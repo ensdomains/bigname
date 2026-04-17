@@ -40,6 +40,19 @@ Public identity rules:
 - token IDs are never treated as logical identity
 - a time-ranged `SurfaceBinding` joins `logical_name_id` to `resource_id`
 
+ENSv1 authority-anchor rules:
+
+- `resource_id` is anchored to the current ENSv1 authority object, not to the surface text and not to the current holder address
+- for this slice, the relevant ENSv1 authority anchors are direct registry-only control, registrar-backed registration, and wrapper-backed control
+- keep the active `resource_id` while the same ENSv1 authority anchor stays authoritative across transfer, renewal, expiry, grace, fuse, controller, or resolver changes
+- rotate the active `resource_id` when authority moves to a different ENSv1 anchor; wrap, unwrap, and re-registration are the important cases
+- if the exact prior ENSv1 authority anchor becomes authoritative again, reuse its prior `resource_id`
+- direct registry-only control has no active `token_lineage_id`
+- registrar-backed and wrapper-backed ENSv1 anchors each carry their own `token_lineage_id`
+- keep the active `token_lineage_id` while the same tokenized ENSv1 anchor stays authoritative; rotate it when authority moves to a different tokenized anchor
+- if authority returns to the exact prior tokenized anchor, reuse its prior `token_lineage_id`
+- ordinary ENSv1 registry-only control, registrar registration, wrap, unwrap, expiry / grace, transfer, and re-registration all use `SurfaceBinding.binding_kind = declared_registry_path`; those lifecycle changes do not require `migration_rebind`
+
 Resource-centric convenience rule:
 
 - when a resource view needs a single display surface, rank bindings in this order:
@@ -61,15 +74,23 @@ Resource-centric convenience rule:
 
 ## Worked Examples
 
-### ENSv1 wrap or unwrap
+### ENSv1 authority-anchor lifecycle
 
-`ens:test.eth` keeps the same `logical_name_id`. If the authority anchor changes, a new `SurfaceBinding` may point to a different `resource_id`, but the public surface history remains continuous.
+| Case | Continuity result |
+| --- | --- |
+| Registry-only control for `ens:sub.alice.eth` | mint one registry-anchored `resource_id`; keep it across registry-owner or controller changes; no active `token_lineage_id`; `binding_kind` is `declared_registry_path` |
+| Registrar registration for `ens:alice.eth` | mint one registrar-anchored `resource_id` and one registrar `token_lineage_id`; keep both while that same lease remains authoritative; `binding_kind` is `declared_registry_path` |
+| Wrap `ens:alice.eth` | keep `logical_name_id`; close the registrar binding; mint a wrapper-anchored `resource_id` and wrapper `token_lineage_id`; the successor binding is still `declared_registry_path` |
+| Unwrap `ens:alice.eth` before the lease ends | keep `logical_name_id`; close the wrapper binding; reactivate the prior registrar `resource_id` and prior registrar `token_lineage_id`; the successor binding is still `declared_registry_path` |
+| `ens:alice.eth` enters expiry or grace while the same authority anchor remains in force | keep the current `resource_id` and current `token_lineage_id`; only status and expiry facts change; `binding_kind` stays `declared_registry_path` |
+| `ens:alice.eth` transfers while the same authority anchor remains in force | keep the current `resource_id` and current `token_lineage_id`; no new binding row is needed if the anchor did not change; `binding_kind` stays `declared_registry_path` |
+| `ens:alice.eth` fully lapses and is later re-registered | keep `logical_name_id`; once the old authority ends, its binding closes; a later registration mints a new registrar `resource_id` and a new registrar `token_lineage_id`; the new binding is `declared_registry_path` |
 
 ### ENSv2 linked surfaces
 
 Two public surfaces may bind to the same `resource_id`. Permissions and role history stay attached to the resource; surface-specific reads keep their own binding provenance.
 
-### Token regeneration
+### Token regeneration with stable authority
 
 Token regeneration does not change `logical_name_id`, and it does not require a new `resource_id` when the backing authority is the same. Token attributes change within the token-lineage history rather than becoming the primary identity.
 

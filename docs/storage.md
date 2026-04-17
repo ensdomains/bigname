@@ -49,6 +49,16 @@ Rules:
 - `resource_id` and `token_lineage_id` must survive projection rebuilds
 - token IDs, node hashes, and resolver addresses are attributes, not identity anchors
 
+ENSv1 continuity rules for adapters:
+
+- mint one `resource_id` per distinct ENSv1 authority anchor and reuse it if that exact anchor becomes authoritative again after a gap
+- for this slice, direct registry-only control, registrar-backed registration, and wrapper-backed control are distinct ENSv1 authority anchors
+- direct registry-only control has no active `token_lineage_id`
+- mint one `token_lineage_id` per distinct tokenized ENSv1 anchor and reuse it if that same tokenized anchor becomes authoritative again
+- transfer, renewal, fuse updates, and expiry / grace changes inside the same current anchor append normalized events but do not mint new `resource_id`, `token_lineage_id`, or `surface_binding_id` rows
+- wrap, unwrap, and re-registration close the old binding range only when the authoritative anchor changes; unwrap back to the same still-live pre-wrap registrar lease reuses the prior registrar `resource_id` and `token_lineage_id`
+- for ENSv1 direct-authority cases in this slice, write `SurfaceBinding.binding_kind = declared_registry_path`; do not use a different binding kind merely because the authority anchor changed between registry, registrar, and wrapper control
+
 `contract_instance_id` rules:
 
 - mint a new `contract_instance_id` when a manifest-declared contract or discovery-admitted contract first enters the canonical source graph
@@ -82,6 +92,8 @@ Use `bigint generated always as identity` for:
 | `execution_*` | execution workers | traces, cached answers, invalidations |
 
 The API process is read-only against storage.
+
+For ENSv1 identity rows, adapters are responsible for minting and reusing `resource_id`, `token_lineage_id`, and `surface_binding_id` according to the continuity rules above. Projection workers consume those identity rows; they do not infer alternate continuity on their own.
 
 At minimum, manifests/discovery persistence must carry:
 

@@ -294,11 +294,27 @@ For ENSv2, `resource_id` maps to the stable resource / canonical ID within a reg
 For ENSv1, `resource_id` is the stable internal identity for the authority object represented by the registry / wrapper / registration state.  
 For Basenames, `resource_id` anchors the Base-side authority object, even when L1 compatibility transport is involved.
 
+ENSv1 continuity rule:
+
+- treat each distinct ENSv1 authority anchor as its own `resource_id`
+- for this slice, the relevant anchor classes are direct registry-only control, registrar-backed registration, and wrapper-backed control
+- keep the same `resource_id` while the same anchor remains authoritative and only holder, controller, resolver, expiry, grace, fuse, or status facts change
+- rotate the active `resource_id` when authority moves to a different anchor, including registry-only to registrar, registrar to wrapper, wrapper back to registrar or registry-only, and full lapse followed by later re-registration
+- if the exact prior ENSv1 anchor becomes authoritative again, reuse that prior `resource_id` instead of minting another one; unwrap back to the still-live pre-wrap registrar lease is the canonical case
+
 ### 7.3 `token_lineage_id`
 
 Stable identity for tokenized ownership history.
 
 This is required because token IDs can change or be replaced while the backing resource remains the same.
+
+ENSv1 continuity rule:
+
+- direct registry-only control has no active `token_lineage_id`
+- mint a `token_lineage_id` when the authoritative ENSv1 anchor is tokenized through a registrar registration or wrapper position
+- keep that `token_lineage_id` across transfer, renewal, expiry, and grace-period changes while the same tokenized anchor stays authoritative
+- rotate the active `token_lineage_id` when authority moves to a different tokenized anchor, including registrar-to-wrapper transitions and a later re-registration after the old registration has fully ended
+- if authority returns to the exact prior tokenized anchor, reuse that anchor's prior `token_lineage_id`; unwrap back to the same still-live registrar lease reactivates the prior registrar lineage
 
 ### 7.4 `contract_instance_id`
 
@@ -383,6 +399,25 @@ At minimum:
 - `observed_wildcard_path`
 - `migration_rebind`
 - `observed_only`
+
+ENSv1 authority-anchor rule:
+
+- use `declared_registry_path` whenever the current ENSv1 binding is directly justified by canonical L1 registry, registrar, or wrapper facts
+- registry-only control, registrar registration, wrapped control, unwrapped control, expiry / grace, transfer, and later re-registration all remain `declared_registry_path`
+- these lifecycle changes only require a new `SurfaceBinding` row when the bound `resource_id` changes; transfer and expiry / grace within the same anchor do not change `binding_kind`
+- do not encode ordinary ENSv1 wrap, unwrap, or re-registration transitions as `migration_rebind`; the identity change is carried by the `resource_id` and `token_lineage_id`, not by inventing a different binding kind
+
+### 8.4 ENSv1 continuity examples
+
+| Case | Current authoritative anchor | `resource_id` rule | `token_lineage_id` rule | `binding_kind` |
+| --- | --- | --- | --- | --- |
+| Registry-only control for `sub.alice.eth` | direct ENS registry control for the subname | mint one registry-anchored `resource_id`; keep it across registry-owner or controller changes until authority moves elsewhere | none while control stays registry-only | `declared_registry_path` |
+| Registrar registration for `alice.eth` | ENSv1 registrar-backed lease | mint one registrar-anchored `resource_id`; keep it across renewals and registrar-owner transfers while the same lease remains authoritative | mint one registrar `token_lineage_id`; keep it while that same lease remains authoritative | `declared_registry_path` |
+| Wrap `alice.eth` | ENSv1 NameWrapper-backed control | close the registrar binding and open a wrapper-anchored `resource_id` because the authority anchor changed | mint a wrapper `token_lineage_id` because the authoritative tokenized anchor changed | `declared_registry_path` |
+| Unwrap `alice.eth` before the lease ends | same pre-wrap registrar lease becomes authoritative again | close the wrapper binding and reactivate the prior registrar `resource_id` instead of minting a new registrar resource | reactivate the prior registrar `token_lineage_id` instead of minting a new registrar lineage | `declared_registry_path` |
+| Expiry or grace for `alice.eth` | same registrar or wrapper anchor, now with expired or grace-period status | keep the current `resource_id`; only status and expiry facts change until the old authority actually ends | keep the current `token_lineage_id` while the same tokenized anchor remains authoritative | `declared_registry_path` |
+| Transfer of `alice.eth` | same current anchor, new holder or controller | keep the current `resource_id`; do not open a new binding row when the authority anchor did not change | keep the current `token_lineage_id` | `declared_registry_path` |
+| Re-registration of `alice.eth` after full lapse | new registrar lease after the prior authority ended | once the old authority ends, close its binding; mint a new registrar `resource_id` for the new lease | mint a new registrar `token_lineage_id` for the new lease | `declared_registry_path` |
 
 ### Why this exists
 
