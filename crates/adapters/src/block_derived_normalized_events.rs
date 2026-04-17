@@ -9,7 +9,14 @@ use sqlx::{PgPool, Row};
 
 const DERIVATION_KIND_RAW_LOG_PREIMAGE_OBSERVATION: &str = "raw_log_preimage_observation";
 const EVENT_KIND_PREIMAGE_OBSERVED: &str = "PreimageObserved";
+const SOURCE_FAMILY_ENS_V1_REGISTRAR_L1: &str = "ens_v1_registrar_l1";
+const SOURCE_EVENT_NAME_REGISTERED: &str = "NameRegistered";
+const SOURCE_EVENT_NAME_RENEWED: &str = "NameRenewed";
+const SOURCE_EVENT_NAME_WRAPPED: &str = "NameWrapped";
 const NAME_WRAPPED_SIGNATURE: &str = "NameWrapped(bytes,bytes32,address,uint32,uint64)";
+const REGISTRAR_NAME_REGISTERED_SIGNATURE: &str =
+    "NameRegistered(string,bytes32,address,uint256,uint256)";
+const REGISTRAR_NAME_RENEWED_SIGNATURE: &str = "NameRenewed(string,bytes32,uint256,uint256)";
 
 /// Sync summary for block-derived normalized events rebuilt from persisted raw payloads.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -157,6 +164,16 @@ pub async fn sync_block_derived_normalized_events(
 }
 
 fn build_preimage_observed_event(raw_log: &WatchedRawLogRow) -> Result<Option<NormalizedEvent>> {
+    if let Some(event) = build_registrar_preimage_observed_event(raw_log)? {
+        return Ok(Some(event));
+    }
+
+    build_name_wrapped_preimage_observed_event(raw_log)
+}
+
+fn build_name_wrapped_preimage_observed_event(
+    raw_log: &WatchedRawLogRow,
+) -> Result<Option<NormalizedEvent>> {
     let Some(topic0) = raw_log.topics.first() else {
         return Ok(None);
     };
@@ -190,7 +207,74 @@ fn build_preimage_observed_event(raw_log: &WatchedRawLogRow) -> Result<Option<No
         );
     }
 
-    Ok(Some(NormalizedEvent {
+    Ok(Some(build_preimage_observed_normalized_event(
+        raw_log,
+        SOURCE_EVENT_NAME_WRAPPED,
+        observation,
+    )))
+}
+
+fn build_registrar_preimage_observed_event(
+    raw_log: &WatchedRawLogRow,
+) -> Result<Option<NormalizedEvent>> {
+    if raw_log.source_family != SOURCE_FAMILY_ENS_V1_REGISTRAR_L1 {
+        return Ok(None);
+    }
+
+    let Some(topic0) = raw_log.topics.first() else {
+        return Ok(None);
+    };
+    let source_event = if topic0.eq_ignore_ascii_case(&registrar_name_registered_topic0()) {
+        SOURCE_EVENT_NAME_REGISTERED
+    } else if topic0.eq_ignore_ascii_case(&registrar_name_renewed_topic0()) {
+        SOURCE_EVENT_NAME_RENEWED
+    } else {
+        return Ok(None);
+    };
+
+    let label = decode_first_dynamic_string(&raw_log.data).with_context(|| {
+        format!(
+            "failed to decode {source_event} string label payload for chain {} block {} log {}",
+            raw_log.chain_id, raw_log.block_hash, raw_log.log_index
+        )
+    })?;
+    let observation = observe_registrar_eth_name(&label).with_context(|| {
+        format!(
+            "failed to derive registrar .eth preimage for chain {} block {} log {}",
+            raw_log.chain_id, raw_log.block_hash, raw_log.log_index
+        )
+    })?;
+    let observed_labelhash = observation
+        .labelhashes
+        .first()
+        .context("registrar observation is missing the explicit labelhash")?;
+
+    if let Some(indexed_labelhash) = raw_log.topics.get(1)
+        && !indexed_labelhash.eq_ignore_ascii_case(observed_labelhash)
+    {
+        bail!(
+            "{source_event} indexed labelhash {} does not match decoded labelhash {} for chain {} block {} log {}",
+            indexed_labelhash,
+            observed_labelhash,
+            raw_log.chain_id,
+            raw_log.block_hash,
+            raw_log.log_index
+        );
+    }
+
+    Ok(Some(build_preimage_observed_normalized_event(
+        raw_log,
+        source_event,
+        observation,
+    )))
+}
+
+fn build_preimage_observed_normalized_event(
+    raw_log: &WatchedRawLogRow,
+    source_event: &str,
+    observation: PreimageObservation,
+) -> NormalizedEvent {
+    NormalizedEvent {
         event_identity: format!(
             "raw_log_preimage_observed:{}:{}:{}:{}:{}",
             raw_log.source_manifest_id,
@@ -222,19 +306,20 @@ fn build_preimage_observed_event(raw_log: &WatchedRawLogRow) -> Result<Option<No
             "emitting_address": raw_log.emitting_address.clone(),
             "topic0": raw_log.topics.first().cloned(),
             "topic1": raw_log.topics.get(1).cloned(),
+            "topic2": raw_log.topics.get(2).cloned(),
             "data_hex": hex_string(&raw_log.data),
         }),
         derivation_kind: DERIVATION_KIND_RAW_LOG_PREIMAGE_OBSERVATION.to_owned(),
         canonicality_state: raw_log.canonicality_state,
         before_state: json!({}),
         after_state: json!({
-            "source_event": "NameWrapped",
+            "source_event": source_event,
             "dns_encoded_name": observation.dns_encoded_name,
             "decoded_name": observation.decoded_name,
             "labelhashes": observation.labelhashes,
             "namehash": observation.namehash,
         }),
-    }))
+    }
 }
 
 async fn load_scanned_log_count(
@@ -555,6 +640,11 @@ fn decode_first_dynamic_bytes(data: &[u8]) -> Result<Vec<u8>> {
     Ok(data[bytes_start..bytes_end].to_vec())
 }
 
+fn decode_first_dynamic_string(data: &[u8]) -> Result<String> {
+    String::from_utf8(decode_first_dynamic_bytes(data)?)
+        .context("dynamic string payload is not valid UTF-8")
+}
+
 fn observe_dns_encoded_name(bytes: &[u8]) -> Result<PreimageObservation> {
     if bytes.is_empty() {
         bail!("dns-encoded name payload must not be empty");
@@ -600,6 +690,23 @@ fn observe_dns_encoded_name(bytes: &[u8]) -> Result<PreimageObservation> {
     })
 }
 
+fn observe_registrar_eth_name(label: &str) -> Result<PreimageObservation> {
+    if label.is_empty() {
+        bail!("registrar label must not be empty");
+    }
+
+    let label_length =
+        u8::try_from(label.len()).context("registrar label exceeds supported DNS label length")?;
+    let mut dns_name = Vec::with_capacity(label.len() + 6);
+    dns_name.push(label_length);
+    dns_name.extend_from_slice(label.as_bytes());
+    dns_name.push(3);
+    dns_name.extend_from_slice(b"eth");
+    dns_name.push(0);
+
+    observe_dns_encoded_name(&dns_name)
+}
+
 fn word_to_usize(word: &[u8]) -> Result<usize> {
     if word.len() != 32 {
         bail!("ABI word must be exactly 32 bytes");
@@ -625,6 +732,14 @@ fn parse_canonicality_state(value: &str) -> Result<CanonicalityState> {
 
 fn name_wrapped_topic0() -> String {
     keccak256_hex(NAME_WRAPPED_SIGNATURE.as_bytes())
+}
+
+fn registrar_name_registered_topic0() -> String {
+    keccak256_hex(REGISTRAR_NAME_REGISTERED_SIGNATURE.as_bytes())
+}
+
+fn registrar_name_renewed_topic0() -> String {
+    keccak256_hex(REGISTRAR_NAME_RENEWED_SIGNATURE.as_bytes())
 }
 
 fn namehash_hex(labels: &[Vec<u8>]) -> String {
@@ -1034,6 +1149,95 @@ mod tests {
 
         let padded_length = ((dns_name.len() + 31) / 32) * 32;
         output.resize(32 * 5 + padded_length, 0);
+        output
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum RegistrarExplicitLabelEvent {
+        NameRegistered,
+        NameRenewed,
+    }
+
+    impl RegistrarExplicitLabelEvent {
+        fn topic0(self) -> String {
+            match self {
+                Self::NameRegistered => registrar_name_registered_topic0(),
+                Self::NameRenewed => registrar_name_renewed_topic0(),
+            }
+        }
+
+        fn topics(self, label: &str) -> Vec<String> {
+            let mut topics = vec![self.topic0(), keccak256_hex(label.as_bytes())];
+            if matches!(self, Self::NameRegistered) {
+                topics.push(hex_string(&abi_word_address(
+                    "0x0000000000000000000000000000000000000001",
+                )));
+            }
+            topics
+        }
+    }
+
+    async fn insert_raw_registrar_label_log(
+        pool: &PgPool,
+        chain_id: &str,
+        block_hash: &str,
+        block_number: i64,
+        address: &str,
+        label: &str,
+        source_event: RegistrarExplicitLabelEvent,
+        canonicality_state: CanonicalityState,
+    ) -> Result<()> {
+        upsert_raw_blocks(
+            pool,
+            &[RawBlock {
+                chain_id: chain_id.to_owned(),
+                block_hash: block_hash.to_owned(),
+                parent_hash: None,
+                block_number,
+                block_timestamp: OffsetDateTime::UNIX_EPOCH,
+                logs_bloom: None,
+                transactions_root: None,
+                receipts_root: None,
+                state_root: None,
+                canonicality_state,
+            }],
+        )
+        .await?;
+
+        upsert_raw_logs(
+            pool,
+            &[RawLog {
+                chain_id: chain_id.to_owned(),
+                block_hash: block_hash.to_owned(),
+                block_number,
+                transaction_hash: format!("0xtx{block_number:02x}"),
+                transaction_index: 0,
+                log_index: 0,
+                emitting_address: address.to_owned(),
+                topics: source_event.topics(label),
+                data: encode_registrar_label_log_data(label),
+                canonicality_state,
+            }],
+        )
+        .await?;
+
+        Ok(())
+    }
+
+    fn encode_registrar_label_log_data(label: &str) -> Vec<u8> {
+        let label_bytes = label.as_bytes();
+        let mut output = Vec::new();
+
+        output.extend_from_slice(&abi_word_u64(96));
+        output.extend_from_slice(&abi_word_u64(1));
+        output.extend_from_slice(&abi_word_u64(2));
+        output.extend_from_slice(&abi_word_u64(
+            u64::try_from(label_bytes.len()).expect("test label length must fit in u64"),
+        ));
+        output.extend_from_slice(label_bytes);
+
+        let padded_length = ((label_bytes.len() + 31) / 32) * 32;
+        output.resize(32 * 4 + padded_length, 0);
         output
     }
 
@@ -1528,6 +1732,435 @@ mod tests {
         )
         .await?;
         assert_eq!(summary.scanned_log_count, 1);
+        assert_eq!(summary.matched_log_count, 0);
+        assert_eq!(summary.total_synced_count, 0);
+        assert_eq!(summary.total_inserted_count, 0);
+        assert!(
+            load_normalized_events_by_namespace(database.pool(), "ens")
+                .await?
+                .is_empty()
+        );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn sync_block_derived_normalized_events_emits_registrar_observations_for_label_logs()
+    -> Result<()> {
+        let _permit = crate::acquire_test_db_permit().await;
+        let database = TestDatabase::new().await?;
+
+        let manifest_id = insert_manifest_version(
+            database.pool(),
+            1,
+            "ens",
+            SOURCE_FAMILY_ENS_V1_REGISTRAR_L1,
+            "ethereum-mainnet",
+            "ens_v1",
+            "active",
+            "uts46-v1",
+            "manifests/ens/ens_v1_registrar_l1/v1.toml",
+        )
+        .await?;
+        let contract_instance_id = Uuid::new_v4();
+        insert_contract_instance(
+            database.pool(),
+            contract_instance_id,
+            "ethereum-mainnet",
+            "contract",
+        )
+        .await?;
+        insert_manifest_contract_instance(
+            database.pool(),
+            manifest_id,
+            "contract",
+            "registrar",
+            contract_instance_id,
+            "0x00000000000000000000000000000000000000aa",
+            Some("registrar"),
+            Some("none"),
+            None,
+            None,
+        )
+        .await?;
+        insert_contract_instance_address(
+            database.pool(),
+            contract_instance_id,
+            "ethereum-mainnet",
+            "0x00000000000000000000000000000000000000aa",
+            manifest_id,
+        )
+        .await?;
+
+        insert_raw_registrar_label_log(
+            database.pool(),
+            "ethereum-mainnet",
+            "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            42,
+            "0x00000000000000000000000000000000000000aa",
+            "registered",
+            RegistrarExplicitLabelEvent::NameRegistered,
+            CanonicalityState::Canonical,
+        )
+        .await?;
+        insert_raw_registrar_label_log(
+            database.pool(),
+            "ethereum-mainnet",
+            "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            43,
+            "0x00000000000000000000000000000000000000aa",
+            "renewed",
+            RegistrarExplicitLabelEvent::NameRenewed,
+            CanonicalityState::Canonical,
+        )
+        .await?;
+
+        let summary = sync_block_derived_normalized_events(
+            database.pool(),
+            "ethereum-mainnet",
+            &[
+                "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+                "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
+            ],
+        )
+        .await?;
+        assert_eq!(summary.scanned_log_count, 2);
+        assert_eq!(summary.matched_log_count, 2);
+        assert_eq!(summary.total_synced_count, 2);
+        assert_eq!(summary.total_inserted_count, 2);
+        assert_eq!(
+            summary.by_kind,
+            BTreeMap::from([(
+                EVENT_KIND_PREIMAGE_OBSERVED.to_owned(),
+                BlockDerivedNormalizedEventKindSyncSummary {
+                    synced_count: 2,
+                    inserted_count: 2,
+                }
+            )])
+        );
+
+        let events = load_normalized_events_by_namespace(database.pool(), "ens").await?;
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].source_family, SOURCE_FAMILY_ENS_V1_REGISTRAR_L1);
+        assert_eq!(events[0].source_manifest_id, Some(manifest_id));
+        assert_eq!(events[0].canonicality_state, CanonicalityState::Canonical);
+        assert_eq!(
+            events[0].after_state["source_event"],
+            SOURCE_EVENT_NAME_REGISTERED
+        );
+        assert_eq!(events[0].after_state["decoded_name"], "registered.eth");
+        assert_eq!(
+            events[1].after_state["source_event"],
+            SOURCE_EVENT_NAME_RENEWED
+        );
+        assert_eq!(events[1].after_state["decoded_name"], "renewed.eth");
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn sync_block_derived_normalized_events_is_idempotent_for_registrar_label_logs()
+    -> Result<()> {
+        let _permit = crate::acquire_test_db_permit().await;
+        let database = TestDatabase::new().await?;
+
+        let manifest_id = insert_manifest_version(
+            database.pool(),
+            1,
+            "ens",
+            SOURCE_FAMILY_ENS_V1_REGISTRAR_L1,
+            "ethereum-mainnet",
+            "ens_v1",
+            "active",
+            "uts46-v1",
+            "manifests/ens/ens_v1_registrar_l1/v1.toml",
+        )
+        .await?;
+        let contract_instance_id = Uuid::new_v4();
+        insert_contract_instance(
+            database.pool(),
+            contract_instance_id,
+            "ethereum-mainnet",
+            "contract",
+        )
+        .await?;
+        insert_manifest_contract_instance(
+            database.pool(),
+            manifest_id,
+            "contract",
+            "registrar",
+            contract_instance_id,
+            "0x00000000000000000000000000000000000000aa",
+            Some("registrar"),
+            Some("none"),
+            None,
+            None,
+        )
+        .await?;
+        insert_contract_instance_address(
+            database.pool(),
+            contract_instance_id,
+            "ethereum-mainnet",
+            "0x00000000000000000000000000000000000000aa",
+            manifest_id,
+        )
+        .await?;
+        insert_raw_registrar_label_log(
+            database.pool(),
+            "ethereum-mainnet",
+            "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            42,
+            "0x00000000000000000000000000000000000000aa",
+            "repeat",
+            RegistrarExplicitLabelEvent::NameRegistered,
+            CanonicalityState::Canonical,
+        )
+        .await?;
+
+        let first = sync_block_derived_normalized_events(
+            database.pool(),
+            "ethereum-mainnet",
+            &["0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned()],
+        )
+        .await?;
+        assert_eq!(first.scanned_log_count, 1);
+        assert_eq!(first.matched_log_count, 1);
+        assert_eq!(first.total_synced_count, 1);
+        assert_eq!(first.total_inserted_count, 1);
+
+        let second = sync_block_derived_normalized_events(
+            database.pool(),
+            "ethereum-mainnet",
+            &["0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned()],
+        )
+        .await?;
+        assert_eq!(second.scanned_log_count, 1);
+        assert_eq!(second.matched_log_count, 1);
+        assert_eq!(second.total_synced_count, 1);
+        assert_eq!(second.total_inserted_count, 0);
+
+        let counts = load_normalized_event_counts_by_kind(database.pool(), "ens").await?;
+        assert_eq!(
+            counts,
+            BTreeMap::from([(EVENT_KIND_PREIMAGE_OBSERVED.to_owned(), 1_usize)])
+        );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn sync_block_derived_normalized_events_skips_orphaned_registrar_logs() -> Result<()> {
+        let _permit = crate::acquire_test_db_permit().await;
+        let database = TestDatabase::new().await?;
+
+        let manifest_id = insert_manifest_version(
+            database.pool(),
+            1,
+            "ens",
+            SOURCE_FAMILY_ENS_V1_REGISTRAR_L1,
+            "ethereum-mainnet",
+            "ens_v1",
+            "active",
+            "uts46-v1",
+            "manifests/ens/ens_v1_registrar_l1/v1.toml",
+        )
+        .await?;
+        let contract_instance_id = Uuid::new_v4();
+        insert_contract_instance(
+            database.pool(),
+            contract_instance_id,
+            "ethereum-mainnet",
+            "contract",
+        )
+        .await?;
+        insert_manifest_contract_instance(
+            database.pool(),
+            manifest_id,
+            "contract",
+            "registrar",
+            contract_instance_id,
+            "0x00000000000000000000000000000000000000aa",
+            Some("registrar"),
+            Some("none"),
+            None,
+            None,
+        )
+        .await?;
+        insert_contract_instance_address(
+            database.pool(),
+            contract_instance_id,
+            "ethereum-mainnet",
+            "0x00000000000000000000000000000000000000aa",
+            manifest_id,
+        )
+        .await?;
+
+        insert_raw_registrar_label_log(
+            database.pool(),
+            "ethereum-mainnet",
+            "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            42,
+            "0x00000000000000000000000000000000000000aa",
+            "canonical",
+            RegistrarExplicitLabelEvent::NameRegistered,
+            CanonicalityState::Canonical,
+        )
+        .await?;
+        insert_raw_registrar_label_log(
+            database.pool(),
+            "ethereum-mainnet",
+            "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            43,
+            "0x00000000000000000000000000000000000000aa",
+            "orphaned",
+            RegistrarExplicitLabelEvent::NameRenewed,
+            CanonicalityState::Orphaned,
+        )
+        .await?;
+
+        let summary = sync_block_derived_normalized_events(
+            database.pool(),
+            "ethereum-mainnet",
+            &[
+                "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+                "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
+            ],
+        )
+        .await?;
+        assert_eq!(summary.scanned_log_count, 1);
+        assert_eq!(summary.matched_log_count, 1);
+        assert_eq!(summary.total_synced_count, 1);
+        assert_eq!(summary.total_inserted_count, 1);
+
+        let events = load_normalized_events_by_namespace(database.pool(), "ens").await?;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].block_number, Some(42));
+        assert_eq!(events[0].after_state["decoded_name"], "canonical.eth");
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn sync_block_derived_normalized_events_skips_inactive_and_non_registrar_label_logs()
+    -> Result<()> {
+        let _permit = crate::acquire_test_db_permit().await;
+        let database = TestDatabase::new().await?;
+
+        let inactive_registrar_manifest_id = insert_manifest_version(
+            database.pool(),
+            1,
+            "ens",
+            SOURCE_FAMILY_ENS_V1_REGISTRAR_L1,
+            "ethereum-mainnet",
+            "ens_v1",
+            "deprecated",
+            "uts46-v1",
+            "manifests/ens/ens_v1_registrar_l1/v1.toml",
+        )
+        .await?;
+        let non_registrar_manifest_id = insert_manifest_version(
+            database.pool(),
+            1,
+            "ens",
+            "ens_test_wrapper",
+            "ethereum-mainnet",
+            "ens_v1",
+            "active",
+            "uts46-v1",
+            "manifests/ens/ens_test_wrapper/v1.toml",
+        )
+        .await?;
+        let inactive_contract_instance_id = Uuid::new_v4();
+        let non_registrar_contract_instance_id = Uuid::new_v4();
+        insert_contract_instance(
+            database.pool(),
+            inactive_contract_instance_id,
+            "ethereum-mainnet",
+            "contract",
+        )
+        .await?;
+        insert_contract_instance(
+            database.pool(),
+            non_registrar_contract_instance_id,
+            "ethereum-mainnet",
+            "contract",
+        )
+        .await?;
+        insert_manifest_contract_instance(
+            database.pool(),
+            inactive_registrar_manifest_id,
+            "contract",
+            "registrar",
+            inactive_contract_instance_id,
+            "0x00000000000000000000000000000000000000aa",
+            Some("registrar"),
+            Some("none"),
+            None,
+            None,
+        )
+        .await?;
+        insert_manifest_contract_instance(
+            database.pool(),
+            non_registrar_manifest_id,
+            "contract",
+            "wrapper",
+            non_registrar_contract_instance_id,
+            "0x00000000000000000000000000000000000000bb",
+            Some("wrapper"),
+            Some("none"),
+            None,
+            None,
+        )
+        .await?;
+        insert_contract_instance_address(
+            database.pool(),
+            inactive_contract_instance_id,
+            "ethereum-mainnet",
+            "0x00000000000000000000000000000000000000aa",
+            inactive_registrar_manifest_id,
+        )
+        .await?;
+        insert_contract_instance_address(
+            database.pool(),
+            non_registrar_contract_instance_id,
+            "ethereum-mainnet",
+            "0x00000000000000000000000000000000000000bb",
+            non_registrar_manifest_id,
+        )
+        .await?;
+        insert_raw_registrar_label_log(
+            database.pool(),
+            "ethereum-mainnet",
+            "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            42,
+            "0x00000000000000000000000000000000000000aa",
+            "inactive",
+            RegistrarExplicitLabelEvent::NameRegistered,
+            CanonicalityState::Canonical,
+        )
+        .await?;
+        insert_raw_registrar_label_log(
+            database.pool(),
+            "ethereum-mainnet",
+            "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            43,
+            "0x00000000000000000000000000000000000000bb",
+            "nonsource",
+            RegistrarExplicitLabelEvent::NameRenewed,
+            CanonicalityState::Canonical,
+        )
+        .await?;
+
+        let summary = sync_block_derived_normalized_events(
+            database.pool(),
+            "ethereum-mainnet",
+            &[
+                "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+                "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
+            ],
+        )
+        .await?;
+        assert_eq!(summary.scanned_log_count, 2);
         assert_eq!(summary.matched_log_count, 0);
         assert_eq!(summary.total_synced_count, 0);
         assert_eq!(summary.total_inserted_count, 0);

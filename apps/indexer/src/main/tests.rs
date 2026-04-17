@@ -951,13 +951,34 @@ fn provider_block(block_hash: &str, parent_hash: Option<&str>, block_number: i64
     }
 }
 
+#[derive(Clone, Debug)]
+struct ProviderBlockFixture {
+    block: ProviderBlock,
+    logs: Vec<Value>,
+}
+
 async fn bundle_provider(
     blocks: Vec<ProviderBlock>,
 ) -> Result<(provider::JsonRpcProvider, JoinHandle<()>)> {
-    let blocks = Arc::new(
+    bundle_provider_with_fixtures(
         blocks
             .into_iter()
-            .map(|block| (block.block_hash.clone(), block))
+            .map(|block| ProviderBlockFixture {
+                logs: vec![rpc_log_payload(&block)],
+                block,
+            })
+            .collect(),
+    )
+    .await
+}
+
+async fn bundle_provider_with_fixtures(
+    fixtures: Vec<ProviderBlockFixture>,
+) -> Result<(provider::JsonRpcProvider, JoinHandle<()>)> {
+    let blocks = Arc::new(
+        fixtures
+            .into_iter()
+            .map(|fixture| (fixture.block.block_hash.clone(), fixture))
             .collect::<std::collections::BTreeMap<_, _>>(),
     );
 
@@ -979,10 +1000,10 @@ async fn bundle_provider(
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_ascii_lowercase();
-                let block = blocks
+                let fixture = blocks
                     .get(&block_hash)
                     .unwrap_or_else(|| panic!("unexpected block bundle request: {body}"));
-                rpc_block_bundle_payload(block)
+                rpc_block_bundle_payload(&fixture.block)
             }
             "eth_getLogs" => {
                 let block_hash = params
@@ -992,10 +1013,10 @@ async fn bundle_provider(
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_ascii_lowercase();
-                let block = blocks
+                let fixture = blocks
                     .get(&block_hash)
                     .unwrap_or_else(|| panic!("unexpected log request: {body}"));
-                Value::Array(vec![rpc_log_payload(block)])
+                Value::Array(fixture.logs.clone())
             }
             "eth_getBlockReceipts" => {
                 let block_hash = params
@@ -1003,10 +1024,10 @@ async fn bundle_provider(
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_ascii_lowercase();
-                let block = blocks
+                let fixture = blocks
                     .get(&block_hash)
                     .unwrap_or_else(|| panic!("unexpected receipt request: {body}"));
-                Value::Array(vec![rpc_receipt_payload(block)])
+                Value::Array(vec![rpc_receipt_payload(&fixture.block)])
             }
             "eth_getCode" => {
                 let address = params
@@ -1100,6 +1121,10 @@ fn name_wrapped_topic0() -> String {
     keccak256_hex(b"NameWrapped(bytes,bytes32,address,uint32,uint64)")
 }
 
+fn registrar_name_registered_topic0() -> String {
+    keccak256_hex(b"NameRegistered(string,bytes32,address,uint256,uint256)")
+}
+
 fn namehash_for_dns_name(dns_name: &[u8]) -> String {
     let mut labels = Vec::<Vec<u8>>::new();
     let mut cursor = 0usize;
@@ -1184,6 +1209,45 @@ fn rpc_log_payload(block: &ProviderBlock) -> Value {
             namehash_for_dns_name(&dns_name)
         ],
         "data": encode_name_wrapped_log_data(&dns_name)
+    })
+}
+
+fn encode_registrar_name_registered_log_data(label: &str) -> String {
+    let label_bytes = label.as_bytes();
+    let mut data = Vec::new();
+
+    data.extend_from_slice(&abi_word_u64(96));
+    data.extend_from_slice(&abi_word_u64(1));
+    data.extend_from_slice(&abi_word_u64(2));
+    data.extend_from_slice(&abi_word_u64(
+        u64::try_from(label_bytes.len()).expect("registrar label test payload must fit in u64"),
+    ));
+    data.extend_from_slice(label_bytes);
+
+    let padded_length = ((label_bytes.len() + 31) / 32) * 32;
+    data.resize(32 * 4 + padded_length, 0);
+
+    hex_string(&data)
+}
+
+fn rpc_registrar_name_registered_log_payload(
+    block: &ProviderBlock,
+    address: &str,
+    label: &str,
+) -> Value {
+    json!({
+        "blockHash": block.block_hash.clone(),
+        "blockNumber": format!("0x{:x}", block.block_number),
+        "transactionHash": transaction_hash_for_block(block),
+        "transactionIndex": "0x0",
+        "logIndex": "0x0",
+        "address": address,
+        "topics": [
+            registrar_name_registered_topic0(),
+            labelhash_hex(label),
+            hex_string(&abi_word_address("0x0000000000000000000000000000000000000001"))
+        ],
+        "data": encode_registrar_name_registered_log_data(label)
     })
 }
 
@@ -2029,6 +2093,155 @@ async fn reconcile_fetched_heads_initializes_chain_from_provider_heads() -> Resu
         .fetch_one(database.pool())
         .await?,
         "wrapped.eth".to_owned()
+    );
+
+    server.abort();
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn reconcile_fetched_heads_backfills_registrar_name_observation_events() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let registrar_contract_instance_id = Uuid::from_u128(32);
+    let registrar_address = "0x00000000000000000000000000000000000000aa";
+
+    sqlx::query(
+        r#"
+            INSERT INTO manifest_versions (
+                manifest_id,
+                manifest_version,
+                namespace,
+                source_family,
+                chain,
+                deployment_epoch,
+                rollout_status,
+                normalizer_version,
+                file_path,
+                manifest_payload
+            )
+            VALUES (
+                1,
+                1,
+                'ens',
+                'ens_v1_registrar_l1',
+                'ethereum-mainnet',
+                'ens_v1',
+                'active',
+                'uts46-v1',
+                'manifests/ens/ens_v1_registrar_l1/v1.toml',
+                '{}'::jsonb
+            )
+            "#,
+    )
+    .execute(database.pool())
+    .await
+    .context("failed to insert manifest_versions for registrar observation reconciliation test")?;
+    insert_contract_instance(
+        database.pool(),
+        registrar_contract_instance_id,
+        "ethereum-mainnet",
+        "contract",
+    )
+    .await?;
+    insert_active_contract_instance_address(
+        database.pool(),
+        registrar_contract_instance_id,
+        "ethereum-mainnet",
+        registrar_address,
+        Some(1),
+    )
+    .await?;
+    insert_manifest_contract_instance(
+        database.pool(),
+        1,
+        "registrar",
+        registrar_contract_instance_id,
+        registrar_address,
+        "none",
+        None,
+        None,
+    )
+    .await?;
+
+    let watched_plan = load_watched_chain_plan(database.pool()).await?;
+    let tasks = sync_intake_chain_tasks(database.pool(), &watched_plan).await?;
+    let canonical_head = provider_block(
+        "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        Some("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+        42,
+    );
+    let (provider, server) = bundle_provider_with_fixtures(vec![ProviderBlockFixture {
+        logs: vec![rpc_registrar_name_registered_log_payload(
+            &canonical_head,
+            registrar_address,
+            "registrar",
+        )],
+        block: canonical_head.clone(),
+    }])
+    .await?;
+
+    let (next_task, outcome) = reconcile_fetched_heads(
+        database.pool(),
+        &tasks[0],
+        &provider,
+        &ProviderHeadSnapshot {
+            canonical: canonical_head,
+            safe: None,
+            finalized: None,
+        },
+    )
+    .await?
+    .expect("registrar observation reconciliation must update task state");
+
+    assert_eq!(
+        outcome.canonical_status,
+        CanonicalReconciliationStatus::Initialized
+    );
+    assert_eq!(next_task.checkpoint.canonical_block_number, Some(42));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM raw_logs")
+            .fetch_one(database.pool())
+            .await?,
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM normalized_events")
+            .fetch_one(database.pool())
+            .await?,
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT source_family FROM normalized_events WHERE event_kind = 'PreimageObserved'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "ens_v1_registrar_l1".to_owned()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT after_state->>'decoded_name' FROM normalized_events WHERE event_kind = 'PreimageObserved'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "registrar.eth".to_owned()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT after_state->>'source_event' FROM normalized_events WHERE event_kind = 'PreimageObserved'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "NameRegistered".to_owned()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT raw_fact_ref->>'emitting_address' FROM normalized_events WHERE event_kind = 'PreimageObserved'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        registrar_address.to_owned()
     );
 
     server.abort();
@@ -2917,13 +3130,13 @@ async fn storage_discovery_refresh_adds_ensv1_address_without_manifest_reload_an
             1
         );
     assert_eq!(
-            sqlx::query_scalar::<_, i64>(
-                "SELECT COUNT(*)::BIGINT FROM normalized_events WHERE event_kind = 'SubregistryChanged'"
-            )
-            .fetch_one(database.pool())
-            .await?,
-            1
-        );
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM normalized_events WHERE event_kind = 'SubregistryChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        1
+    );
     assert_eq!(
             sqlx::query_scalar::<_, String>(
                 "SELECT after_state->>'owner' FROM normalized_events WHERE event_kind = 'SubregistryChanged'"
