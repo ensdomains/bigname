@@ -19,11 +19,11 @@ Canonical schema for communicating about a slice across research, design, review
 
 ## Roles
 
-- `next_slice_researcher` emits a complete envelope (or reports that no viable slice exists and names the smallest unblocker).
-- `$change-gate` fills `change_class`, `docs_to_update`, `write_owner`. Run it before or alongside research when shared-interface risk is present.
-- `task_designer` consumes the envelope and produces a task set. Every task in the set references the envelope's `slice_id`, `owned_paths`, and `change_class`.
-- `verification_reviewer` reads the envelope for context and flags gaps between declared fields and what the diff actually changed.
-- Worker subagents inherit `owned_paths`, `success_signal`, `docs_to_update` as guardrails.
+- `next_slice_researcher` emits a ranked list of complete envelopes (primary first, then viable follow-ons — typically 1–3 entries). Returns an empty list and names the smallest unblocker when no viable slice exists.
+- `$change-gate` fills `change_class`, `docs_to_update`, `write_owner`. Run it before or alongside research when shared-interface risk is present. With a multi-envelope list, classify each envelope independently unless they genuinely share a single shared-interface change.
+- `task_designer` consumes one envelope or a ranked list of envelopes and produces a unified task set. Every task references its originating envelope's `slice_id`, inherits a subset of that envelope's `owned_paths`, and respects its `change_class`. Cross-slice dependencies are marked explicitly.
+- `verification_reviewer` reads the envelope(s) for context and flags gaps between declared fields and what the diff actually changed.
+- Worker subagents inherit `owned_paths`, `success_signal`, `docs_to_update` as guardrails from their task's originating envelope.
 
 ## Slice log
 

@@ -6,6 +6,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -18,6 +19,8 @@ MAX_PASSES = max(1, int(os.environ.get("CODEX_STOP_CONTINUE_MAX_PASSES", "8")))
 STATE_DIR = Path(
     os.environ.get("CODEX_STOP_CONTINUE_STATE_DIR", tempfile.gettempdir())
 ) / "codex-stop-continue"
+ROOT_SENTINEL_DIR = STATE_DIR / "roots"
+ROOT_SENTINEL_TTL = int(os.environ.get("CODEX_STOP_CONTINUE_ROOT_TTL", "86400"))
 FALLBACK_CONTINUE_REASON = (
     "Continue the task instead of stopping with optional next steps. "
     "Do the next concrete work now, and only stop if the work is complete "
@@ -89,6 +92,42 @@ def read_transcript_excerpt(transcript_path: Any) -> str:
     if len(text) > TRANSCRIPT_BYTES:
         return text[-TRANSCRIPT_BYTES:]
     return text
+
+
+def root_sentinel_path() -> Path:
+    return ROOT_SENTINEL_DIR / f"{os.getppid()}.root"
+
+
+def cleanup_stale_root_sentinels() -> None:
+    if not ROOT_SENTINEL_DIR.exists():
+        return
+    cutoff = time.time() - ROOT_SENTINEL_TTL
+    for path in ROOT_SENTINEL_DIR.iterdir():
+        try:
+            if path.stat().st_mtime < cutoff:
+                path.unlink()
+        except OSError:
+            pass
+
+
+def record_root_session(session_id: str) -> None:
+    path = root_sentinel_path()
+    if path.exists():
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(session_id, encoding="utf-8")
+    except OSError as exc:
+        debug(f"stop_continue: failed to write root sentinel: {exc}")
+
+
+def is_subagent_session(session_id: str) -> bool:
+    """True when a root sentinel exists for this Codex process and names a different session."""
+    try:
+        recorded = root_sentinel_path().read_text(encoding="utf-8").strip()
+    except OSError:
+        return False
+    return bool(recorded) and recorded != session_id
 
 
 def state_file(payload: Dict[str, Any]) -> Optional[Path]:
@@ -264,7 +303,19 @@ def main() -> int:
         debug(f"stop_continue: invalid hook payload: {exc}")
         return allow_stop()
 
-    if payload.get("hook_event_name") != "Stop":
+    event = payload.get("hook_event_name")
+    session_id = payload.get("session_id")
+
+    if event == "SessionStart":
+        cleanup_stale_root_sentinels()
+        if isinstance(session_id, str) and session_id:
+            record_root_session(session_id)
+        return allow_stop()
+
+    if event != "Stop":
+        return allow_stop()
+
+    if isinstance(session_id, str) and session_id and is_subagent_session(session_id):
         return allow_stop()
 
     prior_passes = load_pass_count(payload)

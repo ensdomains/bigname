@@ -1,5 +1,16 @@
 {
   "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/bin/sh -lc 'if [ \"${CODEX_STOP_CONTINUE_CHILD:-}\" = \"1\" ]; then exit 0; fi; d=\"$PWD\"; while [ \"$d\" != \"/\" ]; do if [ -f \"$d/.codex/hooks/stop_continue.py\" ]; then exec /usr/bin/env python3 \"$d/.codex/hooks/stop_continue.py\"; fi; d=$(dirname \"$d\"); done; exit 0'",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [

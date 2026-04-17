@@ -14,9 +14,9 @@ Apply `$orchestrate` with the extras below. Do not let the session drift into di
 ## Loop
 
 1. Read `.agents/state/slices.jsonl` so in-flight and completed slices are visible.
-2. Spawn `next_slice_researcher` for the next viable thin slice. Pass the log contents so it does not re-pick live work.
-3. Execute the chosen slice through `$orchestrate` using its default fan-out pattern. Append `picked` / `in_flight` / `completed` events to the slice log as state changes.
-4. When the slice completes or reaches a clear stopping point, loop back to step 2.
+2. Spawn `next_slice_researcher` for the next viable slices. Pass the log contents so it does not re-pick live work. Expect a ranked list of envelopes back.
+3. Execute the primary slice through `$orchestrate` using its default fan-out pattern. If follow-on slices in the ranked list are genuinely independent of the primary (non-overlapping `owned_paths`, `parallel_risk: safe`), you may execute them concurrently instead of waiting for the next loop — log each as `picked` / `in_flight` / `completed` in the slice log.
+4. When the active slices complete or reach a clear stopping point, loop back to step 2. The researcher will re-evaluate based on the updated slice log and may repeat or drop previously listed follow-ons.
 
 Do not decide the next slice locally if `next_slice_researcher` can answer it.
 

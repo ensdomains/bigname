@@ -23,10 +23,12 @@ See `AGENTS.md` High Conflict for surfaces that must not be parallelized casuall
 
 ## Good delegated tasks
 
-- implement one adapter slice in `crates/adapters`
-- add one projection or route in `apps/api` or `apps/worker`
-- add conformance tests in `tests/conformance`
-- wire manifest loading in `crates/manifests`
+Each bullet is one worker's remit — bundle related code, tests, and wiring into the same task rather than fanning out every layer.
+
+- implement one adapter slice in `crates/adapters` together with its conformance tests
+- add one projection or route end-to-end in `apps/api` or `apps/worker`, including manifest wiring and rollout entries
+- wire manifest loading in `crates/manifests` with the discovery and capability-flag paths it unlocks
+- add a coherent batch of conformance tests in `tests/conformance` for an existing capability
 
 ## Bad delegated tasks
 

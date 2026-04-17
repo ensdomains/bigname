@@ -30,8 +30,8 @@ Split work along `docs/workstreams.md` boundaries when possible.
 
 Shared subagents live in `.codex/agents/*.toml`. Dispatch as follows:
 
-- `next_slice_researcher` (read-only) — picks the next viable thin slice. Use for "what should we work on next?" and at the top of continuation loops. Emits the slice envelope.
-- `task_designer` (read-only) — decomposes a chosen slice into owned subagent tasks. Consumes the slice envelope; produces a task set with explicit file ownership.
+- `next_slice_researcher` (read-only) — picks the next viable slices. Use for "what should we work on next?" and at the top of continuation loops. Emits a ranked list of slice envelopes (typically 1–3); primary first.
+- `task_designer` (read-only) — decomposes one or more chosen slices into owned subagent tasks. Consumes a single envelope or a ranked envelope list; produces a unified task set with explicit file ownership and cross-slice dependencies.
 - `docs_writer` — writes or updates docs, task writeups, doc-first semantic changes. Not read-only because its job is to edit under `docs/` and task notes.
 - `verification_reviewer` (read-only) — cross-slice review for correctness, boundary compliance, missing validation. Use when risk is high or multiple workers edited adjacent surfaces.
 - built-in `worker` — bounded implementation task. Give it owned paths, outcome, and validation.
@@ -91,7 +91,7 @@ Bounded deliverables only — no vague goals like "figure it out". Tell each sub
 1. Read the relevant docs and classify the change (`$change-gate` if shared-interface risk).
 2. If the real question is what to do next, delegate slice selection to `next_slice_researcher`.
 3. If the slice is broad or underspecified, delegate decomposition to `task_designer`.
-4. Spawn parallel implementation or documentation subagents only after ownership boundaries are explicit, and append to the slice log. Use the smallest number of agents that materially advances the task; parallelize aggressively once boundaries are clear.
+4. Spawn parallel implementation or documentation subagents only after ownership boundaries are explicit, and append to the slice log. Prefer fewer workers each owning a larger cohesive chunk (capability + tests + wiring) over many thin workers — extra workers only help when the chunks are genuinely independent and the coordination cost is smaller than the wall-clock gain.
 5. Use `docs_writer` for doc and task-writeup changes.
 6. Use `verification_reviewer` for cross-slice checking when risk is high or multiple workers edited adjacent surfaces.
 7. Steer live agents: answer blockers, redirect unclear work, request tighter follow-up. Close agents when their work is integrated.
