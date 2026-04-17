@@ -36,6 +36,15 @@ Shared subagents live in `.codex/agents/*.toml`. Dispatch as follows:
 - `verification_reviewer` (read-only) — cross-slice review for correctness, boundary compliance, missing validation. Use when risk is high or multiple workers edited adjacent surfaces.
 - built-in `worker` — bounded implementation task. Give it owned paths, outcome, and validation.
 
+## Waiting on subagents
+
+Subagents take minutes, not seconds. Slow is not stuck.
+
+- Do not cancel or restart a live subagent because it feels slow. Cancellation requires concrete evidence of being stuck: silence for several minutes AND no sign of work in the latest output. Reading files, running searches, and writing code are work, not silence.
+- Do not spawn duplicates of in-flight work. Before spawning, read `.agents/state/slices.jsonl`.
+- If a live subagent seems off-track, ask it for a status update. Do not kill and restart.
+- If there is nothing else to steer, wait. Spawning more agents because you feel idle is the failure mode.
+
 ## Playbook routing
 
 Dispatch to a playbook skill when the change touches its surface. Playbooks are libraries, not entry points:
