@@ -1,0 +1,331 @@
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
+
+use anyhow::{Result, bail};
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ManifestRepository {
+    pub(crate) root: PathBuf,
+    pub(crate) manifests: Vec<LoadedManifest>,
+    pub(crate) summary: ManifestLoadSummary,
+}
+
+impl ManifestRepository {
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn manifests(&self) -> &[LoadedManifest] {
+        &self.manifests
+    }
+
+    pub fn summary(&self) -> &ManifestLoadSummary {
+        &self.summary
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LoadedManifest {
+    pub path: PathBuf,
+    pub relative_path: PathBuf,
+    pub version_tag: String,
+    pub manifest: SourceManifest,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ManifestLoadSummary {
+    pub root: PathBuf,
+    pub status: ManifestLoadStatus,
+    pub namespace_count: usize,
+    pub source_family_count: usize,
+    pub manifest_count: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ManifestLoadStatus {
+    Loaded,
+    Empty,
+    MissingRoot,
+    InvalidRoot,
+}
+
+impl ManifestLoadStatus {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Loaded => "loaded",
+            Self::Empty => "empty",
+            Self::MissingRoot => "missing_root",
+            Self::InvalidRoot => "invalid_root",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ManifestSyncSummary {
+    pub status: ManifestSyncStatus,
+    pub synced_manifest_count: usize,
+    pub active_manifest_count: usize,
+    pub root_count: usize,
+    pub contract_count: usize,
+    pub capability_count: usize,
+    pub discovery_rule_count: usize,
+    pub removed_manifest_count: usize,
+    pub cleared_discovery_edge_count: usize,
+}
+
+impl ManifestSyncSummary {
+    pub(crate) fn skipped(status: ManifestSyncStatus) -> Self {
+        Self {
+            status,
+            synced_manifest_count: 0,
+            active_manifest_count: 0,
+            root_count: 0,
+            contract_count: 0,
+            capability_count: 0,
+            discovery_rule_count: 0,
+            removed_manifest_count: 0,
+            cleared_discovery_edge_count: 0,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ManifestSyncStatus {
+    Synced,
+    SkippedMissingRoot,
+    SkippedInvalidRoot,
+}
+
+impl ManifestSyncStatus {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Synced => "synced",
+            Self::SkippedMissingRoot => "skipped_missing_root",
+            Self::SkippedInvalidRoot => "skipped_invalid_root",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+
+pub struct WatchedContract {
+    pub chain: String,
+    pub address: String,
+    pub contract_instance_id: Uuid,
+    pub source: WatchedContractSource,
+    pub source_manifest_id: Option<i64>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum WatchedContractSource {
+    ManifestRoot,
+    ManifestContract,
+    DiscoveryEdge,
+}
+
+impl WatchedContractSource {
+    pub(crate) fn from_db_value(value: &str) -> Result<Self> {
+        match value {
+            "manifest_root" => Ok(Self::ManifestRoot),
+            "manifest_contract" => Ok(Self::ManifestContract),
+            "discovery_edge" => Ok(Self::DiscoveryEdge),
+            _ => bail!("unsupported watched contract source {value}"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WatchedContractSummary {
+    pub unique_contract_count: usize,
+    pub source_entry_count: usize,
+    pub manifest_root_count: usize,
+    pub manifest_contract_count: usize,
+    pub discovery_edge_count: usize,
+    pub chains: Vec<WatchedContractChainSummary>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WatchedChainPlan {
+    pub chain: String,
+    pub addresses: Vec<String>,
+    pub manifest_root_entry_count: usize,
+    pub manifest_contract_entry_count: usize,
+    pub discovery_edge_entry_count: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WatchedContractChainSummary {
+    pub chain: String,
+    pub unique_contract_count: usize,
+    pub manifest_root_count: usize,
+    pub manifest_contract_count: usize,
+    pub discovery_edge_count: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ActiveManifestVersion {
+    pub manifest_version: u64,
+    pub source_family: String,
+    pub chain: String,
+    pub deployment_epoch: String,
+    pub normalizer_version: String,
+    pub capability_flags: BTreeMap<String, CapabilityFlag>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NamespaceManifestSnapshot {
+    pub manifests: Vec<ActiveManifestVersion>,
+    pub last_updated: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SourceManifest {
+    pub manifest_version: u64,
+    pub namespace: String,
+    pub source_family: String,
+    pub chain: String,
+    pub deployment_epoch: String,
+    pub rollout_status: RolloutStatus,
+    pub normalizer_version: String,
+    pub capability_flags: BTreeMap<String, CapabilityFlag>,
+    pub roots: Vec<ManifestRoot>,
+    pub contracts: Vec<ManifestContract>,
+    pub discovery_rules: Vec<DiscoveryRule>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RolloutStatus {
+    Draft,
+    Shadow,
+    Active,
+    Deprecated,
+}
+
+impl RolloutStatus {
+    pub const fn as_db_value(self) -> &'static str {
+        match self {
+            Self::Draft => "draft",
+            Self::Shadow => "shadow",
+            Self::Active => "active",
+            Self::Deprecated => "deprecated",
+        }
+    }
+
+    pub const fn is_active(self) -> bool {
+        matches!(self, Self::Active)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapabilitySupportStatus {
+    Unsupported,
+    Shadow,
+    Supported,
+}
+
+impl CapabilitySupportStatus {
+    pub const fn as_db_value(self) -> &'static str {
+        match self {
+            Self::Unsupported => "unsupported",
+            Self::Shadow => "shadow",
+            Self::Supported => "supported",
+        }
+    }
+
+    pub(crate) fn from_db_value(value: &str) -> Result<Self> {
+        match value {
+            "unsupported" => Ok(Self::Unsupported),
+            "shadow" => Ok(Self::Shadow),
+            "supported" => Ok(Self::Supported),
+            _ => bail!("unsupported capability status {value}"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CapabilityFlag {
+    pub status: CapabilitySupportStatus,
+    pub notes: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ManifestRoot {
+    pub name: String,
+    pub address: String,
+    pub code_hash: Option<String>,
+    pub abi_ref: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ManifestContract {
+    pub role: String,
+    pub address: String,
+    pub proxy_kind: String,
+    pub implementation: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DiscoveryRule {
+    pub edge_kind: String,
+    pub from_role: String,
+    pub admission: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+pub(crate) struct RawSourceManifest {
+    manifest_version: u64,
+    namespace: String,
+    source_family: String,
+    chain: String,
+    deployment_epoch: String,
+    rollout_status: RolloutStatus,
+    normalizer_version: String,
+    capability_flags: BTreeMap<String, RawCapabilityFlag>,
+    roots: Vec<ManifestRoot>,
+    contracts: Vec<ManifestContract>,
+    discovery_rules: Vec<DiscoveryRule>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(untagged)]
+enum RawCapabilityFlag {
+    Status(CapabilitySupportStatus),
+    Detailed(CapabilityFlag),
+}
+
+impl From<RawSourceManifest> for SourceManifest {
+    fn from(value: RawSourceManifest) -> Self {
+        Self {
+            manifest_version: value.manifest_version,
+            namespace: value.namespace,
+            source_family: value.source_family,
+            chain: value.chain,
+            deployment_epoch: value.deployment_epoch,
+            rollout_status: value.rollout_status,
+            normalizer_version: value.normalizer_version,
+            capability_flags: value
+                .capability_flags
+                .into_iter()
+                .map(|(name, flag)| {
+                    let flag = match flag {
+                        RawCapabilityFlag::Status(status) => CapabilityFlag {
+                            status,
+                            notes: None,
+                        },
+                        RawCapabilityFlag::Detailed(flag) => flag,
+                    };
+                    (name, flag)
+                })
+                .collect(),
+            roots: value.roots,
+            contracts: value.contracts,
+            discovery_rules: value.discovery_rules,
+        }
+    }
+}
