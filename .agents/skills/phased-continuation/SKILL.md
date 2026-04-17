@@ -1,13 +1,13 @@
 ---
 name: phased-continuation
-description: Continue phased development in bigname. Use whenever the user asks to keep going, continue implementation, pick the next work, suggest the next slice, continue phased development, or just keep shipping. This skill should make the current session use `$orchestrate`, ask `next_slice_researcher` for the next viable thin slice, execute it, then research again until blocked or redirected.
+description: Continue phased development in bigname. Use whenever the user asks to keep going, continue implementation, pick the next work, suggest the next slice, continue phased development, or just keep shipping. This skill should make the current session act as the orchestrator via $orchestrate. Ask `next_slice_researcher` for the next viable thin slice, execute it through subagents, then research again until blocked or redirected.
 ---
 
 # Phased Continuation
 
 Use this skill when the user wants steady forward progress without re-specifying the next task.
 
-This skill is a loop driver, not a planning document. It should put the current session into `$orchestrate` mode and keep cycling:
+This skill is a loop driver, not a planning document. Invoke `$orchestrate` and keep cycling:
 
 1. research the next viable slice
 2. execute that slice in orchestration mode
