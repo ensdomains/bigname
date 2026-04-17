@@ -316,9 +316,13 @@ The architecture adds a first-class surface layer so public names and backing re
 
 ### 8.1 `NameSurface`
 
-Represents a public normalized name in a namespace.
+Represents the canonical stored public-surface row for a normalized name in a namespace.
 
-Persist:
+There is one `NameSurface` row per `logical_name_id`.
+
+It stores the admitted surface identity and one canonical representative normalization result for that surface. It does not collapse every observed spelling or normalization attempt into additional `NameSurface` rows.
+
+Persist on the `NameSurface` row:
 
 - `logical_name_id`
 - `namespace`
@@ -330,6 +334,8 @@ Persist:
 - `labelhashes`
 - `normalizer_version`
 - normalization warnings / errors
+
+On `NameSurface`, `input_name` is the single representative source string whose pinned normalization output populates that row.
 
 ### 8.2 `SurfaceBinding`
 
@@ -370,9 +376,13 @@ This is required to correctly represent cases where:
 
 ## 9. Normalization And Preimage Observation
 
-Normalization is version-pinned and persisted with every surface representation.
+Normalization is version-pinned.
 
-Persist:
+For each `logical_name_id`, the canonical `NameSurface` row persists one representative normalized surface.
+
+When sources reveal additional spellings or presentations of that same surface, those per-observation `input_name` and normalization details persist in immutable name/preimage observation facts and their normalized events rather than in additional `NameSurface` rows.
+
+Persist on the canonical `NameSurface` representation:
 
 - `input_name`
 - `canonical_display_name`
@@ -388,6 +398,7 @@ Rules:
 
 - invalid input is never silently coerced into a valid identity
 - normalization output and the normalizer version used to produce it are both persisted
+- per-observation name text and normalization provenance remain attributable through immutable observation facts and normalized events
 - normalization provenance is part of the audit surface
 
 ### Preimage observation is first-class

@@ -33,9 +33,11 @@ Resource-centric convenience rule:
 - when a resource view needs a single display surface, rank bindings in this order:
   `declared_registry_path`
   `linked_subregistry_path`
+  `migration_rebind`
   `resolver_alias_path`
   `observed_wildcard_path`
   `observed_only`
+- `migration_rebind` ranks after direct declared paths and before alias- or observation-derived paths
 - ties break by earliest active binding, then lexical `normalized_name`
 
 ## Consequences
@@ -58,4 +60,3 @@ Two public surfaces may bind to the same `resource_id`. Permissions and role his
 ### Token regeneration
 
 Token regeneration does not change `logical_name_id`, and it does not require a new `resource_id` when the backing authority is the same. Token attributes change within the token-lineage history rather than becoming the primary identity.
-

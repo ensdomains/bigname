@@ -55,6 +55,7 @@ pub struct RawFactOrphanCounts {
     pub transaction_count: u64,
     pub receipt_count: u64,
     pub log_count: u64,
+    pub call_snapshot_count: u64,
 }
 
 /// Insert missing raw transaction rows or refresh canonicality for already
@@ -192,6 +193,13 @@ pub async fn mark_raw_block_facts_range_orphaned(
     let log_count =
         mark_block_hash_set_orphaned(&mut *transaction, "raw_logs", chain_id, &block_hashes)
             .await?;
+    let call_snapshot_count = mark_block_hash_set_orphaned(
+        &mut *transaction,
+        "raw_call_snapshots",
+        chain_id,
+        &block_hashes,
+    )
+    .await?;
 
     transaction
         .commit()
@@ -204,6 +212,7 @@ pub async fn mark_raw_block_facts_range_orphaned(
         transaction_count,
         receipt_count,
         log_count,
+        call_snapshot_count,
     })
 }
 
@@ -997,6 +1006,7 @@ mod tests {
     };
 
     use anyhow::Result;
+    use serde_json::json;
     use sqlx::{
         PgPool,
         postgres::{PgConnectOptions, PgPoolOptions},
@@ -1004,7 +1014,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        RawBlock, RawCodeHash, default_database_url, upsert_raw_blocks, upsert_raw_code_hashes,
+        RawBlock, RawCallSnapshot, RawCodeHash, default_database_url, upsert_raw_blocks,
+        upsert_raw_call_snapshots, upsert_raw_code_hashes,
     };
 
     static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
@@ -1139,6 +1150,29 @@ mod tests {
             emitting_address: "0x0000000000000000000000000000000000000003".to_owned(),
             topics: vec!["0xtopic0".to_owned(), "0xtopic1".to_owned()],
             data: vec![0xde, 0xad, 0xbe, 0xef],
+            canonicality_state: state,
+        }
+    }
+
+    fn raw_call_snapshot(
+        block_hash: &str,
+        block_number: i64,
+        request_hash: &str,
+        state: CanonicalityState,
+    ) -> RawCallSnapshot {
+        RawCallSnapshot {
+            chain_id: "eth-mainnet".to_owned(),
+            block_hash: block_hash.to_owned(),
+            block_number,
+            request_hash: request_hash.to_owned(),
+            request_payload: json!({
+                "to": "0x0000000000000000000000000000000000000001",
+                "data": format!("0xcall-{request_hash}")
+            }),
+            response_hash: format!("0xresponse-{request_hash}"),
+            response_payload: json!({
+                "result": format!("0xresult-{request_hash}")
+            }),
             canonicality_state: state,
         }
     }
@@ -1284,6 +1318,14 @@ mod tests {
             }],
         )
         .await?;
+        upsert_raw_call_snapshots(
+            database.pool(),
+            &[
+                raw_call_snapshot("0x002", 2, "0xreq-002", CanonicalityState::Canonical),
+                raw_call_snapshot("0x001", 1, "0xreq-001", CanonicalityState::Canonical),
+            ],
+        )
+        .await?;
 
         let counts = mark_raw_block_facts_range_orphaned(
             database.pool(),
@@ -1300,6 +1342,7 @@ mod tests {
                 transaction_count: 1,
                 receipt_count: 1,
                 log_count: 1,
+                call_snapshot_count: 1,
             }
         );
 
@@ -1345,7 +1388,23 @@ mod tests {
         );
         assert_eq!(
             sqlx::query_scalar::<_, String>(
+                "SELECT canonicality_state::TEXT FROM raw_call_snapshots WHERE block_hash = '0x002' AND request_hash = '0xreq-002'"
+            )
+            .fetch_one(database.pool())
+            .await?,
+            "orphaned".to_owned()
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, String>(
                 "SELECT canonicality_state::TEXT FROM raw_blocks WHERE block_hash = '0x001'"
+            )
+            .fetch_one(database.pool())
+            .await?,
+            "canonical".to_owned()
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT canonicality_state::TEXT FROM raw_call_snapshots WHERE block_hash = '0x001' AND request_hash = '0xreq-001'"
             )
             .fetch_one(database.pool())
             .await?,
