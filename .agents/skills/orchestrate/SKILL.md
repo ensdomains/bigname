@@ -1,11 +1,13 @@
 ---
-name: orchestrator
-description: Run broad bigname execution work in orchestration mode. Use whenever the task is large, multi-slice, parallelizable, or should be delegated instead of implemented directly in the current session. This skill turns the current session into the orchestration lead: read docs, classify the change, create bounded tasks, spawn subagents, steer them, and integrate their results without doing most implementation locally.
+name: orchestrate
+description: Run broad bigname execution work in orchestration mode. Use whenever the task is large, multi-slice, parallelizable, or should be delegated instead of implemented directly in the current session. This skill makes the current session orchestrate the work: read docs, classify the change, create bounded tasks, spawn subagents, steer them, and integrate their results without doing most implementation locally.
 ---
 
-# Orchestrator
+# Orchestrate
 
 Use this skill when the current session should coordinate execution instead of owning implementation directly.
+
+This is not a separate agent definition. Using `$orchestrate` means the current session orchestrates the work itself.
 
 The job of the current session is to read the docs, classify the change, create concrete tasks, spawn subagents, interact with them, and integrate their results. Keep local implementation to a minimum and prefer delegation whenever a subagent can own the work cleanly.
 
@@ -35,6 +37,7 @@ The job of the current session is to read the docs, classify the change, create 
 ## Delegation rules
 
 - Prefer specialist subagents when they fit:
+  - `next_slice_researcher` for "what should we work on next?" and phase-aligned thin-slice selection
   - `task_designer` for decomposition, owned slice design, and task prompts
   - `docs_writer` for doc updates, task docs, and other repo documentation changes
   - `verification_reviewer` for cross-slice review and residual risk checking
@@ -70,11 +73,12 @@ For each delegated task, specify:
 ## Preferred fan-out pattern
 
 1. Read the relevant docs and classify the change.
-2. If the work is broad or underspecified, delegate scope mapping or task decomposition first, usually to `task_designer`.
-3. Spawn parallel implementation or documentation subagents only after ownership boundaries are explicit.
-4. Use `docs_writer` instead of writing docs or task documents yourself when delegation is possible.
-5. Use `verification_reviewer` for cross-slice checking when risk is high or multiple workers edited adjacent surfaces.
-6. Synthesize results for the user without taking over implementation yourself.
+2. If the real question is what to do next, delegate slice selection first to `next_slice_researcher`.
+3. If the slice is broad or underspecified, delegate scope mapping or task decomposition next, usually to `task_designer`.
+4. Spawn parallel implementation or documentation subagents only after ownership boundaries are explicit.
+5. Use `docs_writer` instead of writing docs or task documents yourself when delegation is possible.
+6. Use `verification_reviewer` for cross-slice checking when risk is high or multiple workers edited adjacent surfaces.
+7. Synthesize results for the user without taking over implementation yourself.
 
 ## Documentation rule
 
