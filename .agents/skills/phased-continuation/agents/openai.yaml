@@ -1,0 +1,7 @@
+interface:
+  display_name: "Phased Continuation"
+  short_description: "Pick the next slice and hand it to orchestrator"
+  default_prompt: "Use $phased-continuation to identify the next thin phased-development slice and delegate execution to the orchestrator custom agent."
+
+policy:
+  allow_implicit_invocation: true

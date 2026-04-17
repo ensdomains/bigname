@@ -22,10 +22,10 @@
 - Coordinate migrations carefully.
 - Treat fixture updates as cross-workstream review points.
 
-## Local Skills
+## Core Skills
+
+Other local skills are auto-discovered; list only the repo-critical routing skills here.
 
 - `$change-gate`: classify doc-first vs implementation-only work.
-- `$manifest-rollout`: review manifests, discovery, capability flags, and invalidation.
-- `$capability-slice`: map consumer capabilities to routes, projections, tests, and rollout criteria.
-- `$replay-boundaries`: review replay, canonicality, projection, and execution-boundary work.
 - `$parallel-pickup`: take a broad task, split it into safe owned slices, and parallelize with subagents.
+- `$phased-continuation`: choose the next thin phase-aligned slice and route execution to the `orchestrator` custom agent instead of keeping broad implementation in the root session.
