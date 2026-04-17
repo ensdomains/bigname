@@ -1,3 +1,5 @@
+mod name_current;
+
 use anyhow::{Context, Result};
 use bigname_storage::DatabaseConfig;
 use clap::{Args, Parser, Subcommand};
@@ -18,6 +20,7 @@ struct Cli {
 enum Command {
     Run(RunArgs),
     Migrate(MigrateArgs),
+    NameCurrent(NameCurrentArgs),
 }
 
 #[derive(Args, Debug)]
@@ -38,6 +41,25 @@ struct MigrateArgs {
     database: DatabaseConfig,
 }
 
+#[derive(Args, Debug)]
+struct NameCurrentArgs {
+    #[command(subcommand)]
+    command: NameCurrentCommand,
+}
+
+#[derive(Subcommand, Debug)]
+enum NameCurrentCommand {
+    Rebuild(NameCurrentRebuildArgs),
+}
+
+#[derive(Args, Debug)]
+struct NameCurrentRebuildArgs {
+    #[command(flatten)]
+    database: DatabaseConfig,
+    #[arg(long)]
+    logical_name_id: Option<String>,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     init_tracing("bigname-worker");
@@ -45,6 +67,7 @@ async fn main() -> Result<()> {
     match Cli::parse().command {
         Command::Run(args) => run(args).await,
         Command::Migrate(args) => migrate(args).await,
+        Command::NameCurrent(args) => name_current(args).await,
     }
 }
 
@@ -70,6 +93,29 @@ async fn migrate(args: MigrateArgs) -> Result<()> {
     let pool = bigname_storage::connect(&args.database).await?;
     bigname_storage::migrate(&pool).await?;
     info!(service = "worker", "database migrations applied");
+    Ok(())
+}
+
+async fn name_current(args: NameCurrentArgs) -> Result<()> {
+    match args.command {
+        NameCurrentCommand::Rebuild(args) => rebuild_name_current(args).await,
+    }
+}
+
+async fn rebuild_name_current(args: NameCurrentRebuildArgs) -> Result<()> {
+    let pool = bigname_storage::connect(&args.database).await?;
+    let summary = name_current::rebuild_name_current(&pool, args.logical_name_id.as_deref()).await?;
+
+    info!(
+        service = "worker",
+        projection = "name_current",
+        requested_name_count = summary.requested_name_count,
+        upserted_row_count = summary.upserted_row_count,
+        deleted_row_count = summary.deleted_row_count,
+        logical_name_id = args.logical_name_id.as_deref().unwrap_or("all"),
+        "name_current rebuild completed"
+    );
+
     Ok(())
 }
 

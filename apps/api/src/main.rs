@@ -15,10 +15,16 @@ use bigname_manifests::{
     ActiveManifestVersion, CapabilityFlag, NamespaceManifestSnapshot,
     load_namespace_manifest_snapshot,
 };
-use bigname_storage::DatabaseConfig;
+use bigname_storage::{DatabaseConfig, NameCurrentRow, load_name_current};
 use clap::{Args, Parser, Subcommand};
 use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
+use sqlx::{
+    PgPool,
+    types::{
+        JsonValue,
+        time::{OffsetDateTime, UtcOffset},
+    },
+};
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
@@ -136,6 +142,18 @@ struct NamespaceManifestsProvenance {
     manifest_versions: Vec<ManifestVersionRef>,
     execution_trace_id: Option<String>,
     derivation_kind: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct NameResponse {
+    data: JsonValue,
+    declared_state: JsonValue,
+    verified_state: Option<()>,
+    provenance: JsonValue,
+    coverage: JsonValue,
+    chain_positions: JsonValue,
+    consistency: String,
+    last_updated: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -275,6 +293,7 @@ fn app_router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(health))
         .route("/v1/namespaces/{namespace}", get(namespace_metadata))
+        .route("/v1/names/{namespace}/{name}", get(name_current))
         .route("/v1/manifests/{namespace}", get(namespace_manifests))
         .with_state(state)
 }
@@ -333,6 +352,40 @@ async fn namespace_manifests(
     Ok(Json(build_namespace_manifests_response(
         namespace, snapshot,
     )))
+}
+
+async fn name_current(
+    Path((namespace, name)): Path<(String, String)>,
+    State(state): State<AppState>,
+) -> ApiResult<Json<NameResponse>> {
+    ensure_public_namespace(&namespace)?;
+
+    let logical_name_id = format!("{namespace}:{name}");
+    let row = load_name_current(&state.pool, &logical_name_id)
+        .await
+        .map_err(|load_error| {
+            error!(
+                service = "api",
+                namespace = %namespace,
+                name = %name,
+                logical_name_id = %logical_name_id,
+                error = ?load_error,
+                "failed to load exact-name current projection"
+            );
+            ApiError::internal_error(format!(
+                "failed to load current projection for name {namespace}/{name}"
+            ))
+        })?;
+
+    let Some(row) = row else {
+        return Err(ApiError {
+            status: StatusCode::NOT_FOUND,
+            code: "not_found",
+            message: format!("name {name} was not found in namespace {namespace}"),
+        });
+    };
+
+    Ok(Json(build_name_response(row)))
 }
 
 fn build_namespace_metadata_response(
@@ -422,6 +475,318 @@ fn build_namespace_manifests_response(
         consistency: "head".to_owned(),
         last_updated: snapshot.last_updated,
     }
+}
+
+fn build_name_response(row: NameCurrentRow) -> NameResponse {
+    NameResponse {
+        data: build_name_data(&row),
+        declared_state: build_name_declared_state(&row),
+        verified_state: None,
+        provenance: build_name_provenance(&row.provenance),
+        coverage: build_name_coverage(&row.coverage),
+        chain_positions: ensure_object(&row.chain_positions),
+        consistency: canonicality_consistency(&row.canonicality_summary).to_owned(),
+        last_updated: format_timestamp(row.last_recomputed_at),
+    }
+}
+
+fn build_name_data(row: &NameCurrentRow) -> JsonValue {
+    let mut data = empty_object();
+    insert_string_field(&mut data, "logical_name_id", row.logical_name_id.clone());
+    insert_string_field(&mut data, "namespace", row.namespace.clone());
+    insert_string_field(&mut data, "normalized_name", row.normalized_name.clone());
+    insert_string_field(
+        &mut data,
+        "canonical_display_name",
+        row.canonical_display_name.clone(),
+    );
+    insert_string_field(&mut data, "namehash", row.namehash.clone());
+    insert_optional_string_field(
+        &mut data,
+        "resource_id",
+        row.resource_id.map(|value| value.to_string()),
+    );
+    insert_optional_string_field(
+        &mut data,
+        "token_lineage_id",
+        row.token_lineage_id.map(|value| value.to_string()),
+    );
+    insert_optional_string_field(
+        &mut data,
+        "binding_kind",
+        row.binding_kind.map(|value| value.as_str().to_owned()),
+    );
+    data
+}
+
+fn build_name_declared_state(row: &NameCurrentRow) -> JsonValue {
+    let mut declared_state = empty_object();
+    insert_value_field(
+        &mut declared_state,
+        "registration",
+        declared_summary_section(
+            &row.declared_summary,
+            "registration",
+            "declared registration summary is not yet projected",
+        ),
+    );
+    insert_value_field(
+        &mut declared_state,
+        "authority",
+        declared_authority_section(row),
+    );
+    insert_value_field(
+        &mut declared_state,
+        "control",
+        declared_summary_section(
+            &row.declared_summary,
+            "control",
+            "declared control summary is not yet projected",
+        ),
+    );
+    insert_value_field(
+        &mut declared_state,
+        "resolver",
+        declared_summary_section(
+            &row.declared_summary,
+            "resolver",
+            "declared resolver summary is not yet projected",
+        ),
+    );
+    insert_value_field(
+        &mut declared_state,
+        "record_inventory",
+        declared_summary_section(
+            &row.declared_summary,
+            "record_inventory",
+            "declared record inventory summary is not yet projected",
+        ),
+    );
+    insert_value_field(
+        &mut declared_state,
+        "history",
+        declared_summary_section(
+            &row.declared_summary,
+            "history",
+            "declared history pointers are not yet projected",
+        ),
+    );
+    declared_state
+}
+
+fn build_name_provenance(provenance: &JsonValue) -> JsonValue {
+    let mut normalized = empty_object();
+    insert_value_field(
+        &mut normalized,
+        "normalized_event_ids",
+        array_value_strings(provenance_field(provenance, "normalized_event_ids")),
+    );
+    insert_value_field(
+        &mut normalized,
+        "raw_fact_refs",
+        array_or_empty(provenance_field(provenance, "raw_fact_refs")),
+    );
+    insert_value_field(
+        &mut normalized,
+        "manifest_versions",
+        array_or_empty(provenance_field(provenance, "manifest_versions")),
+    );
+    insert_nullable_string_field(
+        &mut normalized,
+        "execution_trace_id",
+        string_field(provenance_field(provenance, "execution_trace_id")),
+    );
+    insert_string_field(
+        &mut normalized,
+        "derivation_kind",
+        string_field(provenance_field(provenance, "derivation_kind"))
+            .unwrap_or_else(|| "declared".to_owned()),
+    );
+    normalized
+}
+
+fn build_name_coverage(coverage: &JsonValue) -> JsonValue {
+    let mut normalized = empty_object();
+    insert_string_field(
+        &mut normalized,
+        "status",
+        string_field(provenance_field(coverage, "status"))
+            .unwrap_or_else(|| "unsupported".to_owned()),
+    );
+    insert_string_field(
+        &mut normalized,
+        "exhaustiveness",
+        string_field(provenance_field(coverage, "exhaustiveness"))
+            .unwrap_or_else(|| "not_applicable".to_owned()),
+    );
+    insert_value_field(
+        &mut normalized,
+        "source_classes_considered",
+        array_or_empty(provenance_field(coverage, "source_classes_considered")),
+    );
+    insert_string_field(
+        &mut normalized,
+        "enumeration_basis",
+        string_field(provenance_field(coverage, "enumeration_basis"))
+            .unwrap_or_else(|| "exact_name".to_owned()),
+    );
+    insert_nullable_string_field(
+        &mut normalized,
+        "unsupported_reason",
+        string_field(provenance_field(coverage, "unsupported_reason")),
+    );
+    normalized
+}
+
+fn declared_authority_section(row: &NameCurrentRow) -> JsonValue {
+    if let Some(section) =
+        provenance_field(&row.declared_summary, "authority").filter(|value| value.is_object())
+    {
+        return section.clone();
+    }
+
+    let has_binding_summary =
+        row.resource_id.is_some() || row.token_lineage_id.is_some() || row.binding_kind.is_some();
+    if !has_binding_summary {
+        return unsupported_section("declared authority summary is not yet projected");
+    }
+
+    let mut authority = empty_object();
+    insert_optional_string_field(
+        &mut authority,
+        "resource_id",
+        row.resource_id.map(|value| value.to_string()),
+    );
+    insert_optional_string_field(
+        &mut authority,
+        "token_lineage_id",
+        row.token_lineage_id.map(|value| value.to_string()),
+    );
+    insert_optional_string_field(
+        &mut authority,
+        "binding_kind",
+        row.binding_kind.map(|value| value.as_str().to_owned()),
+    );
+    authority
+}
+
+fn declared_summary_section(summary: &JsonValue, key: &str, unsupported_reason: &str) -> JsonValue {
+    provenance_field(summary, key)
+        .filter(|value| value.is_object())
+        .cloned()
+        .unwrap_or_else(|| unsupported_section(unsupported_reason))
+}
+
+fn canonicality_consistency(canonicality_summary: &JsonValue) -> &'static str {
+    match string_field(provenance_field(canonicality_summary, "status")).as_deref() {
+        Some("safe") => "safe",
+        Some("finalized") => "finalized",
+        _ => "head",
+    }
+}
+
+fn provenance_field<'a>(value: &'a JsonValue, key: &str) -> Option<&'a JsonValue> {
+    value.as_object().and_then(|object| object.get(key))
+}
+
+fn string_field(value: Option<&JsonValue>) -> Option<String> {
+    match value {
+        Some(JsonValue::String(value)) => Some(value.clone()),
+        Some(JsonValue::Number(value)) => Some(value.to_string()),
+        Some(JsonValue::Bool(value)) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+fn array_or_empty(value: Option<&JsonValue>) -> JsonValue {
+    match value {
+        Some(JsonValue::Array(values)) => JsonValue::Array(values.clone()),
+        _ => JsonValue::Array(Vec::new()),
+    }
+}
+
+fn array_value_strings(value: Option<&JsonValue>) -> JsonValue {
+    match value {
+        Some(JsonValue::Array(values)) => JsonValue::Array(
+            values
+                .iter()
+                .filter_map(|value| value_to_string(value).map(JsonValue::String))
+                .collect(),
+        ),
+        _ => JsonValue::Array(Vec::new()),
+    }
+}
+
+fn value_to_string(value: &JsonValue) -> Option<String> {
+    match value {
+        JsonValue::String(value) => Some(value.clone()),
+        JsonValue::Number(value) => Some(value.to_string()),
+        JsonValue::Bool(value) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+fn ensure_object(value: &JsonValue) -> JsonValue {
+    value
+        .as_object()
+        .map(|_| value.clone())
+        .unwrap_or_else(empty_object)
+}
+
+fn unsupported_section(unsupported_reason: &str) -> JsonValue {
+    let mut value = empty_object();
+    insert_string_field(&mut value, "status", "unsupported".to_owned());
+    insert_string_field(
+        &mut value,
+        "unsupported_reason",
+        unsupported_reason.to_owned(),
+    );
+    value
+}
+
+fn format_timestamp(value: OffsetDateTime) -> String {
+    let value = value.to_offset(UtcOffset::UTC);
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        value.year(),
+        value.month() as u8,
+        value.day(),
+        value.hour(),
+        value.minute(),
+        value.second()
+    )
+}
+
+fn empty_object() -> JsonValue {
+    JsonValue::Object(Default::default())
+}
+
+fn insert_string_field(object: &mut JsonValue, key: &str, value: String) {
+    object
+        .as_object_mut()
+        .expect("object helper must receive object")
+        .insert(key.to_owned(), JsonValue::String(value));
+}
+
+fn insert_optional_string_field(object: &mut JsonValue, key: &str, value: Option<String>) {
+    object
+        .as_object_mut()
+        .expect("object helper must receive object")
+        .insert(
+            key.to_owned(),
+            value.map(JsonValue::String).unwrap_or(JsonValue::Null),
+        );
+}
+
+fn insert_nullable_string_field(object: &mut JsonValue, key: &str, value: Option<String>) {
+    insert_optional_string_field(object, key, value);
+}
+
+fn insert_value_field(object: &mut JsonValue, key: &str, value: JsonValue) {
+    object
+        .as_object_mut()
+        .expect("object helper must receive object")
+        .insert(key.to_owned(), value);
 }
 
 fn ensure_public_namespace(namespace: &str) -> ApiResult<()> {

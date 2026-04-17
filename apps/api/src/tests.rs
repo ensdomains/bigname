@@ -11,9 +11,11 @@ use axum::{
 };
 use bigname_storage::default_database_url;
 use serde::de::DeserializeOwned;
+use serde_json::{Value, json};
 use sqlx::{
     PgPool, Row,
     postgres::{PgConnectOptions, PgPoolOptions},
+    types::{Uuid, time::OffsetDateTime},
 };
 use tower::ServiceExt;
 
@@ -29,6 +31,13 @@ struct TestDatabase {
 
 impl TestDatabase {
     async fn new(initialize_manifest_schema: bool) -> Result<Self> {
+        Self::new_with_schemas(initialize_manifest_schema, false).await
+    }
+
+    async fn new_with_schemas(
+        initialize_manifest_schema: bool,
+        initialize_name_current_schema: bool,
+    ) -> Result<Self> {
         let database_url = std::env::var("BIGNAME_DATABASE_URL")
             .or_else(|_| std::env::var("DATABASE_URL"))
             .unwrap_or_else(|_| default_database_url().to_owned());
@@ -125,6 +134,113 @@ impl TestDatabase {
                 .context("failed to create manifest_capability_flags for API tests")?;
         }
 
+        if initialize_name_current_schema {
+            sqlx::query(
+                r#"
+                    CREATE TABLE name_surfaces (
+                        logical_name_id TEXT PRIMARY KEY,
+                        namespace TEXT NOT NULL,
+                        canonical_display_name TEXT NOT NULL,
+                        normalized_name TEXT NOT NULL,
+                        namehash TEXT NOT NULL,
+                        CHECK (logical_name_id = namespace || ':' || normalized_name)
+                    )
+                    "#,
+            )
+            .execute(&pool)
+            .await
+            .context("failed to create name_surfaces for API tests")?;
+            sqlx::query(
+                r#"
+                    CREATE TABLE resources (
+                        resource_id UUID PRIMARY KEY
+                    )
+                    "#,
+            )
+            .execute(&pool)
+            .await
+            .context("failed to create resources for API tests")?;
+            sqlx::query(
+                r#"
+                    CREATE TABLE token_lineages (
+                        token_lineage_id UUID PRIMARY KEY
+                    )
+                    "#,
+            )
+            .execute(&pool)
+            .await
+            .context("failed to create token_lineages for API tests")?;
+            sqlx::query(
+                r#"
+                    CREATE TABLE surface_bindings (
+                        surface_binding_id UUID PRIMARY KEY,
+                        logical_name_id TEXT NOT NULL REFERENCES name_surfaces (logical_name_id),
+                        resource_id UUID NOT NULL REFERENCES resources (resource_id),
+                        binding_kind TEXT NOT NULL,
+                        CHECK (
+                            binding_kind IN (
+                                'declared_registry_path',
+                                'linked_subregistry_path',
+                                'resolver_alias_path',
+                                'observed_wildcard_path',
+                                'migration_rebind',
+                                'observed_only'
+                            )
+                        )
+                    )
+                    "#,
+            )
+            .execute(&pool)
+            .await
+            .context("failed to create surface_bindings for API tests")?;
+            sqlx::query(
+                r#"
+                    CREATE TABLE name_current (
+                        logical_name_id TEXT PRIMARY KEY REFERENCES name_surfaces (logical_name_id),
+                        namespace TEXT NOT NULL,
+                        canonical_display_name TEXT NOT NULL,
+                        normalized_name TEXT NOT NULL,
+                        namehash TEXT NOT NULL,
+                        surface_binding_id UUID REFERENCES surface_bindings (surface_binding_id),
+                        resource_id UUID REFERENCES resources (resource_id),
+                        token_lineage_id UUID REFERENCES token_lineages (token_lineage_id),
+                        binding_kind TEXT,
+                        declared_summary JSONB NOT NULL DEFAULT '{}'::jsonb,
+                        provenance JSONB NOT NULL DEFAULT '{}'::jsonb,
+                        coverage JSONB NOT NULL DEFAULT '{}'::jsonb,
+                        chain_positions JSONB NOT NULL DEFAULT '{}'::jsonb,
+                        canonicality_summary JSONB NOT NULL DEFAULT '{}'::jsonb,
+                        manifest_version BIGINT NOT NULL CHECK (manifest_version > 0),
+                        last_recomputed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                        CHECK (logical_name_id = namespace || ':' || normalized_name),
+                        CHECK (
+                            (surface_binding_id IS NULL AND resource_id IS NULL AND binding_kind IS NULL)
+                            OR
+                            (surface_binding_id IS NOT NULL AND resource_id IS NOT NULL AND binding_kind IS NOT NULL)
+                        ),
+                        CHECK (
+                            token_lineage_id IS NULL
+                            OR resource_id IS NOT NULL
+                        ),
+                        CHECK (
+                            binding_kind IS NULL
+                            OR binding_kind IN (
+                                'declared_registry_path',
+                                'linked_subregistry_path',
+                                'resolver_alias_path',
+                                'observed_wildcard_path',
+                                'migration_rebind',
+                                'observed_only'
+                            )
+                        )
+                    )
+                    "#,
+            )
+            .execute(&pool)
+            .await
+            .context("failed to create name_current for API tests")?;
+        }
+
         Ok(Self {
             admin_pool,
             pool,
@@ -215,6 +331,79 @@ impl TestDatabase {
         Ok(())
     }
 
+    async fn seed_name_current_binding(
+        &self,
+        logical_name_id: &str,
+        namespace: &str,
+        normalized_name: &str,
+        canonical_display_name: &str,
+        namehash: &str,
+        resource_id: Uuid,
+        token_lineage_id: Uuid,
+        surface_binding_id: Uuid,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+                INSERT INTO name_surfaces (
+                    logical_name_id,
+                    namespace,
+                    canonical_display_name,
+                    normalized_name,
+                    namehash
+                )
+                VALUES ($1, $2, $3, $4, $5)
+                "#,
+        )
+        .bind(logical_name_id)
+        .bind(namespace)
+        .bind(canonical_display_name)
+        .bind(normalized_name)
+        .bind(namehash)
+        .execute(&self.pool)
+        .await
+        .context("failed to insert name_surface for API test")?;
+
+        sqlx::query("INSERT INTO resources (resource_id) VALUES ($1)")
+            .bind(resource_id)
+            .execute(&self.pool)
+            .await
+            .context("failed to insert resource for API test")?;
+
+        sqlx::query("INSERT INTO token_lineages (token_lineage_id) VALUES ($1)")
+            .bind(token_lineage_id)
+            .execute(&self.pool)
+            .await
+            .context("failed to insert token_lineage for API test")?;
+
+        sqlx::query(
+            r#"
+                INSERT INTO surface_bindings (
+                    surface_binding_id,
+                    logical_name_id,
+                    resource_id,
+                    binding_kind
+                )
+                VALUES ($1, $2, $3, $4)
+                "#,
+        )
+        .bind(surface_binding_id)
+        .bind(logical_name_id)
+        .bind(resource_id)
+        .bind("declared_registry_path")
+        .execute(&self.pool)
+        .await
+        .context("failed to insert surface_binding for API test")?;
+
+        Ok(())
+    }
+
+    async fn insert_name_current_row(&self, row: bigname_storage::NameCurrentRow) -> Result<()> {
+        bigname_storage::upsert_name_current_rows(&self.pool, &[row])
+            .await
+            .context("failed to upsert name_current row for API test")?;
+        Ok(())
+    }
+
     async fn cleanup(self) -> Result<()> {
         self.pool.close().await;
         sqlx::query(&format!(
@@ -234,6 +423,354 @@ async fn read_json<T: DeserializeOwned>(response: Response) -> Result<T> {
         .await
         .context("failed to read API response body")?;
     serde_json::from_slice(&bytes).context("failed to decode API response JSON")
+}
+
+fn timestamp(seconds: i64) -> OffsetDateTime {
+    OffsetDateTime::from_unix_timestamp(seconds).expect("test timestamp must be valid")
+}
+
+fn exact_name_row(
+    logical_name_id: &str,
+    surface_binding_id: Uuid,
+    resource_id: Uuid,
+    token_lineage_id: Uuid,
+) -> bigname_storage::NameCurrentRow {
+    bigname_storage::NameCurrentRow {
+        logical_name_id: logical_name_id.to_owned(),
+        namespace: "ens".to_owned(),
+        canonical_display_name: "Alice.eth".to_owned(),
+        normalized_name: "alice.eth".to_owned(),
+        namehash: "namehash:alice.eth".to_owned(),
+        surface_binding_id: Some(surface_binding_id),
+        resource_id: Some(resource_id),
+        token_lineage_id: Some(token_lineage_id),
+        binding_kind: Some(bigname_storage::SurfaceBindingKind::DeclaredRegistryPath),
+        declared_summary: json!({
+            "registration": {
+                "status": "active",
+                "authority_kind": "registrar"
+            },
+            "resolver": {
+                "address": "0x0000000000000000000000000000000000000abc"
+            }
+        }),
+        provenance: json!({
+            "normalized_event_ids": [101, 102],
+            "raw_fact_refs": [
+                {
+                    "kind": "log",
+                    "chain_id": "ethereum-mainnet",
+                    "block_hash": "0xabc"
+                }
+            ],
+            "manifest_versions": [
+                {
+                    "manifest_version": 3,
+                    "source_family": "ens_v1_registry",
+                    "chain": "ethereum-mainnet",
+                    "deployment_epoch": "ens_v1"
+                }
+            ],
+            "execution_trace_id": null,
+            "derivation_kind": "projection_apply"
+        }),
+        coverage: json!({
+            "status": "full",
+            "exhaustiveness": "authoritative",
+            "source_classes_considered": ["ensv1_registry_path"],
+            "unsupported_reason": null,
+            "enumeration_basis": "exact_name"
+        }),
+        chain_positions: json!({
+            "ethereum": {
+                "chain_id": "ethereum-mainnet",
+                "block_number": 21_000_003,
+                "block_hash": "0xbinding",
+                "timestamp": "2026-04-17T00:00:03Z"
+            }
+        }),
+        canonicality_summary: json!({
+            "status": "finalized",
+            "chains": {
+                "ethereum-mainnet": "finalized"
+            }
+        }),
+        manifest_version: 3,
+        last_recomputed_at: timestamp(1_717_171_717),
+    }
+}
+
+#[tokio::test]
+async fn get_name_returns_current_projection_envelope() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0x2200);
+    let token_lineage_id = Uuid::from_u128(0x1100);
+    let surface_binding_id = Uuid::from_u128(0x3300);
+
+    database
+        .seed_name_current_binding(
+            logical_name_id,
+            "ens",
+            "alice.eth",
+            "Alice.eth",
+            "namehash:alice.eth",
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    database
+        .insert_name_current_row(exact_name_row(
+            logical_name_id,
+            surface_binding_id,
+            resource_id,
+            token_lineage_id,
+        ))
+        .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/names/ens/alice.eth")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("name request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let payload: NameResponse = read_json(response).await?;
+    assert_eq!(payload.verified_state, None);
+    assert_eq!(payload.consistency, "finalized");
+    assert_eq!(payload.last_updated, "2024-05-31T16:08:37Z");
+
+    let data = payload.data.as_object().expect("data must be an object");
+    assert_eq!(
+        data.get("logical_name_id"),
+        Some(&Value::String("ens:alice.eth".to_owned()))
+    );
+    assert_eq!(
+        data.get("namespace"),
+        Some(&Value::String("ens".to_owned()))
+    );
+    assert_eq!(
+        data.get("normalized_name"),
+        Some(&Value::String("alice.eth".to_owned()))
+    );
+    assert_eq!(
+        data.get("canonical_display_name"),
+        Some(&Value::String("Alice.eth".to_owned()))
+    );
+    assert_eq!(
+        data.get("namehash"),
+        Some(&Value::String("namehash:alice.eth".to_owned()))
+    );
+    assert_eq!(
+        data.get("resource_id"),
+        Some(&Value::String(resource_id.to_string()))
+    );
+    assert_eq!(
+        data.get("token_lineage_id"),
+        Some(&Value::String(token_lineage_id.to_string()))
+    );
+    assert_eq!(
+        data.get("binding_kind"),
+        Some(&Value::String("declared_registry_path".to_owned()))
+    );
+
+    let declared_state = payload
+        .declared_state
+        .as_object()
+        .expect("declared_state must be an object");
+    assert_eq!(
+        declared_state
+            .get("registration")
+            .and_then(Value::as_object)
+            .and_then(|value| value.get("status"))
+            .and_then(Value::as_str),
+        Some("active")
+    );
+    assert_eq!(
+        declared_state
+            .get("resolver")
+            .and_then(Value::as_object)
+            .and_then(|value| value.get("address"))
+            .and_then(Value::as_str),
+        Some("0x0000000000000000000000000000000000000abc")
+    );
+    assert_eq!(
+        declared_state
+            .get("authority")
+            .and_then(Value::as_object)
+            .and_then(|value| value.get("resource_id")),
+        Some(&Value::String(resource_id.to_string()))
+    );
+    assert_eq!(
+        declared_state
+            .get("control")
+            .and_then(Value::as_object)
+            .and_then(|value| value.get("status"))
+            .and_then(Value::as_str),
+        Some("unsupported")
+    );
+    assert_eq!(
+        declared_state
+            .get("record_inventory")
+            .and_then(Value::as_object)
+            .and_then(|value| value.get("status"))
+            .and_then(Value::as_str),
+        Some("unsupported")
+    );
+    assert_eq!(
+        declared_state
+            .get("history")
+            .and_then(Value::as_object)
+            .and_then(|value| value.get("status"))
+            .and_then(Value::as_str),
+        Some("unsupported")
+    );
+
+    let provenance = payload
+        .provenance
+        .as_object()
+        .expect("provenance must be an object");
+    assert_eq!(
+        provenance.get("normalized_event_ids"),
+        Some(&json!(["101", "102"]))
+    );
+    assert_eq!(
+        provenance.get("derivation_kind").and_then(Value::as_str),
+        Some("projection_apply")
+    );
+    assert_eq!(provenance.get("execution_trace_id"), Some(&Value::Null));
+    assert_eq!(
+        provenance.get("manifest_versions"),
+        Some(&json!([
+            {
+                "manifest_version": 3,
+                "source_family": "ens_v1_registry",
+                "chain": "ethereum-mainnet",
+                "deployment_epoch": "ens_v1"
+            }
+        ]))
+    );
+
+    let coverage = payload
+        .coverage
+        .as_object()
+        .expect("coverage must be an object");
+    assert_eq!(coverage.get("status").and_then(Value::as_str), Some("full"));
+    assert_eq!(
+        coverage.get("exhaustiveness").and_then(Value::as_str),
+        Some("authoritative")
+    );
+    assert_eq!(
+        coverage.get("source_classes_considered"),
+        Some(&json!(["ensv1_registry_path"]))
+    );
+    assert_eq!(
+        coverage.get("enumeration_basis").and_then(Value::as_str),
+        Some("exact_name")
+    );
+    assert_eq!(coverage.get("unsupported_reason"), Some(&Value::Null));
+
+    assert_eq!(
+        payload.chain_positions,
+        json!({
+            "ethereum": {
+                "chain_id": "ethereum-mainnet",
+                "block_number": 21_000_003,
+                "block_hash": "0xbinding",
+                "timestamp": "2026-04-17T00:00:03Z"
+            }
+        })
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_name_returns_not_found_when_projection_row_is_missing() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/names/ens/missing.eth")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("name request failed")?;
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let payload: ErrorResponse = read_json(response).await?;
+    assert_eq!(payload.error.code, "not_found");
+    assert_eq!(
+        payload.error.message,
+        "name missing.eth was not found in namespace ens"
+    );
+    assert!(payload.error.details.is_empty());
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_name_returns_not_found_for_unsupported_namespace_without_storage_read() -> Result<()> {
+    let database = TestDatabase::new(false).await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/names/unknown/alice.eth")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("name request failed")?;
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let payload: ErrorResponse = read_json(response).await?;
+    assert_eq!(payload.error.code, "not_found");
+    assert_eq!(payload.error.message, "namespace unknown is not supported");
+    assert!(payload.error.details.is_empty());
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_name_returns_internal_error_envelope_on_storage_failure() -> Result<()> {
+    let database = TestDatabase::new(false).await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/names/ens/alice.eth")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("name request failed")?;
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    let payload: ErrorResponse = read_json(response).await?;
+    assert_eq!(payload.error.code, "internal_error");
+    assert_eq!(
+        payload.error.message,
+        "failed to load current projection for name ens/alice.eth"
+    );
+    assert!(payload.error.details.is_empty());
+
+    database.cleanup().await?;
+    Ok(())
 }
 
 #[tokio::test]

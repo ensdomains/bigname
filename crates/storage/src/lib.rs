@@ -4,6 +4,7 @@ mod checkpoints;
 mod execution;
 mod identity;
 mod lineage;
+mod name_current;
 mod normalized_events;
 mod raw;
 mod raw_calls;
@@ -37,6 +38,10 @@ pub use identity::{
 pub use lineage::{
     CanonicalityState, ChainLineageBlock, load_chain_lineage_block,
     mark_chain_lineage_range_orphaned, upsert_chain_lineage_blocks,
+};
+pub use name_current::{
+    NameCurrentRow, clear_name_current, delete_name_current, load_name_current,
+    upsert_name_current_rows,
 };
 pub use normalized_events::{
     NormalizedEvent, load_normalized_event_counts_by_kind, load_normalized_events_by_namespace,
