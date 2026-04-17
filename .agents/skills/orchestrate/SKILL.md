@@ -36,6 +36,10 @@ Shared subagents live in `.codex/agents/*.toml`. Dispatch as follows:
 - `verification_reviewer` (read-only) — cross-slice review for correctness, boundary compliance, missing validation. Use when risk is high or multiple workers edited adjacent surfaces.
 - built-in `worker` — bounded implementation task. Give it owned paths, outcome, and validation.
 
+## Dispatching subagents
+
+Typed subagents (anything defined in `.codex/agents/*.toml`) take a scoped prompt, not a fork of the parent thread. Compose each call with only what the subagent needs: the slice envelope or the relevant fields, owned paths, the exact deliverable, success signal. Do not try to inherit full conversation context — that dispatch mode is rejected and wastes a round-trip on retry.
+
 ## Waiting on subagents
 
 Subagents take minutes, not seconds. Slow is not stuck.
