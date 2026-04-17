@@ -6,7 +6,7 @@
 
 - Minimum shared-interface freeze: `docs/architecture.md`, `docs/api-v1.md`, `docs/storage.md`, `docs/manifests.md`, `docs/consumer-capabilities.md`, `docs/adrs/0001-stack.md`, and `docs/adrs/0002-surface-resource-identity.md`.
 - If a task changes public semantics, shared IDs or enums, coverage meaning, manifest schema, workstream ownership, or consumer-replacement meaning, update the relevant docs first or in the same change.
-- Prefer thin end-to-end slices. Do not build disguised legacy API parity or new planning docs unless semantics changed.
+- Prefer cohesive end-to-end slices — a full capability with its tests and wiring, not a commit-sized edge. Do not build disguised legacy API parity or new planning docs unless semantics changed.
 
 ## Boundaries
 

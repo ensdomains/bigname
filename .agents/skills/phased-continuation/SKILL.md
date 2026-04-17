@@ -1,6 +1,6 @@
 ---
 name: phased-continuation
-description: Continue phased development in bigname. Use whenever the user asks to keep going, continue implementation, pick the next work, suggest the next slice, continue phased development, or just keep shipping. Runs $orchestrate in continuation mode, asking next_slice_researcher for the next viable thin slice, executing it, and researching again until blocked or redirected.
+description: Continue phased development in bigname. Use whenever the user asks to keep going, continue implementation, pick the next work, suggest the next slice, continue phased development, or just keep shipping. Runs $orchestrate in continuation mode, asking next_slice_researcher for the next viable slices, executing them, and researching again until blocked or redirected.
 metadata:
   kind: coordination
 ---

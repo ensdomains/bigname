@@ -31,7 +31,7 @@ Implementation detail should stay subordinate to one rule: build the native `v1`
 - keep raw facts immutable and projections disposable
 - treat verified execution as a first-class subsystem from the start
 - measure replacement by consumer capability coverage, not legacy API parity
-- prefer thin end-to-end slices over broad scaffolding with undefined semantics
+- prefer cohesive end-to-end slices over broad scaffolding with undefined semantics
 - freeze cross-workstream interfaces before parallel implementation starts
 
 ---
