@@ -5,12 +5,16 @@ use bigname_manifests::{
     DiscoveryObservation, WatchedContractSource, load_watched_contracts,
     reconcile_discovery_observations,
 };
+use bigname_storage::{CanonicalityState, NormalizedEvent, upsert_normalized_events};
 use sha3::{Digest, Keccak256};
 use sqlx::{PgPool, Row, types::Uuid};
 
 const ENS_V1_REGISTRY_SOURCE_FAMILY: &str = "ens_v1_registry_l1";
 const SUBREGISTRY_EDGE_KIND: &str = "subregistry";
+const EVENT_KIND_SUBREGISTRY_CHANGED: &str = "SubregistryChanged";
+const DERIVATION_KIND_ENS_V1_SUBREGISTRY_CHANGED: &str = "ens_v1_subregistry_changed";
 const NEW_OWNER_SIGNATURE: &str = "NewOwner(bytes32,bytes32,address)";
+#[cfg(test)]
 const ZERO_NODE: &str = "0x0000000000000000000000000000000000000000000000000000000000000000";
 const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 
@@ -36,6 +40,12 @@ struct RegistryRawLogRow {
     emitting_address: String,
     topics: Vec<String>,
     data: Vec<u8>,
+    canonicality_state: CanonicalityState,
+    emitting_contract_instance_id: Uuid,
+    source_manifest_id: i64,
+    namespace: String,
+    source_family: String,
+    manifest_version: i64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -63,6 +73,14 @@ struct ActiveManifestMetadata {
 struct ObservedSubregistryAssignment {
     observation_key: String,
     observation: DiscoveryObservation,
+    raw_log: RegistryRawLogRow,
+}
+
+#[derive(Clone, Debug)]
+struct ActiveSubregistryEdge {
+    observation_key: String,
+    from_contract_instance_id: Uuid,
+    to_contract_instance_id: Uuid,
 }
 
 pub async fn sync_ens_v1_subregistry_discovery(
@@ -74,18 +92,34 @@ pub async fn sync_ens_v1_subregistry_discovery(
     let discovery_source = ens_v1_subregistry_discovery_source(chain);
 
     let mut matched_log_count = 0;
-    let mut latest_observations = BTreeMap::<String, DiscoveryObservation>::new();
+    let mut latest_assignments = BTreeMap::<String, ObservedSubregistryAssignment>::new();
     for raw_log in &raw_logs {
         let Some(assignment) = build_subregistry_assignment(raw_log, &discovery_source)? else {
             continue;
         };
         matched_log_count += 1;
-        latest_observations.insert(assignment.observation_key, assignment.observation);
+        latest_assignments.insert(assignment.observation_key.clone(), assignment);
     }
 
-    let observations = latest_observations.into_values().collect::<Vec<_>>();
+    let observations = latest_assignments
+        .values()
+        .map(|assignment| assignment.observation.clone())
+        .collect::<Vec<_>>();
     let reconciliation =
         reconcile_discovery_observations(pool, &discovery_source, &observations).await?;
+    let active_edges_by_observation_key =
+        load_active_subregistry_edges_by_observation_key(pool, &discovery_source).await?;
+    let events = latest_assignments
+        .values()
+        .filter_map(|assignment| {
+            build_subregistry_changed_event(
+                assignment,
+                active_edges_by_observation_key.get(&assignment.observation_key),
+            )
+            .transpose()
+        })
+        .collect::<Result<Vec<_>>>()?;
+    upsert_normalized_events(pool, &events).await?;
     let active_observation_count = observations
         .iter()
         .filter(|observation| observation.to_address != ZERO_ADDRESS)
@@ -158,6 +192,7 @@ fn build_subregistry_assignment(
                 "tombstone": owner == ZERO_ADDRESS,
             }),
         },
+        raw_log: raw_log.clone(),
     }))
 }
 
@@ -170,10 +205,12 @@ async fn load_registry_raw_logs(
         return Ok(Vec::new());
     }
 
-    let watched_addresses = emitters
+    let emitters_by_address = emitters
         .iter()
-        .map(|emitter| emitter.address.clone())
-        .collect::<Vec<_>>();
+        .cloned()
+        .map(|emitter| (emitter.address.clone(), emitter))
+        .collect::<HashMap<_, _>>();
+    let watched_addresses = emitters_by_address.keys().cloned().collect::<Vec<_>>();
     let rows = sqlx::query(
         r#"
         SELECT
@@ -185,7 +222,8 @@ async fn load_registry_raw_logs(
             log_index,
             emitting_address,
             topics,
-            data
+            data,
+            canonicality_state::TEXT AS canonicality_state
         FROM raw_logs
         WHERE chain_id = $1
           AND lower(emitting_address) = ANY($2::TEXT[])
@@ -205,6 +243,17 @@ async fn load_registry_raw_logs(
 
     rows.into_iter()
         .map(|row| {
+            let emitting_address = normalize_address(
+                &row.try_get::<String, _>("emitting_address")
+                    .context("missing emitting_address")?,
+            );
+            let emitter = emitters_by_address
+                .get(&emitting_address)
+                .with_context(|| {
+                    format!(
+                        "missing active emitter attribution for chain {chain} address {emitting_address}"
+                    )
+                })?;
             Ok(RegistryRawLogRow {
                 chain_id: row.try_get("chain_id").context("missing chain_id")?,
                 block_hash: row.try_get("block_hash").context("missing block_hash")?,
@@ -218,15 +267,158 @@ async fn load_registry_raw_logs(
                     .try_get("transaction_index")
                     .context("missing transaction_index")?,
                 log_index: row.try_get("log_index").context("missing log_index")?,
-                emitting_address: normalize_address(
-                    &row.try_get::<String, _>("emitting_address")
-                        .context("missing emitting_address")?,
-                ),
+                emitting_address,
                 topics: row.try_get("topics").context("missing topics")?,
                 data: row.try_get("data").context("missing data")?,
+                canonicality_state: parse_canonicality_state(
+                    &row.try_get::<String, _>("canonicality_state")
+                        .context("missing canonicality_state")?,
+                )?,
+                emitting_contract_instance_id: emitter.contract_instance_id,
+                source_manifest_id: emitter.source_manifest_id,
+                namespace: emitter.namespace.clone(),
+                source_family: emitter.source_family.clone(),
+                manifest_version: emitter.manifest_version,
             })
         })
         .collect()
+}
+
+async fn load_active_subregistry_edges_by_observation_key(
+    pool: &PgPool,
+    discovery_source: &str,
+) -> Result<HashMap<String, ActiveSubregistryEdge>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            provenance ->> 'observation_key' AS observation_key,
+            from_contract_instance_id,
+            to_contract_instance_id
+        FROM discovery_edges
+        WHERE discovery_source = $1
+          AND edge_kind = $2
+          AND deactivated_at IS NULL
+        "#,
+    )
+    .bind(discovery_source)
+    .bind(SUBREGISTRY_EDGE_KIND)
+    .fetch_all(pool)
+    .await
+    .with_context(|| {
+        format!(
+            "failed to load active ENSv1 subregistry discovery edges for discovery_source {discovery_source}"
+        )
+    })?;
+
+    rows.into_iter()
+        .map(|row| {
+            let edge = ActiveSubregistryEdge {
+                observation_key: row
+                    .try_get::<Option<String>, _>("observation_key")
+                    .context("failed to read observation_key")?
+                    .context("active ENSv1 subregistry edge is missing provenance.observation_key")?,
+                from_contract_instance_id: row
+                    .try_get("from_contract_instance_id")
+                    .context("failed to read from_contract_instance_id")?,
+                to_contract_instance_id: row
+                    .try_get("to_contract_instance_id")
+                    .context("failed to read to_contract_instance_id")?,
+            };
+            Ok((edge.observation_key.clone(), edge))
+        })
+        .collect()
+}
+
+fn build_subregistry_changed_event(
+    assignment: &ObservedSubregistryAssignment,
+    active_edge: Option<&ActiveSubregistryEdge>,
+) -> Result<Option<NormalizedEvent>> {
+    if assignment.observation.to_address != ZERO_ADDRESS && active_edge.is_none() {
+        return Ok(None);
+    }
+
+    let parent_node = assignment
+        .observation
+        .provenance
+        .get("parent_node")
+        .and_then(|value| value.as_str())
+        .context("ENSv1 subregistry observation is missing provenance.parent_node")?;
+    let labelhash = assignment
+        .observation
+        .provenance
+        .get("labelhash")
+        .and_then(|value| value.as_str())
+        .context("ENSv1 subregistry observation is missing provenance.labelhash")?;
+    let child_node = assignment
+        .observation
+        .provenance
+        .get("observation_key")
+        .and_then(|value| value.as_str())
+        .context("ENSv1 subregistry observation is missing provenance.observation_key")?;
+    let owner = assignment
+        .observation
+        .provenance
+        .get("owner")
+        .and_then(|value| value.as_str())
+        .context("ENSv1 subregistry observation is missing provenance.owner")?;
+    let tombstone = assignment.observation.to_address == ZERO_ADDRESS;
+
+    Ok(Some(NormalizedEvent {
+        event_identity: format!(
+            "ens_v1_subregistry_changed:{}:{}:{}:{}:{}",
+            assignment.raw_log.source_manifest_id,
+            assignment.raw_log.block_hash,
+            assignment.raw_log.transaction_hash,
+            assignment.raw_log.log_index,
+            assignment.raw_log.emitting_address
+        ),
+        namespace: assignment.raw_log.namespace.clone(),
+        logical_name_id: None,
+        resource_id: None,
+        event_kind: EVENT_KIND_SUBREGISTRY_CHANGED.to_owned(),
+        source_family: assignment.raw_log.source_family.clone(),
+        manifest_version: assignment.raw_log.manifest_version,
+        source_manifest_id: Some(assignment.raw_log.source_manifest_id),
+        chain_id: Some(assignment.raw_log.chain_id.clone()),
+        block_number: Some(assignment.raw_log.block_number),
+        block_hash: Some(assignment.raw_log.block_hash.clone()),
+        transaction_hash: Some(assignment.raw_log.transaction_hash.clone()),
+        log_index: Some(assignment.raw_log.log_index),
+        raw_fact_ref: serde_json::json!({
+            "kind": "raw_log",
+            "chain_id": assignment.raw_log.chain_id,
+            "block_hash": assignment.raw_log.block_hash,
+            "block_number": assignment.raw_log.block_number,
+            "transaction_hash": assignment.raw_log.transaction_hash,
+            "transaction_index": assignment.raw_log.transaction_index,
+            "log_index": assignment.raw_log.log_index,
+            "emitting_address": assignment.raw_log.emitting_address,
+            "topic0": assignment.raw_log.topics.first().cloned(),
+            "topic1": assignment.raw_log.topics.get(1).cloned(),
+            "topic2": assignment.raw_log.topics.get(2).cloned(),
+            "data_hex": hex_string(&assignment.raw_log.data),
+        }),
+        derivation_kind: DERIVATION_KIND_ENS_V1_SUBREGISTRY_CHANGED.to_owned(),
+        canonicality_state: assignment.raw_log.canonicality_state,
+        before_state: serde_json::json!({}),
+        after_state: serde_json::json!({
+            "source_event": "NewOwner",
+            "discovery_source": assignment.observation.discovery_source,
+            "edge_kind": SUBREGISTRY_EDGE_KIND,
+            "observation_key": assignment.observation_key,
+            "parent_node": parent_node,
+            "labelhash": labelhash,
+            "child_node": child_node,
+            "emitting_address": assignment.raw_log.emitting_address,
+            "owner": owner,
+            "tombstone": tombstone,
+            "from_contract_instance_id": active_edge
+                .map(|edge| edge.from_contract_instance_id.to_string())
+                .unwrap_or_else(|| assignment.raw_log.emitting_contract_instance_id.to_string()),
+            "to_contract_instance_id": active_edge.map(|edge| edge.to_contract_instance_id.to_string()),
+            "active_edge": !tombstone && active_edge.is_some(),
+        }),
+    }))
 }
 
 async fn load_active_emitters(pool: &PgPool, chain: &str) -> Result<Vec<ActiveEmitter>> {
@@ -406,6 +598,17 @@ fn normalize_address(value: &str) -> String {
     value.to_ascii_lowercase()
 }
 
+fn parse_canonicality_state(value: &str) -> Result<CanonicalityState> {
+    match value {
+        "observed" => Ok(CanonicalityState::Observed),
+        "canonical" => Ok(CanonicalityState::Canonical),
+        "safe" => Ok(CanonicalityState::Safe),
+        "finalized" => Ok(CanonicalityState::Finalized),
+        "orphaned" => Ok(CanonicalityState::Orphaned),
+        _ => bail!("unknown canonicality_state value {value}"),
+    }
+}
+
 fn ens_v1_subregistry_discovery_source(chain: &str) -> String {
     format!("ens_v1_registry_new_owner:{chain}")
 }
@@ -443,8 +646,8 @@ mod tests {
         sync_repository,
     };
     use bigname_storage::{
-        CanonicalityState, RawBlock, RawLog, default_database_url, upsert_raw_blocks,
-        upsert_raw_logs,
+        RawBlock, RawLog, default_database_url, load_normalized_events_by_namespace,
+        upsert_raw_blocks, upsert_raw_logs,
     };
     use sqlx::{
         PgPool,
@@ -799,6 +1002,32 @@ proxy_kind = "none"
             .await?,
             discovered_contract_instance_id
         );
+        let normalized_events = load_normalized_events_by_namespace(database.pool(), "ens").await?;
+        assert_eq!(normalized_events.len(), 1);
+        assert_eq!(normalized_events[0].event_kind, EVENT_KIND_SUBREGISTRY_CHANGED);
+        assert_eq!(
+            normalized_events[0].block_hash.as_deref(),
+            Some("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        );
+        assert_eq!(
+            normalized_events[0].after_state["owner"].as_str(),
+            Some("0x00000000000000000000000000000000000000cc")
+        );
+        assert_eq!(
+            normalized_events[0].after_state["tombstone"].as_bool(),
+            Some(false)
+        );
+        assert_eq!(
+            normalized_events[0].after_state["to_contract_instance_id"].as_str(),
+            Some(discovered_contract_instance_id.to_string().as_str())
+        );
+        sync_ens_v1_subregistry_discovery(database.pool(), "ethereum-mainnet").await?;
+        assert_eq!(
+            load_normalized_events_by_namespace(database.pool(), "ens")
+                .await?
+                .len(),
+            1
+        );
 
         let watched_summary = load_watched_contract_summary(database.pool()).await?;
         assert_eq!(watched_summary.unique_contract_count, 2);
@@ -881,6 +1110,16 @@ proxy_kind = "none"
                 manifest_contract_entry_count: 1,
                 discovery_edge_entry_count: 2,
             }]
+        );
+        let normalized_events = load_normalized_events_by_namespace(database.pool(), "ens").await?;
+        assert_eq!(normalized_events.len(), 2);
+        assert_eq!(
+            normalized_events[1].after_state["emitting_address"].as_str(),
+            Some("0x00000000000000000000000000000000000000cc")
+        );
+        assert_eq!(
+            normalized_events[1].after_state["owner"].as_str(),
+            Some("0x00000000000000000000000000000000000000dd")
         );
 
         database.cleanup().await
@@ -1004,6 +1243,17 @@ proxy_kind = "none"
         assert_eq!(summary.active_edge_count, 0);
         assert_eq!(summary.inserted_edge_count, 0);
         assert_eq!(summary.deactivated_edge_count, 1);
+        let normalized_events = load_normalized_events_by_namespace(database.pool(), "ens").await?;
+        assert_eq!(normalized_events.len(), 2);
+        assert_eq!(normalized_events[1].event_kind, EVENT_KIND_SUBREGISTRY_CHANGED);
+        assert_eq!(
+            normalized_events[1].after_state["owner"].as_str(),
+            Some(ZERO_ADDRESS)
+        );
+        assert_eq!(
+            normalized_events[1].after_state["tombstone"].as_bool(),
+            Some(true)
+        );
 
         let discovery_source = ens_v1_subregistry_discovery_source("ethereum-mainnet");
         let cleared_edge = sqlx::query(
@@ -1095,6 +1345,12 @@ proxy_kind = "none"
         assert_eq!(summary.active_edge_count, 0);
         assert_eq!(summary.inserted_edge_count, 0);
         assert_eq!(summary.deactivated_edge_count, 2);
+        assert_eq!(
+            load_normalized_events_by_namespace(database.pool(), "ens")
+                .await?
+                .len(),
+            3
+        );
 
         let discovery_source = ens_v1_subregistry_discovery_source("ethereum-mainnet");
         let ended_edges = sqlx::query(
@@ -1288,6 +1544,11 @@ proxy_kind = "none"
         assert_eq!(summary.active_edge_count, 0);
         assert_eq!(summary.admitted_edge_count, 0);
         assert_eq!(summary.inserted_edge_count, 0);
+        assert!(
+            load_normalized_events_by_namespace(database.pool(), "ens")
+                .await?
+                .is_empty()
+        );
 
         let watched_plan = load_watched_chain_plan(database.pool()).await?;
         assert_eq!(

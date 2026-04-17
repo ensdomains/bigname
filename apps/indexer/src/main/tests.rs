@@ -2916,6 +2916,30 @@ async fn storage_discovery_refresh_adds_ensv1_address_without_manifest_reload_an
             .await?,
             1
         );
+    assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*)::BIGINT FROM normalized_events WHERE event_kind = 'SubregistryChanged'"
+            )
+            .fetch_one(database.pool())
+            .await?,
+            1
+        );
+    assert_eq!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT after_state->>'owner' FROM normalized_events WHERE event_kind = 'SubregistryChanged'"
+            )
+            .fetch_one(database.pool())
+            .await?,
+            "0x0000000000000000000000000000000000000002".to_owned()
+        );
+    assert_eq!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT canonicality_state::TEXT FROM normalized_events WHERE event_kind = 'SubregistryChanged'"
+            )
+            .fetch_one(database.pool())
+            .await?,
+            "canonical".to_owned()
+        );
 
     let unchanged = reconcile_fetched_heads(
         database.pool(),
