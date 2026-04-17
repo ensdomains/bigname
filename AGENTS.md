@@ -27,5 +27,6 @@
 Other local skills are auto-discovered; list only the repo-critical routing skills here.
 
 - `$change-gate`: classify doc-first vs implementation-only work.
+- `$orchestrator`: run broad execution in orchestration mode through subagents instead of doing most implementation in the current session.
 - `$parallel-pickup`: take a broad task, split it into safe owned slices, and parallelize with subagents.
-- `$phased-continuation`: choose the next thin phase-aligned slice and route execution to the `orchestrator` custom agent instead of keeping broad implementation in the root session.
+- `$phased-continuation`: choose the next thin phase-aligned slice and route execution through `$orchestrator` instead of keeping broad implementation in the root session.
