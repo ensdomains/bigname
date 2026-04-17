@@ -6,9 +6,9 @@ use bigname_storage::{
     CheckpointBlockRef, RawBlock, RawCodeHash, RawLog, RawReceipt, RawTransaction,
     advance_chain_checkpoints, load_chain_lineage_block, load_raw_block, load_raw_blocks_by_hashes,
     load_raw_code_hash_counts_by_block_hashes, mark_block_derived_normalized_events_range_orphaned,
-    mark_chain_lineage_range_orphaned, mark_raw_block_facts_range_orphaned,
-    upsert_chain_lineage_blocks, upsert_raw_blocks, upsert_raw_code_hashes, upsert_raw_logs,
-    upsert_raw_receipts, upsert_raw_transactions,
+    mark_chain_lineage_range_orphaned, mark_identity_rows_range_orphaned,
+    mark_raw_block_facts_range_orphaned, upsert_chain_lineage_blocks, upsert_raw_blocks,
+    upsert_raw_code_hashes, upsert_raw_logs, upsert_raw_receipts, upsert_raw_transactions,
 };
 use sha3::{Digest, Keccak256};
 use tracing::{info, warn};
@@ -98,6 +98,43 @@ pub(crate) fn log_chain_reconciliation_outcome(outcome: &ChainReconciliationOutc
         finalized_block_number = outcome.finalized_block_number,
         "provider heads reconciled for chain"
     );
+}
+
+fn log_ens_v1_unwrapped_authority_sync_summary(
+    chain: &str,
+    summary: &bigname_adapters::EnsV1UnwrappedAuthoritySyncSummary,
+) {
+    if summary.scanned_log_count == 0
+        && summary.total_name_surface_count == 0
+        && summary.total_resource_count == 0
+        && summary.total_surface_binding_count == 0
+        && summary.total_normalized_event_count == 0
+    {
+        return;
+    }
+
+    info!(
+        service = "indexer",
+        chain,
+        scanned_raw_log_count = summary.scanned_log_count,
+        matched_raw_log_count = summary.matched_log_count,
+        identity_name_surface_count = summary.total_name_surface_count,
+        identity_resource_count = summary.total_resource_count,
+        identity_surface_binding_count = summary.total_surface_binding_count,
+        identity_normalized_event_count = summary.total_normalized_event_count,
+        identity_event_kind_count = summary.by_kind.len(),
+        "ENSv1 unwrapped authority synced from stored raw logs"
+    );
+
+    for (event_kind, count) in &summary.by_kind {
+        info!(
+            service = "indexer",
+            chain,
+            event_kind,
+            normalized_event_sync_count = count,
+            "ENSv1 unwrapped authority event kind synced"
+        );
+    }
 }
 
 pub(crate) async fn poll_provider_heads(
@@ -190,6 +227,28 @@ pub(crate) async fn reconcile_fetched_heads(
                 chain = %task.chain,
                 orphaned_normalized_event_count,
                 "block-derived normalized events orphaned for the losing branch"
+            );
+        }
+        let orphaned_identity_counts = mark_identity_rows_range_orphaned(
+            pool,
+            &task.chain,
+            current_canonical_hash,
+            canonical.raw_orphan_stop_before_hash.as_deref(),
+        )
+        .await?;
+        if orphaned_identity_counts.token_lineage_count > 0
+            || orphaned_identity_counts.resource_count > 0
+            || orphaned_identity_counts.name_surface_count > 0
+            || orphaned_identity_counts.surface_binding_count > 0
+        {
+            info!(
+                service = "indexer",
+                chain = %task.chain,
+                orphaned_token_lineage_count = orphaned_identity_counts.token_lineage_count,
+                orphaned_resource_count = orphaned_identity_counts.resource_count,
+                orphaned_name_surface_count = orphaned_identity_counts.name_surface_count,
+                orphaned_surface_binding_count = orphaned_identity_counts.surface_binding_count,
+                "identity rows orphaned for the losing branch"
             );
         }
     }
@@ -620,6 +679,9 @@ pub(crate) async fn persist_reconciled_raw_payloads(
     let normalized_event_summary =
         bigname_adapters::sync_block_derived_normalized_events(pool, chain, &block_hashes).await?;
     log_block_derived_normalized_event_summary(chain, &normalized_event_summary);
+    let unwrapped_authority_summary =
+        bigname_adapters::sync_ens_v1_unwrapped_authority(pool, chain).await?;
+    log_ens_v1_unwrapped_authority_sync_summary(chain, &unwrapped_authority_summary);
 
     Ok(())
 }

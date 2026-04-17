@@ -10,12 +10,15 @@ use std::{
 
 use anyhow::Context;
 use bigname_manifests::load_discovery_admission_state;
-use bigname_storage::default_database_url;
+use bigname_storage::{
+    NameSurface, Resource, SurfaceBinding, SurfaceBindingKind, TokenLineage, default_database_url,
+    upsert_name_surfaces, upsert_resources, upsert_surface_bindings, upsert_token_lineages,
+};
 use serde_json::{Value, json};
 use sqlx::{
     PgPool,
     postgres::{PgConnectOptions, PgPoolOptions},
-    types::Uuid,
+    types::{Uuid, time::OffsetDateTime},
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -499,6 +502,113 @@ impl TestDatabase {
         .execute(&pool)
         .await
         .context("failed to create raw_call_snapshots table for indexer tests")?;
+        sqlx::query("CREATE EXTENSION IF NOT EXISTS btree_gist")
+            .execute(&pool)
+            .await
+            .context("failed to create btree_gist extension for indexer tests")?;
+        sqlx::query(
+            r#"
+                CREATE TABLE token_lineages (
+                    token_lineage_id UUID PRIMARY KEY,
+                    chain_id TEXT NOT NULL,
+                    block_hash TEXT NOT NULL,
+                    block_number BIGINT NOT NULL CHECK (block_number >= 0),
+                    provenance JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    canonicality_state canonicality_state NOT NULL DEFAULT 'observed',
+                    observed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    inserted_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                )
+                "#,
+        )
+        .execute(&pool)
+        .await
+        .context("failed to create token_lineages table for indexer tests")?;
+        sqlx::query(
+            r#"
+                CREATE TABLE resources (
+                    resource_id UUID PRIMARY KEY,
+                    token_lineage_id UUID REFERENCES token_lineages (token_lineage_id),
+                    chain_id TEXT NOT NULL,
+                    block_hash TEXT NOT NULL,
+                    block_number BIGINT NOT NULL CHECK (block_number >= 0),
+                    provenance JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    canonicality_state canonicality_state NOT NULL DEFAULT 'observed',
+                    observed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    inserted_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    UNIQUE (token_lineage_id)
+                )
+                "#,
+        )
+        .execute(&pool)
+        .await
+        .context("failed to create resources table for indexer tests")?;
+        sqlx::query(
+            r#"
+                CREATE TABLE name_surfaces (
+                    logical_name_id TEXT PRIMARY KEY,
+                    namespace TEXT NOT NULL,
+                    input_name TEXT NOT NULL,
+                    canonical_display_name TEXT NOT NULL,
+                    normalized_name TEXT NOT NULL,
+                    dns_encoded_name BYTEA NOT NULL,
+                    namehash TEXT NOT NULL,
+                    labelhashes TEXT[] NOT NULL,
+                    normalizer_version TEXT NOT NULL,
+                    normalization_warnings JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    normalization_errors JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    chain_id TEXT NOT NULL,
+                    block_hash TEXT NOT NULL,
+                    block_number BIGINT NOT NULL CHECK (block_number >= 0),
+                    provenance JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    canonicality_state canonicality_state NOT NULL DEFAULT 'observed',
+                    observed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    inserted_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    CHECK (logical_name_id = namespace || ':' || normalized_name)
+                )
+                "#,
+        )
+        .execute(&pool)
+        .await
+        .context("failed to create name_surfaces table for indexer tests")?;
+        sqlx::query(
+            r#"
+                CREATE TABLE surface_bindings (
+                    surface_binding_id UUID PRIMARY KEY,
+                    logical_name_id TEXT NOT NULL REFERENCES name_surfaces (logical_name_id),
+                    resource_id UUID NOT NULL REFERENCES resources (resource_id),
+                    binding_kind TEXT NOT NULL,
+                    active_from TIMESTAMPTZ NOT NULL,
+                    active_to TIMESTAMPTZ,
+                    chain_id TEXT NOT NULL,
+                    block_hash TEXT NOT NULL,
+                    block_number BIGINT NOT NULL CHECK (block_number >= 0),
+                    provenance JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    canonicality_state canonicality_state NOT NULL DEFAULT 'observed',
+                    observed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    inserted_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    CHECK (
+                        binding_kind IN (
+                            'declared_registry_path',
+                            'linked_subregistry_path',
+                            'resolver_alias_path',
+                            'observed_wildcard_path',
+                            'migration_rebind',
+                            'observed_only'
+                        )
+                    ),
+                    CHECK (active_to IS NULL OR active_to > active_from),
+                    CONSTRAINT surface_bindings_no_overlap
+                        EXCLUDE USING gist (
+                            logical_name_id WITH =,
+                            tstzrange(active_from, COALESCE(active_to, 'infinity'::timestamptz), '[)') WITH &&
+                        )
+                        WHERE (canonicality_state IN ('canonical', 'safe', 'finalized'))
+                )
+                "#,
+        )
+        .execute(&pool)
+        .await
+        .context("failed to create surface_bindings table for indexer tests")?;
         sqlx::query(
             r#"
                 CREATE TABLE normalized_events (
@@ -1212,13 +1322,13 @@ fn rpc_log_payload(block: &ProviderBlock) -> Value {
     })
 }
 
-fn encode_registrar_name_registered_log_data(label: &str) -> String {
+fn encode_registrar_name_registered_log_data(label: &str, expiry_unix: i64) -> String {
     let label_bytes = label.as_bytes();
     let mut data = Vec::new();
 
     data.extend_from_slice(&abi_word_u64(96));
     data.extend_from_slice(&abi_word_u64(1));
-    data.extend_from_slice(&abi_word_u64(2));
+    data.extend_from_slice(&abi_word_u64(expiry_unix as u64));
     data.extend_from_slice(&abi_word_u64(
         u64::try_from(label_bytes.len()).expect("registrar label test payload must fit in u64"),
     ));
@@ -1234,6 +1344,7 @@ fn rpc_registrar_name_registered_log_payload(
     block: &ProviderBlock,
     address: &str,
     label: &str,
+    expiry_unix: i64,
 ) -> Value {
     json!({
         "blockHash": block.block_hash.clone(),
@@ -1247,7 +1358,7 @@ fn rpc_registrar_name_registered_log_payload(
             labelhash_hex(label),
             hex_string(&abi_word_address("0x0000000000000000000000000000000000000001"))
         ],
-        "data": encode_registrar_name_registered_log_data(label)
+        "data": encode_registrar_name_registered_log_data(label, expiry_unix)
     })
 }
 
@@ -2176,6 +2287,7 @@ async fn reconcile_fetched_heads_backfills_registrar_name_observation_events() -
             &canonical_head,
             registrar_address,
             "registrar",
+            canonical_head.block_timestamp_unix_secs + 31_536_000,
         )],
         block: canonical_head.clone(),
     }])
@@ -2209,7 +2321,7 @@ async fn reconcile_fetched_heads_backfills_registrar_name_observation_events() -
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM normalized_events")
             .fetch_one(database.pool())
             .await?,
-        1
+        5
     );
     assert_eq!(
         sqlx::query_scalar::<_, String>(
@@ -2242,6 +2354,180 @@ async fn reconcile_fetched_heads_backfills_registrar_name_observation_events() -
         .fetch_one(database.pool())
         .await?,
         registrar_address.to_owned()
+    );
+
+    server.abort();
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn reconcile_fetched_heads_backfills_unwrapped_ensv1_authority_identity_rows() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let registrar_contract_instance_id = Uuid::from_u128(33);
+    let registrar_address = "0x00000000000000000000000000000000000000ab";
+
+    sqlx::query(
+        r#"
+            INSERT INTO manifest_versions (
+                manifest_id,
+                manifest_version,
+                namespace,
+                source_family,
+                chain,
+                deployment_epoch,
+                rollout_status,
+                normalizer_version,
+                file_path,
+                manifest_payload
+            )
+            VALUES (
+                1,
+                1,
+                'ens',
+                'ens_v1_registrar_l1',
+                'ethereum-mainnet',
+                'ens_v1',
+                'active',
+                'uts46-v1',
+                'manifests/ens/ens_v1_registrar_l1/v1.toml',
+                '{}'::jsonb
+            )
+            "#,
+    )
+    .execute(database.pool())
+    .await
+    .context("failed to insert manifest_versions for unwrapped authority reconciliation test")?;
+    insert_contract_instance(
+        database.pool(),
+        registrar_contract_instance_id,
+        "ethereum-mainnet",
+        "contract",
+    )
+    .await?;
+    insert_active_contract_instance_address(
+        database.pool(),
+        registrar_contract_instance_id,
+        "ethereum-mainnet",
+        registrar_address,
+        Some(1),
+    )
+    .await?;
+    insert_manifest_contract_instance(
+        database.pool(),
+        1,
+        "registrar",
+        registrar_contract_instance_id,
+        registrar_address,
+        "none",
+        None,
+        None,
+    )
+    .await?;
+
+    let watched_plan = load_watched_chain_plan(database.pool()).await?;
+    let tasks = sync_intake_chain_tasks(database.pool(), &watched_plan).await?;
+    let canonical_head = provider_block(
+        "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        Some("0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"),
+        52,
+    );
+    let (provider, server) = bundle_provider_with_fixtures(vec![ProviderBlockFixture {
+        logs: vec![rpc_registrar_name_registered_log_payload(
+            &canonical_head,
+            registrar_address,
+            "alice",
+            canonical_head.block_timestamp_unix_secs + 31_536_000,
+        )],
+        block: canonical_head.clone(),
+    }])
+    .await?;
+
+    let (next_task, outcome) = reconcile_fetched_heads(
+        database.pool(),
+        &tasks[0],
+        &provider,
+        &ProviderHeadSnapshot {
+            canonical: canonical_head,
+            safe: None,
+            finalized: None,
+        },
+    )
+    .await?
+    .expect("unwrapped authority reconciliation must update task state");
+
+    assert_eq!(
+        outcome.canonical_status,
+        CanonicalReconciliationStatus::Initialized
+    );
+    assert_eq!(next_task.checkpoint.canonical_block_number, Some(52));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM token_lineages")
+            .fetch_one(database.pool())
+            .await?,
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM resources")
+            .fetch_one(database.pool())
+            .await?,
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM name_surfaces")
+            .fetch_one(database.pool())
+            .await?,
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM surface_bindings")
+            .fetch_one(database.pool())
+            .await?,
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT logical_name_id FROM name_surfaces LIMIT 1")
+            .fetch_one(database.pool())
+            .await?,
+        "ens:alice.eth".to_owned()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT binding_kind FROM surface_bindings LIMIT 1")
+            .fetch_one(database.pool())
+            .await?,
+        "declared_registry_path".to_owned()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM normalized_events WHERE event_kind = 'RegistrationGranted'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM normalized_events WHERE event_kind = 'AuthorityEpochChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM normalized_events WHERE event_kind = 'SurfaceBound'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM normalized_events WHERE event_kind = 'PreimageObserved'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        1
     );
 
     server.abort();
@@ -3402,6 +3688,76 @@ async fn reconcile_fetched_heads_marks_losing_branch_orphaned_on_reorg() -> Resu
         .execute(database.pool())
         .await
         .context("failed to insert normalized event for reorg reconciliation test")?;
+    let losing_timestamp =
+        OffsetDateTime::from_unix_timestamp(losing_block.block_timestamp_unix_secs)
+            .expect("losing block timestamp must be valid");
+    let token_lineage_id = Uuid::from_u128(0x7100);
+    let resource_id = Uuid::from_u128(0x7200);
+    let surface_binding_id = Uuid::from_u128(0x7300);
+    upsert_token_lineages(
+        database.pool(),
+        &[TokenLineage {
+            token_lineage_id,
+            chain_id: "ethereum-mainnet".to_owned(),
+            block_hash: losing_block.block_hash.clone(),
+            block_number: losing_block.block_number,
+            provenance: json!({"test": "reorg"}),
+            canonicality_state: CanonicalityState::Canonical,
+        }],
+    )
+    .await?;
+    upsert_resources(
+        database.pool(),
+        &[Resource {
+            resource_id,
+            token_lineage_id: Some(token_lineage_id),
+            chain_id: "ethereum-mainnet".to_owned(),
+            block_hash: losing_block.block_hash.clone(),
+            block_number: losing_block.block_number,
+            provenance: json!({"test": "reorg"}),
+            canonicality_state: CanonicalityState::Canonical,
+        }],
+    )
+    .await?;
+    upsert_name_surfaces(
+        database.pool(),
+        &[NameSurface {
+            logical_name_id: "ens:reorg.eth".to_owned(),
+            namespace: "ens".to_owned(),
+            input_name: "reorg.eth".to_owned(),
+            canonical_display_name: "reorg.eth".to_owned(),
+            normalized_name: "reorg.eth".to_owned(),
+            dns_encoded_name: vec![5, b'r', b'e', b'o', b'r', b'g', 3, b'e', b't', b'h', 0],
+            namehash: "0xnamehashreorg".to_owned(),
+            labelhashes: vec!["0xlabelhashreorg".to_owned()],
+            normalizer_version: "ensip15@2026-04-16".to_owned(),
+            normalization_warnings: json!([]),
+            normalization_errors: json!([]),
+            chain_id: "ethereum-mainnet".to_owned(),
+            block_hash: losing_block.block_hash.clone(),
+            block_number: losing_block.block_number,
+            provenance: json!({"test": "reorg"}),
+            canonicality_state: CanonicalityState::Canonical,
+        }],
+    )
+    .await?;
+    upsert_surface_bindings(
+        database.pool(),
+        &[SurfaceBinding {
+            surface_binding_id,
+            logical_name_id: "ens:reorg.eth".to_owned(),
+            resource_id,
+            binding_kind: SurfaceBindingKind::DeclaredRegistryPath,
+            active_from: losing_timestamp,
+            active_to: None,
+            chain_id: "ethereum-mainnet".to_owned(),
+            block_hash: losing_block.block_hash.clone(),
+            block_number: losing_block.block_number,
+            provenance: json!({"test": "reorg"}),
+            canonicality_state: CanonicalityState::Canonical,
+        }],
+    )
+    .await?;
     tasks[0].checkpoint = advance_chain_checkpoints(
         database.pool(),
         &ChainCheckpointUpdate {
@@ -3534,6 +3890,41 @@ async fn reconcile_fetched_heads_marks_losing_branch_orphaned_on_reorg() -> Resu
             .await?,
             "orphaned".to_owned()
         );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT canonicality_state::TEXT FROM token_lineages WHERE token_lineage_id = $1"
+        )
+        .bind(token_lineage_id)
+        .fetch_one(database.pool())
+        .await?,
+        "orphaned".to_owned()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT canonicality_state::TEXT FROM resources WHERE resource_id = $1"
+        )
+        .bind(resource_id)
+        .fetch_one(database.pool())
+        .await?,
+        "orphaned".to_owned()
+    );
+    assert_eq!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT canonicality_state::TEXT FROM name_surfaces WHERE logical_name_id = 'ens:reorg.eth'"
+            )
+            .fetch_one(database.pool())
+            .await?,
+            "orphaned".to_owned()
+        );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT canonicality_state::TEXT FROM surface_bindings WHERE surface_binding_id = $1"
+        )
+        .bind(surface_binding_id)
+        .fetch_one(database.pool())
+        .await?,
+        "orphaned".to_owned()
+    );
     assert_eq!(
             sqlx::query_scalar::<_, String>(
                 "SELECT canonicality_state::TEXT FROM raw_transactions WHERE block_hash = '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'"
