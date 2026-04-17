@@ -1,6 +1,8 @@
 ---
 name: manifest-rollout
 description: Plan or review bigname manifest and discovery changes. Use whenever a task adds or edits source manifests, rollout status, capability flags, discovery rules, proxy tracking, contract admission, or manifest-driven invalidation behavior.
+metadata:
+  kind: playbook
 ---
 
 # Manifest Rollout

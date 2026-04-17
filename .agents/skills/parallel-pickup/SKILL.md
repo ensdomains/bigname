@@ -1,40 +1,25 @@
 ---
 name: parallel-pickup
 description: Take a substantial bigname task, split it into safe owned slices, and parallelize it with subagents. Use whenever the user asks to pick up a task, fan work out, parallelize implementation, or coordinate multiple workstreams.
+metadata:
+  kind: coordination
 ---
 
 # Parallel Pickup
 
-Use this skill when the user wants execution, not just planning, and the task is large enough to benefit from parallel work.
+Broad-mode wrapper for `$orchestrate`. Use when execution is wanted (not just planning) and the task is large enough to benefit from parallel workers.
 
-Start with `docs/workstreams.md`. Read `docs/development-plan.md` if milestone order matters. If the task may touch shared semantics, manifests, migrations, `crates/domain`, or parity claims, run `$change-gate` first.
+Apply `$orchestrate` with the fan-out extras below.
 
-## Orchestration rules
+## Extras
 
-1. Form a short top-level plan.
+1. Form a short top-level plan before delegating.
 2. Keep the immediate blocking task local whenever the next step depends on it.
-3. Delegate only concrete sidecar or parallel work with disjoint write ownership.
-4. Split work along the repo boundaries in `docs/workstreams.md`:
-   - `apps/api`
-   - `apps/indexer`
-   - `apps/worker`
-   - `crates/domain`
-   - `crates/storage`
-   - `crates/manifests`
-   - `crates/adapters`
-   - `crates/execution`
-   - `tests/conformance`
-5. Tell each worker exactly which paths it owns.
-6. Tell each worker it is not alone in the codebase and must not revert others' edits.
-7. Ask each worker to report changed files and any residual risks.
+3. Run `$change-gate` first if the task may touch shared semantics, manifests, migrations, `crates/domain`, or parity claims.
+4. Split work along `docs/workstreams.md` boundaries.
+5. Append each dispatched slice to `.agents/state/slices.jsonl` so continuation loops see in-flight work.
 
-## Do not parallelize these casually
-
-- `crates/domain`
-- migration files
-- fixtures
-- manifest schema
-- any unresolved shared-interface change
+See `AGENTS.md` High Conflict for surfaces that must not be parallelized casually, plus any unresolved shared-interface change.
 
 ## Good delegated tasks
 
@@ -47,7 +32,5 @@ Start with `docs/workstreams.md`. Read `docs/development-plan.md` if milestone o
 
 - "figure out the architecture"
 - "change whatever is needed"
-- overlapping edits to the same migration or shared type files
+- overlapping edits to shared type files or the same migration
 - blocking semantic decisions that should stay local
-
-Keep the orchestration concise. The goal is to turn one broad request into a few safe owned slices and then integrate them.

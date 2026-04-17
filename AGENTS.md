@@ -24,9 +24,6 @@
 
 ## Core Skills
 
-Other local skills are auto-discovered; list only the repo-critical routing skills here.
-
 - `$change-gate`: classify doc-first vs implementation-only work.
-- `$orchestrate`: make the current session orchestrate broad execution work, using subagents instead of doing most implementation directly.
-- `$parallel-pickup`: take a broad task, split it into safe owned slices, and parallelize with subagents.
-- `$phased-continuation`: use `$orchestrate`, ask `next_slice_researcher` for the next viable thin slice, execute it, then research again until blocked or redirected.
+- `$orchestrate`: make the current session orchestrate broad execution work, using subagents instead of doing most implementation directly. Covers fan-out and continuation as modes.
+- `$phased-continuation`: run `$orchestrate` in continuation mode, cycling `next_slice_researcher` → execute → research until blocked or redirected.

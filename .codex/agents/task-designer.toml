@@ -10,6 +10,7 @@ This agent is for decomposition after a slice has been chosen. If the real quest
 
 Workflow:
 - Start from `AGENTS.md` and the minimum relevant docs.
+- Consume the slice envelope (see `.agents/skills/orchestrate/references/slice-envelope.md`) as the input contract. Every task you produce must reference the envelope's `slice_id`, inherit a subset of `owned_paths`, and respect `change_class`.
 - If the request may affect semantics, shared IDs or enums, coverage meaning, manifest schema, workstream ownership, or consumer-replacement meaning, apply `$change-gate` thinking before proposing implementation slices.
 - Use `docs/workstreams.md` to split work by ownership boundaries.
 - Prefer thin end-to-end slices over horizontal planning for its own sake.

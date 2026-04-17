@@ -1,6 +1,8 @@
 ---
 name: change-gate
 description: Classify a bigname change before coding. Use whenever a task may affect API semantics, coverage or exhaustiveness, shared IDs or enums, manifests, migrations, workstream ownership, `crates/domain`, or any claim of consumer replacement/parity.
+metadata:
+  kind: playbook
 ---
 
 # Change Gate
@@ -25,7 +27,8 @@ Produce a short gate with:
 1. `change_class`: `semantic`, `shared-interface`, or `implementation-only`
 2. `docs_to_update`: exact files that must change first or alongside code
 3. `write_owner`: the owning workstream or directory
-4. `parallel_risk`: whether the task can run in parallel safely
+
+These feed the slice envelope. `parallel_risk` is assigned by the researcher, not here — see `.agents/skills/orchestrate/references/slice-envelope.md`.
 
 ## Force doc-first treatment when any of these change
 
@@ -46,11 +49,6 @@ Do not treat a task as implementation-only if it would cause any of:
 
 ## Parallel work
 
-If the task is substantial, assign explicit owned paths before parallel work starts. Be conservative around:
+If the task is substantial, assign explicit owned paths before parallel work starts. See `AGENTS.md` High Conflict for the conservative surfaces.
 
-- `crates/domain`
-- migration files
-- fixtures
-- manifest schema
-
-Keep the output concise. The goal is to unblock implementation without shared-interface drift.
+Keep the output concise. The goal is to unblock implementation without shared-interface drift. The classification feeds the slice envelope's `change_class`, `docs_to_update`, and `write_owner` fields — see `.agents/skills/orchestrate/references/slice-envelope.md`.

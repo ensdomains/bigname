@@ -1,6 +1,8 @@
 ---
 name: replay-boundaries
 description: Review bigname storage, replay, projection, and execution-boundary work. Use whenever a task touches canonicality, normalized events, projection rebuilds, reorg repair, invalidation, execution traces, or storage-family write ownership.
+metadata:
+  kind: playbook
 ---
 
 # Replay Boundaries
@@ -25,12 +27,11 @@ For any design, implementation, or review touching replayable state, check:
 
 ## Non-negotiable rules
 
-- Raw facts stay immutable.
-- Canonicality is explicit; reorg repair marks rows noncanonical rather than deleting truth.
-- Projection rows are disposable and rebuildable.
+See `AGENTS.md` Boundaries. Replay-specific additions:
+
+- Reorg repair marks rows noncanonical rather than deleting truth.
 - Only projection workers write projection tables.
 - Invalidation is deterministic and key-scoped, not broad polling.
-- Execution artifacts and traces are durable facts.
 
 ## Boundary enforcement
 

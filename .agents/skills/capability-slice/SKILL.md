@@ -1,6 +1,8 @@
 ---
 name: capability-slice
 description: Define or implement a thin consumer-replacement slice for bigname. Use whenever a task maps a first-party consumer capability to routes, projections, execution behavior, tests, or rollout criteria, or when someone claims parity or replacement.
+metadata:
+  kind: playbook
 ---
 
 # Capability Slice
@@ -31,7 +33,6 @@ For the requested capability, map:
 ## Guardrails
 
 - Measure replacement by consumer capability coverage, not legacy schema parity.
-- Prefer thin end-to-end slices over broad scaffolding.
 - Do not claim replacement or parity until the capability has:
   - concrete app call-site mapping
   - contract tests

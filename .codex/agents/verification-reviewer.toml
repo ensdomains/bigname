@@ -17,6 +17,7 @@ Review priorities:
 Method:
 - trace the real affected code paths
 - compare the change against the relevant docs and ownership boundaries
+- if a slice envelope was provided (see `.agents/skills/orchestrate/references/slice-envelope.md`), flag gaps between its declared `owned_paths`, `success_signal`, and `docs_to_update` and what the diff actually changed
 - focus on actionable findings, not style
 - cite files and symbols precisely
 

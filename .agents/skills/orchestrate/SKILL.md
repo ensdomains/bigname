@@ -1,91 +1,89 @@
 ---
 name: orchestrate
 description: Run broad bigname execution work in orchestration mode. Use whenever the task is large, multi-slice, parallelizable, or should be delegated instead of implemented directly in the current session. This skill makes the current session orchestrate the work. Read docs, classify the change, create bounded tasks, spawn subagents, steer them, and integrate their results without doing most implementation locally.
+metadata:
+  kind: coordination
 ---
 
 # Orchestrate
 
-Use this skill when the current session should coordinate execution instead of owning implementation directly.
-
-This is not a separate agent definition. Using `$orchestrate` means the current session orchestrates the work itself.
-
-The job of the current session is to read the docs, classify the change, create concrete tasks, spawn subagents, interact with them, and integrate their results. Keep local implementation to a minimum and prefer delegation whenever a subagent can own the work cleanly.
+`$phased-continuation` and `$parallel-pickup` are thin mode wrappers around this skill. Their bodies defer here.
 
 ## Core role
 
-- Do not pick up broad implementation work yourself just because the next step is obvious.
-- Do not directly edit product code, tests, manifests, fixtures, migrations, or docs unless delegation is blocked and the task would otherwise stall.
-- Prefer delegation even for documentation writing, task breakdown, and analysis when a subagent can own that work cleanly.
-- Keep your own work focused on orchestration: scoping, task design, delegation, follow-up, conflict resolution, and synthesis.
+- Delegate implementation — including docs, task breakdown, and analysis. Don't edit product code, tests, manifests, fixtures, migrations, or docs unless delegation is blocked.
+- Keep your own work to scoping, task design, delegation, follow-up, conflict resolution, synthesis.
 
 ## Repo rules
 
-- Treat checked-in docs as the source of truth for semantics. Start from `AGENTS.md` and the minimum relevant docs before assigning work.
-- If a task may change public semantics, shared IDs or enums, coverage meaning, manifest schema, workstream ownership, or consumer-replacement meaning, use `$change-gate` before implementation starts.
-- Use thin end-to-end slices. Do not create disguised legacy-parity work or extra planning docs unless semantics changed.
-- Split work along `docs/workstreams.md` boundaries when possible:
-  - `apps/api`
-  - `apps/indexer`
-  - `apps/worker`
-  - `crates/storage`
-  - `crates/manifests`
-  - `crates/adapters`
-  - `crates/execution`
-  - `tests/conformance`
-- Treat `crates/domain`, migrations, fixtures, and manifest schema as high-conflict. Do not fan them out casually.
+See `AGENTS.md` for Guardrails, Boundaries, and High Conflict. Apply them on every delegation.
 
-## Delegation rules
+Split work along `docs/workstreams.md` boundaries when possible.
 
-- Prefer specialist subagents when they fit:
-  - `next_slice_researcher` for "what should we work on next?" and phase-aligned thin-slice selection
-  - `task_designer` for decomposition, owned slice design, and task prompts
-  - `docs_writer` for doc updates, task docs, and other repo documentation changes
-  - `verification_reviewer` for cross-slice review and residual risk checking
-  - built-in `worker` for bounded implementation tasks
-- Prefer read-heavy exploration first when the path is unclear, then hand implementation to focused workers.
-- Assign each subagent a narrow goal, explicit file or directory ownership, expected outputs, and validation expectations.
-- Tell each subagent it is not alone in the codebase and must not revert others' edits.
-- Avoid overlapping write ownership.
-- Do not spawn agents for vague work like "figure it out". Give each agent a bounded deliverable.
-- Use the smallest number of agents that materially advances the task, but parallelize independent slices aggressively once boundaries are clear.
-- Interact with subagents actively: answer blockers, redirect unclear work, and request tighter follow-up when needed.
-- Wait only when blocked on a result needed for the next decision.
-- Close completed agents when their work is integrated.
+## Modes
 
-## Skill routing
+- **default** — bounded task; fan out only if needed.
+- **broad** (triggered by `$parallel-pickup` or requests to parallelize) — split a large task into disjoint owned slices and run workers concurrently.
+- **continuation** (triggered by `$phased-continuation` or "keep going") — loop: research → execute → research. See that skill for loop-specific rules.
 
-- Use `$change-gate` for doc-first classification and shared-interface changes.
-- Use `$manifest-rollout` for manifest, discovery, capability flag, or invalidation changes.
-- Use `$capability-slice` for consumer-capability mapping, routes, projections, tests, and rollout criteria.
-- Use `$replay-boundaries` for replay, canonicality, projection rebuilds, invalidation, or execution-boundary work.
-- Use `$parallel-pickup` when a substantial implementation task should be split into safe owned slices.
+## Subagents
+
+Shared subagents live in `.codex/agents/*.toml`. Dispatch as follows:
+
+- `next_slice_researcher` (read-only) — picks the next viable thin slice. Use for "what should we work on next?" and at the top of continuation loops. Emits the slice envelope.
+- `task_designer` (read-only) — decomposes a chosen slice into owned subagent tasks. Consumes the slice envelope; produces a task set with explicit file ownership.
+- `docs_writer` — writes or updates docs, task writeups, doc-first semantic changes. Not read-only because its job is to edit under `docs/` and task notes.
+- `verification_reviewer` (read-only) — cross-slice review for correctness, boundary compliance, missing validation. Use when risk is high or multiple workers edited adjacent surfaces.
+- built-in `worker` — bounded implementation task. Give it owned paths, outcome, and validation.
+
+## Playbook routing
+
+Dispatch to a playbook skill when the change touches its surface. Playbooks are libraries, not entry points:
+
+- `$change-gate` — classify shared-interface vs implementation-only. Run first whenever semantics, IDs/enums, manifests, migrations, ownership, or parity claims may change. Output fills the envelope's `change_class`, `docs_to_update`, `write_owner`.
+- `$capability-slice` — consumer-capability mapping to routes, projections, tests, rollout criteria.
+- `$manifest-rollout` — manifest, discovery, capability-flag, invalidation changes.
+- `$replay-boundaries` — replay, canonicality, projection rebuilds, execution-boundary work.
+
+## Slice envelope
+
+All research, design, and review subagents communicate via a shared schema. See `references/slice-envelope.md` for the canonical fields and how they compose with `$change-gate` output. Extend subagent prompts to emit or consume it rather than inventing per-agent output shapes.
+
+## Slice log
+
+When fanning out or looping, append to `.agents/state/slices.jsonl` — one JSON line per event:
+
+```
+{"slice_id": "...", "status": "picked|in_flight|completed|blocked", "ts": "...", "owned_paths": [...], "subagent": "...", "notes": "..."}
+```
+
+`next_slice_researcher` must read the log before picking so in-flight or completed slices are not re-picked. The log is gitignored and ephemeral; one line per state transition is enough.
 
 ## Task template
 
 For each delegated task, specify:
 
-- exact outcome to produce
-- files or directories the subagent owns
-- what it must not touch
-- validation or tests it should run if it edits code
-- report back changed files, evidence gathered, unresolved risks, and assumptions
+- exact outcome
+- files or directories owned (disjoint from other in-flight slices)
+- surfaces not to touch
+- validation or tests to run if editing code
+- report back: changed files, evidence gathered, unresolved risks, assumptions
+
+Bounded deliverables only — no vague goals like "figure it out". Tell each subagent it is not alone in the codebase and must not revert others' edits.
 
 ## Preferred fan-out pattern
 
-1. Read the relevant docs and classify the change.
-2. If the real question is what to do next, delegate slice selection first to `next_slice_researcher`.
-3. If the slice is broad or underspecified, delegate scope mapping or task decomposition next, usually to `task_designer`.
-4. Spawn parallel implementation or documentation subagents only after ownership boundaries are explicit.
-5. Use `docs_writer` instead of writing docs or task documents yourself when delegation is possible.
+1. Read the relevant docs and classify the change (`$change-gate` if shared-interface risk).
+2. If the real question is what to do next, delegate slice selection to `next_slice_researcher`.
+3. If the slice is broad or underspecified, delegate decomposition to `task_designer`.
+4. Spawn parallel implementation or documentation subagents only after ownership boundaries are explicit, and append to the slice log. Use the smallest number of agents that materially advances the task; parallelize aggressively once boundaries are clear.
+5. Use `docs_writer` for doc and task-writeup changes.
 6. Use `verification_reviewer` for cross-slice checking when risk is high or multiple workers edited adjacent surfaces.
-7. Synthesize results for the user without taking over implementation yourself.
-
-## Documentation rule
-
-If new docs, doc updates, or task write-ups are needed, prefer a dedicated subagent for that writing instead of drafting them yourself.
+7. Steer live agents: answer blockers, redirect unclear work, request tighter follow-up. Close agents when their work is integrated.
+8. Synthesize results for the user without taking over implementation.
 
 ## Final response
 
-- Summarize which subagents were used and what each one produced.
+- Summarize which subagents were used and what each produced.
 - Distinguish subagent results from your own synthesis.
-- Call out conflicts, unresolved risks, missing validation, and places where user direction is still needed.
+- Call out conflicts, unresolved risks, missing validation, and places where user direction is needed.
