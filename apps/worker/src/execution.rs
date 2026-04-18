@@ -2,14 +2,19 @@ use anyhow::Result;
 use bigname_storage::{
     ExecutionBoundaryInvalidation, ExecutionManifestInvalidation,
     ExecutionOutcomeInvalidationSummary, invalidate_execution_outcomes_for_manifest_version,
+    invalidate_execution_outcomes_for_manifest_version_and_request_key,
     invalidate_execution_outcomes_for_record_boundary,
+    invalidate_execution_outcomes_for_record_boundary_and_request_key,
     invalidate_execution_outcomes_for_topology_boundary,
+    invalidate_execution_outcomes_for_topology_boundary_and_request_key,
 };
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
 
 const VERIFIED_RESOLUTION_REQUEST_TYPE: &str = "verified_resolution";
+const VERIFIED_PRIMARY_NAME_REQUEST_TYPE: &str =
+    bigname_storage::VERIFIED_PRIMARY_NAME_REQUEST_TYPE;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VerifiedResolutionManifestInvalidation {
@@ -22,6 +27,31 @@ pub struct VerifiedResolutionManifestInvalidation {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VerifiedResolutionBoundaryInvalidation {
     pub namespace: String,
+    pub logical_name_id: String,
+    pub resource_id: Uuid,
+    pub normalized_event_id: Option<i64>,
+    pub event_kind: Option<String>,
+    pub chain_id: String,
+    pub block_number: i64,
+    pub block_hash: String,
+    pub timestamp: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VerifiedPrimaryNameManifestInvalidation {
+    pub namespace: String,
+    pub address: String,
+    pub coin_type: String,
+    pub source_manifest_id: Option<i64>,
+    pub source_family: Option<String>,
+    pub manifest_version: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VerifiedPrimaryNameBoundaryInvalidation {
+    pub namespace: String,
+    pub address: String,
+    pub coin_type: String,
     pub logical_name_id: String,
     pub resource_id: Uuid,
     pub normalized_event_id: Option<i64>,
@@ -79,6 +109,56 @@ pub async fn invalidate_verified_resolution_record_boundary(
     .await
 }
 
+pub async fn invalidate_verified_primary_name_manifest_version(
+    pool: &PgPool,
+    invalidation: &VerifiedPrimaryNameManifestInvalidation,
+) -> Result<ExecutionOutcomeInvalidationSummary> {
+    invalidate_execution_outcomes_for_manifest_version_and_request_key(
+        pool,
+        &ExecutionManifestInvalidation {
+            request_type: VERIFIED_PRIMARY_NAME_REQUEST_TYPE.to_owned(),
+            namespace: invalidation.namespace.clone(),
+            source_manifest_id: invalidation.source_manifest_id,
+            source_family: invalidation.source_family.clone(),
+            manifest_version: invalidation.manifest_version,
+        },
+        &invalidation.request_key(),
+    )
+    .await
+}
+
+pub async fn invalidate_verified_primary_name_topology_boundary(
+    pool: &PgPool,
+    invalidation: &VerifiedPrimaryNameBoundaryInvalidation,
+) -> Result<ExecutionOutcomeInvalidationSummary> {
+    invalidate_execution_outcomes_for_topology_boundary_and_request_key(
+        pool,
+        &ExecutionBoundaryInvalidation {
+            request_type: VERIFIED_PRIMARY_NAME_REQUEST_TYPE.to_owned(),
+            namespace: invalidation.namespace.clone(),
+            boundary: invalidation.boundary(),
+        },
+        &invalidation.request_key(),
+    )
+    .await
+}
+
+pub async fn invalidate_verified_primary_name_record_boundary(
+    pool: &PgPool,
+    invalidation: &VerifiedPrimaryNameBoundaryInvalidation,
+) -> Result<ExecutionOutcomeInvalidationSummary> {
+    invalidate_execution_outcomes_for_record_boundary_and_request_key(
+        pool,
+        &ExecutionBoundaryInvalidation {
+            request_type: VERIFIED_PRIMARY_NAME_REQUEST_TYPE.to_owned(),
+            namespace: invalidation.namespace.clone(),
+            boundary: invalidation.boundary(),
+        },
+        &invalidation.request_key(),
+    )
+    .await
+}
+
 impl VerifiedResolutionBoundaryInvalidation {
     fn boundary(&self) -> Value {
         json!({
@@ -94,6 +174,37 @@ impl VerifiedResolutionBoundaryInvalidation {
             }
         })
     }
+}
+
+impl VerifiedPrimaryNameManifestInvalidation {
+    fn request_key(&self) -> String {
+        verified_primary_name_request_key(&self.namespace, &self.address, &self.coin_type)
+    }
+}
+
+impl VerifiedPrimaryNameBoundaryInvalidation {
+    fn request_key(&self) -> String {
+        verified_primary_name_request_key(&self.namespace, &self.address, &self.coin_type)
+    }
+
+    fn boundary(&self) -> Value {
+        json!({
+            "logical_name_id": self.logical_name_id,
+            "resource_id": self.resource_id,
+            "normalized_event_id": self.normalized_event_id,
+            "event_kind": self.event_kind,
+            "chain_position": {
+                "chain_id": self.chain_id,
+                "block_number": self.block_number,
+                "block_hash": self.block_hash,
+                "timestamp": self.timestamp,
+            }
+        })
+    }
+}
+
+fn verified_primary_name_request_key(namespace: &str, address: &str, coin_type: &str) -> String {
+    format!("{namespace}:{}:{coin_type}", address.to_ascii_lowercase())
 }
 
 #[cfg(test)]
@@ -595,6 +706,388 @@ mod tests {
         assert_eq!(
             load_execution_outcome(database.pool(), &keep_outcome.cache_key).await?,
             Some(keep_outcome)
+        );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn verified_primary_manifest_wrapper_scopes_to_exact_tuple_request_key() -> Result<()> {
+        let database = TestDatabase::new().await?;
+
+        let invalidation = VerifiedPrimaryNameManifestInvalidation {
+            namespace: "ens".to_owned(),
+            address: "0xAbCd".to_owned(),
+            coin_type: "60".to_owned(),
+            source_manifest_id: Some(29),
+            source_family: None,
+            manifest_version: 4,
+        };
+
+        let target_trace = execution_trace(
+            Uuid::from_u128(0x5e710000000000000000000000000007),
+            VERIFIED_PRIMARY_NAME_REQUEST_TYPE,
+            "ens",
+            &invalidation.request_key(),
+            1_717_173_300,
+        );
+        let target_outcome = execution_outcome(
+            &target_trace,
+            json!([{
+                "source_manifest_id": 29,
+                "manifest_version": 4
+            }]),
+            version_boundary(
+                "ens:alice.eth",
+                Uuid::from_u128(0x5e71000000000000000000000000aaa3),
+                Some(2_400),
+                Some("ResolverChanged"),
+                22_400_010,
+                "0x111010",
+                "2024-06-07T00:00:27Z",
+            ),
+            version_boundary(
+                "ens:alice.eth",
+                Uuid::from_u128(0x5e71000000000000000000000000bbb3),
+                Some(2_410),
+                Some("RecordsChanged"),
+                22_400_011,
+                "0x111011",
+                "2024-06-07T00:00:28Z",
+            ),
+        );
+        insert_trace_and_outcome(&database, &target_trace, &target_outcome).await?;
+
+        let other_tuple_trace = execution_trace(
+            Uuid::from_u128(0x5e710000000000000000000000000008),
+            VERIFIED_PRIMARY_NAME_REQUEST_TYPE,
+            "ens",
+            &verified_primary_name_request_key("ens", "0xEf01", "60"),
+            1_717_173_301,
+        );
+        let other_tuple_outcome = execution_outcome(
+            &other_tuple_trace,
+            json!([{
+                "source_manifest_id": 29,
+                "manifest_version": 4
+            }]),
+            version_boundary(
+                "ens:bob.eth",
+                Uuid::from_u128(0x5e71000000000000000000000000aaa4),
+                Some(2_420),
+                Some("ResolverChanged"),
+                22_400_020,
+                "0x222020",
+                "2024-06-07T00:00:37Z",
+            ),
+            version_boundary(
+                "ens:bob.eth",
+                Uuid::from_u128(0x5e71000000000000000000000000bbb4),
+                Some(2_430),
+                Some("RecordsChanged"),
+                22_400_021,
+                "0x222021",
+                "2024-06-07T00:00:38Z",
+            ),
+        );
+        insert_trace_and_outcome(&database, &other_tuple_trace, &other_tuple_outcome).await?;
+
+        let verified_resolution_trace = execution_trace(
+            Uuid::from_u128(0x5e710000000000000000000000000009),
+            VERIFIED_RESOLUTION_REQUEST_TYPE,
+            "ens",
+            &invalidation.request_key(),
+            1_717_173_302,
+        );
+        let verified_resolution_outcome = execution_outcome(
+            &verified_resolution_trace,
+            json!([{
+                "source_manifest_id": 29,
+                "manifest_version": 4
+            }]),
+            version_boundary(
+                "ens:charlie.eth",
+                Uuid::from_u128(0x5e71000000000000000000000000aaa5),
+                Some(2_440),
+                Some("ResolverChanged"),
+                22_400_030,
+                "0x333030",
+                "2024-06-07T00:00:47Z",
+            ),
+            version_boundary(
+                "ens:charlie.eth",
+                Uuid::from_u128(0x5e71000000000000000000000000bbb5),
+                Some(2_450),
+                Some("RecordsChanged"),
+                22_400_031,
+                "0x333031",
+                "2024-06-07T00:00:48Z",
+            ),
+        );
+        insert_trace_and_outcome(
+            &database,
+            &verified_resolution_trace,
+            &verified_resolution_outcome,
+        )
+        .await?;
+
+        let summary =
+            invalidate_verified_primary_name_manifest_version(database.pool(), &invalidation)
+                .await?;
+        assert_eq!(summary.deleted_outcome_count, 1);
+        assert_eq!(
+            load_execution_outcome(database.pool(), &target_outcome.cache_key).await?,
+            None
+        );
+        assert_eq!(
+            load_execution_outcome(database.pool(), &other_tuple_outcome.cache_key).await?,
+            Some(other_tuple_outcome)
+        );
+        assert_eq!(
+            load_execution_outcome(database.pool(), &verified_resolution_outcome.cache_key).await?,
+            Some(verified_resolution_outcome)
+        );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn verified_primary_topology_wrapper_scopes_to_exact_tuple_request_key() -> Result<()> {
+        let database = TestDatabase::new().await?;
+
+        let invalidation = VerifiedPrimaryNameBoundaryInvalidation {
+            namespace: "ens".to_owned(),
+            address: "0xAbCd".to_owned(),
+            coin_type: "60".to_owned(),
+            logical_name_id: "ens:alice.eth".to_owned(),
+            resource_id: Uuid::from_u128(0x5e71000000000000000000000000ccc3),
+            normalized_event_id: Some(2_500),
+            event_kind: Some("ResolverChanged".to_owned()),
+            chain_id: "ethereum-mainnet".to_owned(),
+            block_number: 22_500_010,
+            block_hash: "0x444010".to_owned(),
+            timestamp: "2024-06-08T00:00:27Z".to_owned(),
+        };
+
+        let target_trace = execution_trace(
+            Uuid::from_u128(0x5e71000000000000000000000000000a),
+            VERIFIED_PRIMARY_NAME_REQUEST_TYPE,
+            "ens",
+            &invalidation.request_key(),
+            1_717_173_400,
+        );
+        let target_outcome = execution_outcome(
+            &target_trace,
+            json!([{
+                "source_family": "ens_execution",
+                "manifest_version": 9
+            }]),
+            invalidation.boundary(),
+            version_boundary(
+                "ens:alice.eth",
+                Uuid::from_u128(0x5e71000000000000000000000000ddd3),
+                Some(2_510),
+                Some("RecordsChanged"),
+                22_500_011,
+                "0x444011",
+                "2024-06-08T00:00:28Z",
+            ),
+        );
+        insert_trace_and_outcome(&database, &target_trace, &target_outcome).await?;
+
+        let other_tuple_trace = execution_trace(
+            Uuid::from_u128(0x5e71000000000000000000000000000b),
+            VERIFIED_PRIMARY_NAME_REQUEST_TYPE,
+            "ens",
+            &verified_primary_name_request_key("ens", "0xEf01", "60"),
+            1_717_173_401,
+        );
+        let other_tuple_outcome = execution_outcome(
+            &other_tuple_trace,
+            json!([{
+                "source_family": "ens_execution",
+                "manifest_version": 9
+            }]),
+            invalidation.boundary(),
+            version_boundary(
+                "ens:bob.eth",
+                Uuid::from_u128(0x5e71000000000000000000000000ddd4),
+                Some(2_520),
+                Some("RecordsChanged"),
+                22_500_021,
+                "0x555021",
+                "2024-06-08T00:00:38Z",
+            ),
+        );
+        insert_trace_and_outcome(&database, &other_tuple_trace, &other_tuple_outcome).await?;
+
+        let verified_resolution_trace = execution_trace(
+            Uuid::from_u128(0x5e71000000000000000000000000000c),
+            VERIFIED_RESOLUTION_REQUEST_TYPE,
+            "ens",
+            &invalidation.request_key(),
+            1_717_173_402,
+        );
+        let verified_resolution_outcome = execution_outcome(
+            &verified_resolution_trace,
+            json!([{
+                "source_family": "ens_execution",
+                "manifest_version": 9
+            }]),
+            invalidation.boundary(),
+            version_boundary(
+                "ens:charlie.eth",
+                Uuid::from_u128(0x5e71000000000000000000000000ddd5),
+                Some(2_530),
+                Some("RecordsChanged"),
+                22_500_031,
+                "0x666031",
+                "2024-06-08T00:00:48Z",
+            ),
+        );
+        insert_trace_and_outcome(
+            &database,
+            &verified_resolution_trace,
+            &verified_resolution_outcome,
+        )
+        .await?;
+
+        let summary =
+            invalidate_verified_primary_name_topology_boundary(database.pool(), &invalidation)
+                .await?;
+        assert_eq!(summary.deleted_outcome_count, 1);
+        assert_eq!(
+            load_execution_outcome(database.pool(), &target_outcome.cache_key).await?,
+            None
+        );
+        assert_eq!(
+            load_execution_outcome(database.pool(), &other_tuple_outcome.cache_key).await?,
+            Some(other_tuple_outcome)
+        );
+        assert_eq!(
+            load_execution_outcome(database.pool(), &verified_resolution_outcome.cache_key).await?,
+            Some(verified_resolution_outcome)
+        );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn verified_primary_record_wrapper_scopes_to_exact_tuple_request_key() -> Result<()> {
+        let database = TestDatabase::new().await?;
+
+        let invalidation = VerifiedPrimaryNameBoundaryInvalidation {
+            namespace: "ens".to_owned(),
+            address: "0xAbCd".to_owned(),
+            coin_type: "60".to_owned(),
+            logical_name_id: "ens:alice.eth".to_owned(),
+            resource_id: Uuid::from_u128(0x5e71000000000000000000000000eee3),
+            normalized_event_id: Some(2_600),
+            event_kind: Some("RecordsChanged".to_owned()),
+            chain_id: "ethereum-mainnet".to_owned(),
+            block_number: 22_600_010,
+            block_hash: "0x777010".to_owned(),
+            timestamp: "2024-06-09T00:00:27Z".to_owned(),
+        };
+
+        let target_trace = execution_trace(
+            Uuid::from_u128(0x5e71000000000000000000000000000d),
+            VERIFIED_PRIMARY_NAME_REQUEST_TYPE,
+            "ens",
+            &invalidation.request_key(),
+            1_717_173_500,
+        );
+        let target_outcome = execution_outcome(
+            &target_trace,
+            json!([{
+                "source_family": "ens_execution",
+                "manifest_version": 10
+            }]),
+            version_boundary(
+                "ens:alice.eth",
+                Uuid::from_u128(0x5e71000000000000000000000000fff3),
+                Some(2_610),
+                Some("ResolverChanged"),
+                22_600_011,
+                "0x777011",
+                "2024-06-09T00:00:28Z",
+            ),
+            invalidation.boundary(),
+        );
+        insert_trace_and_outcome(&database, &target_trace, &target_outcome).await?;
+
+        let other_tuple_trace = execution_trace(
+            Uuid::from_u128(0x5e71000000000000000000000000000e),
+            VERIFIED_PRIMARY_NAME_REQUEST_TYPE,
+            "ens",
+            &verified_primary_name_request_key("ens", "0xEf01", "60"),
+            1_717_173_501,
+        );
+        let other_tuple_outcome = execution_outcome(
+            &other_tuple_trace,
+            json!([{
+                "source_family": "ens_execution",
+                "manifest_version": 10
+            }]),
+            version_boundary(
+                "ens:bob.eth",
+                Uuid::from_u128(0x5e71000000000000000000000000fff4),
+                Some(2_620),
+                Some("ResolverChanged"),
+                22_600_021,
+                "0x888021",
+                "2024-06-09T00:00:38Z",
+            ),
+            invalidation.boundary(),
+        );
+        insert_trace_and_outcome(&database, &other_tuple_trace, &other_tuple_outcome).await?;
+
+        let verified_resolution_trace = execution_trace(
+            Uuid::from_u128(0x5e71000000000000000000000000000f),
+            VERIFIED_RESOLUTION_REQUEST_TYPE,
+            "ens",
+            &invalidation.request_key(),
+            1_717_173_502,
+        );
+        let verified_resolution_outcome = execution_outcome(
+            &verified_resolution_trace,
+            json!([{
+                "source_family": "ens_execution",
+                "manifest_version": 10
+            }]),
+            version_boundary(
+                "ens:charlie.eth",
+                Uuid::from_u128(0x5e71000000000000000000000000fff5),
+                Some(2_630),
+                Some("ResolverChanged"),
+                22_600_031,
+                "0x999031",
+                "2024-06-09T00:00:48Z",
+            ),
+            invalidation.boundary(),
+        );
+        insert_trace_and_outcome(
+            &database,
+            &verified_resolution_trace,
+            &verified_resolution_outcome,
+        )
+        .await?;
+
+        let summary =
+            invalidate_verified_primary_name_record_boundary(database.pool(), &invalidation)
+                .await?;
+        assert_eq!(summary.deleted_outcome_count, 1);
+        assert_eq!(
+            load_execution_outcome(database.pool(), &target_outcome.cache_key).await?,
+            None
+        );
+        assert_eq!(
+            load_execution_outcome(database.pool(), &other_tuple_outcome.cache_key).await?,
+            Some(other_tuple_outcome)
+        );
+        assert_eq!(
+            load_execution_outcome(database.pool(), &verified_resolution_outcome.cache_key).await?,
+            Some(verified_resolution_outcome)
         );
 
         database.cleanup().await

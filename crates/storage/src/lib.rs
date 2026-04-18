@@ -42,8 +42,11 @@ pub use execution::{
     ExecutionBoundaryInvalidation, ExecutionCacheKey, ExecutionManifestInvalidation,
     ExecutionOutcome, ExecutionOutcomeInvalidationSummary, ExecutionTrace, ExecutionTraceStep,
     invalidate_execution_outcomes_for_manifest_version,
+    invalidate_execution_outcomes_for_manifest_version_and_request_key,
     invalidate_execution_outcomes_for_record_boundary,
-    invalidate_execution_outcomes_for_topology_boundary, load_execution_outcome,
+    invalidate_execution_outcomes_for_record_boundary_and_request_key,
+    invalidate_execution_outcomes_for_topology_boundary,
+    invalidate_execution_outcomes_for_topology_boundary_and_request_key, load_execution_outcome,
     load_execution_trace, upsert_execution_outcome, upsert_execution_outcome_in_transaction,
     upsert_execution_trace, upsert_execution_trace_in_transaction,
 };

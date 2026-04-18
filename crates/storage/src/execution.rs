@@ -208,6 +208,33 @@ pub async fn invalidate_execution_outcomes_for_manifest_version(
     pool: &PgPool,
     invalidation: &ExecutionManifestInvalidation,
 ) -> Result<ExecutionOutcomeInvalidationSummary> {
+    invalidate_execution_outcomes_for_manifest_version_internal(pool, invalidation, None).await
+}
+
+/// Delete cached execution outcomes for one exact stale manifest identity/version and
+/// one exact request key.
+pub async fn invalidate_execution_outcomes_for_manifest_version_and_request_key(
+    pool: &PgPool,
+    invalidation: &ExecutionManifestInvalidation,
+    request_key: &str,
+) -> Result<ExecutionOutcomeInvalidationSummary> {
+    let request_key = normalize_execution_invalidation_request_key(
+        request_key,
+        "execution manifest invalidation",
+    )?;
+    invalidate_execution_outcomes_for_manifest_version_internal(
+        pool,
+        invalidation,
+        Some(request_key.as_str()),
+    )
+    .await
+}
+
+async fn invalidate_execution_outcomes_for_manifest_version_internal(
+    pool: &PgPool,
+    invalidation: &ExecutionManifestInvalidation,
+    request_key: Option<&str>,
+) -> Result<ExecutionOutcomeInvalidationSummary> {
     let invalidation = normalize_execution_manifest_invalidation(invalidation)?;
     let target_identity = invalidation.identity_key();
 
@@ -224,6 +251,9 @@ pub async fn invalidate_execution_outcomes_for_manifest_version(
     .await?;
     let mut cache_keys = Vec::new();
     for outcome in outcomes {
+        if !outcome_matches_request_key(&outcome, request_key) {
+            continue;
+        }
         let manifest_versions = decode_manifest_versions(
             &outcome.cache_key.manifest_versions,
             &outcome.cache_key.request_key,
@@ -257,6 +287,28 @@ pub async fn invalidate_execution_outcomes_for_topology_boundary(
     invalidate_execution_outcomes_for_boundary(
         pool,
         invalidation,
+        None,
+        "topology_version_boundary",
+        |outcome| &outcome.cache_key.topology_version_boundary,
+    )
+    .await
+}
+
+/// Delete cached execution outcomes for one exact stale topology boundary and
+/// one exact request key.
+pub async fn invalidate_execution_outcomes_for_topology_boundary_and_request_key(
+    pool: &PgPool,
+    invalidation: &ExecutionBoundaryInvalidation,
+    request_key: &str,
+) -> Result<ExecutionOutcomeInvalidationSummary> {
+    let request_key = normalize_execution_invalidation_request_key(
+        request_key,
+        "execution topology boundary invalidation",
+    )?;
+    invalidate_execution_outcomes_for_boundary(
+        pool,
+        invalidation,
+        Some(request_key.as_str()),
         "topology_version_boundary",
         |outcome| &outcome.cache_key.topology_version_boundary,
     )
@@ -271,6 +323,28 @@ pub async fn invalidate_execution_outcomes_for_record_boundary(
     invalidate_execution_outcomes_for_boundary(
         pool,
         invalidation,
+        None,
+        "record_version_boundary",
+        |outcome| &outcome.cache_key.record_version_boundary,
+    )
+    .await
+}
+
+/// Delete cached execution outcomes for one exact stale record boundary and one exact
+/// request key.
+pub async fn invalidate_execution_outcomes_for_record_boundary_and_request_key(
+    pool: &PgPool,
+    invalidation: &ExecutionBoundaryInvalidation,
+    request_key: &str,
+) -> Result<ExecutionOutcomeInvalidationSummary> {
+    let request_key = normalize_execution_invalidation_request_key(
+        request_key,
+        "execution record boundary invalidation",
+    )?;
+    invalidate_execution_outcomes_for_boundary(
+        pool,
+        invalidation,
+        Some(request_key.as_str()),
         "record_version_boundary",
         |outcome| &outcome.cache_key.record_version_boundary,
     )
@@ -894,6 +968,7 @@ fn normalize_execution_boundary_invalidation(
 async fn invalidate_execution_outcomes_for_boundary(
     pool: &PgPool,
     invalidation: &ExecutionBoundaryInvalidation,
+    request_key: Option<&str>,
     field_name: &str,
     boundary: impl Fn(&ExecutionOutcome) -> &Value,
 ) -> Result<ExecutionOutcomeInvalidationSummary> {
@@ -916,6 +991,9 @@ async fn invalidate_execution_outcomes_for_boundary(
     .await?;
     let mut cache_keys = Vec::new();
     for outcome in outcomes {
+        if !outcome_matches_request_key(&outcome, request_key) {
+            continue;
+        }
         let outcome_boundary = version_boundary_storage_key(
             boundary(&outcome),
             field_name,
@@ -966,6 +1044,21 @@ fn normalize_execution_cache_key(cache_key: &ExecutionCacheKey) -> Result<Execut
         topology_version_boundary: cache_key.topology_version_boundary.clone(),
         record_version_boundary: cache_key.record_version_boundary.clone(),
     })
+}
+
+fn normalize_execution_invalidation_request_key(
+    request_key: &str,
+    context: &str,
+) -> Result<String> {
+    let request_key = request_key.trim();
+    if request_key.is_empty() {
+        bail!("{context} has empty request_key");
+    }
+    Ok(request_key.to_owned())
+}
+
+fn outcome_matches_request_key(outcome: &ExecutionOutcome, request_key: Option<&str>) -> bool {
+    request_key.is_none_or(|request_key| outcome.cache_key.request_key == request_key)
 }
 
 fn execution_cache_key_storage_key(cache_key: &ExecutionCacheKey) -> Result<String> {

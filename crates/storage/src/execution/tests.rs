@@ -265,6 +265,10 @@ fn execution_outcome_variant(
     outcome
 }
 
+fn verified_primary_request_key(address: &str, coin_type: &str) -> String {
+    format!("ens:{}:{coin_type}", address.to_ascii_lowercase())
+}
+
 async fn insert_trace_and_outcome(
     database: &TestDatabase,
     trace: &ExecutionTrace,
@@ -1086,6 +1090,374 @@ async fn invalidates_execution_outcomes_for_exact_record_boundary_only() -> Resu
     assert_eq!(
         load_execution_outcome(database.pool(), &other_route_outcome.cache_key).await?,
         Some(other_route_outcome)
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn invalidates_verified_primary_execution_outcomes_for_exact_manifest_and_request_key_only()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let target_request_key = verified_primary_request_key("0xAbCd", "60");
+
+    let mut target_trace = execution_trace_variant(
+        Uuid::from_u128(0x0e7ec7ace00000000000000000000019),
+        &target_request_key,
+        1_717_172_200,
+    );
+    target_trace.request_type = "verified_primary_name".to_owned();
+    let target_outcome = execution_outcome_variant(
+        &target_trace,
+        json!([{
+            "source_manifest_id": 31,
+            "manifest_version": 4
+        }]),
+        version_boundary(
+            "ens:alice.eth",
+            Uuid::from_u128(0x0e7ec7ace0000000000000000000abc1),
+            Some(1_510),
+            Some("ResolverChanged"),
+            21_300_010,
+            "0xabd010",
+            "2024-06-04T00:00:27Z",
+        ),
+        version_boundary(
+            "ens:alice.eth",
+            Uuid::from_u128(0x0e7ec7ace0000000000000000000abc2),
+            Some(1_520),
+            Some("RecordsChanged"),
+            21_300_011,
+            "0xabd011",
+            "2024-06-04T00:00:28Z",
+        ),
+    );
+    insert_trace_and_outcome(&database, &target_trace, &target_outcome).await?;
+
+    let mut other_tuple_trace = execution_trace_variant(
+        Uuid::from_u128(0x0e7ec7ace0000000000000000000001a),
+        &verified_primary_request_key("0xEf01", "60"),
+        1_717_172_201,
+    );
+    other_tuple_trace.request_type = "verified_primary_name".to_owned();
+    let other_tuple_outcome = execution_outcome_variant(
+        &other_tuple_trace,
+        json!([{
+            "source_manifest_id": 31,
+            "manifest_version": 4
+        }]),
+        version_boundary(
+            "ens:bob.eth",
+            Uuid::from_u128(0x0e7ec7ace0000000000000000000abc3),
+            Some(1_530),
+            Some("ResolverChanged"),
+            21_300_020,
+            "0xabd020",
+            "2024-06-04T00:00:37Z",
+        ),
+        version_boundary(
+            "ens:bob.eth",
+            Uuid::from_u128(0x0e7ec7ace0000000000000000000abc4),
+            Some(1_540),
+            Some("RecordsChanged"),
+            21_300_021,
+            "0xabd021",
+            "2024-06-04T00:00:38Z",
+        ),
+    );
+    insert_trace_and_outcome(&database, &other_tuple_trace, &other_tuple_outcome).await?;
+
+    let resolution_trace = execution_trace_variant(
+        Uuid::from_u128(0x0e7ec7ace0000000000000000000001b),
+        &target_request_key,
+        1_717_172_202,
+    );
+    let resolution_outcome = execution_outcome_variant(
+        &resolution_trace,
+        json!([{
+            "source_manifest_id": 31,
+            "manifest_version": 4
+        }]),
+        version_boundary(
+            "ens:charlie.eth",
+            Uuid::from_u128(0x0e7ec7ace0000000000000000000abc5),
+            Some(1_550),
+            Some("ResolverChanged"),
+            21_300_030,
+            "0xabd030",
+            "2024-06-04T00:00:47Z",
+        ),
+        version_boundary(
+            "ens:charlie.eth",
+            Uuid::from_u128(0x0e7ec7ace0000000000000000000abc6),
+            Some(1_560),
+            Some("RecordsChanged"),
+            21_300_031,
+            "0xabd031",
+            "2024-06-04T00:00:48Z",
+        ),
+    );
+    insert_trace_and_outcome(&database, &resolution_trace, &resolution_outcome).await?;
+
+    let summary = invalidate_execution_outcomes_for_manifest_version_and_request_key(
+        database.pool(),
+        &ExecutionManifestInvalidation {
+            request_type: "verified_primary_name".to_owned(),
+            namespace: "ens".to_owned(),
+            source_manifest_id: Some(31),
+            source_family: None,
+            manifest_version: 4,
+        },
+        &target_request_key,
+    )
+    .await?;
+    assert_eq!(summary.deleted_outcome_count, 1);
+
+    assert_eq!(
+        load_execution_outcome(database.pool(), &target_outcome.cache_key).await?,
+        None
+    );
+    assert_eq!(
+        load_execution_outcome(database.pool(), &other_tuple_outcome.cache_key).await?,
+        Some(other_tuple_outcome)
+    );
+    assert_eq!(
+        load_execution_outcome(database.pool(), &resolution_outcome.cache_key).await?,
+        Some(resolution_outcome)
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn invalidates_verified_primary_execution_outcomes_for_exact_topology_and_request_key_only()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let target_request_key = verified_primary_request_key("0xAbCd", "60");
+    let target_boundary = version_boundary(
+        "ens:alice.eth",
+        Uuid::from_u128(0x0e7ec7ace0000000000000000000abc7),
+        Some(1_610),
+        Some("ResolverChanged"),
+        21_400_010,
+        "0xabe010",
+        "2024-06-05T00:00:27Z",
+    );
+
+    let mut target_trace = execution_trace_variant(
+        Uuid::from_u128(0x0e7ec7ace0000000000000000000001c),
+        &target_request_key,
+        1_717_172_300,
+    );
+    target_trace.request_type = "verified_primary_name".to_owned();
+    let target_outcome = execution_outcome_variant(
+        &target_trace,
+        json!([{
+            "source_family": "ens_execution",
+            "manifest_version": 7
+        }]),
+        target_boundary.clone(),
+        version_boundary(
+            "ens:alice.eth",
+            Uuid::from_u128(0x0e7ec7ace0000000000000000000abc8),
+            Some(1_620),
+            Some("RecordsChanged"),
+            21_400_011,
+            "0xabe011",
+            "2024-06-05T00:00:28Z",
+        ),
+    );
+    insert_trace_and_outcome(&database, &target_trace, &target_outcome).await?;
+
+    let mut other_tuple_trace = execution_trace_variant(
+        Uuid::from_u128(0x0e7ec7ace0000000000000000000001d),
+        &verified_primary_request_key("0xEf01", "60"),
+        1_717_172_301,
+    );
+    other_tuple_trace.request_type = "verified_primary_name".to_owned();
+    let other_tuple_outcome = execution_outcome_variant(
+        &other_tuple_trace,
+        json!([{
+            "source_family": "ens_execution",
+            "manifest_version": 7
+        }]),
+        target_boundary.clone(),
+        version_boundary(
+            "ens:bob.eth",
+            Uuid::from_u128(0x0e7ec7ace0000000000000000000abc9),
+            Some(1_630),
+            Some("RecordsChanged"),
+            21_400_021,
+            "0xabe021",
+            "2024-06-05T00:00:38Z",
+        ),
+    );
+    insert_trace_and_outcome(&database, &other_tuple_trace, &other_tuple_outcome).await?;
+
+    let resolution_trace = execution_trace_variant(
+        Uuid::from_u128(0x0e7ec7ace0000000000000000000001e),
+        &target_request_key,
+        1_717_172_302,
+    );
+    let resolution_outcome = execution_outcome_variant(
+        &resolution_trace,
+        json!([{
+            "source_family": "ens_execution",
+            "manifest_version": 7
+        }]),
+        target_boundary.clone(),
+        version_boundary(
+            "ens:charlie.eth",
+            Uuid::from_u128(0x0e7ec7ace0000000000000000000abca),
+            Some(1_640),
+            Some("RecordsChanged"),
+            21_400_031,
+            "0xabe031",
+            "2024-06-05T00:00:48Z",
+        ),
+    );
+    insert_trace_and_outcome(&database, &resolution_trace, &resolution_outcome).await?;
+
+    let summary = invalidate_execution_outcomes_for_topology_boundary_and_request_key(
+        database.pool(),
+        &ExecutionBoundaryInvalidation {
+            request_type: "verified_primary_name".to_owned(),
+            namespace: "ens".to_owned(),
+            boundary: target_boundary,
+        },
+        &target_request_key,
+    )
+    .await?;
+    assert_eq!(summary.deleted_outcome_count, 1);
+
+    assert_eq!(
+        load_execution_outcome(database.pool(), &target_outcome.cache_key).await?,
+        None
+    );
+    assert_eq!(
+        load_execution_outcome(database.pool(), &other_tuple_outcome.cache_key).await?,
+        Some(other_tuple_outcome)
+    );
+    assert_eq!(
+        load_execution_outcome(database.pool(), &resolution_outcome.cache_key).await?,
+        Some(resolution_outcome)
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn invalidates_verified_primary_execution_outcomes_for_exact_record_and_request_key_only()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let target_request_key = verified_primary_request_key("0xAbCd", "60");
+    let target_record_boundary = version_boundary(
+        "ens:alice.eth",
+        Uuid::from_u128(0x0e7ec7ace0000000000000000000abcb),
+        Some(1_710),
+        Some("RecordsChanged"),
+        21_500_010,
+        "0xabf010",
+        "2024-06-06T00:00:27Z",
+    );
+
+    let mut target_trace = execution_trace_variant(
+        Uuid::from_u128(0x0e7ec7ace0000000000000000000001f),
+        &target_request_key,
+        1_717_172_400,
+    );
+    target_trace.request_type = "verified_primary_name".to_owned();
+    let target_outcome = execution_outcome_variant(
+        &target_trace,
+        json!([{
+            "source_family": "ens_execution",
+            "manifest_version": 8
+        }]),
+        version_boundary(
+            "ens:alice.eth",
+            Uuid::from_u128(0x0e7ec7ace0000000000000000000abcc),
+            Some(1_720),
+            Some("ResolverChanged"),
+            21_500_011,
+            "0xabf011",
+            "2024-06-06T00:00:28Z",
+        ),
+        target_record_boundary.clone(),
+    );
+    insert_trace_and_outcome(&database, &target_trace, &target_outcome).await?;
+
+    let mut other_tuple_trace = execution_trace_variant(
+        Uuid::from_u128(0x0e7ec7ace00000000000000000000020),
+        &verified_primary_request_key("0xEf01", "60"),
+        1_717_172_401,
+    );
+    other_tuple_trace.request_type = "verified_primary_name".to_owned();
+    let other_tuple_outcome = execution_outcome_variant(
+        &other_tuple_trace,
+        json!([{
+            "source_family": "ens_execution",
+            "manifest_version": 8
+        }]),
+        version_boundary(
+            "ens:bob.eth",
+            Uuid::from_u128(0x0e7ec7ace0000000000000000000abcd),
+            Some(1_730),
+            Some("ResolverChanged"),
+            21_500_021,
+            "0xabf021",
+            "2024-06-06T00:00:38Z",
+        ),
+        target_record_boundary.clone(),
+    );
+    insert_trace_and_outcome(&database, &other_tuple_trace, &other_tuple_outcome).await?;
+
+    let resolution_trace = execution_trace_variant(
+        Uuid::from_u128(0x0e7ec7ace00000000000000000000021),
+        &target_request_key,
+        1_717_172_402,
+    );
+    let resolution_outcome = execution_outcome_variant(
+        &resolution_trace,
+        json!([{
+            "source_family": "ens_execution",
+            "manifest_version": 8
+        }]),
+        version_boundary(
+            "ens:charlie.eth",
+            Uuid::from_u128(0x0e7ec7ace0000000000000000000abce),
+            Some(1_740),
+            Some("ResolverChanged"),
+            21_500_031,
+            "0xabf031",
+            "2024-06-06T00:00:48Z",
+        ),
+        target_record_boundary.clone(),
+    );
+    insert_trace_and_outcome(&database, &resolution_trace, &resolution_outcome).await?;
+
+    let summary = invalidate_execution_outcomes_for_record_boundary_and_request_key(
+        database.pool(),
+        &ExecutionBoundaryInvalidation {
+            request_type: "verified_primary_name".to_owned(),
+            namespace: "ens".to_owned(),
+            boundary: target_record_boundary,
+        },
+        &target_request_key,
+    )
+    .await?;
+    assert_eq!(summary.deleted_outcome_count, 1);
+
+    assert_eq!(
+        load_execution_outcome(database.pool(), &target_outcome.cache_key).await?,
+        None
+    );
+    assert_eq!(
+        load_execution_outcome(database.pool(), &other_tuple_outcome.cache_key).await?,
+        Some(other_tuple_outcome)
+    );
+    assert_eq!(
+        load_execution_outcome(database.pool(), &resolution_outcome.cache_key).await?,
+        Some(resolution_outcome)
     );
 
     database.cleanup().await
