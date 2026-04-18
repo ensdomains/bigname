@@ -1,5 +1,6 @@
 mod address_names;
 mod children;
+mod execution;
 mod name_current;
 mod permissions;
 mod record_inventory;
@@ -10,6 +11,7 @@ use bigname_storage::DatabaseConfig;
 use clap::{Args, Parser, Subcommand};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
+use uuid::Uuid;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -27,6 +29,7 @@ enum Command {
     Migrate(MigrateArgs),
     AddressNamesCurrent(AddressNamesCurrentArgs),
     ChildrenCurrent(ChildrenCurrentArgs),
+    Execution(ExecutionArgs),
     NameCurrent(NameCurrentArgs),
     PermissionsCurrent(PermissionsCurrentArgs),
     RecordInventoryCurrent(RecordInventoryCurrentArgs),
@@ -70,6 +73,12 @@ struct ChildrenCurrentArgs {
 }
 
 #[derive(Args, Debug)]
+struct ExecutionArgs {
+    #[command(subcommand)]
+    command: ExecutionCommand,
+}
+
+#[derive(Args, Debug)]
 struct PermissionsCurrentArgs {
     #[command(subcommand)]
     command: PermissionsCurrentCommand,
@@ -100,6 +109,13 @@ enum AddressNamesCurrentCommand {
 #[derive(Subcommand, Debug)]
 enum ChildrenCurrentCommand {
     Rebuild(ChildrenCurrentRebuildArgs),
+}
+
+#[derive(Subcommand, Debug)]
+enum ExecutionCommand {
+    InvalidateVerifiedResolutionManifest(InvalidateVerifiedResolutionManifestArgs),
+    InvalidateVerifiedResolutionTopologyBoundary(InvalidateVerifiedResolutionBoundaryArgs),
+    InvalidateVerifiedResolutionRecordBoundary(InvalidateVerifiedResolutionBoundaryArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -142,6 +158,44 @@ struct ChildrenCurrentRebuildArgs {
 }
 
 #[derive(Args, Debug)]
+struct InvalidateVerifiedResolutionManifestArgs {
+    #[command(flatten)]
+    database: DatabaseConfig,
+    #[arg(long)]
+    namespace: String,
+    #[arg(long)]
+    source_manifest_id: Option<i64>,
+    #[arg(long)]
+    source_family: Option<String>,
+    #[arg(long)]
+    manifest_version: i64,
+}
+
+#[derive(Args, Debug)]
+struct InvalidateVerifiedResolutionBoundaryArgs {
+    #[command(flatten)]
+    database: DatabaseConfig,
+    #[arg(long)]
+    namespace: String,
+    #[arg(long)]
+    logical_name_id: String,
+    #[arg(long)]
+    resource_id: Uuid,
+    #[arg(long)]
+    normalized_event_id: Option<i64>,
+    #[arg(long)]
+    event_kind: Option<String>,
+    #[arg(long)]
+    chain_id: String,
+    #[arg(long)]
+    block_number: i64,
+    #[arg(long)]
+    block_hash: String,
+    #[arg(long)]
+    timestamp: String,
+}
+
+#[derive(Args, Debug)]
 struct PermissionsCurrentRebuildArgs {
     #[command(flatten)]
     database: DatabaseConfig,
@@ -176,6 +230,7 @@ async fn main() -> Result<()> {
         Command::Migrate(args) => migrate(args).await,
         Command::AddressNamesCurrent(args) => address_names_current(args).await,
         Command::ChildrenCurrent(args) => children_current(args).await,
+        Command::Execution(args) => execution_command(args).await,
         Command::NameCurrent(args) => name_current(args).await,
         Command::PermissionsCurrent(args) => permissions_current(args).await,
         Command::RecordInventoryCurrent(args) => record_inventory_current(args).await,
@@ -223,6 +278,20 @@ async fn address_names_current(args: AddressNamesCurrentArgs) -> Result<()> {
 async fn children_current(args: ChildrenCurrentArgs) -> Result<()> {
     match args.command {
         ChildrenCurrentCommand::Rebuild(args) => rebuild_children_current(args).await,
+    }
+}
+
+async fn execution_command(args: ExecutionArgs) -> Result<()> {
+    match args.command {
+        ExecutionCommand::InvalidateVerifiedResolutionManifest(args) => {
+            invalidate_verified_resolution_manifest(args).await
+        }
+        ExecutionCommand::InvalidateVerifiedResolutionTopologyBoundary(args) => {
+            invalidate_verified_resolution_topology_boundary(args).await
+        }
+        ExecutionCommand::InvalidateVerifiedResolutionRecordBoundary(args) => {
+            invalidate_verified_resolution_record_boundary(args).await
+        }
     }
 }
 
@@ -295,6 +364,98 @@ async fn rebuild_children_current(args: ChildrenCurrentRebuildArgs) -> Result<()
         deleted_row_count = summary.deleted_row_count,
         logical_name_id = args.logical_name_id.as_deref().unwrap_or("all"),
         "children_current rebuild completed"
+    );
+
+    Ok(())
+}
+
+async fn invalidate_verified_resolution_manifest(
+    args: InvalidateVerifiedResolutionManifestArgs,
+) -> Result<()> {
+    let pool = bigname_storage::connect(&args.database).await?;
+    let summary = execution::invalidate_verified_resolution_manifest_version(
+        &pool,
+        &execution::VerifiedResolutionManifestInvalidation {
+            namespace: args.namespace.clone(),
+            source_manifest_id: args.source_manifest_id,
+            source_family: args.source_family.clone(),
+            manifest_version: args.manifest_version,
+        },
+    )
+    .await?;
+
+    info!(
+        service = "worker",
+        execution_request_type = "verified_resolution",
+        invalidation_cause = "manifest_version",
+        namespace = args.namespace.as_str(),
+        manifest_version = args.manifest_version,
+        deleted_outcome_count = summary.deleted_outcome_count,
+        "verified_resolution execution outcome invalidation completed"
+    );
+
+    Ok(())
+}
+
+async fn invalidate_verified_resolution_topology_boundary(
+    args: InvalidateVerifiedResolutionBoundaryArgs,
+) -> Result<()> {
+    let pool = bigname_storage::connect(&args.database).await?;
+    let invalidation = execution::VerifiedResolutionBoundaryInvalidation {
+        namespace: args.namespace.clone(),
+        logical_name_id: args.logical_name_id.clone(),
+        resource_id: args.resource_id,
+        normalized_event_id: args.normalized_event_id,
+        event_kind: args.event_kind.clone(),
+        chain_id: args.chain_id.clone(),
+        block_number: args.block_number,
+        block_hash: args.block_hash.clone(),
+        timestamp: args.timestamp.clone(),
+    };
+    let summary =
+        execution::invalidate_verified_resolution_topology_boundary(&pool, &invalidation).await?;
+
+    info!(
+        service = "worker",
+        execution_request_type = "verified_resolution",
+        invalidation_cause = "topology_boundary",
+        namespace = args.namespace.as_str(),
+        logical_name_id = args.logical_name_id.as_str(),
+        resource_id = %args.resource_id,
+        deleted_outcome_count = summary.deleted_outcome_count,
+        "verified_resolution topology invalidation completed"
+    );
+
+    Ok(())
+}
+
+async fn invalidate_verified_resolution_record_boundary(
+    args: InvalidateVerifiedResolutionBoundaryArgs,
+) -> Result<()> {
+    let pool = bigname_storage::connect(&args.database).await?;
+    let invalidation = execution::VerifiedResolutionBoundaryInvalidation {
+        namespace: args.namespace.clone(),
+        logical_name_id: args.logical_name_id.clone(),
+        resource_id: args.resource_id,
+        normalized_event_id: args.normalized_event_id,
+        event_kind: args.event_kind.clone(),
+        chain_id: args.chain_id.clone(),
+        block_number: args.block_number,
+        block_hash: args.block_hash.clone(),
+        timestamp: args.timestamp.clone(),
+    };
+    let summary =
+        execution::invalidate_verified_resolution_record_boundary(&pool, &invalidation).await?;
+
+    info!(
+        service = "worker",
+        execution_request_type = "verified_resolution",
+        invalidation_cause = "record_boundary",
+        namespace = args.namespace.as_str(),
+        logical_name_id = args.logical_name_id.as_str(),
+        resource_id = %args.resource_id,
+        deleted_outcome_count = summary.deleted_outcome_count,
+        "verified_resolution record invalidation completed"
     );
 
     Ok(())

@@ -58,6 +58,30 @@ pub struct ExecutionOutcome {
     pub finished_at: OffsetDateTime,
 }
 
+/// Exact stale manifest identity/version that should invalidate persisted execution outcomes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExecutionManifestInvalidation {
+    pub request_type: String,
+    pub namespace: String,
+    pub source_manifest_id: Option<i64>,
+    pub source_family: Option<String>,
+    pub manifest_version: i64,
+}
+
+/// Exact stale topology or record boundary that should invalidate persisted execution outcomes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExecutionBoundaryInvalidation {
+    pub request_type: String,
+    pub namespace: String,
+    pub boundary: Value,
+}
+
+/// Summary of one execution-outcome invalidation pass.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ExecutionOutcomeInvalidationSummary {
+    pub deleted_outcome_count: u64,
+}
+
 /// Load one stored execution trace and its ordered steps.
 pub async fn load_execution_trace(
     pool: &PgPool,
@@ -157,6 +181,80 @@ pub async fn upsert_execution_outcome(
         .context("failed to commit execution outcome upsert")?;
 
     Ok(snapshot)
+}
+
+/// Delete cached execution outcomes for one exact stale manifest identity/version.
+pub async fn invalidate_execution_outcomes_for_manifest_version(
+    pool: &PgPool,
+    invalidation: &ExecutionManifestInvalidation,
+) -> Result<ExecutionOutcomeInvalidationSummary> {
+    let invalidation = normalize_execution_manifest_invalidation(invalidation)?;
+    let target_identity = invalidation.identity_key();
+
+    let mut transaction = pool
+        .begin()
+        .await
+        .context("failed to open transaction for execution manifest invalidation")?;
+
+    let outcomes = load_execution_outcomes_for_scope_internal(
+        &mut *transaction,
+        &invalidation.request_type,
+        &invalidation.namespace,
+    )
+    .await?;
+    let mut cache_keys = Vec::new();
+    for outcome in outcomes {
+        let manifest_versions = decode_manifest_versions(
+            &outcome.cache_key.manifest_versions,
+            &outcome.cache_key.request_key,
+        )?;
+        if manifest_versions
+            .iter()
+            .any(|manifest_version| manifest_version.identity_key() == target_identity)
+        {
+            cache_keys.push(execution_cache_key_storage_key(&outcome.cache_key)?);
+        }
+    }
+
+    let deleted_outcome_count =
+        delete_execution_outcomes_by_keys(&mut transaction, &cache_keys).await?;
+
+    transaction
+        .commit()
+        .await
+        .context("failed to commit execution manifest invalidation")?;
+
+    Ok(ExecutionOutcomeInvalidationSummary {
+        deleted_outcome_count,
+    })
+}
+
+/// Delete cached execution outcomes for one exact stale topology boundary.
+pub async fn invalidate_execution_outcomes_for_topology_boundary(
+    pool: &PgPool,
+    invalidation: &ExecutionBoundaryInvalidation,
+) -> Result<ExecutionOutcomeInvalidationSummary> {
+    invalidate_execution_outcomes_for_boundary(
+        pool,
+        invalidation,
+        "topology_version_boundary",
+        |outcome| &outcome.cache_key.topology_version_boundary,
+    )
+    .await
+}
+
+/// Delete cached execution outcomes for one exact stale record boundary.
+pub async fn invalidate_execution_outcomes_for_record_boundary(
+    pool: &PgPool,
+    invalidation: &ExecutionBoundaryInvalidation,
+) -> Result<ExecutionOutcomeInvalidationSummary> {
+    invalidate_execution_outcomes_for_boundary(
+        pool,
+        invalidation,
+        "record_version_boundary",
+        |outcome| &outcome.cache_key.record_version_boundary,
+    )
+    .await
 }
 
 async fn insert_execution_trace_row(
@@ -497,6 +595,72 @@ where
     row.map(decode_execution_outcome_row).transpose()
 }
 
+async fn load_execution_outcomes_for_scope_internal<'e, E>(
+    executor: E,
+    request_type: &str,
+    namespace: &str,
+) -> Result<Vec<ExecutionOutcome>>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            execution_cache_key,
+            request_key,
+            requested_chain_positions,
+            manifest_versions,
+            topology_version_boundary,
+            record_version_boundary,
+            execution_trace_id,
+            request_type,
+            namespace,
+            outcome_payload,
+            failure_payload,
+            finished_at
+        FROM execution_cache_outcomes
+        WHERE request_type = $1
+          AND namespace = $2
+        ORDER BY execution_cache_key
+        "#,
+    )
+    .bind(request_type)
+    .bind(namespace)
+    .fetch_all(executor)
+    .await
+    .with_context(|| {
+        format!(
+            "failed to load execution outcomes for request_type {request_type} and namespace {namespace}"
+        )
+    })?;
+
+    rows.into_iter().map(decode_execution_outcome_row).collect()
+}
+
+async fn delete_execution_outcomes_by_keys(
+    executor: &mut sqlx::Transaction<'_, Postgres>,
+    execution_cache_keys: &[String],
+) -> Result<u64> {
+    let mut deleted_outcome_count = 0;
+    for execution_cache_key in execution_cache_keys {
+        deleted_outcome_count += sqlx::query(
+            r#"
+            DELETE FROM execution_cache_outcomes
+            WHERE execution_cache_key = $1
+            "#,
+        )
+        .bind(execution_cache_key)
+        .execute(&mut **executor)
+        .await
+        .with_context(|| {
+            format!("failed to delete execution outcome for cache key {execution_cache_key}")
+        })?
+        .rows_affected();
+    }
+
+    Ok(deleted_outcome_count)
+}
+
 fn validate_execution_trace(trace: &ExecutionTrace) -> Result<()> {
     if trace.request_type.is_empty() {
         bail!(
@@ -618,6 +782,140 @@ fn normalize_execution_outcome(outcome: &ExecutionOutcome) -> Result<ExecutionOu
         outcome_payload: outcome.outcome_payload.clone(),
         failure_payload: outcome.failure_payload.clone(),
         finished_at: outcome.finished_at,
+    })
+}
+
+impl ExecutionManifestInvalidation {
+    fn identity_key(&self) -> String {
+        ManifestVersionParts {
+            source_manifest_id: self.source_manifest_id,
+            source_family: self.source_family.clone(),
+            manifest_version: self.manifest_version,
+        }
+        .identity_key()
+    }
+}
+
+fn normalize_execution_manifest_invalidation(
+    invalidation: &ExecutionManifestInvalidation,
+) -> Result<ExecutionManifestInvalidation> {
+    let request_type = invalidation.request_type.trim();
+    if request_type.is_empty() {
+        bail!("execution manifest invalidation has empty request_type");
+    }
+
+    let namespace = invalidation.namespace.trim();
+    if namespace.is_empty() {
+        bail!("execution manifest invalidation has empty namespace");
+    }
+
+    let source_manifest_id = match invalidation.source_manifest_id {
+        Some(value) if value > 0 => Some(value),
+        Some(value) => bail!(
+            "execution manifest invalidation for request_type {request_type} namespace {namespace} source_manifest_id must be positive, got {value}"
+        ),
+        None => None,
+    };
+    let source_family = match invalidation.source_family.as_deref() {
+        Some(value) if !value.trim().is_empty() => Some(value.trim().to_owned()),
+        Some(_) => bail!(
+            "execution manifest invalidation for request_type {request_type} namespace {namespace} source_family must be non-empty when present"
+        ),
+        None => None,
+    };
+    if source_manifest_id.is_none() && source_family.is_none() {
+        bail!(
+            "execution manifest invalidation for request_type {request_type} namespace {namespace} must include source_manifest_id or source_family"
+        );
+    }
+    if invalidation.manifest_version <= 0 {
+        bail!(
+            "execution manifest invalidation for request_type {request_type} namespace {namespace} manifest_version must be positive, got {}",
+            invalidation.manifest_version
+        );
+    }
+
+    Ok(ExecutionManifestInvalidation {
+        request_type: request_type.to_owned(),
+        namespace: namespace.to_owned(),
+        source_manifest_id,
+        source_family,
+        manifest_version: invalidation.manifest_version,
+    })
+}
+
+fn normalize_execution_boundary_invalidation(
+    invalidation: &ExecutionBoundaryInvalidation,
+    field_name: &str,
+) -> Result<ExecutionBoundaryInvalidation> {
+    let request_type = invalidation.request_type.trim();
+    if request_type.is_empty() {
+        bail!("execution boundary invalidation has empty request_type");
+    }
+
+    let namespace = invalidation.namespace.trim();
+    if namespace.is_empty() {
+        bail!("execution boundary invalidation has empty namespace");
+    }
+
+    validate_version_boundary(
+        &invalidation.boundary,
+        field_name,
+        &format!("{request_type}/{namespace}"),
+    )?;
+
+    Ok(ExecutionBoundaryInvalidation {
+        request_type: request_type.to_owned(),
+        namespace: namespace.to_owned(),
+        boundary: invalidation.boundary.clone(),
+    })
+}
+
+async fn invalidate_execution_outcomes_for_boundary(
+    pool: &PgPool,
+    invalidation: &ExecutionBoundaryInvalidation,
+    field_name: &str,
+    boundary: impl Fn(&ExecutionOutcome) -> &Value,
+) -> Result<ExecutionOutcomeInvalidationSummary> {
+    let invalidation = normalize_execution_boundary_invalidation(invalidation, field_name)?;
+    let target_boundary = version_boundary_storage_key(
+        &invalidation.boundary,
+        field_name,
+        &format!("{}/{}", invalidation.request_type, invalidation.namespace),
+    )?;
+
+    let mut transaction = pool.begin().await.with_context(|| {
+        format!("failed to open transaction for execution {field_name} invalidation")
+    })?;
+
+    let outcomes = load_execution_outcomes_for_scope_internal(
+        &mut *transaction,
+        &invalidation.request_type,
+        &invalidation.namespace,
+    )
+    .await?;
+    let mut cache_keys = Vec::new();
+    for outcome in outcomes {
+        let outcome_boundary = version_boundary_storage_key(
+            boundary(&outcome),
+            field_name,
+            &outcome.cache_key.request_key,
+        )?;
+        if outcome_boundary == target_boundary {
+            cache_keys.push(execution_cache_key_storage_key(&outcome.cache_key)?);
+        }
+    }
+
+    let deleted_outcome_count =
+        delete_execution_outcomes_by_keys(&mut transaction, &cache_keys).await?;
+
+    transaction
+        .commit()
+        .await
+        .with_context(|| format!("failed to commit execution {field_name} invalidation"))?;
+
+    Ok(ExecutionOutcomeInvalidationSummary {
+        deleted_outcome_count,
     })
 }
 
@@ -832,6 +1130,17 @@ fn decode_manifest_versions(value: &Value, request_key: &str) -> Result<Vec<Mani
 
 fn validate_version_boundary(value: &Value, field_name: &str, request_key: &str) -> Result<()> {
     decode_version_boundary(value, field_name, request_key).map(|_| ())
+}
+
+fn version_boundary_storage_key(
+    value: &Value,
+    field_name: &str,
+    request_key: &str,
+) -> Result<String> {
+    let boundary = decode_version_boundary(value, field_name, request_key)?;
+    let mut key = String::new();
+    append_version_boundary_key_parts(&mut key, &boundary);
+    Ok(key)
 }
 
 fn decode_version_boundary(
