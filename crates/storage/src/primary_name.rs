@@ -1,15 +1,49 @@
 use anyhow::{Context, Result, bail};
+use serde_json::Value;
 use sqlx::{PgPool, Postgres, Row, postgres::PgRow};
 
-/// Persisted bootstrap primary-name lookup tuple keyed by address, coin_type, and namespace.
+/// Persisted declared claim-state for one address, coin_type, and namespace tuple.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PrimaryNameCurrentRow {
     pub address: String,
     pub namespace: String,
     pub coin_type: String,
+    pub claim_status: PrimaryNameClaimStatus,
+    pub raw_claim_name: Option<String>,
+    pub claim_provenance: Value,
 }
 
-/// Load one primary-name bootstrap tuple by exact address, namespace, and coin_type.
+/// Stable storage representation for projection-owned declared primary-name status.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PrimaryNameClaimStatus {
+    Success,
+    NotFound,
+    Unsupported,
+    InvalidName,
+}
+
+impl PrimaryNameClaimStatus {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::NotFound => "not_found",
+            Self::Unsupported => "unsupported",
+            Self::InvalidName => "invalid_name",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "success" => Ok(Self::Success),
+            "not_found" => Ok(Self::NotFound),
+            "unsupported" => Ok(Self::Unsupported),
+            "invalid_name" => Ok(Self::InvalidName),
+            _ => bail!("unknown primary_names_current claim_status {value}"),
+        }
+    }
+}
+
+/// Load one declared primary-name claim-state row by exact address, namespace, and coin_type.
 pub async fn load_primary_name_current(
     pool: &PgPool,
     address: &str,
@@ -22,7 +56,10 @@ pub async fn load_primary_name_current(
         SELECT
             address,
             namespace,
-            coin_type
+            coin_type,
+            claim_status,
+            raw_claim_name,
+            claim_provenance
         FROM primary_names_current
         WHERE address = $1
           AND namespace = $2
@@ -43,7 +80,7 @@ pub async fn load_primary_name_current(
     row.map(decode_primary_name_current_row).transpose()
 }
 
-/// Insert or replace bootstrap primary-name lookup tuples.
+/// Insert or replace declared primary-name claim-state rows.
 pub async fn upsert_primary_name_current_rows(
     pool: &PgPool,
     rows: &[PrimaryNameCurrentRow],
@@ -71,7 +108,7 @@ pub async fn upsert_primary_name_current_rows(
     Ok(snapshots)
 }
 
-/// Delete one bootstrap primary-name tuple so a worker can rebuild that exact key.
+/// Delete one declared primary-name claim-state row so a worker can rebuild that exact key.
 pub async fn delete_primary_name_current(
     pool: &PgPool,
     address: &str,
@@ -100,7 +137,7 @@ pub async fn delete_primary_name_current(
     .map(|result| result.rows_affected())
 }
 
-/// Clear the primary-name bootstrap projection so a worker can perform a one-shot rebuild.
+/// Clear the primary-name claim-state projection so a worker can perform a one-shot rebuild.
 pub async fn clear_primary_names_current(pool: &PgPool) -> Result<u64> {
     sqlx::query("DELETE FROM primary_names_current")
         .execute(pool)
@@ -113,25 +150,40 @@ async fn upsert_primary_name_current_row(
     executor: &mut sqlx::Transaction<'_, Postgres>,
     row: &PrimaryNameCurrentRow,
 ) -> Result<PrimaryNameCurrentRow> {
+    let claim_provenance = serde_json::to_string(&row.claim_provenance)
+        .context("failed to serialize primary_names_current claim_provenance")?;
+
     let snapshot = sqlx::query(
         r#"
         INSERT INTO primary_names_current (
             address,
             coin_type,
-            namespace
+            namespace,
+            claim_status,
+            raw_claim_name,
+            claim_provenance
         )
-        VALUES ($1, $2, $3)
+        VALUES ($1, $2, $3, $4, $5, $6::jsonb)
         ON CONFLICT (address, coin_type, namespace) DO UPDATE
-        SET address = EXCLUDED.address
+        SET
+            claim_status = EXCLUDED.claim_status,
+            raw_claim_name = EXCLUDED.raw_claim_name,
+            claim_provenance = EXCLUDED.claim_provenance
         RETURNING
             address,
             namespace,
-            coin_type
+            coin_type,
+            claim_status,
+            raw_claim_name,
+            claim_provenance
         "#,
     )
     .bind(normalize_address(&row.address))
     .bind(&row.coin_type)
     .bind(&row.namespace)
+    .bind(row.claim_status.as_str())
+    .bind(&row.raw_claim_name)
+    .bind(claim_provenance)
     .fetch_one(&mut **executor)
     .await
     .with_context(|| {
@@ -161,6 +213,31 @@ fn validate_primary_name_current_row(row: &PrimaryNameCurrentRow) -> Result<()> 
             row.namespace
         );
     }
+    match row.claim_status {
+        PrimaryNameClaimStatus::InvalidName => {
+            let raw_claim_name = row
+                .raw_claim_name
+                .as_deref()
+                .context("primary_names_current invalid_name rows must include raw_claim_name")?;
+            if raw_claim_name.trim().is_empty() {
+                bail!("primary_names_current invalid_name raw_claim_name must not be blank");
+            }
+        }
+        _ if row.raw_claim_name.is_some() => {
+            bail!(
+                "primary_names_current rows may include raw_claim_name only for claim_status invalid_name"
+            );
+        }
+        _ => {}
+    }
+    if !row.claim_provenance.is_object() {
+        bail!(
+            "primary_names_current row for address {} namespace {} coin_type {} must store claim_provenance as a JSON object",
+            row.address,
+            row.namespace,
+            row.coin_type
+        );
+    }
 
     Ok(())
 }
@@ -173,6 +250,14 @@ fn decode_primary_name_current_row(row: PgRow) -> Result<PrimaryNameCurrentRow> 
             .to_ascii_lowercase(),
         namespace: row.try_get("namespace").context("missing namespace")?,
         coin_type: row.try_get("coin_type").context("missing coin_type")?,
+        claim_status: PrimaryNameClaimStatus::parse(
+            &row.try_get::<String, _>("claim_status")
+                .context("missing claim_status")?,
+        )?,
+        raw_claim_name: row.try_get("raw_claim_name").context("missing raw_claim_name")?,
+        claim_provenance: row
+            .try_get("claim_provenance")
+            .context("missing claim_provenance")?,
     })
 }
 
@@ -274,6 +359,12 @@ mod tests {
             address: "0x0000000000000000000000000000000000000ABC".to_owned(),
             namespace: "ens".to_owned(),
             coin_type: "60".to_owned(),
+            claim_status: PrimaryNameClaimStatus::NotFound,
+            raw_claim_name: None,
+            claim_provenance: serde_json::json!({
+                "source_family": "ens_v1_reverse_l1",
+                "contract_role": "reverse_registrar",
+            }),
         };
 
         let inserted = upsert_primary_name_current_rows(database.pool(), &[row]).await?;
@@ -283,6 +374,12 @@ mod tests {
                 address: "0x0000000000000000000000000000000000000abc".to_owned(),
                 namespace: "ens".to_owned(),
                 coin_type: "60".to_owned(),
+                claim_status: PrimaryNameClaimStatus::NotFound,
+                raw_claim_name: None,
+                claim_provenance: serde_json::json!({
+                    "source_family": "ens_v1_reverse_l1",
+                    "contract_role": "reverse_registrar",
+                }),
             }]
         );
 
@@ -309,11 +406,20 @@ mod tests {
                     address: "0x0000000000000000000000000000000000000abc".to_owned(),
                     namespace: "ens".to_owned(),
                     coin_type: "60".to_owned(),
+                    claim_status: PrimaryNameClaimStatus::Success,
+                    raw_claim_name: None,
+                    claim_provenance: serde_json::json!({
+                        "source_family": "ens_v1_reverse_l1",
+                        "contract_role": "reverse_registrar",
+                    }),
                 },
                 PrimaryNameCurrentRow {
                     address: "0x0000000000000000000000000000000000000def".to_owned(),
                     namespace: "ens".to_owned(),
                     coin_type: "60".to_owned(),
+                    claim_status: PrimaryNameClaimStatus::Unsupported,
+                    raw_claim_name: None,
+                    claim_provenance: serde_json::json!({}),
                 },
             ],
         )
@@ -349,6 +455,66 @@ mod tests {
             )
             .await?
             .is_none()
+        );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn round_trips_invalid_name_rows_with_raw_claim_input() -> Result<()> {
+        let database = TestDatabase::new().await?;
+
+        let row = PrimaryNameCurrentRow {
+            address: "0x0000000000000000000000000000000000000abc".to_owned(),
+            namespace: "ens".to_owned(),
+            coin_type: "60".to_owned(),
+            claim_status: PrimaryNameClaimStatus::InvalidName,
+            raw_claim_name: Some("alice..eth".to_owned()),
+            claim_provenance: serde_json::json!({
+                "source_family": "ens_v1_resolver_l1",
+                "contract_role": "resolver",
+                "contract_instance_id": "00000000-0000-0000-0000-000000000123",
+                "emitting_address": "0x0000000000000000000000000000000000000fed",
+            }),
+        };
+
+        let inserted = upsert_primary_name_current_rows(database.pool(), &[row.clone()]).await?;
+        assert_eq!(inserted, vec![row.clone()]);
+
+        let loaded = load_primary_name_current(
+            database.pool(),
+            "0x0000000000000000000000000000000000000ABC",
+            "ens",
+            "60",
+        )
+        .await?;
+        assert_eq!(loaded, Some(row));
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn rejects_raw_claim_name_outside_invalid_name_status() -> Result<()> {
+        let database = TestDatabase::new().await?;
+
+        let error = upsert_primary_name_current_rows(
+            database.pool(),
+            &[PrimaryNameCurrentRow {
+                address: "0x0000000000000000000000000000000000000abc".to_owned(),
+                namespace: "ens".to_owned(),
+                coin_type: "60".to_owned(),
+                claim_status: PrimaryNameClaimStatus::Success,
+                raw_claim_name: Some("alice.eth".to_owned()),
+                claim_provenance: serde_json::json!({}),
+            }],
+        )
+        .await
+        .expect_err("success rows must reject raw_claim_name");
+
+        assert!(
+            error
+                .to_string()
+                .contains("raw_claim_name only for claim_status invalid_name")
         );
 
         database.cleanup().await
