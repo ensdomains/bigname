@@ -114,18 +114,19 @@ History reads use normalized events plus thin cursor support rather than a separ
 ### Primary names
 
 - keyed by `(address, coin_type, namespace)`
-- serves status-only declared `claimed_primary_name` readback for the exact requested tuple plus the invalidation context needed to refresh that declared answer
+- serves the exact-tuple declared claim anchor plus the invalidation context needed for current bootstrap handling and any later additive claimed-local readback
 - for ENS on Ethereum Mainnet, the current declared claim precedence is reverse-only through `ens_v1_reverse_l1`; missing or unsupported reverse claims do not trigger fallback to registry-, resolver-, or other claim-setting surfaces, and admitting those fallback sources remains deferred
 - the route-level `claimed_primary_name` and `verified_primary_name` objects share the API `ResultStatus` vocabulary, but they do not collapse declared claim state and verified execution state into one projection-owned field
 - projection-owned `claimed_primary_name` is limited to the declared subset `success|not_found|unsupported|invalid_name`; richer claimed payload fields remain additive-only
-- for ENS on Ethereum Mainnet in Phase 7, the shipped projection is tuple-presence plus declared status only: reverse tuple admission supplies lookup and invalidation state only, and it does not join resolver-backed or execution-derived name identity into richer `claimed_primary_name` fields
-- `primary_names_current(address, coin_type, namespace)` is the frozen projection-owned source for that status-only declared `claimed_primary_name` readback and its invalidation context
-- that identity stays tied to the exact requested tuple and may own only declared claim status plus request-matching invalidation inputs; it does not own richer claimed fields, fallback-source selection, claim-local provenance, execution `request_type`, execution `request key`, `execution_trace_id`, verified status, verified name identity, or verification-local failure payloads
-- the richer claimed field boundary `{name?, raw_claim_name?, provenance?}` remains blocked until a later doc-first contract update freezes an honest declared source for those fields and their claim-local provenance
+- for ENS on Ethereum Mainnet in Phase 7, the shipped projection is the exact-tuple claim anchor plus declared claim-side inputs only: reverse tuple admission supplies lookup and invalidation state, and it does not join resolver-backed or execution-derived name identity into public `claimed_primary_name` fields
+- `primary_names_current(address, coin_type, namespace)` is the frozen projection-owned source for that exact-tuple claim anchor, its declared claim-side inputs, and its invalidation context
+- that identity stays tied to the exact requested tuple and may own `claim_status`, `raw_claim_name`, and claim-local provenance inputs plus request-matching invalidation hooks; it does not own fallback-source selection beyond the admitted reverse-only surface, execution `request_type`, execution `request key`, `execution_trace_id`, verified status, verified name identity, or verification-local failure payloads
+- the next honest public claimed-local addition beyond bare status is `raw_claim_name` only; if later surfaced, it is copied verbatim from `primary_names_current.raw_claim_name` for the same tuple and only when `claim_status=invalid_name`
+- `claimed_primary_name.name` remains blocked until a later doc-first contract update freezes an honest declared normalized claim-identity source that does not collapse into resolver-backed or execution-derived truth
 - tuple presence is a bootstrap lookup and invalidation hook only; it does not by itself widen claim precedence, admit fallback sources, graduate route-level coverage, or imply richer tuple-present claimed payload support
 - `raw_claim_name` is projection-owned claim state only; it exists to preserve the declared raw input when normalization fails and must not be copied into `verified_primary_name`
 - projection rows do not own verified-only states or failure payloads: `mismatch`, `execution_failed`, and verification-local `failure_reason` stay execution-derived even when the tuple row exists
-- claim-local provenance remains deferred; this freeze does not admit section-local `claimed_primary_name.provenance` or any execution-trace join in the projection row
+- claim-local provenance inputs remain projection-owned lookup / invalidation material; this freeze does not admit section-local `claimed_primary_name.provenance`, and any later public claimed provenance must strip `verified_primary_name_lookup` / `verified_primary_name_invalidation` hook material before it leaves the projection row
 - `verified_primary_name` in `mode=verified|both` remains execution-derived even when verified-primary normalized events are also projected for lookup and invalidation support
 
 ## 4. Invalidation Rules
