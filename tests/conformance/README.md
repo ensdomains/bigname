@@ -8,6 +8,7 @@ collections:
 - `GET /v1/names/{namespace}/{name}/children`
 - `GET /v1/addresses/{address}/names`
 - `GET /v1/names/{namespace}/{name}`
+- `GET /v1/resolutions/{namespace}/{name}`
 - `GET /v1/coverage/{namespace}/{name}`
 - `GET /v1/resources/{resource_id}/permissions`
 - `GET /v1/resolvers/{chain_id}/{resolver_address}`
@@ -42,10 +43,15 @@ Execution notes:
   surfaces, resources, token lineage, and bindings; the harness covers the base
   `GET /v1/addresses/{address}/names` response plus shipped `namespace`, `relation`,
   `dedupe_by`, and additive `include=role_summary` handling
-- the exact-name contract seeds a `name_current` row with the frozen exact-name `control`,
-  `resolver`, and `history` summary objects and asserts only those declared-state sections on
-  `GET /v1/names/{namespace}/{name}`
-- the coverage contract reuses the exact-name projection seed and asserts that
+- the exact-name contract seeds raw blocks, identity rows, and normalized events, rebuilds
+  `name_current` through the worker, and asserts only the frozen `control`, `resolver`, and
+  `history` declared-state sections on `GET /v1/names/{namespace}/{name}`
+- the resolution contract reuses the exact-name rebuild seed and asserts the shipped mixed-route
+  envelope on `GET /v1/resolutions/{namespace}/{name}` across `declared`, `verified`, and `both`
+  modes, including required and invalid `records` handling plus the explicitly unsupported
+  declared `topology` / `record_inventory` / `record_cache` sections and unsupported verified
+  query entries that remain after the bootstrap slice
+- the coverage contract reuses the same exact-name rebuild seed and asserts that
   `GET /v1/coverage/{namespace}/{name}` keeps the same single-name `data` and top-level
   `coverage` object as exact-name lookup while exposing the explain-only coverage block in
   `declared_state`
