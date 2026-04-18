@@ -155,6 +155,136 @@ Use this object for summary links into the dedicated history routes. `chain_posi
 
 Use this object for `declared_state.history` on `GET /v1/names/{namespace}/{name}`. `surface_head` is the first canonical row that `GET /v1/history/names/{namespace}/{name}?scope=surface` would return under the shared default sort, and `resource_head` is the same pointer for `scope=resource`. Either field may be `null` when that anchor set has no canonical rows. This summary intentionally does not add a `both_head` field; callers that need union ordering or pagination use the dedicated history route with its existing `scope=both` default.
 
+### `ResolutionResolverHop`
+
+- `logical_name_id`
+- `namespace`
+- `normalized_name`
+- `canonical_display_name`
+- `resource_id`
+- `chain_id`
+- `address`
+- `latest_event_kind`
+
+Use this object for `declared_state.topology.resolver_path[*]` on `GET /v1/resolutions/{namespace}/{name}`. The array is ordered from the surface or ancestor that contributed resolver selection to the final declared resolver target. When `topology` is supported, `resolver_path` is never empty. The last hop is the resolver selected for the requested snapshot. `chain_id` and `address` are both `null` only when the path terminates in “no declared resolver”, and `latest_event_kind` may be `null` when the path has no retained resolver-change pointer.
+
+### `VersionBoundary`
+
+- `logical_name_id`
+- `resource_id`
+- `normalized_event_id`
+- `event_kind`
+- `chain_position`
+
+Use this object for `declared_state.topology.version_boundaries.topology_version_boundary`, `declared_state.topology.version_boundaries.record_version_boundary`, `declared_state.record_inventory.record_version_boundary`, and `declared_state.record_cache.record_version_boundary`. `logical_name_id` and `resource_id` identify the surface and resource that last changed the relevant boundary and may differ from the route `data` when alias or wildcard traversal selects an ancestor. `normalized_event_id` and `event_kind` may be `null` only when the retained boundary is pinned by `chain_position` but there is no retained canonical boundary-event pointer.
+
+### `ResolutionTopology`
+
+- `registry_path`
+- `subregistry_path`
+- `resolver_path`
+- `wildcard`
+- `alias`
+- `version_boundaries`
+- `transport`
+
+Use this object for `declared_state.topology` on `GET /v1/resolutions/{namespace}/{name}`.
+
+Rules:
+
+- `registry_path` is an array of `NameRef`, ordered from the requested surface toward the declared registry authority, and is never empty when `topology` is supported
+- `subregistry_path` is an array of `NameRef`, ordered from the requested surface toward the nearest declared subregistry ancestor, and is empty when no subregistry delegation participates
+- `resolver_path` is an array of `ResolutionResolverHop`
+- `wildcard` is an object with `source` and `matched_labels`; `source` is `NameRef | null` and `matched_labels` is an array of label strings
+- `alias` is an object with `final_target` and `hops`; `final_target` is `NameRef | null` and `hops` is an ordered array of `NameRef` alias targets after the requested surface
+- `version_boundaries` is an object with `topology_version_boundary` and `record_version_boundary`, both using `VersionBoundary`
+- `transport` is an object with `source_chain_id`, `target_chain_id`, `contract_address`, and `latest_event_kind`
+- `wildcard.source=null` with `matched_labels=[]` means wildcard traversal did not participate
+- `alias.final_target=null` with `hops=[]` means alias rewriting did not participate
+- all `transport` fields are `null` when no compatibility transport participates
+- `version_boundaries.record_version_boundary` must equal `record_inventory.record_version_boundary` and `record_cache.record_version_boundary` when those sections are supported in the same response
+
+### `ResolutionRecordSelector`
+
+- `record_key`
+- `record_family`
+- `selector_key`
+- `cacheable`
+
+Use this object for `declared_state.record_inventory.selectors[*]`. `record_key` is the stable round-trip selector token used in the `records` query parameter. `selector_key` is `null` for scalar families and a string for parameterized families. When `selector_key` is not `null`, `record_key` is `record_family + ":" + selector_key`; callers should round-trip the surfaced `record_key` instead of rebuilding it. Numeric selector domains such as coin types remain strings inside `selector_key` so `record_key` stays stable text.
+
+### `ResolutionRecordGap`
+
+- `record_key`
+- `record_family`
+- `selector_key`
+- `gap_reason`
+
+Use this object for `declared_state.record_inventory.explicit_gaps[*]`. `selector_key=null` means the explicit gap applies to the scalar family key itself rather than a parameterized member.
+
+### `ResolutionUnsupportedRecordFamily`
+
+- `record_family`
+- `unsupported_reason`
+
+Use this object for `declared_state.record_inventory.unsupported_families[*]`.
+
+### `ResolutionRecordInventory`
+
+- `record_version_boundary`
+- `enumeration_basis`
+- `selectors`
+- `explicit_gaps`
+- `unsupported_families`
+- `last_change`
+
+Use this object for `declared_state.record_inventory` on `GET /v1/resolutions/{namespace}/{name}` and `GET /v1/names/{namespace}/{name}`.
+
+Rules:
+
+- `record_version_boundary` uses `VersionBoundary`
+- `enumeration_basis` is an object with `observed_selectors`, `capability_declared_families`, and `globally_enumerable`
+- `selectors` is an array of `ResolutionRecordSelector`
+- `explicit_gaps` is an array of `ResolutionRecordGap`
+- `unsupported_families` is an array of `ResolutionUnsupportedRecordFamily`
+- `last_change` is `HistoryPointer | null`
+- `selectors` and `explicit_gaps` are sorted by `record_key` ascending
+- `unsupported_families` is sorted by `record_family` ascending
+- this object may be authoritative for exact lookup while `enumeration_basis.globally_enumerable` remains `false`
+
+### `ResolutionRecordCacheEntry`
+
+- `record_key`
+- `record_family`
+- `selector_key`
+- `status`
+- `value`
+- `unsupported_reason`
+
+Use this object for `declared_state.record_cache.entries[*]`.
+
+Rules:
+
+- `status` uses the shared `ResultStatus` vocabulary, but declared cache entries use only `success`, `not_found`, and `unsupported`
+- `selector_key` follows the same scalar-vs-parameterized rule as `ResolutionRecordSelector`
+- `value` appears only when `status=success` and uses the family-native JSON shape for that selector
+- `unsupported_reason` appears only when `status=unsupported` and is required then
+
+### `ResolutionRecordCache`
+
+- `record_version_boundary`
+- `entries`
+
+Use this object for `declared_state.record_cache` on `GET /v1/resolutions/{namespace}/{name}`.
+
+Rules:
+
+- `record_version_boundary` uses `VersionBoundary`
+- `entries` is an array of `ResolutionRecordCacheEntry`
+- if `records` is omitted, `entries` contains every cacheable selector visible at the current `record_version_boundary` and is sorted by `record_key` ascending
+- if `records` is supplied, `entries` contains exactly one item per requested `record_key` and follows request order
+- `record_version_boundary` must equal `record_inventory.record_version_boundary` when both declared sections are supported in the same response
+
 ### `UnsupportedSummary`
 
 - `status`: always `unsupported`
@@ -269,7 +399,7 @@ Returns:
 - `declared_state.authority`
 - `declared_state.control`: `ExactNameControlSummary | UnsupportedSummary`
 - `declared_state.resolver`: `ExactNameResolverSummary | UnsupportedSummary`
-- `declared_state.record_inventory`
+- `declared_state.record_inventory`: `ResolutionRecordInventory | UnsupportedSummary`
 - `declared_state.history`: `ExactNameHistorySummary | UnsupportedSummary`
 
 Rules:
@@ -280,6 +410,7 @@ Rules:
 - `declared_state.authority` may fall back to `{resource_id, token_lineage_id, binding_kind}` when a dedicated authority summary is not yet projected but the current binding is known
 - `declared_state.control` is the narrow current-`resource_id` control summary only; it does not inline full resource permissions, role-holder detail, or the entire internal `ControlVector`
 - supported `declared_state.resolver` uses `chain_id` plus `address` as the same resolver target key used by `GET /v1/resolvers/{chain_id}/{resolver_address}` when a resolver exists; `chain_id=null` and `address=null` mean no declared current resolver rather than unsupported projection
+- supported `declared_state.record_inventory` reuses the same `ResolutionRecordInventory` object shape as `GET /v1/resolutions/{namespace}/{name}` and, for the same snapshot, must expose the same `record_version_boundary`
 - supported `declared_state.history.surface_head` and `declared_state.history.resource_head` point at the first canonical rows of the dedicated name-history route under `scope=surface` and `scope=resource`; the exact-name route does not add `both_head`, pagination state, or a second history truth system
 - for the same `{namespace}`, `{name}`, and snapshot selection, the top-level `coverage` object matches `GET /v1/coverage/{namespace}/{name}`
 - the shipped exact-name route does not support `include` expansions; history, permissions, resolution, and primary-name reads stay on their dedicated routes
@@ -485,19 +616,132 @@ Supported query parameters:
 
 When `declared_state` is populated, it includes:
 
-- `topology`
-- `record_inventory`
-- `record_cache`
+- `topology`: `ResolutionTopology | UnsupportedSummary`
+- `record_inventory`: `ResolutionRecordInventory | UnsupportedSummary`
+- `record_cache`: `ResolutionRecordCache | UnsupportedSummary`
 
 When `verified_state` is populated, it includes:
 
 - `verified_queries`
 
+When all declared sections are supported, they use this exact field structure:
+
+```json
+{
+  "topology": {
+    "registry_path": [
+      {
+        "logical_name_id": "ens:alice.eth",
+        "namespace": "ens",
+        "normalized_name": "alice.eth",
+        "canonical_display_name": "alice.eth",
+        "namehash": "0x...",
+        "resource_id": "00000000-0000-0000-0000-000000000000",
+        "binding_kind": "declared_registry_path"
+      }
+    ],
+    "subregistry_path": [],
+    "resolver_path": [
+      {
+        "logical_name_id": "ens:alice.eth",
+        "namespace": "ens",
+        "normalized_name": "alice.eth",
+        "canonical_display_name": "alice.eth",
+        "resource_id": "00000000-0000-0000-0000-000000000000",
+        "chain_id": "ethereum-mainnet",
+        "address": "0x0000000000000000000000000000000000000000",
+        "latest_event_kind": "ResolverChanged"
+      }
+    ],
+    "wildcard": {
+      "source": null,
+      "matched_labels": []
+    },
+    "alias": {
+      "final_target": null,
+      "hops": []
+    },
+    "version_boundaries": {
+      "topology_version_boundary": {
+        "logical_name_id": "ens:alice.eth",
+        "resource_id": "00000000-0000-0000-0000-000000000000",
+        "normalized_event_id": null,
+        "event_kind": null,
+        "chain_position": {
+          "chain_id": "ethereum-mainnet",
+          "block_number": 0,
+          "block_hash": "0x0",
+          "timestamp": "2026-04-16T00:00:00Z"
+        }
+      },
+      "record_version_boundary": {
+        "logical_name_id": "ens:alice.eth",
+        "resource_id": "00000000-0000-0000-0000-000000000000",
+        "normalized_event_id": null,
+        "event_kind": null,
+        "chain_position": {
+          "chain_id": "ethereum-mainnet",
+          "block_number": 0,
+          "block_hash": "0x0",
+          "timestamp": "2026-04-16T00:00:00Z"
+        }
+      }
+    },
+    "transport": {
+      "source_chain_id": null,
+      "target_chain_id": null,
+      "contract_address": null,
+      "latest_event_kind": null
+    }
+  },
+  "record_inventory": {
+    "record_version_boundary": {
+      "logical_name_id": "ens:alice.eth",
+      "resource_id": "00000000-0000-0000-0000-000000000000",
+      "normalized_event_id": null,
+      "event_kind": null,
+      "chain_position": {
+        "chain_id": "ethereum-mainnet",
+        "block_number": 0,
+        "block_hash": "0x0",
+        "timestamp": "2026-04-16T00:00:00Z"
+      }
+    },
+    "enumeration_basis": {
+      "observed_selectors": true,
+      "capability_declared_families": true,
+      "globally_enumerable": false
+    },
+    "selectors": [],
+    "explicit_gaps": [],
+    "unsupported_families": [],
+    "last_change": null
+  },
+  "record_cache": {
+    "record_version_boundary": {
+      "logical_name_id": "ens:alice.eth",
+      "resource_id": "00000000-0000-0000-0000-000000000000",
+      "normalized_event_id": null,
+      "event_kind": null,
+      "chain_position": {
+        "chain_id": "ethereum-mainnet",
+        "block_number": 0,
+        "block_hash": "0x0",
+        "timestamp": "2026-04-16T00:00:00Z"
+      }
+    },
+    "entries": []
+  }
+}
+```
+
 Rules:
 
 - `topology`, `record_inventory`, and `record_cache` are always present as objects when `declared_state` is populated; any declared section that is not yet projected returns `UnsupportedSummary`
+- callers must round-trip the surfaced `record_key` strings in `records`; `record_family` and `selector_key` are explanatory fields, not alternate request identity
 - `record_inventory` defines the known record-selector space, explicit gaps, and the current version boundary for the requested surface; it does not imply global record enumeration
 - `record_cache` is the declared last-known-value view over that same selector space and version boundary; it never implies that verified execution was run
+- `topology.version_boundaries.record_version_boundary` must equal `record_inventory.record_version_boundary` and `record_cache.record_version_boundary` when those sections are supported together
 - selector-level declared cache results live in `record_cache.entries`
 - `record_cache.entries[*]` and `verified_queries[*]` always echo the applicable `record_key`, even when the selector status is not `success`
 - `records` is a comma-separated list of explicit record selectors; selectors use the stable `record_key` strings surfaced by `record_inventory`, and the contract permits additive selector families without changing the envelope shape

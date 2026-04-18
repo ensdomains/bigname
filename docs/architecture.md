@@ -860,46 +860,95 @@ Every normalized event must carry:
 
 ### 18.1 `topology`
 
-`topology` captures:
+`topology` is a fixed declared object with:
 
-- registry path
-- subregistry path
-- resolver path
-- wildcard traversal context
-- alias traversal context
-- version boundaries
-- transport context for compatibility layers
+- `registry_path`
+- `subregistry_path`
+- `resolver_path`
+- `wildcard`
+- `alias`
+- `version_boundaries`
+- `transport`
+
+Field semantics:
+
+- `registry_path` is an ordered array of `NameRef` rows from the requested surface toward the declared registry authority and is never empty when `topology` is supported
+- `subregistry_path` is an ordered array of `NameRef` rows from the requested surface toward the nearest declared subregistry ancestor and is empty when no subregistry delegation participates
+- `resolver_path` is an ordered array of resolver hops; each hop carries `logical_name_id`, `namespace`, `normalized_name`, `canonical_display_name`, `resource_id`, `chain_id`, `address`, and `latest_event_kind`
+- `wildcard` is an object with `source` and `matched_labels`
+- `alias` is an object with `final_target` and `hops`
+- `version_boundaries` is an object with `topology_version_boundary` and `record_version_boundary`
+- `transport` is an object with `source_chain_id`, `target_chain_id`, `contract_address`, and `latest_event_kind`
+
+Rules:
+
+- `wildcard.source=null` with `matched_labels=[]` means wildcard traversal did not participate
+- `alias.final_target=null` with `hops=[]` means alias rewriting did not participate
+- all `transport` fields are `null` when no compatibility transport participates
+- each version-boundary object carries `logical_name_id`, `resource_id`, `normalized_event_id`, `event_kind`, and `chain_position`
+- `version_boundaries.record_version_boundary` must match the section-local `record_version_boundary` exposed by both `record_inventory` and `record_cache` for the same declared answer
 
 ### 18.2 `record_inventory`
 
 `record_inventory` is the public contract for “what record space is known to exist”.
 
-It must capture:
+It is a fixed declared object with:
 
-- observed text keys
-- observed coin types
-- observed record families
-- enumeration basis
-- version boundary
-- last change provenance
-- explicit unsupported gaps
+- `record_version_boundary`
+- `enumeration_basis`
+- `selectors`
+- `explicit_gaps`
+- `unsupported_families`
+- `last_change`
+
+Field semantics:
+
+- `record_version_boundary` uses the same version-boundary object shape as `topology.version_boundaries.record_version_boundary`
+- `enumeration_basis` is an object with `observed_selectors`, `capability_declared_families`, and `globally_enumerable`
+- each selector row carries `record_key`, `record_family`, `selector_key`, and `cacheable`
+- each explicit-gap row carries `record_key`, `record_family`, `selector_key`, and `gap_reason`
+- each unsupported-family row carries `record_family` and `unsupported_reason`
+- `last_change` is a history-pointer summary of the canonical event that last changed the admitted selector space, or `null` if no retained pointer exists
 
 Rules:
 
 - record inventory is not the same thing as canonical global enumeration
 - record inventory is usually observed or capability-driven
 - record inventory defines the stable record-selector space admitted by the route, including explicit gaps and unsupported families
+- `selector_key` is `null` for scalar families and a string for parameterized families; when it is present, `record_key` is the round-trip string `record_family + ":" + selector_key`
+- numeric selector domains such as coin types still use string `selector_key` values so `record_key` remains stable text
+- selectors and explicit gaps are sorted by `record_key` ascending; unsupported families are sorted by `record_family` ascending
 - version changes invalidate record inventory and cached record values for the prior version boundary
 
 ### 18.3 `record_cache`
 
 `record_cache` is a declared-state cache of the last known value for supported records.
 
+It is a fixed declared object with:
+
+- `record_version_boundary`
+- `entries`
+
+Each cache entry carries:
+
+- `record_key`
+- `record_family`
+- `selector_key`
+- `status`
+- `value`
+- `unsupported_reason`
+
 Rules:
 
 - `record_cache` is keyed by node and version boundary
 - `record_cache` is the declared last-known-value view over the same selector space and version boundary defined by `record_inventory`
 - `record_cache` is capability-driven, not resolver-family hardcoded
+- `record_version_boundary` must match both `record_inventory.record_version_boundary` and `topology.version_boundaries.record_version_boundary` for the same declared answer
+- cache-entry `status` reuses the shared `ResultStatus` vocabulary, but declared cache entries use only `success`, `not_found`, and `unsupported`
+- cache entries echo the same selector identity tuple `(record_key, record_family, selector_key)` surfaced by `record_inventory`
+- `value` appears only when `status=success` and uses the family-native JSON shape for that selector
+- `unsupported_reason` appears only when `status=unsupported` and is required then
+- if callers request an explicit selector subset, entry order follows request order; otherwise entries are sorted by `record_key` ascending
 - callers may request an explicit selector subset without changing the route envelope or inventing a second declared-state truth system
 - unsupported records must remain requestable through verified execution where possible
 
