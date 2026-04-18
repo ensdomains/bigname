@@ -393,6 +393,117 @@ mod shipped_api {
                 Ok(())
             }
 
+            async fn seed_primary_name_reverse_changed(
+                &self,
+                address: &str,
+                coin_type: &str,
+            ) -> Result<()> {
+                let normalized_address = address.to_ascii_lowercase();
+                let reverse_label = normalized_address.trim_start_matches("0x").to_owned();
+
+                bigname_storage::upsert_normalized_events(
+                    &self.pool,
+                    &[NormalizedEvent {
+                        event_identity: format!(
+                            "conformance:ReverseChanged:{normalized_address}:{coin_type}"
+                        ),
+                        namespace: "ens".to_owned(),
+                        logical_name_id: None,
+                        resource_id: None,
+                        event_kind: "ReverseChanged".to_owned(),
+                        source_family: "ens_v1_reverse_l1".to_owned(),
+                        manifest_version: 1,
+                        source_manifest_id: None,
+                        chain_id: Some("ethereum-mainnet".to_owned()),
+                        block_number: Some(210),
+                        block_hash: Some("0xprimaryname".to_owned()),
+                        transaction_hash: Some("0xtxprimaryname".to_owned()),
+                        log_index: Some(0),
+                        raw_fact_ref: json!({
+                            "kind": "raw_log",
+                            "chain_id": "ethereum-mainnet",
+                            "block_hash": "0xprimaryname",
+                            "block_number": 210,
+                            "transaction_hash": "0xtxprimaryname",
+                            "log_index": 0,
+                        }),
+                        derivation_kind: "ens_v1_reverse_claim".to_owned(),
+                        canonicality_state: CanonicalityState::Canonical,
+                        before_state: json!({}),
+                        after_state: json!({
+                            "source_event": "ReverseClaimed",
+                            "address": normalized_address,
+                            "coin_type": coin_type,
+                            "reverse_namespace": "ens",
+                            "reverse_label": reverse_label,
+                            "reverse_name": format!("{reverse_label}.addr.reverse"),
+                            "reverse_node": "0x00000000000000000000000000000000000000000000000000000000000000d2",
+                        }),
+                    }],
+                )
+                .await
+                .context("failed to seed ReverseChanged event for primary-name conformance")?;
+
+                Ok(())
+            }
+
+            async fn rebuild_primary_names_current(
+                &self,
+                address: &str,
+                namespace: &str,
+                coin_type: &str,
+            ) -> Result<()> {
+                let database_url = self.database_url.clone();
+                let address = address.to_owned();
+                let namespace = namespace.to_owned();
+                let coin_type = coin_type.to_owned();
+                let worker_manifest_path =
+                    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../apps/worker/Cargo.toml");
+
+                tokio::task::spawn_blocking(move || -> Result<()> {
+                    let _guard = WORKER_CARGO_LOCK
+                        .lock()
+                        .expect("worker cargo lock must not be poisoned");
+                    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
+                    let output = Command::new(cargo)
+                        .arg("run")
+                        .arg("--quiet")
+                        .arg("--manifest-path")
+                        .arg(worker_manifest_path)
+                        .arg("--")
+                        .arg("primary-names-current")
+                        .arg("rebuild")
+                        .arg("--database-url")
+                        .arg(&database_url)
+                        .arg("--address")
+                        .arg(&address)
+                        .arg("--namespace")
+                        .arg(&namespace)
+                        .arg("--coin-type")
+                        .arg(&coin_type)
+                        .output()
+                        .with_context(|| {
+                            format!(
+                                "failed to invoke worker primary_names_current rebuild for {address}/{namespace}/{coin_type}"
+                            )
+                        })?;
+
+                    if !output.status.success() {
+                        return Err(anyhow::anyhow!(
+                            "worker primary_names_current rebuild failed for {address}/{namespace}/{coin_type}\nstdout:\n{}\nstderr:\n{}",
+                            String::from_utf8_lossy(&output.stdout),
+                            String::from_utf8_lossy(&output.stderr),
+                        ));
+                    }
+
+                    Ok(())
+                })
+                .await
+                .context("worker primary_names_current rebuild task panicked")??;
+
+                Ok(())
+            }
+
             async fn insert_name_current_row(
                 &self,
                 row: bigname_storage::NameCurrentRow,
@@ -412,44 +523,6 @@ mod shipped_api {
                     .context(
                         "failed to upsert record_inventory_current row for conformance harness",
                     )?;
-                Ok(())
-            }
-
-            async fn create_primary_names_current_table(&self) -> Result<()> {
-                sqlx::query(
-                    r#"
-                        CREATE TABLE primary_names_current (
-                            address TEXT NOT NULL,
-                            namespace TEXT NOT NULL,
-                            coin_type TEXT NOT NULL,
-                            PRIMARY KEY (address, namespace, coin_type)
-                        )
-                    "#,
-                )
-                .execute(&self.pool)
-                .await
-                .context("failed to create primary_names_current for conformance harness")?;
-                Ok(())
-            }
-
-            async fn insert_primary_name_current_row(
-                &self,
-                address: &str,
-                namespace: &str,
-                coin_type: &str,
-            ) -> Result<()> {
-                sqlx::query(
-                    r#"
-                        INSERT INTO primary_names_current (address, namespace, coin_type)
-                        VALUES ($1, $2, $3)
-                    "#,
-                )
-                .bind(address)
-                .bind(namespace)
-                .bind(coin_type)
-                .execute(&self.pool)
-                .await
-                .context("failed to insert primary_names_current row for conformance harness")?;
                 Ok(())
             }
 
@@ -2941,6 +3014,11 @@ mod shipped_api {
                 "coin_type": "60",
             });
 
+            database.seed_primary_name_reverse_changed(address, "60").await?;
+            database
+                .rebuild_primary_names_current(address, "ens", "60")
+                .await?;
+
             let declared_response = app_router(database.app_state())
                 .oneshot(
                     Request::builder()
@@ -3031,8 +3109,6 @@ mod shipped_api {
                 "coin_type": "60",
             });
 
-            database.create_primary_names_current_table().await?;
-
             let declared_response = app_router(database.app_state())
                 .oneshot(
                     Request::builder()
@@ -3121,9 +3197,9 @@ mod shipped_api {
                 "coin_type": "60",
             });
 
-            database.create_primary_names_current_table().await?;
+            database.seed_primary_name_reverse_changed(address, "60").await?;
             database
-                .insert_primary_name_current_row(address, "ens", "60")
+                .rebuild_primary_names_current(address, "ens", "60")
                 .await?;
 
             let declared_response = app_router(database.app_state())

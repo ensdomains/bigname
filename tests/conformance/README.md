@@ -59,21 +59,26 @@ Execution notes:
   `GET /v1/coverage/{namespace}/{name}` keeps the same single-name `data` and top-level
   `coverage` object as exact-name lookup while exposing the explain-only coverage block in
   `declared_state`
-- the primary-name bootstrap contract covers `GET /v1/primary-names/{address}` with explicit
-  `mode=declared`, `mode=verified`, and `mode=both` envelopes for the bootstrap no-table path:
-  all three keep the same `{address, namespace, coin_type}` `data`, `declared` returns only
+- the primary-name bootstrap contract covers `GET /v1/primary-names/{address}` against the same
+  migrated per-test databases as the rest of the harness, while keeping the shipped route
+  bootstrap-only: the row-present cases seed a canonical ENS `ReverseChanged` normalized event,
+  run the worker's targeted `primary-names-current rebuild` for the
+  `(address, namespace, coin_type)` tuple, and then assert that all three
+  `mode=declared`, `mode=verified`, and `mode=both` responses keep the same
+  `{address, namespace, coin_type}` `data`; `declared` returns only
   `declared_state.claimed_primary_name`, `verified` returns only
-  `verified_state.verified_primary_name`, and `both` combines those sections; it requires both
-  `namespace` and `coin_type`, asserts `400 invalid_input` for missing `namespace` / `coin_type`,
-  malformed addresses, and malformed non-decimal `coin_type` values, `404 not_found` for
-  unsupported namespaces, per-mode `status=not_found` tuple results when
-  `primary_names_current` exists but the `(address, namespace, coin_type)` row is absent, and the
-  explicit declared `claimed_primary_name` / verified `verified_primary_name` unsupported sections
-  when the bootstrap path or a tuple-present row is returned; every mode also shares the bootstrap
-  provenance invariant (`normalized_event_ids`, `raw_fact_refs`, and `manifest_versions` empty,
-  `execution_trace_id=null`, `derivation_kind=primary_name_route_bootstrap`) plus the same
-  unsupported coverage invariant (`status=unsupported`, `exhaustiveness=not_applicable`,
-  `source_classes_considered=[]`, `enumeration_basis=primary_name_lookup`,
+  `verified_state.verified_primary_name`, and `both` combines those sections. The tuple-miss case
+  leaves the migrated `primary_names_current` table without that tuple and asserts per-mode
+  `status=not_found`; the tuple-present rebuild path still returns the explicit declared
+  `claimed_primary_name` / verified `verified_primary_name` unsupported sections rather than any
+  richer claimed or verified payload. It also requires both `namespace` and `coin_type`, asserts
+  `400 invalid_input` for missing `namespace` / `coin_type`, malformed addresses, and malformed
+  non-decimal `coin_type` values, `404 not_found` for unsupported namespaces, and the shared
+  bootstrap provenance invariant (`normalized_event_ids`, `raw_fact_refs`, and
+  `manifest_versions` empty, `execution_trace_id=null`,
+  `derivation_kind=primary_name_route_bootstrap`) plus the same unsupported coverage invariant
+  (`status=unsupported`, `exhaustiveness=not_applicable`, `source_classes_considered=[]`,
+  `enumeration_basis=primary_name_lookup`,
   `unsupported_reason="primary-name coverage is not yet supported"`), empty `chain_positions`,
   `consistency=head`, and a UTC `last_updated` timestamp
 - the resource-permissions contract seeds `permissions_current` rows and covers both the base

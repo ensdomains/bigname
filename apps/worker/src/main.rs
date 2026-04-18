@@ -3,6 +3,7 @@ mod children;
 mod execution;
 mod name_current;
 mod permissions;
+mod primary_name;
 mod record_inventory;
 mod resolver;
 
@@ -32,6 +33,7 @@ enum Command {
     Execution(ExecutionArgs),
     NameCurrent(NameCurrentArgs),
     PermissionsCurrent(PermissionsCurrentArgs),
+    PrimaryNamesCurrent(PrimaryNamesCurrentArgs),
     RecordInventoryCurrent(RecordInventoryCurrentArgs),
     ResolverCurrent(ResolverCurrentArgs),
 }
@@ -85,6 +87,12 @@ struct PermissionsCurrentArgs {
 }
 
 #[derive(Args, Debug)]
+struct PrimaryNamesCurrentArgs {
+    #[command(subcommand)]
+    command: PrimaryNamesCurrentCommand,
+}
+
+#[derive(Args, Debug)]
 struct RecordInventoryCurrentArgs {
     #[command(subcommand)]
     command: RecordInventoryCurrentCommand,
@@ -121,6 +129,11 @@ enum ExecutionCommand {
 #[derive(Subcommand, Debug)]
 enum PermissionsCurrentCommand {
     Rebuild(PermissionsCurrentRebuildArgs),
+}
+
+#[derive(Subcommand, Debug)]
+enum PrimaryNamesCurrentCommand {
+    Rebuild(PrimaryNamesCurrentRebuildArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -204,6 +217,18 @@ struct PermissionsCurrentRebuildArgs {
 }
 
 #[derive(Args, Debug)]
+struct PrimaryNamesCurrentRebuildArgs {
+    #[command(flatten)]
+    database: DatabaseConfig,
+    #[arg(long)]
+    address: Option<String>,
+    #[arg(long)]
+    namespace: Option<String>,
+    #[arg(long)]
+    coin_type: Option<String>,
+}
+
+#[derive(Args, Debug)]
 struct RecordInventoryCurrentRebuildArgs {
     #[command(flatten)]
     database: DatabaseConfig,
@@ -233,6 +258,7 @@ async fn main() -> Result<()> {
         Command::Execution(args) => execution_command(args).await,
         Command::NameCurrent(args) => name_current(args).await,
         Command::PermissionsCurrent(args) => permissions_current(args).await,
+        Command::PrimaryNamesCurrent(args) => primary_names_current(args).await,
         Command::RecordInventoryCurrent(args) => record_inventory_current(args).await,
         Command::ResolverCurrent(args) => resolver_current(args).await,
     }
@@ -306,6 +332,12 @@ async fn record_inventory_current(args: RecordInventoryCurrentArgs) -> Result<()
         RecordInventoryCurrentCommand::Rebuild(args) => {
             rebuild_record_inventory_current(args).await
         }
+    }
+}
+
+async fn primary_names_current(args: PrimaryNamesCurrentArgs) -> Result<()> {
+    match args.command {
+        PrimaryNamesCurrentCommand::Rebuild(args) => rebuild_primary_names_current(args).await,
     }
 }
 
@@ -474,6 +506,31 @@ async fn rebuild_permissions_current(args: PermissionsCurrentRebuildArgs) -> Res
         deleted_row_count = summary.deleted_row_count,
         resource_id = args.resource_id.as_deref().unwrap_or("all"),
         "permissions_current rebuild completed"
+    );
+
+    Ok(())
+}
+
+async fn rebuild_primary_names_current(args: PrimaryNamesCurrentRebuildArgs) -> Result<()> {
+    let pool = bigname_storage::connect(&args.database).await?;
+    let summary = primary_name::rebuild_primary_names_current(
+        &pool,
+        args.address.as_deref(),
+        args.namespace.as_deref(),
+        args.coin_type.as_deref(),
+    )
+    .await?;
+
+    info!(
+        service = "worker",
+        projection = "primary_names_current",
+        requested_tuple_count = summary.requested_tuple_count,
+        upserted_row_count = summary.upserted_row_count,
+        deleted_row_count = summary.deleted_row_count,
+        address = args.address.as_deref().unwrap_or("all"),
+        namespace = args.namespace.as_deref().unwrap_or("all"),
+        coin_type = args.coin_type.as_deref().unwrap_or("all"),
+        "primary_names_current rebuild completed"
     );
 
     Ok(())
