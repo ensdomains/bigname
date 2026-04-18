@@ -71,16 +71,27 @@ Execution notes:
   leaves the migrated `primary_names_current` table without that tuple and asserts per-mode
   `status=not_found`; the tuple-present rebuild path still returns the explicit declared
   `claimed_primary_name` / verified `verified_primary_name` unsupported sections rather than any
-  richer claimed or verified payload. It also requires both `namespace` and `coin_type`, asserts
-  `400 invalid_input` for missing `namespace` / `coin_type`, malformed addresses, and malformed
-  non-decimal `coin_type` values, `404 not_found` for unsupported namespaces, and the shared
-  bootstrap provenance invariant (`normalized_event_ids`, `raw_fact_refs`, and
-  `manifest_versions` empty, `execution_trace_id=null`,
-  `derivation_kind=primary_name_route_bootstrap`) plus the same unsupported coverage invariant
-  (`status=unsupported`, `exhaustiveness=not_applicable`, `source_classes_considered=[]`,
+  richer claimed or verified payload. The harness also seeds persisted verified execution outcomes
+  and asserts exact-tuple readback for `verified_state.verified_primary_name` on
+  `mode=verified` / `mode=both` only when that exact `(address, namespace, coin_type)` tuple has
+  a cached answer; the route still keeps public coverage bootstrap `unsupported`, and `mode=both`
+  still pairs that readback with the explicit declared `claimed_primary_name` unsupported section
+  instead of implying a broader claimed or verified contract. Exact-tuple invalidation coverage
+  then evicts only the targeted persisted verified answer across manifest, topology-boundary, and
+  record-boundary cases, confirms sibling tuple outcomes remain readable, and confirms the evicted
+  tuple falls back to the same explicit bootstrap unsupported sections. It also requires both
+  `namespace` and `coin_type`, asserts `400 invalid_input` for missing `namespace` / `coin_type`,
+  malformed addresses, and malformed non-decimal `coin_type` values, `404 not_found` for
+  unsupported namespaces, and the shared bootstrap provenance invariant
+  (`normalized_event_ids`, `raw_fact_refs`, and `manifest_versions` empty,
+  `execution_trace_id=null`, `derivation_kind=primary_name_route_bootstrap`) plus the same
+  unsupported coverage invariant (`status=unsupported`,
+  `exhaustiveness=not_applicable`, `source_classes_considered=[]`,
   `enumeration_basis=primary_name_lookup`,
   `unsupported_reason="primary-name coverage is not yet supported"`), empty `chain_positions`,
-  `consistency=head`, and a UTC `last_updated` timestamp
+  `consistency=head`, and a UTC `last_updated` timestamp; persisted verified readback keeps that
+  same route-level coverage and `derivation_kind`, while swapping in the persisted
+  `manifest_versions`, `execution_trace_id`, and execution `finished_at` as `last_updated`
 - the resource-permissions contract seeds `permissions_current` rows and covers both the base
   `GET /v1/resources/{resource_id}/permissions` collection response and the shipped `subject` and
   `scope` query filters

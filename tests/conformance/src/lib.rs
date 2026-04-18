@@ -30,9 +30,13 @@ mod shipped_api {
             RecordInventoryCurrentRow, ResolverCurrentRow, Resource, SurfaceBinding,
             SurfaceBindingKind, TokenLineage, default_database_url,
             invalidate_execution_outcomes_for_manifest_version,
+            invalidate_execution_outcomes_for_manifest_version_and_request_key,
             invalidate_execution_outcomes_for_record_boundary,
-            invalidate_execution_outcomes_for_topology_boundary, load_execution_outcome,
-            load_execution_trace, upsert_execution_outcome, upsert_execution_trace,
+            invalidate_execution_outcomes_for_record_boundary_and_request_key,
+            invalidate_execution_outcomes_for_topology_boundary,
+            invalidate_execution_outcomes_for_topology_boundary_and_request_key,
+            load_execution_outcome, load_execution_trace, upsert_execution_outcome,
+            upsert_execution_trace,
         };
         use serde::de::DeserializeOwned;
         use serde_json::{Value, json};
@@ -3433,6 +3437,190 @@ mod shipped_api {
         }
 
         #[tokio::test]
+        async fn primary_names_contract_reads_persisted_verified_primary_name_for_exact_tuple()
+        -> Result<()> {
+            let database = HarnessDatabase::new().await?;
+            let address = "0x0000000000000000000000000000000000000abc";
+            let expected_data = json!({
+                "address": address,
+                "namespace": "ens",
+                "coin_type": "60",
+            });
+            let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000041);
+            let finished_at = timestamp(1_717_172_401);
+            let verified_primary_name = primary_name_verified_success(
+                "ens:alice.eth",
+                "alice.eth",
+                "Alice.eth",
+                "0x0000000000000000000000000000000000000000000000000000000000000123",
+                Uuid::from_u128(0x456),
+            );
+
+            seed_primary_name_tuple_anchor(&database, address, "60").await?;
+            seed_primary_name_tuple_anchor(&database, address, "61").await?;
+
+            upsert_execution_trace(
+                &database.pool,
+                &primary_name_execution_trace(
+                    execution_trace_id,
+                    "ens",
+                    address,
+                    "60",
+                    verified_primary_name.clone(),
+                    finished_at,
+                ),
+            )
+            .await?;
+            upsert_execution_outcome(
+                &database.pool,
+                &primary_name_execution_outcome(
+                    execution_trace_id,
+                    "ens",
+                    address,
+                    "60",
+                    verified_primary_name.clone(),
+                    finished_at,
+                    primary_name_shared_topology_boundary(),
+                    primary_name_shared_record_boundary(),
+                ),
+            )
+            .await?;
+
+            let other_finished_at = timestamp(1_717_172_499);
+            let other_verified_primary_name = primary_name_verified_mismatch(
+                "ens:other.eth",
+                "other.eth",
+                "other.eth",
+                "0x0000000000000000000000000000000000000000000000000000000000000456",
+                Uuid::from_u128(0x999),
+                "resolved_address_mismatch",
+            );
+            upsert_execution_trace(
+                &database.pool,
+                &primary_name_execution_trace(
+                    Uuid::from_u128(0x0e7ec7ace00000000000000000000042),
+                    "ens",
+                    address,
+                    "61",
+                    other_verified_primary_name.clone(),
+                    other_finished_at,
+                ),
+            )
+            .await?;
+            upsert_execution_outcome(
+                &database.pool,
+                &primary_name_execution_outcome(
+                    Uuid::from_u128(0x0e7ec7ace00000000000000000000042),
+                    "ens",
+                    address,
+                    "61",
+                    other_verified_primary_name,
+                    other_finished_at,
+                    primary_name_shared_topology_boundary(),
+                    primary_name_shared_record_boundary(),
+                ),
+            )
+            .await?;
+
+            let declared_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/v1/primary-names/{address}?namespace=ens&coin_type=60&mode=declared"
+                        ))
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("declared primary-name persisted readback request failed")?;
+            let verified_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/v1/primary-names/{address}?namespace=ens&coin_type=60&mode=verified"
+                        ))
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("verified primary-name persisted readback request failed")?;
+            let both_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/v1/primary-names/{address}?namespace=ens&coin_type=60&mode=both"
+                        ))
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("mixed primary-name persisted readback request failed")?;
+
+            assert_eq!(declared_response.status(), StatusCode::OK);
+            assert_eq!(verified_response.status(), StatusCode::OK);
+            assert_eq!(both_response.status(), StatusCode::OK);
+
+            let declared_payload: PrimaryNameResponse = read_json(declared_response).await?;
+            let verified_payload: PrimaryNameResponse = read_json(verified_response).await?;
+            let both_payload: PrimaryNameResponse = read_json(both_response).await?;
+
+            assert_eq!(declared_payload.data, expected_data);
+            assert_eq!(verified_payload.data, expected_data);
+            assert_eq!(both_payload.data, expected_data);
+            assert_eq!(
+                declared_payload.declared_state,
+                Some(json!({
+                    "claimed_primary_name": {
+                        "status": "unsupported",
+                        "unsupported_reason": "declared primary-name claim surface is not yet supported",
+                    }
+                }))
+            );
+            assert_eq!(declared_payload.verified_state, None);
+            assert_eq!(verified_payload.declared_state, None);
+            assert_eq!(
+                verified_payload.verified_state,
+                Some(json!({
+                    "verified_primary_name": verified_primary_name.clone(),
+                }))
+            );
+            assert_eq!(
+                both_payload.declared_state,
+                declared_payload.declared_state
+            );
+            assert_eq!(both_payload.verified_state, verified_payload.verified_state);
+
+            assert_primary_name_bootstrap_invariants(&declared_payload);
+            assert_primary_name_persisted_readback_invariants(
+                &verified_payload,
+                execution_trace_id,
+                finished_at,
+            );
+            assert_primary_name_persisted_readback_invariants(
+                &both_payload,
+                execution_trace_id,
+                finished_at,
+            );
+
+            database.cleanup().await?;
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn primary_names_contract_exact_tuple_invalidation_evicts_only_target_persisted_answer()
+        -> Result<()> {
+            for invalidation in [
+                PersistedPrimaryNameInvalidation::Manifest,
+                PersistedPrimaryNameInvalidation::Topology,
+                PersistedPrimaryNameInvalidation::Record,
+            ] {
+                run_primary_name_execution_invalidation_case(invalidation).await?;
+            }
+
+            Ok(())
+        }
+
+        #[tokio::test]
         async fn primary_names_contract_returns_explicit_unsupported_sections_by_mode_for_tuple_present()
         -> Result<()> {
             let database = HarnessDatabase::new().await?;
@@ -5224,17 +5412,7 @@ mod shipped_api {
                 .collect()
         }
 
-        fn assert_primary_name_bootstrap_invariants(payload: &PrimaryNameResponse) {
-            assert_eq!(
-                payload.provenance,
-                json!({
-                    "normalized_event_ids": [],
-                    "raw_fact_refs": [],
-                    "manifest_versions": [],
-                    "execution_trace_id": null,
-                    "derivation_kind": "primary_name_route_bootstrap",
-                })
-            );
+        fn assert_primary_name_route_common_invariants(payload: &PrimaryNameResponse) {
             assert_eq!(
                 payload.coverage,
                 json!({
@@ -5247,7 +5425,40 @@ mod shipped_api {
             );
             assert_eq!(payload.chain_positions, json!({}));
             assert_eq!(payload.consistency, "head");
+        }
+
+        fn assert_primary_name_bootstrap_invariants(payload: &PrimaryNameResponse) {
+            assert_eq!(
+                payload.provenance,
+                json!({
+                    "normalized_event_ids": [],
+                    "raw_fact_refs": [],
+                    "manifest_versions": [],
+                    "execution_trace_id": null,
+                    "derivation_kind": "primary_name_route_bootstrap",
+                })
+            );
+            assert_primary_name_route_common_invariants(payload);
             assert!(payload.last_updated.ends_with('Z'));
+        }
+
+        fn assert_primary_name_persisted_readback_invariants(
+            payload: &PrimaryNameResponse,
+            execution_trace_id: Uuid,
+            finished_at: OffsetDateTime,
+        ) {
+            assert_eq!(
+                payload.provenance,
+                json!({
+                    "normalized_event_ids": [],
+                    "raw_fact_refs": [],
+                    "manifest_versions": primary_name_execution_manifest_versions(),
+                    "execution_trace_id": execution_trace_id.to_string(),
+                    "derivation_kind": "primary_name_route_bootstrap",
+                })
+            );
+            assert_primary_name_route_common_invariants(payload);
+            assert_eq!(payload.last_updated, format_timestamp(finished_at));
         }
 
         fn stable_row_strings(rows: &[Value]) -> Vec<String> {
@@ -6199,6 +6410,215 @@ mod shipped_api {
             })
         }
 
+        fn primary_name_execution_requested_chain_positions() -> Value {
+            json!([{
+                "chain_id": "ethereum-mainnet",
+                "block_number": 21_000_010,
+                "block_hash": "0xprimary",
+            }])
+        }
+
+        fn primary_name_execution_manifest_versions() -> Value {
+            json!([{
+                "manifest_version": 3,
+                "source_family": "ens_v1_registry",
+            }])
+        }
+
+        fn primary_name_execution_request_key(
+            namespace: &str,
+            address: &str,
+            coin_type: &str,
+        ) -> String {
+            format!("{namespace}:{}:{coin_type}", address.to_ascii_lowercase())
+        }
+
+        fn primary_name_verified_success(
+            logical_name_id: &str,
+            normalized_name: &str,
+            canonical_display_name: &str,
+            namehash: &str,
+            resource_id: Uuid,
+        ) -> Value {
+            json!({
+                "status": "success",
+                "name": {
+                    "logical_name_id": logical_name_id,
+                    "namespace": "ens",
+                    "normalized_name": normalized_name,
+                    "canonical_display_name": canonical_display_name,
+                    "namehash": namehash,
+                    "resource_id": resource_id.to_string(),
+                    "binding_kind": "declared_registry_path",
+                }
+            })
+        }
+
+        fn primary_name_verified_mismatch(
+            logical_name_id: &str,
+            normalized_name: &str,
+            canonical_display_name: &str,
+            namehash: &str,
+            resource_id: Uuid,
+            failure_reason: &str,
+        ) -> Value {
+            let mut payload = primary_name_verified_success(
+                logical_name_id,
+                normalized_name,
+                canonical_display_name,
+                namehash,
+                resource_id,
+            );
+            let object = payload
+                .as_object_mut()
+                .expect("verified primary-name payload must be an object");
+            object.insert("status".to_owned(), Value::String("mismatch".to_owned()));
+            object.insert(
+                "failure_reason".to_owned(),
+                Value::String(failure_reason.to_owned()),
+            );
+            payload
+        }
+
+        fn primary_name_execution_trace(
+            execution_trace_id: Uuid,
+            namespace: &str,
+            address: &str,
+            coin_type: &str,
+            verified_primary_name: Value,
+            finished_at: OffsetDateTime,
+        ) -> ExecutionTrace {
+            let normalized_address = address.to_ascii_lowercase();
+            ExecutionTrace {
+                execution_trace_id,
+                request_type: bigname_storage::VERIFIED_PRIMARY_NAME_REQUEST_TYPE.to_owned(),
+                request_key: primary_name_execution_request_key(
+                    namespace,
+                    &normalized_address,
+                    coin_type,
+                ),
+                namespace: namespace.to_owned(),
+                chain_context: json!({
+                    "requested_positions": primary_name_execution_requested_chain_positions(),
+                }),
+                manifest_context: json!({
+                    "manifest_versions": primary_name_execution_manifest_versions(),
+                }),
+                contracts_called: json!([{
+                    "chain_id": "ethereum-mainnet",
+                    "contract_address": "0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe",
+                    "selector": "0x9061b923",
+                }]),
+                gateway_digests: json!([]),
+                final_payload: Some(json!({
+                    "verified_primary_name": verified_primary_name.clone(),
+                })),
+                failure_payload: None,
+                request_metadata: json!({
+                    "normalized_address": normalized_address,
+                    "coin_type": coin_type,
+                    "namespace": namespace,
+                }),
+                finished_at: Some(finished_at),
+                steps: vec![ExecutionTraceStep {
+                    step_index: 0,
+                    step_kind: "call_universal_resolver".to_owned(),
+                    input_digest: Some("sha256:primary-input".to_owned()),
+                    output_digest: Some("sha256:primary-output".to_owned()),
+                    latency_ms: Some(14),
+                    canonicality_dependency: json!({
+                        "ethereum-mainnet": {
+                            "block_hash": "0xprimary",
+                            "block_number": 21_000_010,
+                            "state": "finalized",
+                        }
+                    }),
+                    step_payload: json!({
+                        "address": normalized_address,
+                        "coin_type": coin_type,
+                    }),
+                }],
+            }
+        }
+
+        fn primary_name_execution_outcome(
+            execution_trace_id: Uuid,
+            namespace: &str,
+            address: &str,
+            coin_type: &str,
+            verified_primary_name: Value,
+            finished_at: OffsetDateTime,
+            topology_version_boundary: Value,
+            record_version_boundary: Value,
+        ) -> ExecutionOutcome {
+            let normalized_address = address.to_ascii_lowercase();
+            ExecutionOutcome {
+                cache_key: ExecutionCacheKey {
+                    request_key: primary_name_execution_request_key(
+                        namespace,
+                        &normalized_address,
+                        coin_type,
+                    ),
+                    requested_chain_positions: primary_name_execution_requested_chain_positions(),
+                    manifest_versions: primary_name_execution_manifest_versions(),
+                    topology_version_boundary,
+                    record_version_boundary,
+                },
+                execution_trace_id,
+                request_type: bigname_storage::VERIFIED_PRIMARY_NAME_REQUEST_TYPE.to_owned(),
+                namespace: namespace.to_owned(),
+                outcome_payload: Some(json!({
+                    "verified_primary_name": verified_primary_name,
+                })),
+                failure_payload: None,
+                finished_at,
+            }
+        }
+
+        fn primary_name_shared_topology_boundary() -> Value {
+            json!({
+                "logical_name_id": "ens:alice.eth",
+                "resource_id": Uuid::from_u128(0x0e7ec7ace0000000000000000000aca1).to_string(),
+                "normalized_event_id": 1510,
+                "event_kind": "ResolverChanged",
+                "chain_position": {
+                    "chain_id": "ethereum-mainnet",
+                    "block_number": 21_300_010,
+                    "block_hash": "0xabd010",
+                    "timestamp": "2024-06-04T00:00:27Z",
+                },
+            })
+        }
+
+        fn primary_name_shared_record_boundary() -> Value {
+            json!({
+                "logical_name_id": "ens:alice.eth",
+                "resource_id": Uuid::from_u128(0x0e7ec7ace0000000000000000000aca2).to_string(),
+                "normalized_event_id": 1520,
+                "event_kind": "RecordsChanged",
+                "chain_position": {
+                    "chain_id": "ethereum-mainnet",
+                    "block_number": 21_300_011,
+                    "block_hash": "0xabd011",
+                    "timestamp": "2024-06-04T00:00:28Z",
+                },
+            })
+        }
+
+        async fn seed_primary_name_tuple_anchor(
+            database: &HarnessDatabase,
+            address: &str,
+            coin_type: &str,
+        ) -> Result<()> {
+            database
+                .seed_primary_name_reverse_changed(address, coin_type)
+                .await?;
+            database
+                .rebuild_primary_names_current(address, "ens", coin_type)
+                .await?;
+            Ok(())
+        }
+
         #[derive(Clone, Copy, Debug)]
         enum PersistedResolutionInvalidation {
             Manifest,
@@ -6527,6 +6947,433 @@ mod shipped_api {
                             namespace: "ens".to_owned(),
                             boundary: cache_key.record_version_boundary.clone(),
                         },
+                    )
+                    .await?
+                }
+            };
+
+            assert_eq!(summary.deleted_outcome_count, 1);
+            Ok(())
+        }
+
+        #[derive(Clone, Copy, Debug)]
+        enum PersistedPrimaryNameInvalidation {
+            Manifest,
+            Topology,
+            Record,
+        }
+
+        impl PersistedPrimaryNameInvalidation {
+            fn execution_trace_id(self) -> Uuid {
+                match self {
+                    Self::Manifest => Uuid::from_u128(0x0e7ec7ace00000000000000000000051),
+                    Self::Topology => Uuid::from_u128(0x0e7ec7ace00000000000000000000052),
+                    Self::Record => Uuid::from_u128(0x0e7ec7ace00000000000000000000053),
+                }
+            }
+
+            fn sibling_execution_trace_id(self) -> Uuid {
+                match self {
+                    Self::Manifest => Uuid::from_u128(0x0e7ec7ace00000000000000000000061),
+                    Self::Topology => Uuid::from_u128(0x0e7ec7ace00000000000000000000062),
+                    Self::Record => Uuid::from_u128(0x0e7ec7ace00000000000000000000063),
+                }
+            }
+
+            fn label(self) -> &'static str {
+                match self {
+                    Self::Manifest => "manifest invalidation",
+                    Self::Topology => "topology boundary invalidation",
+                    Self::Record => "record boundary invalidation",
+                }
+            }
+        }
+
+        struct PersistedPrimaryNameExecutionFixture {
+            address: &'static str,
+            target_execution_trace_id: Uuid,
+            target_cache_key: ExecutionCacheKey,
+            sibling_cache_key: ExecutionCacheKey,
+            target_verified_primary_name: Value,
+            sibling_verified_primary_name: Value,
+            target_finished_at: OffsetDateTime,
+            sibling_finished_at: OffsetDateTime,
+        }
+
+        async fn run_primary_name_execution_invalidation_case(
+            invalidation: PersistedPrimaryNameInvalidation,
+        ) -> Result<()> {
+            let database = HarnessDatabase::new().await?;
+            let fixture =
+                seed_persisted_primary_name_execution_fixture(&database, invalidation).await?;
+            let expected_data = json!({
+                "address": fixture.address,
+                "namespace": "ens",
+                "coin_type": "60",
+            });
+
+            let verified_before_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/v1/primary-names/{}?namespace=ens&coin_type=60&mode=verified",
+                            fixture.address
+                        ))
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .with_context(|| {
+                    format!(
+                        "verified primary-name request failed before {}",
+                        invalidation.label()
+                    )
+                })?;
+            let both_before_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/v1/primary-names/{}?namespace=ens&coin_type=60&mode=both",
+                            fixture.address
+                        ))
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .with_context(|| {
+                    format!(
+                        "mixed primary-name request failed before {}",
+                        invalidation.label()
+                    )
+                })?;
+
+            assert_eq!(verified_before_response.status(), StatusCode::OK);
+            assert_eq!(both_before_response.status(), StatusCode::OK);
+
+            let verified_before_payload: PrimaryNameResponse =
+                read_json(verified_before_response).await?;
+            let both_before_payload: PrimaryNameResponse = read_json(both_before_response).await?;
+
+            assert_eq!(verified_before_payload.data, expected_data);
+            assert_eq!(both_before_payload.data, expected_data);
+            assert_eq!(verified_before_payload.declared_state, None);
+            assert_eq!(
+                verified_before_payload.verified_state,
+                Some(json!({
+                    "verified_primary_name": fixture.target_verified_primary_name.clone(),
+                }))
+            );
+            assert_eq!(
+                both_before_payload.declared_state,
+                Some(json!({
+                    "claimed_primary_name": {
+                        "status": "unsupported",
+                        "unsupported_reason": "declared primary-name claim surface is not yet supported",
+                    }
+                }))
+            );
+            assert_eq!(
+                both_before_payload.verified_state,
+                verified_before_payload.verified_state
+            );
+            assert_primary_name_persisted_readback_invariants(
+                &verified_before_payload,
+                fixture.target_execution_trace_id,
+                fixture.target_finished_at,
+            );
+            assert_primary_name_persisted_readback_invariants(
+                &both_before_payload,
+                fixture.target_execution_trace_id,
+                fixture.target_finished_at,
+            );
+
+            invalidate_persisted_primary_name_execution(
+                &database,
+                &fixture.target_cache_key,
+                invalidation,
+            )
+            .await?;
+
+            assert_eq!(
+                load_execution_outcome(&database.pool, &fixture.target_cache_key).await?,
+                None
+            );
+            assert!(
+                load_execution_trace(&database.pool, fixture.target_execution_trace_id)
+                    .await?
+                    .is_some(),
+                "execution traces stay durable after verified-primary cache invalidation",
+            );
+            assert!(
+                load_execution_outcome(&database.pool, &fixture.sibling_cache_key)
+                    .await?
+                    .is_some(),
+                "exact-tuple invalidation must keep sibling tuple outcomes",
+            );
+
+            let verified_after_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/v1/primary-names/{}?namespace=ens&coin_type=60&mode=verified",
+                            fixture.address
+                        ))
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .with_context(|| {
+                    format!(
+                        "verified primary-name request failed after {}",
+                        invalidation.label()
+                    )
+                })?;
+            let both_after_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/v1/primary-names/{}?namespace=ens&coin_type=60&mode=both",
+                            fixture.address
+                        ))
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .with_context(|| {
+                    format!(
+                        "mixed primary-name request failed after {}",
+                        invalidation.label()
+                    )
+                })?;
+            let sibling_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/v1/primary-names/{}?namespace=ens&coin_type=61&mode=verified",
+                            fixture.address
+                        ))
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .with_context(|| {
+                    format!(
+                        "sibling primary-name request failed after {}",
+                        invalidation.label()
+                    )
+                })?;
+
+            assert_eq!(verified_after_response.status(), StatusCode::OK);
+            assert_eq!(both_after_response.status(), StatusCode::OK);
+            assert_eq!(sibling_response.status(), StatusCode::OK);
+
+            let verified_after_payload: PrimaryNameResponse =
+                read_json(verified_after_response).await?;
+            let both_after_payload: PrimaryNameResponse = read_json(both_after_response).await?;
+            let sibling_payload: PrimaryNameResponse = read_json(sibling_response).await?;
+
+            assert_eq!(verified_after_payload.data, expected_data);
+            assert_eq!(both_after_payload.data, expected_data);
+            assert_eq!(verified_after_payload.declared_state, None);
+            assert_eq!(
+                verified_after_payload.verified_state,
+                Some(json!({
+                    "verified_primary_name": {
+                        "status": "unsupported",
+                        "unsupported_reason": "verified primary-name entrypoint is not yet supported",
+                    }
+                }))
+            );
+            assert_eq!(
+                both_after_payload.declared_state,
+                Some(json!({
+                    "claimed_primary_name": {
+                        "status": "unsupported",
+                        "unsupported_reason": "declared primary-name claim surface is not yet supported",
+                    }
+                }))
+            );
+            assert_eq!(
+                both_after_payload.verified_state,
+                verified_after_payload.verified_state
+            );
+            assert_primary_name_bootstrap_invariants(&verified_after_payload);
+            assert_primary_name_bootstrap_invariants(&both_after_payload);
+
+            assert_eq!(
+                sibling_payload.verified_state,
+                Some(json!({
+                    "verified_primary_name": fixture.sibling_verified_primary_name.clone(),
+                }))
+            );
+            assert_primary_name_persisted_readback_invariants(
+                &sibling_payload,
+                invalidation.sibling_execution_trace_id(),
+                fixture.sibling_finished_at,
+            );
+
+            database.cleanup().await?;
+            Ok(())
+        }
+
+        async fn seed_persisted_primary_name_execution_fixture(
+            database: &HarnessDatabase,
+            invalidation: PersistedPrimaryNameInvalidation,
+        ) -> Result<PersistedPrimaryNameExecutionFixture> {
+            let address = "0x0000000000000000000000000000000000000abc";
+            seed_primary_name_tuple_anchor(database, address, "60").await?;
+            seed_primary_name_tuple_anchor(database, address, "61").await?;
+
+            let target_finished_at = timestamp(1_717_172_401);
+            let sibling_finished_at = timestamp(1_717_172_499);
+            let target_verified_primary_name = primary_name_verified_success(
+                "ens:alice.eth",
+                "alice.eth",
+                "Alice.eth",
+                "0x0000000000000000000000000000000000000000000000000000000000000123",
+                Uuid::from_u128(0x456),
+            );
+            let sibling_verified_primary_name = primary_name_verified_mismatch(
+                "ens:other.eth",
+                "other.eth",
+                "other.eth",
+                "0x0000000000000000000000000000000000000000000000000000000000000456",
+                Uuid::from_u128(0x999),
+                "resolved_address_mismatch",
+            );
+
+            let target_outcome = primary_name_execution_outcome(
+                invalidation.execution_trace_id(),
+                "ens",
+                address,
+                "60",
+                target_verified_primary_name.clone(),
+                target_finished_at,
+                primary_name_shared_topology_boundary(),
+                primary_name_shared_record_boundary(),
+            );
+            let sibling_outcome = primary_name_execution_outcome(
+                invalidation.sibling_execution_trace_id(),
+                "ens",
+                address,
+                "61",
+                sibling_verified_primary_name.clone(),
+                sibling_finished_at,
+                primary_name_shared_topology_boundary(),
+                primary_name_shared_record_boundary(),
+            );
+
+            upsert_execution_trace(
+                &database.pool,
+                &primary_name_execution_trace(
+                    invalidation.execution_trace_id(),
+                    "ens",
+                    address,
+                    "60",
+                    target_verified_primary_name.clone(),
+                    target_finished_at,
+                ),
+            )
+            .await?;
+            upsert_execution_outcome(&database.pool, &target_outcome).await?;
+
+            upsert_execution_trace(
+                &database.pool,
+                &primary_name_execution_trace(
+                    invalidation.sibling_execution_trace_id(),
+                    "ens",
+                    address,
+                    "61",
+                    sibling_verified_primary_name.clone(),
+                    sibling_finished_at,
+                ),
+            )
+            .await?;
+            upsert_execution_outcome(&database.pool, &sibling_outcome).await?;
+
+            Ok(PersistedPrimaryNameExecutionFixture {
+                address,
+                target_execution_trace_id: invalidation.execution_trace_id(),
+                target_cache_key: target_outcome.cache_key,
+                sibling_cache_key: sibling_outcome.cache_key,
+                target_verified_primary_name,
+                sibling_verified_primary_name,
+                target_finished_at,
+                sibling_finished_at,
+            })
+        }
+
+        async fn invalidate_persisted_primary_name_execution(
+            database: &HarnessDatabase,
+            cache_key: &ExecutionCacheKey,
+            invalidation: PersistedPrimaryNameInvalidation,
+        ) -> Result<()> {
+            let summary = match invalidation {
+                PersistedPrimaryNameInvalidation::Manifest => {
+                    let manifest_entry = cache_key
+                        .manifest_versions
+                        .as_array()
+                        .and_then(|entries| entries.first())
+                        .context(
+                            "persisted verified primary-name cache key must expose manifest_versions",
+                        )?;
+                    let manifest_version = manifest_entry
+                        .get("manifest_version")
+                        .and_then(Value::as_i64)
+                        .context(
+                            "persisted verified primary-name manifest invalidation requires manifest_version",
+                        )?;
+                    let source_manifest_id = manifest_entry
+                        .get("source_manifest_id")
+                        .and_then(Value::as_i64);
+                    let source_family = manifest_entry
+                        .get("source_family")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned);
+
+                    if source_manifest_id.is_none() && source_family.is_none() {
+                        return Err(anyhow::anyhow!(
+                            "persisted verified primary-name manifest invalidation requires a manifest identity"
+                        ));
+                    }
+
+                    invalidate_execution_outcomes_for_manifest_version_and_request_key(
+                        &database.pool,
+                        &ExecutionManifestInvalidation {
+                            request_type: bigname_storage::VERIFIED_PRIMARY_NAME_REQUEST_TYPE
+                                .to_owned(),
+                            namespace: "ens".to_owned(),
+                            source_manifest_id,
+                            source_family,
+                            manifest_version,
+                        },
+                        &cache_key.request_key,
+                    )
+                    .await?
+                }
+                PersistedPrimaryNameInvalidation::Topology => {
+                    invalidate_execution_outcomes_for_topology_boundary_and_request_key(
+                        &database.pool,
+                        &ExecutionBoundaryInvalidation {
+                            request_type: bigname_storage::VERIFIED_PRIMARY_NAME_REQUEST_TYPE
+                                .to_owned(),
+                            namespace: "ens".to_owned(),
+                            boundary: cache_key.topology_version_boundary.clone(),
+                        },
+                        &cache_key.request_key,
+                    )
+                    .await?
+                }
+                PersistedPrimaryNameInvalidation::Record => {
+                    invalidate_execution_outcomes_for_record_boundary_and_request_key(
+                        &database.pool,
+                        &ExecutionBoundaryInvalidation {
+                            request_type: bigname_storage::VERIFIED_PRIMARY_NAME_REQUEST_TYPE
+                                .to_owned(),
+                            namespace: "ens".to_owned(),
+                            boundary: cache_key.record_version_boundary.clone(),
+                        },
+                        &cache_key.request_key,
                     )
                     .await?
                 }
