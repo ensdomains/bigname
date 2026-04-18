@@ -127,6 +127,17 @@ Every verified answer must be explainable through:
 - CCIP steps
 - final comparison or returned record value
 
+For resolution, the queued explain surface is `GET /v1/explain/resolutions/{namespace}/{name}/execution`.
+
+Rules:
+
+- it is keyed by the same exact surface, snapshot selection, and explicit selector set as `GET /v1/resolutions/{namespace}/{name}`
+- it reads the persisted execution trace and selector-scoped results already stored for that request; it does not re-execute the request or synthesize explain detail from declared topology alone
+- top-level provenance and any selector-local provenance stay anchored to the same persisted `execution_trace_id`
+- the route surfaces the selected entrypoint, resolver discovery path, wildcard traversal, alias rewriting, and the ordered persisted step summary; CCIP-Read participation appears through persisted step kinds rather than a raw gateway transcript
+- it does not become a global trace-inspection API, a raw trace dump, or a second provenance / truth system
+- until a handler ships, the route remains prose-frozen only and stays outside `docs/api-v1.openapi.json`
+
 ## 7. Initial Support Boundary
 
 For the first implementation slice:

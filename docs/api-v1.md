@@ -292,6 +292,39 @@ Rules:
 - if `records` is supplied, `entries` contains exactly one item per requested `record_key` and follows request order
 - `record_version_boundary` must equal `record_inventory.record_version_boundary` when both declared sections are supported in the same response
 
+### `ExecutionStepSummary`
+
+- `step_index`
+- `step_kind`
+- `input_digest`
+- `output_digest`
+- `latency`
+- `canonicality_dependency`
+
+Use this object for `verified_state.execution.steps[*]` on `GET /v1/explain/resolutions/{namespace}/{name}/execution`. It mirrors the persisted execution step list for one verified resolution answer without exposing raw calldata, raw return bodies, or a second trace family.
+
+### `ResolutionExecutionExplainSummary`
+
+- `execution_trace_id`
+- `selected_entrypoint`
+- `resolver_discovery_path`
+- `wildcard`
+- `alias`
+- `steps`
+- `finished_at`
+
+Use this object for `verified_state.execution` on `GET /v1/explain/resolutions/{namespace}/{name}/execution`.
+
+Rules:
+
+- `execution_trace_id` equals top-level `provenance.execution_trace_id`
+- `resolver_discovery_path` is an ordered array of `ResolutionResolverHop`
+- `wildcard` reuses the same object shape as `ResolutionTopology.wildcard`
+- `alias` reuses the same object shape as `ResolutionTopology.alias`
+- `steps` is an ordered array of `ExecutionStepSummary`
+- `steps` summarize only the persisted trace; they do not expose raw calldata, raw gateway payloads, or unpersisted retry state
+- CCIP-Read participation is expressed through persisted `steps[*].step_kind` rather than a second gateway transcript
+
 ### `UnsupportedSummary`
 
 - `status`: always `unsupported`
@@ -396,6 +429,7 @@ The current API binary ships the routes marked `shipped` below. Queued routes re
 | `GET /v1/resources/{resource_id}/permissions` | Resource-centric effective permissions | shipped declared-state |
 | `GET /v1/resolvers/{chain_id}/{resolver_address}` | Resolver overview | shipped declared-state |
 | `GET /v1/resolutions/{namespace}/{name}` | Resolution topology, inventory, and verified reads | shipped mixed declared+verified |
+| `GET /v1/explain/resolutions/{namespace}/{name}/execution` | Persisted verified execution explain for one exact-name resolution request | queued verified-state explain |
 | `GET /v1/primary-names/{address}` | Claimed and verified primary-name answer | shipped mixed declared+verified |
 | `GET /v1/coverage/{namespace}/{name}` | Single-name coverage and explain details | shipped declared-state |
 
@@ -405,7 +439,9 @@ Phase 6 freezes `docs/api-v1.openapi.json` as the publication location for futur
 
 When generated, that artifact covers only the `v1` routes currently shipped by `apps/api/src/main.rs`.
 
-Queued routes stay prose-frozen in this document until their handlers ship. In the current route set, no listed route remains outside that machine-readable publication scope.
+Queued routes stay prose-frozen in this document until their handlers ship.
+
+`GET /v1/explain/resolutions/{namespace}/{name}/execution` is one such queued route: its prose contract is frozen here now, but it does not enter `docs/api-v1.openapi.json` until its handler ships.
 
 ## 5. Route-Level Semantics
 
@@ -875,7 +911,44 @@ Rules:
 - unsupported selector families, unsupported resolver families, or namespaces without a verified entrypoint return `200` with `verified_queries[*].status=unsupported`; they do not silently downgrade to declared cache values
 - supported verified queries that execute but do not produce a trustworthy answer return `status=execution_failed` with `failure_reason`
 - for `mode=verified` or `mode=both`, top-level `provenance` includes the request-scoped execution trace summary and each `verified_queries[*]` item may carry narrower provenance for the specific selector result
+- deeper execution explanation stays on the queued `GET /v1/explain/resolutions/{namespace}/{name}/execution` route; `GET /v1/resolutions/{namespace}/{name}` does not inline ordered step lists or a raw trace dump
 - route-level `coverage` explains declared completeness for topology, inventory, and cache at the requested snapshot; per-selector verified misses or failures do not change that shared route-level `coverage` object by themselves
+
+### `GET /v1/explain/resolutions/{namespace}/{name}/execution`
+
+This route is the queued exact-name resolution execution explain read.
+
+Returns the verified explain view for one exact-name resolution request backed by a persisted execution trace.
+
+Supported query parameters:
+
+- `at`
+- `consistency`
+- `records`
+
+`records` is required and uses the same stable `record_key` selector tokens as `GET /v1/resolutions/{namespace}/{name}`.
+
+`data` identifies the same surface and current binding as `GET /v1/resolutions/{namespace}/{name}` for the requested snapshot.
+
+When `verified_state` is populated, it includes:
+
+- `execution`: `ResolutionExecutionExplainSummary`
+- `verified_queries`
+
+Rules:
+
+- `declared_state` is `null`
+- this route is verified-state only; it does not duplicate `declared_state.topology`, `record_inventory`, or `record_cache`
+- duplicate `records` selectors are rejected with `400 invalid_input`, and malformed selector syntax returns `400 invalid_input`, using the same parsing rules as `GET /v1/resolutions/{namespace}/{name}`
+- this route is keyed by the same exact surface, snapshot selection, and explicit selector set as `GET /v1/resolutions/{namespace}/{name}`; it explains the persisted verified answer that the mixed route would surface for those same inputs
+- `verified_state.verified_queries` reuses the same selector-scoped result objects, request order, and `ResultStatus` subset as the mixed resolution route
+- `verified_state.execution.execution_trace_id` must equal top-level `provenance.execution_trace_id`
+- top-level `provenance` anchors the response to the persisted execution trace, and any `verified_queries[*].provenance` objects must stay within that same `execution_trace_id` rather than creating a second provenance system
+- `verified_state.execution.resolver_discovery_path`, `wildcard`, and `alias` explain the runtime path selected for that persisted trace; they do not widen declared topology into a second truth model
+- `verified_state.execution.steps` is the ordered persisted step summary for the trace and must not be treated as raw calldata, raw gateway payloads, or a replayable execution dump
+- the route does not trigger fresh execution and does not synthesize explanation from declared topology alone; if no persisted verified resolution answer exists for the requested surface, snapshot, and explicit selector set, return `404 not_found`
+- for the same `{namespace}`, `{name}`, and snapshot selection, the top-level `coverage` object matches `GET /v1/resolutions/{namespace}/{name}`
+- the initial contract defines no `include` expansions for this route
 
 ### `GET /v1/primary-names/{address}`
 

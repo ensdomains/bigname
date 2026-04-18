@@ -320,7 +320,7 @@ Add the execution plane that turns declared state into verified answers.
 - cache and invalidation rules
 - `Resolution` reads in `verified` and `both` modes
 - `PrimaryName` reads in `verified` and `both` modes
-- explain views for resolution execution
+- `GET /v1/explain/resolutions/{namespace}/{name}/execution` explain view over persisted resolution execution traces
 
 ### Exit Criteria
 
@@ -329,8 +329,9 @@ Add the execution plane that turns declared state into verified answers.
 - every verified answer produces traceable provenance and execution traces
 - relevant topology or record changes invalidate cached verified answers deterministically
 
-### Current shipped progress
+### Current contract-freeze and shipped progress
 
+- `phase7-resolution-execution-explain-contract-clarification`: `GET /v1/explain/resolutions/{namespace}/{name}/execution` is frozen in the shared docs as a queued verified-state explain route for the same exact surface, snapshot, and explicit selector set as `GET /v1/resolutions/{namespace}/{name}`; it reads persisted execution traces only, stays route-local instead of becoming a raw trace dump, and remains outside `docs/api-v1.openapi.json` until a handler ships
 - `phase7-primary-name-route-envelope-bootstrap`: `GET /v1/primary-names/{address}` is shipped as a head-only bootstrap on the already frozen mixed declared+verified route contract and enters machine-readable publication scope; it currently honors `namespace`, `coin_type`, and optional `mode`, and tuple-present reads may still surface explicit `unsupported` result objects while richer claim/verified payloads and broader Phase 7 verified execution deliverables remain pending
 
 ---
