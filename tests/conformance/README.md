@@ -11,6 +11,7 @@ collections:
 - `GET /v1/coverage/{namespace}/{name}`
 - `GET /v1/resources/{resource_id}/permissions`
 - `GET /v1/resolvers/{chain_id}/{resolver_address}`
+- `GET /v1/history/addresses/{address}`
 - `GET /v1/history/names/{namespace}/{name}`
 - `GET /v1/history/resources/{resource_id}`
 
@@ -50,3 +51,9 @@ Execution notes:
 - the resolver-overview contract seeds `resolver_current` rows and asserts the shipped declared
   summary sections, projection provenance, coverage, and lowercase address normalization for
   `GET /v1/resolvers/{chain_id}/{resolver_address}`
+- the address-history contract seeds `address_names_current` anchors plus the backing surfaces,
+  resources, token lineage, bindings, and canonical normalized events; the harness covers the
+  base `GET /v1/history/addresses/{address}` response with the shipped empty `declared_state`,
+  normalized-event provenance, and default `both` scope behavior, plus the shipped
+  `namespace=ens&relation=registrant` filter combination and
+  `relation=effective_controller` with `scope=surface`, `scope=resource`, and `scope=both`
