@@ -528,6 +528,14 @@ fn app_router(state: AppState) -> Router {
         .route("/v1/addresses/{address}/names", get(address_names))
         .route("/v1/history/addresses/{address}", get(address_history))
         .route("/v1/coverage/{namespace}/{name}", get(coverage_current))
+        .route(
+            "/v1/explain/names/{namespace}/{name}/surface-binding",
+            get(explain_surface_binding_current),
+        )
+        .route(
+            "/v1/explain/names/{namespace}/{name}/authority-control",
+            get(explain_authority_control_current),
+        )
         .route("/v1/namespaces/{namespace}", get(namespace_metadata))
         .route("/v1/names/{namespace}/{name}/children", get(name_children))
         .route("/v1/names/{namespace}/{name}", get(name_current))
@@ -671,6 +679,74 @@ async fn coverage_current(
     };
 
     Ok(Json(build_name_coverage_response(row)))
+}
+
+async fn explain_surface_binding_current(
+    Path((namespace, name)): Path<(String, String)>,
+    State(state): State<AppState>,
+) -> ApiResult<Json<NameResponse>> {
+    ensure_public_namespace(&namespace)?;
+
+    let logical_name_id = format!("{namespace}:{name}");
+    let row = load_name_current(&state.pool, &logical_name_id)
+        .await
+        .map_err(|load_error| {
+            error!(
+                service = "api",
+                namespace = %namespace,
+                name = %name,
+                logical_name_id = %logical_name_id,
+                error = ?load_error,
+                "failed to load exact-name current projection for surface-binding explain route"
+            );
+            ApiError::internal_error(format!(
+                "failed to load surface-binding explain projection for name {namespace}/{name}"
+            ))
+        })?;
+
+    let Some(row) = row else {
+        return Err(ApiError {
+            status: StatusCode::NOT_FOUND,
+            code: "not_found",
+            message: format!("name {name} was not found in namespace {namespace}"),
+        });
+    };
+
+    Ok(Json(build_name_surface_binding_explain_response(row)))
+}
+
+async fn explain_authority_control_current(
+    Path((namespace, name)): Path<(String, String)>,
+    State(state): State<AppState>,
+) -> ApiResult<Json<NameResponse>> {
+    ensure_public_namespace(&namespace)?;
+
+    let logical_name_id = format!("{namespace}:{name}");
+    let row = load_name_current(&state.pool, &logical_name_id)
+        .await
+        .map_err(|load_error| {
+            error!(
+                service = "api",
+                namespace = %namespace,
+                name = %name,
+                logical_name_id = %logical_name_id,
+                error = ?load_error,
+                "failed to load exact-name current projection for authority-control explain route"
+            );
+            ApiError::internal_error(format!(
+                "failed to load authority-control explain projection for name {namespace}/{name}"
+            ))
+        })?;
+
+    let Some(row) = row else {
+        return Err(ApiError {
+            status: StatusCode::NOT_FOUND,
+            code: "not_found",
+            message: format!("name {name} was not found in namespace {namespace}"),
+        });
+    };
+
+    Ok(Json(build_name_authority_control_explain_response(row)))
 }
 
 async fn resolution_current(
@@ -1350,22 +1426,33 @@ fn build_namespace_manifests_response(
 }
 
 fn build_name_response(row: NameCurrentRow) -> NameResponse {
-    NameResponse {
-        data: build_name_data(&row),
-        declared_state: build_name_declared_state(&row),
-        verified_state: None,
-        provenance: build_name_provenance(&row.provenance),
-        coverage: build_name_coverage(&row.coverage),
-        chain_positions: ensure_object(&row.chain_positions),
-        consistency: canonicality_consistency(&row.canonicality_summary).to_owned(),
-        last_updated: format_timestamp(row.last_recomputed_at),
-    }
+    let declared_state = build_name_declared_state(&row);
+
+    build_name_declared_response(row, declared_state)
 }
 
 fn build_name_coverage_response(row: NameCurrentRow) -> NameResponse {
+    let declared_state = build_name_coverage_declared_state(&row.coverage);
+
+    build_name_declared_response(row, declared_state)
+}
+
+fn build_name_surface_binding_explain_response(row: NameCurrentRow) -> NameResponse {
+    let declared_state = build_name_surface_binding_explain_declared_state(&row);
+
+    build_name_declared_response(row, declared_state)
+}
+
+fn build_name_authority_control_explain_response(row: NameCurrentRow) -> NameResponse {
+    let declared_state = build_name_authority_control_explain_declared_state(&row);
+
+    build_name_declared_response(row, declared_state)
+}
+
+fn build_name_declared_response(row: NameCurrentRow, declared_state: JsonValue) -> NameResponse {
     NameResponse {
         data: build_name_data(&row),
-        declared_state: build_name_coverage_declared_state(&row.coverage),
+        declared_state,
         verified_state: None,
         provenance: build_name_provenance(&row.provenance),
         coverage: build_name_coverage(&row.coverage),
@@ -2480,6 +2567,60 @@ fn build_name_coverage_declared_state(coverage: &JsonValue) -> JsonValue {
         string_field(provenance_field(coverage, "unsupported_reason")),
     );
     declared_state
+}
+
+fn build_name_surface_binding_explain_declared_state(row: &NameCurrentRow) -> JsonValue {
+    let mut declared_state = empty_object();
+    insert_value_field(
+        &mut declared_state,
+        "surface_binding",
+        build_name_surface_binding_explain_summary(row),
+    );
+    insert_value_field(
+        &mut declared_state,
+        "history",
+        declared_summary_section(
+            &row.declared_summary,
+            "history",
+            "declared history pointers are not yet projected",
+        ),
+    );
+    declared_state
+}
+
+fn build_name_authority_control_explain_declared_state(row: &NameCurrentRow) -> JsonValue {
+    let mut declared_state = empty_object();
+    insert_value_field(
+        &mut declared_state,
+        "authority",
+        declared_authority_section(row),
+    );
+    insert_value_field(
+        &mut declared_state,
+        "control",
+        declared_name_control_section(&row.declared_summary),
+    );
+    declared_state
+}
+
+fn build_name_surface_binding_explain_summary(row: &NameCurrentRow) -> JsonValue {
+    let has_binding_summary = row.surface_binding_id.is_some() || row.binding_kind.is_some();
+    if !has_binding_summary {
+        return unsupported_section("declared surface binding summary is not yet projected");
+    }
+
+    let mut surface_binding = empty_object();
+    insert_optional_string_field(
+        &mut surface_binding,
+        "surface_binding_id",
+        row.surface_binding_id.map(|value| value.to_string()),
+    );
+    insert_optional_string_field(
+        &mut surface_binding,
+        "binding_kind",
+        row.binding_kind.map(|value| value.as_str().to_owned()),
+    );
+    surface_binding
 }
 
 fn declared_authority_section(row: &NameCurrentRow) -> JsonValue {

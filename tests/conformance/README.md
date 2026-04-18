@@ -45,7 +45,9 @@ Execution notes:
   `dedupe_by`, and additive `include=role_summary` handling
 - the exact-name contract seeds raw blocks, identity rows, and normalized events, rebuilds
   `name_current` through the worker, and asserts only the frozen `control`, `resolver`, and
-  `history` declared-state sections on `GET /v1/names/{namespace}/{name}`
+  `history` declared-state sections on `GET /v1/names/{namespace}/{name}`, with
+  `declared_state.history.{surface_head,resource_head}` acting as the exact-name links into the
+  shipped history routes that satisfy the Phase 6 history-explain deliverable
 - the resolution contract reuses the exact-name rebuild seed and asserts the shipped mixed-route
   envelope on `GET /v1/resolutions/{namespace}/{name}` across `declared`, `verified`, and `both`
   modes, including required and invalid `records` handling plus the supported declared
@@ -77,6 +79,10 @@ Execution notes:
   `GET /v1/history/names/{namespace}/{name}`, and
   `GET /v1/history/resources/{resource_id}` while preserving the frozen default `page.sort`
   invariants
-- exact-name explain-route conformance for
+- exact-name explain-route conformance reuses the same exact-name rebuild seed and covers
   `GET /v1/explain/names/{namespace}/{name}/surface-binding` and
-  `GET /v1/explain/names/{namespace}/{name}/authority-control` is not covered yet
+  `GET /v1/explain/names/{namespace}/{name}/authority-control`, asserting declared-only
+  responses that preserve the exact-name `data`, provenance, coverage, and frozen summary
+  sections; the `surface-binding` explain contract also verifies that `declared_state.history`
+  remains the shipped exact-name head-pointer link into the dedicated history routes instead of a
+  separate history explain endpoint

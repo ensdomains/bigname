@@ -1858,6 +1858,161 @@ mod shipped_api {
         }
 
         #[tokio::test]
+        async fn surface_binding_explain_contract_is_declared_only_with_exact_name_coverage_and_frozen_summary()
+        -> Result<()> {
+            let database = HarnessDatabase::new().await?;
+            let logical_name_id = "ens:alice.eth";
+            let resource_id = Uuid::from_u128(0x2200);
+            let token_lineage_id = Uuid::from_u128(0x1100);
+            let surface_binding_id = Uuid::from_u128(0x3300);
+
+            database
+                .seed_exact_name_rebuild_inputs(
+                    logical_name_id,
+                    resource_id,
+                    token_lineage_id,
+                    surface_binding_id,
+                )
+                .await?;
+            database.rebuild_name_current(logical_name_id).await?;
+
+            let explain_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri("/v1/explain/names/ens/alice.eth/surface-binding")
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("surface-binding explain request failed")?;
+            let name_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri("/v1/names/ens/alice.eth")
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("exact name request failed")?;
+
+            assert_eq!(explain_response.status(), StatusCode::OK);
+            assert_eq!(name_response.status(), StatusCode::OK);
+
+            let explain_payload: NameResponse = read_json(explain_response).await?;
+            let name_payload: NameResponse = read_json(name_response).await?;
+            let name_declared_state = name_payload
+                .declared_state
+                .as_object()
+                .expect("declared_state must be an object");
+            let history = name_declared_state
+                .get("history")
+                .cloned()
+                .expect("history summary must be present");
+
+            assert_eq!(explain_payload.data, name_payload.data);
+            assert_eq!(explain_payload.provenance, name_payload.provenance);
+            assert_eq!(explain_payload.coverage, name_payload.coverage);
+            assert_eq!(explain_payload.chain_positions, name_payload.chain_positions);
+            assert_eq!(explain_payload.consistency, name_payload.consistency);
+            assert_eq!(explain_payload.last_updated, name_payload.last_updated);
+            assert_eq!(explain_payload.verified_state, None);
+            assert_eq!(explain_payload.declared_state.get("history"), Some(&history));
+            assert_eq!(
+                explain_payload.declared_state,
+                json!({
+                    "surface_binding": exact_name_surface_binding_summary(surface_binding_id),
+                    "history": history,
+                })
+            );
+            assert_exact_name_history_summary_matches_history_route(
+                &database,
+                "ens",
+                "alice.eth",
+                explain_payload
+                    .declared_state
+                    .get("history")
+                    .expect("history summary must be present"),
+            )
+            .await?;
+
+            database.cleanup().await?;
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn authority_control_explain_contract_is_declared_only_with_exact_name_coverage_and_frozen_summaries()
+        -> Result<()> {
+            let database = HarnessDatabase::new().await?;
+            let logical_name_id = "ens:alice.eth";
+            let resource_id = Uuid::from_u128(0x2200);
+            let token_lineage_id = Uuid::from_u128(0x1100);
+            let surface_binding_id = Uuid::from_u128(0x3300);
+
+            database
+                .seed_exact_name_rebuild_inputs(
+                    logical_name_id,
+                    resource_id,
+                    token_lineage_id,
+                    surface_binding_id,
+                )
+                .await?;
+            database.rebuild_name_current(logical_name_id).await?;
+
+            let explain_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri("/v1/explain/names/ens/alice.eth/authority-control")
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("authority-control explain request failed")?;
+            let name_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri("/v1/names/ens/alice.eth")
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("exact name request failed")?;
+
+            assert_eq!(explain_response.status(), StatusCode::OK);
+            assert_eq!(name_response.status(), StatusCode::OK);
+
+            let explain_payload: NameResponse = read_json(explain_response).await?;
+            let name_payload: NameResponse = read_json(name_response).await?;
+            let name_declared_state = name_payload
+                .declared_state
+                .as_object()
+                .expect("declared_state must be an object");
+            let authority = exact_name_authority_summary(resource_id, token_lineage_id);
+            let control = exact_name_control_summary();
+
+            assert_eq!(explain_payload.data, name_payload.data);
+            assert_eq!(explain_payload.provenance, name_payload.provenance);
+            assert_eq!(explain_payload.coverage, name_payload.coverage);
+            assert_eq!(explain_payload.chain_positions, name_payload.chain_positions);
+            assert_eq!(explain_payload.consistency, name_payload.consistency);
+            assert_eq!(explain_payload.last_updated, name_payload.last_updated);
+            assert_eq!(explain_payload.verified_state, None);
+            assert_eq!(name_declared_state.get("authority"), Some(&authority));
+            assert_eq!(name_declared_state.get("control"), Some(&control));
+            assert_eq!(explain_payload.declared_state.get("authority"), Some(&authority));
+            assert_eq!(explain_payload.declared_state.get("control"), Some(&control));
+            assert_eq!(
+                explain_payload.declared_state,
+                json!({
+                    "authority": authority,
+                    "control": control,
+                })
+            );
+
+            database.cleanup().await?;
+            Ok(())
+        }
+
+        #[tokio::test]
         async fn resolution_contract_returns_declared_and_verified_sections_by_mode() -> Result<()>
         {
             let database = HarnessDatabase::new().await?;
@@ -4599,6 +4754,21 @@ mod shipped_api {
                 "registrant": "0x00000000000000000000000000000000000000aa",
                 "registry_owner": "0x00000000000000000000000000000000000000bb",
                 "latest_event_kind": "AuthorityTransferred",
+            })
+        }
+
+        fn exact_name_authority_summary(resource_id: Uuid, token_lineage_id: Uuid) -> Value {
+            json!({
+                "resource_id": resource_id.to_string(),
+                "token_lineage_id": token_lineage_id.to_string(),
+                "binding_kind": "declared_registry_path",
+            })
+        }
+
+        fn exact_name_surface_binding_summary(surface_binding_id: Uuid) -> Value {
+            json!({
+                "surface_binding_id": surface_binding_id.to_string(),
+                "binding_kind": "declared_registry_path",
             })
         }
 
