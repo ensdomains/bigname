@@ -17,9 +17,10 @@ use bigname_manifests::{
 };
 use bigname_storage::{
     AddressNameCurrentEntry, AddressNameRelation, AddressNamesCurrentDedupe, ChildrenCurrentRow,
-    DatabaseConfig, HistoryEvent, HistoryScope, NameCurrentRow, collapse_address_name_current_rows,
-    load_address_names_current, load_children_current, load_name_current, load_name_history,
-    load_name_surface, load_resource, load_resource_history,
+    DatabaseConfig, HistoryEvent, HistoryScope, NameCurrentRow, PermissionScope,
+    PermissionsCurrentRow, collapse_address_name_current_rows, load_address_names_current,
+    load_children_current, load_name_current, load_name_history, load_name_surface,
+    load_permissions_current, load_resource, load_resource_history,
     load_surface_bindings_by_logical_name_id, load_surface_bindings_by_resource_id,
 };
 use clap::{Args, Parser, Subcommand};
@@ -169,6 +170,12 @@ struct HistoryQuery {
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
+struct PermissionsQuery {
+    subject: Option<String>,
+    scope: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
 struct ChildrenQuery {
     surface_classes: Option<String>,
     include: Option<String>,
@@ -210,6 +217,19 @@ struct ChildrenResponse {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct AddressNamesResponse {
+    data: Vec<JsonValue>,
+    declared_state: JsonValue,
+    verified_state: Option<()>,
+    provenance: JsonValue,
+    coverage: CoverageResponse,
+    chain_positions: JsonValue,
+    page: HistoryPageResponse,
+    consistency: String,
+    last_updated: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct ResourcePermissionsResponse {
     data: Vec<JsonValue>,
     declared_state: JsonValue,
     verified_state: Option<()>,
@@ -371,6 +391,10 @@ fn app_router(state: AppState) -> Router {
         .route("/v1/names/{namespace}/{name}", get(name_current))
         .route("/v1/history/names/{namespace}/{name}", get(name_history))
         .route("/v1/history/resources/{resource_id}", get(resource_history))
+        .route(
+            "/v1/resources/{resource_id}/permissions",
+            get(resource_permissions),
+        )
         .route("/v1/manifests/{namespace}", get(namespace_manifests))
         .with_state(state)
 }
@@ -660,6 +684,39 @@ async fn resource_history(
     Ok(Json(build_history_response(rows, scope)))
 }
 
+async fn resource_permissions(
+    Path(resource_id): Path<String>,
+    Query(query): Query<PermissionsQuery>,
+    State(state): State<AppState>,
+) -> ApiResult<Json<ResourcePermissionsResponse>> {
+    let resource_id = Uuid::parse_str(&resource_id).map_err(|_| ApiError {
+        status: StatusCode::BAD_REQUEST,
+        code: "invalid_input",
+        message: "resource_id must be a UUID".to_owned(),
+    })?;
+    let subject = parse_permissions_subject(query.subject.as_deref());
+    let scope = parse_permission_scope_filter(query.scope.as_deref())?;
+
+    let rows =
+        load_permissions_current(&state.pool, resource_id, subject.as_deref(), scope.as_ref())
+            .await
+            .map_err(|load_error| {
+                error!(
+                    service = "api",
+                    resource_id = %resource_id,
+                    subject = ?subject,
+                    scope = scope.as_ref().map(PermissionScope::storage_key),
+                    error = ?load_error,
+                    "failed to load permissions_current rows"
+                );
+                ApiError::internal_error(format!(
+                    "failed to load permissions for resource {resource_id}"
+                ))
+            })?;
+
+    Ok(Json(build_resource_permissions_response(rows)))
+}
+
 fn build_namespace_metadata_response(
     namespace: String,
     snapshot: NamespaceManifestSnapshot,
@@ -859,6 +916,35 @@ fn build_history_response(rows: Vec<HistoryEvent>, scope: HistoryScope) -> Histo
     }
 }
 
+fn build_resource_permissions_response(
+    rows: Vec<PermissionsCurrentRow>,
+) -> ResourcePermissionsResponse {
+    let last_updated = rows
+        .iter()
+        .map(|row| row.last_recomputed_at)
+        .max()
+        .map(format_timestamp)
+        .unwrap_or_else(|| format_timestamp(OffsetDateTime::now_utc()));
+
+    ResourcePermissionsResponse {
+        data: rows.iter().map(build_permission_item).collect(),
+        declared_state: empty_object(),
+        verified_state: None,
+        provenance: build_permissions_provenance(&rows),
+        coverage: build_permissions_coverage(&rows),
+        chain_positions: build_permissions_chain_positions(&rows),
+        page: HistoryPageResponse {
+            cursor: None,
+            next_cursor: None,
+            page_size: rows.len() as u64,
+            sort: "subject_scope_asc".to_owned(),
+        },
+        consistency: collection_consistency(rows.iter().map(|row| &row.canonicality_summary))
+            .to_owned(),
+        last_updated,
+    }
+}
+
 fn build_child_item(row: &ChildrenCurrentRow) -> JsonValue {
     let mut value = empty_object();
     insert_string_field(
@@ -875,6 +961,35 @@ fn build_child_item(row: &ChildrenCurrentRow) -> JsonValue {
     );
     insert_string_field(&mut value, "namehash", row.namehash.clone());
     insert_string_field(&mut value, "surface_class", row.surface_class.clone());
+    value
+}
+
+fn build_permission_item(row: &PermissionsCurrentRow) -> JsonValue {
+    let mut value = empty_object();
+    insert_string_field(&mut value, "resource_id", row.resource_id.to_string());
+    insert_string_field(&mut value, "subject", row.subject.clone());
+    insert_value_field(
+        &mut value,
+        "scope",
+        build_permission_scope_value(&row.scope),
+    );
+    insert_value_field(
+        &mut value,
+        "effective_powers",
+        row.effective_powers.clone(),
+    );
+    insert_value_field(&mut value, "grant_source", row.grant_source.clone());
+    insert_value_field(
+        &mut value,
+        "revocation_source",
+        row.revocation_source.clone().unwrap_or(JsonValue::Null),
+    );
+    insert_value_field(&mut value, "inheritance_path", row.inheritance_path.clone());
+    insert_value_field(
+        &mut value,
+        "transfer_behavior",
+        row.transfer_behavior.clone(),
+    );
     value
 }
 
@@ -1034,6 +1149,24 @@ fn collect_address_names_provenance_values(
     deduped
 }
 
+fn collect_permissions_provenance_values(
+    rows: &[PermissionsCurrentRow],
+    key: &str,
+) -> Vec<JsonValue> {
+    let mut deduped = Vec::new();
+    for row in rows {
+        let Some(JsonValue::Array(values)) = provenance_field(&row.provenance, key) else {
+            continue;
+        };
+        for value in values {
+            if !deduped.contains(value) {
+                deduped.push(value.clone());
+            }
+        }
+    }
+    deduped
+}
+
 fn build_children_chain_positions(rows: &[ChildrenCurrentRow]) -> JsonValue {
     let mut chain_positions = BTreeMap::<String, ChainPositionResponse>::new();
     for row in rows {
@@ -1068,6 +1201,94 @@ fn build_address_names_chain_positions(entries: &[AddressNameCurrentEntry]) -> J
     }
 
     serde_json::to_value(chain_positions).expect("address names chain positions must serialize")
+}
+
+fn build_permissions_chain_positions(rows: &[PermissionsCurrentRow]) -> JsonValue {
+    let mut chain_positions = BTreeMap::<String, ChainPositionResponse>::new();
+    for row in rows {
+        let Some(position_values) = row.chain_positions.as_object() else {
+            continue;
+        };
+
+        for (slot, position_value) in position_values {
+            let Some(candidate) = chain_position_from_value(position_value) else {
+                continue;
+            };
+            merge_chain_position(&mut chain_positions, slot.clone(), candidate);
+        }
+    }
+
+    serde_json::to_value(chain_positions).expect("permissions chain positions must serialize")
+}
+
+fn build_permissions_provenance(rows: &[PermissionsCurrentRow]) -> JsonValue {
+    let mut value = empty_object();
+    insert_value_field(
+        &mut value,
+        "normalized_event_ids",
+        JsonValue::Array(
+            collect_permissions_provenance_values(rows, "normalized_event_ids")
+                .into_iter()
+                .filter_map(|value| value_to_string(&value).map(JsonValue::String))
+                .collect(),
+        ),
+    );
+    insert_value_field(
+        &mut value,
+        "raw_fact_refs",
+        JsonValue::Array(collect_permissions_provenance_values(rows, "raw_fact_refs")),
+    );
+    insert_value_field(
+        &mut value,
+        "manifest_versions",
+        JsonValue::Array(collect_permissions_provenance_values(
+            rows,
+            "manifest_versions",
+        )),
+    );
+    insert_value_field(&mut value, "execution_trace_id", JsonValue::Null);
+    insert_string_field(
+        &mut value,
+        "derivation_kind",
+        rows.iter()
+            .filter_map(|row| string_field(provenance_field(&row.provenance, "derivation_kind")))
+            .next()
+            .unwrap_or_else(|| "declared".to_owned()),
+    );
+    value
+}
+
+fn build_permissions_coverage(rows: &[PermissionsCurrentRow]) -> CoverageResponse {
+    let sample = rows.first().map(|row| &row.coverage);
+
+    CoverageResponse {
+        status: string_field(sample.and_then(|value| provenance_field(value, "status")))
+            .unwrap_or_else(|| "full".to_owned()),
+        exhaustiveness: string_field(
+            sample.and_then(|value| provenance_field(value, "exhaustiveness")),
+        )
+        .unwrap_or_else(|| "authoritative".to_owned()),
+        source_classes_considered: match sample
+            .and_then(|value| provenance_field(value, "source_classes_considered"))
+        {
+            Some(JsonValue::Array(values)) => values.iter().filter_map(value_to_string).collect(),
+            _ => vec!["permissions_current".to_owned()],
+        },
+        enumeration_basis: string_field(
+            sample.and_then(|value| provenance_field(value, "enumeration_basis")),
+        )
+        .unwrap_or_else(|| "resource_permissions".to_owned()),
+        unsupported_reason: string_field(
+            sample.and_then(|value| provenance_field(value, "unsupported_reason")),
+        ),
+    }
+}
+
+fn build_permission_scope_value(scope: &PermissionScope) -> JsonValue {
+    let mut value = empty_object();
+    insert_string_field(&mut value, "kind", scope.kind().to_owned());
+    insert_value_field(&mut value, "detail", scope.detail());
+    value
 }
 
 fn build_name_data(row: &NameCurrentRow) -> JsonValue {
@@ -1574,6 +1795,75 @@ fn parse_history_scope(scope: Option<&str>) -> ApiResult<HistoryScope> {
             message: "scope must be one of: surface, resource, both".to_owned(),
         }),
     }
+}
+
+fn parse_permissions_subject(subject: Option<&str>) -> Option<String> {
+    subject
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+fn parse_permission_scope_filter(scope: Option<&str>) -> ApiResult<Option<PermissionScope>> {
+    let Some(scope) = scope.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+
+    if scope == "root" {
+        return Ok(Some(PermissionScope::Root));
+    }
+    if scope == "registry" {
+        return Ok(Some(PermissionScope::Registry));
+    }
+    if scope == "resource" {
+        return Ok(Some(PermissionScope::Resource));
+    }
+
+    let mut parts = scope.split(':');
+    let kind = parts.next().unwrap_or_default();
+    let first = parts.next();
+    let second = parts.next();
+    let extra = parts.next();
+
+    let parsed = match (kind, first, second, extra) {
+        ("resolver", Some(chain_id), Some(resolver_address), None) => {
+            Some(PermissionScope::Resolver {
+                chain_id: chain_id.to_owned(),
+                resolver_address: resolver_address.to_ascii_lowercase(),
+            })
+        }
+        ("record_manager", Some(chain_id), Some(manager_address), None) => {
+            Some(PermissionScope::RecordManager {
+                chain_id: chain_id.to_owned(),
+                manager_address: manager_address.to_ascii_lowercase(),
+            })
+        }
+        ("migration_derived", Some(predecessor_resource_id), None, None) => {
+            Some(PermissionScope::MigrationDerived {
+                predecessor_resource_id: Uuid::parse_str(predecessor_resource_id).map_err(
+                    |_| ApiError {
+                        status: StatusCode::BAD_REQUEST,
+                        code: "invalid_input",
+                        message: "scope must use a valid permissions scope filter".to_owned(),
+                    },
+                )?,
+            })
+        }
+        ("transport_derived", Some(transport), None, None) => {
+            Some(PermissionScope::TransportDerived {
+                transport: transport.to_owned(),
+            })
+        }
+        _ => None,
+    };
+
+    parsed
+        .ok_or(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            code: "invalid_input",
+            message: "scope must use a valid permissions scope filter".to_owned(),
+        })
+        .map(Some)
 }
 
 fn parse_children_query(query: &ChildrenQuery) -> ApiResult<bool> {

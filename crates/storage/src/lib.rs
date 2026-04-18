@@ -9,6 +9,7 @@ mod identity;
 mod lineage;
 mod name_current;
 mod normalized_events;
+mod permissions;
 mod raw;
 mod raw_calls;
 mod raw_children;
@@ -61,6 +62,10 @@ pub use name_current::{
 pub use normalized_events::{
     NormalizedEvent, load_normalized_event_counts_by_kind, load_normalized_events_by_namespace,
     mark_block_derived_normalized_events_range_orphaned, upsert_normalized_events,
+};
+pub use permissions::{
+    PermissionScope, PermissionsCurrentRow, clear_permissions_current, delete_permissions_current,
+    load_permissions_current, upsert_permissions_current_rows,
 };
 pub use raw::{
     RawBlock, load_raw_block, load_raw_blocks_by_hashes, mark_raw_block_range_orphaned,

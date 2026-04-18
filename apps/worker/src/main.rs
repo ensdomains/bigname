@@ -1,6 +1,7 @@
 mod address_names;
 mod children;
 mod name_current;
+mod permissions;
 
 use anyhow::{Context, Result};
 use bigname_storage::DatabaseConfig;
@@ -25,6 +26,7 @@ enum Command {
     AddressNamesCurrent(AddressNamesCurrentArgs),
     ChildrenCurrent(ChildrenCurrentArgs),
     NameCurrent(NameCurrentArgs),
+    PermissionsCurrent(PermissionsCurrentArgs),
 }
 
 #[derive(Args, Debug)]
@@ -63,6 +65,12 @@ struct ChildrenCurrentArgs {
     command: ChildrenCurrentCommand,
 }
 
+#[derive(Args, Debug)]
+struct PermissionsCurrentArgs {
+    #[command(subcommand)]
+    command: PermissionsCurrentCommand,
+}
+
 #[derive(Subcommand, Debug)]
 enum NameCurrentCommand {
     Rebuild(NameCurrentRebuildArgs),
@@ -76,6 +84,11 @@ enum AddressNamesCurrentCommand {
 #[derive(Subcommand, Debug)]
 enum ChildrenCurrentCommand {
     Rebuild(ChildrenCurrentRebuildArgs),
+}
+
+#[derive(Subcommand, Debug)]
+enum PermissionsCurrentCommand {
+    Rebuild(PermissionsCurrentRebuildArgs),
 }
 
 #[derive(Args, Debug)]
@@ -102,6 +115,14 @@ struct ChildrenCurrentRebuildArgs {
     logical_name_id: Option<String>,
 }
 
+#[derive(Args, Debug)]
+struct PermissionsCurrentRebuildArgs {
+    #[command(flatten)]
+    database: DatabaseConfig,
+    #[arg(long)]
+    resource_id: Option<String>,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     init_tracing("bigname-worker");
@@ -112,6 +133,7 @@ async fn main() -> Result<()> {
         Command::AddressNamesCurrent(args) => address_names_current(args).await,
         Command::ChildrenCurrent(args) => children_current(args).await,
         Command::NameCurrent(args) => name_current(args).await,
+        Command::PermissionsCurrent(args) => permissions_current(args).await,
     }
 }
 
@@ -155,6 +177,12 @@ async fn address_names_current(args: AddressNamesCurrentArgs) -> Result<()> {
 async fn children_current(args: ChildrenCurrentArgs) -> Result<()> {
     match args.command {
         ChildrenCurrentCommand::Rebuild(args) => rebuild_children_current(args).await,
+    }
+}
+
+async fn permissions_current(args: PermissionsCurrentArgs) -> Result<()> {
+    match args.command {
+        PermissionsCurrentCommand::Rebuild(args) => rebuild_permissions_current(args).await,
     }
 }
 
@@ -207,6 +235,24 @@ async fn rebuild_children_current(args: ChildrenCurrentRebuildArgs) -> Result<()
         deleted_row_count = summary.deleted_row_count,
         logical_name_id = args.logical_name_id.as_deref().unwrap_or("all"),
         "children_current rebuild completed"
+    );
+
+    Ok(())
+}
+
+async fn rebuild_permissions_current(args: PermissionsCurrentRebuildArgs) -> Result<()> {
+    let pool = bigname_storage::connect(&args.database).await?;
+    let summary =
+        permissions::rebuild_permissions_current(&pool, args.resource_id.as_deref()).await?;
+
+    info!(
+        service = "worker",
+        projection = "permissions_current",
+        requested_resource_count = summary.requested_resource_count,
+        upserted_row_count = summary.upserted_row_count,
+        deleted_row_count = summary.deleted_row_count,
+        resource_id = args.resource_id.as_deref().unwrap_or("all"),
+        "permissions_current rebuild completed"
     );
 
     Ok(())

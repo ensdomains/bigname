@@ -10,8 +10,8 @@ use axum::{
     http::Request,
 };
 use bigname_storage::{
-    CanonicalityState, NameSurface, NormalizedEvent, RawBlock, Resource, SurfaceBinding,
-    SurfaceBindingKind, TokenLineage, default_database_url,
+    CanonicalityState, NameSurface, NormalizedEvent, PermissionScope, PermissionsCurrentRow,
+    RawBlock, Resource, SurfaceBinding, SurfaceBindingKind, TokenLineage, default_database_url,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -608,6 +608,91 @@ fn history_event_identities(payload: &HistoryResponse) -> Vec<&str> {
             row.get("event_identity")
                 .and_then(Value::as_str)
                 .expect("history row must include event_identity")
+        })
+        .collect()
+}
+
+fn permission_current_row(
+    resource_id: Uuid,
+    subject: &str,
+    scope: PermissionScope,
+    manifest_version: i64,
+    block_number: i64,
+) -> PermissionsCurrentRow {
+    PermissionsCurrentRow {
+        resource_id,
+        subject: subject.to_owned(),
+        scope,
+        effective_powers: json!([
+            "set_resolver",
+            if manifest_version % 2 == 0 {
+                "create_subnames"
+            } else {
+                "set_records"
+            }
+        ]),
+        grant_source: json!({
+            "kind": "normalized_event",
+            "manifest_version": manifest_version,
+        }),
+        revocation_source: None,
+        inheritance_path: json!([
+            {
+                "kind": "resource_authority",
+                "resource_id": resource_id,
+            }
+        ]),
+        transfer_behavior: json!({
+            "kind": "resource_rebound",
+        }),
+        provenance: json!({
+            "normalized_event_ids": [block_number, block_number + 1],
+            "raw_fact_refs": [{
+                "kind": "raw_log",
+                "block_number": block_number,
+            }],
+            "manifest_versions": [{
+                "manifest_version": manifest_version,
+                "source_family": "ens_v2_registry_l1",
+                "chain": "ethereum-mainnet",
+                "deployment_epoch": "ens_v2",
+            }],
+            "derivation_kind": "permissions_current_rebuild",
+        }),
+        coverage: json!({
+            "status": "full",
+            "exhaustiveness": "authoritative",
+            "source_classes_considered": ["permissions_current"],
+            "enumeration_basis": "resource_permissions",
+            "unsupported_reason": null,
+        }),
+        chain_positions: json!({
+            "ethereum": {
+                "chain_id": "ethereum-mainnet",
+                "block_number": block_number,
+                "block_hash": format!("0xperm{block_number:02x}"),
+                "timestamp": format!("2026-04-17T00:00:{:02}Z", block_number % 60),
+            }
+        }),
+        canonicality_summary: json!({
+            "status": "finalized",
+            "chains": {
+                "ethereum-mainnet": "finalized",
+            }
+        }),
+        manifest_version,
+        last_recomputed_at: timestamp(1_717_174_000 + block_number),
+    }
+}
+
+fn permission_subjects(payload: &ResourcePermissionsResponse) -> Vec<&str> {
+    payload
+        .data
+        .iter()
+        .map(|row| {
+            row.get("subject")
+                .and_then(Value::as_str)
+                .expect("permission row must include subject")
         })
         .collect()
 }
@@ -2949,6 +3034,237 @@ async fn get_resource_history_returns_not_found_when_anchor_is_missing() -> Resu
         payload.error.message,
         format!("resource {resource_id} was not found")
     );
+    assert!(payload.error.details.is_empty());
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_resource_permissions_returns_declared_state_collection() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let resource_id = Uuid::from_u128(0xa300);
+    let filtered_subject = "0x0000000000000000000000000000000000000abc";
+    let other_subject = "0x0000000000000000000000000000000000000def";
+
+    bigname_storage::upsert_resources(&database.pool, &[resource(resource_id)]).await?;
+    bigname_storage::upsert_permissions_current_rows(
+        &database.pool,
+        &[
+            permission_current_row(
+                resource_id,
+                filtered_subject,
+                PermissionScope::Resource,
+                7,
+                41,
+            ),
+            permission_current_row(
+                resource_id,
+                filtered_subject,
+                PermissionScope::Resolver {
+                    chain_id: "ethereum-mainnet".to_owned(),
+                    resolver_address: "0x0000000000000000000000000000000000000aaa".to_owned(),
+                },
+                8,
+                42,
+            ),
+            permission_current_row(resource_id, other_subject, PermissionScope::Registry, 9, 43),
+        ],
+    )
+    .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(&format!("/v1/resources/{resource_id}/permissions"))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("resource permissions request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let payload: ResourcePermissionsResponse = read_json(response).await?;
+    assert_eq!(
+        permission_subjects(&payload),
+        vec![filtered_subject, filtered_subject, other_subject]
+    );
+    assert!(payload.verified_state.is_none());
+    assert_eq!(payload.declared_state, json!({}));
+    assert_eq!(payload.page.page_size, 3);
+    assert_eq!(payload.page.sort, "subject_scope_asc");
+    assert_eq!(payload.consistency, "finalized");
+    assert_eq!(payload.coverage.status, "full");
+    assert_eq!(payload.coverage.exhaustiveness, "authoritative");
+    assert_eq!(
+        payload.coverage.source_classes_considered,
+        vec!["permissions_current".to_owned()]
+    );
+    assert_eq!(payload.coverage.enumeration_basis, "resource_permissions");
+    assert_eq!(payload.coverage.unsupported_reason, None);
+    assert_eq!(
+        payload
+            .provenance
+            .get("derivation_kind")
+            .and_then(Value::as_str),
+        Some("permissions_current_rebuild")
+    );
+
+    let resource_row = payload
+        .data
+        .iter()
+        .find(|row| {
+            row.get("scope")
+                .and_then(|value| value.get("kind"))
+                .and_then(Value::as_str)
+                == Some("resource")
+        })
+        .expect("resource row");
+    assert_eq!(
+        resource_row.get("resource_id"),
+        Some(&Value::String(resource_id.to_string()))
+    );
+    assert_eq!(
+        resource_row.get("scope"),
+        Some(&json!({
+            "kind": "resource",
+            "detail": {},
+        }))
+    );
+    assert_eq!(
+        resource_row.get("effective_powers"),
+        Some(&json!(["set_resolver", "set_records"]))
+    );
+    assert_eq!(resource_row.get("revocation_source"), Some(&Value::Null));
+
+    let resolver_row = payload
+        .data
+        .iter()
+        .find(|row| {
+            row.get("scope")
+                .and_then(|value| value.get("kind"))
+                .and_then(Value::as_str)
+                == Some("resolver")
+        })
+        .expect("resolver row");
+    assert_eq!(
+        resolver_row.get("scope"),
+        Some(&json!({
+            "kind": "resolver",
+            "detail": {
+                "chain_id": "ethereum-mainnet",
+                "resolver_address": "0x0000000000000000000000000000000000000aaa",
+            },
+        }))
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_resource_permissions_honors_subject_and_scope_filters() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let resource_id = Uuid::from_u128(0xa301);
+    let shared_subject = "0x0000000000000000000000000000000000000abc";
+
+    bigname_storage::upsert_resources(&database.pool, &[resource(resource_id)]).await?;
+    bigname_storage::upsert_permissions_current_rows(
+        &database.pool,
+        &[
+            permission_current_row(
+                resource_id,
+                shared_subject,
+                PermissionScope::Resource,
+                7,
+                51,
+            ),
+            permission_current_row(
+                resource_id,
+                shared_subject,
+                PermissionScope::Resolver {
+                    chain_id: "ethereum-mainnet".to_owned(),
+                    resolver_address: "0x0000000000000000000000000000000000000bbb".to_owned(),
+                },
+                8,
+                52,
+            ),
+            permission_current_row(
+                resource_id,
+                "0x0000000000000000000000000000000000000def",
+                PermissionScope::Resource,
+                9,
+                53,
+            ),
+        ],
+    )
+    .await?;
+
+    let subject_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(&format!(
+                    "/v1/resources/{resource_id}/permissions?subject={shared_subject}"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("resource permissions subject filter request failed")?;
+    let subject_payload: ResourcePermissionsResponse = read_json(subject_response).await?;
+    assert_eq!(
+        permission_subjects(&subject_payload),
+        vec![shared_subject, shared_subject]
+    );
+
+    let scope_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(&format!(
+                    "/v1/resources/{resource_id}/permissions?scope=resolver:ethereum-mainnet:0x0000000000000000000000000000000000000bbb"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("resource permissions scope filter request failed")?;
+    let scope_payload: ResourcePermissionsResponse = read_json(scope_response).await?;
+    assert_eq!(scope_payload.data.len(), 1);
+    assert_eq!(
+        scope_payload.data[0].get("scope"),
+        Some(&json!({
+            "kind": "resolver",
+            "detail": {
+                "chain_id": "ethereum-mainnet",
+                "resolver_address": "0x0000000000000000000000000000000000000bbb",
+            },
+        }))
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_resource_permissions_rejects_invalid_resource_id() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resources/not-a-uuid/permissions")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("invalid resource permissions request failed")?;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let payload: ErrorResponse = read_json(response).await?;
+    assert_eq!(payload.error.code, "invalid_input");
+    assert_eq!(payload.error.message, "resource_id must be a UUID");
     assert!(payload.error.details.is_empty());
 
     database.cleanup().await?;
