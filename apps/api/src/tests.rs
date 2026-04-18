@@ -9,7 +9,10 @@ use axum::{
     body::{Body, to_bytes},
     http::Request,
 };
-use bigname_storage::default_database_url;
+use bigname_storage::{
+    CanonicalityState, NameSurface, NormalizedEvent, RawBlock, Resource, SurfaceBinding,
+    SurfaceBindingKind, default_database_url,
+};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use sqlx::{
@@ -248,11 +251,47 @@ impl TestDatabase {
         })
     }
 
+    async fn new_migrated() -> Result<Self> {
+        let database = Self::new(false).await?;
+        bigname_storage::MIGRATOR
+            .run(&database.pool)
+            .await
+            .context("failed to apply checked-in migrations for API tests")?;
+        Ok(database)
+    }
+
     fn app_state(&self) -> AppState {
         AppState {
             phase: "test",
             pool: self.pool.clone(),
         }
+    }
+
+    async fn seed_history_binding(
+        &self,
+        logical_name_id: &str,
+        resource_id: Uuid,
+        surface_binding_id: Uuid,
+    ) -> Result<()> {
+        bigname_storage::upsert_name_surfaces(&self.pool, &[name_surface(logical_name_id)])
+            .await
+            .context("failed to upsert name surface for history API test")?;
+        bigname_storage::upsert_resources(&self.pool, &[resource(resource_id)])
+            .await
+            .context("failed to upsert resource for history API test")?;
+        bigname_storage::upsert_surface_bindings(
+            &self.pool,
+            &[surface_binding(
+                surface_binding_id,
+                logical_name_id,
+                resource_id,
+                timestamp(1_700_000_000),
+            )],
+        )
+        .await
+        .context("failed to upsert surface binding for history API test")?;
+
+        Ok(())
     }
 
     async fn insert_manifest(
@@ -427,6 +466,150 @@ async fn read_json<T: DeserializeOwned>(response: Response) -> Result<T> {
 
 fn timestamp(seconds: i64) -> OffsetDateTime {
     OffsetDateTime::from_unix_timestamp(seconds).expect("test timestamp must be valid")
+}
+
+fn raw_block(
+    chain_id: &str,
+    block_hash: &str,
+    parent_hash: Option<&str>,
+    block_number: i64,
+    block_timestamp: i64,
+) -> RawBlock {
+    RawBlock {
+        chain_id: chain_id.to_owned(),
+        block_hash: block_hash.to_owned(),
+        parent_hash: parent_hash.map(str::to_owned),
+        block_number,
+        block_timestamp: timestamp(block_timestamp),
+        logs_bloom: None,
+        transactions_root: None,
+        receipts_root: None,
+        state_root: None,
+        canonicality_state: CanonicalityState::Canonical,
+    }
+}
+
+fn resource(resource_id: Uuid) -> Resource {
+    Resource {
+        resource_id,
+        token_lineage_id: None,
+        chain_id: "ethereum-mainnet".to_owned(),
+        block_hash: "0xresource".to_owned(),
+        block_number: 99,
+        provenance: json!({"seed": "resource"}),
+        canonicality_state: CanonicalityState::Canonical,
+    }
+}
+
+fn name_surface(logical_name_id: &str) -> NameSurface {
+    let normalized_name = logical_name_id
+        .split_once(':')
+        .map(|(_, normalized_name)| normalized_name)
+        .expect("logical_name_id must include namespace");
+
+    NameSurface {
+        logical_name_id: logical_name_id.to_owned(),
+        namespace: "ens".to_owned(),
+        input_name: normalized_name.to_owned(),
+        canonical_display_name: "Alice.eth".to_owned(),
+        normalized_name: normalized_name.to_owned(),
+        dns_encoded_name: vec![5, b'a', b'l', b'i', b'c', b'e'],
+        namehash: format!("namehash:{normalized_name}"),
+        labelhashes: vec!["labelhash:alice".to_owned()],
+        normalizer_version: "uts46-v1".to_owned(),
+        normalization_warnings: json!([]),
+        normalization_errors: json!([]),
+        chain_id: "ethereum-mainnet".to_owned(),
+        block_hash: "0xsurface".to_owned(),
+        block_number: 98,
+        provenance: json!({"seed": "surface"}),
+        canonicality_state: CanonicalityState::Canonical,
+    }
+}
+
+fn surface_binding(
+    surface_binding_id: Uuid,
+    logical_name_id: &str,
+    resource_id: Uuid,
+    active_from: OffsetDateTime,
+) -> SurfaceBinding {
+    SurfaceBinding {
+        surface_binding_id,
+        logical_name_id: logical_name_id.to_owned(),
+        resource_id,
+        binding_kind: SurfaceBindingKind::DeclaredRegistryPath,
+        active_from,
+        active_to: None,
+        chain_id: "ethereum-mainnet".to_owned(),
+        block_hash: "0xbinding".to_owned(),
+        block_number: 100,
+        provenance: json!({"seed": "binding"}),
+        canonicality_state: CanonicalityState::Canonical,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn history_event(
+    event_identity: &str,
+    logical_name_id: Option<&str>,
+    resource_id: Option<Uuid>,
+    chain_id: Option<&str>,
+    block_number: Option<i64>,
+    block_hash: Option<&str>,
+    transaction_hash: Option<&str>,
+    log_index: Option<i64>,
+    canonicality_state: CanonicalityState,
+) -> NormalizedEvent {
+    NormalizedEvent {
+        event_identity: event_identity.to_owned(),
+        namespace: "ens".to_owned(),
+        logical_name_id: logical_name_id.map(str::to_owned),
+        resource_id,
+        event_kind: "HistoryEvent".to_owned(),
+        source_family: "ens_v1_registry_l1".to_owned(),
+        manifest_version: 7,
+        source_manifest_id: None,
+        chain_id: chain_id.map(str::to_owned),
+        block_number,
+        block_hash: block_hash.map(str::to_owned),
+        transaction_hash: transaction_hash.map(str::to_owned),
+        log_index,
+        raw_fact_ref: json!({
+            "kind": "raw_log",
+            "event_identity": event_identity,
+        }),
+        derivation_kind: "history_test".to_owned(),
+        canonicality_state,
+        before_state: json!({
+            "provenance": {
+                "before": event_identity,
+            }
+        }),
+        after_state: json!({
+            "provenance": {
+                "after": event_identity,
+            },
+            "coverage": {
+                "status": "full",
+                "exhaustiveness": "authoritative",
+                "source_classes_considered": ["normalized_events"],
+                "enumeration_basis": event_identity,
+                "unsupported_reason": null,
+            }
+        }),
+    }
+}
+
+fn history_event_identities(payload: &HistoryResponse) -> Vec<&str> {
+    payload
+        .data
+        .iter()
+        .map(|row| {
+            row.get("event_identity")
+                .and_then(Value::as_str)
+                .expect("history row must include event_identity")
+        })
+        .collect()
 }
 
 fn exact_name_row(
@@ -766,6 +949,1070 @@ async fn get_name_returns_internal_error_envelope_on_storage_failure() -> Result
     assert_eq!(
         payload.error.message,
         "failed to load current projection for name ens/alice.eth"
+    );
+    assert!(payload.error.details.is_empty());
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_name_history_returns_canonical_only_rows_with_provenance_and_coverage() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0xa001);
+    let surface_binding_id = Uuid::from_u128(0xb001);
+    let manifest_id_v7 = database
+        .insert_manifest(
+            "ens",
+            "ens_v1_registry_l1",
+            "ethereum-mainnet",
+            "bootstrap",
+            7,
+            "active",
+            "history-test-v1",
+        )
+        .await?;
+    let manifest_id_v8 = database
+        .insert_manifest(
+            "ens",
+            "ens_v1_registry_l1",
+            "ethereum-mainnet",
+            "bootstrap-next",
+            8,
+            "active",
+            "history-test-v2",
+        )
+        .await?;
+
+    database
+        .seed_history_binding(logical_name_id, resource_id, surface_binding_id)
+        .await?;
+
+    bigname_storage::upsert_raw_blocks(
+        &database.pool,
+        &[
+            raw_block("ethereum-mainnet", "0x100", None, 100, 1_700_000_100),
+            raw_block(
+                "ethereum-mainnet",
+                "0x101",
+                Some("0x100"),
+                101,
+                1_700_000_101,
+            ),
+            raw_block(
+                "ethereum-mainnet",
+                "0x102",
+                Some("0x101"),
+                102,
+                1_700_000_102,
+            ),
+            raw_block(
+                "ethereum-mainnet",
+                "0x103",
+                Some("0x102"),
+                103,
+                1_700_000_103,
+            ),
+        ],
+    )
+    .await?;
+
+    bigname_storage::upsert_normalized_events(
+        &database.pool,
+        &[
+            NormalizedEvent {
+                manifest_version: 7,
+                source_manifest_id: Some(manifest_id_v7),
+                ..history_event(
+                    "history:canonical",
+                    Some(logical_name_id),
+                    Some(resource_id),
+                    Some("ethereum-mainnet"),
+                    Some(100),
+                    Some("0x100"),
+                    Some("0xtx100"),
+                    Some(0),
+                    CanonicalityState::Canonical,
+                )
+            },
+            NormalizedEvent {
+                manifest_version: 8,
+                source_manifest_id: Some(manifest_id_v8),
+                ..history_event(
+                    "history:safe",
+                    Some(logical_name_id),
+                    Some(resource_id),
+                    Some("ethereum-mainnet"),
+                    Some(101),
+                    Some("0x101"),
+                    Some("0xtx101"),
+                    Some(0),
+                    CanonicalityState::Safe,
+                )
+            },
+            NormalizedEvent {
+                manifest_version: 7,
+                source_manifest_id: Some(manifest_id_v7),
+                ..history_event(
+                    "history:finalized",
+                    Some(logical_name_id),
+                    Some(resource_id),
+                    Some("ethereum-mainnet"),
+                    Some(102),
+                    Some("0x102"),
+                    Some("0xtx102"),
+                    Some(0),
+                    CanonicalityState::Finalized,
+                )
+            },
+            history_event(
+                "history:observed",
+                Some(logical_name_id),
+                Some(resource_id),
+                Some("ethereum-mainnet"),
+                Some(103),
+                Some("0x103"),
+                Some("0xtx103"),
+                Some(0),
+                CanonicalityState::Observed,
+            ),
+            history_event(
+                "history:orphaned",
+                Some(logical_name_id),
+                Some(resource_id),
+                None,
+                None,
+                None,
+                None,
+                None,
+                CanonicalityState::Orphaned,
+            ),
+        ],
+    )
+    .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/history/names/ens/alice.eth")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("name history request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let payload: HistoryResponse = read_json(response).await?;
+    assert_eq!(
+        history_event_identities(&payload),
+        vec!["history:finalized", "history:safe", "history:canonical"]
+    );
+    assert_eq!(payload.page.sort, "chain_position_desc");
+    assert_eq!(payload.page.page_size, 50);
+    assert_eq!(payload.consistency, "head");
+    assert_eq!(payload.last_updated, "2023-11-14T22:15:02Z");
+    assert_eq!(payload.verified_state, None);
+    assert_eq!(payload.declared_state, json!({}));
+    assert_eq!(
+        payload.coverage,
+        CoverageResponse {
+            status: "full".to_owned(),
+            exhaustiveness: "authoritative".to_owned(),
+            source_classes_considered: vec!["normalized_events".to_owned()],
+            enumeration_basis: "canonical normalized-event history for the requested both scope"
+                .to_owned(),
+            unsupported_reason: None,
+        }
+    );
+    assert_eq!(
+        payload
+            .provenance
+            .get("derivation_kind")
+            .and_then(Value::as_str),
+        Some("normalized_event_history")
+    );
+    assert_eq!(
+        payload.provenance.get("execution_trace_id"),
+        Some(&Value::Null)
+    );
+    assert_eq!(
+        payload.provenance.get("manifest_versions"),
+        Some(&json!([
+            {
+                "manifest_version": 7,
+                "source_family": "ens_v1_registry_l1",
+                "source_manifest_id": manifest_id_v7
+            },
+            {
+                "manifest_version": 8,
+                "source_family": "ens_v1_registry_l1",
+                "source_manifest_id": manifest_id_v8
+            }
+        ]))
+    );
+    assert_eq!(
+        payload
+            .provenance
+            .get("raw_fact_refs")
+            .and_then(Value::as_array)
+            .map(Vec::len),
+        Some(3)
+    );
+    assert_eq!(
+        payload.chain_positions,
+        json!({
+            "ethereum": {
+                "chain_id": "ethereum-mainnet",
+                "block_number": 102,
+                "block_hash": "0x102",
+                "timestamp": "2023-11-14T22:15:02Z"
+            }
+        })
+    );
+
+    let first_row = payload
+        .data
+        .first()
+        .and_then(Value::as_object)
+        .expect("first history row must be an object");
+    assert_eq!(
+        first_row.get("canonicality_state").and_then(Value::as_str),
+        Some("finalized")
+    );
+    assert_eq!(
+        first_row.get("chain_position"),
+        Some(&json!({
+            "chain_id": "ethereum-mainnet",
+            "block_number": 102,
+            "block_hash": "0x102",
+            "timestamp": "2023-11-14T22:15:02Z"
+        }))
+    );
+    assert_eq!(
+        first_row.get("provenance"),
+        Some(&json!({
+            "after": "history:finalized"
+        }))
+    );
+    assert_eq!(
+        first_row.get("coverage"),
+        Some(&json!({
+            "status": "full",
+            "exhaustiveness": "authoritative",
+            "source_classes_considered": ["normalized_events"],
+            "enumeration_basis": "history:finalized",
+            "unsupported_reason": null
+        }))
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_name_history_honors_scope_query_parameter() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0xa100);
+    let other_resource_id = Uuid::from_u128(0xa101);
+    let surface_binding_id = Uuid::from_u128(0xb100);
+
+    database
+        .seed_history_binding(logical_name_id, resource_id, surface_binding_id)
+        .await?;
+
+    bigname_storage::upsert_raw_blocks(
+        &database.pool,
+        &[
+            raw_block("ethereum-mainnet", "0x200", None, 200, 1_700_000_200),
+            raw_block(
+                "ethereum-mainnet",
+                "0x201",
+                Some("0x200"),
+                201,
+                1_700_000_201,
+            ),
+            raw_block(
+                "ethereum-mainnet",
+                "0x202",
+                Some("0x201"),
+                202,
+                1_700_000_202,
+            ),
+            raw_block(
+                "ethereum-mainnet",
+                "0x203",
+                Some("0x202"),
+                203,
+                1_700_000_203,
+            ),
+            raw_block(
+                "ethereum-mainnet",
+                "0x204",
+                Some("0x203"),
+                204,
+                1_700_000_204,
+            ),
+        ],
+    )
+    .await?;
+
+    bigname_storage::upsert_normalized_events(
+        &database.pool,
+        &[
+            history_event(
+                "surface-only",
+                Some(logical_name_id),
+                None,
+                Some("ethereum-mainnet"),
+                Some(200),
+                Some("0x200"),
+                Some("0xtx200"),
+                Some(0),
+                CanonicalityState::Canonical,
+            ),
+            history_event(
+                "resource-only",
+                None,
+                Some(resource_id),
+                Some("ethereum-mainnet"),
+                Some(201),
+                Some("0x201"),
+                Some("0xtx201"),
+                Some(0),
+                CanonicalityState::Canonical,
+            ),
+            history_event(
+                "both-anchors",
+                Some(logical_name_id),
+                Some(resource_id),
+                Some("ethereum-mainnet"),
+                Some(202),
+                Some("0x202"),
+                Some("0xtx202"),
+                Some(0),
+                CanonicalityState::Canonical,
+            ),
+            history_event(
+                "same-resource-other-name",
+                Some("ens:other.eth"),
+                Some(resource_id),
+                Some("ethereum-mainnet"),
+                Some(203),
+                Some("0x203"),
+                Some("0xtx203"),
+                Some(0),
+                CanonicalityState::Canonical,
+            ),
+            history_event(
+                "same-name-other-resource",
+                Some(logical_name_id),
+                Some(other_resource_id),
+                Some("ethereum-mainnet"),
+                Some(204),
+                Some("0x204"),
+                Some("0xtx204"),
+                Some(0),
+                CanonicalityState::Canonical,
+            ),
+        ],
+    )
+    .await?;
+
+    let surface_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/history/names/ens/alice.eth?scope=surface")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("surface history request failed")?;
+    let surface_payload: HistoryResponse = read_json(surface_response).await?;
+    assert_eq!(
+        history_event_identities(&surface_payload),
+        vec!["same-name-other-resource", "both-anchors", "surface-only"]
+    );
+
+    let resource_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/history/names/ens/alice.eth?scope=resource")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("resource history request failed")?;
+    let resource_payload: HistoryResponse = read_json(resource_response).await?;
+    assert_eq!(
+        history_event_identities(&resource_payload),
+        vec!["same-resource-other-name", "both-anchors", "resource-only"]
+    );
+
+    let both_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/history/names/ens/alice.eth?scope=both")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("combined history request failed")?;
+    let both_payload: HistoryResponse = read_json(both_response).await?;
+    assert_eq!(
+        history_event_identities(&both_payload),
+        vec![
+            "same-name-other-resource",
+            "same-resource-other-name",
+            "both-anchors",
+            "resource-only",
+            "surface-only",
+        ]
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_name_history_resource_scope_preserves_rebound_resources() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let logical_name_id = "ens:alice.eth";
+    let old_resource_id = Uuid::from_u128(0xa120);
+    let current_resource_id = Uuid::from_u128(0xa121);
+
+    bigname_storage::upsert_name_surfaces(&database.pool, &[name_surface(logical_name_id)]).await?;
+    bigname_storage::upsert_resources(
+        &database.pool,
+        &[resource(old_resource_id), resource(current_resource_id)],
+    )
+    .await?;
+    bigname_storage::upsert_surface_bindings(
+        &database.pool,
+        &[
+            SurfaceBinding {
+                active_to: Some(timestamp(1_700_000_250)),
+                ..surface_binding(
+                    Uuid::from_u128(0xb120),
+                    logical_name_id,
+                    old_resource_id,
+                    timestamp(1_700_000_200),
+                )
+            },
+            surface_binding(
+                Uuid::from_u128(0xb121),
+                logical_name_id,
+                current_resource_id,
+                timestamp(1_700_000_251),
+            ),
+        ],
+    )
+    .await?;
+
+    bigname_storage::upsert_raw_blocks(
+        &database.pool,
+        &[
+            raw_block("ethereum-mainnet", "0x220", None, 220, 1_700_000_220),
+            raw_block(
+                "ethereum-mainnet",
+                "0x221",
+                Some("0x220"),
+                221,
+                1_700_000_221,
+            ),
+            raw_block(
+                "ethereum-mainnet",
+                "0x222",
+                Some("0x221"),
+                222,
+                1_700_000_222,
+            ),
+        ],
+    )
+    .await?;
+
+    bigname_storage::upsert_normalized_events(
+        &database.pool,
+        &[
+            history_event(
+                "resource-old",
+                None,
+                Some(old_resource_id),
+                Some("ethereum-mainnet"),
+                Some(220),
+                Some("0x220"),
+                Some("0xtx220"),
+                Some(0),
+                CanonicalityState::Canonical,
+            ),
+            history_event(
+                "resource-current",
+                None,
+                Some(current_resource_id),
+                Some("ethereum-mainnet"),
+                Some(221),
+                Some("0x221"),
+                Some("0xtx221"),
+                Some(0),
+                CanonicalityState::Canonical,
+            ),
+            history_event(
+                "surface-anchor",
+                Some(logical_name_id),
+                None,
+                Some("ethereum-mainnet"),
+                Some(222),
+                Some("0x222"),
+                Some("0xtx222"),
+                Some(0),
+                CanonicalityState::Canonical,
+            ),
+        ],
+    )
+    .await?;
+
+    let resource_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/history/names/ens/alice.eth?scope=resource")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("name resource-scope history request failed")?;
+    let resource_payload: HistoryResponse = read_json(resource_response).await?;
+    assert_eq!(
+        history_event_identities(&resource_payload),
+        vec!["resource-current", "resource-old"]
+    );
+
+    let both_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/history/names/ens/alice.eth?scope=both")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("name combined history request failed")?;
+    let both_payload: HistoryResponse = read_json(both_response).await?;
+    assert_eq!(
+        history_event_identities(&both_payload),
+        vec!["surface-anchor", "resource-current", "resource-old"]
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_name_history_returns_not_found_when_anchor_is_missing() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/history/names/ens/missing.eth")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("name history request failed")?;
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let payload: ErrorResponse = read_json(response).await?;
+    assert_eq!(payload.error.code, "not_found");
+    assert_eq!(
+        payload.error.message,
+        "name missing.eth was not found in namespace ens"
+    );
+    assert!(payload.error.details.is_empty());
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_name_history_returns_not_found_for_unsupported_namespace() -> Result<()> {
+    let database = TestDatabase::new(false).await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/history/names/unknown/alice.eth")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("name history request failed")?;
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let payload: ErrorResponse = read_json(response).await?;
+    assert_eq!(payload.error.code, "not_found");
+    assert_eq!(payload.error.message, "namespace unknown is not supported");
+    assert!(payload.error.details.is_empty());
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_resource_history_returns_chain_position_desc_ordering() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0xa300);
+    let surface_binding_id = Uuid::from_u128(0xb300);
+
+    database
+        .seed_history_binding(logical_name_id, resource_id, surface_binding_id)
+        .await?;
+
+    bigname_storage::upsert_raw_blocks(
+        &database.pool,
+        &[
+            raw_block("base-mainnet", "0xb101", None, 101, 1_700_000_401),
+            raw_block("ethereum-mainnet", "0xe100", None, 100, 1_700_000_400),
+            raw_block("base-mainnet", "0xb100", Some("0xb101"), 100, 1_700_000_399),
+        ],
+    )
+    .await?;
+
+    bigname_storage::upsert_normalized_events(
+        &database.pool,
+        &[
+            history_event(
+                "no-chain-position",
+                Some(logical_name_id),
+                Some(resource_id),
+                None,
+                None,
+                None,
+                None,
+                None,
+                CanonicalityState::Canonical,
+            ),
+            history_event(
+                "ethereum-lower-log",
+                Some(logical_name_id),
+                Some(resource_id),
+                Some("ethereum-mainnet"),
+                Some(100),
+                Some("0xe100"),
+                Some("0xtx100"),
+                Some(1),
+                CanonicalityState::Canonical,
+            ),
+            history_event(
+                "ethereum-higher-log",
+                Some(logical_name_id),
+                Some(resource_id),
+                Some("ethereum-mainnet"),
+                Some(100),
+                Some("0xe100"),
+                Some("0xtx100"),
+                Some(7),
+                CanonicalityState::Canonical,
+            ),
+            history_event(
+                "base-same-height",
+                Some(logical_name_id),
+                Some(resource_id),
+                Some("base-mainnet"),
+                Some(100),
+                Some("0xb100"),
+                Some("0xtx090"),
+                Some(0),
+                CanonicalityState::Canonical,
+            ),
+            history_event(
+                "base-higher-height",
+                Some(logical_name_id),
+                Some(resource_id),
+                Some("base-mainnet"),
+                Some(101),
+                Some("0xb101"),
+                Some("0xtx101"),
+                Some(0),
+                CanonicalityState::Canonical,
+            ),
+        ],
+    )
+    .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(&format!("/v1/history/resources/{resource_id}"))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("resource history request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let payload: HistoryResponse = read_json(response).await?;
+    assert_eq!(
+        history_event_identities(&payload),
+        vec![
+            "base-higher-height",
+            "base-same-height",
+            "ethereum-higher-log",
+            "ethereum-lower-log",
+            "no-chain-position",
+        ]
+    );
+    assert_eq!(payload.page.sort, "chain_position_desc");
+    assert_eq!(
+        payload.chain_positions,
+        json!({
+            "base": {
+                "chain_id": "base-mainnet",
+                "block_number": 101,
+                "block_hash": "0xb101",
+                "timestamp": "2023-11-14T22:20:01Z"
+            },
+            "ethereum": {
+                "chain_id": "ethereum-mainnet",
+                "block_number": 100,
+                "block_hash": "0xe100",
+                "timestamp": "2023-11-14T22:20:00Z"
+            }
+        })
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_resource_history_honors_scope_query_parameter() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0xa200);
+    let other_resource_id = Uuid::from_u128(0xa201);
+    let surface_binding_id = Uuid::from_u128(0xb200);
+
+    database
+        .seed_history_binding(logical_name_id, resource_id, surface_binding_id)
+        .await?;
+
+    bigname_storage::upsert_raw_blocks(
+        &database.pool,
+        &[
+            raw_block("ethereum-mainnet", "0x300", None, 300, 1_700_000_300),
+            raw_block(
+                "ethereum-mainnet",
+                "0x301",
+                Some("0x300"),
+                301,
+                1_700_000_301,
+            ),
+            raw_block(
+                "ethereum-mainnet",
+                "0x302",
+                Some("0x301"),
+                302,
+                1_700_000_302,
+            ),
+            raw_block(
+                "ethereum-mainnet",
+                "0x303",
+                Some("0x302"),
+                303,
+                1_700_000_303,
+            ),
+            raw_block(
+                "ethereum-mainnet",
+                "0x304",
+                Some("0x303"),
+                304,
+                1_700_000_304,
+            ),
+        ],
+    )
+    .await?;
+
+    bigname_storage::upsert_normalized_events(
+        &database.pool,
+        &[
+            history_event(
+                "surface-only",
+                Some(logical_name_id),
+                None,
+                Some("ethereum-mainnet"),
+                Some(300),
+                Some("0x300"),
+                Some("0xtx300"),
+                Some(0),
+                CanonicalityState::Canonical,
+            ),
+            history_event(
+                "resource-only",
+                None,
+                Some(resource_id),
+                Some("ethereum-mainnet"),
+                Some(301),
+                Some("0x301"),
+                Some("0xtx301"),
+                Some(0),
+                CanonicalityState::Canonical,
+            ),
+            history_event(
+                "both-anchors",
+                Some(logical_name_id),
+                Some(resource_id),
+                Some("ethereum-mainnet"),
+                Some(302),
+                Some("0x302"),
+                Some("0xtx302"),
+                Some(0),
+                CanonicalityState::Canonical,
+            ),
+            history_event(
+                "same-resource-other-name",
+                Some("ens:other.eth"),
+                Some(resource_id),
+                Some("ethereum-mainnet"),
+                Some(303),
+                Some("0x303"),
+                Some("0xtx303"),
+                Some(0),
+                CanonicalityState::Canonical,
+            ),
+            history_event(
+                "same-name-other-resource",
+                Some(logical_name_id),
+                Some(other_resource_id),
+                Some("ethereum-mainnet"),
+                Some(304),
+                Some("0x304"),
+                Some("0xtx304"),
+                Some(0),
+                CanonicalityState::Canonical,
+            ),
+        ],
+    )
+    .await?;
+
+    let surface_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(&format!(
+                    "/v1/history/resources/{resource_id}?scope=surface"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("surface resource-history request failed")?;
+    let surface_payload: HistoryResponse = read_json(surface_response).await?;
+    assert_eq!(
+        history_event_identities(&surface_payload),
+        vec!["same-name-other-resource", "both-anchors", "surface-only"]
+    );
+
+    let resource_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(&format!(
+                    "/v1/history/resources/{resource_id}?scope=resource"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("resource resource-history request failed")?;
+    let resource_payload: HistoryResponse = read_json(resource_response).await?;
+    assert_eq!(
+        history_event_identities(&resource_payload),
+        vec!["same-resource-other-name", "both-anchors", "resource-only"]
+    );
+
+    let both_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(&format!("/v1/history/resources/{resource_id}?scope=both"))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("combined resource-history request failed")?;
+    let both_payload: HistoryResponse = read_json(both_response).await?;
+    assert_eq!(
+        history_event_identities(&both_payload),
+        vec![
+            "same-name-other-resource",
+            "same-resource-other-name",
+            "both-anchors",
+            "resource-only",
+            "surface-only",
+        ]
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_resource_history_surface_scope_preserves_multiple_bound_surfaces() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let resource_id = Uuid::from_u128(0xa230);
+    let primary_logical_name_id = "ens:alice.eth";
+    let alias_logical_name_id = "ens:alice-base.eth";
+
+    bigname_storage::upsert_name_surfaces(
+        &database.pool,
+        &[
+            name_surface(primary_logical_name_id),
+            name_surface(alias_logical_name_id),
+        ],
+    )
+    .await?;
+    bigname_storage::upsert_resources(&database.pool, &[resource(resource_id)]).await?;
+    bigname_storage::upsert_surface_bindings(
+        &database.pool,
+        &[
+            surface_binding(
+                Uuid::from_u128(0xb230),
+                primary_logical_name_id,
+                resource_id,
+                timestamp(1_700_000_300),
+            ),
+            surface_binding(
+                Uuid::from_u128(0xb231),
+                alias_logical_name_id,
+                resource_id,
+                timestamp(1_700_000_301),
+            ),
+        ],
+    )
+    .await?;
+
+    bigname_storage::upsert_raw_blocks(
+        &database.pool,
+        &[
+            raw_block("ethereum-mainnet", "0x330", None, 330, 1_700_000_330),
+            raw_block(
+                "ethereum-mainnet",
+                "0x331",
+                Some("0x330"),
+                331,
+                1_700_000_331,
+            ),
+            raw_block(
+                "ethereum-mainnet",
+                "0x332",
+                Some("0x331"),
+                332,
+                1_700_000_332,
+            ),
+        ],
+    )
+    .await?;
+
+    bigname_storage::upsert_normalized_events(
+        &database.pool,
+        &[
+            history_event(
+                "surface-primary",
+                Some(primary_logical_name_id),
+                None,
+                Some("ethereum-mainnet"),
+                Some(330),
+                Some("0x330"),
+                Some("0xtx330"),
+                Some(0),
+                CanonicalityState::Canonical,
+            ),
+            history_event(
+                "surface-alias",
+                Some(alias_logical_name_id),
+                None,
+                Some("ethereum-mainnet"),
+                Some(331),
+                Some("0x331"),
+                Some("0xtx331"),
+                Some(0),
+                CanonicalityState::Canonical,
+            ),
+            history_event(
+                "resource-anchor",
+                None,
+                Some(resource_id),
+                Some("ethereum-mainnet"),
+                Some(332),
+                Some("0x332"),
+                Some("0xtx332"),
+                Some(0),
+                CanonicalityState::Canonical,
+            ),
+        ],
+    )
+    .await?;
+
+    let surface_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(&format!(
+                    "/v1/history/resources/{resource_id}?scope=surface"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("resource surface-scope history request failed")?;
+    let surface_payload: HistoryResponse = read_json(surface_response).await?;
+    assert_eq!(
+        history_event_identities(&surface_payload),
+        vec!["surface-alias", "surface-primary"]
+    );
+
+    let both_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(&format!("/v1/history/resources/{resource_id}?scope=both"))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("resource combined history request failed")?;
+    let both_payload: HistoryResponse = read_json(both_response).await?;
+    assert_eq!(
+        history_event_identities(&both_payload),
+        vec!["resource-anchor", "surface-alias", "surface-primary"]
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_resource_history_returns_not_found_when_anchor_is_missing() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let resource_id = Uuid::from_u128(0xa999);
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(&format!("/v1/history/resources/{resource_id}"))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("resource history request failed")?;
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let payload: ErrorResponse = read_json(response).await?;
+    assert_eq!(payload.error.code, "not_found");
+    assert_eq!(
+        payload.error.message,
+        format!("resource {resource_id} was not found")
     );
     assert!(payload.error.details.is_empty());
 

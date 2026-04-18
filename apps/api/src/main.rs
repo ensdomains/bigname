@@ -6,7 +6,7 @@ use std::{
 use anyhow::{Context, Result};
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::get,
@@ -15,13 +15,18 @@ use bigname_manifests::{
     ActiveManifestVersion, CapabilityFlag, NamespaceManifestSnapshot,
     load_namespace_manifest_snapshot,
 };
-use bigname_storage::{DatabaseConfig, NameCurrentRow, load_name_current};
+use bigname_storage::{
+    DatabaseConfig, HistoryEvent, HistoryScope, NameCurrentRow, load_name_current,
+    load_name_history, load_name_surface, load_resource, load_resource_history,
+    load_surface_bindings_by_logical_name_id, load_surface_bindings_by_resource_id,
+};
 use clap::{Args, Parser, Subcommand};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use sqlx::{
     PgPool,
     types::{
-        JsonValue,
+        JsonValue, Uuid,
         time::{OffsetDateTime, UtcOffset},
     },
 };
@@ -154,6 +159,32 @@ struct NameResponse {
     chain_positions: JsonValue,
     consistency: String,
     last_updated: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+struct HistoryQuery {
+    scope: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct HistoryResponse {
+    data: Vec<JsonValue>,
+    declared_state: JsonValue,
+    verified_state: Option<()>,
+    provenance: JsonValue,
+    coverage: CoverageResponse,
+    chain_positions: JsonValue,
+    page: HistoryPageResponse,
+    consistency: String,
+    last_updated: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct HistoryPageResponse {
+    cursor: Option<String>,
+    next_cursor: Option<String>,
+    page_size: u64,
+    sort: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -294,6 +325,8 @@ fn app_router(state: AppState) -> Router {
         .route("/healthz", get(health))
         .route("/v1/namespaces/{namespace}", get(namespace_metadata))
         .route("/v1/names/{namespace}/{name}", get(name_current))
+        .route("/v1/history/names/{namespace}/{name}", get(name_history))
+        .route("/v1/history/resources/{resource_id}", get(resource_history))
         .route("/v1/manifests/{namespace}", get(namespace_manifests))
         .with_state(state)
 }
@@ -386,6 +419,111 @@ async fn name_current(
     };
 
     Ok(Json(build_name_response(row)))
+}
+
+async fn name_history(
+    Path((namespace, name)): Path<(String, String)>,
+    Query(query): Query<HistoryQuery>,
+    State(state): State<AppState>,
+) -> ApiResult<Json<HistoryResponse>> {
+    ensure_public_namespace(&namespace)?;
+
+    let scope = parse_history_scope(query.scope.as_deref())?;
+    let logical_name_id = format!("{namespace}:{name}");
+    let surface = load_name_surface(&state.pool, &logical_name_id)
+        .await
+        .map_err(|load_error| {
+            error!(
+                service = "api",
+                namespace = %namespace,
+                name = %name,
+                logical_name_id = %logical_name_id,
+                error = ?load_error,
+                "failed to load name surface for history route"
+            );
+            ApiError::internal_error(format!(
+                "failed to load history for name {namespace}/{name}"
+            ))
+        })?;
+
+    let Some(_surface) = surface else {
+        return Err(ApiError {
+            status: StatusCode::NOT_FOUND,
+            code: "not_found",
+            message: format!("name {name} was not found in namespace {namespace}"),
+        });
+    };
+
+    let resource_ids = resource_ids_for_name(&state.pool, &logical_name_id).await?;
+    let rows = load_name_history(&state.pool, &logical_name_id, &resource_ids, scope, true)
+        .await
+        .map_err(|load_error| {
+            error!(
+                service = "api",
+                namespace = %namespace,
+                name = %name,
+                logical_name_id = %logical_name_id,
+                resource_ids = ?resource_ids,
+                scope = scope.as_str(),
+                error = ?load_error,
+                "failed to load name history"
+            );
+            ApiError::internal_error(format!(
+                "failed to load history for name {namespace}/{name}"
+            ))
+        })?;
+
+    Ok(Json(build_history_response(rows, scope)))
+}
+
+async fn resource_history(
+    Path(resource_id): Path<String>,
+    Query(query): Query<HistoryQuery>,
+    State(state): State<AppState>,
+) -> ApiResult<Json<HistoryResponse>> {
+    let scope = parse_history_scope(query.scope.as_deref())?;
+    let resource_id = Uuid::parse_str(&resource_id).map_err(|_| ApiError {
+        status: StatusCode::BAD_REQUEST,
+        code: "invalid_input",
+        message: "resource_id must be a UUID".to_owned(),
+    })?;
+
+    let resource = load_resource(&state.pool, resource_id)
+        .await
+        .map_err(|load_error| {
+            error!(
+                service = "api",
+                resource_id = %resource_id,
+                error = ?load_error,
+                "failed to load resource for history route"
+            );
+            ApiError::internal_error(format!("failed to load history for resource {resource_id}"))
+        })?;
+
+    let Some(_resource) = resource else {
+        return Err(ApiError {
+            status: StatusCode::NOT_FOUND,
+            code: "not_found",
+            message: format!("resource {resource_id} was not found"),
+        });
+    };
+
+    let logical_name_ids = logical_name_ids_for_resource(&state.pool, resource_id).await?;
+    let rows = load_resource_history(&state.pool, resource_id, &logical_name_ids, scope, true)
+        .await
+        .map_err(|load_error| {
+            error!(
+                service = "api",
+                resource_id = %resource_id,
+                logical_name_ids = ?logical_name_ids,
+                scope = scope.as_str(),
+                error = ?load_error,
+                "failed to load resource history"
+            );
+            ApiError::internal_error(format!("failed to load history for resource {resource_id}"))
+        })?;
+
+    Ok(Json(build_history_response(rows, scope)))
 }
 
 fn build_namespace_metadata_response(
@@ -487,6 +625,32 @@ fn build_name_response(row: NameCurrentRow) -> NameResponse {
         chain_positions: ensure_object(&row.chain_positions),
         consistency: canonicality_consistency(&row.canonicality_summary).to_owned(),
         last_updated: format_timestamp(row.last_recomputed_at),
+    }
+}
+
+fn build_history_response(rows: Vec<HistoryEvent>, scope: HistoryScope) -> HistoryResponse {
+    let last_updated = rows
+        .iter()
+        .filter_map(|row| row.block_timestamp)
+        .max()
+        .map(format_timestamp)
+        .unwrap_or_else(|| format_timestamp(OffsetDateTime::now_utc()));
+
+    HistoryResponse {
+        data: rows.iter().map(build_history_item).collect(),
+        declared_state: empty_object(),
+        verified_state: None,
+        provenance: build_history_provenance(&rows),
+        coverage: build_history_coverage(scope),
+        chain_positions: build_history_chain_positions(&rows),
+        page: HistoryPageResponse {
+            cursor: None,
+            next_cursor: None,
+            page_size: 50,
+            sort: "chain_position_desc".to_owned(),
+        },
+        consistency: "head".to_owned(),
+        last_updated,
     }
 }
 
@@ -685,6 +849,167 @@ fn canonicality_consistency(canonicality_summary: &JsonValue) -> &'static str {
     }
 }
 
+fn build_history_item(row: &HistoryEvent) -> JsonValue {
+    let mut value = empty_object();
+    insert_string_field(
+        &mut value,
+        "normalized_event_id",
+        row.normalized_event_id.to_string(),
+    );
+    insert_string_field(&mut value, "event_identity", row.event_identity.clone());
+    insert_string_field(&mut value, "namespace", row.namespace.clone());
+    insert_optional_string_field(&mut value, "logical_name_id", row.logical_name_id.clone());
+    insert_optional_string_field(
+        &mut value,
+        "resource_id",
+        row.resource_id.map(|resource_id| resource_id.to_string()),
+    );
+    insert_string_field(&mut value, "event_kind", row.event_kind.clone());
+    insert_string_field(&mut value, "source_family", row.source_family.clone());
+    insert_value_field(
+        &mut value,
+        "manifest_version",
+        JsonValue::Number(row.manifest_version.into()),
+    );
+    insert_value_field(
+        &mut value,
+        "source_manifest_id",
+        row.source_manifest_id
+            .map(|source_manifest_id| JsonValue::Number(source_manifest_id.into()))
+            .unwrap_or(JsonValue::Null),
+    );
+    insert_value_field(
+        &mut value,
+        "chain_position",
+        build_history_chain_position(row),
+    );
+    insert_nullable_string_field(&mut value, "transaction_hash", row.transaction_hash.clone());
+    insert_value_field(
+        &mut value,
+        "log_index",
+        row.log_index
+            .map(|log_index| JsonValue::Number(log_index.into()))
+            .unwrap_or(JsonValue::Null),
+    );
+    insert_value_field(&mut value, "raw_fact_ref", row.raw_fact_ref.clone());
+    insert_string_field(&mut value, "derivation_kind", row.derivation_kind.clone());
+    insert_string_field(
+        &mut value,
+        "canonicality_state",
+        row.canonicality_state.as_str().to_owned(),
+    );
+    insert_value_field(&mut value, "before_state", row.before_state.clone());
+    insert_value_field(&mut value, "after_state", row.after_state.clone());
+    insert_value_field(&mut value, "provenance", ensure_object(&row.provenance));
+    insert_value_field(&mut value, "coverage", build_name_coverage(&row.coverage));
+    value
+}
+
+fn build_history_provenance(rows: &[HistoryEvent]) -> JsonValue {
+    let mut value = empty_object();
+    insert_value_field(
+        &mut value,
+        "normalized_event_ids",
+        JsonValue::Array(
+            rows.iter()
+                .map(|row| JsonValue::String(row.normalized_event_id.to_string()))
+                .collect(),
+        ),
+    );
+    insert_value_field(
+        &mut value,
+        "raw_fact_refs",
+        dedupe_json_values(rows.iter().map(|row| row.raw_fact_ref.clone())),
+    );
+    insert_value_field(
+        &mut value,
+        "manifest_versions",
+        dedupe_json_values(rows.iter().map(history_manifest_version)),
+    );
+    insert_value_field(&mut value, "execution_trace_id", JsonValue::Null);
+    insert_string_field(
+        &mut value,
+        "derivation_kind",
+        "normalized_event_history".to_owned(),
+    );
+    value
+}
+
+fn build_history_coverage(scope: HistoryScope) -> CoverageResponse {
+    CoverageResponse {
+        status: "full".to_owned(),
+        exhaustiveness: "authoritative".to_owned(),
+        source_classes_considered: vec!["normalized_events".to_owned()],
+        enumeration_basis: format!(
+            "canonical normalized-event history for the requested {} scope",
+            scope.as_str()
+        ),
+        unsupported_reason: None,
+    }
+}
+
+fn build_history_chain_positions(rows: &[HistoryEvent]) -> JsonValue {
+    let mut chain_positions = BTreeMap::<String, ChainPositionResponse>::new();
+    for row in rows {
+        let (Some(chain_id), Some(block_number), Some(block_hash), Some(timestamp)) = (
+            row.chain_id.as_ref(),
+            row.block_number,
+            row.block_hash.as_ref(),
+            row.block_timestamp,
+        ) else {
+            continue;
+        };
+
+        let key = chain_position_key(chain_id);
+        let candidate = ChainPositionResponse {
+            chain_id: chain_id.clone(),
+            block_number,
+            block_hash: block_hash.clone(),
+            timestamp: format_timestamp(timestamp),
+        };
+
+        match chain_positions.get(&key) {
+            Some(existing)
+                if existing.block_number > candidate.block_number
+                    || (existing.block_number == candidate.block_number
+                        && existing.block_hash >= candidate.block_hash) => {}
+            _ => {
+                chain_positions.insert(key, candidate);
+            }
+        }
+    }
+
+    serde_json::to_value(chain_positions).expect("history chain positions must serialize")
+}
+
+fn build_history_chain_position(row: &HistoryEvent) -> JsonValue {
+    match (
+        row.chain_id.as_ref(),
+        row.block_number,
+        row.block_hash.as_ref(),
+        row.block_timestamp,
+    ) {
+        (Some(chain_id), Some(block_number), Some(block_hash), Some(timestamp)) => json!({
+            "chain_id": chain_id,
+            "block_number": block_number,
+            "block_hash": block_hash,
+            "timestamp": format_timestamp(timestamp),
+        }),
+        _ => JsonValue::Null,
+    }
+}
+
+fn dedupe_json_values(values: impl Iterator<Item = JsonValue>) -> JsonValue {
+    let mut deduped = Vec::new();
+    for value in values {
+        if !deduped.contains(&value) {
+            deduped.push(value);
+        }
+    }
+
+    JsonValue::Array(deduped)
+}
+
 fn provenance_field<'a>(value: &'a JsonValue, key: &str) -> Option<&'a JsonValue> {
     value.as_object().and_then(|object| object.get(key))
 }
@@ -787,6 +1112,81 @@ fn insert_value_field(object: &mut JsonValue, key: &str, value: JsonValue) {
         .as_object_mut()
         .expect("object helper must receive object")
         .insert(key.to_owned(), value);
+}
+
+fn parse_history_scope(scope: Option<&str>) -> ApiResult<HistoryScope> {
+    match scope.unwrap_or("both") {
+        "surface" => Ok(HistoryScope::Surface),
+        "resource" => Ok(HistoryScope::Resource),
+        "both" => Ok(HistoryScope::Both),
+        _ => Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            code: "invalid_input",
+            message: "scope must be one of: surface, resource, both".to_owned(),
+        }),
+    }
+}
+
+async fn resource_ids_for_name(pool: &PgPool, logical_name_id: &str) -> ApiResult<Vec<Uuid>> {
+    let bindings = load_surface_bindings_by_logical_name_id(pool, logical_name_id)
+        .await
+        .map_err(|load_error| {
+            error!(
+                service = "api",
+                logical_name_id = %logical_name_id,
+                error = ?load_error,
+                "failed to load surface bindings for name history"
+            );
+            ApiError::internal_error(format!(
+                "failed to load history bindings for logical name {logical_name_id}"
+            ))
+        })?;
+
+    Ok(bindings
+        .into_iter()
+        .map(|binding| binding.resource_id)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect())
+}
+
+async fn logical_name_ids_for_resource(pool: &PgPool, resource_id: Uuid) -> ApiResult<Vec<String>> {
+    let bindings = load_surface_bindings_by_resource_id(pool, resource_id)
+        .await
+        .map_err(|load_error| {
+            error!(
+                service = "api",
+                resource_id = %resource_id,
+                error = ?load_error,
+                "failed to load surface bindings for resource history"
+            );
+            ApiError::internal_error(format!(
+                "failed to load history bindings for resource {resource_id}"
+            ))
+        })?;
+
+    Ok(bindings
+        .into_iter()
+        .map(|binding| binding.logical_name_id)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect())
+}
+
+fn chain_position_key(chain_id: &str) -> String {
+    match chain_id {
+        "ethereum-mainnet" => "ethereum".to_owned(),
+        "base-mainnet" => "base".to_owned(),
+        other => other.to_owned(),
+    }
+}
+
+fn history_manifest_version(row: &HistoryEvent) -> JsonValue {
+    json!({
+        "manifest_version": row.manifest_version,
+        "source_family": row.source_family.clone(),
+        "source_manifest_id": row.source_manifest_id,
+    })
 }
 
 fn ensure_public_namespace(namespace: &str) -> ApiResult<()> {

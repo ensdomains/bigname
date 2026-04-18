@@ -2,6 +2,7 @@
 
 mod checkpoints;
 mod execution;
+mod history;
 mod identity;
 mod lineage;
 mod name_current;
@@ -23,6 +24,7 @@ pub use checkpoints::{
 pub use execution::{
     ExecutionTrace, ExecutionTraceStep, load_execution_trace, upsert_execution_trace,
 };
+pub use history::{HistoryEvent, HistoryScope, load_name_history, load_resource_history};
 pub use identity::{
     IdentityOrphanCounts, NameSurface, Resource, SurfaceBinding, SurfaceBindingKind, TokenLineage,
     load_name_surface, load_name_surface_including_noncanonical, load_resource,
