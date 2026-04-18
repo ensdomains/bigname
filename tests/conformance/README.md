@@ -110,3 +110,9 @@ Execution notes:
   sections; the `surface-binding` explain contract also verifies that `declared_state.history`
   remains the shipped exact-name head-pointer link into the dedicated history routes instead of a
   separate history explain endpoint
+- resolution execution explain conformance reuses that exact-name rebuild seed, inserts persisted
+  execution trace/outcome rows directly, and covers
+  `GET /v1/explain/resolutions/{namespace}/{name}/execution`, asserting shared top-level envelope
+  invariants with `GET /v1/resolutions/{namespace}/{name}`, request-order preservation for
+  `verified_queries`, presence of the persisted execution summary, and `404 not_found` when the
+  current exact surface has no persisted answer for the requested selector set

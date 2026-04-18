@@ -24,9 +24,11 @@ mod shipped_api {
             response::Response,
         };
         use bigname_storage::{
-            CanonicalityState, NameSurface, NormalizedEvent, PermissionScope,
+            CanonicalityState, ExecutionCacheKey, ExecutionOutcome, ExecutionTrace,
+            ExecutionTraceStep, NameSurface, NormalizedEvent, PermissionScope,
             PermissionsCurrentRow, RawBlock, RecordInventoryCurrentRow, ResolverCurrentRow,
             Resource, SurfaceBinding, SurfaceBindingKind, TokenLineage, default_database_url,
+            upsert_execution_outcome, upsert_execution_trace,
         };
         use serde::de::DeserializeOwned;
         use serde_json::{Value, json};
@@ -2558,6 +2560,223 @@ mod shipped_api {
         }
 
         #[tokio::test]
+        async fn resolution_execution_explain_contract_reads_persisted_answer_and_reuses_resolution_envelope()
+        -> Result<()> {
+            let database = HarnessDatabase::new().await?;
+            let logical_name_id = "ens:alice.eth";
+            let resource_id = Uuid::from_u128(0x2200);
+            let token_lineage_id = Uuid::from_u128(0x1100);
+            let surface_binding_id = Uuid::from_u128(0x3300);
+            let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000021);
+
+            database
+                .seed_exact_name_rebuild_inputs(
+                    logical_name_id,
+                    resource_id,
+                    token_lineage_id,
+                    surface_binding_id,
+                )
+                .await?;
+            database.rebuild_name_current(logical_name_id).await?;
+            database
+                .insert_record_inventory_current_row(resolution_record_inventory_current_row(
+                    logical_name_id,
+                    resource_id,
+                ))
+                .await?;
+
+            let name_row = bigname_storage::load_name_current(&database.pool, logical_name_id)
+                .await?
+                .context("resolution execution explain requires an exact-name current row")?;
+            let record_inventory_row =
+                resolution_record_inventory_current_row(logical_name_id, resource_id);
+            let explain_records = parse_resolution_record_keys(
+                Some("text:com.twitter,addr:60"),
+                ResolutionMode::Verified,
+            )
+            .map_err(|error| anyhow::anyhow!(error.message))?;
+            let cache_key = build_resolution_execution_cache_key(
+                &name_row,
+                &explain_records,
+                Some(&record_inventory_row),
+            )?;
+            let request_key = cache_key.request_key.clone();
+            let persisted_verified_queries = resolution_execution_verified_queries(
+                execution_trace_id,
+                &["addr:60", "text:com.twitter"],
+            );
+
+            upsert_execution_trace(
+                &database.pool,
+                &resolution_execution_trace(
+                    execution_trace_id,
+                    &request_key,
+                    &["addr:60", "text:com.twitter"],
+                    persisted_verified_queries.clone(),
+                ),
+            )
+            .await?;
+            upsert_execution_outcome(
+                &database.pool,
+                &resolution_execution_outcome(
+                    execution_trace_id,
+                    cache_key,
+                    persisted_verified_queries,
+                ),
+            )
+            .await?;
+
+            let explain_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(
+                            "/v1/explain/resolutions/ens/alice.eth/execution?records=text:com.twitter,addr:60",
+                        )
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("resolution execution explain request failed")?;
+            let resolution_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(
+                            "/v1/resolutions/ens/alice.eth?mode=verified&records=text:com.twitter,addr:60",
+                        )
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("resolution request failed")?;
+
+            assert_eq!(explain_response.status(), StatusCode::OK);
+            assert_eq!(resolution_response.status(), StatusCode::OK);
+
+            let explain_payload: ResolutionResponse = read_json(explain_response).await?;
+            let resolution_payload: ResolutionResponse = read_json(resolution_response).await?;
+            let expected_verified_queries = resolution_execution_verified_queries(
+                execution_trace_id,
+                &["text:com.twitter", "addr:60"],
+            );
+
+            assert_eq!(explain_payload.data, resolution_payload.data);
+            assert_eq!(explain_payload.coverage, resolution_payload.coverage);
+            assert_eq!(
+                explain_payload.chain_positions,
+                resolution_payload.chain_positions
+            );
+            assert_eq!(explain_payload.consistency, resolution_payload.consistency);
+            assert_eq!(
+                explain_payload.last_updated,
+                resolution_payload.last_updated
+            );
+            assert_eq!(
+                explain_payload.provenance.get("execution_trace_id"),
+                Some(&Value::String(execution_trace_id.to_string()))
+            );
+            assert_eq!(explain_payload.declared_state, None);
+            assert_eq!(
+                explain_payload.verified_state,
+                Some(json!({
+                    "execution": resolution_execution_summary(execution_trace_id, resource_id),
+                    "verified_queries": expected_verified_queries,
+                }))
+            );
+
+            database.cleanup().await?;
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn resolution_execution_explain_contract_returns_not_found_for_selector_set_cache_miss()
+        -> Result<()> {
+            let database = HarnessDatabase::new().await?;
+            let logical_name_id = "ens:alice.eth";
+            let resource_id = Uuid::from_u128(0x2200);
+            let token_lineage_id = Uuid::from_u128(0x1100);
+            let surface_binding_id = Uuid::from_u128(0x3300);
+            let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000022);
+
+            database
+                .seed_exact_name_rebuild_inputs(
+                    logical_name_id,
+                    resource_id,
+                    token_lineage_id,
+                    surface_binding_id,
+                )
+                .await?;
+            database.rebuild_name_current(logical_name_id).await?;
+            database
+                .insert_record_inventory_current_row(resolution_record_inventory_current_row(
+                    logical_name_id,
+                    resource_id,
+                ))
+                .await?;
+
+            let name_row = bigname_storage::load_name_current(&database.pool, logical_name_id)
+                .await?
+                .context("resolution execution explain requires an exact-name current row")?;
+            let record_inventory_row =
+                resolution_record_inventory_current_row(logical_name_id, resource_id);
+            let persisted_records =
+                parse_resolution_record_keys(Some("addr:60"), ResolutionMode::Verified)
+                    .map_err(|error| anyhow::anyhow!(error.message))?;
+            let cache_key = build_resolution_execution_cache_key(
+                &name_row,
+                &persisted_records,
+                Some(&record_inventory_row),
+            )?;
+            let request_key = cache_key.request_key.clone();
+            let persisted_verified_queries =
+                resolution_execution_verified_queries(execution_trace_id, &["addr:60"]);
+
+            upsert_execution_trace(
+                &database.pool,
+                &resolution_execution_trace(
+                    execution_trace_id,
+                    &request_key,
+                    &["addr:60"],
+                    persisted_verified_queries.clone(),
+                ),
+            )
+            .await?;
+            upsert_execution_outcome(
+                &database.pool,
+                &resolution_execution_outcome(
+                    execution_trace_id,
+                    cache_key,
+                    persisted_verified_queries,
+                ),
+            )
+            .await?;
+
+            let response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(
+                            "/v1/explain/resolutions/ens/alice.eth/execution?records=text:com.twitter,addr:60",
+                        )
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("resolution execution explain request failed")?;
+
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+            let payload: ErrorResponse = read_json(response).await?;
+            assert_eq!(payload.error.code, "not_found");
+            assert_eq!(
+                payload.error.message,
+                "persisted resolution execution explain was not found for name alice.eth in namespace ens"
+            );
+            assert!(payload.error.details.is_empty());
+
+            database.cleanup().await?;
+            Ok(())
+        }
+
+        #[tokio::test]
         async fn resolver_overview_contract_returns_declared_state_with_shared_projection_envelope()
         -> Result<()> {
             let database = HarnessDatabase::new().await?;
@@ -3014,7 +3233,9 @@ mod shipped_api {
                 "coin_type": "60",
             });
 
-            database.seed_primary_name_reverse_changed(address, "60").await?;
+            database
+                .seed_primary_name_reverse_changed(address, "60")
+                .await?;
             database
                 .rebuild_primary_names_current(address, "ens", "60")
                 .await?;
@@ -3197,7 +3418,9 @@ mod shipped_api {
                 "coin_type": "60",
             });
 
-            database.seed_primary_name_reverse_changed(address, "60").await?;
+            database
+                .seed_primary_name_reverse_changed(address, "60")
+                .await?;
             database
                 .rebuild_primary_names_current(address, "ens", "60")
                 .await?;
@@ -5748,6 +5971,206 @@ mod shipped_api {
                         })
                     })
                     .collect::<Vec<_>>()
+            })
+        }
+
+        fn resolution_execution_verified_queries(
+            execution_trace_id: Uuid,
+            record_keys: &[&str],
+        ) -> Value {
+            json!(
+                record_keys
+                    .iter()
+                    .map(|record_key| match *record_key {
+                        "addr:60" => json!({
+                            "record_key": "addr:60",
+                            "status": "success",
+                            "value": {
+                                "coin_type": "60",
+                                "value": "0x00000000000000000000000000000000000000aa",
+                            },
+                            "provenance": {
+                                "execution_trace_id": execution_trace_id.to_string(),
+                            }
+                        }),
+                        "text:com.twitter" => json!({
+                            "record_key": "text:com.twitter",
+                            "status": "not_found",
+                            "failure_reason": "no_text_record",
+                            "provenance": {
+                                "execution_trace_id": execution_trace_id.to_string(),
+                            }
+                        }),
+                        unexpected => panic!(
+                            "unexpected persisted verified resolution selector {unexpected}"
+                        ),
+                    })
+                    .collect::<Vec<_>>()
+            )
+        }
+
+        fn resolution_execution_trace(
+            execution_trace_id: Uuid,
+            request_key: &str,
+            request_record_keys: &[&str],
+            verified_queries: Value,
+        ) -> ExecutionTrace {
+            ExecutionTrace {
+                execution_trace_id,
+                request_type: "verified_resolution".to_owned(),
+                request_key: request_key.to_owned(),
+                namespace: "ens".to_owned(),
+                chain_context: json!({
+                    "requested_positions": [{
+                        "chain_id": "ethereum-mainnet",
+                        "block_number": 106,
+                        "block_hash": "0xhistorysurface",
+                    }],
+                }),
+                manifest_context: json!({
+                    "manifest_versions": [{
+                        "source_family": "ens_execution",
+                        "manifest_version": 5,
+                    }]
+                }),
+                contracts_called: json!([
+                    {
+                        "chain_id": "ethereum-mainnet",
+                        "contract_address": "0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe",
+                        "selector": "0x9061b923",
+                    }
+                ]),
+                gateway_digests: json!([]),
+                final_payload: Some(json!({
+                    "verified_queries": verified_queries.clone(),
+                })),
+                failure_payload: None,
+                request_metadata: json!({
+                    "surface": "alice.eth",
+                    "record_keys": request_record_keys,
+                    "entrypoint": "universal_resolver",
+                    "contract_address": "0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe",
+                }),
+                finished_at: Some(timestamp(1_717_171_900)),
+                steps: vec![
+                    ExecutionTraceStep {
+                        step_index: 0,
+                        step_kind: "load_declared_topology".to_owned(),
+                        input_digest: Some("sha256:topology-input".to_owned()),
+                        output_digest: Some("sha256:topology-output".to_owned()),
+                        latency_ms: Some(4),
+                        canonicality_dependency: json!({
+                            "ethereum-mainnet": {
+                                "block_hash": "0xbinding",
+                                "block_number": 21_000_003,
+                                "state": "finalized",
+                            }
+                        }),
+                        step_payload: json!({
+                            "entrypoint": "universal_resolver",
+                            "resolver": "0x0000000000000000000000000000000000000abc",
+                        }),
+                    },
+                    ExecutionTraceStep {
+                        step_index: 1,
+                        step_kind: "call_universal_resolver".to_owned(),
+                        input_digest: Some("sha256:resolver-input".to_owned()),
+                        output_digest: Some("sha256:resolver-output".to_owned()),
+                        latency_ms: Some(28),
+                        canonicality_dependency: json!({
+                            "ethereum-mainnet": {
+                                "block_hash": "0xbinding",
+                                "block_number": 21_000_003,
+                                "state": "finalized",
+                            }
+                        }),
+                        step_payload: json!({
+                            "name": "alice.eth",
+                            "record_count": request_record_keys.len(),
+                        }),
+                    },
+                ],
+            }
+        }
+
+        fn resolution_execution_outcome(
+            execution_trace_id: Uuid,
+            cache_key: ExecutionCacheKey,
+            verified_queries: Value,
+        ) -> ExecutionOutcome {
+            ExecutionOutcome {
+                cache_key,
+                execution_trace_id,
+                request_type: "verified_resolution".to_owned(),
+                namespace: "ens".to_owned(),
+                outcome_payload: Some(json!({
+                    "verified_queries": verified_queries,
+                })),
+                failure_payload: None,
+                finished_at: timestamp(1_717_171_900),
+            }
+        }
+
+        fn resolution_execution_summary(execution_trace_id: Uuid, resource_id: Uuid) -> Value {
+            json!({
+                "execution_trace_id": execution_trace_id.to_string(),
+                "selected_entrypoint": {
+                    "source_family": "ens_execution",
+                    "role": "universal_resolver",
+                    "chain_id": "ethereum-mainnet",
+                    "contract_address": "0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe",
+                },
+                "resolver_discovery_path": [
+                    {
+                        "logical_name_id": "ens:alice.eth",
+                        "namespace": "ens",
+                        "normalized_name": "alice.eth",
+                        "canonical_display_name": "Alice.eth",
+                        "resource_id": resource_id.to_string(),
+                        "chain_id": "ethereum-mainnet",
+                        "address": "0x0000000000000000000000000000000000000abc",
+                        "latest_event_kind": "ResolverChanged",
+                    }
+                ],
+                "wildcard": {
+                    "source": null,
+                    "matched_labels": [],
+                },
+                "alias": {
+                    "final_target": null,
+                    "hops": [],
+                },
+                "steps": [
+                    {
+                        "step_index": 0,
+                        "step_kind": "load_declared_topology",
+                        "input_digest": "sha256:topology-input",
+                        "output_digest": "sha256:topology-output",
+                        "latency": 4,
+                        "canonicality_dependency": {
+                            "ethereum-mainnet": {
+                                "block_hash": "0xbinding",
+                                "block_number": 21_000_003,
+                                "state": "finalized",
+                            }
+                        }
+                    },
+                    {
+                        "step_index": 1,
+                        "step_kind": "call_universal_resolver",
+                        "input_digest": "sha256:resolver-input",
+                        "output_digest": "sha256:resolver-output",
+                        "latency": 28,
+                        "canonicality_dependency": {
+                            "ethereum-mainnet": {
+                                "block_hash": "0xbinding",
+                                "block_number": 21_000_003,
+                                "state": "finalized",
+                            }
+                        }
+                    }
+                ],
+                "finished_at": format_timestamp(timestamp(1_717_171_900)),
             })
         }
 
