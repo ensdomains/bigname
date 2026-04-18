@@ -8,6 +8,9 @@ collections:
 - `GET /v1/names/{namespace}/{name}/children`
 - `GET /v1/addresses/{address}/names`
 - `GET /v1/names/{namespace}/{name}`
+- `GET /v1/coverage/{namespace}/{name}`
+- `GET /v1/resources/{resource_id}/permissions`
+- `GET /v1/resolvers/{chain_id}/{resolver_address}`
 - `GET /v1/history/names/{namespace}/{name}`
 - `GET /v1/history/resources/{resource_id}`
 
@@ -38,3 +41,12 @@ Execution notes:
   surfaces, resources, token lineage, and bindings; the harness covers the base
   `GET /v1/addresses/{address}/names` response plus shipped `namespace`, `relation`, and
   `dedupe_by` query handling
+- the coverage contract reuses the exact-name projection seed and asserts that
+  `GET /v1/coverage/{namespace}/{name}` preserves the shipped name payload envelope while moving
+  the explain block into `declared_state`
+- the resource-permissions contract seeds `permissions_current` rows and covers both the base
+  `GET /v1/resources/{resource_id}/permissions` collection response and the shipped `subject` and
+  `scope` query filters
+- the resolver-overview contract seeds `resolver_current` rows and asserts the shipped declared
+  summary sections, projection provenance, coverage, and lowercase address normalization for
+  `GET /v1/resolvers/{chain_id}/{resolver_address}`

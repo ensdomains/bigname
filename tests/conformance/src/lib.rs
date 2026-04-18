@@ -18,7 +18,8 @@ mod shipped_api {
             response::Response,
         };
         use bigname_storage::{
-            CanonicalityState, NameSurface, NormalizedEvent, RawBlock, Resource, SurfaceBinding,
+            CanonicalityState, NameSurface, NormalizedEvent, PermissionScope,
+            PermissionsCurrentRow, RawBlock, ResolverCurrentRow, Resource, SurfaceBinding,
             SurfaceBindingKind, TokenLineage, default_database_url,
         };
         use serde::de::DeserializeOwned;
@@ -1215,6 +1216,444 @@ mod shipped_api {
         }
 
         #[tokio::test]
+        async fn coverage_contract_returns_declared_state_explain_with_shared_top_level_coverage()
+        -> Result<()> {
+            let database = HarnessDatabase::new().await?;
+            let logical_name_id = "ens:alice.eth";
+            let resource_id = Uuid::from_u128(0x2200);
+            let token_lineage_id = Uuid::from_u128(0x1100);
+            let surface_binding_id = Uuid::from_u128(0x3300);
+
+            database
+                .seed_name_current_binding(
+                    logical_name_id,
+                    resource_id,
+                    token_lineage_id,
+                    surface_binding_id,
+                )
+                .await?;
+            database
+                .insert_name_current_row(exact_name_row(
+                    logical_name_id,
+                    surface_binding_id,
+                    resource_id,
+                    token_lineage_id,
+                ))
+                .await?;
+
+            let coverage_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri("/v1/coverage/ens/alice.eth")
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("coverage request failed")?;
+            let name_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri("/v1/names/ens/alice.eth")
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("name request failed")?;
+
+            assert_eq!(coverage_response.status(), StatusCode::OK);
+            assert_eq!(name_response.status(), StatusCode::OK);
+
+            let coverage_payload: NameResponse = read_json(coverage_response).await?;
+            let name_payload: NameResponse = read_json(name_response).await?;
+
+            assert_eq!(coverage_payload.data, name_payload.data);
+            assert_eq!(coverage_payload.coverage, name_payload.coverage);
+            assert_eq!(coverage_payload.provenance, name_payload.provenance);
+            assert_eq!(
+                coverage_payload.chain_positions,
+                name_payload.chain_positions
+            );
+            assert_eq!(coverage_payload.consistency, name_payload.consistency);
+            assert_eq!(coverage_payload.last_updated, name_payload.last_updated);
+            assert_eq!(coverage_payload.verified_state, None);
+            assert_eq!(
+                coverage_payload.declared_state,
+                json!({
+                    "status": "full",
+                    "exhaustiveness": "authoritative",
+                    "source_classes_considered": ["ensv1_registry_path"],
+                    "enumeration_basis": "exact_name",
+                    "unsupported_reason": null
+                })
+            );
+
+            database.cleanup().await?;
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn resolver_overview_contract_returns_declared_state_with_shared_projection_envelope()
+        -> Result<()> {
+            let database = HarnessDatabase::new().await?;
+            let chain_id = "ethereum-mainnet";
+            let resolver_address = "0x0000000000000000000000000000000000000aaa";
+
+            bigname_storage::upsert_resolver_current_rows(
+                &database.pool,
+                &[resolver_current_row(chain_id, resolver_address)],
+            )
+            .await
+            .context("failed to upsert resolver_current rows for conformance")?;
+
+            let response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri("/v1/resolvers/ethereum-mainnet/0x0000000000000000000000000000000000000AAA")
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("resolver overview request failed")?;
+
+            assert_eq!(response.status(), StatusCode::OK);
+
+            let payload: ResolverResponse = read_json(response).await?;
+            assert_eq!(
+                payload.data,
+                json!({
+                    "chain_id": chain_id,
+                    "resolver_address": resolver_address,
+                })
+            );
+            assert_eq!(
+                payload.declared_state,
+                json!({
+                    "bindings": {
+                        "status": "supported",
+                        "count": 1,
+                        "items": [{
+                            "logical_name_id": "ens:alice.eth",
+                            "canonical_display_name": "Alice.eth",
+                            "normalized_name": "alice.eth",
+                            "namehash": "namehash:alice.eth",
+                            "resource_id": "00000000-0000-0000-0000-00000000b100",
+                            "surface_binding_id": "00000000-0000-0000-0000-00000000b101",
+                            "binding_kind": "declared_registry_path",
+                        }],
+                    },
+                    "aliases": {
+                        "status": "unsupported",
+                        "unsupported_reason": "resolver alias mappings are not yet projected for the resolver_current rebuild",
+                    },
+                    "permissions": {
+                        "status": "supported",
+                        "count": 1,
+                        "items": [{
+                            "resource_id": "00000000-0000-0000-0000-00000000b100",
+                            "subject": "0x0000000000000000000000000000000000000abc",
+                            "effective_powers": ["set_resolver", "set_records"],
+                            "grant_source": {
+                                "kind": "normalized_event",
+                                "event_identity": "resolver-permission-1",
+                            },
+                            "revocation_source": null,
+                        }],
+                    },
+                    "role_holders": {
+                        "status": "supported",
+                        "count": 1,
+                        "items": [{
+                            "subject": "0x0000000000000000000000000000000000000abc",
+                            "resource_count": 1,
+                            "permission_row_count": 1,
+                            "effective_powers": ["set_records", "set_resolver"],
+                            "resource_ids": ["00000000-0000-0000-0000-00000000b100"],
+                        }],
+                    },
+                    "event_summary": {
+                        "status": "supported",
+                        "count": 2,
+                        "by_kind": {
+                            "PermissionChanged": 1,
+                            "ResolverChanged": 1,
+                        },
+                    },
+                })
+            );
+            assert_eq!(payload.verified_state, None);
+            assert_eq!(
+                payload.provenance,
+                json!({
+                    "normalized_event_ids": ["101", "202"],
+                    "raw_fact_refs": [{
+                        "kind": "raw_log",
+                        "chain_id": chain_id,
+                        "block_number": 202,
+                    }],
+                    "manifest_versions": [{
+                        "manifest_version": 7,
+                        "source_family": "ens_v2_registry_l1",
+                        "chain": chain_id,
+                        "deployment_epoch": "ens_v2",
+                    }],
+                    "execution_trace_id": null,
+                    "derivation_kind": "resolver_current_rebuild",
+                })
+            );
+            assert_eq!(
+                payload.coverage,
+                json!({
+                    "status": "full",
+                    "exhaustiveness": "authoritative",
+                    "source_classes_considered": ["ens_v2_registry_l1", "permissions_current"],
+                    "enumeration_basis": "resolver_target",
+                    "unsupported_reason": null,
+                })
+            );
+            assert_eq!(
+                payload.chain_positions,
+                json!({
+                    "ethereum": {
+                        "chain_id": chain_id,
+                        "block_number": 202,
+                        "block_hash": "0xresolverc8",
+                        "timestamp": "2026-04-17T00:00:22Z",
+                    }
+                })
+            );
+            assert_eq!(payload.consistency, "finalized");
+            assert_eq!(payload.last_updated, "2025-06-01T17:50:02Z");
+
+            database.cleanup().await?;
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn resource_permissions_contract_returns_rows_with_shared_collection_envelope()
+        -> Result<()> {
+            let database = HarnessDatabase::new().await?;
+            let resource_id = Uuid::from_u128(0xa300);
+            let filtered_subject = "0x0000000000000000000000000000000000000abc";
+            let other_subject = "0x0000000000000000000000000000000000000def";
+
+            bigname_storage::upsert_resources(&database.pool, &[resource(resource_id)])
+                .await
+                .context("failed to upsert resource for permissions conformance")?;
+            bigname_storage::upsert_permissions_current_rows(
+                &database.pool,
+                &[
+                    permission_current_row(
+                        resource_id,
+                        filtered_subject,
+                        PermissionScope::Resource,
+                        7,
+                        41,
+                    ),
+                    permission_current_row(
+                        resource_id,
+                        filtered_subject,
+                        PermissionScope::Resolver {
+                            chain_id: "ethereum-mainnet".to_owned(),
+                            resolver_address: "0x0000000000000000000000000000000000000aaa"
+                                .to_owned(),
+                        },
+                        8,
+                        42,
+                    ),
+                    permission_current_row(
+                        resource_id,
+                        other_subject,
+                        PermissionScope::Registry,
+                        9,
+                        43,
+                    ),
+                ],
+            )
+            .await
+            .context("failed to upsert permissions_current rows for conformance")?;
+
+            let response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/v1/resources/{resource_id}/permissions"))
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("resource permissions request failed")?;
+
+            assert_eq!(response.status(), StatusCode::OK);
+
+            let payload: ResourcePermissionsResponse = read_json(response).await?;
+            assert_eq!(
+                permission_subjects(&payload),
+                vec![filtered_subject, filtered_subject, other_subject]
+            );
+            assert!(payload.verified_state.is_none());
+            assert_eq!(payload.declared_state, json!({}));
+            assert_eq!(payload.page.page_size, 3);
+            assert_eq!(payload.page.sort, "subject_scope_asc");
+            assert_eq!(payload.consistency, "finalized");
+            assert_eq!(payload.coverage.status, "full");
+            assert_eq!(payload.coverage.exhaustiveness, "authoritative");
+            assert_eq!(
+                payload.coverage.source_classes_considered,
+                vec!["permissions_current".to_owned()]
+            );
+            assert_eq!(payload.coverage.enumeration_basis, "resource_permissions");
+            assert_eq!(payload.coverage.unsupported_reason, None);
+            assert_eq!(
+                payload
+                    .provenance
+                    .get("derivation_kind")
+                    .and_then(Value::as_str),
+                Some("permissions_current_rebuild")
+            );
+
+            let resource_row = payload
+                .data
+                .iter()
+                .find(|row| {
+                    row.get("scope")
+                        .and_then(|value| value.get("kind"))
+                        .and_then(Value::as_str)
+                        == Some("resource")
+                })
+                .expect("resource row");
+            assert_eq!(
+                resource_row.get("resource_id"),
+                Some(&Value::String(resource_id.to_string()))
+            );
+            assert_eq!(
+                resource_row.get("scope"),
+                Some(&json!({
+                    "kind": "resource",
+                    "detail": {},
+                }))
+            );
+            assert_eq!(
+                resource_row.get("effective_powers"),
+                Some(&json!(["set_resolver", "set_records"]))
+            );
+            assert_eq!(resource_row.get("revocation_source"), Some(&Value::Null));
+
+            let resolver_row = payload
+                .data
+                .iter()
+                .find(|row| {
+                    row.get("scope")
+                        .and_then(|value| value.get("kind"))
+                        .and_then(Value::as_str)
+                        == Some("resolver")
+                })
+                .expect("resolver row");
+            assert_eq!(
+                resolver_row.get("scope"),
+                Some(&json!({
+                    "kind": "resolver",
+                    "detail": {
+                        "chain_id": "ethereum-mainnet",
+                        "resolver_address": "0x0000000000000000000000000000000000000aaa",
+                    },
+                }))
+            );
+
+            database.cleanup().await?;
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn resource_permissions_contract_honors_subject_and_scope_filters() -> Result<()> {
+            let database = HarnessDatabase::new().await?;
+            let resource_id = Uuid::from_u128(0xa301);
+            let shared_subject = "0x0000000000000000000000000000000000000abc";
+
+            bigname_storage::upsert_resources(&database.pool, &[resource(resource_id)])
+                .await
+                .context("failed to upsert resource for permissions filter conformance")?;
+            bigname_storage::upsert_permissions_current_rows(
+                &database.pool,
+                &[
+                    permission_current_row(
+                        resource_id,
+                        shared_subject,
+                        PermissionScope::Resource,
+                        7,
+                        51,
+                    ),
+                    permission_current_row(
+                        resource_id,
+                        shared_subject,
+                        PermissionScope::Resolver {
+                            chain_id: "ethereum-mainnet".to_owned(),
+                            resolver_address: "0x0000000000000000000000000000000000000bbb"
+                                .to_owned(),
+                        },
+                        8,
+                        52,
+                    ),
+                    permission_current_row(
+                        resource_id,
+                        "0x0000000000000000000000000000000000000def",
+                        PermissionScope::Resource,
+                        9,
+                        53,
+                    ),
+                ],
+            )
+            .await
+            .context("failed to upsert permissions_current filter rows for conformance")?;
+
+            let subject_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/v1/resources/{resource_id}/permissions?subject={shared_subject}"
+                        ))
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("resource permissions subject filter request failed")?;
+            assert_eq!(subject_response.status(), StatusCode::OK);
+
+            let subject_payload: ResourcePermissionsResponse = read_json(subject_response).await?;
+            assert_eq!(
+                permission_subjects(&subject_payload),
+                vec![shared_subject, shared_subject]
+            );
+
+            let scope_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/v1/resources/{resource_id}/permissions?scope=resolver:ethereum-mainnet:0x0000000000000000000000000000000000000bbb"
+                        ))
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("resource permissions scope filter request failed")?;
+            assert_eq!(scope_response.status(), StatusCode::OK);
+
+            let scope_payload: ResourcePermissionsResponse = read_json(scope_response).await?;
+            assert_eq!(scope_payload.data.len(), 1);
+            assert_eq!(
+                scope_payload.data[0].get("scope"),
+                Some(&json!({
+                    "kind": "resolver",
+                    "detail": {
+                        "chain_id": "ethereum-mainnet",
+                        "resolver_address": "0x0000000000000000000000000000000000000bbb",
+                    },
+                }))
+            );
+
+            database.cleanup().await?;
+            Ok(())
+        }
+
+        #[tokio::test]
         async fn name_history_contract_returns_declared_rows_with_empty_declared_state()
         -> Result<()> {
             let database = HarnessDatabase::new().await?;
@@ -1650,6 +2089,91 @@ mod shipped_api {
                 .collect()
         }
 
+        fn permission_current_row(
+            resource_id: Uuid,
+            subject: &str,
+            scope: PermissionScope,
+            manifest_version: i64,
+            block_number: i64,
+        ) -> PermissionsCurrentRow {
+            PermissionsCurrentRow {
+                resource_id,
+                subject: subject.to_owned(),
+                scope,
+                effective_powers: json!([
+                    "set_resolver",
+                    if manifest_version % 2 == 0 {
+                        "create_subnames"
+                    } else {
+                        "set_records"
+                    }
+                ]),
+                grant_source: json!({
+                    "kind": "normalized_event",
+                    "manifest_version": manifest_version,
+                }),
+                revocation_source: None,
+                inheritance_path: json!([
+                    {
+                        "kind": "resource_authority",
+                        "resource_id": resource_id,
+                    }
+                ]),
+                transfer_behavior: json!({
+                    "kind": "resource_rebound",
+                }),
+                provenance: json!({
+                    "normalized_event_ids": [block_number, block_number + 1],
+                    "raw_fact_refs": [{
+                        "kind": "raw_log",
+                        "block_number": block_number,
+                    }],
+                    "manifest_versions": [{
+                        "manifest_version": manifest_version,
+                        "source_family": "ens_v2_registry_l1",
+                        "chain": "ethereum-mainnet",
+                        "deployment_epoch": "ens_v2",
+                    }],
+                    "derivation_kind": "permissions_current_rebuild",
+                }),
+                coverage: json!({
+                    "status": "full",
+                    "exhaustiveness": "authoritative",
+                    "source_classes_considered": ["permissions_current"],
+                    "enumeration_basis": "resource_permissions",
+                    "unsupported_reason": null,
+                }),
+                chain_positions: json!({
+                    "ethereum": {
+                        "chain_id": "ethereum-mainnet",
+                        "block_number": block_number,
+                        "block_hash": format!("0xperm{block_number:02x}"),
+                        "timestamp": format!("2026-04-17T00:00:{:02}Z", block_number % 60),
+                    }
+                }),
+                canonicality_summary: json!({
+                    "status": "finalized",
+                    "chains": {
+                        "ethereum-mainnet": "finalized",
+                    }
+                }),
+                manifest_version,
+                last_recomputed_at: timestamp(1_717_174_000 + block_number),
+            }
+        }
+
+        fn permission_subjects(payload: &ResourcePermissionsResponse) -> Vec<&str> {
+            payload
+                .data
+                .iter()
+                .map(|row| {
+                    row.get("subject")
+                        .and_then(Value::as_str)
+                        .expect("permission row must include subject")
+                })
+                .collect()
+        }
+
         fn collection_name_surface(
             logical_name_id: &str,
             display_name: &str,
@@ -1851,6 +2375,104 @@ mod shipped_api {
                 }),
                 manifest_version: 3,
                 last_recomputed_at: timestamp(1_717_173_000 + block_number),
+            }
+        }
+
+        fn resolver_current_row(chain_id: &str, resolver_address: &str) -> ResolverCurrentRow {
+            ResolverCurrentRow {
+                chain_id: chain_id.to_owned(),
+                resolver_address: resolver_address.to_owned(),
+                declared_summary: json!({
+                    "bindings": {
+                        "status": "supported",
+                        "count": 1,
+                        "items": [{
+                            "logical_name_id": "ens:alice.eth",
+                            "canonical_display_name": "Alice.eth",
+                            "normalized_name": "alice.eth",
+                            "namehash": "namehash:alice.eth",
+                            "resource_id": "00000000-0000-0000-0000-00000000b100",
+                            "surface_binding_id": "00000000-0000-0000-0000-00000000b101",
+                            "binding_kind": "declared_registry_path",
+                        }],
+                    },
+                    "aliases": {
+                        "status": "unsupported",
+                        "unsupported_reason": "resolver alias mappings are not yet projected for the resolver_current rebuild",
+                    },
+                    "permissions": {
+                        "status": "supported",
+                        "count": 1,
+                        "items": [{
+                            "resource_id": "00000000-0000-0000-0000-00000000b100",
+                            "subject": "0x0000000000000000000000000000000000000abc",
+                            "effective_powers": ["set_resolver", "set_records"],
+                            "grant_source": {
+                                "kind": "normalized_event",
+                                "event_identity": "resolver-permission-1",
+                            },
+                            "revocation_source": null,
+                        }],
+                    },
+                    "role_holders": {
+                        "status": "supported",
+                        "count": 1,
+                        "items": [{
+                            "subject": "0x0000000000000000000000000000000000000abc",
+                            "resource_count": 1,
+                            "permission_row_count": 1,
+                            "effective_powers": ["set_records", "set_resolver"],
+                            "resource_ids": ["00000000-0000-0000-0000-00000000b100"],
+                        }],
+                    },
+                    "event_summary": {
+                        "status": "supported",
+                        "count": 2,
+                        "by_kind": {
+                            "PermissionChanged": 1,
+                            "ResolverChanged": 1,
+                        },
+                    },
+                }),
+                provenance: json!({
+                    "normalized_event_ids": [101, 202],
+                    "raw_fact_refs": [{
+                        "kind": "raw_log",
+                        "chain_id": chain_id,
+                        "block_number": 202,
+                    }],
+                    "manifest_versions": [{
+                        "manifest_version": 7,
+                        "source_family": "ens_v2_registry_l1",
+                        "chain": chain_id,
+                        "deployment_epoch": "ens_v2",
+                    }],
+                    "execution_trace_id": null,
+                    "derivation_kind": "resolver_current_rebuild",
+                }),
+                coverage: json!({
+                    "status": "full",
+                    "exhaustiveness": "authoritative",
+                    "source_classes_considered": ["ens_v2_registry_l1", "permissions_current"],
+                    "unsupported_reason": null,
+                    "enumeration_basis": "resolver_target",
+                }),
+                chain_positions: json!({
+                    "ethereum": {
+                        "chain_id": chain_id,
+                        "block_number": 202,
+                        "block_hash": "0xresolverc8",
+                        "timestamp": "2026-04-17T00:00:22Z",
+                    }
+                }),
+                canonicality_summary: json!({
+                    "status": "finalized",
+                    "chains": {
+                        chain_id: "finalized",
+                    }
+                }),
+                manifest_version: 7,
+                last_recomputed_at: timestamp(1_748_800_202),
             }
         }
 
