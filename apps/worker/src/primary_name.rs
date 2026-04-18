@@ -2,10 +2,11 @@ use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, bail};
 use bigname_storage::{
-    PrimaryNameClaimStatus, PrimaryNameCurrentRow, clear_primary_names_current,
-    delete_primary_name_current, upsert_primary_name_current_rows,
+    PrimaryNameClaimStatus, PrimaryNameCurrentRow, VERIFIED_PRIMARY_NAME_INVALIDATION_KEY,
+    VERIFIED_PRIMARY_NAME_LOOKUP_KEY, clear_primary_names_current, delete_primary_name_current,
+    upsert_primary_name_current_rows,
 };
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use sqlx::{
     PgPool, Row,
     postgres::{PgConnectOptions, PgPoolOptions, PgRow},
@@ -48,6 +49,7 @@ struct ReverseClaimTuple {
 struct NameClaimObservation {
     key: PrimaryNameTupleKey,
     raw_name: Option<String>,
+    primary_claim_source: Value,
 }
 
 pub async fn rebuild_primary_names_current(
@@ -77,7 +79,7 @@ async fn rebuild_all_primary_names(pool: &PgPool) -> Result<PrimaryNamesCurrentR
             let observation = claim_observations.get(&tuple.key);
             primary_name_row(tuple, observation)
         })
-        .collect::<Vec<PrimaryNameCurrentRow>>();
+        .collect::<Result<Vec<PrimaryNameCurrentRow>>>()?;
     let upserted_row_count = upsert_primary_name_current_rows(pool, &rows).await?.len();
     let status_counts = count_statuses(&rows);
 
@@ -109,7 +111,7 @@ async fn rebuild_one_primary_name(
     let projected_row = match load_reverse_claim_tuple(pool, &target).await? {
         Some(tuple) => {
             let claim_observation = load_latest_name_claim_observation(pool, &target).await?;
-            Some(primary_name_row(&tuple, claim_observation.as_ref()))
+            Some(primary_name_row(&tuple, claim_observation.as_ref())?)
         }
         None => None,
     };
@@ -227,7 +229,8 @@ async fn load_latest_name_claim_observations(
             LOWER(ne.after_state->'primary_claim_source'->>'address') AS address,
             COALESCE(ne.after_state->'primary_claim_source'->>'namespace', ne.namespace) AS namespace,
             ne.after_state->'primary_claim_source'->>'coin_type' AS coin_type,
-            ne.after_state->>'raw_name' AS raw_name
+            ne.after_state->>'raw_name' AS raw_name,
+            ne.after_state->'primary_claim_source' AS primary_claim_source
         FROM normalized_events ne
         WHERE ne.namespace = $1
           AND ne.event_kind = 'RecordChanged'
@@ -270,7 +273,8 @@ async fn load_latest_name_claim_observation(
             LOWER(ne.after_state->'primary_claim_source'->>'address') AS address,
             COALESCE(ne.after_state->'primary_claim_source'->>'namespace', ne.namespace) AS namespace,
             ne.after_state->'primary_claim_source'->>'coin_type' AS coin_type,
-            ne.after_state->>'raw_name' AS raw_name
+            ne.after_state->>'raw_name' AS raw_name,
+            ne.after_state->'primary_claim_source' AS primary_claim_source
         FROM normalized_events ne
         WHERE ne.namespace = $1
           AND ne.event_kind = 'RecordChanged'
@@ -314,9 +318,17 @@ fn decode_reverse_claim_tuple(row: PgRow) -> Result<ReverseClaimTuple> {
 }
 
 fn decode_name_claim_observation(row: PgRow) -> Result<NameClaimObservation> {
+    let primary_claim_source: Value = row
+        .try_get("primary_claim_source")
+        .context("missing primary_claim_source")?;
+    primary_claim_source
+        .as_object()
+        .context("primary_claim_source must be a JSON object")?;
+
     Ok(NameClaimObservation {
         key: decode_tuple_key(&row)?,
         raw_name: row.try_get("raw_name").context("missing raw_name")?,
+        primary_claim_source,
     })
 }
 
@@ -352,25 +364,71 @@ fn decode_tuple_key(row: &PgRow) -> Result<PrimaryNameTupleKey> {
 fn primary_name_row(
     tuple: &ReverseClaimTuple,
     claim_observation: Option<&NameClaimObservation>,
-) -> PrimaryNameCurrentRow {
-    let (claim_status, raw_claim_name) = match claim_observation
-        .and_then(|observation| observation.raw_name.as_deref())
-    {
-        Some(raw_name) if claim_name_looks_normalizable(raw_name) => {
-            (PrimaryNameClaimStatus::Success, None)
-        }
-        Some(raw_name) => (PrimaryNameClaimStatus::InvalidName, Some(raw_name.to_owned())),
-        None => (PrimaryNameClaimStatus::NotFound, None),
-    };
+) -> Result<PrimaryNameCurrentRow> {
+    let (claim_status, raw_claim_name) =
+        match claim_observation.and_then(|observation| observation.raw_name.as_deref()) {
+            Some(raw_name) if claim_name_looks_normalizable(raw_name) => {
+                (PrimaryNameClaimStatus::Success, None)
+            }
+            Some(raw_name) => (
+                PrimaryNameClaimStatus::InvalidName,
+                Some(raw_name.to_owned()),
+            ),
+            None => (PrimaryNameClaimStatus::NotFound, None),
+        };
 
-    PrimaryNameCurrentRow {
+    Ok(PrimaryNameCurrentRow {
         address: tuple.key.address.clone(),
         namespace: tuple.key.namespace.clone(),
         coin_type: tuple.key.coin_type.clone(),
         claim_status,
         raw_claim_name,
-        claim_provenance: tuple.claim_provenance.clone(),
+        claim_provenance: build_claim_provenance(tuple, claim_status, claim_observation)?,
+    })
+}
+
+fn build_claim_provenance(
+    tuple: &ReverseClaimTuple,
+    claim_status: PrimaryNameClaimStatus,
+    claim_observation: Option<&NameClaimObservation>,
+) -> Result<Value> {
+    let mut claim_provenance = tuple
+        .claim_provenance
+        .as_object()
+        .cloned()
+        .context("reverse-claim claim_provenance must be a JSON object")?;
+    claim_provenance.insert(
+        VERIFIED_PRIMARY_NAME_LOOKUP_KEY.to_owned(),
+        verified_primary_name_lookup_hook(&tuple.key),
+    );
+    claim_provenance.insert(
+        VERIFIED_PRIMARY_NAME_INVALIDATION_KEY.to_owned(),
+        verified_primary_name_invalidation_hook(claim_status, claim_observation),
+    );
+    Ok(Value::Object(claim_provenance))
+}
+
+fn verified_primary_name_lookup_hook(key: &PrimaryNameTupleKey) -> Value {
+    json!({
+        "address": key.address,
+        "namespace": key.namespace,
+        "coin_type": key.coin_type,
+    })
+}
+
+fn verified_primary_name_invalidation_hook(
+    claim_status: PrimaryNameClaimStatus,
+    claim_observation: Option<&NameClaimObservation>,
+) -> Value {
+    let mut invalidation =
+        Map::from_iter([("claim_status".to_owned(), json!(claim_status.as_str()))]);
+    if let Some(claim_observation) = claim_observation {
+        invalidation.insert(
+            "primary_claim_source".to_owned(),
+            claim_observation.primary_claim_source.clone(),
+        );
     }
+    Value::Object(invalidation)
 }
 
 fn claim_name_looks_normalizable(raw_name: &str) -> bool {
@@ -381,7 +439,9 @@ fn claim_name_looks_normalizable(raw_name: &str) -> bool {
     raw_name.split('.').all(|label| {
         !label.is_empty()
             && label.len() <= 63
-            && !label.chars().any(|character| character.is_control() || character.is_whitespace())
+            && !label
+                .chars()
+                .any(|character| character.is_control() || character.is_whitespace())
     })
 }
 
@@ -612,6 +672,67 @@ mod tests {
         }
     }
 
+    fn expected_claim_provenance(
+        address: &str,
+        coin_type: &str,
+        reverse_block_number: i64,
+        claim_status: PrimaryNameClaimStatus,
+        primary_claim_block_number: Option<i64>,
+    ) -> Value {
+        let normalized_address = address.to_ascii_lowercase();
+        let reverse_label = normalized_address.trim_start_matches("0x").to_owned();
+        let mut claim_provenance = Map::from_iter([
+            ("source_family".to_owned(), json!("ens_v1_reverse_l1")),
+            ("contract_role".to_owned(), json!("reverse_registrar")),
+            (
+                "contract_instance_id".to_owned(),
+                json!(format!(
+                    "00000000-0000-0000-0000-{reverse_block_number:012x}"
+                )),
+            ),
+            (
+                "emitting_address".to_owned(),
+                json!("0x00000000000000000000000000000000000000ad"),
+            ),
+            (
+                VERIFIED_PRIMARY_NAME_LOOKUP_KEY.to_owned(),
+                json!({
+                    "address": normalized_address.clone(),
+                    "namespace": ENS_NAMESPACE,
+                    "coin_type": coin_type,
+                }),
+            ),
+        ]);
+        let mut invalidation =
+            Map::from_iter([("claim_status".to_owned(), json!(claim_status.as_str()))]);
+        if let Some(primary_claim_block_number) = primary_claim_block_number {
+            invalidation.insert(
+                "primary_claim_source".to_owned(),
+                json!({
+                    "address": normalized_address.clone(),
+                    "namespace": ENS_NAMESPACE,
+                    "coin_type": coin_type,
+                    "reverse_name": format!("{reverse_label}.addr.reverse"),
+                    "reverse_node": format!("0x{primary_claim_block_number:064x}"),
+                    "claim_provenance": {
+                        "source_family": "ens_v1_reverse_l1",
+                        "contract_role": "reverse_registrar",
+                        "contract_instance_id": format!(
+                            "00000000-0000-0000-0000-{primary_claim_block_number:012x}"
+                        ),
+                        "emitting_address": "0x00000000000000000000000000000000000000ad",
+                    },
+                }),
+            );
+        }
+        claim_provenance.insert(
+            VERIFIED_PRIMARY_NAME_INVALIDATION_KEY.to_owned(),
+            Value::Object(invalidation),
+        );
+
+        Value::Object(claim_provenance)
+    }
+
     #[tokio::test]
     async fn full_rebuild_projects_declared_claim_status_rows() -> Result<()> {
         let database = TestDatabase::new().await?;
@@ -720,12 +841,13 @@ mod tests {
                 coin_type: "60".to_owned(),
                 claim_status: PrimaryNameClaimStatus::Success,
                 raw_claim_name: None,
-                claim_provenance: json!({
-                    "source_family": "ens_v1_reverse_l1",
-                    "contract_role": "reverse_registrar",
-                    "contract_instance_id": "00000000-0000-0000-0000-000000000065",
-                    "emitting_address": "0x00000000000000000000000000000000000000ad",
-                }),
+                claim_provenance: expected_claim_provenance(
+                    "0x0000000000000000000000000000000000000aaa",
+                    "60",
+                    101,
+                    PrimaryNameClaimStatus::Success,
+                    Some(201),
+                ),
             })
         );
         assert_eq!(
@@ -742,12 +864,13 @@ mod tests {
                 coin_type: "61".to_owned(),
                 claim_status: PrimaryNameClaimStatus::NotFound,
                 raw_claim_name: None,
-                claim_provenance: json!({
-                    "source_family": "ens_v1_reverse_l1",
-                    "contract_role": "reverse_registrar",
-                    "contract_instance_id": "00000000-0000-0000-0000-000000000066",
-                    "emitting_address": "0x00000000000000000000000000000000000000ad",
-                }),
+                claim_provenance: expected_claim_provenance(
+                    "0x0000000000000000000000000000000000000aaa",
+                    "61",
+                    102,
+                    PrimaryNameClaimStatus::NotFound,
+                    None,
+                ),
             })
         );
         assert_eq!(
@@ -764,12 +887,13 @@ mod tests {
                 coin_type: "60".to_owned(),
                 claim_status: PrimaryNameClaimStatus::InvalidName,
                 raw_claim_name: Some("alice..eth".to_owned()),
-                claim_provenance: json!({
-                    "source_family": "ens_v1_reverse_l1",
-                    "contract_role": "reverse_registrar",
-                    "contract_instance_id": "00000000-0000-0000-0000-000000000067",
-                    "emitting_address": "0x00000000000000000000000000000000000000ad",
-                }),
+                claim_provenance: expected_claim_provenance(
+                    "0x0000000000000000000000000000000000000bbb",
+                    "60",
+                    103,
+                    PrimaryNameClaimStatus::InvalidName,
+                    Some(202),
+                ),
             })
         );
         assert!(
@@ -918,12 +1042,86 @@ mod tests {
                 coin_type: "60".to_owned(),
                 claim_status: PrimaryNameClaimStatus::InvalidName,
                 raw_claim_name: Some("alice..eth".to_owned()),
-                claim_provenance: json!({
-                    "source_family": "ens_v1_reverse_l1",
-                    "contract_role": "reverse_registrar",
-                    "contract_instance_id": "00000000-0000-0000-0000-00000000012c",
-                    "emitting_address": "0x00000000000000000000000000000000000000ad",
-                }),
+                claim_provenance: expected_claim_provenance(
+                    "0x0000000000000000000000000000000000000abc",
+                    "60",
+                    300,
+                    PrimaryNameClaimStatus::InvalidName,
+                    Some(302),
+                ),
+            })
+        );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn targeted_rebuild_keeps_primary_claim_source_hook_for_not_found_rows() -> Result<()> {
+        let database = TestDatabase::new().await?;
+
+        upsert_normalized_events(
+            database.pool(),
+            &[
+                reverse_changed_event(
+                    "reverse-a-60",
+                    "0x0000000000000000000000000000000000000abc",
+                    "60",
+                    400,
+                    0,
+                    CanonicalityState::Canonical,
+                ),
+                reverse_linked_name_event(
+                    "record-a-60-empty",
+                    "0x0000000000000000000000000000000000000abc",
+                    "60",
+                    None,
+                    401,
+                    0,
+                    CanonicalityState::Canonical,
+                ),
+            ],
+        )
+        .await?;
+
+        let summary = rebuild_primary_names_current(
+            database.pool(),
+            Some("0x0000000000000000000000000000000000000abc"),
+            Some("ens"),
+            Some("60"),
+        )
+        .await?;
+        assert_eq!(
+            summary,
+            PrimaryNamesCurrentRebuildSummary {
+                requested_tuple_count: 1,
+                upserted_row_count: 1,
+                deleted_row_count: 0,
+                success_row_count: 0,
+                not_found_row_count: 1,
+                invalid_name_row_count: 0,
+            }
+        );
+        assert_eq!(
+            load_primary_name_current(
+                database.pool(),
+                "0x0000000000000000000000000000000000000abc",
+                "ens",
+                "60",
+            )
+            .await?,
+            Some(PrimaryNameCurrentRow {
+                address: "0x0000000000000000000000000000000000000abc".to_owned(),
+                namespace: "ens".to_owned(),
+                coin_type: "60".to_owned(),
+                claim_status: PrimaryNameClaimStatus::NotFound,
+                raw_claim_name: None,
+                claim_provenance: expected_claim_provenance(
+                    "0x0000000000000000000000000000000000000abc",
+                    "60",
+                    400,
+                    PrimaryNameClaimStatus::NotFound,
+                    Some(401),
+                ),
             })
         );
 
