@@ -103,6 +103,21 @@ verified_resolution = "shadow"
 
 That freeze attaches `verified_resolution` ownership to `ens_execution`. It allows shadow execution traces and cache ownership without implying that public verified-resolution reads are already shipped.
 
+ENS reverse-claim intake follows the same source-family discipline. For Ethereum Mainnet, later declared primary-claim intake is anchored to `ens_v1_reverse_l1`, not `ens_v1_registry_l1` or `ens_v1_resolver_l1`. Its canonical contract entry is the Ethereum `addr.reverse` Reverse Registrar.
+
+Relevant manifest fields for that reverse family:
+
+```toml
+source_family = "ens_v1_reverse_l1"
+chain = "ethereum-mainnet"
+
+[[contracts]]
+role = "reverse_registrar"
+address = "0xa58E81fe9b61B5c3fE2AFD33CF304c454AbFc7Cb"
+```
+
+That freeze only fixes the authoritative reverse entrypoint and role mapping for later primary-claim intake. It does not define a new capability flag, does not choose default-reverse fallback behavior, and does not by itself ship public primary-name reads.
+
 ## 5. Contract Instance Admission And Continuity
 
 Manifest loading admits source-graph nodes as `contract_instance_id`s, not as raw addresses.
@@ -178,6 +193,7 @@ Rules:
 - shadow capabilities may write facts and traces without being enabled for general reads
 - capability ownership attaches to the manifest-declared `source_family`; it is never implied by another family's presence
 - ENS verified resolution on Ethereum Mainnet is owned by `ens_execution` through contract role `universal_resolver` at `0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe`, not by `ens_v1_registry_l1`
+- ENS reverse-claim intake on Ethereum Mainnet is anchored to `ens_v1_reverse_l1` through contract role `reverse_registrar` at `0xa58E81fe9b61B5c3fE2AFD33CF304c454AbFc7Cb`, not by `ens_v1_registry_l1` or `ens_v1_resolver_l1`
 - adding a new capability is additive if it does not change prior semantics
 
 ## 10. Ownership And Workflow

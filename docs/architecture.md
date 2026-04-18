@@ -589,6 +589,7 @@ Rules:
 - manifest versions are carried forward into normalized events and projections
 - capability ownership attaches to the declaring `source_family`; it is never implied by a different family's presence alone
 - ENS verified resolution on Ethereum Mainnet belongs to `ens_execution`, whose canonical contract role is `universal_resolver` at `0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe` on the ENS Universal Resolver, not to `ens_v1_registry_l1`
+- ENS declared reverse-claim intake on Ethereum Mainnet belongs to `ens_v1_reverse_l1`, whose canonical contract role is `reverse_registrar` at `0xa58E81fe9b61B5c3fE2AFD33CF304c454AbFc7Cb` on the Ethereum `addr.reverse` Reverse Registrar, not to `ens_v1_registry_l1` or `ens_v1_resolver_l1`
 - draft or optional features may be enabled behind manifest flags without changing the public contract
 
 ---
@@ -1045,6 +1046,7 @@ Rules:
 - if the raw claim exists but cannot be normalized, the route surfaces `status=invalid_name` instead of silently dropping the claim
 - verified primary names require the verification algorithm to succeed
 - reverse claims alone are insufficient
+- later ENS declared primary-claim intake starts from the `ens_v1_reverse_l1` `reverse_registrar` entrypoint at `0xa58E81fe9b61B5c3fE2AFD33CF304c454AbFc7Cb`; this freeze does not choose default-reverse fallback precedence
 - Basenames claim-setting operations affect the claim surface, but the read contract still distinguishes claim from verified primary name
 
 ---
