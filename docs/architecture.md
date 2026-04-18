@@ -1013,21 +1013,30 @@ Each item must include:
 Rules:
 
 - callers may request de-duplicated results by `resource_id`, but surface-first semantics remain the default
+- default sort is `display_name_asc`
 - exhaustiveness is only authoritative for source classes with enumerable ownership / assignment surfaces
 - wildcard- and offchain-derived names are never silently treated as exhaustive enumeration results
-- role-summary expansion is additive; it must not change item identity, grouping semantics, or coverage meaning
+- role-summary expansion is additive; it must not change item identity, supported filters, grouping semantics, default sort, cursor behavior, or coverage meaning
 
-### 21.3 Address → names with roles
+### 21.3 Address → names with `include=role_summary`
 
-This is a first-class view, not application-side joining.
+This is an additive expansion of the same address-to-name collection, not a separate route and not application-side joining.
 
-It returns surfaces plus:
+When requested, each item adds:
 
-- effective role summary
-- role bitmap / decoded powers
+- `role_summary`
 - `subname_count`
 - `record_count`
-- expiry / status
+- `status`
+- `expiry`
+
+Rules:
+
+- `include=role_summary` keeps the base `Address.names` query contract unchanged: `namespace`, `relation`, and `dedupe_by` keep the same meaning and defaults
+- the default sort stays `display_name_asc`
+- surface-first enumeration remains the default and `dedupe_by=resource` remains grouping-only behavior
+- the added fields above are expansion-only fields; they do not replace the required surface identity, binding, or relation facets
+- `role_summary` derives from the same resource-anchored effective-permission truth family used by `GET /v1/resources/{resource_id}/permissions`; it does not create a second address-role ledger
 
 ### 21.4 Name → children
 
@@ -1082,7 +1091,7 @@ Rules:
 - `scope` selects anchor sets, not alternate storage families
 - name-history `resource` scope includes every resource ever bound to the requested surface
 - resource-history `surface` scope includes every surface ever bound to the requested resource
-- any future address-centric history view must compose address anchor resolution with the same normalized-event history contract rather than introducing a separate address-history truth system
+- `Address.history` composes address anchor resolution with the same normalized-event history contract, using the existing address relation vocabulary and `scope=surface|resource|both` across current and historical matches rather than introducing a separate address-history truth system
 
 ### 21.7 Resolver overview
 
@@ -1277,7 +1286,7 @@ The checked-in baseline lives in `docs/consumer-capabilities.md`. The summary be
 | --- | --- | --- |
 | exact name profile | profile pages, record editing, registration views | `Name.registration` + `Resolution` |
 | names owned / controlled by address | dashboard and search flows | `Address.names` |
-| names owned / controlled by address with role summary | dashboard lists | `Address.names` with role summary |
+| names owned / controlled by address with role summary | dashboard lists | `Address.names` with `include=role_summary` |
 | declared child subnames and child counts | subname pages and creation flows | `Name.children` |
 | record inventory for editing | profile / records screens | `Resolution.record_inventory` |
 | verified record reads | profile / send / address resolution | `Resolution.verified_queries` |

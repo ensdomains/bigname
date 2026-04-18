@@ -161,6 +161,7 @@ The current API binary ships only the declared-state subset below. Queued routes
 | `GET /v1/names/{namespace}/{name}/children` | Declared child collection by default | shipped declared-state |
 | `GET /v1/history/names/{namespace}/{name}` | Surface or combined history | shipped declared-state |
 | `GET /v1/history/resources/{resource_id}` | Resource history | shipped declared-state |
+| `GET /v1/history/addresses/{address}` | Address activity across related surfaces and resources | queued declared-state |
 | `GET /v1/manifests/{namespace}` | Active manifest versions and capabilities | shipped declared-state |
 | `GET /v1/addresses/{address}/names` | Address-to-surface collection | queued declared-state |
 | `GET /v1/resources/{resource_id}/permissions` | Resource-centric effective permissions | queued declared-state |
@@ -246,6 +247,7 @@ Supported filters in the first declared-state contract:
 - `namespace`
 - `relation=registrant|token_holder|effective_controller`
 - `dedupe_by=surface|resource`
+- `include=role_summary`
 
 Each item includes:
 
@@ -258,12 +260,22 @@ Each item includes:
 - `binding_kind`
 - `relation_facets`
 
+When `include=role_summary` is requested, each item also adds:
+
+- `role_summary`
+- `subname_count`
+- `record_count`
+- `status`
+- `expiry`
+
 Rules:
 
 - `dedupe_by=surface` is the default truth model
 - `dedupe_by=resource` changes grouping only; it does not change coverage semantics or turn the route into a resource collection
-- a later `include=role_summary` expansion is additive and must not change enumeration basis, default sort, or item identity
-- later additive fields such as expiry, status, or counts must not replace the required surface identity and relation facets
+- the default sort remains `display_name_asc`
+- `include=role_summary` is additive; it does not change supported filters, default `dedupe_by`, enumeration basis, route-level coverage meaning, default sort, cursor behavior, or item identity
+- the `role_summary` expansion derives from the current item `resource_id` plus the existing resource-permissions truth family; it does not introduce a separate address-role ledger
+- the added fields `role_summary`, `subname_count`, `record_count`, `status`, and `expiry` are optional expansion fields only and do not replace the required surface identity and relation facets
 
 ### `GET /v1/resources/{resource_id}/permissions`
 
@@ -337,7 +349,30 @@ Rules:
 - `scope=surface` returns events anchored by any `logical_name_id` ever bound to that resource
 - `scope=both` returns the union of those anchor sets
 - observed and orphaned events are excluded from the shipped history routes
-- no dedicated address-history route is frozen in the shipped subset; queued address activity views must reuse these same anchor and coverage semantics rather than invent a second history contract
+- no dedicated address-history route ships in the current subset; the queued route below reuses these same anchor and coverage semantics rather than inventing a second history contract
+
+### `GET /v1/history/addresses/{address}`
+
+This route is queued but frozen now to unblock address activity reads.
+
+Returns canonical normalized-event history for one address-derived anchor set.
+
+Supported query parameters:
+
+- `namespace`
+- `relation=registrant|token_holder|effective_controller`
+- `scope=surface|resource|both` with default `both`
+
+Rules:
+
+- address history reuses the existing normalized-event history contract; it does not introduce a separate address-history ledger or projection family
+- `namespace` and `relation` filter which related surfaces and resources contribute anchors for the requested address across current and historical matches; they do not change history row shape, ordering, or coverage meaning
+- `scope=surface` returns events anchored by any `logical_name_id` selected for the requested address across current and historical matches under the active filters
+- `scope=resource` returns events anchored by any `resource_id` selected for the requested address across current and historical matches under the active filters
+- `scope=both` returns the union of those anchor sets
+- observed and orphaned events are excluded from this route
+- this route follows the shared history default sort `chain_position_desc`
+- `declared_state` is `{}` for history routes; the normalized-event rows themselves are the declared answer
 
 ### `GET /v1/resolvers/{chain_id}/{resolver_address}`
 

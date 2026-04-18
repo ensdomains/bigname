@@ -27,7 +27,7 @@ Some declared-state route families are still queued in the API binary. Their pro
 | `primary_names_current` | `(address, coin_type, namespace)` | primary-name reads | reverse, primary claim, verified primary events |
 | `coverage_current` | `logical_name_id` | exact-name inline coverage, dedicated single-name coverage/explain reads | `CoverageChanged`, capability changes |
 
-History reads use normalized events plus thin cursor support rather than a separate denormalized history truth table. Future address-history views must compose address anchor selection with the same normalized-event history family rather than introducing a separate history projection.
+History reads use normalized events plus thin cursor support rather than a separate denormalized history truth table. Queued address-history views must compose address anchor selection across current and historical matches with the same normalized-event history family rather than introducing a separate history projection or ledger.
 
 ## 3. Collection Semantics
 
@@ -52,7 +52,9 @@ History reads use normalized events plus thin cursor support rather than a separ
 - the initial declared-state relation vocabulary is `registrant`, `token_holder`, and `effective_controller`
 - callers may request `dedupe_by=resource`
 - default sort is `display_name_asc`
-- any later role-summary expansion must remain additive to the same surface-first collection semantics
+- `include=role_summary` is additive and adds only `role_summary`, `subname_count`, `record_count`, `status`, and `expiry`
+- `include=role_summary` does not change supported filters, default grouping, default sort, cursor semantics, or route-level coverage meaning
+- `role_summary` derives from the current item `resource_id` plus the existing resource-permissions truth family; it does not require a second address-role projection or ledger
 
 ### Name to children
 
@@ -66,6 +68,7 @@ History reads use normalized events plus thin cursor support rather than a separ
 - `scope=surface|resource|both` maps onto normalized-event filters, not different truth systems
 - name-history resource scope resolves across every resource ever bound to the requested surface
 - resource-history surface scope resolves across every surface ever bound to the requested resource
+- queued `Address.history` resolves address-derived surface and resource anchor sets across current and historical matches first, then applies the same `scope=surface|resource|both` history contract over normalized events
 
 ### Resource permissions
 

@@ -78,7 +78,7 @@ Turn the revised architecture into implementation-ready semantics for the first 
 - frozen collection semantics for:
   - exact name lookup
   - address → names
-  - address → names with roles
+  - address → names with role summary
   - name → children
   - history scopes
   - resolver overview
@@ -275,12 +275,16 @@ Expose the first stable native `v1` surface for declared-state product reads.
 ### Minimum supported reads
 
 - exact name lookup
-- address → names
-- address → names with role summary
+- `Address.names`
+- `Address.names` with `include=role_summary`
 - name → children
 - name / resource → role holders
-- name / address history
+- name history
+- resource history
+- address history
 - resolver overview
+
+`Address.names` with `include=role_summary` stays the same declared-state address collection with an additive expansion, and `Address.history` stays the address-derived variant of the shared normalized-event history contract rather than a second route family.
 
 ### Exit Criteria
 
@@ -448,7 +452,7 @@ The apps monorepo should be migrated by capability group, not by endpoint mirror
 ### Group 2: Collections
 
 - address → names
-- address → names with roles
+- address → names with role summary
 - name → children
 - child counts
 

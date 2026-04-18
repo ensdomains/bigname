@@ -9,8 +9,8 @@ This document is the checked-in replacement contract for first-party consumers u
 | Capability | Example consumer surface | Native `v1` responsibility |
 | --- | --- | --- |
 | exact name profile | profile pages, record editing, registration views | `Name.registration` + `Resolution` |
-| names owned or controlled by address | dashboards and search flows | `Address.names` |
-| names with role summary | dashboard lists | `Address.names` with `include=role_summary` |
+| names owned / controlled by address | dashboards and search flows | `Address.names` |
+| names owned / controlled by address with role summary | dashboard lists | `Address.names` with `include=role_summary` |
 | declared child subnames and counts | subname pages and creation flows | `Name.children` |
 | record inventory for editing | profile and records screens | `Resolution.record_inventory` |
 | verified record reads | profile, send, and address-resolution flows | `Resolution.verified_queries` |
@@ -24,6 +24,8 @@ This document is the checked-in replacement contract for first-party consumers u
 ## 2. Current Status
 
 - this is the working baseline for Phase 0
+- `Address.names` with `include=role_summary` is an additive expansion of the same address-to-surface collection; it is not a separate route or replacement surface
+- `Address.history` is the declared-state address activity read over address-derived surface and resource anchors; it reuses the shared history contract rather than introducing a separate truth system
 - when the apps monorepo is imported, add app-by-app call-site mappings rather than replacing this table
 - any capability required by a first-party consumer that is not covered here must be added here before code claims parity
 
