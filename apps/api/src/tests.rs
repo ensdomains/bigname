@@ -11,7 +11,8 @@ use axum::{
 };
 use bigname_storage::{
     CanonicalityState, NameSurface, NormalizedEvent, PermissionScope, PermissionsCurrentRow,
-    RawBlock, Resource, SurfaceBinding, SurfaceBindingKind, TokenLineage, default_database_url,
+    RawBlock, ResolverCurrentRow, Resource, SurfaceBinding, SurfaceBindingKind, TokenLineage,
+    default_database_url,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -697,6 +698,104 @@ fn permission_subjects(payload: &ResourcePermissionsResponse) -> Vec<&str> {
         .collect()
 }
 
+fn resolver_current_row(chain_id: &str, resolver_address: &str) -> ResolverCurrentRow {
+    ResolverCurrentRow {
+        chain_id: chain_id.to_owned(),
+        resolver_address: resolver_address.to_owned(),
+        declared_summary: json!({
+            "bindings": {
+                "status": "supported",
+                "count": 1,
+                "items": [{
+                    "logical_name_id": "ens:alice.eth",
+                    "canonical_display_name": "Alice.eth",
+                    "normalized_name": "alice.eth",
+                    "namehash": "namehash:alice.eth",
+                    "resource_id": "00000000-0000-0000-0000-00000000b100",
+                    "surface_binding_id": "00000000-0000-0000-0000-00000000b101",
+                    "binding_kind": "declared_registry_path",
+                }],
+            },
+            "aliases": {
+                "status": "unsupported",
+                "unsupported_reason": "resolver alias mappings are not yet projected for the resolver_current rebuild",
+            },
+            "permissions": {
+                "status": "supported",
+                "count": 1,
+                "items": [{
+                    "resource_id": "00000000-0000-0000-0000-00000000b100",
+                    "subject": "0x0000000000000000000000000000000000000abc",
+                    "effective_powers": ["set_resolver", "set_records"],
+                    "grant_source": {
+                        "kind": "normalized_event",
+                        "event_identity": "resolver-permission-1",
+                    },
+                    "revocation_source": null,
+                }],
+            },
+            "role_holders": {
+                "status": "supported",
+                "count": 1,
+                "items": [{
+                    "subject": "0x0000000000000000000000000000000000000abc",
+                    "resource_count": 1,
+                    "permission_row_count": 1,
+                    "effective_powers": ["set_records", "set_resolver"],
+                    "resource_ids": ["00000000-0000-0000-0000-00000000b100"],
+                }],
+            },
+            "event_summary": {
+                "status": "supported",
+                "count": 2,
+                "by_kind": {
+                    "PermissionChanged": 1,
+                    "ResolverChanged": 1,
+                },
+            },
+        }),
+        provenance: json!({
+            "normalized_event_ids": [101, 202],
+            "raw_fact_refs": [{
+                "kind": "raw_log",
+                "chain_id": chain_id,
+                "block_number": 202,
+            }],
+            "manifest_versions": [{
+                "manifest_version": 7,
+                "source_family": "ens_v2_registry_l1",
+                "chain": chain_id,
+                "deployment_epoch": "ens_v2",
+            }],
+            "execution_trace_id": null,
+            "derivation_kind": "resolver_current_rebuild",
+        }),
+        coverage: json!({
+            "status": "full",
+            "exhaustiveness": "authoritative",
+            "source_classes_considered": ["ens_v2_registry_l1", "permissions_current"],
+            "unsupported_reason": null,
+            "enumeration_basis": "resolver_target",
+        }),
+        chain_positions: json!({
+            "ethereum": {
+                "chain_id": chain_id,
+                "block_number": 202,
+                "block_hash": "0xresolverc8",
+                "timestamp": "2026-04-17T00:00:22Z",
+            }
+        }),
+        canonicality_summary: json!({
+            "status": "finalized",
+            "chains": {
+                chain_id: "finalized",
+            }
+        }),
+        manifest_version: 7,
+        last_recomputed_at: timestamp(1_748_800_202),
+    }
+}
+
 fn exact_name_row(
     logical_name_id: &str,
     surface_binding_id: Uuid,
@@ -1239,6 +1338,170 @@ async fn get_coverage_returns_declared_state_explain_with_shared_top_level_cover
             "unsupported_reason": null
         })
     );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_resolver_overview_returns_declared_state_with_shared_projection_envelope() -> Result<()>
+{
+    let database = TestDatabase::new_migrated().await?;
+    let chain_id = "ethereum-mainnet";
+    let resolver_address = "0x0000000000000000000000000000000000000aaa";
+
+    bigname_storage::upsert_resolver_current_rows(
+        &database.pool,
+        &[resolver_current_row(chain_id, resolver_address)],
+    )
+    .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resolvers/ethereum-mainnet/0x0000000000000000000000000000000000000AAA")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("resolver overview request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let payload: ResolverResponse = read_json(response).await?;
+    assert_eq!(
+        payload.data,
+        json!({
+            "chain_id": chain_id,
+            "resolver_address": resolver_address,
+        })
+    );
+    assert_eq!(
+        payload.declared_state,
+        json!({
+            "bindings": {
+                "status": "supported",
+                "count": 1,
+                "items": [{
+                    "logical_name_id": "ens:alice.eth",
+                    "canonical_display_name": "Alice.eth",
+                    "normalized_name": "alice.eth",
+                    "namehash": "namehash:alice.eth",
+                    "resource_id": "00000000-0000-0000-0000-00000000b100",
+                    "surface_binding_id": "00000000-0000-0000-0000-00000000b101",
+                    "binding_kind": "declared_registry_path",
+                }],
+            },
+            "aliases": {
+                "status": "unsupported",
+                "unsupported_reason": "resolver alias mappings are not yet projected for the resolver_current rebuild",
+            },
+            "permissions": {
+                "status": "supported",
+                "count": 1,
+                "items": [{
+                    "resource_id": "00000000-0000-0000-0000-00000000b100",
+                    "subject": "0x0000000000000000000000000000000000000abc",
+                    "effective_powers": ["set_resolver", "set_records"],
+                    "grant_source": {
+                        "kind": "normalized_event",
+                        "event_identity": "resolver-permission-1",
+                    },
+                    "revocation_source": null,
+                }],
+            },
+            "role_holders": {
+                "status": "supported",
+                "count": 1,
+                "items": [{
+                    "subject": "0x0000000000000000000000000000000000000abc",
+                    "resource_count": 1,
+                    "permission_row_count": 1,
+                    "effective_powers": ["set_records", "set_resolver"],
+                    "resource_ids": ["00000000-0000-0000-0000-00000000b100"],
+                }],
+            },
+            "event_summary": {
+                "status": "supported",
+                "count": 2,
+                "by_kind": {
+                    "PermissionChanged": 1,
+                    "ResolverChanged": 1,
+                },
+            },
+        })
+    );
+    assert_eq!(payload.verified_state, None);
+    assert_eq!(
+        payload.provenance,
+        json!({
+            "normalized_event_ids": ["101", "202"],
+            "raw_fact_refs": [{
+                "kind": "raw_log",
+                "chain_id": chain_id,
+                "block_number": 202,
+            }],
+            "manifest_versions": [{
+                "manifest_version": 7,
+                "source_family": "ens_v2_registry_l1",
+                "chain": chain_id,
+                "deployment_epoch": "ens_v2",
+            }],
+            "execution_trace_id": null,
+            "derivation_kind": "resolver_current_rebuild",
+        })
+    );
+    assert_eq!(
+        payload.coverage,
+        json!({
+            "status": "full",
+            "exhaustiveness": "authoritative",
+            "source_classes_considered": ["ens_v2_registry_l1", "permissions_current"],
+            "enumeration_basis": "resolver_target",
+            "unsupported_reason": null,
+        })
+    );
+    assert_eq!(
+        payload.chain_positions,
+        json!({
+            "ethereum": {
+                "chain_id": chain_id,
+                "block_number": 202,
+                "block_hash": "0xresolverc8",
+                "timestamp": "2026-04-17T00:00:22Z",
+            }
+        })
+    );
+    assert_eq!(payload.consistency, "finalized");
+    assert_eq!(payload.last_updated, "2025-06-01T17:50:02Z");
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_resolver_overview_returns_not_found_when_projection_is_missing() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resolvers/ethereum-mainnet/0x0000000000000000000000000000000000000aaa")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("missing resolver overview request failed")?;
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let payload: ErrorResponse = read_json(response).await?;
+    assert_eq!(payload.error.code, "not_found");
+    assert_eq!(
+        payload.error.message,
+        "resolver 0x0000000000000000000000000000000000000aaa was not found on chain ethereum-mainnet"
+    );
+    assert!(payload.error.details.is_empty());
 
     database.cleanup().await?;
     Ok(())

@@ -2,6 +2,7 @@ mod address_names;
 mod children;
 mod name_current;
 mod permissions;
+mod resolver;
 
 use anyhow::{Context, Result};
 use bigname_storage::DatabaseConfig;
@@ -27,6 +28,7 @@ enum Command {
     ChildrenCurrent(ChildrenCurrentArgs),
     NameCurrent(NameCurrentArgs),
     PermissionsCurrent(PermissionsCurrentArgs),
+    ResolverCurrent(ResolverCurrentArgs),
 }
 
 #[derive(Args, Debug)]
@@ -71,6 +73,12 @@ struct PermissionsCurrentArgs {
     command: PermissionsCurrentCommand,
 }
 
+#[derive(Args, Debug)]
+struct ResolverCurrentArgs {
+    #[command(subcommand)]
+    command: ResolverCurrentCommand,
+}
+
 #[derive(Subcommand, Debug)]
 enum NameCurrentCommand {
     Rebuild(NameCurrentRebuildArgs),
@@ -89,6 +97,11 @@ enum ChildrenCurrentCommand {
 #[derive(Subcommand, Debug)]
 enum PermissionsCurrentCommand {
     Rebuild(PermissionsCurrentRebuildArgs),
+}
+
+#[derive(Subcommand, Debug)]
+enum ResolverCurrentCommand {
+    Rebuild(ResolverCurrentRebuildArgs),
 }
 
 #[derive(Args, Debug)]
@@ -123,6 +136,16 @@ struct PermissionsCurrentRebuildArgs {
     resource_id: Option<String>,
 }
 
+#[derive(Args, Debug)]
+struct ResolverCurrentRebuildArgs {
+    #[command(flatten)]
+    database: DatabaseConfig,
+    #[arg(long)]
+    chain_id: Option<String>,
+    #[arg(long)]
+    resolver_address: Option<String>,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     init_tracing("bigname-worker");
@@ -134,6 +157,7 @@ async fn main() -> Result<()> {
         Command::ChildrenCurrent(args) => children_current(args).await,
         Command::NameCurrent(args) => name_current(args).await,
         Command::PermissionsCurrent(args) => permissions_current(args).await,
+        Command::ResolverCurrent(args) => resolver_current(args).await,
     }
 }
 
@@ -183,6 +207,12 @@ async fn children_current(args: ChildrenCurrentArgs) -> Result<()> {
 async fn permissions_current(args: PermissionsCurrentArgs) -> Result<()> {
     match args.command {
         PermissionsCurrentCommand::Rebuild(args) => rebuild_permissions_current(args).await,
+    }
+}
+
+async fn resolver_current(args: ResolverCurrentArgs) -> Result<()> {
+    match args.command {
+        ResolverCurrentCommand::Rebuild(args) => rebuild_resolver_current(args).await,
     }
 }
 
@@ -253,6 +283,29 @@ async fn rebuild_permissions_current(args: PermissionsCurrentRebuildArgs) -> Res
         deleted_row_count = summary.deleted_row_count,
         resource_id = args.resource_id.as_deref().unwrap_or("all"),
         "permissions_current rebuild completed"
+    );
+
+    Ok(())
+}
+
+async fn rebuild_resolver_current(args: ResolverCurrentRebuildArgs) -> Result<()> {
+    let pool = bigname_storage::connect(&args.database).await?;
+    let summary = resolver::rebuild_resolver_current(
+        &pool,
+        args.chain_id.as_deref(),
+        args.resolver_address.as_deref(),
+    )
+    .await?;
+
+    info!(
+        service = "worker",
+        projection = "resolver_current",
+        requested_resolver_count = summary.requested_resolver_count,
+        upserted_row_count = summary.upserted_row_count,
+        deleted_row_count = summary.deleted_row_count,
+        chain_id = args.chain_id.as_deref().unwrap_or("all"),
+        resolver_address = args.resolver_address.as_deref().unwrap_or("all"),
+        "resolver_current rebuild completed"
     );
 
     Ok(())

@@ -14,6 +14,7 @@ mod raw;
 mod raw_calls;
 mod raw_children;
 mod raw_code;
+mod resolver;
 
 use anyhow::{Context, Result};
 use clap::Args;
@@ -81,6 +82,10 @@ pub use raw_children::{
 };
 pub use raw_code::{
     RawCodeHash, load_raw_code_hash_counts_by_block_hashes, upsert_raw_code_hashes,
+};
+pub use resolver::{
+    ResolverCurrentRow, clear_resolver_current, delete_resolver_current, load_resolver_current,
+    upsert_resolver_current_rows,
 };
 
 /// Checked-in migrations for the bootstrap workspace.

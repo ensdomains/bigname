@@ -18,10 +18,11 @@ use bigname_manifests::{
 use bigname_storage::{
     AddressNameCurrentEntry, AddressNameRelation, AddressNamesCurrentDedupe, ChildrenCurrentRow,
     DatabaseConfig, HistoryEvent, HistoryScope, NameCurrentRow, PermissionScope,
-    PermissionsCurrentRow, collapse_address_name_current_rows, load_address_names_current,
-    load_children_current, load_name_current, load_name_history, load_name_surface,
-    load_permissions_current, load_resource, load_resource_history,
-    load_surface_bindings_by_logical_name_id, load_surface_bindings_by_resource_id,
+    PermissionsCurrentRow, ResolverCurrentRow, collapse_address_name_current_rows,
+    load_address_names_current, load_children_current, load_name_current, load_name_history,
+    load_name_surface, load_permissions_current, load_resolver_current, load_resource,
+    load_resource_history, load_surface_bindings_by_logical_name_id,
+    load_surface_bindings_by_resource_id,
 };
 use clap::{Args, Parser, Subcommand};
 use serde::{Deserialize, Serialize};
@@ -163,6 +164,8 @@ struct NameResponse {
     consistency: String,
     last_updated: String,
 }
+
+type ResolverResponse = NameResponse;
 
 #[derive(Clone, Debug, Default, Deserialize)]
 struct HistoryQuery {
@@ -390,6 +393,10 @@ fn app_router(state: AppState) -> Router {
         .route("/v1/namespaces/{namespace}", get(namespace_metadata))
         .route("/v1/names/{namespace}/{name}/children", get(name_children))
         .route("/v1/names/{namespace}/{name}", get(name_current))
+        .route(
+            "/v1/resolvers/{chain_id}/{resolver_address}",
+            get(resolver_current),
+        )
         .route("/v1/history/names/{namespace}/{name}", get(name_history))
         .route("/v1/history/resources/{resource_id}", get(resource_history))
         .route(
@@ -522,6 +529,37 @@ async fn coverage_current(
     };
 
     Ok(Json(build_name_coverage_response(row)))
+}
+
+async fn resolver_current(
+    Path((chain_id, resolver_address)): Path<(String, String)>,
+    State(state): State<AppState>,
+) -> ApiResult<Json<ResolverResponse>> {
+    let normalized_address = normalize_address(&resolver_address);
+    let row = load_resolver_current(&state.pool, &chain_id, &normalized_address)
+        .await
+        .map_err(|load_error| {
+            error!(
+                service = "api",
+                chain_id = %chain_id,
+                resolver_address = %normalized_address,
+                error = ?load_error,
+                "failed to load resolver_current projection"
+            );
+            ApiError::internal_error(format!(
+                "failed to load resolver projection for chain_id {chain_id} resolver_address {normalized_address}"
+            ))
+        })?;
+
+    let Some(row) = row else {
+        return Err(ApiError {
+            status: StatusCode::NOT_FOUND,
+            code: "not_found",
+            message: format!("resolver {normalized_address} was not found on chain {chain_id}"),
+        });
+    };
+
+    Ok(Json(build_resolver_response(row)))
 }
 
 async fn address_names(
@@ -858,6 +896,19 @@ fn build_name_coverage_response(row: NameCurrentRow) -> NameResponse {
     NameResponse {
         data: build_name_data(&row),
         declared_state: build_name_coverage_declared_state(&row.coverage),
+        verified_state: None,
+        provenance: build_name_provenance(&row.provenance),
+        coverage: build_name_coverage(&row.coverage),
+        chain_positions: ensure_object(&row.chain_positions),
+        consistency: canonicality_consistency(&row.canonicality_summary).to_owned(),
+        last_updated: format_timestamp(row.last_recomputed_at),
+    }
+}
+
+fn build_resolver_response(row: ResolverCurrentRow) -> ResolverResponse {
+    ResolverResponse {
+        data: build_resolver_data(&row),
+        declared_state: build_resolver_declared_state(&row.declared_summary),
         verified_state: None,
         provenance: build_name_provenance(&row.provenance),
         coverage: build_name_coverage(&row.coverage),
@@ -1364,6 +1415,13 @@ fn build_name_data(row: &NameCurrentRow) -> JsonValue {
     data
 }
 
+fn build_resolver_data(row: &ResolverCurrentRow) -> JsonValue {
+    let mut data = empty_object();
+    insert_string_field(&mut data, "chain_id", row.chain_id.clone());
+    insert_string_field(&mut data, "resolver_address", row.resolver_address.clone());
+    data
+}
+
 fn build_name_declared_state(row: &NameCurrentRow) -> JsonValue {
     let mut declared_state = empty_object();
     insert_value_field(
@@ -1414,6 +1472,56 @@ fn build_name_declared_state(row: &NameCurrentRow) -> JsonValue {
             &row.declared_summary,
             "history",
             "declared history pointers are not yet projected",
+        ),
+    );
+    declared_state
+}
+
+fn build_resolver_declared_state(summary: &JsonValue) -> JsonValue {
+    let mut declared_state = empty_object();
+    insert_value_field(
+        &mut declared_state,
+        "bindings",
+        declared_summary_section(
+            summary,
+            "bindings",
+            "resolver bindings summary is not yet projected",
+        ),
+    );
+    insert_value_field(
+        &mut declared_state,
+        "aliases",
+        declared_summary_section(
+            summary,
+            "aliases",
+            "resolver alias summary is not yet projected",
+        ),
+    );
+    insert_value_field(
+        &mut declared_state,
+        "permissions",
+        declared_summary_section(
+            summary,
+            "permissions",
+            "resolver permissions summary is not yet projected",
+        ),
+    );
+    insert_value_field(
+        &mut declared_state,
+        "role_holders",
+        declared_summary_section(
+            summary,
+            "role_holders",
+            "resolver role holder summary is not yet projected",
+        ),
+    );
+    insert_value_field(
+        &mut declared_state,
+        "event_summary",
+        declared_summary_section(
+            summary,
+            "event_summary",
+            "resolver event summary is not yet projected",
         ),
     );
     declared_state
