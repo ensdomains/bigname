@@ -11,9 +11,10 @@ use axum::{
     http::Request,
 };
 use bigname_storage::{
-    CanonicalityState, NameSurface, NormalizedEvent, PermissionScope, PermissionsCurrentRow,
-    RawBlock, ResolverCurrentRow, Resource, SurfaceBinding, SurfaceBindingKind, TokenLineage,
-    default_database_url,
+    CanonicalityState, ExecutionCacheKey, ExecutionOutcome, ExecutionTrace, ExecutionTraceStep,
+    NameSurface, NormalizedEvent, PermissionScope, PermissionsCurrentRow, RawBlock,
+    ResolverCurrentRow, Resource, SurfaceBinding, SurfaceBindingKind, TokenLineage,
+    default_database_url, upsert_execution_outcome, upsert_execution_trace,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -461,6 +462,56 @@ impl TestDatabase {
         .execute(&self.pool)
         .await
         .context("failed to insert surface_binding for API test")?;
+
+        Ok(())
+    }
+
+    async fn seed_name_current_binding_migrated(
+        &self,
+        logical_name_id: &str,
+        resource_id: Uuid,
+        token_lineage_id: Uuid,
+        surface_binding_id: Uuid,
+    ) -> Result<()> {
+        bigname_storage::upsert_raw_blocks(
+            &self.pool,
+            &[
+                raw_block("ethereum-mainnet", "0xsurface", None, 98, 1_717_171_698),
+                raw_block("ethereum-mainnet", "0xresource", None, 99, 1_717_171_699),
+                raw_block("ethereum-mainnet", "0xbinding", None, 100, 1_717_171_700),
+            ],
+        )
+        .await?;
+        bigname_storage::upsert_name_surfaces(&self.pool, &[name_surface(logical_name_id)]).await?;
+        bigname_storage::upsert_token_lineages(
+            &self.pool,
+            &[address_name_token_lineage(
+                token_lineage_id,
+                "0xresource",
+                99,
+            )],
+        )
+        .await?;
+        bigname_storage::upsert_resources(
+            &self.pool,
+            &[address_name_resource(
+                resource_id,
+                Some(token_lineage_id),
+                "0xresource",
+                99,
+            )],
+        )
+        .await?;
+        bigname_storage::upsert_surface_bindings(
+            &self.pool,
+            &[surface_binding(
+                surface_binding_id,
+                logical_name_id,
+                resource_id,
+                timestamp(1_717_171_700),
+            )],
+        )
+        .await?;
 
         Ok(())
     }
@@ -1276,6 +1327,136 @@ fn worker_record_inventory_current_row(
         }),
         manifest_version: 3,
         last_recomputed_at: timestamp(1_717_171_719),
+    }
+}
+
+fn resolution_execution_requested_chain_positions() -> Value {
+    json!([{
+        "chain_id": "ethereum-mainnet",
+        "block_number": 21_000_003,
+        "block_hash": "0xbinding"
+    }])
+}
+
+fn resolution_execution_request_key(records: &[&str]) -> String {
+    let mut records = records
+        .iter()
+        .map(|record| (*record).to_owned())
+        .collect::<Vec<_>>();
+    records.sort_unstable();
+    format!("ens:alice.eth:{}", records.join(","))
+}
+
+fn resolution_execution_trace(
+    execution_trace_id: Uuid,
+    request_key: &str,
+    request_record_keys: &[&str],
+    verified_queries: Value,
+) -> ExecutionTrace {
+    ExecutionTrace {
+        execution_trace_id,
+        request_type: VERIFIED_RESOLUTION_REQUEST_TYPE.to_owned(),
+        request_key: request_key.to_owned(),
+        namespace: "ens".to_owned(),
+        chain_context: json!({
+            "requested_positions": resolution_execution_requested_chain_positions(),
+        }),
+        manifest_context: json!({
+            "manifest_versions": [{
+                "source_family": "ens_execution",
+                "manifest_version": 5
+            }]
+        }),
+        contracts_called: json!([
+            {
+                "chain_id": "ethereum-mainnet",
+                "contract_address": "0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe",
+                "selector": "0x9061b923"
+            }
+        ]),
+        gateway_digests: json!([]),
+        final_payload: Some(json!({
+            "verified_queries": verified_queries.clone()
+        })),
+        failure_payload: None,
+        request_metadata: json!({
+            "surface": "alice.eth",
+            "record_keys": request_record_keys,
+            "entrypoint": "universal_resolver",
+            "contract_address": "0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe"
+        }),
+        finished_at: Some(timestamp(1_717_171_900)),
+        steps: vec![
+            ExecutionTraceStep {
+                step_index: 0,
+                step_kind: "load_declared_topology".to_owned(),
+                input_digest: Some("sha256:topology-input".to_owned()),
+                output_digest: Some("sha256:topology-output".to_owned()),
+                latency_ms: Some(4),
+                canonicality_dependency: json!({
+                    "ethereum-mainnet": {
+                        "block_hash": "0xbinding",
+                        "block_number": 21_000_003,
+                        "state": "finalized"
+                    }
+                }),
+                step_payload: json!({
+                    "entrypoint": "universal_resolver",
+                    "resolver": "0x0000000000000000000000000000000000000abc"
+                }),
+            },
+            ExecutionTraceStep {
+                step_index: 1,
+                step_kind: "call_universal_resolver".to_owned(),
+                input_digest: Some("sha256:resolver-input".to_owned()),
+                output_digest: Some("sha256:resolver-output".to_owned()),
+                latency_ms: Some(28),
+                canonicality_dependency: json!({
+                    "ethereum-mainnet": {
+                        "block_hash": "0xbinding",
+                        "block_number": 21_000_003,
+                        "state": "finalized"
+                    }
+                }),
+                step_payload: json!({
+                    "name": "alice.eth",
+                    "record_count": 2
+                }),
+            },
+        ],
+    }
+}
+
+fn resolution_execution_outcome(
+    execution_trace_id: Uuid,
+    request_key: &str,
+    verified_queries: Value,
+    logical_name_id: &str,
+    resource_id: Uuid,
+) -> ExecutionOutcome {
+    ExecutionOutcome {
+        cache_key: ExecutionCacheKey {
+            request_key: request_key.to_owned(),
+            requested_chain_positions: resolution_execution_requested_chain_positions(),
+            manifest_versions: json!([
+                {
+                    "manifest_version": 3,
+                    "source_family": "ens_v1_registry",
+                    "chain": "ethereum-mainnet",
+                    "deployment_epoch": "ens_v1"
+                }
+            ]),
+            topology_version_boundary: record_inventory_boundary(logical_name_id, resource_id),
+            record_version_boundary: record_inventory_boundary(logical_name_id, resource_id),
+        },
+        execution_trace_id,
+        request_type: VERIFIED_RESOLUTION_REQUEST_TYPE.to_owned(),
+        namespace: "ens".to_owned(),
+        outcome_payload: Some(json!({
+            "verified_queries": verified_queries
+        })),
+        failure_payload: None,
+        finished_at: timestamp(1_717_171_900),
     }
 }
 
@@ -2217,6 +2398,309 @@ async fn get_authority_control_explain_reuses_exact_name_envelope_fields() -> Re
             }
         })
     );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_resolution_execution_explain_returns_persisted_verified_state_and_reuses_resolution_envelope_fields()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0x2200);
+    let token_lineage_id = Uuid::from_u128(0x1100);
+    let surface_binding_id = Uuid::from_u128(0x3300);
+    let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000021);
+    let request_key = resolution_execution_request_key(&["addr:60", "text:com.twitter"]);
+    let persisted_verified_queries = json!([
+        {
+            "record_key": "addr:60",
+            "status": "success",
+            "value": {
+                "coin_type": "60",
+                "value": "0x00000000000000000000000000000000000000aa"
+            },
+            "provenance": {
+                "execution_trace_id": execution_trace_id.to_string()
+            }
+        },
+        {
+            "record_key": "text:com.twitter",
+            "status": "not_found",
+            "failure_reason": "no_text_record",
+            "provenance": {
+                "execution_trace_id": execution_trace_id.to_string()
+            }
+        }
+    ]);
+
+    database
+        .seed_name_current_binding_migrated(
+            logical_name_id,
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    database
+        .insert_name_current_row(exact_name_row(
+            logical_name_id,
+            surface_binding_id,
+            resource_id,
+            token_lineage_id,
+        ))
+        .await?;
+    database
+        .insert_record_inventory_current_row(record_inventory_current_row(
+            logical_name_id,
+            resource_id,
+        ))
+        .await?;
+
+    let trace = resolution_execution_trace(
+        execution_trace_id,
+        &request_key,
+        &["addr:60", "text:com.twitter"],
+        persisted_verified_queries.clone(),
+    );
+    let outcome = resolution_execution_outcome(
+        execution_trace_id,
+        &request_key,
+        persisted_verified_queries,
+        logical_name_id,
+        resource_id,
+    );
+    upsert_execution_trace(&database.pool, &trace).await?;
+    upsert_execution_outcome(&database.pool, &outcome).await?;
+
+    let explain_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/explain/resolutions/ens/alice.eth/execution?records=text:com.twitter,addr:60")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("resolution execution explain request failed")?;
+    let resolution_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resolutions/ens/alice.eth?mode=verified&records=text:com.twitter,addr:60")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("resolution request failed")?;
+
+    assert_eq!(explain_response.status(), StatusCode::OK);
+    assert_eq!(resolution_response.status(), StatusCode::OK);
+
+    let explain_payload: ResolutionResponse = read_json(explain_response).await?;
+    let resolution_payload: ResolutionResponse = read_json(resolution_response).await?;
+
+    assert_eq!(explain_payload.data, resolution_payload.data);
+    assert_eq!(explain_payload.coverage, resolution_payload.coverage);
+    assert_eq!(explain_payload.provenance, resolution_payload.provenance);
+    assert_eq!(
+        explain_payload.chain_positions,
+        resolution_payload.chain_positions
+    );
+    assert_eq!(explain_payload.consistency, resolution_payload.consistency);
+    assert_eq!(explain_payload.last_updated, resolution_payload.last_updated);
+    assert_eq!(explain_payload.declared_state, None);
+    assert_eq!(
+        explain_payload.verified_state,
+        Some(json!({
+            "execution": {
+                "execution_trace_id": execution_trace_id.to_string(),
+                "selected_entrypoint": {
+                    "source_family": "ens_execution",
+                    "role": "universal_resolver",
+                    "chain_id": "ethereum-mainnet",
+                    "contract_address": "0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe"
+                },
+                "resolver_discovery_path": [
+                    {
+                        "logical_name_id": "ens:alice.eth",
+                        "namespace": "ens",
+                        "normalized_name": "alice.eth",
+                        "canonical_display_name": "Alice.eth",
+                        "resource_id": resource_id.to_string(),
+                        "chain_id": "ethereum-mainnet",
+                        "address": "0x0000000000000000000000000000000000000abc",
+                        "latest_event_kind": "ResolverChanged"
+                    }
+                ],
+                "wildcard": {
+                    "source": null,
+                    "matched_labels": []
+                },
+                "alias": {
+                    "final_target": null,
+                    "hops": []
+                },
+                "steps": [
+                    {
+                        "step_index": 0,
+                        "step_kind": "load_declared_topology",
+                        "input_digest": "sha256:topology-input",
+                        "output_digest": "sha256:topology-output",
+                        "latency": 4,
+                        "canonicality_dependency": {
+                            "ethereum-mainnet": {
+                                "block_hash": "0xbinding",
+                                "block_number": 21_000_003,
+                                "state": "finalized"
+                            }
+                        }
+                    },
+                    {
+                        "step_index": 1,
+                        "step_kind": "call_universal_resolver",
+                        "input_digest": "sha256:resolver-input",
+                        "output_digest": "sha256:resolver-output",
+                        "latency": 28,
+                        "canonicality_dependency": {
+                            "ethereum-mainnet": {
+                                "block_hash": "0xbinding",
+                                "block_number": 21_000_003,
+                                "state": "finalized"
+                            }
+                        }
+                    }
+                ],
+                "finished_at": format_timestamp(timestamp(1_717_171_900))
+            },
+            "verified_queries": [
+                {
+                    "record_key": "text:com.twitter",
+                    "status": "not_found",
+                    "failure_reason": "no_text_record",
+                    "provenance": {
+                        "execution_trace_id": execution_trace_id.to_string()
+                    }
+                },
+                {
+                    "record_key": "addr:60",
+                    "status": "success",
+                    "value": {
+                        "coin_type": "60",
+                        "value": "0x00000000000000000000000000000000000000aa"
+                    },
+                    "provenance": {
+                        "execution_trace_id": execution_trace_id.to_string()
+                    }
+                }
+            ]
+        }))
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_resolution_execution_explain_returns_not_found_when_persisted_answer_is_missing()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0x2200);
+    let token_lineage_id = Uuid::from_u128(0x1100);
+    let surface_binding_id = Uuid::from_u128(0x3300);
+
+    database
+        .seed_name_current_binding_migrated(
+            logical_name_id,
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    database
+        .insert_name_current_row(exact_name_row(
+            logical_name_id,
+            surface_binding_id,
+            resource_id,
+            token_lineage_id,
+        ))
+        .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/explain/resolutions/ens/alice.eth/execution?records=addr:60")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("resolution execution explain request failed")?;
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let payload: ErrorResponse = read_json(response).await?;
+    assert_eq!(payload.error.code, "not_found");
+    assert_eq!(
+        payload.error.message,
+        "persisted resolution execution explain was not found for name alice.eth in namespace ens"
+    );
+    assert!(payload.error.details.is_empty());
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_resolution_execution_explain_rejects_duplicate_records() -> Result<()> {
+    let database = TestDatabase::new(false).await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/explain/resolutions/ens/alice.eth/execution?records=text,text")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("duplicate resolution execution explain request failed")?;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let payload: ErrorResponse = read_json(response).await?;
+    assert_eq!(payload.error.code, "invalid_input");
+    assert_eq!(
+        payload.error.message,
+        "records must not contain duplicate selectors"
+    );
+    assert!(payload.error.details.is_empty());
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_resolution_execution_explain_rejects_malformed_records() -> Result<()> {
+    let database = TestDatabase::new(false).await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/explain/resolutions/ens/alice.eth/execution?records=:avatar")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("malformed resolution execution explain request failed")?;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let payload: ErrorResponse = read_json(response).await?;
+    assert_eq!(payload.error.code, "invalid_input");
+    assert_eq!(
+        payload.error.message,
+        "records must contain only valid record selectors"
+    );
+    assert!(payload.error.details.is_empty());
 
     database.cleanup().await?;
     Ok(())
@@ -7614,11 +8098,7 @@ async fn get_primary_names_freezes_bootstrap_behavior_for_tuple_present() -> Res
     let database = TestDatabase::new(false).await?;
     database.create_primary_names_current_table().await?;
     database
-        .insert_primary_name_current_row(
-            "0x0000000000000000000000000000000000000abc",
-            "ens",
-            "60",
-        )
+        .insert_primary_name_current_row("0x0000000000000000000000000000000000000abc", "ens", "60")
         .await?;
 
     let response = app_router(database.app_state())
@@ -7826,6 +8306,7 @@ fn openapi_document_publishes_only_shipped_routes() {
             "/v1/coverage/{namespace}/{name}".to_owned(),
             "/v1/explain/names/{namespace}/{name}/authority-control".to_owned(),
             "/v1/explain/names/{namespace}/{name}/surface-binding".to_owned(),
+            "/v1/explain/resolutions/{namespace}/{name}/execution".to_owned(),
             "/v1/history/addresses/{address}".to_owned(),
             "/v1/history/names/{namespace}/{name}".to_owned(),
             "/v1/history/resources/{resource_id}".to_owned(),
@@ -7902,6 +8383,40 @@ fn openapi_document_freezes_query_params_and_shared_envelopes() {
     let records = openapi_parameter(resolutions, "records");
     assert_eq!(records.get("style"), Some(&json!("form")));
     assert_eq!(records.get("explode"), Some(&json!(false)));
+
+    let resolution_execution = openapi_operation(
+        &document,
+        "/v1/explain/resolutions/{namespace}/{name}/execution",
+    );
+    let resolution_execution_parameters = resolution_execution
+        .get("parameters")
+        .and_then(Value::as_array)
+        .expect("resolution execution explain must expose parameters");
+    let resolution_execution_parameter_names = resolution_execution_parameters
+        .iter()
+        .filter_map(|parameter| parameter.get("name").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        resolution_execution_parameter_names,
+        vec!["namespace", "name", "records"]
+    );
+    let resolution_execution_records = openapi_parameter(resolution_execution, "records");
+    assert_eq!(
+        resolution_execution_records.get("schema"),
+        Some(&json!({ "type": "string" }))
+    );
+    assert_eq!(
+        resolution_execution_records.get("required"),
+        Some(&json!(true))
+    );
+    assert_eq!(
+        resolution_execution_records.get("style"),
+        Some(&json!("form"))
+    );
+    assert_eq!(
+        resolution_execution_records.get("explode"),
+        Some(&json!(false))
+    );
 
     let primary_names = openapi_operation(&document, "/v1/primary-names/{address}");
     let primary_namespace = openapi_parameter(primary_names, "namespace");
@@ -8049,6 +8564,5 @@ fn openapi_document_matches_checked_in_artifact() {
     );
     let checked_in =
         fs::read_to_string(&artifact_path).expect("checked-in OpenAPI artifact must exist");
-
     assert_eq!(checked_in, render_openapi_document());
 }

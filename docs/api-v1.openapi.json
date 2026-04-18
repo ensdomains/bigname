@@ -1038,6 +1038,92 @@
         ]
       }
     },
+    "/v1/explain/resolutions/{namespace}/{name}/execution": {
+      "get": {
+        "operationId": "explain_resolution_execution_current",
+        "parameters": [
+          {
+            "description": "Supported namespace identifier.",
+            "in": "path",
+            "name": "namespace",
+            "required": true,
+            "schema": {
+              "enum": [
+                "ens",
+                "basenames"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Normalized name within the namespace.",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Comma-separated record selectors. Required for the persisted execution explain lookup.",
+            "explode": false,
+            "in": "query",
+            "name": "records",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "style": "form"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResolutionResponse"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Requested resource was not found"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "summary": "Persisted verified execution explain for one exact-name resolution request",
+        "tags": [
+          "Explain"
+        ]
+      }
+    },
     "/v1/history/addresses/{address}": {
       "get": {
         "operationId": "address_history",

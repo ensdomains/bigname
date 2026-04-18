@@ -4,7 +4,7 @@ use std::{
     net::SocketAddr,
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
@@ -18,13 +18,14 @@ use bigname_manifests::{
 };
 use bigname_storage::{
     AddressNameCurrentEntry, AddressNameRelation, AddressNamesCurrentDedupe, ChildrenCurrentRow,
-    DatabaseConfig, HistoryEvent, HistoryScope, NameCurrentRow, PermissionScope,
-    PermissionsCurrentRow, RecordInventoryCurrentRow, ResolverCurrentRow, SurfaceBindingKind,
+    DatabaseConfig, ExecutionCacheKey, ExecutionOutcome, ExecutionTrace, HistoryEvent,
+    HistoryScope, NameCurrentRow, PermissionScope, PermissionsCurrentRow,
+    RecordInventoryCurrentRow, ResolverCurrentRow, SurfaceBindingKind,
     collapse_address_name_current_rows, load_address_history, load_address_names_current,
-    load_children_current, load_name_current, load_name_history, load_name_surface,
-    load_permissions_current, load_record_inventory_current, load_resolver_current, load_resource,
-    load_resource_history, load_surface_bindings_by_logical_name_id,
-    load_surface_bindings_by_resource_id,
+    load_children_current, load_execution_outcome, load_execution_trace, load_name_current,
+    load_name_history, load_name_surface, load_permissions_current, load_record_inventory_current,
+    load_resolver_current, load_resource, load_resource_history,
+    load_surface_bindings_by_logical_name_id, load_surface_bindings_by_resource_id,
 };
 use clap::{Args, Parser, Subcommand};
 use serde::{Deserialize, Serialize};
@@ -82,6 +83,7 @@ enum ApiRouteId {
     Coverage,
     ExplainSurfaceBinding,
     ExplainAuthorityControl,
+    ExplainResolutionExecution,
     NamespaceMetadata,
     NameChildren,
     NameCurrent,
@@ -127,6 +129,11 @@ const API_ROUTE_DEFINITIONS: &[ApiRouteDefinition] = &[
     ApiRouteDefinition {
         id: ApiRouteId::ExplainAuthorityControl,
         path: "/v1/explain/names/{namespace}/{name}/authority-control",
+        published_in_contract: true,
+    },
+    ApiRouteDefinition {
+        id: ApiRouteId::ExplainResolutionExecution,
+        path: "/v1/explain/resolutions/{namespace}/{name}/execution",
         published_in_contract: true,
     },
     ApiRouteDefinition {
@@ -354,6 +361,11 @@ struct AddressHistoryQuery {
 #[derive(Clone, Debug, Default, Deserialize)]
 struct ResolutionQuery {
     mode: Option<String>,
+    records: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+struct ResolutionExecutionExplainQuery {
     records: Option<String>,
 }
 
@@ -628,6 +640,7 @@ impl IntoResponse for ApiError {
 type ApiResult<T> = std::result::Result<T, ApiError>;
 
 const PUBLIC_NAMESPACES: &[&str] = &["ens", "basenames"];
+const VERIFIED_RESOLUTION_REQUEST_TYPE: &str = "verified_resolution";
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -655,6 +668,9 @@ impl ApiRouteDefinition {
             }
             ApiRouteId::ExplainAuthorityControl => {
                 router.route(self.path, get(explain_authority_control_current))
+            }
+            ApiRouteId::ExplainResolutionExecution => {
+                router.route(self.path, get(explain_resolution_execution_current))
             }
             ApiRouteId::NamespaceMetadata => router.route(self.path, get(namespace_metadata)),
             ApiRouteId::NameChildren => router.route(self.path, get(name_children)),
@@ -684,6 +700,7 @@ impl ApiRouteId {
             Self::Coverage => "coverage_current",
             Self::ExplainSurfaceBinding => "explain_surface_binding_current",
             Self::ExplainAuthorityControl => "explain_authority_control_current",
+            Self::ExplainResolutionExecution => "explain_resolution_execution_current",
             Self::NamespaceMetadata => "namespace_metadata",
             Self::NameChildren => "name_children",
             Self::NameCurrent => "name_current",
@@ -786,6 +803,25 @@ impl ApiRouteId {
                 vec![namespace_path_parameter(), name_path_parameter()],
                 "ExactNameResponse",
                 false,
+                true,
+            ),
+            Self::ExplainResolutionExecution => openapi_json_get_operation(
+                self.operation_id(),
+                "Persisted verified execution explain for one exact-name resolution request",
+                "Explain",
+                vec![
+                    namespace_path_parameter(),
+                    name_path_parameter(),
+                    required_csv_query_parameter(
+                        "records",
+                        "Comma-separated record selectors. Required for the persisted execution explain lookup.",
+                        json!({
+                            "type": "string",
+                        }),
+                    ),
+                ],
+                "ResolutionResponse",
+                true,
                 true,
             ),
             Self::NamespaceMetadata => openapi_json_get_operation(
@@ -1481,6 +1517,19 @@ fn csv_query_parameter(
     parameter
 }
 
+fn required_csv_query_parameter(
+    name: &'static str,
+    description: impl Into<String>,
+    schema: JsonValue,
+) -> JsonValue {
+    let mut parameter = csv_query_parameter(name, description, schema);
+    parameter
+        .as_object_mut()
+        .expect("required CSV query parameter helper must create an object")
+        .insert("required".to_owned(), JsonValue::Bool(true));
+    parameter
+}
+
 fn namespace_path_parameter() -> JsonValue {
     path_parameter(
         "namespace",
@@ -1867,6 +1916,146 @@ async fn explain_authority_control_current(
     };
 
     Ok(Json(build_name_authority_control_explain_response(row)))
+}
+
+async fn explain_resolution_execution_current(
+    Path((namespace, name)): Path<(String, String)>,
+    Query(query): Query<ResolutionExecutionExplainQuery>,
+    State(state): State<AppState>,
+) -> ApiResult<Json<ResolutionResponse>> {
+    ensure_public_namespace(&namespace)?;
+
+    let records = parse_resolution_record_keys(query.records.as_deref(), ResolutionMode::Verified)?;
+    let logical_name_id = format!("{namespace}:{name}");
+    let row = load_name_current(&state.pool, &logical_name_id)
+        .await
+        .map_err(|load_error| {
+            error!(
+                service = "api",
+                namespace = %namespace,
+                name = %name,
+                logical_name_id = %logical_name_id,
+                records = ?records,
+                error = ?load_error,
+                "failed to load exact-name current projection for resolution execution explain route"
+            );
+            ApiError::internal_error(format!(
+                "failed to load resolution execution explain projection for name {namespace}/{name}"
+            ))
+        })?;
+
+    let Some(row) = row else {
+        return Err(ApiError {
+            status: StatusCode::NOT_FOUND,
+            code: "not_found",
+            message: format!("name {name} was not found in namespace {namespace}"),
+        });
+    };
+
+    let record_inventory_current = load_supported_record_inventory_current(&state.pool, &row)
+        .await
+        .map_err(|load_error| {
+            error!(
+                service = "api",
+                namespace = %namespace,
+                name = %name,
+                logical_name_id = %logical_name_id,
+                records = ?records,
+                error = ?load_error,
+                "failed to load declared record inventory for resolution execution explain route"
+            );
+            ApiError::internal_error(format!(
+                "failed to load resolution execution explain projection for name {namespace}/{name}"
+            ))
+        })?;
+
+    let cache_key = build_resolution_execution_cache_key(
+        &row,
+        &records,
+        record_inventory_current.as_ref(),
+    )
+    .map_err(|cache_key_error| {
+        error!(
+            service = "api",
+            namespace = %namespace,
+            name = %name,
+            logical_name_id = %logical_name_id,
+            records = ?records,
+            error = ?cache_key_error,
+            "failed to derive persisted execution cache key for resolution execution explain route"
+        );
+        ApiError::internal_error(format!(
+            "failed to load resolution execution explain projection for name {namespace}/{name}"
+        ))
+    })?;
+
+    let outcome = load_execution_outcome(&state.pool, &cache_key)
+        .await
+        .map_err(|load_error| {
+            error!(
+                service = "api",
+                namespace = %namespace,
+                name = %name,
+                logical_name_id = %logical_name_id,
+                records = ?records,
+                error = ?load_error,
+                "failed to load persisted execution outcome for resolution execution explain route"
+            );
+            ApiError::internal_error(format!(
+                "failed to load resolution execution explain projection for name {namespace}/{name}"
+            ))
+        })?;
+
+    let Some(outcome) = outcome else {
+        return Err(ApiError {
+            status: StatusCode::NOT_FOUND,
+            code: "not_found",
+            message: format!(
+                "persisted resolution execution explain was not found for name {name} in namespace {namespace}"
+            ),
+        });
+    };
+
+    let trace = load_execution_trace(&state.pool, outcome.execution_trace_id)
+        .await
+        .map_err(|load_error| {
+            error!(
+                service = "api",
+                namespace = %namespace,
+                name = %name,
+                logical_name_id = %logical_name_id,
+                execution_trace_id = %outcome.execution_trace_id,
+                error = ?load_error,
+                "failed to load persisted execution trace for resolution execution explain route"
+            );
+            ApiError::internal_error(format!(
+                "failed to load resolution execution explain projection for name {namespace}/{name}"
+            ))
+        })?;
+
+    let Some(trace) = trace else {
+        return Err(ApiError::internal_error(format!(
+            "failed to load resolution execution explain projection for name {namespace}/{name}"
+        )));
+    };
+
+    let response = build_resolution_execution_explain_response(row, &records, &trace, &outcome)
+        .map_err(|build_error| {
+            error!(
+                service = "api",
+                namespace = %namespace,
+                name = %name,
+                logical_name_id = %logical_name_id,
+                execution_trace_id = %outcome.execution_trace_id,
+                error = ?build_error,
+                "failed to build resolution execution explain response"
+            );
+            ApiError::internal_error(format!(
+                "failed to load resolution execution explain projection for name {namespace}/{name}"
+            ))
+        })?;
+
+    Ok(Json(response))
 }
 
 async fn resolution_current(
@@ -2665,6 +2854,33 @@ fn build_resolution_response(
     }
 }
 
+fn build_resolution_execution_explain_response(
+    row: NameCurrentRow,
+    records: &[ResolutionRecordKey],
+    trace: &ExecutionTrace,
+    outcome: &ExecutionOutcome,
+) -> Result<ResolutionResponse> {
+    let data = build_name_data(&row);
+    let verified_state =
+        build_resolution_execution_explain_verified_state(&row, records, trace, outcome)?;
+    let provenance = build_name_provenance(&row.provenance);
+    let coverage = build_name_coverage(&row.coverage);
+    let chain_positions = ensure_object(&row.chain_positions);
+    let consistency = canonicality_consistency(&row.canonicality_summary).to_owned();
+    let last_updated = format_timestamp(row.last_recomputed_at);
+
+    Ok(ResolutionResponse {
+        data,
+        declared_state: None,
+        verified_state: Some(verified_state),
+        provenance,
+        coverage,
+        chain_positions,
+        consistency,
+        last_updated,
+    })
+}
+
 fn build_primary_name_response(
     address: String,
     namespace: String,
@@ -2839,6 +3055,26 @@ fn build_resolution_verified_state(records: &[ResolutionRecordKey]) -> JsonValue
     verified_state
 }
 
+fn build_resolution_execution_explain_verified_state(
+    row: &NameCurrentRow,
+    records: &[ResolutionRecordKey],
+    trace: &ExecutionTrace,
+    outcome: &ExecutionOutcome,
+) -> Result<JsonValue> {
+    let mut verified_state = empty_object();
+    insert_value_field(
+        &mut verified_state,
+        "execution",
+        build_resolution_execution_summary(row, trace, outcome)?,
+    );
+    insert_value_field(
+        &mut verified_state,
+        "verified_queries",
+        reordered_persisted_verified_queries(outcome, records)?,
+    );
+    Ok(verified_state)
+}
+
 fn build_resolution_verified_query(record: &ResolutionRecordKey) -> JsonValue {
     let mut query = empty_object();
     insert_string_field(&mut query, "record_key", record.record_key.clone());
@@ -2849,6 +3085,243 @@ fn build_resolution_verified_query(record: &ResolutionRecordKey) -> JsonValue {
         "verified resolution entrypoint is not yet supported".to_owned(),
     );
     query
+}
+
+fn build_resolution_execution_summary(
+    row: &NameCurrentRow,
+    trace: &ExecutionTrace,
+    outcome: &ExecutionOutcome,
+) -> Result<JsonValue> {
+    if trace.request_type != VERIFIED_RESOLUTION_REQUEST_TYPE
+        || outcome.request_type != VERIFIED_RESOLUTION_REQUEST_TYPE
+    {
+        bail!(
+            "persisted execution explain requires request_type {VERIFIED_RESOLUTION_REQUEST_TYPE}"
+        );
+    }
+
+    let mut execution = empty_object();
+    insert_string_field(
+        &mut execution,
+        "execution_trace_id",
+        trace.execution_trace_id.to_string(),
+    );
+    insert_value_field(
+        &mut execution,
+        "selected_entrypoint",
+        build_resolution_selected_entrypoint(trace),
+    );
+    insert_value_field(
+        &mut execution,
+        "resolver_discovery_path",
+        build_resolution_execution_resolver_discovery_path(row, trace),
+    );
+    insert_value_field(
+        &mut execution,
+        "wildcard",
+        build_resolution_execution_wildcard(trace),
+    );
+    insert_value_field(
+        &mut execution,
+        "alias",
+        build_resolution_execution_alias(trace),
+    );
+    insert_value_field(
+        &mut execution,
+        "steps",
+        JsonValue::Array(
+            trace
+                .steps
+                .iter()
+                .map(build_execution_step_summary)
+                .collect(),
+        ),
+    );
+    insert_string_field(
+        &mut execution,
+        "finished_at",
+        format_timestamp(trace.finished_at.unwrap_or(outcome.finished_at)),
+    );
+
+    Ok(execution)
+}
+
+fn build_resolution_selected_entrypoint(trace: &ExecutionTrace) -> JsonValue {
+    let source_family = provenance_field(&trace.manifest_context, "manifest_versions")
+        .and_then(JsonValue::as_array)
+        .and_then(|items| {
+            items
+                .iter()
+                .find_map(|item| string_field(provenance_field(item, "source_family")))
+        });
+    let role =
+        string_field(provenance_field(&trace.request_metadata, "entrypoint")).or_else(|| {
+            trace
+                .steps
+                .iter()
+                .find_map(|step| string_field(provenance_field(&step.step_payload, "entrypoint")))
+        });
+    let contract_call = trace
+        .contracts_called
+        .as_array()
+        .and_then(|items| items.iter().find(|item| item.is_object()));
+
+    let chain_id = string_field(contract_call.and_then(|item| provenance_field(item, "chain_id")));
+    let contract_address = string_field(provenance_field(
+        &trace.request_metadata,
+        "contract_address",
+    ))
+    .or_else(|| {
+        trace
+            .steps
+            .iter()
+            .find_map(|step| string_field(provenance_field(&step.step_payload, "resolver")))
+    })
+    .or_else(|| {
+        string_field(contract_call.and_then(|item| provenance_field(item, "contract_address")))
+    });
+
+    let mut selected_entrypoint = empty_object();
+    insert_nullable_string_field(&mut selected_entrypoint, "source_family", source_family);
+    insert_nullable_string_field(&mut selected_entrypoint, "role", role);
+    insert_nullable_string_field(&mut selected_entrypoint, "chain_id", chain_id);
+    insert_nullable_string_field(
+        &mut selected_entrypoint,
+        "contract_address",
+        contract_address,
+    );
+    selected_entrypoint
+}
+
+fn build_resolution_execution_resolver_discovery_path(
+    row: &NameCurrentRow,
+    trace: &ExecutionTrace,
+) -> JsonValue {
+    let declared_resolver = provenance_field(&row.declared_summary, "resolver");
+    let chain_id = trace
+        .contracts_called
+        .as_array()
+        .and_then(|items| items.iter().find(|item| item.is_object()))
+        .and_then(|item| string_field(provenance_field(item, "chain_id")))
+        .or_else(|| {
+            string_field(declared_resolver.and_then(|value| provenance_field(value, "chain_id")))
+        });
+    let address = trace
+        .steps
+        .iter()
+        .find_map(|step| string_field(provenance_field(&step.step_payload, "resolver")))
+        .or_else(|| {
+            string_field(declared_resolver.and_then(|value| provenance_field(value, "address")))
+        });
+    let latest_event_kind = string_field(
+        declared_resolver.and_then(|value| provenance_field(value, "latest_event_kind")),
+    );
+
+    JsonValue::Array(vec![build_resolution_resolver_hop(
+        row,
+        chain_id,
+        address,
+        latest_event_kind,
+    )])
+}
+
+fn build_resolution_execution_wildcard(trace: &ExecutionTrace) -> JsonValue {
+    persisted_trace_detail_object(trace, "wildcard").unwrap_or_else(|| {
+        json!({
+            "source": null,
+            "matched_labels": [],
+        })
+    })
+}
+
+fn build_resolution_execution_alias(trace: &ExecutionTrace) -> JsonValue {
+    persisted_trace_detail_object(trace, "alias").unwrap_or_else(|| {
+        json!({
+            "final_target": null,
+            "hops": [],
+        })
+    })
+}
+
+fn build_execution_step_summary(step: &bigname_storage::ExecutionTraceStep) -> JsonValue {
+    let mut summary = empty_object();
+    insert_value_field(
+        &mut summary,
+        "step_index",
+        JsonValue::Number(step.step_index.into()),
+    );
+    insert_string_field(&mut summary, "step_kind", step.step_kind.clone());
+    insert_nullable_string_field(&mut summary, "input_digest", step.input_digest.clone());
+    insert_nullable_string_field(&mut summary, "output_digest", step.output_digest.clone());
+    insert_value_field(
+        &mut summary,
+        "latency",
+        step.latency_ms
+            .map(|value| JsonValue::Number(value.into()))
+            .unwrap_or(JsonValue::Null),
+    );
+    insert_value_field(
+        &mut summary,
+        "canonicality_dependency",
+        ensure_object(&step.canonicality_dependency),
+    );
+    summary
+}
+
+fn reordered_persisted_verified_queries(
+    outcome: &ExecutionOutcome,
+    records: &[ResolutionRecordKey],
+) -> Result<JsonValue> {
+    let outcome_payload = outcome
+        .outcome_payload
+        .as_ref()
+        .context("persisted execution outcome must set outcome_payload")?;
+    let verified_queries = provenance_field(outcome_payload, "verified_queries")
+        .and_then(JsonValue::as_array)
+        .context("persisted execution outcome must set verified_queries")?;
+
+    let mut queries_by_record_key = BTreeMap::new();
+    for query in verified_queries {
+        let record_key = string_field(provenance_field(query, "record_key"))
+            .context("persisted verified query must include record_key")?;
+        if queries_by_record_key
+            .insert(record_key.clone(), query.clone())
+            .is_some()
+        {
+            bail!("persisted execution outcome contained duplicate verified query {record_key}");
+        }
+    }
+
+    let requested_record_keys = records
+        .iter()
+        .map(|record| record.record_key.clone())
+        .collect::<BTreeSet<_>>();
+    if queries_by_record_key.len() != requested_record_keys.len()
+        || queries_by_record_key
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            != requested_record_keys
+    {
+        bail!("persisted execution outcome selector set did not match requested records");
+    }
+
+    Ok(JsonValue::Array(
+        records
+            .iter()
+            .map(|record| {
+                queries_by_record_key
+                    .get(&record.record_key)
+                    .cloned()
+                    .with_context(|| {
+                        format!(
+                            "persisted execution outcome did not include selector {}",
+                            record.record_key
+                        )
+                    })
+            })
+            .collect::<Result<Vec<_>>>()?,
+    ))
 }
 
 fn build_resolution_topology(
@@ -3028,6 +3501,52 @@ fn resolution_record_version_boundary(
         .or_else(|| build_supported_record_version_boundary(row))
 }
 
+fn build_resolution_execution_cache_key(
+    row: &NameCurrentRow,
+    records: &[ResolutionRecordKey],
+    record_inventory_row: Option<&RecordInventoryCurrentRow>,
+) -> Result<ExecutionCacheKey> {
+    let manifest_versions = array_or_empty(provenance_field(&row.provenance, "manifest_versions"));
+    if manifest_versions
+        .as_array()
+        .is_none_or(|items| items.is_empty())
+    {
+        bail!(
+            "resolution execution explain requires non-empty manifest_versions provenance for {}",
+            row.logical_name_id
+        );
+    }
+
+    let topology_version_boundary = build_supported_record_version_boundary(row)
+        .or_else(|| resolution_record_version_boundary(row, record_inventory_row))
+        .with_context(|| {
+            format!(
+                "resolution execution explain requires a topology boundary for {}",
+                row.logical_name_id
+            )
+        })?;
+    let record_version_boundary = resolution_record_version_boundary(row, record_inventory_row)
+        .or_else(|| build_supported_record_version_boundary(row))
+        .with_context(|| {
+            format!(
+                "resolution execution explain requires a record boundary for {}",
+                row.logical_name_id
+            )
+        })?;
+
+    Ok(ExecutionCacheKey {
+        request_key: normalized_resolution_request_key(
+            &row.namespace,
+            &row.normalized_name,
+            records,
+        ),
+        requested_chain_positions: build_requested_chain_positions(&row.chain_positions)?,
+        manifest_versions,
+        topology_version_boundary,
+        record_version_boundary,
+    })
+}
+
 fn build_resolution_boundary_chain_position(row: &NameCurrentRow) -> Option<ChainPositionResponse> {
     let chain_positions = row.chain_positions.as_object()?;
     chain_positions
@@ -3039,6 +3558,71 @@ fn build_resolution_boundary_chain_position(row: &NameCurrentRow) -> Option<Chai
                 .filter_map(chain_position_from_value);
             let first = parsed.next()?;
             parsed.next().is_none().then_some(first)
+        })
+}
+
+fn normalized_resolution_request_key(
+    namespace: &str,
+    normalized_name: &str,
+    records: &[ResolutionRecordKey],
+) -> String {
+    let mut record_keys = records
+        .iter()
+        .map(|record| record.record_key.clone())
+        .collect::<Vec<_>>();
+    record_keys.sort_unstable();
+    format!("{namespace}:{normalized_name}:{}", record_keys.join(","))
+}
+
+fn build_requested_chain_positions(chain_positions: &JsonValue) -> Result<JsonValue> {
+    let positions = chain_positions
+        .as_object()
+        .context("resolution execution explain requires chain_positions")?
+        .values()
+        .filter_map(chain_position_from_value)
+        .map(|position| {
+            json!({
+                "chain_id": position.chain_id,
+                "block_number": position.block_number,
+                "block_hash": position.block_hash,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    if positions.is_empty() {
+        bail!("resolution execution explain requires at least one chain position");
+    }
+
+    let mut positions = positions;
+    positions.sort_by(|left, right| {
+        string_field(provenance_field(left, "chain_id"))
+            .cmp(&string_field(provenance_field(right, "chain_id")))
+            .then(
+                provenance_field(left, "block_number")
+                    .and_then(JsonValue::as_i64)
+                    .cmp(&provenance_field(right, "block_number").and_then(JsonValue::as_i64)),
+            )
+            .then(
+                string_field(provenance_field(left, "block_hash"))
+                    .cmp(&string_field(provenance_field(right, "block_hash"))),
+            )
+    });
+
+    Ok(JsonValue::Array(positions))
+}
+
+fn persisted_trace_detail_object(trace: &ExecutionTrace, key: &str) -> Option<JsonValue> {
+    provenance_field(&trace.request_metadata, key)
+        .filter(|value| value.is_object())
+        .cloned()
+        .or_else(|| {
+            trace
+                .steps
+                .iter()
+                .find_map(|step| {
+                    provenance_field(&step.step_payload, key).filter(|value| value.is_object())
+                })
+                .cloned()
         })
 }
 
