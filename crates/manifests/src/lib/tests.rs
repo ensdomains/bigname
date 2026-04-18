@@ -232,6 +232,20 @@ proxy_kind = "none"
     )
 }
 
+fn checked_in_manifest_contents(
+    namespace: &str,
+    source_family: &str,
+    version_tag: &str,
+) -> Result<String> {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../manifests")
+        .join(namespace)
+        .join(source_family)
+        .join(format!("{version_tag}.toml"));
+    fs::read_to_string(&path)
+        .with_context(|| format!("failed to read checked-in manifest {}", path.display()))
+}
+
 async fn load_single_contract_instance_for_address(
     pool: &PgPool,
     chain: &str,
@@ -623,6 +637,75 @@ async fn active_execution_family_is_admitted_with_owned_capability_and_watch_tar
         contract.address == normalize_address("0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe")
             && contract.source == WatchedContractSource::ManifestContract
     }));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn checked_in_reverse_manifest_is_admitted_as_authoritative_watch_target() -> Result<()> {
+    let test_dir = TestDir::new()?;
+    let database = TestDatabase::new().await?;
+
+    test_dir.write_manifest(
+        "ens",
+        "ens_v1_reverse_l1",
+        "v1",
+        &checked_in_manifest_contents("ens", "ens_v1_reverse_l1", "v1")?,
+    )?;
+
+    let repository = load_repository(&test_dir.path)?;
+    assert_eq!(repository.summary().status, ManifestLoadStatus::Loaded);
+    assert_eq!(repository.manifests().len(), 1);
+    assert_eq!(repository.manifests()[0].manifest.source_family, "ens_v1_reverse_l1");
+
+    let summary = sync_repository(database.pool(), &repository).await?;
+    assert_eq!(summary.status, ManifestSyncStatus::Synced);
+    assert_eq!(summary.active_manifest_count, 1);
+    assert_eq!(summary.root_count, 0);
+    assert_eq!(summary.contract_count, 1);
+    assert_eq!(summary.capability_count, 0);
+    assert_eq!(summary.discovery_rule_count, 0);
+
+    assert_eq!(
+        load_manifest_rollout_statuses(database.pool(), "ens").await?,
+        vec![("ens_v1_reverse_l1".to_owned(), "active".to_owned())]
+    );
+    assert_eq!(
+        load_capability_flags_for_source_family(database.pool(), "ens", "ens_v1_reverse_l1")
+            .await?,
+        BTreeMap::new()
+    );
+
+    let active_manifests = load_active_manifests_for_namespace(database.pool(), "ens").await?;
+    assert_eq!(active_manifests.len(), 1);
+    assert_eq!(active_manifests[0].source_family, "ens_v1_reverse_l1");
+    assert!(active_manifests[0].capability_flags.is_empty());
+
+    let reverse_registrar = normalize_address("0xa58E81fe9b61B5c3fE2AFD33CF304c454AbFc7Cb");
+    let watched_contracts = load_watched_contracts(database.pool()).await?;
+    assert_eq!(watched_contracts.len(), 1);
+    assert!(watched_contracts.iter().any(|contract| {
+        contract.address == reverse_registrar
+            && contract.source == WatchedContractSource::ManifestContract
+    }));
+
+    assert_eq!(
+        load_watched_chain_plan(database.pool()).await?,
+        vec![WatchedChainPlan {
+            chain: "ethereum-mainnet".to_owned(),
+            addresses: vec![reverse_registrar.clone()],
+            manifest_root_entry_count: 0,
+            manifest_contract_entry_count: 1,
+            discovery_edge_entry_count: 0,
+        }]
+    );
+
+    let admission_state = load_discovery_admission_state(database.pool()).await?;
+    assert!(admission_state.has_authoritative_address(
+        "ethereum-mainnet",
+        &reverse_registrar
+    ));
 
     database.cleanup().await?;
     Ok(())

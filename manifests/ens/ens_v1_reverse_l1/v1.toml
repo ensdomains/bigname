@@ -1,0 +1,17 @@
+# Bootstrap seed for the canonical ENS reverse registrar on Ethereum mainnet.
+manifest_version = 1
+namespace = "ens"
+source_family = "ens_v1_reverse_l1"
+chain = "ethereum-mainnet"
+deployment_epoch = "ens_v1"
+rollout_status = "active"
+normalizer_version = "uts46-v1"
+roots = []
+discovery_rules = []
+
+[capability_flags]
+
+[[contracts]]
+role = "reverse_registrar"
+address = "0xa58E81fe9b61B5c3fE2AFD33CF304c454AbFc7Cb"
+proxy_kind = "none"
