@@ -981,15 +981,22 @@ Rules:
 - `claimed_primary_name.status` uses the shared `ResultStatus` vocabulary; the initial declared contract uses `success`, `not_found`, `unsupported`, and `invalid_name`
 - `verified_primary_name.status` uses the same `ResultStatus` vocabulary; the initial verified contract uses `success`, `not_found`, `mismatch`, `unsupported`, `invalid_name`, and `execution_failed`
 - `claimed_primary_name` and `verified_primary_name` always include `status` when their containing section is populated
+- the additive tuple-present follow-on freezes `claimed_primary_name` to the field boundary `{status, name?, raw_claim_name?, unsupported_reason?, provenance?}`; `name`, when later shipped, carries the normalized claim identity using the shared `NameRef` shape, `raw_claim_name` appears only for `status=invalid_name`, and `failure_reason` is not used on this declared object
+- the additive tuple-present follow-on freezes `verified_primary_name` to the field boundary `{status, name?, unsupported_reason?, failure_reason?, provenance?}`; its `name`, when later shipped, uses that same `NameRef` shape, and `raw_claim_name` never appears on this execution-derived object
+- `claimed_primary_name.name` appears only for `status=success`; `verified_primary_name.name` appears only for `status=success` or `status=mismatch`, where the route established a concrete normalized name target for verification
 - in the shipped bootstrap slice, tuple-present reads may still return explicit `status=unsupported` result objects for `claimed_primary_name`, `verified_primary_name`, or both; richer tuple-present payloads remain pending additive support
-- concrete declared claim identity fields, `raw_claim_name` on `status=invalid_name`, and richer verified result payloads are reserved for that additive follow-up work; the shipped bootstrap handler does not yet surface them
+- the richer tuple-present fields above are prose-frozen only until additive handler support ships; the current bootstrap handler and current `docs/api-v1.openapi.json` publication remain limited to the already shipped bootstrap envelope
 - `verified_primary_name` is authoritative only when `status=success`
-- `status=mismatch` remains reserved for the additive verified result shape where the claim normalizes and resolves but the verified target address for the requested `coin_type` does not equal the requested `{address}`
+- `status=mismatch` applies only to `verified_primary_name` and remains reserved for the additive verified result shape where the claim normalizes and resolves for the requested `coin_type`, but the verified target address does not equal the requested `{address}`
+- `verified_primary_name.failure_reason` is verification-local and may appear only for `status=mismatch`, `status=invalid_name`, or `status=execution_failed`; it must not be used to restate declared claim identity or to duplicate `raw_claim_name`
+- when both sections are populated and the raw claim exists but cannot be normalized, `claimed_primary_name.status=invalid_name` may carry `raw_claim_name` while `verified_primary_name.status=invalid_name` remains limited to verification-local fields
 - invalid address syntax, missing required `namespace` or `coin_type`, or a malformed query tuple returns `400 invalid_input`
 - an unsupported public namespace returns `404 not_found`
 - no declared or verified primary-name answer for the requested tuple returns `200` with `status=not_found`; it does not turn the route into `404`
 - unsupported claim surfaces or unsupported verified entrypoints return `200` with the corresponding object `status=unsupported`
-- top-level `provenance` summarizes the declared claim inputs and, when `verified_state` is populated, the verification trace; `claimed_primary_name` and `verified_primary_name` may each carry narrower provenance objects
+- top-level `provenance` summarizes the declared claim inputs and, when an execution-derived verified answer is present, the verification trace
+- `claimed_primary_name.provenance`, when later shipped, is claim-local declared provenance and must not introduce a second `execution_trace_id`
+- `verified_primary_name.provenance`, when later shipped, is verification-local provenance and must stay within top-level `provenance.execution_trace_id`
 - route-level `coverage` explains completeness of the declared claim surface for the requested tuple; a verification mismatch or absence does not by itself change that coverage summary
 
 ## 6. Sorting And Pagination Defaults

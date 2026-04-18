@@ -67,8 +67,14 @@ Rules:
 
 - the route keeps claimed state separate from the execution-derived verification result
 - `claimed_primary_name` and `verified_primary_name` both use the shared `ResultStatus` vocabulary
-- `verified_primary_name` uses `success`, `not_found`, `mismatch`, `unsupported`, `invalid_name`, and `execution_failed`
+- `claimed_primary_name` is limited to `success`, `not_found`, `unsupported`, and `invalid_name`; `verified_primary_name` is limited to `success`, `not_found`, `mismatch`, `unsupported`, `invalid_name`, and `execution_failed`
 - a raw claim that cannot be normalized surfaces `status=invalid_name`; it is not silently treated as missing
+- `raw_claim_name` is claim-local state: it may be preserved to explain `claimed_primary_name.status=invalid_name`, but it does not migrate into `verified_primary_name`
+- `mismatch` and `execution_failed` are verified-only outcomes; when emitted, any `failure_reason` stays verification-local and does not duplicate declared claim identity
+- `mismatch` means the claim normalized, resolved for the requested `coin_type`, and produced a concrete target address that did not equal the requested address
+- when verification establishes a concrete normalized name target, `verified_primary_name` may carry that name identity for `status=success` or `status=mismatch`; it omits that identity for `status=not_found`, `status=unsupported`, `status=invalid_name`, and `status=execution_failed`
+- claim-local provenance and verification-local provenance may both contribute to the route, but only the verification-local side is anchored to the persisted `execution_trace_id`
+- the shipped bootstrap route may still return explicit verified `status=unsupported` without surfacing the richer tuple-present execution payload above
 
 ## 4. Trace Schema
 
