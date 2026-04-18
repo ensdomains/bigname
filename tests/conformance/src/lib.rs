@@ -25,8 +25,8 @@ mod shipped_api {
         };
         use bigname_storage::{
             CanonicalityState, NameSurface, NormalizedEvent, PermissionScope,
-            PermissionsCurrentRow, RawBlock, ResolverCurrentRow, Resource, SurfaceBinding,
-            SurfaceBindingKind, TokenLineage, default_database_url,
+            PermissionsCurrentRow, RawBlock, RecordInventoryCurrentRow, ResolverCurrentRow,
+            Resource, SurfaceBinding, SurfaceBindingKind, TokenLineage, default_database_url,
         };
         use serde::de::DeserializeOwned;
         use serde_json::{Value, json};
@@ -400,6 +400,18 @@ mod shipped_api {
                 bigname_storage::upsert_name_current_rows(&self.pool, &[row])
                     .await
                     .context("failed to upsert name_current row for conformance harness")?;
+                Ok(())
+            }
+
+            async fn insert_record_inventory_current_row(
+                &self,
+                row: RecordInventoryCurrentRow,
+            ) -> Result<()> {
+                bigname_storage::upsert_record_inventory_current_rows(&self.pool, &[row])
+                    .await
+                    .context(
+                        "failed to upsert record_inventory_current row for conformance harness",
+                    )?;
                 Ok(())
             }
 
@@ -1912,11 +1924,17 @@ mod shipped_api {
             assert_eq!(explain_payload.data, name_payload.data);
             assert_eq!(explain_payload.provenance, name_payload.provenance);
             assert_eq!(explain_payload.coverage, name_payload.coverage);
-            assert_eq!(explain_payload.chain_positions, name_payload.chain_positions);
+            assert_eq!(
+                explain_payload.chain_positions,
+                name_payload.chain_positions
+            );
             assert_eq!(explain_payload.consistency, name_payload.consistency);
             assert_eq!(explain_payload.last_updated, name_payload.last_updated);
             assert_eq!(explain_payload.verified_state, None);
-            assert_eq!(explain_payload.declared_state.get("history"), Some(&history));
+            assert_eq!(
+                explain_payload.declared_state.get("history"),
+                Some(&history)
+            );
             assert_eq!(
                 explain_payload.declared_state,
                 json!({
@@ -1992,14 +2010,23 @@ mod shipped_api {
             assert_eq!(explain_payload.data, name_payload.data);
             assert_eq!(explain_payload.provenance, name_payload.provenance);
             assert_eq!(explain_payload.coverage, name_payload.coverage);
-            assert_eq!(explain_payload.chain_positions, name_payload.chain_positions);
+            assert_eq!(
+                explain_payload.chain_positions,
+                name_payload.chain_positions
+            );
             assert_eq!(explain_payload.consistency, name_payload.consistency);
             assert_eq!(explain_payload.last_updated, name_payload.last_updated);
             assert_eq!(explain_payload.verified_state, None);
             assert_eq!(name_declared_state.get("authority"), Some(&authority));
             assert_eq!(name_declared_state.get("control"), Some(&control));
-            assert_eq!(explain_payload.declared_state.get("authority"), Some(&authority));
-            assert_eq!(explain_payload.declared_state.get("control"), Some(&control));
+            assert_eq!(
+                explain_payload.declared_state.get("authority"),
+                Some(&authority)
+            );
+            assert_eq!(
+                explain_payload.declared_state.get("control"),
+                Some(&control)
+            );
             assert_eq!(
                 explain_payload.declared_state,
                 json!({
@@ -2030,6 +2057,12 @@ mod shipped_api {
                 )
                 .await?;
             database.rebuild_name_current(logical_name_id).await?;
+            database
+                .insert_record_inventory_current_row(resolution_record_inventory_current_row(
+                    logical_name_id,
+                    resource_id,
+                ))
+                .await?;
 
             let default_response = app_router(database.app_state())
                 .oneshot(
@@ -2043,7 +2076,9 @@ mod shipped_api {
             let declared_response = app_router(database.app_state())
                 .oneshot(
                     Request::builder()
-                        .uri("/v1/resolutions/ens/alice.eth?mode=declared&records=text")
+                        .uri(
+                            "/v1/resolutions/ens/alice.eth?mode=declared&records=text:com.twitter,addr:60,avatar",
+                        )
                         .body(Body::empty())
                         .expect("request must build"),
                 )
@@ -2061,7 +2096,7 @@ mod shipped_api {
             let both_response = app_router(database.app_state())
                 .oneshot(
                     Request::builder()
-                        .uri("/v1/resolutions/ens/alice.eth?mode=both&records=text")
+                        .uri("/v1/resolutions/ens/alice.eth?mode=both&records=text:com.twitter")
                         .body(Body::empty())
                         .expect("request must build"),
                 )
@@ -2077,15 +2112,30 @@ mod shipped_api {
             let declared_payload: ResolutionResponse = read_json(declared_response).await?;
             let verified_payload: ResolutionResponse = read_json(verified_response).await?;
             let both_payload: ResolutionResponse = read_json(both_response).await?;
+            let expected_default_declared_state = resolution_supported_declared_state(
+                logical_name_id,
+                resource_id,
+                &["addr:60", "avatar"],
+            );
+            let expected_declared_state = resolution_supported_declared_state(
+                logical_name_id,
+                resource_id,
+                &["text:com.twitter", "addr:60", "avatar"],
+            );
+            let expected_both_declared_state = resolution_supported_declared_state(
+                logical_name_id,
+                resource_id,
+                &["text:com.twitter"],
+            );
 
             assert_eq!(
-                default_payload.declared_state,
-                Some(resolution_supported_declared_state(resource_id))
+                default_payload.declared_state.as_ref(),
+                Some(&expected_default_declared_state)
             );
             assert_eq!(default_payload.verified_state, None);
             assert_eq!(
-                declared_payload.declared_state,
-                Some(resolution_supported_declared_state(resource_id))
+                declared_payload.declared_state.as_ref(),
+                Some(&expected_declared_state)
             );
             assert_eq!(declared_payload.verified_state, None);
             assert_eq!(verified_payload.declared_state, None);
@@ -2094,12 +2144,123 @@ mod shipped_api {
                 Some(resolution_unsupported_verified_state(&["text", "addr:60"]))
             );
             assert_eq!(
-                both_payload.declared_state,
-                Some(resolution_supported_declared_state(resource_id))
+                both_payload.declared_state.as_ref(),
+                Some(&expected_both_declared_state)
             );
             assert_eq!(
                 both_payload.verified_state,
-                Some(resolution_unsupported_verified_state(&["text"]))
+                Some(resolution_unsupported_verified_state(&["text:com.twitter"]))
+            );
+
+            let default_declared_state = default_payload
+                .declared_state
+                .as_ref()
+                .expect("default declared_state must be present");
+            let inventory_selector_tuples = default_declared_state
+                .get("record_inventory")
+                .and_then(|value| value.get("selectors"))
+                .and_then(Value::as_array)
+                .expect("supported record_inventory must expose selectors")
+                .iter()
+                .map(record_selector_identity_tuple)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                inventory_selector_tuples,
+                vec![
+                    (
+                        "addr:60".to_owned(),
+                        "addr".to_owned(),
+                        Some("60".to_owned())
+                    ),
+                    ("avatar".to_owned(), "avatar".to_owned(), None),
+                    (
+                        "text:com.twitter".to_owned(),
+                        "text".to_owned(),
+                        Some("com.twitter".to_owned()),
+                    ),
+                ]
+            );
+
+            let inventory_selector_tuple_set = inventory_selector_tuples
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            let topology_record_version_boundary = default_declared_state
+                .get("topology")
+                .and_then(|value| value.get("version_boundaries"))
+                .and_then(|value| value.get("record_version_boundary"))
+                .expect("supported topology must expose record_version_boundary");
+            let record_inventory_version_boundary = default_declared_state
+                .get("record_inventory")
+                .and_then(|value| value.get("record_version_boundary"))
+                .expect("supported record_inventory must expose record_version_boundary");
+            let full_cache = default_declared_state
+                .get("record_cache")
+                .expect("supported record_cache must be present");
+            let full_cache_entries = full_cache
+                .get("entries")
+                .and_then(Value::as_array)
+                .expect("supported record_cache must expose entries");
+            let full_cache_selector_tuples = full_cache_entries
+                .iter()
+                .map(record_selector_identity_tuple)
+                .collect::<Vec<_>>();
+
+            assert_eq!(
+                record_inventory_version_boundary,
+                topology_record_version_boundary
+            );
+            assert_eq!(
+                full_cache.get("record_version_boundary"),
+                Some(topology_record_version_boundary)
+            );
+            assert_eq!(
+                full_cache_selector_tuples,
+                vec![
+                    (
+                        "addr:60".to_owned(),
+                        "addr".to_owned(),
+                        Some("60".to_owned())
+                    ),
+                    ("avatar".to_owned(), "avatar".to_owned(), None),
+                ]
+            );
+            assert!(
+                full_cache_selector_tuples
+                    .iter()
+                    .all(|tuple| inventory_selector_tuple_set.contains(tuple))
+            );
+
+            let narrowed_cache_selector_tuples = declared_payload
+                .declared_state
+                .as_ref()
+                .and_then(|value| value.get("record_cache"))
+                .and_then(|value| value.get("entries"))
+                .and_then(Value::as_array)
+                .expect("declared mode record_cache must expose entries")
+                .iter()
+                .map(record_selector_identity_tuple)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                narrowed_cache_selector_tuples,
+                vec![
+                    (
+                        "text:com.twitter".to_owned(),
+                        "text".to_owned(),
+                        Some("com.twitter".to_owned()),
+                    ),
+                    (
+                        "addr:60".to_owned(),
+                        "addr".to_owned(),
+                        Some("60".to_owned())
+                    ),
+                    ("avatar".to_owned(), "avatar".to_owned(), None),
+                ]
+            );
+            assert!(
+                narrowed_cache_selector_tuples
+                    .iter()
+                    .all(|tuple| inventory_selector_tuple_set.contains(tuple))
             );
 
             database.cleanup().await?;
@@ -2221,11 +2382,19 @@ mod shipped_api {
                 )
                 .await?;
             database.rebuild_name_current(logical_name_id).await?;
+            database
+                .insert_record_inventory_current_row(resolution_record_inventory_current_row(
+                    logical_name_id,
+                    resource_id,
+                ))
+                .await?;
 
             let resolution_response = app_router(database.app_state())
                 .oneshot(
                     Request::builder()
-                        .uri("/v1/resolutions/ens/alice.eth?mode=both&records=text,addr:60")
+                        .uri(
+                            "/v1/resolutions/ens/alice.eth?mode=both&records=text:com.twitter,addr:60",
+                        )
                         .body(Body::empty())
                         .expect("request must build"),
                 )
@@ -2246,6 +2415,11 @@ mod shipped_api {
 
             let resolution_payload: ResolutionResponse = read_json(resolution_response).await?;
             let name_payload: NameResponse = read_json(name_response).await?;
+            let expected_resolution_declared_state = resolution_supported_declared_state(
+                logical_name_id,
+                resource_id,
+                &["text:com.twitter", "addr:60"],
+            );
 
             assert_eq!(resolution_payload.data, name_payload.data);
             assert_eq!(resolution_payload.provenance, name_payload.provenance);
@@ -2257,12 +2431,15 @@ mod shipped_api {
             assert_eq!(resolution_payload.consistency, name_payload.consistency);
             assert_eq!(resolution_payload.last_updated, name_payload.last_updated);
             assert_eq!(
-                resolution_payload.declared_state,
-                Some(resolution_supported_declared_state(resource_id))
+                resolution_payload.declared_state.as_ref(),
+                Some(&expected_resolution_declared_state)
             );
             assert_eq!(
                 resolution_payload.verified_state,
-                Some(resolution_unsupported_verified_state(&["text", "addr:60"]))
+                Some(resolution_unsupported_verified_state(&[
+                    "text:com.twitter",
+                    "addr:60",
+                ]))
             );
 
             database.cleanup().await?;
@@ -4780,7 +4957,172 @@ mod shipped_api {
             })
         }
 
-        fn resolution_supported_declared_state(resource_id: Uuid) -> Value {
+        fn resolution_record_inventory_boundary(logical_name_id: &str, resource_id: Uuid) -> Value {
+            json!({
+                "logical_name_id": logical_name_id,
+                "resource_id": resource_id.to_string(),
+                "normalized_event_id": null,
+                "event_kind": null,
+                "chain_position": {
+                    "chain_id": "ethereum-mainnet",
+                    "block_number": 106,
+                    "block_hash": "0xhistorysurface",
+                    "timestamp": "2024-05-31T16:08:26Z",
+                },
+            })
+        }
+
+        fn resolution_record_inventory_enumeration_basis() -> Value {
+            json!({
+                "observed_selectors": true,
+                "capability_declared_families": true,
+                "globally_enumerable": false,
+            })
+        }
+
+        fn resolution_record_inventory_selectors() -> Value {
+            json!([
+                {
+                    "record_key": "addr:60",
+                    "record_family": "addr",
+                    "selector_key": "60",
+                    "cacheable": true,
+                },
+                {
+                    "record_key": "avatar",
+                    "record_family": "avatar",
+                    "selector_key": null,
+                    "cacheable": true,
+                },
+                {
+                    "record_key": "text:com.twitter",
+                    "record_family": "text",
+                    "selector_key": "com.twitter",
+                    "cacheable": false,
+                }
+            ])
+        }
+
+        fn resolution_record_inventory_explicit_gaps() -> Value {
+            json!([
+                {
+                    "record_key": "contenthash",
+                    "record_family": "contenthash",
+                    "selector_key": null,
+                    "gap_reason": "not_observed_on_current_resolver",
+                }
+            ])
+        }
+
+        fn resolution_record_inventory_unsupported_families() -> Value {
+            json!([
+                {
+                    "record_family": "abi",
+                    "unsupported_reason": "resolver_family_pending",
+                },
+                {
+                    "record_family": "pubkey",
+                    "unsupported_reason": "resolver_family_pending",
+                }
+            ])
+        }
+
+        fn resolution_record_inventory_last_change() -> Value {
+            json!({
+                "normalized_event_id": 1200,
+                "event_kind": "RecordsChanged",
+                "chain_position": {
+                    "chain_id": "ethereum-mainnet",
+                    "block_number": 106,
+                    "block_hash": "0xhistorysurface",
+                    "timestamp": "2024-05-31T16:08:26Z",
+                }
+            })
+        }
+
+        fn resolution_record_cache_entries(record_keys: &[&str]) -> Vec<Value> {
+            record_keys
+                .iter()
+                .map(|record_key| match *record_key {
+                    "addr:60" => json!({
+                        "record_key": "addr:60",
+                        "record_family": "addr",
+                        "selector_key": "60",
+                        "status": "success",
+                        "value": {
+                            "coin_type": "60",
+                            "value": "0x0000000000000000000000000000000000000abc",
+                        }
+                    }),
+                    "avatar" => json!({
+                        "record_key": "avatar",
+                        "record_family": "avatar",
+                        "selector_key": null,
+                        "status": "unsupported",
+                        "unsupported_reason": "resolver_family_pending",
+                    }),
+                    "text:com.twitter" => json!({
+                        "record_key": "text:com.twitter",
+                        "record_family": "text",
+                        "selector_key": "com.twitter",
+                        "status": "not_found",
+                    }),
+                    unexpected => panic!("unexpected direct ENS record selector {unexpected}"),
+                })
+                .collect()
+        }
+
+        fn resolution_record_inventory_current_row(
+            logical_name_id: &str,
+            resource_id: Uuid,
+        ) -> RecordInventoryCurrentRow {
+            RecordInventoryCurrentRow {
+                resource_id,
+                record_version_boundary: resolution_record_inventory_boundary(
+                    logical_name_id,
+                    resource_id,
+                ),
+                enumeration_basis: resolution_record_inventory_enumeration_basis(),
+                selectors: resolution_record_inventory_selectors(),
+                explicit_gaps: resolution_record_inventory_explicit_gaps(),
+                unsupported_families: resolution_record_inventory_unsupported_families(),
+                last_change: Some(resolution_record_inventory_last_change()),
+                entries: json!(resolution_record_cache_entries(&["addr:60", "avatar"])),
+                provenance: json!({
+                    "normalized_event_ids": [1200],
+                    "derivation_kind": "record_inventory_current_rebuild",
+                }),
+                coverage: json!({
+                    "status": "full",
+                    "exhaustiveness": "authoritative",
+                    "enumeration_basis": "declared_record_inventory",
+                }),
+                chain_positions: json!({
+                    "ethereum-mainnet": {
+                        "chain_id": "ethereum-mainnet",
+                        "block_number": 106,
+                        "block_hash": "0xhistorysurface",
+                        "timestamp": "2024-05-31T16:08:26Z",
+                    }
+                }),
+                canonicality_summary: json!({
+                    "status": "finalized",
+                    "chains": {
+                        "ethereum-mainnet": "finalized",
+                    }
+                }),
+                manifest_version: 7,
+                last_recomputed_at: timestamp(1_717_171_718),
+            }
+        }
+
+        fn resolution_supported_declared_state(
+            logical_name_id: &str,
+            resource_id: Uuid,
+            record_cache_keys: &[&str],
+        ) -> Value {
+            let record_version_boundary =
+                resolution_record_inventory_boundary(logical_name_id, resource_id);
             json!({
                 "topology": {
                     "registry_path": [
@@ -4816,30 +5158,8 @@ mod shipped_api {
                         "hops": [],
                     },
                     "version_boundaries": {
-                        "topology_version_boundary": {
-                            "logical_name_id": "ens:alice.eth",
-                            "resource_id": resource_id.to_string(),
-                            "normalized_event_id": null,
-                            "event_kind": null,
-                            "chain_position": {
-                                "chain_id": "ethereum-mainnet",
-                                "block_number": 106,
-                                "block_hash": "0xhistorysurface",
-                                "timestamp": "2024-05-31T16:08:26Z",
-                            },
-                        },
-                        "record_version_boundary": {
-                            "logical_name_id": "ens:alice.eth",
-                            "resource_id": resource_id.to_string(),
-                            "normalized_event_id": null,
-                            "event_kind": null,
-                            "chain_position": {
-                                "chain_id": "ethereum-mainnet",
-                                "block_number": 106,
-                                "block_hash": "0xhistorysurface",
-                                "timestamp": "2024-05-31T16:08:26Z",
-                            },
-                        },
+                        "topology_version_boundary": record_version_boundary.clone(),
+                        "record_version_boundary": record_version_boundary.clone(),
                     },
                     "transport": {
                         "source_chain_id": null,
@@ -4849,14 +5169,41 @@ mod shipped_api {
                     },
                 },
                 "record_inventory": {
-                    "status": "unsupported",
-                    "unsupported_reason": "declared resolution record inventory is not yet projected",
+                    "record_version_boundary": record_version_boundary.clone(),
+                    "enumeration_basis": resolution_record_inventory_enumeration_basis(),
+                    "selectors": resolution_record_inventory_selectors(),
+                    "explicit_gaps": resolution_record_inventory_explicit_gaps(),
+                    "unsupported_families": resolution_record_inventory_unsupported_families(),
+                    "last_change": resolution_record_inventory_last_change(),
                 },
                 "record_cache": {
-                    "status": "unsupported",
-                    "unsupported_reason": "declared resolution record cache is not yet projected",
+                    "record_version_boundary": record_version_boundary,
+                    "entries": resolution_record_cache_entries(record_cache_keys),
                 }
             })
+        }
+
+        fn record_selector_identity_tuple(value: &Value) -> (String, String, Option<String>) {
+            let selector_key = match value.get("selector_key") {
+                Some(Value::Null) => None,
+                Some(Value::String(selector_key)) => Some(selector_key.clone()),
+                Some(_) => panic!("selector_key must be a string or null"),
+                None => panic!("selector_key must be present"),
+            };
+
+            (
+                value
+                    .get("record_key")
+                    .and_then(Value::as_str)
+                    .expect("record_key must be present")
+                    .to_owned(),
+                value
+                    .get("record_family")
+                    .and_then(Value::as_str)
+                    .expect("record_family must be present")
+                    .to_owned(),
+                selector_key,
+            )
         }
 
         fn resolution_unsupported_verified_state(record_keys: &[&str]) -> Value {

@@ -50,9 +50,11 @@ Execution notes:
   shipped history routes that satisfy the Phase 6 history-explain deliverable
 - the resolution contract reuses the exact-name rebuild seed and asserts the shipped mixed-route
   envelope on `GET /v1/resolutions/{namespace}/{name}` across `declared`, `verified`, and `both`
-  modes, including required and invalid `records` handling plus the supported declared
-  `topology` section, still-unsupported declared `record_inventory` / `record_cache` sections,
-  and unsupported verified query entries that remain after the bootstrap slice
+  modes, including required and invalid `records` handling, the supported declared `topology`,
+  `record_inventory`, and `record_cache` sections, the shared record-version-boundary invariant
+  across those declared sections, selector identity and cache-subset invariants between
+  `record_inventory` and `record_cache`, and verified query entries that remain explicitly
+  unsupported until their own slice lands
 - the coverage contract reuses the same exact-name rebuild seed and asserts that
   `GET /v1/coverage/{namespace}/{name}` keeps the same single-name `data` and top-level
   `coverage` object as exact-name lookup while exposing the explain-only coverage block in
