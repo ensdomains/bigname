@@ -1023,6 +1023,12 @@ Rules:
 - each declared summary section is always present as an object
 - any declared summary section that is not yet projected must return an explicit unsupported object instead of disappearing silently
 - `authority` may fall back to the current binding identifiers when the binding is known but a richer authority summary is not yet projected
+- exact-name `control` is a narrow current-control summary for the bound `resource_id`; in the initial contract it carries `registrant`, `registry_owner`, and `latest_event_kind`, and it stays narrower than both the internal `ControlVector` and the dedicated resource-permissions truth family
+- exact-name `control` may repeat the current `registrant` already visible in `registration` when the same canonical facts drive both summaries; that duplication is intentional and does not create a second control truth system
+- exact-name `resolver` is a narrow current-resolver summary; in the initial contract it carries `chain_id`, `address`, and `latest_event_kind`, and `chain_id=null` plus `address=null` mean the current resource has no declared resolver rather than that resolver reads are unsupported
+- exact-name `resolver` does not inline alias traversal, wildcard traversal, transport context, record inventory, or resolver-overview subdocuments; those remain on `Resolution.topology`, `Resolution.record_inventory`, and resolver-centric reads
+- exact-name `history` is a pair of head pointers into the canonical name-history contract rather than embedded rows; it carries `surface_head` and `resource_head`, each meaning “the first canonical row under `chain_position_desc` for the matching scope”
+- exact-name `history` intentionally omits a `both_head` field; the dedicated history route keeps the `scope=both` union contract, row shape, and pagination behavior
 - for the same exact-name target and snapshot, the top-level `coverage` object matches the shared `Coverage` summary returned by `GET /v1/coverage/{namespace}/{name}`
 - verified resolution remains a separate route family; exact-name lookup does not inline verified execution in the declared-state baseline
 

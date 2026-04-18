@@ -124,6 +124,37 @@ Rules:
 
 Use this object for the `role_summary` expansion on `GET /v1/addresses/{address}/names`. It is the per-resource summary view of the current effective permission rows for the same `resource_id`. Row-granular permission lineage such as `grant_source`, `revocation_source`, `inheritance_path`, and `transfer_behavior` stays on `GET /v1/resources/{resource_id}/permissions`.
 
+### `ExactNameControlSummary`
+
+- `registrant`
+- `registry_owner`
+- `latest_event_kind`
+
+Use this object for `declared_state.control` on `GET /v1/names/{namespace}/{name}`. It is the exact-name summary form of the current resource-anchored control facts for the route's current `resource_id`, not a second permissions ledger and not a full `ControlVector` dump. When this summary is supported, these keys stay present; values may be `null` when the current authority epoch does not expose that subject or there is no retained control-change pointer yet.
+
+### `ExactNameResolverSummary`
+
+- `chain_id`
+- `address`
+- `latest_event_kind`
+
+Use this object for `declared_state.resolver` on `GET /v1/names/{namespace}/{name}`. It identifies the current resolver target for the bound resource only; it does not inline `Resolution.topology`, wildcard or alias traversal detail, or resolver-overview subdocuments. When this summary is supported, `chain_id` and `address` are both `null` if the current resource has no declared resolver at the requested snapshot, and `latest_event_kind` may be `null` when the summary has no retained resolver-change pointer.
+
+### `HistoryPointer`
+
+- `normalized_event_id`
+- `event_kind`
+- `chain_position`
+
+Use this object for summary links into the dedicated history routes. `chain_position` reuses the per-chain position object shape from `ChainPositions` and points at the same canonical normalized-event row that would appear in the dedicated history route under the matching scope and default sort.
+
+### `ExactNameHistorySummary`
+
+- `surface_head`
+- `resource_head`
+
+Use this object for `declared_state.history` on `GET /v1/names/{namespace}/{name}`. `surface_head` is the first canonical row that `GET /v1/history/names/{namespace}/{name}?scope=surface` would return under the shared default sort, and `resource_head` is the same pointer for `scope=resource`. Either field may be `null` when that anchor set has no canonical rows. This summary intentionally does not add a `both_head` field; callers that need union ordering or pagination use the dedicated history route with its existing `scope=both` default.
+
 ### `UnsupportedSummary`
 
 - `status`: always `unsupported`
@@ -236,10 +267,10 @@ Returns:
 - `data` binding identifiers: `resource_id`, `token_lineage_id`, `binding_kind`
 - `declared_state.registration`
 - `declared_state.authority`
-- `declared_state.control`
-- `declared_state.resolver`
+- `declared_state.control`: `ExactNameControlSummary | UnsupportedSummary`
+- `declared_state.resolver`: `ExactNameResolverSummary | UnsupportedSummary`
 - `declared_state.record_inventory`
-- `declared_state.history`
+- `declared_state.history`: `ExactNameHistorySummary | UnsupportedSummary`
 
 Rules:
 
@@ -247,6 +278,9 @@ Rules:
 - every declared summary section above is always present as an object
 - if a section is not yet projected, it returns `UnsupportedSummary`
 - `declared_state.authority` may fall back to `{resource_id, token_lineage_id, binding_kind}` when a dedicated authority summary is not yet projected but the current binding is known
+- `declared_state.control` is the narrow current-`resource_id` control summary only; it does not inline full resource permissions, role-holder detail, or the entire internal `ControlVector`
+- supported `declared_state.resolver` uses `chain_id` plus `address` as the same resolver target key used by `GET /v1/resolvers/{chain_id}/{resolver_address}` when a resolver exists; `chain_id=null` and `address=null` mean no declared current resolver rather than unsupported projection
+- supported `declared_state.history.surface_head` and `declared_state.history.resource_head` point at the first canonical rows of the dedicated name-history route under `scope=surface` and `scope=resource`; the exact-name route does not add `both_head`, pagination state, or a second history truth system
 - for the same `{namespace}`, `{name}`, and snapshot selection, the top-level `coverage` object matches `GET /v1/coverage/{namespace}/{name}`
 - the shipped exact-name route does not support `include` expansions; history, permissions, resolution, and primary-name reads stay on their dedicated routes
 - `verified_state` is `null` for the shipped exact-name route

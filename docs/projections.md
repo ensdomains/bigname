@@ -17,7 +17,7 @@ Some declared-state route families are still queued in the API binary. Their pro
 
 | Projection | Primary key | Primary read | Source events |
 | --- | --- | --- | --- |
-| `name_current` | `logical_name_id` | exact name lookup | identity, registration, control, resolver, coverage |
+| `name_current` | `logical_name_id` | exact name lookup | identity, registration, control, resolver, history heads, coverage |
 | `surface_bindings_current` | `surface_binding_id` | exact lookup, explain | `SurfaceBound`, `SurfaceUnbound`, migration events |
 | `address_names_current` | `(address, logical_name_id, relation)` | address collections (queued) | authority, control, reverse, primary claim events |
 | `children_current` | `(parent_logical_name_id, child_logical_name_id, surface_class)` | child collections | registration, subregistry, alias, wildcard events |
@@ -38,6 +38,10 @@ History reads use normalized events plus thin cursor support rather than a separ
 - returns the current binding plus fixed declared summary sections for registration, authority, control, resolver, record inventory, and history
 - unsupported declared summary sections stay explicit in the read model; they are not omitted silently
 - authority may fall back to binding identifiers when a richer authority summary is not yet projected
+- `control` is the exact-name summary form of current resource-anchored control facts and, in the initial contract, carries only `registrant`, `registry_owner`, and `latest_event_kind`; it is narrower than both the internal `ControlVector` and `permissions_current`
+- `resolver` is the exact-name summary form of the current resolver target and, in the initial contract, carries `chain_id`, `address`, and `latest_event_kind`; `chain_id=null` and `address=null` mean the current binding has no declared resolver rather than that the resolver summary itself is unsupported
+- `history` is a pair of head pointers derived from canonical normalized events: `surface_head` and `resource_head`, each pointing at the first row the dedicated name-history route would return for the same target under `scope=surface` or `scope=resource`
+- `history` summary stays in `name_current` only as these scope-specific head pointers; paginated history rows and `scope=both` union ordering remain on the dedicated history reads and do not create a separate history projection
 
 ### Coverage by exact name
 
