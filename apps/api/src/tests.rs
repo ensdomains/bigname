@@ -683,6 +683,87 @@ fn exact_name_row(
     }
 }
 
+fn collection_name_surface(
+    logical_name_id: &str,
+    display_name: &str,
+    namehash: &str,
+    block_number: i64,
+) -> NameSurface {
+    let namespace = logical_name_id
+        .split_once(':')
+        .map(|(namespace, _)| namespace)
+        .expect("logical_name_id must include namespace")
+        .to_owned();
+
+    NameSurface {
+        logical_name_id: logical_name_id.to_owned(),
+        namespace,
+        input_name: display_name.to_owned(),
+        canonical_display_name: display_name.to_owned(),
+        normalized_name: display_name.to_owned(),
+        dns_encoded_name: display_name.as_bytes().to_vec(),
+        namehash: namehash.to_owned(),
+        labelhashes: vec![format!("labelhash:{display_name}")],
+        normalizer_version: "ensip15@2026-04-16".to_owned(),
+        normalization_warnings: json!([]),
+        normalization_errors: json!([]),
+        chain_id: "ethereum-mainnet".to_owned(),
+        block_hash: format!("0xsurface{block_number:02x}"),
+        block_number,
+        provenance: json!({"seed": "children_surface"}),
+        canonicality_state: CanonicalityState::Finalized,
+    }
+}
+
+fn declared_child_row(
+    parent_logical_name_id: &str,
+    child_logical_name_id: &str,
+    display_name: &str,
+    namehash: &str,
+    normalized_event_id: i64,
+    block_number: i64,
+) -> bigname_storage::ChildrenCurrentRow {
+    bigname_storage::ChildrenCurrentRow {
+        parent_logical_name_id: parent_logical_name_id.to_owned(),
+        child_logical_name_id: child_logical_name_id.to_owned(),
+        surface_class: "declared".to_owned(),
+        namespace: "ens".to_owned(),
+        canonical_display_name: display_name.to_owned(),
+        normalized_name: display_name.to_owned(),
+        namehash: namehash.to_owned(),
+        provenance: json!({
+            "normalized_event_ids": [normalized_event_id],
+            "raw_fact_refs": [{
+                "kind": "raw_log",
+                "block_number": block_number,
+            }],
+            "manifest_versions": [{
+                "manifest_version": 1,
+                "source_family": "ens_v1_registry_l1",
+                "source_manifest_id": null,
+            }],
+            "execution_trace_id": null,
+            "derivation_kind": "children_current_rebuild",
+        }),
+        chain_positions: json!({
+            "ethereum": {
+                "chain_id": "ethereum-mainnet",
+                "block_number": block_number,
+                "block_hash": format!("0xblock{block_number:02x}"),
+                "timestamp": format!("2026-04-17T00:00:{:02}Z", block_number % 60),
+            }
+        }),
+        canonicality_summary: json!({
+            "status": "finalized",
+            "chains": {
+                "ethereum-mainnet": "finalized"
+            }
+        }),
+        manifest_version: 1,
+        last_recomputed_at: timestamp(1_717_172_000 + block_number),
+    }
+}
+
 #[tokio::test]
 async fn get_name_returns_current_projection_envelope() -> Result<()> {
     let database = TestDatabase::new_with_schemas(false, true).await?;
@@ -870,6 +951,249 @@ async fn get_name_returns_current_projection_envelope() -> Result<()> {
             }
         })
     );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_name_children_returns_declared_rows_sorted_with_declared_only_coverage() -> Result<()>
+{
+    let database = TestDatabase::new_migrated().await?;
+    let parent_logical_name_id = "ens:parent.eth";
+
+    bigname_storage::upsert_name_surfaces(
+        &database.pool,
+        &[
+            collection_name_surface(parent_logical_name_id, "parent.eth", "node:parent.eth", 10),
+            collection_name_surface(
+                "ens:bob.parent.eth",
+                "bob.parent.eth",
+                "node:bob.parent.eth",
+                11,
+            ),
+            collection_name_surface(
+                "ens:alice.parent.eth",
+                "alice.parent.eth",
+                "node:alice.parent.eth",
+                12,
+            ),
+        ],
+    )
+    .await?;
+    bigname_storage::upsert_children_current_rows(
+        &database.pool,
+        &[
+            declared_child_row(
+                parent_logical_name_id,
+                "ens:bob.parent.eth",
+                "bob.parent.eth",
+                "node:bob.parent.eth",
+                201,
+                11,
+            ),
+            declared_child_row(
+                parent_logical_name_id,
+                "ens:alice.parent.eth",
+                "alice.parent.eth",
+                "node:alice.parent.eth",
+                202,
+                12,
+            ),
+        ],
+    )
+    .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/names/ens/parent.eth/children")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("children request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let payload: ChildrenResponse = read_json(response).await?;
+    assert!(
+        payload
+            .declared_state
+            .as_object()
+            .map(|value| value.is_empty())
+            .unwrap_or(false)
+    );
+    assert_eq!(payload.coverage.status, "full");
+    assert_eq!(payload.coverage.exhaustiveness, "authoritative");
+    assert_eq!(
+        payload.coverage.source_classes_considered,
+        vec!["declared".to_owned()]
+    );
+    assert_eq!(
+        payload.coverage.enumeration_basis,
+        "declared_direct_children"
+    );
+    assert_eq!(payload.coverage.unsupported_reason, None);
+    assert_eq!(payload.page.sort, "display_name_asc");
+    assert_eq!(payload.page.page_size, 2);
+    assert_eq!(payload.consistency, "finalized");
+    assert_eq!(
+        payload.last_updated,
+        format_timestamp(timestamp(1_717_172_012))
+    );
+    assert_eq!(
+        payload.provenance,
+        json!({
+            "normalized_event_ids": ["202", "201"],
+            "raw_fact_refs": [
+                {"kind": "raw_log", "block_number": 12},
+                {"kind": "raw_log", "block_number": 11}
+            ],
+            "manifest_versions": [{
+                "manifest_version": 1,
+                "source_family": "ens_v1_registry_l1",
+                "source_manifest_id": null
+            }],
+            "execution_trace_id": null,
+            "derivation_kind": "children_current_rebuild"
+        })
+    );
+    assert_eq!(
+        payload.chain_positions,
+        json!({
+            "ethereum": {
+                "chain_id": "ethereum-mainnet",
+                "block_number": 12,
+                "block_hash": "0xblock0c",
+                "timestamp": "2026-04-17T00:00:12Z"
+            }
+        })
+    );
+
+    let child_ids = payload
+        .data
+        .iter()
+        .map(|row| {
+            row.get("logical_name_id")
+                .and_then(Value::as_str)
+                .expect("child row must include logical_name_id")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        child_ids,
+        vec!["ens:alice.parent.eth", "ens:bob.parent.eth"]
+    );
+    assert_eq!(
+        payload.data[0].get("surface_class").and_then(Value::as_str),
+        Some("declared")
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_name_children_include_counts_returns_declared_subname_count() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let parent_logical_name_id = "ens:parent.eth";
+
+    bigname_storage::upsert_name_surfaces(
+        &database.pool,
+        &[
+            collection_name_surface(parent_logical_name_id, "parent.eth", "node:parent.eth", 20),
+            collection_name_surface(
+                "ens:alice.parent.eth",
+                "alice.parent.eth",
+                "node:alice.parent.eth",
+                21,
+            ),
+            collection_name_surface(
+                "ens:bob.parent.eth",
+                "bob.parent.eth",
+                "node:bob.parent.eth",
+                22,
+            ),
+        ],
+    )
+    .await?;
+    bigname_storage::upsert_children_current_rows(
+        &database.pool,
+        &[
+            declared_child_row(
+                parent_logical_name_id,
+                "ens:alice.parent.eth",
+                "alice.parent.eth",
+                "node:alice.parent.eth",
+                301,
+                21,
+            ),
+            declared_child_row(
+                parent_logical_name_id,
+                "ens:bob.parent.eth",
+                "bob.parent.eth",
+                "node:bob.parent.eth",
+                302,
+                22,
+            ),
+        ],
+    )
+    .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/names/ens/parent.eth/children?include=counts")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("children counts request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let payload: ChildrenResponse = read_json(response).await?;
+    assert_eq!(payload.declared_state.get("subname_count"), Some(&json!(2)));
+    assert_eq!(payload.data.len(), 2);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_name_children_rejects_non_declared_surface_classes() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+
+    bigname_storage::upsert_name_surfaces(
+        &database.pool,
+        &[collection_name_surface(
+            "ens:parent.eth",
+            "parent.eth",
+            "node:parent.eth",
+            30,
+        )],
+    )
+    .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/names/ens/parent.eth/children?surface_classes=declared,linked")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("children unsupported surface_classes request failed")?;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let payload: ErrorResponse = read_json(response).await?;
+    assert_eq!(payload.error.code, "unsupported");
+    assert_eq!(
+        payload.error.message,
+        "surface_classes other than declared are not yet supported"
+    );
+    assert!(payload.error.details.is_empty());
 
     database.cleanup().await?;
     Ok(())

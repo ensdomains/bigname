@@ -16,9 +16,10 @@ use bigname_manifests::{
     load_namespace_manifest_snapshot,
 };
 use bigname_storage::{
-    DatabaseConfig, HistoryEvent, HistoryScope, NameCurrentRow, load_name_current,
-    load_name_history, load_name_surface, load_resource, load_resource_history,
-    load_surface_bindings_by_logical_name_id, load_surface_bindings_by_resource_id,
+    ChildrenCurrentRow, DatabaseConfig, HistoryEvent, HistoryScope, NameCurrentRow,
+    load_children_current, load_name_current, load_name_history, load_name_surface, load_resource,
+    load_resource_history, load_surface_bindings_by_logical_name_id,
+    load_surface_bindings_by_resource_id,
 };
 use clap::{Args, Parser, Subcommand};
 use serde::{Deserialize, Serialize};
@@ -166,8 +167,27 @@ struct HistoryQuery {
     scope: Option<String>,
 }
 
+#[derive(Clone, Debug, Default, Deserialize)]
+struct ChildrenQuery {
+    surface_classes: Option<String>,
+    include: Option<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct HistoryResponse {
+    data: Vec<JsonValue>,
+    declared_state: JsonValue,
+    verified_state: Option<()>,
+    provenance: JsonValue,
+    coverage: CoverageResponse,
+    chain_positions: JsonValue,
+    page: HistoryPageResponse,
+    consistency: String,
+    last_updated: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct ChildrenResponse {
     data: Vec<JsonValue>,
     declared_state: JsonValue,
     verified_state: Option<()>,
@@ -324,6 +344,7 @@ fn app_router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(health))
         .route("/v1/namespaces/{namespace}", get(namespace_metadata))
+        .route("/v1/names/{namespace}/{name}/children", get(name_children))
         .route("/v1/names/{namespace}/{name}", get(name_current))
         .route("/v1/history/names/{namespace}/{name}", get(name_history))
         .route("/v1/history/resources/{resource_id}", get(resource_history))
@@ -419,6 +440,58 @@ async fn name_current(
     };
 
     Ok(Json(build_name_response(row)))
+}
+
+async fn name_children(
+    Path((namespace, name)): Path<(String, String)>,
+    Query(query): Query<ChildrenQuery>,
+    State(state): State<AppState>,
+) -> ApiResult<Json<ChildrenResponse>> {
+    ensure_public_namespace(&namespace)?;
+
+    let include_counts = parse_children_query(&query)?;
+    let logical_name_id = format!("{namespace}:{name}");
+    let surface = load_name_surface(&state.pool, &logical_name_id)
+        .await
+        .map_err(|load_error| {
+            error!(
+                service = "api",
+                namespace = %namespace,
+                name = %name,
+                logical_name_id = %logical_name_id,
+                error = ?load_error,
+                "failed to load name surface for children route"
+            );
+            ApiError::internal_error(format!(
+                "failed to load child collection for name {namespace}/{name}"
+            ))
+        })?;
+
+    let Some(_surface) = surface else {
+        return Err(ApiError {
+            status: StatusCode::NOT_FOUND,
+            code: "not_found",
+            message: format!("name {name} was not found in namespace {namespace}"),
+        });
+    };
+
+    let rows = load_children_current(&state.pool, &logical_name_id)
+        .await
+        .map_err(|load_error| {
+            error!(
+                service = "api",
+                namespace = %namespace,
+                name = %name,
+                logical_name_id = %logical_name_id,
+                error = ?load_error,
+                "failed to load children_current rows"
+            );
+            ApiError::internal_error(format!(
+                "failed to load child collection for name {namespace}/{name}"
+            ))
+        })?;
+
+    Ok(Json(build_children_response(rows, include_counts)))
 }
 
 async fn name_history(
@@ -628,6 +701,42 @@ fn build_name_response(row: NameCurrentRow) -> NameResponse {
     }
 }
 
+fn build_children_response(
+    rows: Vec<ChildrenCurrentRow>,
+    include_counts: bool,
+) -> ChildrenResponse {
+    let last_updated = rows
+        .iter()
+        .map(|row| row.last_recomputed_at)
+        .max()
+        .map(format_timestamp)
+        .unwrap_or_else(|| format_timestamp(OffsetDateTime::now_utc()));
+
+    ChildrenResponse {
+        data: rows.iter().map(build_child_item).collect(),
+        declared_state: build_children_declared_state(rows.len(), include_counts),
+        verified_state: None,
+        provenance: build_children_provenance(&rows),
+        coverage: CoverageResponse {
+            status: "full".to_owned(),
+            exhaustiveness: "authoritative".to_owned(),
+            source_classes_considered: vec!["declared".to_owned()],
+            enumeration_basis: "declared_direct_children".to_owned(),
+            unsupported_reason: None,
+        },
+        chain_positions: build_children_chain_positions(&rows),
+        page: HistoryPageResponse {
+            cursor: None,
+            next_cursor: None,
+            page_size: rows.len() as u64,
+            sort: "display_name_asc".to_owned(),
+        },
+        consistency: collection_consistency(rows.iter().map(|row| &row.canonicality_summary))
+            .to_owned(),
+        last_updated,
+    }
+}
+
 fn build_history_response(rows: Vec<HistoryEvent>, scope: HistoryScope) -> HistoryResponse {
     let last_updated = rows
         .iter()
@@ -652,6 +761,107 @@ fn build_history_response(rows: Vec<HistoryEvent>, scope: HistoryScope) -> Histo
         consistency: "head".to_owned(),
         last_updated,
     }
+}
+
+fn build_child_item(row: &ChildrenCurrentRow) -> JsonValue {
+    let mut value = empty_object();
+    insert_string_field(
+        &mut value,
+        "logical_name_id",
+        row.child_logical_name_id.clone(),
+    );
+    insert_string_field(&mut value, "namespace", row.namespace.clone());
+    insert_string_field(&mut value, "normalized_name", row.normalized_name.clone());
+    insert_string_field(
+        &mut value,
+        "canonical_display_name",
+        row.canonical_display_name.clone(),
+    );
+    insert_string_field(&mut value, "namehash", row.namehash.clone());
+    insert_string_field(&mut value, "surface_class", row.surface_class.clone());
+    value
+}
+
+fn build_children_declared_state(child_count: usize, include_counts: bool) -> JsonValue {
+    let mut declared_state = empty_object();
+    if include_counts {
+        insert_value_field(
+            &mut declared_state,
+            "subname_count",
+            JsonValue::Number((child_count as u64).into()),
+        );
+    }
+    declared_state
+}
+
+fn build_children_provenance(rows: &[ChildrenCurrentRow]) -> JsonValue {
+    let mut value = empty_object();
+    insert_value_field(
+        &mut value,
+        "normalized_event_ids",
+        JsonValue::Array(
+            collect_children_provenance_values(rows, "normalized_event_ids")
+                .into_iter()
+                .filter_map(|value| value_to_string(&value).map(JsonValue::String))
+                .collect(),
+        ),
+    );
+    insert_value_field(
+        &mut value,
+        "raw_fact_refs",
+        JsonValue::Array(collect_children_provenance_values(rows, "raw_fact_refs")),
+    );
+    insert_value_field(
+        &mut value,
+        "manifest_versions",
+        JsonValue::Array(collect_children_provenance_values(
+            rows,
+            "manifest_versions",
+        )),
+    );
+    insert_value_field(&mut value, "execution_trace_id", JsonValue::Null);
+    insert_string_field(
+        &mut value,
+        "derivation_kind",
+        rows.iter()
+            .filter_map(|row| string_field(provenance_field(&row.provenance, "derivation_kind")))
+            .next()
+            .unwrap_or_else(|| "declared".to_owned()),
+    );
+    value
+}
+
+fn collect_children_provenance_values(rows: &[ChildrenCurrentRow], key: &str) -> Vec<JsonValue> {
+    let mut deduped = Vec::new();
+    for row in rows {
+        let Some(JsonValue::Array(values)) = provenance_field(&row.provenance, key) else {
+            continue;
+        };
+        for value in values {
+            if !deduped.contains(value) {
+                deduped.push(value.clone());
+            }
+        }
+    }
+    deduped
+}
+
+fn build_children_chain_positions(rows: &[ChildrenCurrentRow]) -> JsonValue {
+    let mut chain_positions = BTreeMap::<String, ChainPositionResponse>::new();
+    for row in rows {
+        let Some(position_values) = row.chain_positions.as_object() else {
+            continue;
+        };
+
+        for (slot, position_value) in position_values {
+            let Some(candidate) = chain_position_from_value(position_value) else {
+                continue;
+            };
+            merge_chain_position(&mut chain_positions, slot.clone(), candidate);
+        }
+    }
+
+    serde_json::to_value(chain_positions).expect("children chain positions must serialize")
 }
 
 fn build_name_data(row: &NameCurrentRow) -> JsonValue {
@@ -849,6 +1059,23 @@ fn canonicality_consistency(canonicality_summary: &JsonValue) -> &'static str {
     }
 }
 
+fn collection_consistency<'a>(summaries: impl Iterator<Item = &'a JsonValue>) -> &'static str {
+    let mut consistency = "finalized";
+    let mut saw_any = false;
+
+    for summary in summaries {
+        saw_any = true;
+        match canonicality_consistency(summary) {
+            "head" => return "head",
+            "safe" => consistency = "safe",
+            "finalized" => {}
+            _ => consistency = "head",
+        }
+    }
+
+    if saw_any { consistency } else { "head" }
+}
+
 fn build_history_item(row: &HistoryEvent) -> JsonValue {
     let mut value = empty_object();
     insert_string_field(
@@ -967,19 +1194,35 @@ fn build_history_chain_positions(rows: &[HistoryEvent]) -> JsonValue {
             block_hash: block_hash.clone(),
             timestamp: format_timestamp(timestamp),
         };
-
-        match chain_positions.get(&key) {
-            Some(existing)
-                if existing.block_number > candidate.block_number
-                    || (existing.block_number == candidate.block_number
-                        && existing.block_hash >= candidate.block_hash) => {}
-            _ => {
-                chain_positions.insert(key, candidate);
-            }
-        }
+        merge_chain_position(&mut chain_positions, key, candidate);
     }
 
     serde_json::to_value(chain_positions).expect("history chain positions must serialize")
+}
+
+fn chain_position_from_value(value: &JsonValue) -> Option<ChainPositionResponse> {
+    Some(ChainPositionResponse {
+        chain_id: string_field(provenance_field(value, "chain_id"))?,
+        block_number: provenance_field(value, "block_number")?.as_i64()?,
+        block_hash: string_field(provenance_field(value, "block_hash"))?,
+        timestamp: string_field(provenance_field(value, "timestamp"))?,
+    })
+}
+
+fn merge_chain_position(
+    chain_positions: &mut BTreeMap<String, ChainPositionResponse>,
+    key: String,
+    candidate: ChainPositionResponse,
+) {
+    match chain_positions.get(&key) {
+        Some(existing)
+            if existing.block_number > candidate.block_number
+                || (existing.block_number == candidate.block_number
+                    && existing.block_hash >= candidate.block_hash) => {}
+        _ => {
+            chain_positions.insert(key, candidate);
+        }
+    }
 }
 
 fn build_history_chain_position(row: &HistoryEvent) -> JsonValue {
@@ -1125,6 +1368,70 @@ fn parse_history_scope(scope: Option<&str>) -> ApiResult<HistoryScope> {
             message: "scope must be one of: surface, resource, both".to_owned(),
         }),
     }
+}
+
+fn parse_children_query(query: &ChildrenQuery) -> ApiResult<bool> {
+    parse_children_surface_classes(query.surface_classes.as_deref())?;
+    parse_children_include_counts(query.include.as_deref())
+}
+
+fn parse_children_surface_classes(surface_classes: Option<&str>) -> ApiResult<()> {
+    let mut requested_non_declared = false;
+
+    for value in surface_classes
+        .unwrap_or("declared")
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        match value {
+            "declared" => {}
+            "linked" | "alias" | "wildcard" => requested_non_declared = true,
+            _ => {
+                return Err(ApiError {
+                    status: StatusCode::BAD_REQUEST,
+                    code: "invalid_input",
+                    message:
+                        "surface_classes must contain only declared, linked, alias, or wildcard"
+                            .to_owned(),
+                });
+            }
+        }
+    }
+
+    if requested_non_declared {
+        return Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            code: "unsupported",
+            message: "surface_classes other than declared are not yet supported".to_owned(),
+        });
+    }
+
+    Ok(())
+}
+
+fn parse_children_include_counts(include: Option<&str>) -> ApiResult<bool> {
+    let mut include_counts = false;
+
+    for value in include
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        match value {
+            "counts" => include_counts = true,
+            _ => {
+                return Err(ApiError {
+                    status: StatusCode::BAD_REQUEST,
+                    code: "invalid_input",
+                    message: "include must contain only counts".to_owned(),
+                });
+            }
+        }
+    }
+
+    Ok(include_counts)
 }
 
 async fn resource_ids_for_name(pool: &PgPool, logical_name_id: &str) -> ApiResult<Vec<Uuid>> {

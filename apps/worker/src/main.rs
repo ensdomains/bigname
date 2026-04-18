@@ -1,3 +1,4 @@
+mod children;
 mod name_current;
 
 use anyhow::{Context, Result};
@@ -20,6 +21,7 @@ struct Cli {
 enum Command {
     Run(RunArgs),
     Migrate(MigrateArgs),
+    ChildrenCurrent(ChildrenCurrentArgs),
     NameCurrent(NameCurrentArgs),
 }
 
@@ -47,13 +49,32 @@ struct NameCurrentArgs {
     command: NameCurrentCommand,
 }
 
+#[derive(Args, Debug)]
+struct ChildrenCurrentArgs {
+    #[command(subcommand)]
+    command: ChildrenCurrentCommand,
+}
+
 #[derive(Subcommand, Debug)]
 enum NameCurrentCommand {
     Rebuild(NameCurrentRebuildArgs),
 }
 
+#[derive(Subcommand, Debug)]
+enum ChildrenCurrentCommand {
+    Rebuild(ChildrenCurrentRebuildArgs),
+}
+
 #[derive(Args, Debug)]
 struct NameCurrentRebuildArgs {
+    #[command(flatten)]
+    database: DatabaseConfig,
+    #[arg(long)]
+    logical_name_id: Option<String>,
+}
+
+#[derive(Args, Debug)]
+struct ChildrenCurrentRebuildArgs {
     #[command(flatten)]
     database: DatabaseConfig,
     #[arg(long)]
@@ -67,6 +88,7 @@ async fn main() -> Result<()> {
     match Cli::parse().command {
         Command::Run(args) => run(args).await,
         Command::Migrate(args) => migrate(args).await,
+        Command::ChildrenCurrent(args) => children_current(args).await,
         Command::NameCurrent(args) => name_current(args).await,
     }
 }
@@ -102,9 +124,16 @@ async fn name_current(args: NameCurrentArgs) -> Result<()> {
     }
 }
 
+async fn children_current(args: ChildrenCurrentArgs) -> Result<()> {
+    match args.command {
+        ChildrenCurrentCommand::Rebuild(args) => rebuild_children_current(args).await,
+    }
+}
+
 async fn rebuild_name_current(args: NameCurrentRebuildArgs) -> Result<()> {
     let pool = bigname_storage::connect(&args.database).await?;
-    let summary = name_current::rebuild_name_current(&pool, args.logical_name_id.as_deref()).await?;
+    let summary =
+        name_current::rebuild_name_current(&pool, args.logical_name_id.as_deref()).await?;
 
     info!(
         service = "worker",
@@ -114,6 +143,24 @@ async fn rebuild_name_current(args: NameCurrentRebuildArgs) -> Result<()> {
         deleted_row_count = summary.deleted_row_count,
         logical_name_id = args.logical_name_id.as_deref().unwrap_or("all"),
         "name_current rebuild completed"
+    );
+
+    Ok(())
+}
+
+async fn rebuild_children_current(args: ChildrenCurrentRebuildArgs) -> Result<()> {
+    let pool = bigname_storage::connect(&args.database).await?;
+    let summary =
+        children::rebuild_children_current(&pool, args.logical_name_id.as_deref()).await?;
+
+    info!(
+        service = "worker",
+        projection = "children_current",
+        requested_parent_count = summary.requested_parent_count,
+        upserted_row_count = summary.upserted_row_count,
+        deleted_row_count = summary.deleted_row_count,
+        logical_name_id = args.logical_name_id.as_deref().unwrap_or("all"),
+        "children_current rebuild completed"
     );
 
     Ok(())
