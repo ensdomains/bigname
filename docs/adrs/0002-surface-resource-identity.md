@@ -47,6 +47,8 @@ ENSv1 authority-anchor rules:
 - keep the active `resource_id` while the same ENSv1 authority anchor stays authoritative across transfer, renewal, expiry, grace, fuse, controller, or resolver changes
 - rotate the active `resource_id` when authority moves to a different ENSv1 anchor; wrap, unwrap, and re-registration are the important cases
 - if the exact prior ENSv1 authority anchor becomes authoritative again, reuse its prior `resource_id`
+- effective permissions and permission history are keyed to the authoritative `resource_id`, not to the surface text
+- when the same ENSv1 anchor remains authoritative, resource-centric permission continuity stays on that `resource_id`; when authority moves to a different anchor, resource-centric permission reads do not merge predecessor and successor resources
 - direct registry-only control has no active `token_lineage_id`
 - registrar-backed and wrapper-backed ENSv1 anchors each carry their own `token_lineage_id`
 - keep the active `token_lineage_id` while the same tokenized ENSv1 anchor stays authoritative; rotate it when authority moves to a different tokenized anchor
@@ -85,6 +87,8 @@ Resource-centric convenience rule:
 | `ens:alice.eth` enters expiry or grace while the same authority anchor remains in force | keep the current `resource_id` and current `token_lineage_id`; only status and expiry facts change; `binding_kind` stays `declared_registry_path` |
 | `ens:alice.eth` transfers while the same authority anchor remains in force | keep the current `resource_id` and current `token_lineage_id`; no new binding row is needed if the anchor did not change; `binding_kind` stays `declared_registry_path` |
 | `ens:alice.eth` fully lapses and is later re-registered | keep `logical_name_id`; once the old authority ends, its binding closes; a later registration mints a new registrar `resource_id` and a new registrar `token_lineage_id`; the new binding is `declared_registry_path` |
+
+Resource-centric permissions follow the same lifecycle: while one ENSv1 authority anchor remains authoritative, effective permission continuity stays on that anchor's `resource_id`; wrap, unwrap, or re-registration do not cause the API to stitch different `resource_id` values into one permission collection, and a return to an exact prior anchor reuses that prior resource-anchored permission history.
 
 ### ENSv2 linked surfaces
 

@@ -2643,6 +2643,14 @@ async fn reconcile_fetched_heads_backfills_unwrapped_ensv1_authority_identity_ro
         .await?,
         1
     );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM normalized_events WHERE event_kind = 'PermissionChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        2
+    );
     let resolver_event_resource_id = sqlx::query_scalar::<_, Uuid>(
         "SELECT resource_id FROM normalized_events WHERE event_kind = 'ResolverChanged'",
     )
@@ -2653,6 +2661,31 @@ async fn reconcile_fetched_heads_backfills_unwrapped_ensv1_authority_identity_ro
         sqlx::query_scalar::<_, Uuid>("SELECT resource_id FROM resources LIMIT 1")
             .fetch_one(database.pool())
             .await?
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM normalized_events WHERE event_kind = 'PermissionChanged' AND resource_id = $1"
+        )
+        .bind(resolver_event_resource_id)
+        .fetch_one(database.pool())
+        .await?,
+        2
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT after_state->'scope'->>'kind' FROM normalized_events WHERE event_kind = 'PermissionChanged' AND after_state->'scope'->>'kind' = 'resource' LIMIT 1"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "resource".to_owned()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT after_state->'scope'->>'kind' FROM normalized_events WHERE event_kind = 'PermissionChanged' AND after_state->'scope'->>'kind' = 'resolver' LIMIT 1"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "resolver".to_owned()
     );
     assert_eq!(
         sqlx::query_scalar::<_, String>(

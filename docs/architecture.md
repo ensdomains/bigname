@@ -301,6 +301,8 @@ ENSv1 continuity rule:
 - keep the same `resource_id` while the same anchor remains authoritative and only holder, controller, resolver, expiry, grace, fuse, or status facts change
 - rotate the active `resource_id` when authority moves to a different anchor, including registry-only to registrar, registrar to wrapper, wrapper back to registrar or registry-only, and full lapse followed by later re-registration
 - if the exact prior ENSv1 anchor becomes authoritative again, reuse that prior `resource_id` instead of minting another one; unwrap back to the still-live pre-wrap registrar lease is the canonical case
+- resource-anchored permission truth follows the active `resource_id`; authority and permission continuity stay on that resource while the same anchor remains authoritative
+- when authority moves to a different ENSv1 anchor, the successor `resource_id` has its own effective-permission truth; public reads do not silently merge predecessor and successor resources
 
 ### 7.3 `token_lineage_id`
 
@@ -1053,6 +1055,7 @@ Rules:
 - the truth anchor is `resource_id`
 - subject- or resolver-centric summaries may be projected for display, but they derive from the same resource-anchored effective grant rows
 - resolver-scoped permissions are part of this collection through scope detail, not a separate permission ledger
+- if one surface rebinds across ENSv1 authority anchors, resource-centric permission reads stay partitioned by `resource_id` rather than stitching old and new anchors into one collection
 
 ### 21.6 History
 

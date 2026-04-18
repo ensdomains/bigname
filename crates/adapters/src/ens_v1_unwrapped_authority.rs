@@ -23,6 +23,7 @@ const DERIVATION_KIND_ENS_V1_UNWRAPPED_AUTHORITY: &str = "ens_v1_unwrapped_autho
 const EVENT_KIND_AUTHORITY_EPOCH_CHANGED: &str = "AuthorityEpochChanged";
 const EVENT_KIND_AUTHORITY_TRANSFERRED: &str = "AuthorityTransferred";
 const EVENT_KIND_EXPIRY_CHANGED: &str = "ExpiryChanged";
+const EVENT_KIND_PERMISSION_CHANGED: &str = "PermissionChanged";
 const EVENT_KIND_REGISTRATION_GRANTED: &str = "RegistrationGranted";
 const EVENT_KIND_REGISTRATION_RELEASED: &str = "RegistrationReleased";
 const EVENT_KIND_REGISTRATION_RENEWED: &str = "RegistrationRenewed";
@@ -40,6 +41,9 @@ const NEW_OWNER_SIGNATURE: &str = "NewOwner(bytes32,bytes32,address)";
 const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 const ENS_NORMALIZER_VERSION: &str = "ensip15@2026-04-16";
 const ENS_GRACE_PERIOD_SECS: i64 = 90 * 24 * 60 * 60;
+const PERMISSION_POWER_RESOURCE_CONTROL: &str = "resource_control";
+const PERMISSION_POWER_RESOLVER_CONTROL: &str = "resolver_control";
+const PERMISSION_TRANSFER_BEHAVIOR: &str = "replace_on_authority_change";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EnsV1UnwrappedAuthoritySyncSummary {
@@ -201,7 +205,7 @@ struct BoundaryRef {
     canonicality_state: CanonicalityState,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AuthorityKind {
     RegistryOnly,
     Registrar,
@@ -212,6 +216,21 @@ impl AuthorityKind {
         match self {
             Self::RegistryOnly => "registry_only",
             Self::Registrar => "registrar",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PermissionAction {
+    Grant,
+    Revoke,
+}
+
+impl PermissionAction {
+    const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Grant => "grant",
+            Self::Revoke => "revoke",
         }
     }
 }
@@ -495,10 +514,26 @@ fn finalize_history(mut history: NameHistory, head_ref: &BoundaryRef) -> Result<
                 transition_authority(
                     &mut history,
                     Some(build_registrar_anchor(&lease)),
-                    registry_after,
+                    registry_after.clone(),
                     &release_ref,
                     release_ref.block_timestamp,
                 )?;
+                if let (Some(name), Some(anchor), Some(subject)) = (
+                    history.name.as_ref(),
+                    registry_after.as_ref(),
+                    nonzero_address(history.current_registry_owner.as_deref()),
+                ) {
+                    emit_boundary_permission_grants(
+                        &mut history.events,
+                        &release_ref,
+                        &name.logical_name_id,
+                        anchor,
+                        &subject,
+                        history.current_resolver.as_deref(),
+                        &release_ref.chain_id,
+                        EVENT_KIND_REGISTRATION_RELEASED,
+                    );
+                }
             } else if history.open_binding.is_none() {
                 let registrar_anchor = build_registrar_anchor(&lease);
                 history.open_binding = Some(OpenBinding {
@@ -877,6 +912,20 @@ async fn apply_observation(
                     event.reference.log_index.unwrap_or_default()
                 ),
             ));
+            if let (Some(anchor), Some(subject)) = (
+                after_anchor.as_ref(),
+                nonzero_address(Some(event.registrant.as_str())),
+            ) {
+                emit_observation_permission_grants(
+                    &mut history.events,
+                    &event.reference,
+                    &name.logical_name_id,
+                    anchor,
+                    &subject,
+                    history.current_resolver.as_deref(),
+                    EVENT_KIND_REGISTRATION_GRANTED,
+                );
+            }
 
             transition_authority(
                 history,
@@ -952,6 +1001,20 @@ async fn apply_observation(
                         event.reference.log_index.unwrap_or_default()
                     ),
                 ));
+                if let (Some(anchor), Some(subject)) = (
+                    anchor.as_ref(),
+                    nonzero_address(Some(lease.registrant.as_str())),
+                ) {
+                    emit_observation_permission_grants(
+                        &mut history.events,
+                        &event.reference,
+                        &name.logical_name_id,
+                        anchor,
+                        &subject,
+                        history.current_resolver.as_deref(),
+                        EVENT_KIND_REGISTRATION_GRANTED,
+                    );
+                }
             }
             let name = history
                 .name
@@ -1018,24 +1081,23 @@ async fn apply_observation(
             }
         }
         AuthorityObservation::TokenTransferred(event) => {
+            let Some(name) = history.name.clone() else {
+                return Ok(());
+            };
+            let current_resolver = history.current_resolver.clone();
             let Some(current_registration) = history.current_registration.as_mut() else {
                 return Ok(());
             };
             if event.from_address == ZERO_ADDRESS || event.to_address == ZERO_ADDRESS {
                 return Ok(());
             }
-            let Some(name) = history.name.as_ref() else {
-                return Ok(());
-            };
             let previous_registrant = current_registration.registrant.clone();
             current_registration.registrant = event.to_address.clone();
+            let anchor = build_registrar_anchor(current_registration);
             history.events.push(build_normalized_event(
                 &event.reference,
                 Some(name.logical_name_id.clone()),
-                Some(deterministic_uuid(&format!(
-                    "resource:{}",
-                    current_registration.authority_key
-                ))),
+                Some(anchor.resource_id),
                 EVENT_KIND_TOKEN_CONTROL_TRANSFERRED,
                 json!({
                     "from": previous_registrant,
@@ -1055,12 +1117,22 @@ async fn apply_observation(
                     event.reference.log_index.unwrap_or_default()
                 ),
             ));
+            emit_observation_permission_subject_change(
+                &mut history.events,
+                &event.reference,
+                &name.logical_name_id,
+                &anchor,
+                Some(previous_registrant.as_str()),
+                Some(event.to_address.as_str()),
+                current_resolver.as_deref(),
+                EVENT_KIND_TOKEN_CONTROL_TRANSFERRED,
+            );
         }
         AuthorityObservation::ResolverChanged(event) => {
             let before_resolver = history.current_resolver.clone();
             history.current_resolver = Some(event.resolver.clone());
 
-            let Some(name) = history.name.as_ref() else {
+            let Some(name) = history.name.clone() else {
                 return Ok(());
             };
             let authority = active_anchor_for_history(history, &event.reference.chain_id);
@@ -1087,6 +1159,58 @@ async fn apply_observation(
                     event.reference.log_index.unwrap_or_default()
                 ),
             ));
+            let authority_subject = match authority.as_ref().map(|value| value.kind) {
+                Some(AuthorityKind::Registrar) => history
+                    .current_registration
+                    .as_ref()
+                    .map(|registration| registration.registrant.as_str()),
+                Some(AuthorityKind::RegistryOnly) => history.current_registry_owner.as_deref(),
+                None => None,
+            };
+            if let (Some(anchor), Some(subject)) =
+                (authority.as_ref(), nonzero_address(authority_subject))
+            {
+                let before_resolver = nonzero_address(before_resolver.as_deref());
+                let after_resolver = nonzero_address(Some(event.resolver.as_str()));
+                if before_resolver != after_resolver {
+                    if let Some(previous_resolver) = before_resolver.as_deref() {
+                        history
+                            .events
+                            .push(build_observation_permission_change_event(
+                                &event.reference,
+                                &name.logical_name_id,
+                                anchor,
+                                &subject,
+                                resolver_permission_scope(
+                                    &event.reference.chain_id,
+                                    previous_resolver,
+                                ),
+                                format!("resolver:{previous_resolver}"),
+                                PERMISSION_POWER_RESOLVER_CONTROL,
+                                PermissionAction::Revoke,
+                                EVENT_KIND_RESOLVER_CHANGED,
+                            ));
+                    }
+                    if let Some(current_resolver) = after_resolver.as_deref() {
+                        history
+                            .events
+                            .push(build_observation_permission_change_event(
+                                &event.reference,
+                                &name.logical_name_id,
+                                anchor,
+                                &subject,
+                                resolver_permission_scope(
+                                    &event.reference.chain_id,
+                                    current_resolver,
+                                ),
+                                format!("resolver:{current_resolver}"),
+                                PERMISSION_POWER_RESOLVER_CONTROL,
+                                PermissionAction::Grant,
+                                EVENT_KIND_RESOLVER_CHANGED,
+                            ));
+                    }
+                }
+            }
         }
         AuthorityObservation::RegistryOwnerChanged(event) => {
             let before_anchor = active_anchor_for_history(history, &event.reference.chain_id);
@@ -1129,6 +1253,41 @@ async fn apply_observation(
                             event.reference.log_index.unwrap_or_default()
                         ),
                     ));
+                }
+            }
+            if let Some(name) = history.name.clone() {
+                match (before_anchor.as_ref(), after_anchor.as_ref()) {
+                    (Some(before), Some(after))
+                        if before.kind == AuthorityKind::RegistryOnly
+                            && after.kind == AuthorityKind::RegistryOnly =>
+                    {
+                        emit_observation_permission_subject_change(
+                            &mut history.events,
+                            &event.reference,
+                            &name.logical_name_id,
+                            after,
+                            before_owner.as_deref(),
+                            history.current_registry_owner.as_deref(),
+                            history.current_resolver.as_deref(),
+                            EVENT_KIND_AUTHORITY_TRANSFERRED,
+                        );
+                    }
+                    (_, Some(after)) if after.kind == AuthorityKind::RegistryOnly => {
+                        if let Some(subject) =
+                            nonzero_address(history.current_registry_owner.as_deref())
+                        {
+                            emit_observation_permission_grants(
+                                &mut history.events,
+                                &event.reference,
+                                &name.logical_name_id,
+                                after,
+                                &subject,
+                                history.current_resolver.as_deref(),
+                                EVENT_KIND_AUTHORITY_TRANSFERRED,
+                            );
+                        }
+                    }
+                    _ => {}
                 }
             }
             transition_authority(
@@ -1302,6 +1461,269 @@ fn active_anchor_for_history(history: &NameHistory, chain: &str) -> Option<Autho
         return Some(build_registrar_anchor(registration));
     }
     registry_anchor_for_history(history, chain, &history.labelhash)
+}
+
+fn nonzero_address(value: Option<&str>) -> Option<String> {
+    value
+        .filter(|address| !address.eq_ignore_ascii_case(ZERO_ADDRESS))
+        .map(ToOwned::to_owned)
+}
+
+fn resource_permission_scope() -> serde_json::Value {
+    json!({
+        "kind": "resource",
+    })
+}
+
+fn resolver_permission_scope(chain_id: &str, resolver: &str) -> serde_json::Value {
+    json!({
+        "kind": "resolver",
+        "chain_id": chain_id,
+        "resolver_address": resolver,
+    })
+}
+
+fn permission_source(anchor: &AuthorityAnchor, source_event_kind: &str) -> serde_json::Value {
+    json!({
+        "kind": "ens_v1_authority",
+        "authority_kind": anchor.kind.as_str(),
+        "authority_key": anchor.authority_key,
+        "source_event_kind": source_event_kind,
+    })
+}
+
+fn permission_state(
+    subject: &str,
+    scope: serde_json::Value,
+    effective_powers: &[&str],
+    grant_source: Option<serde_json::Value>,
+    revocation_source: Option<serde_json::Value>,
+) -> serde_json::Value {
+    json!({
+        "subject": subject,
+        "scope": scope,
+        "effective_powers": effective_powers,
+        "grant_source": grant_source,
+        "revocation_source": revocation_source,
+        "inheritance_path": [],
+        "transfer_behavior": PERMISSION_TRANSFER_BEHAVIOR,
+    })
+}
+
+fn build_observation_permission_change_event(
+    reference: &ObservationRef,
+    logical_name_id: &str,
+    anchor: &AuthorityAnchor,
+    subject: &str,
+    scope: serde_json::Value,
+    scope_identity: String,
+    power: &str,
+    action: PermissionAction,
+    source_event_kind: &str,
+) -> NormalizedEvent {
+    let source = permission_source(anchor, source_event_kind);
+    let before_state = match action {
+        PermissionAction::Grant => permission_state(subject, scope.clone(), &[], None, None),
+        PermissionAction::Revoke => {
+            permission_state(subject, scope.clone(), &[power], Some(source.clone()), None)
+        }
+    };
+    let after_state = match action {
+        PermissionAction::Grant => permission_state(subject, scope, &[power], Some(source), None),
+        PermissionAction::Revoke => permission_state(subject, scope, &[], None, Some(source)),
+    };
+
+    build_normalized_event(
+        reference,
+        Some(logical_name_id.to_owned()),
+        Some(anchor.resource_id),
+        EVENT_KIND_PERMISSION_CHANGED,
+        before_state,
+        after_state,
+        format!(
+            "permission:{}:{}:{}:{}:{}:{}",
+            action.as_str(),
+            scope_identity,
+            subject,
+            reference.block_hash,
+            reference.transaction_hash.as_deref().unwrap_or_default(),
+            reference.log_index.unwrap_or_default()
+        ),
+    )
+}
+
+fn build_boundary_permission_change_event(
+    reference: &BoundaryRef,
+    logical_name_id: &str,
+    anchor: &AuthorityAnchor,
+    subject: &str,
+    scope: serde_json::Value,
+    scope_identity: String,
+    power: &str,
+    action: PermissionAction,
+    source_event_kind: &str,
+) -> NormalizedEvent {
+    let source = permission_source(anchor, source_event_kind);
+    let before_state = match action {
+        PermissionAction::Grant => permission_state(subject, scope.clone(), &[], None, None),
+        PermissionAction::Revoke => {
+            permission_state(subject, scope.clone(), &[power], Some(source.clone()), None)
+        }
+    };
+    let after_state = match action {
+        PermissionAction::Grant => permission_state(subject, scope, &[power], Some(source), None),
+        PermissionAction::Revoke => permission_state(subject, scope, &[], None, Some(source)),
+    };
+
+    build_boundary_event(
+        reference,
+        Some(logical_name_id.to_owned()),
+        Some(anchor.resource_id),
+        EVENT_KIND_PERMISSION_CHANGED,
+        before_state,
+        after_state,
+        format!(
+            "permission:{}:{}:{}:{}:{}",
+            action.as_str(),
+            scope_identity,
+            subject,
+            reference.block_hash,
+            anchor.authority_key
+        ),
+        anchor.binding_source_family.clone(),
+        anchor.binding_manifest_version,
+        Some(anchor.binding_manifest_id),
+        reference.canonicality_state,
+    )
+}
+
+fn emit_observation_permission_grants(
+    events: &mut Vec<NormalizedEvent>,
+    reference: &ObservationRef,
+    logical_name_id: &str,
+    anchor: &AuthorityAnchor,
+    subject: &str,
+    resolver: Option<&str>,
+    source_event_kind: &str,
+) {
+    events.push(build_observation_permission_change_event(
+        reference,
+        logical_name_id,
+        anchor,
+        subject,
+        resource_permission_scope(),
+        "resource".to_owned(),
+        PERMISSION_POWER_RESOURCE_CONTROL,
+        PermissionAction::Grant,
+        source_event_kind,
+    ));
+
+    if let Some(resolver) = nonzero_address(resolver) {
+        events.push(build_observation_permission_change_event(
+            reference,
+            logical_name_id,
+            anchor,
+            subject,
+            resolver_permission_scope(&reference.chain_id, &resolver),
+            format!("resolver:{resolver}"),
+            PERMISSION_POWER_RESOLVER_CONTROL,
+            PermissionAction::Grant,
+            source_event_kind,
+        ));
+    }
+}
+
+fn emit_boundary_permission_grants(
+    events: &mut Vec<NormalizedEvent>,
+    reference: &BoundaryRef,
+    logical_name_id: &str,
+    anchor: &AuthorityAnchor,
+    subject: &str,
+    resolver: Option<&str>,
+    chain_id: &str,
+    source_event_kind: &str,
+) {
+    events.push(build_boundary_permission_change_event(
+        reference,
+        logical_name_id,
+        anchor,
+        subject,
+        resource_permission_scope(),
+        "resource".to_owned(),
+        PERMISSION_POWER_RESOURCE_CONTROL,
+        PermissionAction::Grant,
+        source_event_kind,
+    ));
+
+    if let Some(resolver) = nonzero_address(resolver) {
+        events.push(build_boundary_permission_change_event(
+            reference,
+            logical_name_id,
+            anchor,
+            subject,
+            resolver_permission_scope(chain_id, &resolver),
+            format!("resolver:{resolver}"),
+            PERMISSION_POWER_RESOLVER_CONTROL,
+            PermissionAction::Grant,
+            source_event_kind,
+        ));
+    }
+}
+
+fn emit_observation_permission_subject_change(
+    events: &mut Vec<NormalizedEvent>,
+    reference: &ObservationRef,
+    logical_name_id: &str,
+    anchor: &AuthorityAnchor,
+    before_subject: Option<&str>,
+    after_subject: Option<&str>,
+    resolver: Option<&str>,
+    source_event_kind: &str,
+) {
+    let before_subject = nonzero_address(before_subject);
+    let after_subject = nonzero_address(after_subject);
+    if before_subject == after_subject {
+        return;
+    }
+
+    if let Some(subject) = before_subject.as_deref() {
+        events.push(build_observation_permission_change_event(
+            reference,
+            logical_name_id,
+            anchor,
+            subject,
+            resource_permission_scope(),
+            "resource".to_owned(),
+            PERMISSION_POWER_RESOURCE_CONTROL,
+            PermissionAction::Revoke,
+            source_event_kind,
+        ));
+        if let Some(resolver) = nonzero_address(resolver) {
+            events.push(build_observation_permission_change_event(
+                reference,
+                logical_name_id,
+                anchor,
+                subject,
+                resolver_permission_scope(&reference.chain_id, &resolver),
+                format!("resolver:{resolver}"),
+                PERMISSION_POWER_RESOLVER_CONTROL,
+                PermissionAction::Revoke,
+                source_event_kind,
+            ));
+        }
+    }
+
+    if let Some(subject) = after_subject.as_deref() {
+        emit_observation_permission_grants(
+            events,
+            reference,
+            logical_name_id,
+            anchor,
+            subject,
+            resolver,
+            source_event_kind,
+        );
+    }
 }
 
 fn emit_registration_released_event(
@@ -2483,12 +2905,16 @@ mod tests {
         assert_eq!(first.total_name_surface_count, 1);
         assert_eq!(first.total_resource_count, 1);
         assert_eq!(first.total_surface_binding_count, 1);
-        assert_eq!(first.total_normalized_event_count, 4);
+        assert_eq!(first.total_normalized_event_count, 5);
         assert_eq!(
             first.by_kind.get(EVENT_KIND_REGISTRATION_GRANTED),
             Some(&1_usize)
         );
         assert_eq!(first.by_kind.get(EVENT_KIND_EXPIRY_CHANGED), Some(&1_usize));
+        assert_eq!(
+            first.by_kind.get(EVENT_KIND_PERMISSION_CHANGED),
+            Some(&1_usize)
+        );
         assert_eq!(first.by_kind.get(EVENT_KIND_SURFACE_BOUND), Some(&1_usize));
         assert_eq!(
             first.by_kind.get(EVENT_KIND_AUTHORITY_EPOCH_CHANGED),
@@ -2501,7 +2927,7 @@ mod tests {
         assert_eq!(second.total_name_surface_count, 1);
         assert_eq!(second.total_resource_count, 1);
         assert_eq!(second.total_surface_binding_count, 1);
-        assert_eq!(second.total_normalized_event_count, 4);
+        assert_eq!(second.total_normalized_event_count, 5);
 
         assert!(
             load_name_surface(database.pool(), "ens:alice.eth")
@@ -2531,13 +2957,14 @@ mod tests {
             sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM normalized_events")
                 .fetch_one(database.pool())
                 .await?,
-            4
+            5
         );
         assert_eq!(
             load_normalized_event_counts_by_kind(database.pool(), "ens").await?,
             BTreeMap::from([
                 (EVENT_KIND_AUTHORITY_EPOCH_CHANGED.to_owned(), 1_usize),
                 (EVENT_KIND_EXPIRY_CHANGED.to_owned(), 1_usize),
+                (EVENT_KIND_PERMISSION_CHANGED.to_owned(), 1_usize),
                 (EVENT_KIND_REGISTRATION_GRANTED.to_owned(), 1_usize),
                 (EVENT_KIND_SURFACE_BOUND.to_owned(), 1_usize),
             ])
@@ -2690,10 +3117,14 @@ mod tests {
         assert_eq!(first.total_name_surface_count, 1);
         assert_eq!(first.total_resource_count, 1);
         assert_eq!(first.total_surface_binding_count, 1);
-        assert_eq!(first.total_normalized_event_count, 5);
+        assert_eq!(first.total_normalized_event_count, 7);
         assert_eq!(
             first.by_kind.get(EVENT_KIND_RESOLVER_CHANGED),
             Some(&1_usize)
+        );
+        assert_eq!(
+            first.by_kind.get(EVENT_KIND_PERMISSION_CHANGED),
+            Some(&2_usize)
         );
 
         let expected_identity = format!(
@@ -2714,6 +3145,39 @@ mod tests {
                 .fetch_one(database.pool())
                 .await?;
         assert_eq!(resolver_event_resource_id, authority_resource_id);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM normalized_events WHERE event_kind = 'PermissionChanged'"
+            )
+            .fetch_one(database.pool())
+            .await?,
+            2
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM normalized_events WHERE event_kind = 'PermissionChanged' AND resource_id = $1"
+            )
+            .bind(authority_resource_id)
+            .fetch_one(database.pool())
+            .await?,
+            2
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT after_state->'scope'->>'kind' FROM normalized_events WHERE event_kind = 'PermissionChanged' AND after_state->'scope'->>'kind' = 'resource' LIMIT 1"
+            )
+            .fetch_one(database.pool())
+            .await?,
+            "resource".to_owned()
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT after_state->'scope'->>'kind' FROM normalized_events WHERE event_kind = 'PermissionChanged' AND after_state->'scope'->>'kind' = 'resolver' LIMIT 1"
+            )
+            .fetch_one(database.pool())
+            .await?,
+            "resolver".to_owned()
+        );
         assert_eq!(
             sqlx::query_scalar::<_, String>(
                 "SELECT event_identity FROM normalized_events WHERE event_kind = 'ResolverChanged'"
@@ -2766,7 +3230,7 @@ mod tests {
         let second = sync_ens_v1_unwrapped_authority(database.pool(), "ethereum-mainnet").await?;
         assert_eq!(second.scanned_log_count, 2);
         assert_eq!(second.matched_log_count, 2);
-        assert_eq!(second.total_normalized_event_count, 5);
+        assert_eq!(second.total_normalized_event_count, 7);
         assert_eq!(
             sqlx::query_scalar::<_, i64>(
                 "SELECT COUNT(*) FROM normalized_events WHERE event_kind = 'ResolverChanged'"
@@ -2779,7 +3243,281 @@ mod tests {
             sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM normalized_events")
                 .fetch_one(database.pool())
                 .await?,
-            5
+            7
+        );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn sync_ens_v1_unwrapped_authority_partitions_permission_events_by_authoritative_resource_id()
+    -> Result<()> {
+        let _permit = crate::acquire_test_db_permit().await;
+        let database = TestDatabase::new().await?;
+
+        let registrar_manifest_id = insert_manifest_version(
+            database.pool(),
+            1,
+            "ens",
+            SOURCE_FAMILY_ENS_V1_REGISTRAR_L1,
+            "ethereum-mainnet",
+            "ens_v1",
+            "active",
+            "uts46-v1",
+            "manifests/ens/ens_v1_registrar_l1/v1.toml",
+        )
+        .await?;
+        let registrar_contract_instance_id = Uuid::new_v4();
+        insert_contract_instance(
+            database.pool(),
+            registrar_contract_instance_id,
+            "ethereum-mainnet",
+            "contract",
+        )
+        .await?;
+        insert_manifest_contract_instance(
+            database.pool(),
+            registrar_manifest_id,
+            "contract",
+            "registrar",
+            registrar_contract_instance_id,
+            "0x00000000000000000000000000000000000000aa",
+            Some("registrar"),
+            Some("none"),
+        )
+        .await?;
+        insert_contract_instance_address(
+            database.pool(),
+            registrar_contract_instance_id,
+            "ethereum-mainnet",
+            "0x00000000000000000000000000000000000000aa",
+            registrar_manifest_id,
+        )
+        .await?;
+
+        let registry_manifest_id = insert_manifest_version(
+            database.pool(),
+            1,
+            "ens",
+            SOURCE_FAMILY_ENS_V1_REGISTRY_L1,
+            "ethereum-mainnet",
+            "ens_v1",
+            "active",
+            "uts46-v1",
+            "manifests/ens/ens_v1_registry_l1/v1.toml",
+        )
+        .await?;
+        let registry_contract_instance_id = Uuid::new_v4();
+        insert_contract_instance(
+            database.pool(),
+            registry_contract_instance_id,
+            "ethereum-mainnet",
+            "contract",
+        )
+        .await?;
+        insert_manifest_contract_instance(
+            database.pool(),
+            registry_manifest_id,
+            "contract",
+            "registry",
+            registry_contract_instance_id,
+            "0x00000000000000000000000000000000000000bb",
+            Some("registry"),
+            Some("none"),
+        )
+        .await?;
+        insert_contract_instance_address(
+            database.pool(),
+            registry_contract_instance_id,
+            "ethereum-mainnet",
+            "0x00000000000000000000000000000000000000bb",
+            registry_manifest_id,
+        )
+        .await?;
+
+        let alice = observe_registrar_eth_name_with_version("alice", ENS_NORMALIZER_VERSION)?;
+        let registration_expiry = 1_700_000_100;
+        upsert_raw_blocks(
+            database.pool(),
+            &[
+                raw_block(
+                    "0x1111111111111111111111111111111111111111111111111111111111111111",
+                    Some("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+                    41,
+                    1_700_000_010,
+                ),
+                raw_block(
+                    "0x2222222222222222222222222222222222222222222222222222222222222222",
+                    Some("0x1111111111111111111111111111111111111111111111111111111111111111"),
+                    42,
+                    1_700_000_042,
+                ),
+                raw_block(
+                    "0x3333333333333333333333333333333333333333333333333333333333333333",
+                    Some("0x2222222222222222222222222222222222222222222222222222222222222222"),
+                    43,
+                    1_700_000_050,
+                ),
+                raw_block(
+                    "0x4444444444444444444444444444444444444444444444444444444444444444",
+                    Some("0x3333333333333333333333333333333333333333333333333333333333333333"),
+                    44,
+                    release_after_grace(OffsetDateTime::from_unix_timestamp(registration_expiry)?)?
+                        .unix_timestamp(),
+                ),
+            ],
+        )
+        .await?;
+        upsert_raw_logs(
+            database.pool(),
+            &[
+                RawLog {
+                    chain_id: "ethereum-mainnet".to_owned(),
+                    block_hash:
+                        "0x1111111111111111111111111111111111111111111111111111111111111111"
+                            .to_owned(),
+                    block_number: 41,
+                    transaction_hash:
+                        "0xtx11111111111111111111111111111111111111111111111111111111111111"
+                            .to_owned(),
+                    transaction_index: 0,
+                    log_index: 0,
+                    emitting_address: "0x00000000000000000000000000000000000000bb".to_owned(),
+                    topics: vec![new_owner_topic0(), eth_node(), keccak256_hex(b"alice")],
+                    data: abi_word_address("0x0000000000000000000000000000000000000003").to_vec(),
+                    canonicality_state: CanonicalityState::Canonical,
+                },
+                RawLog {
+                    chain_id: "ethereum-mainnet".to_owned(),
+                    block_hash:
+                        "0x2222222222222222222222222222222222222222222222222222222222222222"
+                            .to_owned(),
+                    block_number: 42,
+                    transaction_hash:
+                        "0xtx22222222222222222222222222222222222222222222222222222222222222"
+                            .to_owned(),
+                    transaction_index: 0,
+                    log_index: 0,
+                    emitting_address: "0x00000000000000000000000000000000000000aa".to_owned(),
+                    topics: vec![
+                        name_registered_topic0(),
+                        keccak256_hex(b"alice"),
+                        hex_string(&abi_word_address(
+                            "0x0000000000000000000000000000000000000001",
+                        )),
+                    ],
+                    data: encode_registrar_name_registered_log_data("alice", registration_expiry),
+                    canonicality_state: CanonicalityState::Canonical,
+                },
+                RawLog {
+                    chain_id: "ethereum-mainnet".to_owned(),
+                    block_hash:
+                        "0x3333333333333333333333333333333333333333333333333333333333333333"
+                            .to_owned(),
+                    block_number: 43,
+                    transaction_hash:
+                        "0xtx33333333333333333333333333333333333333333333333333333333333333"
+                            .to_owned(),
+                    transaction_index: 0,
+                    log_index: 0,
+                    emitting_address: "0x00000000000000000000000000000000000000aa".to_owned(),
+                    topics: vec![
+                        transfer_topic0(),
+                        hex_string(&abi_word_address(
+                            "0x0000000000000000000000000000000000000001",
+                        )),
+                        hex_string(&abi_word_address(
+                            "0x0000000000000000000000000000000000000002",
+                        )),
+                        alice.labelhashes[0].clone(),
+                    ],
+                    data: Vec::new(),
+                    canonicality_state: CanonicalityState::Canonical,
+                },
+                RawLog {
+                    chain_id: "ethereum-mainnet".to_owned(),
+                    block_hash:
+                        "0x3333333333333333333333333333333333333333333333333333333333333333"
+                            .to_owned(),
+                    block_number: 43,
+                    transaction_hash:
+                        "0xtx33333333333333333333333333333333333333333333333333333333333333"
+                            .to_owned(),
+                    transaction_index: 0,
+                    log_index: 1,
+                    emitting_address: "0x00000000000000000000000000000000000000bb".to_owned(),
+                    topics: vec![new_resolver_topic0(), alice.namehash.clone()],
+                    data: encode_registry_new_resolver_log_data(
+                        "0x00000000000000000000000000000000000000cc",
+                    ),
+                    canonicality_state: CanonicalityState::Canonical,
+                },
+            ],
+        )
+        .await?;
+
+        let summary = sync_ens_v1_unwrapped_authority(database.pool(), "ethereum-mainnet").await?;
+        assert_eq!(summary.total_resource_count, 2);
+        assert_eq!(
+            summary.by_kind.get(EVENT_KIND_PERMISSION_CHANGED),
+            Some(&6_usize)
+        );
+
+        let registrar_resource_id = sqlx::query_scalar::<_, Uuid>(
+            "SELECT resource_id FROM resources WHERE provenance->>'authority_kind' = 'registrar' LIMIT 1",
+        )
+        .fetch_one(database.pool())
+        .await?;
+        let registry_resource_id = sqlx::query_scalar::<_, Uuid>(
+            "SELECT resource_id FROM resources WHERE provenance->>'authority_kind' = 'registry_only' LIMIT 1",
+        )
+        .fetch_one(database.pool())
+        .await?;
+        assert_ne!(registrar_resource_id, registry_resource_id);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM normalized_events WHERE event_kind = 'PermissionChanged' AND resource_id = $1"
+            )
+            .bind(registrar_resource_id)
+            .fetch_one(database.pool())
+            .await?,
+            4
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM normalized_events WHERE event_kind = 'PermissionChanged' AND resource_id = $1"
+            )
+            .bind(registry_resource_id)
+            .fetch_one(database.pool())
+            .await?,
+            2
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM normalized_events WHERE event_kind = 'PermissionChanged' AND resource_id = $1 AND block_number = 44"
+            )
+            .bind(registry_resource_id)
+            .fetch_one(database.pool())
+            .await?,
+            2
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT after_state->>'subject' FROM normalized_events WHERE event_kind = 'PermissionChanged' AND resource_id = $1 AND after_state->'scope'->>'kind' = 'resource' AND after_state->>'subject' <> '' ORDER BY block_number DESC LIMIT 1"
+            )
+            .bind(registry_resource_id)
+            .fetch_one(database.pool())
+            .await?,
+            "0x0000000000000000000000000000000000000003".to_owned()
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT after_state->'scope'->>'resolver_address' FROM normalized_events WHERE event_kind = 'PermissionChanged' AND resource_id = $1 AND after_state->'scope'->>'kind' = 'resolver' ORDER BY block_number DESC LIMIT 1"
+            )
+            .bind(registry_resource_id)
+            .fetch_one(database.pool())
+            .await?,
+            "0x00000000000000000000000000000000000000cc".to_owned()
         );
 
         database.cleanup().await

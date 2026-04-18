@@ -55,8 +55,10 @@ ENSv1 continuity rules for adapters:
 - for this slice, direct registry-only control, registrar-backed registration, and wrapper-backed control are distinct ENSv1 authority anchors
 - direct registry-only control has no active `token_lineage_id`
 - mint one `token_lineage_id` per distinct tokenized ENSv1 anchor and reuse it if that same tokenized anchor becomes authoritative again
-- transfer, renewal, fuse updates, and expiry / grace changes inside the same current anchor append normalized events but do not mint new `resource_id`, `token_lineage_id`, or `surface_binding_id` rows
+- transfer, renewal, fuse updates, expiry / grace changes, and permission or scope changes inside the same current anchor append normalized events against the current `resource_id` but do not mint new `resource_id`, `token_lineage_id`, or `surface_binding_id` rows
 - wrap, unwrap, and re-registration close the old binding range only when the authoritative anchor changes; unwrap back to the same still-live pre-wrap registrar lease reuses the prior registrar `resource_id` and `token_lineage_id`
+- when authority moves to a different anchor, close or reactivate binding continuity as above and attach subsequent authority- and permission-family normalized events to the successor `resource_id`
+- adapters do not rewrite predecessor-resource normalized events or infer successor-resource permissions from them; any successor effective permission state must come from normalized events attached to that successor `resource_id`
 - for ENSv1 direct-authority cases in this slice, write `SurfaceBinding.binding_kind = declared_registry_path`; do not use a different binding kind merely because the authority anchor changed between registry, registrar, and wrapper control
 
 `contract_instance_id` rules:
@@ -93,7 +95,7 @@ Use `bigint generated always as identity` for:
 
 The API process is read-only against storage.
 
-For ENSv1 identity rows, adapters are responsible for minting and reusing `resource_id`, `token_lineage_id`, and `surface_binding_id` according to the continuity rules above. Projection workers consume those identity rows; they do not infer alternate continuity on their own.
+For ENSv1 identity rows and normalized authority / permission events, adapters are responsible for minting and reusing `resource_id`, `token_lineage_id`, and `surface_binding_id` according to the continuity rules above and for attaching normalized events to the authoritative `resource_id` in effect at that chain position. Projection workers consume those identity rows and normalized events; they do not infer alternate continuity or synthesize cross-resource permission carry on their own.
 
 At minimum, manifests/discovery persistence must carry:
 
