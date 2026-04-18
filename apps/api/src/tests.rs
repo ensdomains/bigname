@@ -898,6 +898,73 @@ fn exact_name_row(
     }
 }
 
+fn address_name_name_current_row(
+    logical_name_id: &str,
+    canonical_display_name: &str,
+    normalized_name: &str,
+    namehash: &str,
+    surface_binding_id: Uuid,
+    resource_id: Uuid,
+    token_lineage_id: Option<Uuid>,
+    block_number: i64,
+    declared_summary: Value,
+) -> bigname_storage::NameCurrentRow {
+    bigname_storage::NameCurrentRow {
+        logical_name_id: logical_name_id.to_owned(),
+        namespace: logical_name_id
+            .split_once(':')
+            .map(|(namespace, _)| namespace)
+            .expect("logical_name_id must include namespace")
+            .to_owned(),
+        canonical_display_name: canonical_display_name.to_owned(),
+        normalized_name: normalized_name.to_owned(),
+        namehash: namehash.to_owned(),
+        surface_binding_id: Some(surface_binding_id),
+        resource_id: Some(resource_id),
+        token_lineage_id,
+        binding_kind: Some(bigname_storage::SurfaceBindingKind::DeclaredRegistryPath),
+        declared_summary,
+        provenance: json!({
+            "normalized_event_ids": [block_number, block_number + 1],
+            "raw_fact_refs": [{
+                "kind": "raw_log",
+                "block_number": block_number,
+            }],
+            "manifest_versions": [{
+                "manifest_version": 3,
+                "source_family": "ens_v1_registry",
+                "chain": "ethereum-mainnet",
+                "deployment_epoch": "ens_v1",
+            }],
+            "execution_trace_id": null,
+            "derivation_kind": "projection_apply",
+        }),
+        coverage: json!({
+            "status": "full",
+            "exhaustiveness": "authoritative",
+            "source_classes_considered": ["ensv1_registry_path"],
+            "unsupported_reason": null,
+            "enumeration_basis": "exact_name",
+        }),
+        chain_positions: json!({
+            "ethereum": {
+                "chain_id": "ethereum-mainnet",
+                "block_number": block_number,
+                "block_hash": format!("0xname{block_number:02x}"),
+                "timestamp": format!("2026-04-17T00:00:{:02}Z", block_number % 60),
+            }
+        }),
+        canonicality_summary: json!({
+            "status": "finalized",
+            "chains": {
+                "ethereum-mainnet": "finalized"
+            }
+        }),
+        manifest_version: 3,
+        last_recomputed_at: timestamp(1_717_175_000 + block_number),
+    }
+}
+
 fn collection_name_surface(
     logical_name_id: &str,
     display_name: &str,
@@ -2299,26 +2366,282 @@ async fn get_address_names_dedupe_by_resource_changes_grouping_only() -> Result<
 }
 
 #[tokio::test]
-async fn get_address_names_include_role_summary_is_explicitly_unsupported() -> Result<()> {
-    let database = TestDatabase::new(false).await?;
+async fn get_address_names_include_role_summary_adds_projection_backed_expansion_fields()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000fed";
+    let resource_id = Uuid::from_u128(0x8600);
+    let token_lineage_id = Uuid::from_u128(0x8601);
+    let surface_binding_id = Uuid::from_u128(0x8602);
+    let subject = "0x0000000000000000000000000000000000000abc";
+    let other_subject = "0x0000000000000000000000000000000000000def";
 
-    let response = app_router(database.app_state())
+    bigname_storage::upsert_raw_blocks(
+        &database.pool,
+        &[
+            raw_block("ethereum-mainnet", "0xalpha", None, 61, 1_717_173_061),
+            raw_block("ethereum-mainnet", "0xperm", None, 62, 1_717_173_062),
+        ],
+    )
+    .await?;
+    bigname_storage::upsert_token_lineages(
+        &database.pool,
+        &[address_name_token_lineage(token_lineage_id, "0xalpha", 61)],
+    )
+    .await?;
+    bigname_storage::upsert_resources(
+        &database.pool,
+        &[address_name_resource(
+            resource_id,
+            Some(token_lineage_id),
+            "0xalpha",
+            61,
+        )],
+    )
+    .await?;
+    bigname_storage::upsert_name_surfaces(
+        &database.pool,
+        &[
+            collection_name_surface("ens:alpha.eth", "alpha.eth", "node:alpha.eth", 61),
+            collection_name_surface(
+                "ens:child-one.alpha.eth",
+                "child-one.alpha.eth",
+                "node:child-one.alpha.eth",
+                62,
+            ),
+            collection_name_surface(
+                "ens:child-two.alpha.eth",
+                "child-two.alpha.eth",
+                "node:child-two.alpha.eth",
+                63,
+            ),
+        ],
+    )
+    .await?;
+    bigname_storage::upsert_surface_bindings(
+        &database.pool,
+        &[address_name_surface_binding(
+            surface_binding_id,
+            "ens:alpha.eth",
+            resource_id,
+            "0xalpha",
+            61,
+            1_717_173_061,
+        )],
+    )
+    .await?;
+    bigname_storage::upsert_address_names_current_rows(
+        &database.pool,
+        &[address_name_current_row(
+            address,
+            "ens:alpha.eth",
+            bigname_storage::AddressNameRelation::Registrant,
+            "alpha.eth",
+            "alpha.eth",
+            "node:alpha.eth",
+            surface_binding_id,
+            resource_id,
+            Some(token_lineage_id),
+            61,
+        )],
+    )
+    .await?;
+    database
+        .insert_name_current_row(address_name_name_current_row(
+            "ens:alpha.eth",
+            "alpha.eth",
+            "alpha.eth",
+            "node:alpha.eth",
+            surface_binding_id,
+            resource_id,
+            Some(token_lineage_id),
+            64,
+            json!({
+                "registration": {
+                    "status": "active",
+                    "authority_kind": "registrar",
+                },
+                "control": {
+                    "status": "wrapped",
+                    "expiry": "2026-09-01T00:00:00Z",
+                    "registrant": address,
+                    "registry_owner": subject,
+                    "latest_event_kind": "NameWrapped",
+                },
+                "resolver": {
+                    "chain_id": "ethereum-mainnet",
+                    "address": "0x0000000000000000000000000000000000000aaa",
+                    "latest_event_kind": "ResolverChanged",
+                },
+                "record_inventory": {
+                    "status": "supported",
+                    "count": 2,
+                },
+                "history": {
+                    "surface_head": null,
+                    "resource_head": null,
+                },
+            }),
+        ))
+        .await?;
+    bigname_storage::upsert_children_current_rows(
+        &database.pool,
+        &[
+            declared_child_row(
+                "ens:alpha.eth",
+                "ens:child-one.alpha.eth",
+                "child-one.alpha.eth",
+                "node:child-one.alpha.eth",
+                701,
+                62,
+            ),
+            declared_child_row(
+                "ens:alpha.eth",
+                "ens:child-two.alpha.eth",
+                "child-two.alpha.eth",
+                "node:child-two.alpha.eth",
+                702,
+                63,
+            ),
+        ],
+    )
+    .await?;
+    bigname_storage::upsert_permissions_current_rows(
+        &database.pool,
+        &[
+            permission_current_row(resource_id, subject, PermissionScope::Resource, 7, 71),
+            permission_current_row(
+                resource_id,
+                subject,
+                PermissionScope::Resolver {
+                    chain_id: "ethereum-mainnet".to_owned(),
+                    resolver_address: "0x0000000000000000000000000000000000000aaa".to_owned(),
+                },
+                8,
+                72,
+            ),
+            permission_current_row(resource_id, other_subject, PermissionScope::Registry, 9, 73),
+        ],
+    )
+    .await?;
+
+    let base_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/addresses/0x0000000000000000000000000000000000000abc/names?include=role_summary")
+                .uri(format!("/v1/addresses/{address}/names"))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("base address names request failed")?;
+    let include_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/addresses/{address}/names?include=role_summary"
+                ))
                 .body(Body::empty())
                 .expect("request must build"),
         )
         .await
         .context("role summary request failed")?;
 
+    assert_eq!(base_response.status(), StatusCode::OK);
+    assert_eq!(include_response.status(), StatusCode::OK);
+
+    let base_payload: AddressNamesResponse = read_json(base_response).await?;
+    let payload: AddressNamesResponse = read_json(include_response).await?;
+
+    assert_eq!(payload.coverage, base_payload.coverage);
+    assert_eq!(payload.page, base_payload.page);
+    assert_eq!(payload.declared_state, base_payload.declared_state);
+    assert_eq!(payload.data.len(), 1);
+    assert_eq!(
+        payload.data[0].get("logical_name_id"),
+        base_payload.data[0].get("logical_name_id")
+    );
+    assert_eq!(
+        payload.data[0].get("resource_id"),
+        base_payload.data[0].get("resource_id")
+    );
+    assert_eq!(
+        payload.data[0].get("relation_facets"),
+        base_payload.data[0].get("relation_facets")
+    );
+    assert_eq!(payload.data[0].get("status"), Some(&json!("wrapped")));
+    assert_eq!(
+        payload.data[0].get("expiry"),
+        Some(&json!("2026-09-01T00:00:00Z"))
+    );
+    assert_eq!(payload.data[0].get("record_count"), Some(&json!(2)));
+    assert_eq!(payload.data[0].get("subname_count"), Some(&json!(2)));
+    assert_eq!(
+        payload.data[0].get("role_summary"),
+        Some(&json!({
+            "subjects": [
+                {
+                    "subject": subject,
+                    "scopes": [
+                        {
+                            "scope": {
+                                "kind": "resolver",
+                                "detail": {
+                                    "chain_id": "ethereum-mainnet",
+                                    "resolver_address": "0x0000000000000000000000000000000000000aaa",
+                                },
+                            },
+                            "effective_powers": ["set_resolver", "create_subnames"],
+                        },
+                        {
+                            "scope": {
+                                "kind": "resource",
+                                "detail": {},
+                            },
+                            "effective_powers": ["set_resolver", "set_records"],
+                        },
+                    ],
+                },
+                {
+                    "subject": other_subject,
+                    "scopes": [
+                        {
+                            "scope": {
+                                "kind": "registry",
+                                "detail": {},
+                            },
+                            "effective_powers": ["set_resolver", "set_records"],
+                        },
+                    ],
+                },
+            ],
+        }))
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_address_names_rejects_unknown_include_values() -> Result<()> {
+    let database = TestDatabase::new(false).await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/addresses/0x0000000000000000000000000000000000000abc/names?include=role_summary,unknown")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("invalid include request failed")?;
+
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
     let payload: ErrorResponse = read_json(response).await?;
-    assert_eq!(payload.error.code, "unsupported");
+    assert_eq!(payload.error.code, "invalid_input");
     assert_eq!(
         payload.error.message,
-        "include=role_summary is not yet supported"
+        "include must contain only role_summary"
     );
 
     database.cleanup().await?;

@@ -192,6 +192,11 @@ struct AddressNamesQuery {
     include: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct AddressNamesIncludeOptions {
+    role_summary: bool,
+}
+
 #[derive(Clone, Debug, Default, Deserialize)]
 struct AddressHistoryQuery {
     namespace: Option<String>,
@@ -236,6 +241,31 @@ struct AddressNamesResponse {
     page: HistoryPageResponse,
     consistency: String,
     last_updated: String,
+}
+
+#[derive(Clone, Debug, Default)]
+struct AddressNamesResponseSupplement {
+    provenances: Vec<JsonValue>,
+    chain_positions: Vec<JsonValue>,
+    canonicality_summaries: Vec<JsonValue>,
+    last_recomputed_at: Vec<OffsetDateTime>,
+}
+
+#[derive(Clone, Debug)]
+struct AddressNameExpansionFacts {
+    status: JsonValue,
+    expiry: JsonValue,
+    record_count: JsonValue,
+}
+
+impl Default for AddressNameExpansionFacts {
+    fn default() -> Self {
+        Self {
+            status: JsonValue::Null,
+            expiry: JsonValue::Null,
+            record_count: JsonValue::Null,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -578,7 +608,7 @@ async fn address_names(
     let namespace = parse_address_names_namespace(query.namespace.as_deref())?;
     let relation = parse_address_name_relation(query.relation.as_deref())?;
     let dedupe_by = parse_address_names_dedupe_by(query.dedupe_by.as_deref())?;
-    parse_address_names_include(query.include.as_deref())?;
+    let include = parse_address_names_include(query.include.as_deref())?;
     let normalized_address = normalize_address(&address);
 
     let rows = load_address_names_current(
@@ -603,9 +633,15 @@ async fn address_names(
         ))
     })?;
 
-    Ok(Json(build_address_names_response(
-        collapse_address_name_current_rows(&rows, dedupe_by),
-    )))
+    let entries = collapse_address_name_current_rows(&rows, dedupe_by);
+    let response = if include.role_summary {
+        build_address_names_response_with_role_summary(&state.pool, entries).await?
+    } else {
+        let data = entries.iter().map(build_address_name_item).collect();
+        build_address_names_response(entries, data, AddressNamesResponseSupplement::default())
+    };
+
+    Ok(Json(response))
 }
 
 async fn name_children(
@@ -835,6 +871,99 @@ async fn resource_permissions(
     Ok(Json(build_resource_permissions_response(rows)))
 }
 
+async fn build_address_names_response_with_role_summary(
+    pool: &PgPool,
+    entries: Vec<AddressNameCurrentEntry>,
+) -> ApiResult<AddressNamesResponse> {
+    let mut data = Vec::with_capacity(entries.len());
+    let mut supplement = AddressNamesResponseSupplement::default();
+    let mut name_current_cache = BTreeMap::<String, Option<NameCurrentRow>>::new();
+    let mut permissions_cache = BTreeMap::<Uuid, Vec<PermissionsCurrentRow>>::new();
+    let mut children_cache = BTreeMap::<String, Vec<ChildrenCurrentRow>>::new();
+
+    for entry in &entries {
+        let name_row = match name_current_cache.get(&entry.logical_name_id) {
+            Some(row) => row.clone(),
+            None => {
+                let row = load_name_current(pool, &entry.logical_name_id)
+                    .await
+                    .map_err(|load_error| {
+                        error!(
+                            service = "api",
+                            logical_name_id = %entry.logical_name_id,
+                            error = ?load_error,
+                            "failed to load name_current row for address role summary expansion"
+                        );
+                        ApiError::internal_error(format!(
+                            "failed to load current projection for logical name {}",
+                            entry.logical_name_id
+                        ))
+                    })?;
+                name_current_cache.insert(entry.logical_name_id.clone(), row.clone());
+                row
+            }
+        };
+
+        let permissions = match permissions_cache.get(&entry.resource_id) {
+            Some(rows) => rows.clone(),
+            None => {
+                let rows = load_permissions_current(pool, entry.resource_id, None, None)
+                    .await
+                    .map_err(|load_error| {
+                        error!(
+                            service = "api",
+                            resource_id = %entry.resource_id,
+                            error = ?load_error,
+                            "failed to load permissions_current rows for address role summary expansion"
+                        );
+                        ApiError::internal_error(format!(
+                            "failed to load permissions for resource {}",
+                            entry.resource_id
+                        ))
+                    })?;
+                permissions_cache.insert(entry.resource_id, rows.clone());
+                rows
+            }
+        };
+
+        let children = match children_cache.get(&entry.logical_name_id) {
+            Some(rows) => rows.clone(),
+            None => {
+                let rows = load_children_current(pool, &entry.logical_name_id)
+                    .await
+                    .map_err(|load_error| {
+                        error!(
+                            service = "api",
+                            logical_name_id = %entry.logical_name_id,
+                            error = ?load_error,
+                            "failed to load children_current rows for address role summary expansion"
+                        );
+                        ApiError::internal_error(format!(
+                            "failed to load child collection for logical name {}",
+                            entry.logical_name_id
+                        ))
+                    })?;
+                children_cache.insert(entry.logical_name_id.clone(), rows.clone());
+                rows
+            }
+        };
+
+        if let Some(row) = name_row.as_ref() {
+            supplement.push_name_current(row);
+        }
+        supplement.push_permissions(&permissions);
+        supplement.push_children(&children);
+        data.push(build_address_name_item_with_role_summary(
+            entry,
+            name_row.as_ref(),
+            &permissions,
+            &children,
+        ));
+    }
+
+    Ok(build_address_names_response(entries, data, supplement))
+}
+
 fn build_namespace_metadata_response(
     namespace: String,
     snapshot: NamespaceManifestSnapshot,
@@ -999,19 +1128,56 @@ fn build_children_response(
     }
 }
 
-fn build_address_names_response(entries: Vec<AddressNameCurrentEntry>) -> AddressNamesResponse {
+impl AddressNamesResponseSupplement {
+    fn push_name_current(&mut self, row: &NameCurrentRow) {
+        self.provenances.push(row.provenance.clone());
+        self.chain_positions.push(row.chain_positions.clone());
+        self.canonicality_summaries
+            .push(row.canonicality_summary.clone());
+        self.last_recomputed_at.push(row.last_recomputed_at);
+    }
+
+    fn push_permissions(&mut self, rows: &[PermissionsCurrentRow]) {
+        self.provenances
+            .extend(rows.iter().map(|row| row.provenance.clone()));
+        self.chain_positions
+            .extend(rows.iter().map(|row| row.chain_positions.clone()));
+        self.canonicality_summaries
+            .extend(rows.iter().map(|row| row.canonicality_summary.clone()));
+        self.last_recomputed_at
+            .extend(rows.iter().map(|row| row.last_recomputed_at));
+    }
+
+    fn push_children(&mut self, rows: &[ChildrenCurrentRow]) {
+        self.provenances
+            .extend(rows.iter().map(|row| row.provenance.clone()));
+        self.chain_positions
+            .extend(rows.iter().map(|row| row.chain_positions.clone()));
+        self.canonicality_summaries
+            .extend(rows.iter().map(|row| row.canonicality_summary.clone()));
+        self.last_recomputed_at
+            .extend(rows.iter().map(|row| row.last_recomputed_at));
+    }
+}
+
+fn build_address_names_response(
+    entries: Vec<AddressNameCurrentEntry>,
+    data: Vec<JsonValue>,
+    supplement: AddressNamesResponseSupplement,
+) -> AddressNamesResponse {
     let last_updated = entries
         .iter()
         .map(|entry| entry.last_recomputed_at)
+        .chain(supplement.last_recomputed_at.iter().copied())
         .max()
         .map(format_timestamp)
         .unwrap_or_else(|| format_timestamp(OffsetDateTime::now_utc()));
 
     AddressNamesResponse {
-        data: entries.iter().map(build_address_name_item).collect(),
+        data,
         declared_state: empty_object(),
         verified_state: None,
-        provenance: build_address_names_provenance(&entries),
+        provenance: build_address_names_provenance(&entries, &supplement),
         coverage: CoverageResponse {
             status: "full".to_owned(),
             exhaustiveness: "authoritative".to_owned(),
@@ -1019,7 +1185,7 @@ fn build_address_names_response(entries: Vec<AddressNameCurrentEntry>) -> Addres
             enumeration_basis: "surface_current_relations".to_owned(),
             unsupported_reason: None,
         },
-        chain_positions: build_address_names_chain_positions(&entries),
+        chain_positions: build_address_names_chain_positions(&entries, &supplement),
         page: HistoryPageResponse {
             cursor: None,
             next_cursor: None,
@@ -1027,7 +1193,10 @@ fn build_address_names_response(entries: Vec<AddressNameCurrentEntry>) -> Addres
             sort: "display_name_asc".to_owned(),
         },
         consistency: collection_consistency(
-            entries.iter().map(|entry| &entry.canonicality_summary),
+            entries
+                .iter()
+                .map(|entry| &entry.canonicality_summary)
+                .chain(supplement.canonicality_summaries.iter()),
         )
         .to_owned(),
         last_updated,
@@ -1164,6 +1333,33 @@ fn build_address_name_item(entry: &AddressNameCurrentEntry) -> JsonValue {
     value
 }
 
+fn build_address_name_item_with_role_summary(
+    entry: &AddressNameCurrentEntry,
+    name_row: Option<&NameCurrentRow>,
+    permissions: &[PermissionsCurrentRow],
+    children: &[ChildrenCurrentRow],
+) -> JsonValue {
+    let mut value = build_address_name_item(entry);
+    let facts = name_row
+        .map(build_address_name_expansion_facts)
+        .unwrap_or_default();
+
+    insert_value_field(
+        &mut value,
+        "role_summary",
+        build_address_name_role_summary(permissions),
+    );
+    insert_value_field(
+        &mut value,
+        "subname_count",
+        JsonValue::Number((children.len() as u64).into()),
+    );
+    insert_value_field(&mut value, "record_count", facts.record_count);
+    insert_value_field(&mut value, "status", facts.status);
+    insert_value_field(&mut value, "expiry", facts.expiry);
+    value
+}
+
 fn build_children_declared_state(child_count: usize, include_counts: bool) -> JsonValue {
     let mut declared_state = empty_object();
     if include_counts {
@@ -1213,13 +1409,21 @@ fn build_children_provenance(rows: &[ChildrenCurrentRow]) -> JsonValue {
     value
 }
 
-fn build_address_names_provenance(entries: &[AddressNameCurrentEntry]) -> JsonValue {
+fn build_address_names_provenance(
+    entries: &[AddressNameCurrentEntry],
+    supplement: &AddressNamesResponseSupplement,
+) -> JsonValue {
+    let provenances = entries
+        .iter()
+        .map(|entry| &entry.provenance)
+        .chain(supplement.provenances.iter())
+        .collect::<Vec<_>>();
     let mut value = empty_object();
     insert_value_field(
         &mut value,
         "normalized_event_ids",
         JsonValue::Array(
-            collect_address_names_provenance_values(entries, "normalized_event_ids")
+            collect_collection_provenance_values(&provenances, "normalized_event_ids")
                 .into_iter()
                 .filter_map(|value| value_to_string(&value).map(JsonValue::String))
                 .collect(),
@@ -1228,16 +1432,16 @@ fn build_address_names_provenance(entries: &[AddressNameCurrentEntry]) -> JsonVa
     insert_value_field(
         &mut value,
         "raw_fact_refs",
-        JsonValue::Array(collect_address_names_provenance_values(
-            entries,
+        JsonValue::Array(collect_collection_provenance_values(
+            &provenances,
             "raw_fact_refs",
         )),
     );
     insert_value_field(
         &mut value,
         "manifest_versions",
-        JsonValue::Array(collect_address_names_provenance_values(
-            entries,
+        JsonValue::Array(collect_collection_provenance_values(
+            &provenances,
             "manifest_versions",
         )),
     );
@@ -1245,11 +1449,9 @@ fn build_address_names_provenance(entries: &[AddressNameCurrentEntry]) -> JsonVa
     insert_string_field(
         &mut value,
         "derivation_kind",
-        entries
+        provenances
             .iter()
-            .filter_map(|entry| {
-                string_field(provenance_field(&entry.provenance, "derivation_kind"))
-            })
+            .filter_map(|provenance| string_field(provenance_field(provenance, "derivation_kind")))
             .next()
             .unwrap_or_else(|| "declared".to_owned()),
     );
@@ -1271,13 +1473,10 @@ fn collect_children_provenance_values(rows: &[ChildrenCurrentRow], key: &str) ->
     deduped
 }
 
-fn collect_address_names_provenance_values(
-    entries: &[AddressNameCurrentEntry],
-    key: &str,
-) -> Vec<JsonValue> {
+fn collect_collection_provenance_values(provenances: &[&JsonValue], key: &str) -> Vec<JsonValue> {
     let mut deduped = Vec::new();
-    for entry in entries {
-        let Some(JsonValue::Array(values)) = provenance_field(&entry.provenance, key) else {
+    for provenance in provenances {
+        let Some(JsonValue::Array(values)) = provenance_field(provenance, key) else {
             continue;
         };
         for value in values {
@@ -1325,10 +1524,17 @@ fn build_children_chain_positions(rows: &[ChildrenCurrentRow]) -> JsonValue {
     serde_json::to_value(chain_positions).expect("children chain positions must serialize")
 }
 
-fn build_address_names_chain_positions(entries: &[AddressNameCurrentEntry]) -> JsonValue {
+fn build_address_names_chain_positions(
+    entries: &[AddressNameCurrentEntry],
+    supplement: &AddressNamesResponseSupplement,
+) -> JsonValue {
     let mut chain_positions = BTreeMap::<String, ChainPositionResponse>::new();
-    for entry in entries {
-        let Some(position_values) = entry.chain_positions.as_object() else {
+    for position_value in entries
+        .iter()
+        .map(|entry| &entry.chain_positions)
+        .chain(supplement.chain_positions.iter())
+    {
+        let Some(position_values) = position_value.as_object() else {
             continue;
         };
 
@@ -1429,6 +1635,67 @@ fn build_permission_scope_value(scope: &PermissionScope) -> JsonValue {
     insert_string_field(&mut value, "kind", scope.kind().to_owned());
     insert_value_field(&mut value, "detail", scope.detail());
     value
+}
+
+fn build_address_name_role_summary(rows: &[PermissionsCurrentRow]) -> JsonValue {
+    let mut subjects = BTreeMap::<String, Vec<&PermissionsCurrentRow>>::new();
+
+    for row in rows {
+        subjects.entry(row.subject.clone()).or_default().push(row);
+    }
+
+    json!({
+        "subjects": subjects
+            .into_iter()
+            .map(|(subject, mut rows)| {
+                rows.sort_by(|left, right| left.scope.storage_key().cmp(&right.scope.storage_key()));
+                json!({
+                    "subject": subject,
+                    "scopes": rows
+                        .into_iter()
+                        .map(|row| {
+                            json!({
+                                "scope": build_permission_scope_value(&row.scope),
+                                "effective_powers": row.effective_powers.clone(),
+                            })
+                        })
+                        .collect::<Vec<_>>(),
+                })
+            })
+            .collect::<Vec<_>>(),
+    })
+}
+
+fn build_address_name_expansion_facts(row: &NameCurrentRow) -> AddressNameExpansionFacts {
+    let declared_state = build_name_declared_state(row);
+
+    AddressNameExpansionFacts {
+        status: supported_summary_field(provenance_field(&declared_state, "control"), "status"),
+        expiry: supported_summary_field(provenance_field(&declared_state, "control"), "expiry"),
+        record_count: supported_summary_field(
+            provenance_field(&declared_state, "record_inventory"),
+            "count",
+        ),
+    }
+}
+
+fn supported_summary_field(section: Option<&JsonValue>, key: &str) -> JsonValue {
+    if summary_is_unsupported(section) {
+        return JsonValue::Null;
+    }
+
+    section
+        .and_then(|value| provenance_field(value, key))
+        .cloned()
+        .unwrap_or(JsonValue::Null)
+}
+
+fn summary_is_unsupported(section: Option<&JsonValue>) -> bool {
+    matches!(
+        string_field(section.and_then(|value| provenance_field(value, "status"))).as_deref(),
+        Some("unsupported")
+    ) && string_field(section.and_then(|value| provenance_field(value, "unsupported_reason")))
+        .is_some()
 }
 
 fn build_name_data(row: &NameCurrentRow) -> JsonValue {
@@ -2144,7 +2411,9 @@ fn parse_address_names_dedupe_by(dedupe_by: Option<&str>) -> ApiResult<AddressNa
     }
 }
 
-fn parse_address_names_include(include: Option<&str>) -> ApiResult<()> {
+fn parse_address_names_include(include: Option<&str>) -> ApiResult<AddressNamesIncludeOptions> {
+    let mut options = AddressNamesIncludeOptions::default();
+
     for value in include
         .unwrap_or_default()
         .split(',')
@@ -2152,13 +2421,7 @@ fn parse_address_names_include(include: Option<&str>) -> ApiResult<()> {
         .filter(|value| !value.is_empty())
     {
         match value {
-            "role_summary" => {
-                return Err(ApiError {
-                    status: StatusCode::BAD_REQUEST,
-                    code: "unsupported",
-                    message: "include=role_summary is not yet supported".to_owned(),
-                });
-            }
+            "role_summary" => options.role_summary = true,
             _ => {
                 return Err(ApiError {
                     status: StatusCode::BAD_REQUEST,
@@ -2169,7 +2432,7 @@ fn parse_address_names_include(include: Option<&str>) -> ApiResult<()> {
         }
     }
 
-    Ok(())
+    Ok(options)
 }
 
 fn parse_children_surface_classes(surface_classes: Option<&str>) -> ApiResult<()> {
