@@ -40,8 +40,8 @@ Execution notes:
   rejected
 - the address-name collection contract seeds `address_names_current` rows plus the backing
   surfaces, resources, token lineage, and bindings; the harness covers the base
-  `GET /v1/addresses/{address}/names` response plus shipped `namespace`, `relation`, and
-  `dedupe_by` query handling
+  `GET /v1/addresses/{address}/names` response plus shipped `namespace`, `relation`,
+  `dedupe_by`, and additive `include=role_summary` handling
 - the exact-name contract seeds a `name_current` row with the frozen exact-name `control`,
   `resolver`, and `history` summary objects and asserts only those declared-state sections on
   `GET /v1/names/{namespace}/{name}`
