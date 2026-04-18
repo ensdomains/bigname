@@ -20,8 +20,6 @@ const EVENT_KIND_PERMISSION_CHANGED: &str = "PermissionChanged";
 const EVENT_KIND_RESOLVER_CHANGED: &str = "ResolverChanged";
 const RESOLVER_CURRENT_DERIVATION_KIND: &str = "resolver_current_rebuild";
 const RESOLVER_CURRENT_ENUMERATION_BASIS: &str = "resolver_overview";
-const ALIASES_UNSUPPORTED_REASON: &str =
-    "resolver alias mappings are not yet projected for the resolver_current rebuild";
 const CANONICAL_STATE_FILTER: &str = r#"
   IN (
     'canonical'::canonicality_state,
@@ -453,25 +451,12 @@ fn build_declared_summary(
     permissions: &[ResolverPermissionSeed],
 ) -> Value {
     json!({
-        "bindings": {
-            "status": "supported",
-            "count": bindings.len(),
-            "items": bindings
+        "bindings": build_binding_summary(bindings.iter()),
+        "aliases": build_binding_summary(
+            bindings
                 .iter()
-                .map(|binding| {
-                    json!({
-                        "logical_name_id": binding.logical_name_id,
-                        "canonical_display_name": binding.canonical_display_name,
-                        "normalized_name": binding.normalized_name,
-                        "namehash": binding.namehash,
-                        "resource_id": binding.resource_id,
-                        "surface_binding_id": binding.surface_binding_id,
-                        "binding_kind": binding.binding_kind.as_str(),
-                    })
-                })
-                .collect::<Vec<_>>(),
-        },
-        "aliases": unsupported_summary(ALIASES_UNSUPPORTED_REASON),
+                .filter(|binding| binding.binding_kind == SurfaceBindingKind::ResolverAliasPath)
+        ),
         "permissions": {
             "status": "supported",
             "count": permissions.len(),
@@ -490,6 +475,27 @@ fn build_declared_summary(
         },
         "role_holders": build_role_holders_summary(permissions),
         "event_summary": build_event_summary(bindings, permissions),
+    })
+}
+
+fn build_binding_summary<'a>(bindings: impl Iterator<Item = &'a CurrentBindingSeed>) -> Value {
+    let items = bindings.map(build_binding_item).collect::<Vec<_>>();
+    json!({
+        "status": "supported",
+        "count": items.len(),
+        "items": items,
+    })
+}
+
+fn build_binding_item(binding: &CurrentBindingSeed) -> Value {
+    json!({
+        "logical_name_id": binding.logical_name_id,
+        "canonical_display_name": binding.canonical_display_name,
+        "normalized_name": binding.normalized_name,
+        "namehash": binding.namehash,
+        "resource_id": binding.resource_id,
+        "surface_binding_id": binding.surface_binding_id,
+        "binding_kind": binding.binding_kind.as_str(),
     })
 }
 
@@ -721,13 +727,6 @@ fn build_canonicality_summary(
             .map(|(chain_id, state)| (chain_id, Value::String(state.as_str().to_owned())))
             .collect::<serde_json::Map<String, Value>>(),
     }))
-}
-
-fn unsupported_summary(reason: &str) -> Value {
-    json!({
-        "status": "unsupported",
-        "unsupported_reason": reason,
-    })
 }
 
 fn normalize_resolver_address(value: &str) -> String {
@@ -964,6 +963,8 @@ mod tests {
         let database = TestDatabase::new().await?;
         let resource_id = Uuid::from_u128(0x8100);
         let surface_binding_id = Uuid::from_u128(0x8200);
+        let alias_resource_id = Uuid::from_u128(0x8101);
+        let alias_surface_binding_id = Uuid::from_u128(0x8201);
 
         seed_identity(
             database.pool(),
@@ -971,6 +972,16 @@ mod tests {
             resource_id,
             surface_binding_id,
             "alpha.eth",
+            SurfaceBindingKind::DeclaredRegistryPath,
+        )
+        .await?;
+        seed_identity(
+            database.pool(),
+            "ens:beta.eth",
+            alias_resource_id,
+            alias_surface_binding_id,
+            "beta.eth",
+            SurfaceBindingKind::ResolverAliasPath,
         )
         .await?;
         seed_raw_blocks(
@@ -983,14 +994,24 @@ mod tests {
         .await?;
         seed_resolver_events(
             database.pool(),
-            &[resolver_event(
-                "resolver-alpha",
-                "ens:alpha.eth",
-                resource_id,
-                "0x0000000000000000000000000000000000000aAa",
-                100,
-                0,
-            )],
+            &[
+                resolver_event(
+                    "resolver-alpha",
+                    "ens:alpha.eth",
+                    resource_id,
+                    "0x0000000000000000000000000000000000000aAa",
+                    100,
+                    0,
+                ),
+                resolver_event(
+                    "resolver-beta",
+                    "ens:beta.eth",
+                    alias_resource_id,
+                    "0x0000000000000000000000000000000000000AaA",
+                    100,
+                    1,
+                ),
+            ],
         )
         .await?;
         seed_permissions(
@@ -1058,20 +1079,37 @@ mod tests {
         .await?
         .context("resolver_current row should exist")?;
 
-        assert_eq!(row.declared_summary["bindings"]["count"], json!(1));
+        assert_eq!(row.declared_summary["bindings"]["count"], json!(2));
         assert_eq!(
             row.declared_summary["bindings"]["items"][0]["logical_name_id"],
             json!("ens:alpha.eth")
         );
         assert_eq!(
+            row.declared_summary["bindings"]["items"][1]["logical_name_id"],
+            json!("ens:beta.eth")
+        );
+        assert_eq!(
             row.declared_summary["aliases"]["status"],
-            json!("unsupported")
+            json!("supported")
+        );
+        assert_eq!(row.declared_summary["aliases"]["count"], json!(1));
+        assert_eq!(
+            row.declared_summary["aliases"]["items"][0]["logical_name_id"],
+            json!("ens:beta.eth")
+        );
+        assert_eq!(
+            row.declared_summary["aliases"]["items"][0]["binding_kind"],
+            json!("resolver_alias_path")
+        );
+        assert_eq!(
+            row.declared_summary["aliases"]["items"][0],
+            row.declared_summary["bindings"]["items"][1]
         );
         assert_eq!(row.declared_summary["permissions"]["count"], json!(2));
         assert_eq!(row.declared_summary["role_holders"]["count"], json!(2));
         assert_eq!(
             row.declared_summary["event_summary"]["by_kind"][EVENT_KIND_RESOLVER_CHANGED],
-            json!(1)
+            json!(2)
         );
         assert_eq!(
             row.declared_summary["event_summary"]["by_kind"][EVENT_KIND_PERMISSION_CHANGED],
@@ -1105,6 +1143,7 @@ mod tests {
             binding_resource_id,
             binding_surface_binding_id,
             "beta.eth",
+            SurfaceBindingKind::DeclaredRegistryPath,
         )
         .await?;
         seed_raw_blocks(
@@ -1212,6 +1251,7 @@ mod tests {
         resource_id: Uuid,
         surface_binding_id: Uuid,
         display_name: &str,
+        binding_kind: SurfaceBindingKind,
     ) -> Result<()> {
         upsert_name_surfaces(pool, &[name_surface(logical_name_id, display_name)]).await?;
         upsert_resources(pool, &[resource(resource_id)]).await?;
@@ -1221,6 +1261,7 @@ mod tests {
                 surface_binding_id,
                 logical_name_id,
                 resource_id,
+                binding_kind,
             )],
         )
         .await?;
@@ -1284,12 +1325,13 @@ mod tests {
         surface_binding_id: Uuid,
         logical_name_id: &str,
         resource_id: Uuid,
+        binding_kind: SurfaceBindingKind,
     ) -> SurfaceBinding {
         SurfaceBinding {
             surface_binding_id,
             logical_name_id: logical_name_id.to_owned(),
             resource_id,
-            binding_kind: SurfaceBindingKind::DeclaredRegistryPath,
+            binding_kind,
             active_from: timestamp(1_776_200_000),
             active_to: None,
             chain_id: "ethereum-mainnet".to_owned(),
