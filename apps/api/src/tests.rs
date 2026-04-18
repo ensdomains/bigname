@@ -1460,6 +1460,116 @@ fn resolution_execution_outcome(
     }
 }
 
+fn primary_name_execution_requested_chain_positions() -> Value {
+    json!([{
+        "chain_id": "ethereum-mainnet",
+        "block_number": 21_000_010,
+        "block_hash": "0xprimary"
+    }])
+}
+
+fn primary_name_execution_manifest_versions() -> Value {
+    json!([{
+        "manifest_version": 3,
+        "source_family": "ens_v1_registry"
+    }])
+}
+
+fn primary_name_execution_request_key(namespace: &str, address: &str, coin_type: &str) -> String {
+    format!("{namespace}:{}:{coin_type}", address.to_ascii_lowercase())
+}
+
+fn primary_name_execution_trace(
+    execution_trace_id: Uuid,
+    namespace: &str,
+    address: &str,
+    coin_type: &str,
+    verified_primary_name: Value,
+    finished_at: OffsetDateTime,
+) -> ExecutionTrace {
+    let normalized_address = address.to_ascii_lowercase();
+    ExecutionTrace {
+        execution_trace_id,
+        request_type: bigname_storage::VERIFIED_PRIMARY_NAME_REQUEST_TYPE.to_owned(),
+        request_key: primary_name_execution_request_key(namespace, &normalized_address, coin_type),
+        namespace: namespace.to_owned(),
+        chain_context: json!({
+            "requested_positions": primary_name_execution_requested_chain_positions(),
+        }),
+        manifest_context: json!({
+            "manifest_versions": primary_name_execution_manifest_versions(),
+        }),
+        contracts_called: json!([{
+            "chain_id": "ethereum-mainnet",
+            "contract_address": "0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe",
+            "selector": "0x9061b923"
+        }]),
+        gateway_digests: json!([]),
+        final_payload: Some(json!({
+            "verified_primary_name": verified_primary_name.clone()
+        })),
+        failure_payload: None,
+        request_metadata: json!({
+            "normalized_address": normalized_address,
+            "coin_type": coin_type,
+            "namespace": namespace
+        }),
+        finished_at: Some(finished_at),
+        steps: vec![ExecutionTraceStep {
+            step_index: 0,
+            step_kind: "call_universal_resolver".to_owned(),
+            input_digest: Some("sha256:primary-input".to_owned()),
+            output_digest: Some("sha256:primary-output".to_owned()),
+            latency_ms: Some(14),
+            canonicality_dependency: json!({
+                "ethereum-mainnet": {
+                    "block_hash": "0xprimary",
+                    "block_number": 21_000_010,
+                    "state": "finalized"
+                }
+            }),
+            step_payload: json!({
+                "address": normalized_address,
+                "coin_type": coin_type
+            }),
+        }],
+    }
+}
+
+fn primary_name_execution_outcome(
+    execution_trace_id: Uuid,
+    namespace: &str,
+    address: &str,
+    coin_type: &str,
+    verified_primary_name: Value,
+    finished_at: OffsetDateTime,
+) -> ExecutionOutcome {
+    let normalized_address = address.to_ascii_lowercase();
+    ExecutionOutcome {
+        cache_key: ExecutionCacheKey {
+            request_key: primary_name_execution_request_key(namespace, &normalized_address, coin_type),
+            requested_chain_positions: primary_name_execution_requested_chain_positions(),
+            manifest_versions: primary_name_execution_manifest_versions(),
+            topology_version_boundary: record_inventory_boundary(
+                "ens:alice.eth",
+                Uuid::from_u128(0x0e7ec7ace0000000000000000000bbb1),
+            ),
+            record_version_boundary: record_inventory_boundary(
+                "ens:alice.eth",
+                Uuid::from_u128(0x0e7ec7ace0000000000000000000bbb2),
+            ),
+        },
+        execution_trace_id,
+        request_type: bigname_storage::VERIFIED_PRIMARY_NAME_REQUEST_TYPE.to_owned(),
+        namespace: namespace.to_owned(),
+        outcome_payload: Some(json!({
+            "verified_primary_name": verified_primary_name
+        })),
+        failure_payload: None,
+        finished_at,
+    }
+}
+
 fn address_name_name_current_row(
     logical_name_id: &str,
     canonical_display_name: &str,
@@ -8233,8 +8343,41 @@ async fn get_primary_names_freezes_bootstrap_mode_envelopes() -> Result<()> {
 
 #[tokio::test]
 async fn get_primary_names_returns_not_found_for_tuple_miss_when_projection_exists() -> Result<()> {
-    let database = TestDatabase::new(false).await?;
-    database.create_primary_names_current_table().await?;
+    let database = TestDatabase::new_migrated().await?;
+    database
+        .insert_primary_name_current_row("0x0000000000000000000000000000000000000abc", "ens", "61")
+        .await?;
+
+    let other_verified_primary_name = json!({
+        "status": "success",
+        "name": {
+            "logical_name_id": "ens:other.eth",
+            "namespace": "ens",
+            "normalized_name": "other.eth",
+            "canonical_display_name": "other.eth",
+            "namehash": "0x0000000000000000000000000000000000000000000000000000000000000456",
+            "resource_id": "00000000-0000-0000-0000-000000000999",
+            "binding_kind": "declared_registry_path"
+        }
+    });
+    let other_trace = primary_name_execution_trace(
+        Uuid::from_u128(0x0e7ec7ace00000000000000000000031),
+        "ens",
+        "0x0000000000000000000000000000000000000abc",
+        "61",
+        other_verified_primary_name.clone(),
+        timestamp(1_717_172_301),
+    );
+    let other_outcome = primary_name_execution_outcome(
+        other_trace.execution_trace_id,
+        "ens",
+        "0x0000000000000000000000000000000000000abc",
+        "61",
+        other_verified_primary_name,
+        timestamp(1_717_172_301),
+    );
+    upsert_execution_trace(&database.pool, &other_trace).await?;
+    upsert_execution_outcome(&database.pool, &other_outcome).await?;
 
     let response = app_router(database.app_state())
         .oneshot(
@@ -8265,6 +8408,166 @@ async fn get_primary_names_returns_not_found_for_tuple_miss_when_projection_exis
             }
         }))
     );
+    assert_eq!(payload.provenance.get("execution_trace_id"), Some(&Value::Null));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_primary_names_reads_persisted_verified_primary_name_for_exact_tuple() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000041);
+    let finished_at = timestamp(1_717_172_401);
+    let verified_primary_name = json!({
+        "status": "success",
+        "name": {
+            "logical_name_id": "ens:alice.eth",
+            "namespace": "ens",
+            "normalized_name": "alice.eth",
+            "canonical_display_name": "Alice.eth",
+            "namehash": "0x0000000000000000000000000000000000000000000000000000000000000123",
+            "resource_id": "00000000-0000-0000-0000-000000000456",
+            "binding_kind": "declared_registry_path"
+        }
+    });
+
+    database
+        .insert_primary_name_current_row(address, "ens", "60")
+        .await?;
+    database
+        .insert_primary_name_current_row(address, "ens", "61")
+        .await?;
+
+    let trace = primary_name_execution_trace(
+        execution_trace_id,
+        "ens",
+        address,
+        "60",
+        verified_primary_name.clone(),
+        finished_at,
+    );
+    let outcome = primary_name_execution_outcome(
+        execution_trace_id,
+        "ens",
+        address,
+        "60",
+        verified_primary_name.clone(),
+        finished_at,
+    );
+    upsert_execution_trace(&database.pool, &trace).await?;
+    upsert_execution_outcome(&database.pool, &outcome).await?;
+
+    let other_trace = primary_name_execution_trace(
+        Uuid::from_u128(0x0e7ec7ace00000000000000000000042),
+        "ens",
+        address,
+        "61",
+        json!({
+            "status": "mismatch",
+            "name": {
+                "logical_name_id": "ens:other.eth",
+                "namespace": "ens",
+                "normalized_name": "other.eth",
+                "canonical_display_name": "other.eth",
+                "namehash": "0x0000000000000000000000000000000000000000000000000000000000000456",
+                "resource_id": "00000000-0000-0000-0000-000000000999",
+                "binding_kind": "declared_registry_path"
+            },
+            "failure_reason": "resolved_address_mismatch"
+        }),
+        timestamp(1_717_172_499),
+    );
+    let other_outcome = primary_name_execution_outcome(
+        other_trace.execution_trace_id,
+        "ens",
+        address,
+        "61",
+        json!({
+            "status": "mismatch",
+            "name": {
+                "logical_name_id": "ens:other.eth",
+                "namespace": "ens",
+                "normalized_name": "other.eth",
+                "canonical_display_name": "other.eth",
+                "namehash": "0x0000000000000000000000000000000000000000000000000000000000000456",
+                "resource_id": "00000000-0000-0000-0000-000000000999",
+                "binding_kind": "declared_registry_path"
+            },
+            "failure_reason": "resolved_address_mismatch"
+        }),
+        timestamp(1_717_172_499),
+    );
+    upsert_execution_trace(&database.pool, &other_trace).await?;
+    upsert_execution_outcome(&database.pool, &other_outcome).await?;
+
+    let verified_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/primary-names/0x0000000000000000000000000000000000000abc?namespace=ens&coin_type=60&mode=verified")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("verified primary-name persisted readback request failed")?;
+    let both_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/primary-names/0x0000000000000000000000000000000000000abc?namespace=ens&coin_type=60&mode=both")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("mixed primary-name persisted readback request failed")?;
+
+    assert_eq!(verified_response.status(), StatusCode::OK);
+    assert_eq!(both_response.status(), StatusCode::OK);
+
+    let verified_payload: PrimaryNameResponse = read_json(verified_response).await?;
+    let both_payload: PrimaryNameResponse = read_json(both_response).await?;
+
+    assert_eq!(verified_payload.declared_state, None);
+    assert_eq!(
+        verified_payload.verified_state,
+        Some(json!({
+            "verified_primary_name": verified_primary_name.clone()
+        }))
+    );
+    assert_eq!(
+        both_payload.declared_state,
+        Some(json!({
+            "claimed_primary_name": {
+                "status": "unsupported",
+                "unsupported_reason": "declared primary-name claim surface is not yet supported",
+            }
+        }))
+    );
+    assert_eq!(both_payload.verified_state, verified_payload.verified_state);
+    assert_eq!(
+        verified_payload.provenance,
+        json!({
+            "normalized_event_ids": [],
+            "raw_fact_refs": [],
+            "manifest_versions": primary_name_execution_manifest_versions(),
+            "execution_trace_id": execution_trace_id.to_string(),
+            "derivation_kind": "primary_name_route_bootstrap",
+        })
+    );
+    assert_eq!(both_payload.provenance, verified_payload.provenance);
+    assert_eq!(
+        verified_payload.coverage,
+        json!({
+            "status": "unsupported",
+            "exhaustiveness": "not_applicable",
+            "source_classes_considered": [],
+            "enumeration_basis": "primary_name_lookup",
+            "unsupported_reason": "primary-name coverage is not yet supported",
+        })
+    );
+    assert_eq!(both_payload.coverage, verified_payload.coverage);
+    assert_eq!(verified_payload.last_updated, "2024-05-31T16:20:01Z");
+    assert_eq!(both_payload.last_updated, "2024-05-31T16:20:01Z");
 
     database.cleanup().await?;
     Ok(())

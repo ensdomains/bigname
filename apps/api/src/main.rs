@@ -21,6 +21,7 @@ use bigname_storage::{
     DatabaseConfig, ExecutionCacheKey, ExecutionOutcome, ExecutionTrace, HistoryEvent,
     HistoryScope, NameCurrentRow, PermissionScope, PermissionsCurrentRow,
     RecordInventoryCurrentRow, ResolverCurrentRow, SurfaceBindingKind,
+    VERIFIED_PRIMARY_NAME_REQUEST_TYPE,
     collapse_address_name_current_rows, load_address_history, load_address_names_current,
     load_children_current, load_execution_outcome, load_execution_trace, load_name_current,
     load_name_history, load_name_surface, load_permissions_current, load_record_inventory_current,
@@ -401,10 +402,24 @@ struct ResolutionRecordKey {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum PrimaryNameLookupState {
+enum PrimaryNameTupleState {
     ProjectionUnavailable,
     TupleMissing,
     TuplePresent,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PrimaryNameLookupState {
+    tuple_state: PrimaryNameTupleState,
+    persisted_verified: Option<PersistedPrimaryNameVerifiedReadback>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PersistedPrimaryNameVerifiedReadback {
+    execution_trace_id: Uuid,
+    manifest_versions: JsonValue,
+    verified_primary_name: JsonValue,
+    finished_at: OffsetDateTime,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -2179,14 +2194,15 @@ async fn primary_names(
     let coin_type = parse_primary_name_coin_type(query.coin_type.as_deref())?;
     let mode = parse_resolution_mode(query.mode.as_deref())?;
     let lookup_state =
-        load_primary_name_lookup_state(&state.pool, &address, &namespace, &coin_type).await?;
+        load_primary_name_lookup_state(&state.pool, &address, &namespace, &coin_type, mode)
+            .await?;
 
     Ok(Json(build_primary_name_response(
         address,
         namespace,
         coin_type,
         mode,
-        lookup_state,
+        &lookup_state,
     )))
 }
 
@@ -2936,7 +2952,7 @@ fn build_primary_name_response(
     namespace: String,
     coin_type: String,
     mode: ResolutionMode,
-    lookup_state: PrimaryNameLookupState,
+    lookup_state: &PrimaryNameLookupState,
 ) -> PrimaryNameResponse {
     let data = json!({
         "address": address,
@@ -2945,20 +2961,24 @@ fn build_primary_name_response(
     });
     let declared_state = mode
         .includes_declared()
-        .then(|| json!({ "claimed_primary_name": primary_name_claim_result(lookup_state) }));
+        .then(|| {
+            json!({ "claimed_primary_name": primary_name_claim_result(lookup_state.tuple_state) })
+        });
     let verified_state = mode
         .includes_verified()
-        .then(|| json!({ "verified_primary_name": primary_name_verified_result(lookup_state) }));
+        .then(|| {
+            json!({ "verified_primary_name": primary_name_verified_result(lookup_state) })
+        });
 
     PrimaryNameResponse {
         data,
         declared_state,
         verified_state,
-        provenance: primary_name_bootstrap_provenance(),
+        provenance: primary_name_route_provenance(lookup_state.persisted_verified.as_ref()),
         coverage: primary_name_bootstrap_coverage(),
         chain_positions: empty_object(),
         consistency: "head".to_owned(),
-        last_updated: format_timestamp(OffsetDateTime::now_utc()),
+        last_updated: primary_name_last_updated(lookup_state.persisted_verified.as_ref()),
     }
 }
 
@@ -3008,21 +3028,25 @@ fn build_children_response(
     }
 }
 
-fn primary_name_claim_result(lookup_state: PrimaryNameLookupState) -> JsonValue {
-    match lookup_state {
-        PrimaryNameLookupState::ProjectionUnavailable | PrimaryNameLookupState::TuplePresent => {
+fn primary_name_claim_result(tuple_state: PrimaryNameTupleState) -> JsonValue {
+    match tuple_state {
+        PrimaryNameTupleState::ProjectionUnavailable | PrimaryNameTupleState::TuplePresent => {
             primary_name_unsupported_result(
                 "declared primary-name claim surface is not yet supported",
             )
         }
-        PrimaryNameLookupState::TupleMissing => primary_name_not_found_result(),
+        PrimaryNameTupleState::TupleMissing => primary_name_not_found_result(),
     }
 }
 
-fn primary_name_verified_result(lookup_state: PrimaryNameLookupState) -> JsonValue {
-    match lookup_state {
-        PrimaryNameLookupState::TupleMissing => primary_name_not_found_result(),
-        PrimaryNameLookupState::ProjectionUnavailable | PrimaryNameLookupState::TuplePresent => {
+fn primary_name_verified_result(lookup_state: &PrimaryNameLookupState) -> JsonValue {
+    if let Some(persisted_verified) = lookup_state.persisted_verified.as_ref() {
+        return persisted_verified.verified_primary_name.clone();
+    }
+
+    match lookup_state.tuple_state {
+        PrimaryNameTupleState::TupleMissing => primary_name_not_found_result(),
+        PrimaryNameTupleState::ProjectionUnavailable | PrimaryNameTupleState::TuplePresent => {
             primary_name_unsupported_result("verified primary-name entrypoint is not yet supported")
         }
     }
@@ -3049,6 +3073,27 @@ fn primary_name_bootstrap_provenance() -> JsonValue {
     })
 }
 
+fn primary_name_route_provenance(
+    persisted_verified: Option<&PersistedPrimaryNameVerifiedReadback>,
+) -> JsonValue {
+    let mut provenance = primary_name_bootstrap_provenance();
+
+    if let Some(persisted_verified) = persisted_verified {
+        insert_value_field(
+            &mut provenance,
+            "manifest_versions",
+            array_or_empty(Some(&persisted_verified.manifest_versions)),
+        );
+        insert_nullable_string_field(
+            &mut provenance,
+            "execution_trace_id",
+            Some(persisted_verified.execution_trace_id.to_string()),
+        );
+    }
+
+    provenance
+}
+
 fn primary_name_bootstrap_coverage() -> JsonValue {
     json!({
         "status": "unsupported",
@@ -3057,6 +3102,14 @@ fn primary_name_bootstrap_coverage() -> JsonValue {
         "enumeration_basis": "primary_name_lookup",
         "unsupported_reason": "primary-name coverage is not yet supported",
     })
+}
+
+fn primary_name_last_updated(
+    persisted_verified: Option<&PersistedPrimaryNameVerifiedReadback>,
+) -> String {
+    persisted_verified
+        .map(|persisted_verified| format_timestamp(persisted_verified.finished_at))
+        .unwrap_or_else(|| format_timestamp(OffsetDateTime::now_utc()))
 }
 
 fn build_resolution_declared_state(
@@ -5870,6 +5923,7 @@ async fn load_primary_name_lookup_state(
     address: &str,
     namespace: &str,
     coin_type: &str,
+    mode: ResolutionMode,
 ) -> ApiResult<PrimaryNameLookupState> {
     let query = sqlx::query(
         r#"
@@ -5888,10 +5942,24 @@ async fn load_primary_name_lookup_state(
     .await;
 
     match query {
-        Ok(Some(_)) => Ok(PrimaryNameLookupState::TuplePresent),
-        Ok(None) => Ok(PrimaryNameLookupState::TupleMissing),
+        Ok(Some(_)) => Ok(PrimaryNameLookupState {
+            tuple_state: PrimaryNameTupleState::TuplePresent,
+            persisted_verified: if mode.includes_verified() {
+                load_persisted_primary_name_verified_readback(pool, address, namespace, coin_type)
+                    .await?
+            } else {
+                None
+            },
+        }),
+        Ok(None) => Ok(PrimaryNameLookupState {
+            tuple_state: PrimaryNameTupleState::TupleMissing,
+            persisted_verified: None,
+        }),
         Err(sqlx::Error::Database(error)) if error.code().as_deref() == Some("42P01") => {
-            Ok(PrimaryNameLookupState::ProjectionUnavailable)
+            Ok(PrimaryNameLookupState {
+                tuple_state: PrimaryNameTupleState::ProjectionUnavailable,
+                persisted_verified: None,
+            })
         }
         Err(load_error) => {
             error!(
@@ -5907,6 +5975,442 @@ async fn load_primary_name_lookup_state(
             )))
         }
     }
+}
+
+async fn load_persisted_primary_name_verified_readback(
+    pool: &PgPool,
+    address: &str,
+    namespace: &str,
+    coin_type: &str,
+) -> ApiResult<Option<PersistedPrimaryNameVerifiedReadback>> {
+    if namespace != "ens" {
+        return Ok(None);
+    }
+
+    let request_key = primary_name_verified_request_key(namespace, address, coin_type);
+    let row = sqlx::query(
+        r#"
+        SELECT
+            request_key,
+            requested_chain_positions,
+            manifest_versions,
+            topology_version_boundary,
+            record_version_boundary,
+            execution_trace_id,
+            request_type,
+            namespace,
+            outcome_payload,
+            failure_payload,
+            finished_at
+        FROM execution_cache_outcomes
+        WHERE request_type = $1
+          AND namespace = $2
+          AND request_key = $3
+        ORDER BY finished_at DESC, execution_trace_id DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(VERIFIED_PRIMARY_NAME_REQUEST_TYPE)
+    .bind(namespace)
+    .bind(&request_key)
+    .fetch_optional(pool)
+    .await;
+
+    let Some(row) = (match row {
+        Ok(row) => row,
+        Err(sqlx::Error::Database(error)) if error.code().as_deref() == Some("42P01") => {
+            return Ok(None);
+        }
+        Err(load_error) => {
+            error!(
+                service = "api",
+                address = %address,
+                namespace = %namespace,
+                coin_type = %coin_type,
+                error = ?load_error,
+                "failed to load persisted verified primary-name outcome"
+            );
+            return Err(ApiError::internal_error(format!(
+                "failed to load persisted verified primary-name outcome for address {address}"
+            )));
+        }
+    }) else {
+        return Ok(None);
+    };
+
+    let outcome = ExecutionOutcome {
+        cache_key: ExecutionCacheKey {
+            request_key: row.try_get("request_key").map_err(|load_error| {
+                error!(
+                    service = "api",
+                    address = %address,
+                    namespace = %namespace,
+                    coin_type = %coin_type,
+                    error = ?load_error,
+                    "failed to decode persisted verified primary-name request_key"
+                );
+                ApiError::internal_error(format!(
+                    "failed to decode persisted verified primary-name outcome for address {address}"
+                ))
+            })?,
+            requested_chain_positions: row
+                .try_get("requested_chain_positions")
+                .map_err(|load_error| {
+                    error!(
+                        service = "api",
+                        address = %address,
+                        namespace = %namespace,
+                        coin_type = %coin_type,
+                        error = ?load_error,
+                        "failed to decode persisted verified primary-name requested_chain_positions"
+                    );
+                    ApiError::internal_error(format!(
+                        "failed to decode persisted verified primary-name outcome for address {address}"
+                    ))
+                })?,
+            manifest_versions: row.try_get("manifest_versions").map_err(|load_error| {
+                error!(
+                    service = "api",
+                    address = %address,
+                    namespace = %namespace,
+                    coin_type = %coin_type,
+                    error = ?load_error,
+                    "failed to decode persisted verified primary-name manifest_versions"
+                );
+                ApiError::internal_error(format!(
+                    "failed to decode persisted verified primary-name outcome for address {address}"
+                ))
+            })?,
+            topology_version_boundary: row
+                .try_get("topology_version_boundary")
+                .map_err(|load_error| {
+                    error!(
+                        service = "api",
+                        address = %address,
+                        namespace = %namespace,
+                        coin_type = %coin_type,
+                        error = ?load_error,
+                        "failed to decode persisted verified primary-name topology_version_boundary"
+                    );
+                    ApiError::internal_error(format!(
+                        "failed to decode persisted verified primary-name outcome for address {address}"
+                    ))
+                })?,
+            record_version_boundary: row
+                .try_get("record_version_boundary")
+                .map_err(|load_error| {
+                    error!(
+                        service = "api",
+                        address = %address,
+                        namespace = %namespace,
+                        coin_type = %coin_type,
+                        error = ?load_error,
+                        "failed to decode persisted verified primary-name record_version_boundary"
+                    );
+                    ApiError::internal_error(format!(
+                        "failed to decode persisted verified primary-name outcome for address {address}"
+                    ))
+                })?,
+        },
+        execution_trace_id: row.try_get("execution_trace_id").map_err(|load_error| {
+            error!(
+                service = "api",
+                address = %address,
+                namespace = %namespace,
+                coin_type = %coin_type,
+                error = ?load_error,
+                "failed to decode persisted verified primary-name execution_trace_id"
+            );
+            ApiError::internal_error(format!(
+                "failed to decode persisted verified primary-name outcome for address {address}"
+            ))
+        })?,
+        request_type: row.try_get("request_type").map_err(|load_error| {
+            error!(
+                service = "api",
+                address = %address,
+                namespace = %namespace,
+                coin_type = %coin_type,
+                error = ?load_error,
+                "failed to decode persisted verified primary-name request_type"
+            );
+            ApiError::internal_error(format!(
+                "failed to decode persisted verified primary-name outcome for address {address}"
+            ))
+        })?,
+        namespace: row.try_get("namespace").map_err(|load_error| {
+            error!(
+                service = "api",
+                address = %address,
+                namespace = %namespace,
+                coin_type = %coin_type,
+                error = ?load_error,
+                "failed to decode persisted verified primary-name namespace"
+            );
+            ApiError::internal_error(format!(
+                "failed to decode persisted verified primary-name outcome for address {address}"
+            ))
+        })?,
+        outcome_payload: row.try_get("outcome_payload").map_err(|load_error| {
+            error!(
+                service = "api",
+                address = %address,
+                namespace = %namespace,
+                coin_type = %coin_type,
+                error = ?load_error,
+                "failed to decode persisted verified primary-name outcome_payload"
+            );
+            ApiError::internal_error(format!(
+                "failed to decode persisted verified primary-name outcome for address {address}"
+            ))
+        })?,
+        failure_payload: row.try_get("failure_payload").map_err(|load_error| {
+            error!(
+                service = "api",
+                address = %address,
+                namespace = %namespace,
+                coin_type = %coin_type,
+                error = ?load_error,
+                "failed to decode persisted verified primary-name failure_payload"
+            );
+            ApiError::internal_error(format!(
+                "failed to decode persisted verified primary-name outcome for address {address}"
+            ))
+        })?,
+        finished_at: row.try_get("finished_at").map_err(|load_error| {
+            error!(
+                service = "api",
+                address = %address,
+                namespace = %namespace,
+                coin_type = %coin_type,
+                error = ?load_error,
+                "failed to decode persisted verified primary-name finished_at"
+            );
+            ApiError::internal_error(format!(
+                "failed to decode persisted verified primary-name outcome for address {address}"
+            ))
+        })?,
+    };
+
+    if outcome.request_type != VERIFIED_PRIMARY_NAME_REQUEST_TYPE
+        || outcome.namespace != namespace
+        || outcome.cache_key.request_key != request_key
+    {
+        error!(
+            service = "api",
+            address = %address,
+            namespace = %namespace,
+            coin_type = %coin_type,
+            request_type = %outcome.request_type,
+            cached_namespace = %outcome.namespace,
+            cached_request_key = %outcome.cache_key.request_key,
+            "persisted verified primary-name outcome identity mismatch"
+        );
+        return Err(ApiError::internal_error(format!(
+            "persisted verified primary-name outcome identity mismatch for address {address}"
+        )));
+    }
+
+    let trace = load_execution_trace(pool, outcome.execution_trace_id)
+        .await
+        .map_err(|load_error| {
+            error!(
+                service = "api",
+                address = %address,
+                namespace = %namespace,
+                coin_type = %coin_type,
+                execution_trace_id = %outcome.execution_trace_id,
+                error = ?load_error,
+                "failed to load persisted verified primary-name trace"
+            );
+            ApiError::internal_error(format!(
+                "failed to load persisted verified primary-name trace for address {address}"
+            ))
+        })?
+        .ok_or_else(|| {
+            error!(
+                service = "api",
+                address = %address,
+                namespace = %namespace,
+                coin_type = %coin_type,
+                execution_trace_id = %outcome.execution_trace_id,
+                "persisted verified primary-name trace missing"
+            );
+            ApiError::internal_error(format!(
+                "persisted verified primary-name trace missing for address {address}"
+            ))
+        })?;
+
+    let verified_primary_name = persisted_verified_primary_name_section(
+        &trace,
+        &outcome,
+        address,
+        namespace,
+        coin_type,
+    )?;
+
+    Ok(Some(PersistedPrimaryNameVerifiedReadback {
+        execution_trace_id: outcome.execution_trace_id,
+        manifest_versions: outcome.cache_key.manifest_versions.clone(),
+        verified_primary_name,
+        finished_at: outcome.finished_at,
+    }))
+}
+
+fn primary_name_verified_request_key(namespace: &str, address: &str, coin_type: &str) -> String {
+    format!("{namespace}:{address}:{coin_type}")
+}
+
+fn persisted_verified_primary_name_section(
+    trace: &ExecutionTrace,
+    outcome: &ExecutionOutcome,
+    address: &str,
+    namespace: &str,
+    coin_type: &str,
+) -> ApiResult<JsonValue> {
+    let request_key = primary_name_verified_request_key(namespace, address, coin_type);
+    if trace.request_type != VERIFIED_PRIMARY_NAME_REQUEST_TYPE
+        || trace.namespace != namespace
+        || trace.request_key != request_key
+    {
+        error!(
+            service = "api",
+            address = %address,
+            namespace = %namespace,
+            coin_type = %coin_type,
+            request_type = %trace.request_type,
+            trace_namespace = %trace.namespace,
+            trace_request_key = %trace.request_key,
+            "persisted verified primary-name trace identity mismatch"
+        );
+        return Err(ApiError::internal_error(format!(
+            "persisted verified primary-name trace identity mismatch for address {address}"
+        )));
+    }
+
+    let trace_metadata = trace.request_metadata.as_object().ok_or_else(|| {
+        error!(
+            service = "api",
+            address = %address,
+            namespace = %namespace,
+            coin_type = %coin_type,
+            execution_trace_id = %trace.execution_trace_id,
+            "persisted verified primary-name trace metadata missing"
+        );
+        ApiError::internal_error(format!(
+            "persisted verified primary-name trace metadata missing for address {address}"
+        ))
+    })?;
+
+    let metadata_address = trace_metadata
+        .get("normalized_address")
+        .and_then(JsonValue::as_str);
+    let metadata_namespace = trace_metadata.get("namespace").and_then(JsonValue::as_str);
+    let metadata_coin_type = trace_metadata.get("coin_type").and_then(JsonValue::as_str);
+    if metadata_address != Some(address)
+        || metadata_namespace != Some(namespace)
+        || metadata_coin_type != Some(coin_type)
+    {
+        error!(
+            service = "api",
+            address = %address,
+            namespace = %namespace,
+            coin_type = %coin_type,
+            execution_trace_id = %trace.execution_trace_id,
+            metadata = ?trace.request_metadata,
+            "persisted verified primary-name trace tuple mismatch"
+        );
+        return Err(ApiError::internal_error(format!(
+            "persisted verified primary-name trace tuple mismatch for address {address}"
+        )));
+    }
+
+    let verified_primary_name = outcome
+        .outcome_payload
+        .as_ref()
+        .and_then(JsonValue::as_object)
+        .and_then(|payload| payload.get("verified_primary_name"))
+        .and_then(JsonValue::as_object)
+        .map(|section| JsonValue::Object(section.clone()))
+        .ok_or_else(|| {
+            error!(
+                service = "api",
+                address = %address,
+                namespace = %namespace,
+                coin_type = %coin_type,
+                execution_trace_id = %trace.execution_trace_id,
+                "persisted verified primary-name outcome section missing"
+            );
+            ApiError::internal_error(format!(
+                "persisted verified primary-name outcome missing for address {address}"
+            ))
+        })?;
+
+    let status = verified_primary_name
+        .as_object()
+        .and_then(|section| section.get("status"))
+        .and_then(JsonValue::as_str)
+        .ok_or_else(|| {
+            error!(
+                service = "api",
+                address = %address,
+                namespace = %namespace,
+                coin_type = %coin_type,
+                execution_trace_id = %trace.execution_trace_id,
+                "persisted verified primary-name status missing"
+            );
+            ApiError::internal_error(format!(
+                "persisted verified primary-name status missing for address {address}"
+            ))
+        })?;
+
+    if status == "execution_failed" {
+        if trace.final_payload.is_some()
+            || !outcome
+                .failure_payload
+                .as_ref()
+                .is_some_and(JsonValue::is_object)
+            || !trace.failure_payload.as_ref().is_some_and(JsonValue::is_object)
+        {
+            error!(
+                service = "api",
+                address = %address,
+                namespace = %namespace,
+                coin_type = %coin_type,
+                execution_trace_id = %trace.execution_trace_id,
+                "persisted verified primary-name execution_failed payload mismatch"
+            );
+            return Err(ApiError::internal_error(format!(
+                "persisted verified primary-name payload mismatch for address {address}"
+            )));
+        }
+    } else {
+        let trace_verified_primary_name = trace
+            .final_payload
+            .as_ref()
+            .and_then(JsonValue::as_object)
+            .and_then(|payload| payload.get("verified_primary_name"))
+            .and_then(JsonValue::as_object)
+            .map(|section| JsonValue::Object(section.clone()));
+        if trace.failure_payload.is_some()
+            || outcome.failure_payload.is_some()
+            || trace_verified_primary_name.as_ref() != Some(&verified_primary_name)
+        {
+            error!(
+                service = "api",
+                address = %address,
+                namespace = %namespace,
+                coin_type = %coin_type,
+                execution_trace_id = %trace.execution_trace_id,
+                "persisted verified primary-name final payload mismatch"
+            );
+            return Err(ApiError::internal_error(format!(
+                "persisted verified primary-name payload mismatch for address {address}"
+            )));
+        }
+    }
+
+    Ok(verified_primary_name)
 }
 
 fn address_names_dedupe_label(dedupe_by: AddressNamesCurrentDedupe) -> &'static str {
