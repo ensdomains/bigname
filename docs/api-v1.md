@@ -385,8 +385,8 @@ The current API binary ships the routes marked `shipped` below. Queued routes re
 | --- | --- | --- |
 | `GET /v1/namespaces/{namespace}` | Namespace metadata and support status | shipped declared-state |
 | `GET /v1/names/{namespace}/{name}` | Exact name lookup | shipped declared-state |
-| `GET /v1/explain/names/{namespace}/{name}/surface-binding` | Current surface-binding explain view for one exact name | queued declared-state |
-| `GET /v1/explain/names/{namespace}/{name}/authority-control` | Current authority/control explain view for one exact name | queued declared-state |
+| `GET /v1/explain/names/{namespace}/{name}/surface-binding` | Current surface-binding explain view for one exact name | shipped declared-state |
+| `GET /v1/explain/names/{namespace}/{name}/authority-control` | Current authority/control explain view for one exact name | shipped declared-state |
 | `GET /v1/names/{namespace}/{name}/children` | Declared child collection by default | shipped declared-state |
 | `GET /v1/history/names/{namespace}/{name}` | Surface or combined history | shipped declared-state |
 | `GET /v1/history/resources/{resource_id}` | Resource history | shipped declared-state |
@@ -398,6 +398,14 @@ The current API binary ships the routes marked `shipped` below. Queued routes re
 | `GET /v1/resolutions/{namespace}/{name}` | Resolution topology, inventory, and verified reads | shipped mixed declared+verified |
 | `GET /v1/primary-names/{address}` | Claimed and verified primary-name answer | queued mixed declared+verified |
 | `GET /v1/coverage/{namespace}/{name}` | Single-name coverage and explain details | shipped declared-state |
+
+### Machine-Readable Contract Publication
+
+Phase 6 freezes `docs/api-v1.openapi.json` as the publication location for future machine-readable contract output.
+
+When generated, that artifact covers only the `v1` routes currently shipped by `apps/api/src/main.rs`.
+
+Queued routes stay prose-frozen in this document until their handlers ship. In the current route set, `GET /v1/primary-names/{address}` remains outside that machine-readable publication scope.
 
 ## 5. Route-Level Semantics
 
@@ -472,7 +480,7 @@ Rules:
 
 ### `GET /v1/explain/names/{namespace}/{name}/surface-binding`
 
-This route is queued but frozen now to unblock exact-name surface-binding explain reads.
+This route ships as the exact-name surface-binding explain read.
 
 Returns the declared-state binding explanation for one exact public surface.
 
@@ -500,7 +508,7 @@ Rules:
 
 ### `GET /v1/explain/names/{namespace}/{name}/authority-control`
 
-This route is queued but frozen now to unblock exact-name authority/control explain reads.
+This route ships as the exact-name authority/control explain read.
 
 Returns the declared-state authority and control explanation for one exact public surface.
 
@@ -695,7 +703,7 @@ This route ships as the resolver-overview read.
 `data` identifies the resolver target. `declared_state` groups:
 
 - current bindings: `ResolverOverviewBindingSummary | UnsupportedSummary`
-- alias mappings: `ResolverOverviewBindingSummary | UnsupportedSummary`
+- alias mappings: `ResolverOverviewBindingSummary`
 - resolver-scoped permissions
 - role-holder summary
 - resolver event summary
@@ -708,10 +716,11 @@ Rules:
 
 - resolver overview is declared-state only and `verified_state` remains `null`
 - supported `declared_state.bindings` includes every current resolver-linked binding whose current resolver target matches the route target, regardless of `binding_kind`
-- supported `declared_state.aliases` reuses the same `{status, count, items}` summary envelope as `bindings`, but `items` is only the current `binding_kind=resolver_alias_path` subset of those same resolver-linked bindings
+- supported `declared_state.aliases` ships in the initial resolver-overview contract and reuses the same `{status, count, items}` summary envelope as `bindings`, but `items` is only the current `binding_kind=resolver_alias_path` subset of those same resolver-linked bindings
 - `declared_state.aliases` is sourced from current resolver-linked bindings only; it does not enumerate historical alias rows or create a second alias ledger
+- when no current alias binding exists for the target resolver, `declared_state.aliases` returns `{status:"supported", count:0, items:[]}`
 - counts for nodes, aliases, and role holders live inside those declared summaries rather than as a separate truth system
-- any declared summary that is not yet projected returns `UnsupportedSummary`
+- any other declared summary that is not yet projected returns `UnsupportedSummary`
 
 ### `GET /v1/resolutions/{namespace}/{name}`
 

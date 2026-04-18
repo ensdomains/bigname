@@ -269,7 +269,7 @@ Expose the first stable native `v1` surface for declared-state product reads.
   - `GET /v1/explain/names/{namespace}/{name}/authority-control`
   - `GET /v1/coverage/{namespace}/{name}`
 - shipped shared history routes plus exact-name `declared_state.history.{surface_head,resource_head}` satisfy the Phase 6 history-explain deliverable; no separate exact-name history-explain route is introduced in this phase
-- OpenAPI or equivalent contract output
+- machine-readable contract output frozen to the publication location `docs/api-v1.openapi.json`; when generated, it covers only the routes currently shipped by `apps/api/src/main.rs`
 - replay-stable `cursor` / `page_size` plus frozen default sorts for shipped collection reads
 - resolver overview alias summary sourced from current resolver-linked bindings
 
@@ -295,9 +295,10 @@ Expose the first stable native `v1` surface for declared-state product reads.
 
 ### Current contract-freeze status
 
-- `phase6-surface-binding-authority-explain-contract-clarification`: `GET /v1/explain/names/{namespace}/{name}/surface-binding` and `GET /v1/explain/names/{namespace}/{name}/authority-control` are frozen in the shared docs as exact-name-scoped declared-state explain routes over existing truth families; implementation remains queued
+- `phase6-surface-binding-authority-explain-contract-clarification`: `GET /v1/explain/names/{namespace}/{name}/surface-binding` and `GET /v1/explain/names/{namespace}/{name}/authority-control` are frozen in the shared docs and shipped by `apps/api/src/main.rs` as exact-name-scoped declared-state explain routes over existing truth families
 - `phase6-shipped-read-pagination`: `cursor` and `page_size` are frozen for `GET /v1/addresses/{address}/names`, `GET /v1/names/{namespace}/{name}/children`, `GET /v1/resources/{resource_id}/permissions`, `GET /v1/history/addresses/{address}`, `GET /v1/history/names/{namespace}/{name}`, and `GET /v1/history/resources/{resource_id}`; no other shipped route honors those query parameters in the initial contract
-- `phase6-resolver-overview-alias-summary-support`: supported `declared_state.aliases` on `GET /v1/resolvers/{chain_id}/{resolver_address}` is frozen as the `binding_kind=resolver_alias_path` subset of current resolver-linked bindings with the shared `{status, count, items}` summary envelope; the shipped route may still return `UnsupportedSummary` until that projection support lands
+- `phase6-openapi-contract-output-clarification`: machine-readable contract output is frozen to the publication location `docs/api-v1.openapi.json`; when generated, it covers only the routes currently shipped by `apps/api/src/main.rs`, and queued routes, currently `GET /v1/primary-names/{address}`, stay prose-frozen in `docs/api-v1.md` until their handlers ship
+- `phase6-resolver-overview-alias-summary-support`: supported `declared_state.aliases` on `GET /v1/resolvers/{chain_id}/{resolver_address}` is shipped as the `binding_kind=resolver_alias_path` subset of current resolver-linked bindings with the shared `{status, count, items}` summary envelope, including `count=0` with `items=[]` when no current alias binding exists
 
 ---
 
