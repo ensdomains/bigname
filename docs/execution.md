@@ -41,11 +41,14 @@ Verified resolution follows this sequence:
 5. follow CCIP-Read when allowed by the manifest and resolver family
 6. persist the execution trace and final answer
 
+For ENS on Ethereum Mainnet, step 2 is frozen to the `ens_execution` source family. Its canonical manifest-declared execution entrypoint is the ENS Universal Resolver: `[[contracts]] role = "universal_resolver"` at `0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe`.
+
 Rules:
 
 - every step is attributable in provenance
 - one verified resolution request may cover multiple explicit record selectors under one request-scoped execution trace
 - execution returns one `verified_queries` result object per requested selector and uses the shared `ResultStatus` vocabulary
+- execution entrypoint selection is attributable to the manifest-declared `source_family` and `role`; it is not implied by registry-family presence alone
 - wildcard traversal and alias rewriting must be explicit in the trace
 - unsupported record families stay explicit as `status=unsupported`; they do not silently degrade to declared cache values
 - supported selector requests that cannot produce a trustworthy answer return `status=execution_failed` with a typed `failure_reason`
@@ -142,6 +145,6 @@ Rules:
 
 For the first implementation slice:
 
-- ENS uses the canonical Universal Resolver path on Ethereum L1
+- ENS verified resolution on Ethereum Mainnet uses `ens_execution` with contract role `universal_resolver` at `0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe`; freezing this entrypoint does not by itself ship public verified-resolution reads
 - Basenames verified execution is scaffolded but may initially expose partial coverage until Base-side authority and L1 transport are both wired
 - unsupported resolver families remain requestable but must return explicit `status=unsupported` results unless the route cannot attribute any section-level answer at all

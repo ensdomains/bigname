@@ -587,6 +587,8 @@ Rules:
 - changing the declared root or contract address mints a new contract instance and closes the old active range; any continuity to the predecessor is represented with a `migration` edge
 - declared proxy implementations resolve to separate implementation `contract_instance_id` nodes; a proxy implementation change updates the proxy / implementation edge, not the proxy identity
 - manifest versions are carried forward into normalized events and projections
+- capability ownership attaches to the declaring `source_family`; it is never implied by a different family's presence alone
+- ENS verified resolution on Ethereum Mainnet belongs to `ens_execution`, whose canonical contract role is `universal_resolver` at `0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe` on the ENS Universal Resolver, not to `ens_v1_registry_l1`
 - draft or optional features may be enabled behind manifest flags without changing the public contract
 
 ---
@@ -1278,7 +1280,7 @@ Verified execution is a required subsystem.
 
 Default verified resolution paths:
 
-- ENS uses the canonical Universal Resolver path on Ethereum Mainnet
+- ENS uses `ens_execution` with contract role `universal_resolver` at `0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe` as the canonical verified-resolution entrypoint on Ethereum Mainnet; freezing this entrypoint and capability owner does not by itself expose public verified reads
 - Basenames uses the L1 compatibility path plus Base-native state, with provenance showing both transport and Base authority surfaces
 
 The execution engine must support:

@@ -83,8 +83,25 @@ admission = "reachable_from_root"
 
 [capability_flags]
 declared_children = "supported"
+```
+
+Capability ownership is source-family specific. For ENS verified resolution on Ethereum Mainnet, the authoritative execution manifest is `ens_execution`, not `ens_v1_registry_l1`. Its canonical contract entry is the ENS Universal Resolver.
+
+Relevant manifest fields for that execution family:
+
+```toml
+source_family = "ens_execution"
+chain = "ethereum-mainnet"
+
+[[contracts]]
+role = "universal_resolver"
+address = "0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe"
+
+[capability_flags]
 verified_resolution = "shadow"
 ```
+
+That freeze attaches `verified_resolution` ownership to `ens_execution`. It allows shadow execution traces and cache ownership without implying that public verified-resolution reads are already shipped.
 
 ## 5. Contract Instance Admission And Continuity
 
@@ -159,6 +176,8 @@ Rules:
 
 - an unsupported capability must surface as `coverage.unsupported_reason` or a typed error
 - shadow capabilities may write facts and traces without being enabled for general reads
+- capability ownership attaches to the manifest-declared `source_family`; it is never implied by another family's presence
+- ENS verified resolution on Ethereum Mainnet is owned by `ens_execution` through contract role `universal_resolver` at `0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe`, not by `ens_v1_registry_l1`
 - adding a new capability is additive if it does not change prior semantics
 
 ## 10. Ownership And Workflow
