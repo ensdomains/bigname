@@ -1,9 +1,24 @@
+use std::collections::BTreeSet;
+
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
 use sqlx::{PgPool, Postgres, QueryBuilder, Row, postgres::PgRow, types::time::OffsetDateTime};
 use uuid::Uuid;
 
-use crate::CanonicalityState;
+use crate::{
+    CanonicalityState,
+    address_names::{
+        AddressNameRelation, load_address_names_current,
+        load_address_names_current_including_noncanonical,
+    },
+};
+
+const ADDRESS_HISTORY_MATCH_DERIVATION_KIND: &str = "ens_v1_unwrapped_authority";
+const ADDRESS_HISTORY_MATCH_EVENT_KINDS: &[&str] = &[
+    "RegistrationGranted",
+    "TokenControlTransferred",
+    "AuthorityTransferred",
+];
 
 /// Anchor selection for normalized-event history reads.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -94,6 +109,41 @@ pub async fn load_resource_history(
     })
 }
 
+/// Load history rows for one address-derived anchor set.
+pub async fn load_address_history(
+    pool: &PgPool,
+    address: &str,
+    namespace: Option<&str>,
+    relation: Option<AddressNameRelation>,
+    scope: HistoryScope,
+    canonical_only: bool,
+) -> Result<Vec<HistoryEvent>> {
+    let normalized_address = address.to_ascii_lowercase();
+    let selector = load_address_history_selector(
+        pool,
+        &normalized_address,
+        namespace,
+        relation,
+        scope,
+        canonical_only,
+    )
+    .await?;
+
+    load_history(pool, selector, canonical_only)
+        .await
+        .with_context(|| {
+            let mut parts = vec![format!("address {}", normalized_address)];
+            if let Some(namespace) = namespace {
+                parts.push(format!("namespace {namespace}"));
+            }
+            if let Some(relation) = relation {
+                parts.push(format!("relation {}", relation.as_str()));
+            }
+            parts.push(format!("scope {}", scope.as_str()));
+            format!("failed to load history for {}", parts.join(" "))
+        })
+}
+
 #[derive(Clone, Debug)]
 enum HistorySelector {
     None,
@@ -167,6 +217,206 @@ fn resource_history_selector(
             HistorySelector::logical_names_or_resources(logical_name_ids, resource_ids)
         }
     }
+}
+
+async fn load_address_history_selector(
+    pool: &PgPool,
+    address: &str,
+    namespace: Option<&str>,
+    relation: Option<AddressNameRelation>,
+    scope: HistoryScope,
+    canonical_only: bool,
+) -> Result<HistorySelector> {
+    let current_rows = if canonical_only {
+        load_address_names_current(pool, address, namespace, relation).await
+    } else {
+        load_address_names_current_including_noncanonical(pool, address, namespace, relation).await
+    }
+    .with_context(|| {
+        let mut parts = vec![format!("address {address}")];
+        if let Some(namespace) = namespace {
+            parts.push(format!("namespace {namespace}"));
+        }
+        if let Some(relation) = relation {
+            parts.push(format!("relation {}", relation.as_str()));
+        }
+        format!(
+            "failed to load address_names_current anchors for {}",
+            parts.join(" ")
+        )
+    })?;
+
+    let mut logical_name_ids = current_rows
+        .iter()
+        .map(|row| row.logical_name_id.clone())
+        .collect::<BTreeSet<_>>();
+    let mut resource_ids = current_rows
+        .iter()
+        .map(|row| row.resource_id)
+        .collect::<BTreeSet<_>>();
+
+    let historical_matches =
+        load_historical_address_history_matches(pool, address, namespace, relation, canonical_only)
+            .await?;
+    for anchor in historical_matches {
+        if let Some(logical_name_id) = anchor.logical_name_id {
+            logical_name_ids.insert(logical_name_id);
+        }
+        if let Some(resource_id) = anchor.resource_id {
+            resource_ids.insert(resource_id);
+        }
+    }
+
+    let logical_name_ids = logical_name_ids.into_iter().collect::<Vec<_>>();
+    let resource_ids = resource_ids.into_iter().collect::<Vec<_>>();
+
+    Ok(match scope {
+        HistoryScope::Surface => HistorySelector::logical_names(logical_name_ids),
+        HistoryScope::Resource => HistorySelector::resources(resource_ids),
+        HistoryScope::Both => {
+            HistorySelector::logical_names_or_resources(logical_name_ids, resource_ids)
+        }
+    })
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AddressHistoryAnchor {
+    logical_name_id: Option<String>,
+    resource_id: Option<Uuid>,
+}
+
+async fn load_historical_address_history_matches(
+    pool: &PgPool,
+    address: &str,
+    namespace: Option<&str>,
+    relation: Option<AddressNameRelation>,
+    canonical_only: bool,
+) -> Result<Vec<AddressHistoryAnchor>> {
+    let mut builder = QueryBuilder::<Postgres>::new(
+        r#"
+        SELECT DISTINCT
+            ne.logical_name_id,
+            ne.resource_id
+        FROM normalized_events ne
+        LEFT JOIN resources r
+          ON r.resource_id = ne.resource_id
+        WHERE ne.derivation_kind = 
+        "#,
+    );
+    builder.push_bind(ADDRESS_HISTORY_MATCH_DERIVATION_KIND);
+    builder.push(" AND ne.event_kind IN (");
+    let mut separated = builder.separated(", ");
+    for event_kind in ADDRESS_HISTORY_MATCH_EVENT_KINDS {
+        separated.push_bind(*event_kind);
+    }
+    separated.push_unseparated(")");
+
+    if canonical_only {
+        builder.push(
+            r#"
+            AND ne.canonicality_state IN (
+                'canonical'::canonicality_state,
+                'safe'::canonicality_state,
+                'finalized'::canonicality_state
+            )
+            "#,
+        );
+    }
+
+    if let Some(namespace) = namespace {
+        builder.push(" AND ne.namespace = ");
+        builder.push_bind(namespace);
+    }
+
+    builder.push(" AND ");
+    push_address_match_filter(&mut builder, address, relation);
+
+    let rows = builder
+        .build()
+        .fetch_all(pool)
+        .await
+        .context("failed to fetch historical address-history anchors")?;
+
+    rows.into_iter()
+        .map(decode_address_history_anchor)
+        .collect()
+}
+
+fn push_address_match_filter<'a>(
+    builder: &mut QueryBuilder<'a, Postgres>,
+    address: &'a str,
+    relation: Option<AddressNameRelation>,
+) {
+    match relation {
+        Some(AddressNameRelation::Registrant) | Some(AddressNameRelation::TokenHolder) => {
+            builder.push("(");
+            push_tokenized_address_match_filter(builder, address);
+            builder.push(")");
+        }
+        Some(AddressNameRelation::EffectiveController) => {
+            builder.push("(");
+            push_tokenized_address_match_filter(builder, address);
+            builder.push(" OR ");
+            push_registry_owner_match_filter(builder, address);
+            builder.push(")");
+        }
+        None => {
+            builder.push("(");
+            push_tokenized_address_match_filter(builder, address);
+            builder.push(" OR ");
+            push_registry_owner_match_filter(builder, address);
+            builder.push(")");
+        }
+    }
+}
+
+fn push_tokenized_address_match_filter<'a>(
+    builder: &mut QueryBuilder<'a, Postgres>,
+    address: &'a str,
+) {
+    builder.push(
+        r#"
+        (
+            r.token_lineage_id IS NOT NULL
+            AND (
+                (
+                    ne.event_kind = 'RegistrationGranted'
+                    AND LOWER(COALESCE(ne.after_state ->> 'registrant', '')) = 
+        "#,
+    );
+    builder.push_bind(address);
+    builder.push(
+        r#"
+                )
+                OR (
+                    ne.event_kind = 'TokenControlTransferred'
+                    AND LOWER(COALESCE(ne.after_state ->> 'to', '')) = 
+        "#,
+    );
+    builder.push_bind(address);
+    builder.push(
+        r#"
+                )
+            )
+        )
+        "#,
+    );
+}
+
+fn push_registry_owner_match_filter<'a>(
+    builder: &mut QueryBuilder<'a, Postgres>,
+    address: &'a str,
+) {
+    builder.push(
+        r#"
+        (
+            r.token_lineage_id IS NULL
+            AND ne.event_kind = 'AuthorityTransferred'
+            AND LOWER(COALESCE(ne.after_state ->> 'owner', '')) = 
+        "#,
+    );
+    builder.push_bind(address);
+    builder.push(")");
 }
 
 async fn load_history(
@@ -324,6 +574,15 @@ fn push_uuid_filter_tail<'a>(builder: &mut QueryBuilder<'a, Postgres>, values: &
     separated.push_unseparated(")");
 }
 
+fn decode_address_history_anchor(row: PgRow) -> Result<AddressHistoryAnchor> {
+    Ok(AddressHistoryAnchor {
+        logical_name_id: row
+            .try_get("logical_name_id")
+            .context("missing logical_name_id")?,
+        resource_id: row.try_get("resource_id").context("missing resource_id")?,
+    })
+}
+
 fn decode_history_event(row: PgRow) -> Result<HistoryEvent> {
     let provenance: Value = row.try_get("provenance").context("missing provenance")?;
     let coverage: Value = row.try_get("coverage").context("missing coverage")?;
@@ -408,9 +667,10 @@ mod tests {
 
     use super::*;
     use crate::{
-        NameSurface, NormalizedEvent, RawBlock, Resource, SurfaceBinding, SurfaceBindingKind,
-        default_database_url, upsert_name_surfaces, upsert_normalized_events, upsert_raw_blocks,
-        upsert_resources, upsert_surface_bindings,
+        AddressNameCurrentRow, AddressNameRelation, NameSurface, NormalizedEvent, RawBlock,
+        Resource, SurfaceBinding, SurfaceBindingKind, TokenLineage, default_database_url,
+        upsert_address_names_current_rows, upsert_name_surfaces, upsert_normalized_events,
+        upsert_raw_blocks, upsert_resources, upsert_surface_bindings, upsert_token_lineages,
     };
 
     static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
@@ -524,6 +784,24 @@ mod tests {
         }
     }
 
+    fn tokenized_resource(resource_id: Uuid, token_lineage_id: Uuid) -> Resource {
+        Resource {
+            token_lineage_id: Some(token_lineage_id),
+            ..resource(resource_id)
+        }
+    }
+
+    fn token_lineage(token_lineage_id: Uuid) -> TokenLineage {
+        TokenLineage {
+            token_lineage_id,
+            chain_id: "ethereum-mainnet".to_owned(),
+            block_hash: format!("0xlineage{}", token_lineage_id.simple()),
+            block_number: 97,
+            provenance: json!({"seed": "token_lineage"}),
+            canonicality_state: CanonicalityState::Canonical,
+        }
+    }
+
     fn name_surface(logical_name_id: &str) -> NameSurface {
         let normalized_name = logical_name_id
             .split_once(':')
@@ -618,6 +896,101 @@ mod tests {
                     "event_identity": event_identity,
                 }
             }),
+        }
+    }
+
+    fn authority_match_event(
+        event_identity: &str,
+        logical_name_id: &str,
+        resource_id: Uuid,
+        event_kind: &str,
+        block_number: i64,
+        block_hash: &str,
+        after_state: Value,
+    ) -> NormalizedEvent {
+        NormalizedEvent {
+            event_kind: event_kind.to_owned(),
+            source_family: "ens_v1_registrar_l1".to_owned(),
+            derivation_kind: ADDRESS_HISTORY_MATCH_DERIVATION_KIND.to_owned(),
+            after_state,
+            before_state: json!({}),
+            ..history_event(
+                event_identity,
+                Some(logical_name_id),
+                Some(resource_id),
+                Some("ethereum-mainnet"),
+                Some(block_number),
+                Some(block_hash),
+                Some(&format!("0xtx{block_number}")),
+                Some(0),
+                CanonicalityState::Canonical,
+            )
+        }
+    }
+
+    fn address_name_current_row(
+        address: &str,
+        logical_name_id: &str,
+        relation: AddressNameRelation,
+        surface_binding_id: Uuid,
+        resource_id: Uuid,
+        token_lineage_id: Option<Uuid>,
+        block_number: i64,
+    ) -> AddressNameCurrentRow {
+        let normalized_name = logical_name_id
+            .split_once(':')
+            .map(|(_, normalized_name)| normalized_name)
+            .expect("logical_name_id must include namespace");
+
+        AddressNameCurrentRow {
+            address: address.to_owned(),
+            logical_name_id: logical_name_id.to_owned(),
+            relation,
+            namespace: "ens".to_owned(),
+            canonical_display_name: normalized_name.to_owned(),
+            normalized_name: normalized_name.to_owned(),
+            namehash: format!("namehash:{normalized_name}"),
+            surface_binding_id,
+            resource_id,
+            token_lineage_id,
+            binding_kind: SurfaceBindingKind::DeclaredRegistryPath,
+            provenance: json!({
+                "normalized_event_ids": [block_number],
+                "raw_fact_refs": [{
+                    "kind": "raw_log",
+                    "block_number": block_number,
+                }],
+                "manifest_versions": [{
+                    "manifest_version": 3,
+                    "source_family": "ens_v1_registrar_l1",
+                    "source_manifest_id": null,
+                }],
+                "execution_trace_id": null,
+                "derivation_kind": "address_names_current_rebuild",
+            }),
+            coverage: json!({
+                "status": "full",
+                "exhaustiveness": "authoritative",
+                "source_classes_considered": ["ensv1_registry_path"],
+                "enumeration_basis": "surface_current_relations",
+                "unsupported_reason": null,
+            }),
+            chain_positions: json!({
+                "ethereum": {
+                    "chain_id": "ethereum-mainnet",
+                    "block_number": block_number,
+                    "block_hash": format!("0xaddr{block_number:02x}"),
+                    "timestamp": format!("2026-04-17T00:00:{:02}Z", block_number % 60),
+                }
+            }),
+            canonicality_summary: json!({
+                "status": "canonical",
+                "chains": {
+                    "ethereum-mainnet": "canonical",
+                }
+            }),
+            manifest_version: 3,
+            last_recomputed_at: timestamp(1_717_173_000 + block_number),
         }
     }
 
@@ -1263,6 +1636,340 @@ mod tests {
                 .map(|row| row.event_identity.as_str())
                 .collect::<Vec<_>>(),
             vec!["surface-alias", "surface-primary"]
+        );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn address_history_uses_current_and_historical_address_matches() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let address = "0x0000000000000000000000000000000000000abc";
+        let current_logical_name_id = "ens:current.eth";
+        let historical_logical_name_id = "ens:historical.eth";
+        let current_resource_id = Uuid::from_u128(0xa230);
+        let current_token_lineage_id = Uuid::from_u128(0xa231);
+        let current_surface_binding_id = Uuid::from_u128(0xb230);
+        let historical_resource_id = Uuid::from_u128(0xa232);
+        let historical_token_lineage_id = Uuid::from_u128(0xa233);
+
+        upsert_raw_blocks(
+            database.pool(),
+            &[
+                raw_block("ethereum-mainnet", "0x430", None, 430, 1_700_000_430),
+                raw_block(
+                    "ethereum-mainnet",
+                    "0x431",
+                    Some("0x430"),
+                    431,
+                    1_700_000_431,
+                ),
+                raw_block(
+                    "ethereum-mainnet",
+                    "0x432",
+                    Some("0x431"),
+                    432,
+                    1_700_000_432,
+                ),
+                raw_block(
+                    "ethereum-mainnet",
+                    "0x433",
+                    Some("0x432"),
+                    433,
+                    1_700_000_433,
+                ),
+                raw_block(
+                    "ethereum-mainnet",
+                    "0x434",
+                    Some("0x433"),
+                    434,
+                    1_700_000_434,
+                ),
+                raw_block(
+                    "ethereum-mainnet",
+                    "0x435",
+                    Some("0x434"),
+                    435,
+                    1_700_000_435,
+                ),
+            ],
+        )
+        .await?;
+
+        upsert_token_lineages(
+            database.pool(),
+            &[
+                token_lineage(current_token_lineage_id),
+                token_lineage(historical_token_lineage_id),
+            ],
+        )
+        .await?;
+        upsert_resources(
+            database.pool(),
+            &[
+                tokenized_resource(current_resource_id, current_token_lineage_id),
+                tokenized_resource(historical_resource_id, historical_token_lineage_id),
+            ],
+        )
+        .await?;
+        upsert_name_surfaces(
+            database.pool(),
+            &[
+                name_surface(current_logical_name_id),
+                name_surface(historical_logical_name_id),
+            ],
+        )
+        .await?;
+        upsert_surface_bindings(
+            database.pool(),
+            &[surface_binding(
+                current_surface_binding_id,
+                current_logical_name_id,
+                current_resource_id,
+                timestamp(1_700_000_430),
+            )],
+        )
+        .await?;
+        upsert_address_names_current_rows(
+            database.pool(),
+            &[address_name_current_row(
+                address,
+                current_logical_name_id,
+                AddressNameRelation::Registrant,
+                current_surface_binding_id,
+                current_resource_id,
+                Some(current_token_lineage_id),
+                430,
+            )],
+        )
+        .await?;
+
+        upsert_normalized_events(
+            database.pool(),
+            &[
+                history_event(
+                    "current-surface",
+                    Some(current_logical_name_id),
+                    None,
+                    Some("ethereum-mainnet"),
+                    Some(434),
+                    Some("0x434"),
+                    Some("0xtx434"),
+                    Some(0),
+                    CanonicalityState::Canonical,
+                ),
+                history_event(
+                    "current-resource",
+                    None,
+                    Some(current_resource_id),
+                    Some("ethereum-mainnet"),
+                    Some(435),
+                    Some("0x435"),
+                    Some("0xtx435"),
+                    Some(0),
+                    CanonicalityState::Canonical,
+                ),
+                history_event(
+                    "historical-surface",
+                    Some(historical_logical_name_id),
+                    None,
+                    Some("ethereum-mainnet"),
+                    Some(433),
+                    Some("0x433"),
+                    Some("0xtx433"),
+                    Some(0),
+                    CanonicalityState::Canonical,
+                ),
+                history_event(
+                    "historical-resource",
+                    None,
+                    Some(historical_resource_id),
+                    Some("ethereum-mainnet"),
+                    Some(432),
+                    Some("0x432"),
+                    Some("0xtx432"),
+                    Some(0),
+                    CanonicalityState::Canonical,
+                ),
+                authority_match_event(
+                    "historical-match",
+                    historical_logical_name_id,
+                    historical_resource_id,
+                    "RegistrationGranted",
+                    431,
+                    "0x431",
+                    json!({
+                        "registrant": "0x0000000000000000000000000000000000000ABC",
+                    }),
+                ),
+            ],
+        )
+        .await?;
+
+        let surface_rows = load_address_history(
+            database.pool(),
+            address,
+            Some("ens"),
+            Some(AddressNameRelation::Registrant),
+            HistoryScope::Surface,
+            true,
+        )
+        .await?;
+        assert_eq!(
+            surface_rows
+                .iter()
+                .map(|row| row.event_identity.as_str())
+                .collect::<Vec<_>>(),
+            vec!["current-surface", "historical-surface", "historical-match"]
+        );
+
+        let resource_rows = load_address_history(
+            database.pool(),
+            address,
+            Some("ens"),
+            Some(AddressNameRelation::Registrant),
+            HistoryScope::Resource,
+            true,
+        )
+        .await?;
+        assert_eq!(
+            resource_rows
+                .iter()
+                .map(|row| row.event_identity.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "current-resource",
+                "historical-resource",
+                "historical-match"
+            ]
+        );
+
+        let both_rows = load_address_history(
+            database.pool(),
+            address,
+            Some("ens"),
+            Some(AddressNameRelation::Registrant),
+            HistoryScope::Both,
+            true,
+        )
+        .await?;
+        assert_eq!(
+            both_rows
+                .iter()
+                .map(|row| row.event_identity.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "current-resource",
+                "current-surface",
+                "historical-surface",
+                "historical-resource",
+                "historical-match",
+            ]
+        );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn address_history_effective_controller_includes_registry_owner_matches() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let address = "0x0000000000000000000000000000000000000def";
+        let logical_name_id = "ens:controller.eth";
+        let resource_id = Uuid::from_u128(0xa240);
+
+        upsert_raw_blocks(
+            database.pool(),
+            &[
+                raw_block("ethereum-mainnet", "0x440", None, 440, 1_700_000_440),
+                raw_block(
+                    "ethereum-mainnet",
+                    "0x441",
+                    Some("0x440"),
+                    441,
+                    1_700_000_441,
+                ),
+                raw_block(
+                    "ethereum-mainnet",
+                    "0x442",
+                    Some("0x441"),
+                    442,
+                    1_700_000_442,
+                ),
+            ],
+        )
+        .await?;
+        upsert_resources(database.pool(), &[resource(resource_id)]).await?;
+
+        upsert_normalized_events(
+            database.pool(),
+            &[
+                authority_match_event(
+                    "controller-match",
+                    logical_name_id,
+                    resource_id,
+                    "AuthorityTransferred",
+                    440,
+                    "0x440",
+                    json!({
+                        "owner": "0x0000000000000000000000000000000000000DEF",
+                    }),
+                ),
+                history_event(
+                    "controller-surface",
+                    Some(logical_name_id),
+                    None,
+                    Some("ethereum-mainnet"),
+                    Some(441),
+                    Some("0x441"),
+                    Some("0xtx441"),
+                    Some(0),
+                    CanonicalityState::Canonical,
+                ),
+                history_event(
+                    "controller-resource",
+                    None,
+                    Some(resource_id),
+                    Some("ethereum-mainnet"),
+                    Some(442),
+                    Some("0x442"),
+                    Some("0xtx442"),
+                    Some(0),
+                    CanonicalityState::Canonical,
+                ),
+            ],
+        )
+        .await?;
+
+        let registrant_rows = load_address_history(
+            database.pool(),
+            address,
+            Some("ens"),
+            Some(AddressNameRelation::Registrant),
+            HistoryScope::Both,
+            true,
+        )
+        .await?;
+        assert!(registrant_rows.is_empty());
+
+        let controller_rows = load_address_history(
+            database.pool(),
+            address,
+            Some("ens"),
+            Some(AddressNameRelation::EffectiveController),
+            HistoryScope::Both,
+            true,
+        )
+        .await?;
+        assert_eq!(
+            controller_rows
+                .iter()
+                .map(|row| row.event_identity.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "controller-resource",
+                "controller-surface",
+                "controller-match"
+            ]
         );
 
         database.cleanup().await

@@ -19,9 +19,9 @@ use bigname_storage::{
     AddressNameCurrentEntry, AddressNameRelation, AddressNamesCurrentDedupe, ChildrenCurrentRow,
     DatabaseConfig, HistoryEvent, HistoryScope, NameCurrentRow, PermissionScope,
     PermissionsCurrentRow, ResolverCurrentRow, collapse_address_name_current_rows,
-    load_address_names_current, load_children_current, load_name_current, load_name_history,
-    load_name_surface, load_permissions_current, load_resolver_current, load_resource,
-    load_resource_history, load_surface_bindings_by_logical_name_id,
+    load_address_history, load_address_names_current, load_children_current, load_name_current,
+    load_name_history, load_name_surface, load_permissions_current, load_resolver_current,
+    load_resource, load_resource_history, load_surface_bindings_by_logical_name_id,
     load_surface_bindings_by_resource_id,
 };
 use clap::{Args, Parser, Subcommand};
@@ -190,6 +190,13 @@ struct AddressNamesQuery {
     relation: Option<String>,
     dedupe_by: Option<String>,
     include: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+struct AddressHistoryQuery {
+    namespace: Option<String>,
+    relation: Option<String>,
+    scope: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -389,6 +396,7 @@ fn app_router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(health))
         .route("/v1/addresses/{address}/names", get(address_names))
+        .route("/v1/history/addresses/{address}", get(address_history))
         .route("/v1/coverage/{namespace}/{name}", get(coverage_current))
         .route("/v1/namespaces/{namespace}", get(namespace_metadata))
         .route("/v1/names/{namespace}/{name}/children", get(name_children))
@@ -650,6 +658,43 @@ async fn name_children(
         })?;
 
     Ok(Json(build_children_response(rows, include_counts)))
+}
+
+async fn address_history(
+    Path(address): Path<String>,
+    Query(query): Query<AddressHistoryQuery>,
+    State(state): State<AppState>,
+) -> ApiResult<Json<HistoryResponse>> {
+    let namespace = parse_address_names_namespace(query.namespace.as_deref())?;
+    let relation = parse_address_name_relation(query.relation.as_deref())?;
+    let scope = parse_history_scope(query.scope.as_deref())?;
+    let normalized_address = normalize_address(&address);
+
+    let rows = load_address_history(
+        &state.pool,
+        &normalized_address,
+        namespace.as_deref(),
+        relation,
+        scope,
+        true,
+    )
+    .await
+    .map_err(|load_error| {
+        error!(
+            service = "api",
+            address = %normalized_address,
+            namespace = ?namespace,
+            relation = relation.map(|value| value.as_str()),
+            scope = scope.as_str(),
+            error = ?load_error,
+            "failed to load address history"
+        );
+        ApiError::internal_error(format!(
+            "failed to load history for address {normalized_address}"
+        ))
+    })?;
+
+    Ok(Json(build_history_response(rows, scope)))
 }
 
 async fn name_history(
