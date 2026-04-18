@@ -3168,12 +3168,13 @@ fn supported_resolution_verified_records(
 ) -> Vec<ResolutionRecordKey> {
     records
         .iter()
-        .filter(|record| {
-            record.record_family == "addr"
-                && record
-                    .selector_key
-                    .as_deref()
-                    .is_some_and(|selector| selector.as_bytes().iter().all(u8::is_ascii_digit))
+        .filter(|record| match record.record_family.as_str() {
+            "addr" => record
+                .selector_key
+                .as_deref()
+                .is_some_and(|selector| selector.as_bytes().iter().all(u8::is_ascii_digit)),
+            "text" => record.selector_key.is_some(),
+            _ => false,
         })
         .cloned()
         .collect()

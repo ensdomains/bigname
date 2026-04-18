@@ -2412,8 +2412,18 @@ async fn get_resolution_execution_explain_returns_persisted_verified_state_and_r
     let token_lineage_id = Uuid::from_u128(0x1100);
     let surface_binding_id = Uuid::from_u128(0x3300);
     let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000021);
-    let request_key = resolution_execution_request_key(&["addr:60"]);
+    let request_key = resolution_execution_request_key(&["text:com.twitter", "addr:60"]);
     let persisted_verified_queries = json!([
+        {
+            "record_key": "text:com.twitter",
+            "status": "success",
+            "value": {
+                "value": "@alice"
+            },
+            "provenance": {
+                "execution_trace_id": execution_trace_id.to_string()
+            }
+        },
         {
             "record_key": "addr:60",
             "status": "success",
@@ -2453,7 +2463,7 @@ async fn get_resolution_execution_explain_returns_persisted_verified_state_and_r
     let trace = resolution_execution_trace(
         execution_trace_id,
         &request_key,
-        &["addr:60"],
+        &["text:com.twitter", "addr:60"],
         persisted_verified_queries.clone(),
     );
     let outcome = resolution_execution_outcome(
@@ -2469,7 +2479,7 @@ async fn get_resolution_execution_explain_returns_persisted_verified_state_and_r
     let explain_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/explain/resolutions/ens/alice.eth/execution?records=addr:60")
+                .uri("/v1/explain/resolutions/ens/alice.eth/execution?records=text:com.twitter,addr:60")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -2478,7 +2488,7 @@ async fn get_resolution_execution_explain_returns_persisted_verified_state_and_r
     let resolution_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=verified&records=addr:60")
+                .uri("/v1/resolutions/ens/alice.eth?mode=verified&records=text:com.twitter,addr:60")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -2492,6 +2502,16 @@ async fn get_resolution_execution_explain_returns_persisted_verified_state_and_r
     let resolution_payload: ResolutionResponse = read_json(resolution_response).await?;
     let expected_resolution_verified_state = json!({
         "verified_queries": [
+            {
+                "record_key": "text:com.twitter",
+                "status": "success",
+                "value": {
+                    "value": "@alice"
+                },
+                "provenance": {
+                    "execution_trace_id": execution_trace_id.to_string()
+                }
+            },
             {
                 "record_key": "addr:60",
                 "status": "success",
@@ -2585,6 +2605,16 @@ async fn get_resolution_execution_explain_returns_persisted_verified_state_and_r
             },
             "verified_queries": [
                 {
+                    "record_key": "text:com.twitter",
+                    "status": "success",
+                    "value": {
+                        "value": "@alice"
+                    },
+                    "provenance": {
+                        "execution_trace_id": execution_trace_id.to_string()
+                    }
+                },
+                {
                     "record_key": "addr:60",
                     "status": "success",
                     "value": {
@@ -2612,8 +2642,18 @@ async fn get_resolution_verified_state_uses_supported_persisted_answers_and_pres
     let token_lineage_id = Uuid::from_u128(0x1100);
     let surface_binding_id = Uuid::from_u128(0x3300);
     let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000022);
-    let request_key = resolution_execution_request_key(&["addr:60"]);
+    let request_key = resolution_execution_request_key(&["text:com.twitter", "addr:60"]);
     let persisted_verified_queries = json!([
+        {
+            "record_key": "text:com.twitter",
+            "status": "success",
+            "value": {
+                "value": "@alice"
+            },
+            "provenance": {
+                "execution_trace_id": execution_trace_id.to_string()
+            }
+        },
         {
             "record_key": "addr:60",
             "status": "success",
@@ -2653,7 +2693,7 @@ async fn get_resolution_verified_state_uses_supported_persisted_answers_and_pres
     let trace = resolution_execution_trace(
         execution_trace_id,
         &request_key,
-        &["addr:60"],
+        &["text:com.twitter", "addr:60"],
         persisted_verified_queries.clone(),
     );
     let outcome = resolution_execution_outcome(
@@ -2669,7 +2709,7 @@ async fn get_resolution_verified_state_uses_supported_persisted_answers_and_pres
     let verified_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=verified&records=text:com.twitter,addr:60")
+                .uri("/v1/resolutions/ens/alice.eth?mode=verified&records=avatar,text:com.twitter,addr:60")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -2678,7 +2718,7 @@ async fn get_resolution_verified_state_uses_supported_persisted_answers_and_pres
     let both_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=both&records=text:com.twitter,addr:60")
+                .uri("/v1/resolutions/ens/alice.eth?mode=both&records=avatar,text:com.twitter,addr:60")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -2693,9 +2733,19 @@ async fn get_resolution_verified_state_uses_supported_persisted_answers_and_pres
     let expected_verified_state = json!({
         "verified_queries": [
             {
-                "record_key": "text:com.twitter",
+                "record_key": "avatar",
                 "status": "unsupported",
                 "unsupported_reason": "verified resolution entrypoint is not yet supported"
+            },
+            {
+                "record_key": "text:com.twitter",
+                "status": "success",
+                "value": {
+                    "value": "@alice"
+                },
+                "provenance": {
+                    "execution_trace_id": execution_trace_id.to_string()
+                }
             },
             {
                 "record_key": "addr:60",

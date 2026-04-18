@@ -105,10 +105,16 @@ enum VerifiedQueryStatus {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct VerifiedQuerySummary {
     record_key: String,
-    coin_type: String,
+    selector: SupportedVerifiedRecordKey,
     status: VerifiedQueryStatus,
     value: Option<String>,
     failure_reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum SupportedVerifiedRecordKey {
+    Addr { coin_type: String },
+    Text,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -232,7 +238,7 @@ fn validate_ordered_record_keys(record_keys: &[String], context: &str) -> Result
 
     let mut seen = BTreeSet::new();
     for record_key in record_keys {
-        parse_supported_addr_record_key(record_key)?;
+        parse_supported_verified_record_key(record_key)?;
         if !seen.insert(record_key.clone()) {
             bail!("{context} must not contain duplicate selectors ({record_key})");
         }
@@ -281,7 +287,7 @@ fn extract_verified_queries_from_payload(
             bail!("{context}.verified_queries must not contain duplicate selectors ({record_key})");
         }
 
-        let coin_type = parse_supported_addr_record_key(&record_key)?;
+        let selector = parse_supported_verified_record_key(&record_key)?;
         let (status, value, failure_reason) = match required_string(
             query,
             "status",
@@ -289,14 +295,16 @@ fn extract_verified_queries_from_payload(
         )? {
             "success" => {
                 let value = required_object(query.get("value"), &format!("{query_context}.value"))?;
-                let value_coin_type =
-                    required_string(value, "coin_type", &format!("{query_context}.value"))?;
-                if value_coin_type != coin_type {
-                    bail!(
-                        "ENS direct-path verified resolution query value coin_type {} does not match record_key {}",
-                        value_coin_type,
-                        record_key
-                    );
+                if let SupportedVerifiedRecordKey::Addr { coin_type } = &selector {
+                    let value_coin_type =
+                        required_string(value, "coin_type", &format!("{query_context}.value"))?;
+                    if value_coin_type != coin_type {
+                        bail!(
+                            "ENS direct-path verified resolution query value coin_type {} does not match record_key {}",
+                            value_coin_type,
+                            record_key
+                        );
+                    }
                 }
                 let resolved_value = required_nonempty_string_field(
                     value,
@@ -333,7 +341,7 @@ fn extract_verified_queries_from_payload(
 
         queries.push(VerifiedQuerySummary {
             record_key,
-            coin_type,
+            selector,
             status,
             value,
             failure_reason,
@@ -636,20 +644,25 @@ fn validate_raw_call_snapshots(
     Ok(())
 }
 
-fn parse_supported_addr_record_key(record_key: &str) -> Result<String> {
-    let Some(coin_type) = record_key.strip_prefix("addr:") else {
-        bail!(
-            "ENS direct-path verified resolution only supports addr:<coin_type> selectors, found {}",
-            record_key
-        );
-    };
-    if coin_type.is_empty() || !coin_type.as_bytes().iter().all(u8::is_ascii_digit) {
-        bail!(
-            "ENS direct-path verified resolution only supports addr:<coin_type> selectors, found {}",
-            record_key
-        );
+fn parse_supported_verified_record_key(record_key: &str) -> Result<SupportedVerifiedRecordKey> {
+    if let Some(coin_type) = record_key.strip_prefix("addr:") {
+        if !coin_type.is_empty() && coin_type.as_bytes().iter().all(u8::is_ascii_digit) {
+            return Ok(SupportedVerifiedRecordKey::Addr {
+                coin_type: coin_type.to_owned(),
+            });
+        }
     }
-    Ok(coin_type.to_owned())
+
+    if let Some(text_key) = record_key.strip_prefix("text:") {
+        if !text_key.is_empty() {
+            return Ok(SupportedVerifiedRecordKey::Text);
+        }
+    }
+
+    bail!(
+        "ENS direct-path verified resolution only supports addr:<coin_type> and text:<key> selectors, found {}",
+        record_key
+    );
 }
 
 fn validate_success_final_payload(
@@ -665,23 +678,35 @@ fn validate_success_final_payload(
         "record_kind",
         "ENS direct-path verified resolution success trace.final_payload",
     )?;
-    if record_kind != "addr" {
-        bail!(
-            "ENS direct-path verified resolution success trace.final_payload.record_kind must be addr, found {}",
-            record_kind
-        );
-    }
-    let coin_type = required_coin_type_field(
-        object,
-        "coin_type",
-        "ENS direct-path verified resolution success trace.final_payload",
-    )?;
-    if coin_type != query.coin_type {
-        bail!(
-            "ENS direct-path verified resolution success trace.final_payload.coin_type {} does not match outcome record_key {}",
-            coin_type,
-            query.record_key
-        );
+    match &query.selector {
+        SupportedVerifiedRecordKey::Addr { coin_type } => {
+            if record_kind != "addr" {
+                bail!(
+                    "ENS direct-path verified resolution success trace.final_payload.record_kind must be addr, found {}",
+                    record_kind
+                );
+            }
+            let payload_coin_type = required_coin_type_field(
+                object,
+                "coin_type",
+                "ENS direct-path verified resolution success trace.final_payload",
+            )?;
+            if &payload_coin_type != coin_type {
+                bail!(
+                    "ENS direct-path verified resolution success trace.final_payload.coin_type {} does not match outcome record_key {}",
+                    payload_coin_type,
+                    query.record_key
+                );
+            }
+        }
+        SupportedVerifiedRecordKey::Text => {
+            if record_kind != "text" {
+                bail!(
+                    "ENS direct-path verified resolution success trace.final_payload.record_kind must be text, found {}",
+                    record_kind
+                );
+            }
+        }
     }
     let value = required_nonempty_string_field(
         object,
@@ -1614,7 +1639,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_non_addr_selector_before_writing_any_storage() -> Result<()> {
+    async fn persists_text_selector_results_before_writing_storage() -> Result<()> {
         let database = TestDatabase::new().await?;
         let mut request = multi_selector_request();
         let ordered_record_keys = vec!["addr:60".to_owned(), "text:com.twitter".to_owned()];
@@ -1649,20 +1674,68 @@ mod tests {
         request.outcome.cache_key.request_key = request_key;
         request.outcome.outcome_payload = request.trace.final_payload.clone();
 
+        let persisted =
+            persist_ens_exact_name_verified_resolution_direct(database.pool(), &request).await?;
+        assert!(
+            load_execution_trace(database.pool(), persisted.execution_trace_id)
+                .await?
+                .is_some(),
+            "supported text selector must persist trace rows"
+        );
+        assert!(
+            load_execution_outcome(database.pool(), &persisted.cache_key)
+                .await?
+                .is_some(),
+            "supported text selector must persist outcome rows"
+        );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn rejects_unsupported_selector_before_writing_any_storage() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let mut request = multi_selector_request();
+        let ordered_record_keys = vec!["addr:60".to_owned(), "avatar".to_owned()];
+        let request_key = normalized_request_key("alice.eth", &ordered_record_keys);
+        request.trace.execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000017);
+        request.trace.request_key = request_key.clone();
+        request.trace.request_metadata = json!({
+            "surface": "alice.eth",
+            "record_keys": ordered_record_keys,
+            "normalizer_version": "uts46-v1"
+        });
+        request.trace.final_payload = Some(json!({
+            "verified_queries": [
+                {
+                    "record_key": "addr:60",
+                    "status": "success",
+                    "value": {
+                        "coin_type": "60",
+                        "value": "0x00000000000000000000000000000000000000aa"
+                    }
+                },
+                {
+                    "record_key": "avatar",
+                    "status": "success",
+                    "value": {
+                        "value": "ipfs://avatar"
+                    }
+                }
+            ]
+        }));
+        request.outcome.execution_trace_id = request.trace.execution_trace_id;
+        request.outcome.cache_key.request_key = request_key;
+        request.outcome.outcome_payload = request.trace.final_payload.clone();
+
         let error = persist_ens_exact_name_verified_resolution_direct(database.pool(), &request)
             .await
-            .expect_err("non-addr selector must be rejected");
+            .expect_err("unsupported selector must be rejected");
         assert!(
             error
                 .to_string()
-                .contains("only supports addr:<coin_type> selectors"),
+                .contains("only supports addr:<coin_type> and text:<key> selectors"),
             "unexpected error: {error:#}"
-        );
-        assert!(
-            load_execution_trace(database.pool(), request.trace.execution_trace_id)
-                .await?
-                .is_none(),
-            "rejected request must not persist trace rows"
         );
         assert!(
             load_execution_outcome(database.pool(), &request.outcome.cache_key)
