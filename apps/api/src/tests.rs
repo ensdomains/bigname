@@ -729,6 +729,71 @@ fn permission_subjects(payload: &ResourcePermissionsResponse) -> Vec<&str> {
         .collect()
 }
 
+fn stable_row_strings(rows: &[Value]) -> Vec<String> {
+    rows.iter()
+        .map(|row| serde_json::to_string(row).expect("response rows must serialize"))
+        .collect()
+}
+
+fn assert_replay_stable_pagination(
+    base_rows: &[Value],
+    base_page: &HistoryPageResponse,
+    first_rows: &[Value],
+    first_page: &HistoryPageResponse,
+    second_rows: &[Value],
+    second_page: &HistoryPageResponse,
+    replay_rows: &[Value],
+    replay_page: &HistoryPageResponse,
+    expected_sort: &str,
+    expected_unpaged_page_size: u64,
+    expected_paged_page_size: u64,
+) {
+    let base_rows = stable_row_strings(base_rows);
+    let first_rows = stable_row_strings(first_rows);
+    let second_rows = stable_row_strings(second_rows);
+    let replay_rows = stable_row_strings(replay_rows);
+
+    assert_eq!(base_page.cursor, None);
+    assert_eq!(base_page.next_cursor, None);
+    assert_eq!(base_page.page_size, expected_unpaged_page_size);
+    assert_eq!(base_page.sort, expected_sort);
+
+    assert_eq!(first_page.cursor, None);
+    assert_eq!(first_page.page_size, expected_paged_page_size);
+    assert_eq!(first_page.sort, expected_sort);
+
+    let applied_cursor = first_page
+        .next_cursor
+        .clone()
+        .expect("first page must return a cursor for replay assertions");
+
+    assert_eq!(
+        first_rows,
+        base_rows
+            .iter()
+            .take(first_rows.len())
+            .cloned()
+            .collect::<Vec<_>>()
+    );
+
+    assert_eq!(second_page.cursor.as_deref(), Some(applied_cursor.as_str()));
+    assert_eq!(second_page.page_size, expected_paged_page_size);
+    assert_eq!(second_page.sort, expected_sort);
+    assert_eq!(
+        second_rows,
+        base_rows
+            .iter()
+            .skip(first_rows.len())
+            .take(second_rows.len())
+            .cloned()
+            .collect::<Vec<_>>()
+    );
+
+    assert_eq!(replay_page.cursor.as_deref(), Some(applied_cursor.as_str()));
+    assert_eq!(replay_page, second_page);
+    assert_eq!(replay_rows, second_rows);
+}
+
 fn resolver_current_row(chain_id: &str, resolver_address: &str) -> ResolverCurrentRow {
     ResolverCurrentRow {
         chain_id: chain_id.to_owned(),
@@ -736,20 +801,40 @@ fn resolver_current_row(chain_id: &str, resolver_address: &str) -> ResolverCurre
         declared_summary: json!({
             "bindings": {
                 "status": "supported",
-                "count": 1,
-                "items": [{
-                    "logical_name_id": "ens:alice.eth",
-                    "canonical_display_name": "Alice.eth",
-                    "normalized_name": "alice.eth",
-                    "namehash": "namehash:alice.eth",
-                    "resource_id": "00000000-0000-0000-0000-00000000b100",
-                    "surface_binding_id": "00000000-0000-0000-0000-00000000b101",
-                    "binding_kind": "declared_registry_path",
-                }],
+                "count": 2,
+                "items": [
+                    {
+                        "logical_name_id": "ens:alice.eth",
+                        "canonical_display_name": "Alice.eth",
+                        "normalized_name": "alice.eth",
+                        "namehash": "namehash:alice.eth",
+                        "resource_id": "00000000-0000-0000-0000-00000000b100",
+                        "surface_binding_id": "00000000-0000-0000-0000-00000000b101",
+                        "binding_kind": "declared_registry_path",
+                    },
+                    {
+                        "logical_name_id": "ens:beta.eth",
+                        "canonical_display_name": "Beta.eth",
+                        "normalized_name": "beta.eth",
+                        "namehash": "namehash:beta.eth",
+                        "resource_id": "00000000-0000-0000-0000-00000000b102",
+                        "surface_binding_id": "00000000-0000-0000-0000-00000000b103",
+                        "binding_kind": "resolver_alias_path",
+                    }
+                ],
             },
             "aliases": {
-                "status": "unsupported",
-                "unsupported_reason": "resolver alias mappings are not yet projected for the resolver_current rebuild",
+                "status": "supported",
+                "count": 1,
+                "items": [{
+                    "logical_name_id": "ens:beta.eth",
+                    "canonical_display_name": "Beta.eth",
+                    "normalized_name": "beta.eth",
+                    "namehash": "namehash:beta.eth",
+                    "resource_id": "00000000-0000-0000-0000-00000000b102",
+                    "surface_binding_id": "00000000-0000-0000-0000-00000000b103",
+                    "binding_kind": "resolver_alias_path",
+                }],
             },
             "permissions": {
                 "status": "supported",
@@ -2057,20 +2142,40 @@ async fn get_resolver_overview_returns_declared_state_with_shared_projection_env
         json!({
             "bindings": {
                 "status": "supported",
-                "count": 1,
-                "items": [{
-                    "logical_name_id": "ens:alice.eth",
-                    "canonical_display_name": "Alice.eth",
-                    "normalized_name": "alice.eth",
-                    "namehash": "namehash:alice.eth",
-                    "resource_id": "00000000-0000-0000-0000-00000000b100",
-                    "surface_binding_id": "00000000-0000-0000-0000-00000000b101",
-                    "binding_kind": "declared_registry_path",
-                }],
+                "count": 2,
+                "items": [
+                    {
+                        "logical_name_id": "ens:alice.eth",
+                        "canonical_display_name": "Alice.eth",
+                        "normalized_name": "alice.eth",
+                        "namehash": "namehash:alice.eth",
+                        "resource_id": "00000000-0000-0000-0000-00000000b100",
+                        "surface_binding_id": "00000000-0000-0000-0000-00000000b101",
+                        "binding_kind": "declared_registry_path",
+                    },
+                    {
+                        "logical_name_id": "ens:beta.eth",
+                        "canonical_display_name": "Beta.eth",
+                        "normalized_name": "beta.eth",
+                        "namehash": "namehash:beta.eth",
+                        "resource_id": "00000000-0000-0000-0000-00000000b102",
+                        "surface_binding_id": "00000000-0000-0000-0000-00000000b103",
+                        "binding_kind": "resolver_alias_path",
+                    }
+                ],
             },
             "aliases": {
-                "status": "unsupported",
-                "unsupported_reason": "resolver alias mappings are not yet projected for the resolver_current rebuild",
+                "status": "supported",
+                "count": 1,
+                "items": [{
+                    "logical_name_id": "ens:beta.eth",
+                    "canonical_display_name": "Beta.eth",
+                    "normalized_name": "beta.eth",
+                    "namehash": "namehash:beta.eth",
+                    "resource_id": "00000000-0000-0000-0000-00000000b102",
+                    "surface_binding_id": "00000000-0000-0000-0000-00000000b103",
+                    "binding_kind": "resolver_alias_path",
+                }],
             },
             "permissions": {
                 "status": "supported",
@@ -2314,6 +2419,65 @@ async fn get_name_children_returns_declared_rows_sorted_with_declared_only_cover
     assert_eq!(
         payload.data[0].get("surface_class").and_then(Value::as_str),
         Some("declared")
+    );
+
+    let first_page_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/names/ens/parent.eth/children?page_size=1")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("children first page request failed")?;
+    assert_eq!(first_page_response.status(), StatusCode::OK);
+    let first_page_payload: ChildrenResponse = read_json(first_page_response).await?;
+    let cursor = first_page_payload
+        .page
+        .next_cursor
+        .clone()
+        .expect("children first page must include next_cursor");
+
+    let second_page_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/names/ens/parent.eth/children?page_size=1&cursor={cursor}"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("children second page request failed")?;
+    assert_eq!(second_page_response.status(), StatusCode::OK);
+    let second_page_payload: ChildrenResponse = read_json(second_page_response).await?;
+
+    let replay_page_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/names/ens/parent.eth/children?page_size=1&cursor={cursor}"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("children replay page request failed")?;
+    assert_eq!(replay_page_response.status(), StatusCode::OK);
+    let replay_page_payload: ChildrenResponse = read_json(replay_page_response).await?;
+
+    assert_replay_stable_pagination(
+        &payload.data,
+        &payload.page,
+        &first_page_payload.data,
+        &first_page_payload.page,
+        &second_page_payload.data,
+        &second_page_payload.page,
+        &replay_page_payload.data,
+        &replay_page_payload.page,
+        "display_name_asc",
+        2,
+        1,
     );
 
     database.cleanup().await?;
@@ -2647,6 +2811,65 @@ async fn get_address_names_returns_surface_first_rows_sorted_with_stable_relatio
     assert_eq!(
         payload.data[1].get("relation_facets"),
         Some(&json!(["effective_controller"]))
+    );
+
+    let first_page_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/addresses/{address}/names?page_size=1"))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("address names first page request failed")?;
+    assert_eq!(first_page_response.status(), StatusCode::OK);
+    let first_page_payload: AddressNamesResponse = read_json(first_page_response).await?;
+    let cursor = first_page_payload
+        .page
+        .next_cursor
+        .clone()
+        .expect("address names first page must include next_cursor");
+
+    let second_page_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/addresses/{address}/names?page_size=1&cursor={cursor}"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("address names second page request failed")?;
+    assert_eq!(second_page_response.status(), StatusCode::OK);
+    let second_page_payload: AddressNamesResponse = read_json(second_page_response).await?;
+
+    let replay_page_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/addresses/{address}/names?page_size=1&cursor={cursor}"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("address names replay page request failed")?;
+    assert_eq!(replay_page_response.status(), StatusCode::OK);
+    let replay_page_payload: AddressNamesResponse = read_json(replay_page_response).await?;
+
+    assert_replay_stable_pagination(
+        &payload.data,
+        &payload.page,
+        &first_page_payload.data,
+        &first_page_payload.page,
+        &second_page_payload.data,
+        &second_page_payload.page,
+        &replay_page_payload.data,
+        &replay_page_payload.page,
+        "display_name_asc",
+        2,
+        1,
     );
 
     database.cleanup().await?;
@@ -3639,6 +3862,65 @@ async fn get_name_history_returns_canonical_only_rows_with_provenance_and_covera
         }))
     );
 
+    let first_page_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/history/names/ens/alice.eth?page_size=1")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("name history first page request failed")?;
+    assert_eq!(first_page_response.status(), StatusCode::OK);
+    let first_page_payload: HistoryResponse = read_json(first_page_response).await?;
+    let cursor = first_page_payload
+        .page
+        .next_cursor
+        .clone()
+        .expect("name history first page must include next_cursor");
+
+    let second_page_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/history/names/ens/alice.eth?page_size=1&cursor={cursor}"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("name history second page request failed")?;
+    assert_eq!(second_page_response.status(), StatusCode::OK);
+    let second_page_payload: HistoryResponse = read_json(second_page_response).await?;
+
+    let replay_page_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/history/names/ens/alice.eth?page_size=1&cursor={cursor}"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("name history replay page request failed")?;
+    assert_eq!(replay_page_response.status(), StatusCode::OK);
+    let replay_page_payload: HistoryResponse = read_json(replay_page_response).await?;
+
+    assert_replay_stable_pagination(
+        &payload.data,
+        &payload.page,
+        &first_page_payload.data,
+        &first_page_payload.page,
+        &second_page_payload.data,
+        &second_page_payload.page,
+        &replay_page_payload.data,
+        &replay_page_payload.page,
+        "chain_position_desc",
+        50,
+        1,
+    );
+
     database.cleanup().await?;
     Ok(())
 }
@@ -4115,6 +4397,65 @@ async fn get_resource_history_returns_chain_position_desc_ordering() -> Result<(
                 "timestamp": "2023-11-14T22:20:00Z"
             }
         })
+    );
+
+    let first_page_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(&format!("/v1/history/resources/{resource_id}?page_size=1"))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("resource history first page request failed")?;
+    assert_eq!(first_page_response.status(), StatusCode::OK);
+    let first_page_payload: HistoryResponse = read_json(first_page_response).await?;
+    let cursor = first_page_payload
+        .page
+        .next_cursor
+        .clone()
+        .expect("resource history first page must include next_cursor");
+
+    let second_page_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(&format!(
+                    "/v1/history/resources/{resource_id}?page_size=1&cursor={cursor}"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("resource history second page request failed")?;
+    assert_eq!(second_page_response.status(), StatusCode::OK);
+    let second_page_payload: HistoryResponse = read_json(second_page_response).await?;
+
+    let replay_page_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(&format!(
+                    "/v1/history/resources/{resource_id}?page_size=1&cursor={cursor}"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("resource history replay page request failed")?;
+    assert_eq!(replay_page_response.status(), StatusCode::OK);
+    let replay_page_payload: HistoryResponse = read_json(replay_page_response).await?;
+
+    assert_replay_stable_pagination(
+        &payload.data,
+        &payload.page,
+        &first_page_payload.data,
+        &first_page_payload.page,
+        &second_page_payload.data,
+        &second_page_payload.page,
+        &replay_page_payload.data,
+        &replay_page_payload.page,
+        "chain_position_desc",
+        50,
+        1,
     );
 
     database.cleanup().await?;
@@ -4683,6 +5024,67 @@ async fn get_address_history_composes_current_and_historical_matches() -> Result
         "canonical normalized-event history for the requested both scope"
     );
 
+    let first_page_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/history/addresses/{address}?namespace=ens&relation=registrant&page_size=1"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("address history first page request failed")?;
+    assert_eq!(first_page_response.status(), StatusCode::OK);
+    let first_page_payload: HistoryResponse = read_json(first_page_response).await?;
+    let cursor = first_page_payload
+        .page
+        .next_cursor
+        .clone()
+        .expect("address history first page must include next_cursor");
+
+    let second_page_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/history/addresses/{address}?namespace=ens&relation=registrant&page_size=1&cursor={cursor}"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("address history second page request failed")?;
+    assert_eq!(second_page_response.status(), StatusCode::OK);
+    let second_page_payload: HistoryResponse = read_json(second_page_response).await?;
+
+    let replay_page_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/history/addresses/{address}?namespace=ens&relation=registrant&page_size=1&cursor={cursor}"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("address history replay page request failed")?;
+    assert_eq!(replay_page_response.status(), StatusCode::OK);
+    let replay_page_payload: HistoryResponse = read_json(replay_page_response).await?;
+
+    assert_replay_stable_pagination(
+        &payload.data,
+        &payload.page,
+        &first_page_payload.data,
+        &first_page_payload.page,
+        &second_page_payload.data,
+        &second_page_payload.page,
+        &replay_page_payload.data,
+        &replay_page_payload.page,
+        "chain_position_desc",
+        50,
+        1,
+    );
+
     database.cleanup().await?;
     Ok(())
 }
@@ -5077,6 +5479,67 @@ async fn get_resource_permissions_returns_declared_state_collection() -> Result<
                 "resolver_address": "0x0000000000000000000000000000000000000aaa",
             },
         }))
+    );
+
+    let first_page_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(&format!(
+                    "/v1/resources/{resource_id}/permissions?page_size=1"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("resource permissions first page request failed")?;
+    assert_eq!(first_page_response.status(), StatusCode::OK);
+    let first_page_payload: ResourcePermissionsResponse = read_json(first_page_response).await?;
+    let cursor = first_page_payload
+        .page
+        .next_cursor
+        .clone()
+        .expect("resource permissions first page must include next_cursor");
+
+    let second_page_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(&format!(
+                    "/v1/resources/{resource_id}/permissions?page_size=1&cursor={cursor}"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("resource permissions second page request failed")?;
+    assert_eq!(second_page_response.status(), StatusCode::OK);
+    let second_page_payload: ResourcePermissionsResponse = read_json(second_page_response).await?;
+
+    let replay_page_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(&format!(
+                    "/v1/resources/{resource_id}/permissions?page_size=1&cursor={cursor}"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("resource permissions replay page request failed")?;
+    assert_eq!(replay_page_response.status(), StatusCode::OK);
+    let replay_page_payload: ResourcePermissionsResponse = read_json(replay_page_response).await?;
+
+    assert_replay_stable_pagination(
+        &payload.data,
+        &payload.page,
+        &first_page_payload.data,
+        &first_page_payload.page,
+        &second_page_payload.data,
+        &second_page_payload.page,
+        &replay_page_payload.data,
+        &replay_page_payload.page,
+        "subject_scope_asc",
+        3,
+        1,
     );
 
     database.cleanup().await?;

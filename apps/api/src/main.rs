@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fmt::Write as _,
     net::SocketAddr,
 };
 
@@ -182,18 +183,24 @@ type ResolverResponse = NameResponse;
 #[derive(Clone, Debug, Default, Deserialize)]
 struct HistoryQuery {
     scope: Option<String>,
+    cursor: Option<String>,
+    page_size: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
 struct PermissionsQuery {
     subject: Option<String>,
     scope: Option<String>,
+    cursor: Option<String>,
+    page_size: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
 struct ChildrenQuery {
     surface_classes: Option<String>,
     include: Option<String>,
+    cursor: Option<String>,
+    page_size: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -202,6 +209,8 @@ struct AddressNamesQuery {
     relation: Option<String>,
     dedupe_by: Option<String>,
     include: Option<String>,
+    cursor: Option<String>,
+    page_size: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -214,6 +223,8 @@ struct AddressHistoryQuery {
     namespace: Option<String>,
     relation: Option<String>,
     scope: Option<String>,
+    cursor: Option<String>,
+    page_size: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -327,6 +338,55 @@ struct HistoryPageResponse {
     next_cursor: Option<String>,
     page_size: u64,
     sort: String,
+}
+
+const DEFAULT_PAGE_SIZE: u64 = 50;
+const MAX_PAGE_SIZE: u64 = 200;
+const CURSOR_VERSION: u8 = 1;
+
+#[derive(Clone, Debug)]
+struct PaginationRequest {
+    active: bool,
+    cursor: Option<String>,
+    page_size: u64,
+}
+
+#[derive(Clone, Debug)]
+struct PaginationWindow {
+    start: usize,
+    end: usize,
+    page: HistoryPageResponse,
+}
+
+#[derive(Clone, Debug)]
+struct CursorSpec {
+    route: &'static str,
+    anchor: String,
+    sort: &'static str,
+    filters: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct CursorEnvelope {
+    version: u8,
+    route: String,
+    anchor: String,
+    sort: String,
+    filters: BTreeMap<String, String>,
+    item: BTreeMap<String, String>,
+}
+
+impl CursorSpec {
+    fn envelope(&self, item: BTreeMap<String, String>) -> CursorEnvelope {
+        CursorEnvelope {
+            version: CURSOR_VERSION,
+            route: self.route.to_owned(),
+            anchor: self.anchor.clone(),
+            sort: self.sort.to_owned(),
+            filters: self.filters.clone(),
+            item,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -692,6 +752,7 @@ async fn address_names(
     let relation = parse_address_name_relation(query.relation.as_deref())?;
     let dedupe_by = parse_address_names_dedupe_by(query.dedupe_by.as_deref())?;
     let include = parse_address_names_include(query.include.as_deref())?;
+    let pagination = parse_pagination(query.cursor.as_deref(), query.page_size)?;
     let normalized_address = normalize_address(&address);
 
     let rows = load_address_names_current(
@@ -717,11 +778,46 @@ async fn address_names(
     })?;
 
     let entries = collapse_address_name_current_rows(&rows, dedupe_by);
+    let mut filters = BTreeMap::new();
+    if let Some(namespace) = namespace.as_ref() {
+        filters.insert("namespace".to_owned(), namespace.clone());
+    }
+    if let Some(relation) = relation {
+        filters.insert("relation".to_owned(), relation.as_str().to_owned());
+    }
+    filters.insert(
+        "dedupe_by".to_owned(),
+        address_names_dedupe_label(dedupe_by).to_owned(),
+    );
+    let page = paginate_window(
+        &entries,
+        &pagination,
+        entries.len() as u64,
+        &CursorSpec {
+            route: "/v1/addresses/{address}/names",
+            anchor: normalized_address.clone(),
+            sort: "display_name_asc",
+            filters,
+        },
+        address_name_cursor_fields,
+    )?;
+    let page_entries = &entries[page.start..page.end];
     let response = if include.role_summary {
-        build_address_names_response_with_role_summary(&state.pool, entries).await?
+        build_address_names_response_with_role_summary(
+            &state.pool,
+            &entries,
+            page_entries,
+            page.page,
+        )
+        .await?
     } else {
-        let data = entries.iter().map(build_address_name_item).collect();
-        build_address_names_response(entries, data, AddressNamesResponseSupplement::default())
+        let data = page_entries.iter().map(build_address_name_item).collect();
+        build_address_names_response(
+            &entries,
+            data,
+            AddressNamesResponseSupplement::default(),
+            page.page,
+        )
     };
 
     Ok(Json(response))
@@ -735,6 +831,7 @@ async fn name_children(
     ensure_public_namespace(&namespace)?;
 
     let include_counts = parse_children_query(&query)?;
+    let pagination = parse_pagination(query.cursor.as_deref(), query.page_size)?;
     let logical_name_id = format!("{namespace}:{name}");
     let surface = load_name_surface(&state.pool, &logical_name_id)
         .await
@@ -776,7 +873,25 @@ async fn name_children(
             ))
         })?;
 
-    Ok(Json(build_children_response(rows, include_counts)))
+    let page = paginate_window(
+        &rows,
+        &pagination,
+        rows.len() as u64,
+        &CursorSpec {
+            route: "/v1/names/{namespace}/{name}/children",
+            anchor: logical_name_id,
+            sort: "display_name_asc",
+            filters: BTreeMap::new(),
+        },
+        child_cursor_fields,
+    )?;
+
+    Ok(Json(build_children_response(
+        &rows,
+        &rows[page.start..page.end],
+        include_counts,
+        page.page,
+    )))
 }
 
 async fn address_history(
@@ -787,6 +902,7 @@ async fn address_history(
     let namespace = parse_address_names_namespace(query.namespace.as_deref())?;
     let relation = parse_address_name_relation(query.relation.as_deref())?;
     let scope = parse_history_scope(query.scope.as_deref())?;
+    let pagination = parse_pagination(query.cursor.as_deref(), query.page_size)?;
     let normalized_address = normalize_address(&address);
 
     let rows = load_address_history(
@@ -813,7 +929,33 @@ async fn address_history(
         ))
     })?;
 
-    Ok(Json(build_history_response(rows, scope)))
+    let mut filters = BTreeMap::new();
+    filters.insert("scope".to_owned(), scope.as_str().to_owned());
+    if let Some(namespace) = namespace.as_ref() {
+        filters.insert("namespace".to_owned(), namespace.clone());
+    }
+    if let Some(relation) = relation {
+        filters.insert("relation".to_owned(), relation.as_str().to_owned());
+    }
+    let page = paginate_window(
+        &rows,
+        &pagination,
+        DEFAULT_PAGE_SIZE,
+        &CursorSpec {
+            route: "/v1/history/addresses/{address}",
+            anchor: normalized_address.clone(),
+            sort: "chain_position_desc",
+            filters,
+        },
+        history_cursor_fields,
+    )?;
+
+    Ok(Json(build_history_response(
+        &rows,
+        &rows[page.start..page.end],
+        scope,
+        page.page,
+    )))
 }
 
 async fn name_history(
@@ -824,6 +966,7 @@ async fn name_history(
     ensure_public_namespace(&namespace)?;
 
     let scope = parse_history_scope(query.scope.as_deref())?;
+    let pagination = parse_pagination(query.cursor.as_deref(), query.page_size)?;
     let logical_name_id = format!("{namespace}:{name}");
     let surface = load_name_surface(&state.pool, &logical_name_id)
         .await
@@ -868,7 +1011,27 @@ async fn name_history(
             ))
         })?;
 
-    Ok(Json(build_history_response(rows, scope)))
+    let mut filters = BTreeMap::new();
+    filters.insert("scope".to_owned(), scope.as_str().to_owned());
+    let page = paginate_window(
+        &rows,
+        &pagination,
+        DEFAULT_PAGE_SIZE,
+        &CursorSpec {
+            route: "/v1/history/names/{namespace}/{name}",
+            anchor: logical_name_id,
+            sort: "chain_position_desc",
+            filters,
+        },
+        history_cursor_fields,
+    )?;
+
+    Ok(Json(build_history_response(
+        &rows,
+        &rows[page.start..page.end],
+        scope,
+        page.page,
+    )))
 }
 
 async fn resource_history(
@@ -877,6 +1040,7 @@ async fn resource_history(
     State(state): State<AppState>,
 ) -> ApiResult<Json<HistoryResponse>> {
     let scope = parse_history_scope(query.scope.as_deref())?;
+    let pagination = parse_pagination(query.cursor.as_deref(), query.page_size)?;
     let resource_id = Uuid::parse_str(&resource_id).map_err(|_| ApiError {
         status: StatusCode::BAD_REQUEST,
         code: "invalid_input",
@@ -918,7 +1082,27 @@ async fn resource_history(
             ApiError::internal_error(format!("failed to load history for resource {resource_id}"))
         })?;
 
-    Ok(Json(build_history_response(rows, scope)))
+    let mut filters = BTreeMap::new();
+    filters.insert("scope".to_owned(), scope.as_str().to_owned());
+    let page = paginate_window(
+        &rows,
+        &pagination,
+        DEFAULT_PAGE_SIZE,
+        &CursorSpec {
+            route: "/v1/history/resources/{resource_id}",
+            anchor: resource_id.to_string(),
+            sort: "chain_position_desc",
+            filters,
+        },
+        history_cursor_fields,
+    )?;
+
+    Ok(Json(build_history_response(
+        &rows,
+        &rows[page.start..page.end],
+        scope,
+        page.page,
+    )))
 }
 
 async fn resource_permissions(
@@ -933,6 +1117,7 @@ async fn resource_permissions(
     })?;
     let subject = parse_permissions_subject(query.subject.as_deref());
     let scope = parse_permission_scope_filter(query.scope.as_deref())?;
+    let pagination = parse_pagination(query.cursor.as_deref(), query.page_size)?;
 
     let rows =
         load_permissions_current(&state.pool, resource_id, subject.as_deref(), scope.as_ref())
@@ -951,20 +1136,46 @@ async fn resource_permissions(
                 ))
             })?;
 
-    Ok(Json(build_resource_permissions_response(rows)))
+    let mut filters = BTreeMap::new();
+    if let Some(subject) = subject.as_ref() {
+        filters.insert("subject".to_owned(), subject.clone());
+    }
+    if let Some(scope) = scope.as_ref() {
+        filters.insert("scope".to_owned(), scope.storage_key());
+    }
+    let page = paginate_window(
+        &rows,
+        &pagination,
+        rows.len() as u64,
+        &CursorSpec {
+            route: "/v1/resources/{resource_id}/permissions",
+            anchor: resource_id.to_string(),
+            sort: "subject_scope_asc",
+            filters,
+        },
+        permission_cursor_fields,
+    )?;
+
+    Ok(Json(build_resource_permissions_response(
+        &rows,
+        &rows[page.start..page.end],
+        page.page,
+    )))
 }
 
 async fn build_address_names_response_with_role_summary(
     pool: &PgPool,
-    entries: Vec<AddressNameCurrentEntry>,
+    entries: &[AddressNameCurrentEntry],
+    page_entries: &[AddressNameCurrentEntry],
+    page: HistoryPageResponse,
 ) -> ApiResult<AddressNamesResponse> {
-    let mut data = Vec::with_capacity(entries.len());
+    let mut data = Vec::with_capacity(page_entries.len());
     let mut supplement = AddressNamesResponseSupplement::default();
     let mut name_current_cache = BTreeMap::<String, Option<NameCurrentRow>>::new();
     let mut permissions_cache = BTreeMap::<Uuid, Vec<PermissionsCurrentRow>>::new();
     let mut children_cache = BTreeMap::<String, Vec<ChildrenCurrentRow>>::new();
 
-    for entry in &entries {
+    for entry in page_entries {
         let name_row = match name_current_cache.get(&entry.logical_name_id) {
             Some(row) => row.clone(),
             None => {
@@ -1044,7 +1255,9 @@ async fn build_address_names_response_with_role_summary(
         ));
     }
 
-    Ok(build_address_names_response(entries, data, supplement))
+    Ok(build_address_names_response(
+        entries, data, supplement, page,
+    ))
 }
 
 fn build_namespace_metadata_response(
@@ -1206,8 +1419,10 @@ fn build_resolver_response(row: ResolverCurrentRow) -> ResolverResponse {
 }
 
 fn build_children_response(
-    rows: Vec<ChildrenCurrentRow>,
+    rows: &[ChildrenCurrentRow],
+    page_rows: &[ChildrenCurrentRow],
     include_counts: bool,
+    page: HistoryPageResponse,
 ) -> ChildrenResponse {
     let last_updated = rows
         .iter()
@@ -1217,10 +1432,10 @@ fn build_children_response(
         .unwrap_or_else(|| format_timestamp(OffsetDateTime::now_utc()));
 
     ChildrenResponse {
-        data: rows.iter().map(build_child_item).collect(),
+        data: page_rows.iter().map(build_child_item).collect(),
         declared_state: build_children_declared_state(rows.len(), include_counts),
         verified_state: None,
-        provenance: build_children_provenance(&rows),
+        provenance: build_children_provenance(rows),
         coverage: CoverageResponse {
             status: "full".to_owned(),
             exhaustiveness: "authoritative".to_owned(),
@@ -1228,13 +1443,8 @@ fn build_children_response(
             enumeration_basis: "declared_direct_children".to_owned(),
             unsupported_reason: None,
         },
-        chain_positions: build_children_chain_positions(&rows),
-        page: HistoryPageResponse {
-            cursor: None,
-            next_cursor: None,
-            page_size: rows.len() as u64,
-            sort: "display_name_asc".to_owned(),
-        },
+        chain_positions: build_children_chain_positions(rows),
+        page,
         consistency: collection_consistency(rows.iter().map(|row| &row.canonicality_summary))
             .to_owned(),
         last_updated,
@@ -1504,9 +1714,10 @@ impl AddressNamesResponseSupplement {
 }
 
 fn build_address_names_response(
-    entries: Vec<AddressNameCurrentEntry>,
+    entries: &[AddressNameCurrentEntry],
     data: Vec<JsonValue>,
     supplement: AddressNamesResponseSupplement,
+    page: HistoryPageResponse,
 ) -> AddressNamesResponse {
     let last_updated = entries
         .iter()
@@ -1528,13 +1739,8 @@ fn build_address_names_response(
             enumeration_basis: "surface_current_relations".to_owned(),
             unsupported_reason: None,
         },
-        chain_positions: build_address_names_chain_positions(&entries, &supplement),
-        page: HistoryPageResponse {
-            cursor: None,
-            next_cursor: None,
-            page_size: entries.len() as u64,
-            sort: "display_name_asc".to_owned(),
-        },
+        chain_positions: build_address_names_chain_positions(entries, &supplement),
+        page,
         consistency: collection_consistency(
             entries
                 .iter()
@@ -1546,7 +1752,12 @@ fn build_address_names_response(
     }
 }
 
-fn build_history_response(rows: Vec<HistoryEvent>, scope: HistoryScope) -> HistoryResponse {
+fn build_history_response(
+    rows: &[HistoryEvent],
+    page_rows: &[HistoryEvent],
+    scope: HistoryScope,
+    page: HistoryPageResponse,
+) -> HistoryResponse {
     let last_updated = rows
         .iter()
         .filter_map(|row| row.block_timestamp)
@@ -1555,25 +1766,22 @@ fn build_history_response(rows: Vec<HistoryEvent>, scope: HistoryScope) -> Histo
         .unwrap_or_else(|| format_timestamp(OffsetDateTime::now_utc()));
 
     HistoryResponse {
-        data: rows.iter().map(build_history_item).collect(),
+        data: page_rows.iter().map(build_history_item).collect(),
         declared_state: empty_object(),
         verified_state: None,
-        provenance: build_history_provenance(&rows),
+        provenance: build_history_provenance(rows),
         coverage: build_history_coverage(scope),
-        chain_positions: build_history_chain_positions(&rows),
-        page: HistoryPageResponse {
-            cursor: None,
-            next_cursor: None,
-            page_size: 50,
-            sort: "chain_position_desc".to_owned(),
-        },
+        chain_positions: build_history_chain_positions(rows),
+        page,
         consistency: "head".to_owned(),
         last_updated,
     }
 }
 
 fn build_resource_permissions_response(
-    rows: Vec<PermissionsCurrentRow>,
+    rows: &[PermissionsCurrentRow],
+    page_rows: &[PermissionsCurrentRow],
+    page: HistoryPageResponse,
 ) -> ResourcePermissionsResponse {
     let last_updated = rows
         .iter()
@@ -1583,18 +1791,13 @@ fn build_resource_permissions_response(
         .unwrap_or_else(|| format_timestamp(OffsetDateTime::now_utc()));
 
     ResourcePermissionsResponse {
-        data: rows.iter().map(build_permission_item).collect(),
+        data: page_rows.iter().map(build_permission_item).collect(),
         declared_state: empty_object(),
         verified_state: None,
-        provenance: build_permissions_provenance(&rows),
-        coverage: build_permissions_coverage(&rows),
-        chain_positions: build_permissions_chain_positions(&rows),
-        page: HistoryPageResponse {
-            cursor: None,
-            next_cursor: None,
-            page_size: rows.len() as u64,
-            sort: "subject_scope_asc".to_owned(),
-        },
+        provenance: build_permissions_provenance(rows),
+        coverage: build_permissions_coverage(rows),
+        chain_positions: build_permissions_chain_positions(rows),
+        page,
         consistency: collection_consistency(rows.iter().map(|row| &row.canonicality_summary))
             .to_owned(),
         last_updated,
@@ -2823,6 +3026,191 @@ fn parse_permission_scope_filter(scope: Option<&str>) -> ApiResult<Option<Permis
             message: "scope must use a valid permissions scope filter".to_owned(),
         })
         .map(Some)
+}
+
+fn parse_pagination(cursor: Option<&str>, page_size: Option<u64>) -> ApiResult<PaginationRequest> {
+    let cursor = cursor
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let active = cursor.is_some() || page_size.is_some();
+
+    let page_size = match page_size {
+        None if !active => DEFAULT_PAGE_SIZE,
+        None => DEFAULT_PAGE_SIZE,
+        Some(value) if !(1..=MAX_PAGE_SIZE).contains(&value) => {
+            return Err(ApiError {
+                status: StatusCode::BAD_REQUEST,
+                code: "invalid_input",
+                message: format!("page_size must be between 1 and {MAX_PAGE_SIZE}"),
+            });
+        }
+        Some(value) => value,
+    };
+
+    Ok(PaginationRequest {
+        active,
+        cursor,
+        page_size,
+    })
+}
+
+fn paginate_window<T>(
+    items: &[T],
+    request: &PaginationRequest,
+    unpaged_page_size: u64,
+    spec: &CursorSpec,
+    item_cursor_fields: impl Fn(&T) -> BTreeMap<String, String>,
+) -> ApiResult<PaginationWindow> {
+    if !request.active {
+        return Ok(PaginationWindow {
+            start: 0,
+            end: items.len(),
+            page: HistoryPageResponse {
+                cursor: None,
+                next_cursor: None,
+                page_size: unpaged_page_size,
+                sort: spec.sort.to_owned(),
+            },
+        });
+    }
+
+    let start = match request.cursor.as_deref() {
+        None => 0,
+        Some(cursor) => {
+            let decoded = decode_cursor(cursor)?;
+            validate_cursor(spec, &decoded)?;
+            items
+                .iter()
+                .position(|item| item_cursor_fields(item) == decoded.item)
+                .map(|index| index + 1)
+                .ok_or_else(invalid_cursor_error)?
+        }
+    };
+    let end = (start + request.page_size as usize).min(items.len());
+    let next_cursor = if end < items.len() {
+        Some(encode_cursor(
+            &spec.envelope(item_cursor_fields(&items[end - 1])),
+        ))
+    } else {
+        None
+    };
+
+    Ok(PaginationWindow {
+        start,
+        end,
+        page: HistoryPageResponse {
+            cursor: request.cursor.clone(),
+            next_cursor,
+            page_size: request.page_size,
+            sort: spec.sort.to_owned(),
+        },
+    })
+}
+
+fn invalid_cursor_error() -> ApiError {
+    ApiError {
+        status: StatusCode::BAD_REQUEST,
+        code: "invalid_input",
+        message: "cursor must be a valid pagination cursor".to_owned(),
+    }
+}
+
+fn validate_cursor(spec: &CursorSpec, cursor: &CursorEnvelope) -> ApiResult<()> {
+    if cursor.version != CURSOR_VERSION
+        || cursor.route != spec.route
+        || cursor.anchor != spec.anchor
+        || cursor.sort != spec.sort
+        || cursor.filters != spec.filters
+    {
+        return Err(invalid_cursor_error());
+    }
+
+    Ok(())
+}
+
+fn decode_cursor(cursor: &str) -> ApiResult<CursorEnvelope> {
+    let decoded = decode_hex(cursor).ok_or_else(invalid_cursor_error)?;
+    serde_json::from_slice(&decoded).map_err(|_| invalid_cursor_error())
+}
+
+fn encode_cursor(cursor: &CursorEnvelope) -> String {
+    encode_hex(&serde_json::to_vec(cursor).expect("cursor envelope must serialize for pagination"))
+}
+
+fn encode_hex(bytes: &[u8]) -> String {
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        write!(&mut encoded, "{byte:02x}").expect("hex encoding must write into string");
+    }
+    encoded
+}
+
+fn decode_hex(value: &str) -> Option<Vec<u8>> {
+    if value.len() % 2 != 0 {
+        return None;
+    }
+
+    let mut decoded = Vec::with_capacity(value.len() / 2);
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        let high = decode_hex_nibble(bytes[index])?;
+        let low = decode_hex_nibble(bytes[index + 1])?;
+        decoded.push((high << 4) | low);
+        index += 2;
+    }
+    Some(decoded)
+}
+
+fn decode_hex_nibble(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn address_name_cursor_fields(entry: &AddressNameCurrentEntry) -> BTreeMap<String, String> {
+    let mut item = BTreeMap::new();
+    item.insert(
+        "canonical_display_name".to_owned(),
+        entry.canonical_display_name.clone(),
+    );
+    item.insert("logical_name_id".to_owned(), entry.logical_name_id.clone());
+    item.insert("resource_id".to_owned(), entry.resource_id.to_string());
+    item
+}
+
+fn child_cursor_fields(row: &ChildrenCurrentRow) -> BTreeMap<String, String> {
+    let mut item = BTreeMap::new();
+    item.insert(
+        "canonical_display_name".to_owned(),
+        row.canonical_display_name.clone(),
+    );
+    item.insert(
+        "child_logical_name_id".to_owned(),
+        row.child_logical_name_id.clone(),
+    );
+    item
+}
+
+fn permission_cursor_fields(row: &PermissionsCurrentRow) -> BTreeMap<String, String> {
+    let mut item = BTreeMap::new();
+    item.insert("subject".to_owned(), row.subject.clone());
+    item.insert("scope".to_owned(), row.scope.storage_key());
+    item
+}
+
+fn history_cursor_fields(row: &HistoryEvent) -> BTreeMap<String, String> {
+    let mut item = BTreeMap::new();
+    item.insert(
+        "normalized_event_id".to_owned(),
+        row.normalized_event_id.to_string(),
+    );
+    item.insert("event_identity".to_owned(), row.event_identity.clone());
+    item
 }
 
 fn parse_children_query(query: &ChildrenQuery) -> ApiResult<bool> {

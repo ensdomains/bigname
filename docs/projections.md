@@ -4,7 +4,7 @@ Status: Phase 0 baseline
 
 This document freezes the read-model boundaries between normalized events, current-state projections, and API reads.
 
-Some declared-state route families are still queued in the API binary. Their projection boundaries are nevertheless normative here so the read contract can freeze before those handlers ship.
+Only the exact-name explain routes and the primary-name route family are still queued in the API binary. Their projection boundaries are nevertheless normative here so the read contract can freeze before those handlers ship.
 
 ## 1. Projection Rules
 
@@ -19,10 +19,10 @@ Some declared-state route families are still queued in the API binary. Their pro
 | --- | --- | --- | --- |
 | `name_current` | `logical_name_id` | exact name lookup | identity, registration, control, resolver, history heads, coverage |
 | `surface_bindings_current` | `surface_binding_id` | exact lookup, explain | `SurfaceBound`, `SurfaceUnbound`, migration events |
-| `address_names_current` | `(address, logical_name_id, relation)` | address collections (queued) | authority, control, reverse, primary claim events |
+| `address_names_current` | `(address, logical_name_id, relation)` | address collections (shipped) | authority, control, reverse, primary claim events |
 | `children_current` | `(parent_logical_name_id, child_logical_name_id, surface_class)` | child collections | registration, subregistry, alias, wildcard events |
-| `permissions_current` | `(resource_id, subject, scope)` | resource permissions reads (queued) | permission and transfer events |
-| `resolver_current` | `(chain_id, resolver_address)` | resolver overview (queued) | resolver, alias, permission, inventory events |
+| `permissions_current` | `(resource_id, subject, scope)` | resource permissions reads (shipped) | permission and transfer events |
+| `resolver_current` | `(chain_id, resolver_address)` | resolver overview (shipped) | resolver, alias, permission, inventory events |
 | `record_inventory_current` | `(resource_id, version_boundary)` | declared resolution inventory + cache | record and version-boundary events |
 | `primary_names_current` | `(address, coin_type, namespace)` | declared primary claim + verification lookup key | reverse, primary claim, verified primary events |
 | `coverage_current` | `logical_name_id` | exact-name inline coverage, dedicated single-name coverage/explain reads | `CoverageChanged`, capability changes |
@@ -77,7 +77,7 @@ History reads use normalized events plus thin cursor support rather than a separ
 - `scope=surface|resource|both` maps onto normalized-event filters, not different truth systems
 - name-history resource scope resolves across every resource ever bound to the requested surface
 - resource-history surface scope resolves across every surface ever bound to the requested resource
-- queued `Address.history` resolves address-derived surface and resource anchor sets across current and historical matches first, then applies the same `scope=surface|resource|both` history contract over normalized events
+- shipped `Address.history` resolves address-derived surface and resource anchor sets across current and historical matches first, then applies the same `scope=surface|resource|both` history contract over normalized events
 
 ### Resource permissions
 
