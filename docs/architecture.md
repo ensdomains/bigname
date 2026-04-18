@@ -1059,6 +1059,8 @@ When requested, each item adds:
 - `status`
 - `expiry`
 
+`role_summary` is a per-resource summary object. In the first shipped slice it carries one `subjects[*]` entry per distinct current permission subject for the same `resource_id`, and each subject entry keeps the current `scope` plus `effective_powers` pairs from the resource-permissions collection. Row-granular grant and revocation lineage stays on the dedicated resource-permissions route.
+
 Rules:
 
 - `include=role_summary` keeps the base `Address.names` query contract unchanged: `namespace`, `relation`, and `dedupe_by` keep the same meaning and defaults
@@ -1066,6 +1068,9 @@ Rules:
 - surface-first enumeration remains the default and `dedupe_by=resource` remains grouping-only behavior
 - the added fields above are expansion-only fields; they do not replace the required surface identity, binding, or relation facets
 - `role_summary` derives from the same resource-anchored effective-permission truth family used by `GET /v1/resources/{resource_id}/permissions`; it does not create a second address-role ledger
+- `subname_count` reuses the declared direct-children rule from `Name.children`, so it counts declared direct child surfaces only
+- `status` and `expiry` come directly from the current `ControlVector` for that `resource_id`; they are not recomputed from the address relation
+- `record_count` is the count of distinct stable declared record selectors for that `resource_id` at the current version boundary, using the same declared record-inventory semantics as `Resolution.record_inventory`; it is not a separate address-list counter, a raw resolver-slot count, or a verified execution count
 
 ### 21.4 Name → children
 
@@ -1095,6 +1100,7 @@ Rules:
 
 - the truth anchor is `resource_id`
 - subject- or resolver-centric summaries may be projected for display, but they derive from the same resource-anchored effective grant rows
+- `Address.names?include=role_summary` is one such display summary: it groups the current resource-anchored rows by `subject`, keeps each grouped subject's `scope` plus `effective_powers`, and leaves grant lineage on this route
 - resolver-scoped permissions are part of this collection through scope detail, not a separate permission ledger
 - if one surface rebinds across ENSv1 authority anchors, resource-centric permission reads stay partitioned by `resource_id` rather than stitching old and new anchors into one collection
 

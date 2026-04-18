@@ -114,6 +114,16 @@ Rules:
 - `token_lineage_id`
 - `current_resolver`
 
+### `RoleSummary`
+
+- `subjects`
+- `subjects[*].subject`
+- `subjects[*].scopes`
+- `subjects[*].scopes[*].scope`
+- `subjects[*].scopes[*].effective_powers`
+
+Use this object for the `role_summary` expansion on `GET /v1/addresses/{address}/names`. It is the per-resource summary view of the current effective permission rows for the same `resource_id`. Row-granular permission lineage such as `grant_source`, `revocation_source`, `inheritance_path`, and `transfer_behavior` stays on `GET /v1/resources/{resource_id}/permissions`.
+
 ### `UnsupportedSummary`
 
 - `status`: always `unsupported`
@@ -291,7 +301,7 @@ Each item includes:
 
 When `include=role_summary` is requested, each item also adds:
 
-- `role_summary`
+- `role_summary`: `RoleSummary`
 - `subname_count`
 - `record_count`
 - `status`
@@ -304,6 +314,10 @@ Rules:
 - the default sort remains `display_name_asc`
 - `include=role_summary` is additive; it does not change supported filters, default `dedupe_by`, enumeration basis, route-level coverage meaning, default sort, cursor behavior, or item identity
 - the `role_summary` expansion derives from the current item `resource_id` plus the existing resource-permissions truth family; it does not introduce a separate address-role ledger
+- `role_summary` groups the current `GET /v1/resources/{resource_id}/permissions` rows by `subject`; each grouped subject keeps the current `(scope, effective_powers)` pairs for that `resource_id`, while row-granular grant and revocation detail stays on the dedicated permissions route
+- `subname_count` counts the same declared direct child surfaces returned by `GET /v1/names/{namespace}/{name}/children` by default; it does not include linked, alias-derived, or wildcard-observed child buckets
+- `status` and `expiry` mirror the current `ControlVector.status` and `ControlVector.expiry` values for the item `resource_id`
+- `record_count` counts the distinct stable declared record selectors for the item `resource_id` at its current version boundary; in the first shipped slice this is the number of selectors that belong to the same declared record-inventory answer shape used by `Resolution.record_inventory`, not a count of raw resolver slots, cached values, or verified query results
 - the added fields `role_summary`, `subname_count`, `record_count`, `status`, and `expiry` are optional expansion fields only and do not replace the required surface identity and relation facets
 
 ### `GET /v1/resources/{resource_id}/permissions`
@@ -332,6 +346,7 @@ Rules:
 
 - `resource_id` is the truth anchor; surface names or resolver addresses may appear only as explanatory context
 - resolver-scoped permissions remain rows in this same collection with resolver-specific scope detail; they are not a separate truth system
+- `GET /v1/addresses/{address}/names?include=role_summary` is the per-resource summary form of this same collection: it groups current rows by `subject`, retains each grouped subject's `scope` plus `effective_powers`, and leaves row-granular lineage on this dedicated route
 - this route is declared-state only and `verified_state` remains `null`
 
 ### `GET /v1/names/{namespace}/{name}/children`
