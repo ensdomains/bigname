@@ -230,7 +230,7 @@ Every externally visible answer returns, directly or by expansion:
 
 - `declared_state` is authoritative for enumerable, source-managed facts.
 - `verified_state` is authoritative for resolution and primary-name answers that require execution.
-- `provenance` must identify both source facts and execution traces used to derive the answer.
+- `provenance` must identify source facts and any execution traces used to derive the answer.
 - `coverage` must explain completeness and exhaustiveness, not merely freshness.
 - `chain_positions` must be explicit whenever an answer depends on multiple chains or execution checkpoints.
 - `consistency` is caller-visible and not inferred implicitly.
@@ -1061,10 +1061,11 @@ Rules:
 - for ENS on Ethereum Mainnet, the current declared claim precedence is reverse-only through `ens_v1_reverse_l1` and its `reverse_registrar` entrypoint at `0xa58E81fe9b61B5c3fE2AFD33CF304c454AbFc7Cb`
 - missing or unsupported ENS reverse claims do not trigger fallback to registry-, resolver-, or other claim-setting surfaces in this phase
 - any fallback beyond that reverse-only ENS claim surface remains deferred and requires a later doc-first contract update; manifest presence alone does not widen claim precedence
-- in Phase 7, that reverse-only ENS claim precedence does not combine with resolver-backed or execution-derived name data to enrich `claimed_primary_name`; richer ENS tuple-present claimed payloads remain blocked until a later doc-first contract update freezes an honest declared source for them
+- in Phase 7, that reverse-only ENS claim precedence does not combine with resolver-backed or execution-derived name data to enrich `claimed_primary_name`; `claimed_primary_name.provenance` is limited to exact-tuple declared row provenance, while richer ENS tuple-present claimed payloads such as `claimed_primary_name.name` remain blocked until a later doc-first contract update freezes an honest declared source for them
 - the first additive ENS verified-primary readback slice uses stable execution identity `request_type=verified_primary_name` with request-key identity `{namespace}:{normalized_address}:{coin_type}` for the exact route tuple; claimed text, normalized name identity, verified target address, result status, and section-local provenance are outside that cache identity
 - the matching `primary_names_current(address, coin_type, namespace)` row is the only admitted claim-side lookup / invalidation anchor for that verified request; the projection may carry claim-local lookup and invalidation inputs only, and it does not become a second verified ledger
-- top-level route provenance joins declared claim inputs with any persisted verification trace; section-local claim provenance stays declared-only, and section-local verified provenance stays within the top-level `execution_trace_id`
+- `claimed_primary_name.provenance` is the first public claim-local section provenance on this route: exact-tuple declared-only provenance from the requested `primary_names_current(address, coin_type, namespace)` row, stripped of `verified_primary_name_lookup` / `verified_primary_name_invalidation`, and with no `execution_trace_id`
+- top-level route provenance joins declared claim inputs with any persisted verification trace; `claimed_primary_name.provenance` stays row-scoped and declared-only, and section-local verified provenance stays within the top-level `execution_trace_id`
 - Basenames claim-setting operations affect the claim surface, but the read contract still distinguishes claim from verified primary name
 
 ---
