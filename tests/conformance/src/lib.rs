@@ -19,7 +19,7 @@ mod shipped_api {
         };
         use bigname_storage::{
             CanonicalityState, NameSurface, NormalizedEvent, RawBlock, Resource, SurfaceBinding,
-            SurfaceBindingKind, default_database_url,
+            SurfaceBindingKind, TokenLineage, default_database_url,
         };
         use serde::de::DeserializeOwned;
         use serde_json::{Value, json};
@@ -411,6 +411,716 @@ mod shipped_api {
             );
             assert_eq!(payload.provenance.manifest_versions.len(), 2);
             assert!(payload.verified_state.is_none());
+
+            database.cleanup().await?;
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn name_children_contract_returns_declared_rows_sorted_with_declared_only_coverage()
+        -> Result<()> {
+            let database = HarnessDatabase::new().await?;
+            let parent_logical_name_id = "ens:parent.eth";
+
+            bigname_storage::upsert_name_surfaces(
+                &database.pool,
+                &[
+                    collection_name_surface(
+                        parent_logical_name_id,
+                        "parent.eth",
+                        "node:parent.eth",
+                        10,
+                    ),
+                    collection_name_surface(
+                        "ens:bob.parent.eth",
+                        "bob.parent.eth",
+                        "node:bob.parent.eth",
+                        11,
+                    ),
+                    collection_name_surface(
+                        "ens:alice.parent.eth",
+                        "alice.parent.eth",
+                        "node:alice.parent.eth",
+                        12,
+                    ),
+                ],
+            )
+            .await
+            .context("failed to upsert name surfaces for children conformance")?;
+            bigname_storage::upsert_children_current_rows(
+                &database.pool,
+                &[
+                    declared_child_row(
+                        parent_logical_name_id,
+                        "ens:bob.parent.eth",
+                        "bob.parent.eth",
+                        "node:bob.parent.eth",
+                        201,
+                        11,
+                    ),
+                    declared_child_row(
+                        parent_logical_name_id,
+                        "ens:alice.parent.eth",
+                        "alice.parent.eth",
+                        "node:alice.parent.eth",
+                        202,
+                        12,
+                    ),
+                ],
+            )
+            .await
+            .context("failed to upsert children_current rows for conformance")?;
+
+            let response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri("/v1/names/ens/parent.eth/children")
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("children request failed")?;
+
+            assert_eq!(response.status(), StatusCode::OK);
+
+            let payload: ChildrenResponse = read_json(response).await?;
+            assert!(
+                payload
+                    .declared_state
+                    .as_object()
+                    .map(|value| value.is_empty())
+                    .unwrap_or(false)
+            );
+            assert_eq!(payload.coverage.status, "full");
+            assert_eq!(payload.coverage.exhaustiveness, "authoritative");
+            assert_eq!(
+                payload.coverage.source_classes_considered,
+                vec!["declared".to_owned()]
+            );
+            assert_eq!(
+                payload.coverage.enumeration_basis,
+                "declared_direct_children"
+            );
+            assert_eq!(payload.coverage.unsupported_reason, None);
+            assert_eq!(payload.page.sort, "display_name_asc");
+            assert_eq!(payload.page.page_size, 2);
+            assert_eq!(payload.consistency, "finalized");
+            assert_eq!(payload.last_updated, "2024-05-31T16:13:32Z");
+            assert_eq!(
+                payload.provenance,
+                json!({
+                    "normalized_event_ids": ["202", "201"],
+                    "raw_fact_refs": [
+                        {"kind": "raw_log", "block_number": 12},
+                        {"kind": "raw_log", "block_number": 11}
+                    ],
+                    "manifest_versions": [{
+                        "manifest_version": 1,
+                        "source_family": "ens_v1_registry_l1",
+                        "source_manifest_id": null
+                    }],
+                    "execution_trace_id": null,
+                    "derivation_kind": "children_current_rebuild"
+                })
+            );
+            assert_eq!(
+                payload.chain_positions,
+                json!({
+                    "ethereum": {
+                        "chain_id": "ethereum-mainnet",
+                        "block_number": 12,
+                        "block_hash": "0xblock0c",
+                        "timestamp": "2026-04-17T00:00:12Z"
+                    }
+                })
+            );
+
+            let child_ids = payload
+                .data
+                .iter()
+                .map(|row| {
+                    row.get("logical_name_id")
+                        .and_then(Value::as_str)
+                        .expect("child row must include logical_name_id")
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                child_ids,
+                vec!["ens:alice.parent.eth", "ens:bob.parent.eth"]
+            );
+            assert_eq!(
+                payload.data[0].get("surface_class").and_then(Value::as_str),
+                Some("declared")
+            );
+
+            database.cleanup().await?;
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn name_children_contract_include_counts_returns_declared_subname_count() -> Result<()>
+        {
+            let database = HarnessDatabase::new().await?;
+            let parent_logical_name_id = "ens:parent.eth";
+
+            bigname_storage::upsert_name_surfaces(
+                &database.pool,
+                &[
+                    collection_name_surface(
+                        parent_logical_name_id,
+                        "parent.eth",
+                        "node:parent.eth",
+                        20,
+                    ),
+                    collection_name_surface(
+                        "ens:alice.parent.eth",
+                        "alice.parent.eth",
+                        "node:alice.parent.eth",
+                        21,
+                    ),
+                    collection_name_surface(
+                        "ens:bob.parent.eth",
+                        "bob.parent.eth",
+                        "node:bob.parent.eth",
+                        22,
+                    ),
+                ],
+            )
+            .await
+            .context("failed to upsert name surfaces for children counts conformance")?;
+            bigname_storage::upsert_children_current_rows(
+                &database.pool,
+                &[
+                    declared_child_row(
+                        parent_logical_name_id,
+                        "ens:alice.parent.eth",
+                        "alice.parent.eth",
+                        "node:alice.parent.eth",
+                        301,
+                        21,
+                    ),
+                    declared_child_row(
+                        parent_logical_name_id,
+                        "ens:bob.parent.eth",
+                        "bob.parent.eth",
+                        "node:bob.parent.eth",
+                        302,
+                        22,
+                    ),
+                ],
+            )
+            .await
+            .context("failed to upsert children_current rows for counts conformance")?;
+
+            let response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri("/v1/names/ens/parent.eth/children?include=counts")
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("children counts request failed")?;
+
+            assert_eq!(response.status(), StatusCode::OK);
+
+            let payload: ChildrenResponse = read_json(response).await?;
+            assert_eq!(payload.declared_state.get("subname_count"), Some(&json!(2)));
+            assert_eq!(payload.data.len(), 2);
+
+            database.cleanup().await?;
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn name_children_contract_rejects_non_declared_surface_classes() -> Result<()> {
+            let database = HarnessDatabase::new().await?;
+
+            bigname_storage::upsert_name_surfaces(
+                &database.pool,
+                &[collection_name_surface(
+                    "ens:parent.eth",
+                    "parent.eth",
+                    "node:parent.eth",
+                    30,
+                )],
+            )
+            .await
+            .context("failed to upsert parent surface for surface_classes conformance")?;
+
+            let response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri("/v1/names/ens/parent.eth/children?surface_classes=declared,linked")
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("children unsupported surface_classes request failed")?;
+
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+            let payload: ErrorResponse = read_json(response).await?;
+            assert_eq!(payload.error.code, "unsupported");
+            assert_eq!(
+                payload.error.message,
+                "surface_classes other than declared are not yet supported"
+            );
+            assert!(payload.error.details.is_empty());
+
+            database.cleanup().await?;
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn address_names_contract_returns_surface_first_rows_sorted_with_stable_relation_facets()
+        -> Result<()> {
+            let database = HarnessDatabase::new().await?;
+            let address = "0x0000000000000000000000000000000000000bbb";
+            let alpha_resource_id = Uuid::from_u128(0x8100);
+            let alpha_token_lineage_id = Uuid::from_u128(0x8101);
+            let alpha_surface_binding_id = Uuid::from_u128(0x8102);
+            let beta_resource_id = Uuid::from_u128(0x8200);
+            let beta_token_lineage_id = Uuid::from_u128(0x8201);
+            let beta_surface_binding_id = Uuid::from_u128(0x8202);
+
+            bigname_storage::upsert_token_lineages(
+                &database.pool,
+                &[
+                    address_name_token_lineage(alpha_token_lineage_id, "0xalpha", 11),
+                    address_name_token_lineage(beta_token_lineage_id, "0xbeta", 12),
+                ],
+            )
+            .await
+            .context("failed to upsert token lineages for address-name conformance")?;
+            bigname_storage::upsert_resources(
+                &database.pool,
+                &[
+                    address_name_resource(
+                        alpha_resource_id,
+                        Some(alpha_token_lineage_id),
+                        "0xalpha",
+                        11,
+                    ),
+                    address_name_resource(
+                        beta_resource_id,
+                        Some(beta_token_lineage_id),
+                        "0xbeta",
+                        12,
+                    ),
+                ],
+            )
+            .await
+            .context("failed to upsert resources for address-name conformance")?;
+            bigname_storage::upsert_name_surfaces(
+                &database.pool,
+                &[
+                    collection_name_surface("ens:beta.eth", "beta.eth", "node:beta.eth", 12),
+                    collection_name_surface("ens:alpha.eth", "alpha.eth", "node:alpha.eth", 11),
+                ],
+            )
+            .await
+            .context("failed to upsert name surfaces for address-name conformance")?;
+            bigname_storage::upsert_surface_bindings(
+                &database.pool,
+                &[
+                    address_name_surface_binding(
+                        beta_surface_binding_id,
+                        "ens:beta.eth",
+                        beta_resource_id,
+                        "0xbeta",
+                        12,
+                        1_717_173_012,
+                    ),
+                    address_name_surface_binding(
+                        alpha_surface_binding_id,
+                        "ens:alpha.eth",
+                        alpha_resource_id,
+                        "0xalpha",
+                        11,
+                        1_717_173_011,
+                    ),
+                ],
+            )
+            .await
+            .context("failed to upsert surface bindings for address-name conformance")?;
+            bigname_storage::upsert_address_names_current_rows(
+                &database.pool,
+                &[
+                    address_name_current_row(
+                        address,
+                        "ens:beta.eth",
+                        bigname_storage::AddressNameRelation::EffectiveController,
+                        "beta.eth",
+                        "beta.eth",
+                        "node:beta.eth",
+                        beta_surface_binding_id,
+                        beta_resource_id,
+                        Some(beta_token_lineage_id),
+                        12,
+                    ),
+                    address_name_current_row(
+                        address,
+                        "ens:alpha.eth",
+                        bigname_storage::AddressNameRelation::TokenHolder,
+                        "alpha.eth",
+                        "alpha.eth",
+                        "node:alpha.eth",
+                        alpha_surface_binding_id,
+                        alpha_resource_id,
+                        Some(alpha_token_lineage_id),
+                        11,
+                    ),
+                    address_name_current_row(
+                        address,
+                        "ens:alpha.eth",
+                        bigname_storage::AddressNameRelation::Registrant,
+                        "alpha.eth",
+                        "alpha.eth",
+                        "node:alpha.eth",
+                        alpha_surface_binding_id,
+                        alpha_resource_id,
+                        Some(alpha_token_lineage_id),
+                        11,
+                    ),
+                ],
+            )
+            .await
+            .context("failed to upsert address_names_current rows for conformance")?;
+
+            let response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/v1/addresses/{address}/names"))
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("address names request failed")?;
+
+            assert_eq!(response.status(), StatusCode::OK);
+
+            let payload: AddressNamesResponse = read_json(response).await?;
+            assert!(
+                payload
+                    .declared_state
+                    .as_object()
+                    .map(|value| value.is_empty())
+                    .unwrap_or(false)
+            );
+            assert_eq!(payload.coverage.status, "full");
+            assert_eq!(payload.coverage.exhaustiveness, "authoritative");
+            assert_eq!(
+                payload.coverage.source_classes_considered,
+                vec!["ensv1_registry_path".to_owned()]
+            );
+            assert_eq!(
+                payload.coverage.enumeration_basis,
+                "surface_current_relations"
+            );
+            assert_eq!(payload.page.sort, "display_name_asc");
+            assert_eq!(payload.page.page_size, 2);
+            assert_eq!(payload.consistency, "finalized");
+
+            let logical_name_ids = payload
+                .data
+                .iter()
+                .map(|row| {
+                    row.get("logical_name_id")
+                        .and_then(Value::as_str)
+                        .expect("address-name row must include logical_name_id")
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(logical_name_ids, vec!["ens:alpha.eth", "ens:beta.eth"]);
+            assert_eq!(
+                payload.data[0].get("relation_facets"),
+                Some(&json!(["registrant", "token_holder"]))
+            );
+            assert_eq!(
+                payload.data[1].get("relation_facets"),
+                Some(&json!(["effective_controller"]))
+            );
+
+            database.cleanup().await?;
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn address_names_contract_honors_namespace_and_relation_filters() -> Result<()> {
+            let database = HarnessDatabase::new().await?;
+            let address = "0x0000000000000000000000000000000000000abc";
+            let ens_resource_id = Uuid::from_u128(0x8300);
+            let ens_token_lineage_id = Uuid::from_u128(0x8301);
+            let ens_surface_binding_id = Uuid::from_u128(0x8302);
+            let base_resource_id = Uuid::from_u128(0x8400);
+            let base_surface_binding_id = Uuid::from_u128(0x8402);
+
+            bigname_storage::upsert_token_lineages(
+                &database.pool,
+                &[address_name_token_lineage(
+                    ens_token_lineage_id,
+                    "0xens",
+                    21,
+                )],
+            )
+            .await
+            .context("failed to upsert filtered token lineage for conformance")?;
+            bigname_storage::upsert_resources(
+                &database.pool,
+                &[
+                    address_name_resource(ens_resource_id, Some(ens_token_lineage_id), "0xens", 21),
+                    address_name_resource(base_resource_id, None, "0xbase", 22),
+                ],
+            )
+            .await
+            .context("failed to upsert filtered resources for conformance")?;
+            bigname_storage::upsert_name_surfaces(
+                &database.pool,
+                &[
+                    collection_name_surface("ens:alice.eth", "alice.eth", "node:alice.eth", 21),
+                    collection_name_surface(
+                        "basenames:alice.base.eth",
+                        "alice.base.eth",
+                        "node:alice.base.eth",
+                        22,
+                    ),
+                ],
+            )
+            .await
+            .context("failed to upsert filtered name surfaces for conformance")?;
+            bigname_storage::upsert_surface_bindings(
+                &database.pool,
+                &[
+                    address_name_surface_binding(
+                        ens_surface_binding_id,
+                        "ens:alice.eth",
+                        ens_resource_id,
+                        "0xens",
+                        21,
+                        1_717_173_021,
+                    ),
+                    address_name_surface_binding(
+                        base_surface_binding_id,
+                        "basenames:alice.base.eth",
+                        base_resource_id,
+                        "0xbase",
+                        22,
+                        1_717_173_022,
+                    ),
+                ],
+            )
+            .await
+            .context("failed to upsert filtered surface bindings for conformance")?;
+            bigname_storage::upsert_address_names_current_rows(
+                &database.pool,
+                &[
+                    address_name_current_row(
+                        address,
+                        "ens:alice.eth",
+                        bigname_storage::AddressNameRelation::Registrant,
+                        "alice.eth",
+                        "alice.eth",
+                        "node:alice.eth",
+                        ens_surface_binding_id,
+                        ens_resource_id,
+                        Some(ens_token_lineage_id),
+                        21,
+                    ),
+                    address_name_current_row(
+                        address,
+                        "basenames:alice.base.eth",
+                        bigname_storage::AddressNameRelation::EffectiveController,
+                        "alice.base.eth",
+                        "alice.base.eth",
+                        "node:alice.base.eth",
+                        base_surface_binding_id,
+                        base_resource_id,
+                        None,
+                        22,
+                    ),
+                ],
+            )
+            .await
+            .context("failed to upsert filtered address_names_current rows for conformance")?;
+
+            let response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/v1/addresses/{address}/names?namespace=ens&relation=registrant"
+                        ))
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("filtered address names request failed")?;
+
+            assert_eq!(response.status(), StatusCode::OK);
+
+            let payload: AddressNamesResponse = read_json(response).await?;
+            assert_eq!(payload.data.len(), 1);
+            assert_eq!(
+                payload.data[0].get("logical_name_id"),
+                Some(&Value::String("ens:alice.eth".to_owned()))
+            );
+            assert_eq!(
+                payload.data[0].get("relation_facets"),
+                Some(&json!(["registrant"]))
+            );
+
+            database.cleanup().await?;
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn address_names_contract_dedupe_by_resource_changes_grouping_only() -> Result<()> {
+            let database = HarnessDatabase::new().await?;
+            let address = "0x0000000000000000000000000000000000000def";
+            let shared_resource_id = Uuid::from_u128(0x8500);
+            let shared_token_lineage_id = Uuid::from_u128(0x8501);
+            let alpha_surface_binding_id = Uuid::from_u128(0x8502);
+            let beta_surface_binding_id = Uuid::from_u128(0x8503);
+
+            bigname_storage::upsert_token_lineages(
+                &database.pool,
+                &[address_name_token_lineage(
+                    shared_token_lineage_id,
+                    "0xshared",
+                    31,
+                )],
+            )
+            .await
+            .context("failed to upsert shared token lineage for conformance")?;
+            bigname_storage::upsert_resources(
+                &database.pool,
+                &[address_name_resource(
+                    shared_resource_id,
+                    Some(shared_token_lineage_id),
+                    "0xshared",
+                    31,
+                )],
+            )
+            .await
+            .context("failed to upsert shared resource for conformance")?;
+            bigname_storage::upsert_name_surfaces(
+                &database.pool,
+                &[
+                    collection_name_surface("ens:beta.eth", "beta.eth", "node:beta.eth", 31),
+                    collection_name_surface("ens:alpha.eth", "alpha.eth", "node:alpha.eth", 31),
+                ],
+            )
+            .await
+            .context("failed to upsert shared name surfaces for conformance")?;
+            bigname_storage::upsert_surface_bindings(
+                &database.pool,
+                &[
+                    address_name_surface_binding(
+                        beta_surface_binding_id,
+                        "ens:beta.eth",
+                        shared_resource_id,
+                        "0xshared",
+                        31,
+                        1_717_173_031,
+                    ),
+                    address_name_surface_binding(
+                        alpha_surface_binding_id,
+                        "ens:alpha.eth",
+                        shared_resource_id,
+                        "0xshared",
+                        31,
+                        1_717_173_031,
+                    ),
+                ],
+            )
+            .await
+            .context("failed to upsert shared surface bindings for conformance")?;
+            bigname_storage::upsert_address_names_current_rows(
+                &database.pool,
+                &[
+                    address_name_current_row(
+                        address,
+                        "ens:beta.eth",
+                        bigname_storage::AddressNameRelation::EffectiveController,
+                        "beta.eth",
+                        "beta.eth",
+                        "node:beta.eth",
+                        beta_surface_binding_id,
+                        shared_resource_id,
+                        Some(shared_token_lineage_id),
+                        31,
+                    ),
+                    address_name_current_row(
+                        address,
+                        "ens:alpha.eth",
+                        bigname_storage::AddressNameRelation::Registrant,
+                        "alpha.eth",
+                        "alpha.eth",
+                        "node:alpha.eth",
+                        alpha_surface_binding_id,
+                        shared_resource_id,
+                        Some(shared_token_lineage_id),
+                        31,
+                    ),
+                    address_name_current_row(
+                        address,
+                        "ens:alpha.eth",
+                        bigname_storage::AddressNameRelation::TokenHolder,
+                        "alpha.eth",
+                        "alpha.eth",
+                        "node:alpha.eth",
+                        alpha_surface_binding_id,
+                        shared_resource_id,
+                        Some(shared_token_lineage_id),
+                        31,
+                    ),
+                ],
+            )
+            .await
+            .context("failed to upsert shared address_names_current rows for conformance")?;
+
+            let surface_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/v1/addresses/{address}/names?dedupe_by=surface"))
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("surface-dedupe address names request failed")?;
+            let surface_payload: AddressNamesResponse = read_json(surface_response).await?;
+            assert_eq!(surface_payload.data.len(), 2);
+
+            let resource_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/v1/addresses/{address}/names?dedupe_by=resource"))
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("resource-dedupe address names request failed")?;
+
+            assert_eq!(resource_response.status(), StatusCode::OK);
+
+            let resource_payload: AddressNamesResponse = read_json(resource_response).await?;
+            assert_eq!(resource_payload.data.len(), 1);
+            assert_eq!(
+                resource_payload.data[0].get("logical_name_id"),
+                Some(&Value::String("ens:alpha.eth".to_owned()))
+            );
+            assert_eq!(
+                resource_payload.data[0].get("resource_id"),
+                Some(&Value::String(shared_resource_id.to_string()))
+            );
+            assert_eq!(
+                resource_payload.data[0].get("relation_facets"),
+                Some(&json!([
+                    "registrant",
+                    "token_holder",
+                    "effective_controller"
+                ]))
+            );
+            assert_eq!(resource_payload.coverage, surface_payload.coverage);
 
             database.cleanup().await?;
             Ok(())
@@ -938,6 +1648,210 @@ mod shipped_api {
                         .expect("history row must include event_identity")
                 })
                 .collect()
+        }
+
+        fn collection_name_surface(
+            logical_name_id: &str,
+            display_name: &str,
+            namehash: &str,
+            block_number: i64,
+        ) -> NameSurface {
+            let namespace = logical_name_id
+                .split_once(':')
+                .map(|(namespace, _)| namespace)
+                .expect("logical_name_id must include namespace")
+                .to_owned();
+
+            NameSurface {
+                logical_name_id: logical_name_id.to_owned(),
+                namespace,
+                input_name: display_name.to_owned(),
+                canonical_display_name: display_name.to_owned(),
+                normalized_name: display_name.to_owned(),
+                dns_encoded_name: display_name.as_bytes().to_vec(),
+                namehash: namehash.to_owned(),
+                labelhashes: vec![format!("labelhash:{display_name}")],
+                normalizer_version: "ensip15@2026-04-16".to_owned(),
+                normalization_warnings: json!([]),
+                normalization_errors: json!([]),
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: format!("0xsurface{block_number:02x}"),
+                block_number,
+                provenance: json!({"seed": "children_surface"}),
+                canonicality_state: CanonicalityState::Finalized,
+            }
+        }
+
+        fn declared_child_row(
+            parent_logical_name_id: &str,
+            child_logical_name_id: &str,
+            display_name: &str,
+            namehash: &str,
+            normalized_event_id: i64,
+            block_number: i64,
+        ) -> bigname_storage::ChildrenCurrentRow {
+            bigname_storage::ChildrenCurrentRow {
+                parent_logical_name_id: parent_logical_name_id.to_owned(),
+                child_logical_name_id: child_logical_name_id.to_owned(),
+                surface_class: "declared".to_owned(),
+                namespace: "ens".to_owned(),
+                canonical_display_name: display_name.to_owned(),
+                normalized_name: display_name.to_owned(),
+                namehash: namehash.to_owned(),
+                provenance: json!({
+                    "normalized_event_ids": [normalized_event_id],
+                    "raw_fact_refs": [{
+                        "kind": "raw_log",
+                        "block_number": block_number,
+                    }],
+                    "manifest_versions": [{
+                        "manifest_version": 1,
+                        "source_family": "ens_v1_registry_l1",
+                        "source_manifest_id": null,
+                    }],
+                    "execution_trace_id": null,
+                    "derivation_kind": "children_current_rebuild",
+                }),
+                chain_positions: json!({
+                    "ethereum": {
+                        "chain_id": "ethereum-mainnet",
+                        "block_number": block_number,
+                        "block_hash": format!("0xblock{block_number:02x}"),
+                        "timestamp": format!("2026-04-17T00:00:{:02}Z", block_number % 60),
+                    }
+                }),
+                canonicality_summary: json!({
+                    "status": "finalized",
+                    "chains": {
+                        "ethereum-mainnet": "finalized"
+                    }
+                }),
+                manifest_version: 1,
+                last_recomputed_at: timestamp(1_717_172_000 + block_number),
+            }
+        }
+
+        fn address_name_token_lineage(
+            token_lineage_id: Uuid,
+            block_hash: &str,
+            block_number: i64,
+        ) -> TokenLineage {
+            TokenLineage {
+                token_lineage_id,
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: block_hash.to_owned(),
+                block_number,
+                provenance: json!({"seed": "address_name_token_lineage"}),
+                canonicality_state: CanonicalityState::Finalized,
+            }
+        }
+
+        fn address_name_resource(
+            resource_id: Uuid,
+            token_lineage_id: Option<Uuid>,
+            block_hash: &str,
+            block_number: i64,
+        ) -> Resource {
+            Resource {
+                resource_id,
+                token_lineage_id,
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: block_hash.to_owned(),
+                block_number,
+                provenance: json!({"seed": "address_name_resource"}),
+                canonicality_state: CanonicalityState::Finalized,
+            }
+        }
+
+        fn address_name_surface_binding(
+            surface_binding_id: Uuid,
+            logical_name_id: &str,
+            resource_id: Uuid,
+            block_hash: &str,
+            block_number: i64,
+            active_from: i64,
+        ) -> SurfaceBinding {
+            SurfaceBinding {
+                surface_binding_id,
+                logical_name_id: logical_name_id.to_owned(),
+                resource_id,
+                binding_kind: SurfaceBindingKind::DeclaredRegistryPath,
+                active_from: timestamp(active_from),
+                active_to: None,
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: block_hash.to_owned(),
+                block_number,
+                provenance: json!({"seed": "address_name_binding"}),
+                canonicality_state: CanonicalityState::Finalized,
+            }
+        }
+
+        fn address_name_current_row(
+            address: &str,
+            logical_name_id: &str,
+            relation: bigname_storage::AddressNameRelation,
+            display_name: &str,
+            normalized_name: &str,
+            namehash: &str,
+            surface_binding_id: Uuid,
+            resource_id: Uuid,
+            token_lineage_id: Option<Uuid>,
+            block_number: i64,
+        ) -> bigname_storage::AddressNameCurrentRow {
+            bigname_storage::AddressNameCurrentRow {
+                address: address.to_owned(),
+                logical_name_id: logical_name_id.to_owned(),
+                relation,
+                namespace: logical_name_id
+                    .split_once(':')
+                    .map(|(namespace, _)| namespace)
+                    .expect("logical_name_id must include namespace")
+                    .to_owned(),
+                canonical_display_name: display_name.to_owned(),
+                normalized_name: normalized_name.to_owned(),
+                namehash: namehash.to_owned(),
+                surface_binding_id,
+                resource_id,
+                token_lineage_id,
+                binding_kind: SurfaceBindingKind::DeclaredRegistryPath,
+                provenance: json!({
+                    "normalized_event_ids": [block_number],
+                    "raw_fact_refs": [{
+                        "kind": "raw_log",
+                        "block_number": block_number,
+                    }],
+                    "manifest_versions": [{
+                        "manifest_version": 3,
+                        "source_family": "ens_v1_registrar_l1",
+                        "source_manifest_id": null,
+                    }],
+                    "execution_trace_id": null,
+                    "derivation_kind": "address_names_current_rebuild",
+                }),
+                coverage: json!({
+                    "status": "full",
+                    "exhaustiveness": "authoritative",
+                    "source_classes_considered": ["ensv1_registry_path"],
+                    "unsupported_reason": null,
+                    "enumeration_basis": "surface_current_relations",
+                }),
+                chain_positions: json!({
+                    "ethereum": {
+                        "chain_id": "ethereum-mainnet",
+                        "block_number": block_number,
+                        "block_hash": format!("0xaddr{block_number:02x}"),
+                        "timestamp": format!("2026-04-17T00:00:{:02}Z", block_number % 60),
+                    }
+                }),
+                canonicality_summary: json!({
+                    "status": "finalized",
+                    "chains": {
+                        "ethereum-mainnet": "finalized"
+                    }
+                }),
+                manifest_version: 3,
+                last_recomputed_at: timestamp(1_717_173_000 + block_number),
+            }
         }
 
         fn exact_name_row(
