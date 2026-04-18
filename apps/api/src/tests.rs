@@ -9264,7 +9264,7 @@ async fn get_primary_names_reads_declared_claim_status_for_exact_tuple() -> Resu
 }
 
 #[tokio::test]
-async fn get_primary_names_keeps_invalid_name_declared_status_shaped() -> Result<()> {
+async fn get_primary_names_reads_raw_claim_name_for_invalid_name_exact_tuple() -> Result<()> {
     let database = TestDatabase::new(false).await?;
     database.create_primary_names_current_table().await?;
     database
@@ -9301,9 +9301,13 @@ async fn get_primary_names_keeps_invalid_name_declared_status_shaped() -> Result
         claimed_primary_name.get("status"),
         Some(&json!("invalid_name"))
     );
+    assert_eq!(
+        claimed_primary_name.get("raw_claim_name"),
+        Some(&json!("alice..eth"))
+    );
     assert!(
-        !claimed_primary_name.contains_key("raw_claim_name"),
-        "status-only declared readback must not surface raw_claim_name yet"
+        !claimed_primary_name.contains_key("name"),
+        "declared invalid-name readback must not backfill claimed_primary_name.name"
     );
     assert_eq!(
         payload.verified_state,
@@ -9911,8 +9915,10 @@ fn openapi_document_freezes_query_params_and_shared_envelopes() {
             .and_then(Value::as_object)
             .and_then(|properties| properties.get("declared_state")),
         Some(&json!({
-            "type": ["object", "null"],
-            "additionalProperties": true,
+            "anyOf": [
+                { "$ref": "#/components/schemas/PrimaryNameDeclaredState" },
+                { "$ref": "#/components/schemas/NullValue" },
+            ],
         }))
     );
     assert_eq!(
@@ -9921,10 +9927,74 @@ fn openapi_document_freezes_query_params_and_shared_envelopes() {
             .and_then(Value::as_object)
             .and_then(|properties| properties.get("verified_state")),
         Some(&json!({
-            "type": ["object", "null"],
-            "additionalProperties": true,
+            "anyOf": [
+                { "$ref": "#/components/schemas/PrimaryNameVerifiedState" },
+                { "$ref": "#/components/schemas/NullValue" },
+            ],
         }))
     );
+    let primary_name_declared_state = openapi_schema(&document, "PrimaryNameDeclaredState");
+    assert_eq!(
+        required_fields(primary_name_declared_state),
+        vec!["claimed_primary_name"]
+    );
+    assert_eq!(
+        primary_name_declared_state
+            .get("properties")
+            .and_then(Value::as_object)
+            .and_then(|properties| properties.get("claimed_primary_name")),
+        Some(&json!({ "$ref": "#/components/schemas/PrimaryNameClaimedResult" }))
+    );
+    assert_eq!(
+        primary_name_declared_state.get("additionalProperties"),
+        Some(&json!(false))
+    );
+
+    let primary_name_verified_state = openapi_schema(&document, "PrimaryNameVerifiedState");
+    assert_eq!(
+        required_fields(primary_name_verified_state),
+        vec!["verified_primary_name"]
+    );
+    assert_eq!(
+        primary_name_verified_state
+            .get("properties")
+            .and_then(Value::as_object)
+            .and_then(|properties| properties.get("verified_primary_name")),
+        Some(&json!({ "$ref": "#/components/schemas/JsonObject" }))
+    );
+    assert_eq!(
+        primary_name_verified_state.get("additionalProperties"),
+        Some(&json!(false))
+    );
+
+    let primary_name_claimed_result = openapi_schema(&document, "PrimaryNameClaimedResult");
+    let primary_name_claimed_variants = primary_name_claimed_result
+        .get("oneOf")
+        .and_then(Value::as_array)
+        .expect("PrimaryNameClaimedResult must define oneOf variants");
+    assert!(primary_name_claimed_variants.iter().any(|variant| {
+        variant
+            == &json!({
+                "type": "object",
+                "required": ["status", "raw_claim_name"],
+                "properties": {
+                    "status": {
+                        "type": "string",
+                        "const": "invalid_name",
+                    },
+                    "raw_claim_name": {
+                        "type": "string",
+                    },
+                },
+                "additionalProperties": false,
+            })
+    }));
+    assert!(primary_name_claimed_variants.iter().all(|variant| {
+        !variant
+            .get("properties")
+            .and_then(Value::as_object)
+            .is_some_and(|properties| properties.contains_key("name"))
+    }));
 
     let coverage = openapi_schema(&document, "CoverageResponse");
     assert_eq!(

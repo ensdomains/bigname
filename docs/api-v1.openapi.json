@@ -498,6 +498,69 @@
       "NullValue": {
         "type": "null"
       },
+      "PrimaryNameClaimedResult": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "status": {
+                "const": "success",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "status": {
+                "const": "not_found",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "status": {
+                "const": "unsupported",
+                "type": "string"
+              },
+              "unsupported_reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "status"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "raw_claim_name": {
+                "type": "string"
+              },
+              "status": {
+                "const": "invalid_name",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "raw_claim_name"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "PrimaryNameData": {
         "properties": {
           "address": {
@@ -521,6 +584,18 @@
         ],
         "type": "object"
       },
+      "PrimaryNameDeclaredState": {
+        "additionalProperties": false,
+        "properties": {
+          "claimed_primary_name": {
+            "$ref": "#/components/schemas/PrimaryNameClaimedResult"
+          }
+        },
+        "required": [
+          "claimed_primary_name"
+        ],
+        "type": "object"
+      },
       "PrimaryNameResponse": {
         "properties": {
           "chain_positions": {
@@ -536,10 +611,13 @@
             "$ref": "#/components/schemas/PrimaryNameData"
           },
           "declared_state": {
-            "additionalProperties": true,
-            "type": [
-              "object",
-              "null"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PrimaryNameDeclaredState"
+              },
+              {
+                "$ref": "#/components/schemas/NullValue"
+              }
             ]
           },
           "last_updated": {
@@ -550,10 +628,13 @@
             "$ref": "#/components/schemas/Provenance"
           },
           "verified_state": {
-            "additionalProperties": true,
-            "type": [
-              "object",
-              "null"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PrimaryNameVerifiedState"
+              },
+              {
+                "$ref": "#/components/schemas/NullValue"
+              }
             ]
           }
         },
@@ -566,6 +647,18 @@
           "chain_positions",
           "consistency",
           "last_updated"
+        ],
+        "type": "object"
+      },
+      "PrimaryNameVerifiedState": {
+        "additionalProperties": false,
+        "properties": {
+          "verified_primary_name": {
+            "$ref": "#/components/schemas/JsonObject"
+          }
+        },
+        "required": [
+          "verified_primary_name"
         ],
         "type": "object"
       },

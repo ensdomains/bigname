@@ -19,8 +19,8 @@ use bigname_manifests::{
 use bigname_storage::{
     AddressNameCurrentEntry, AddressNameRelation, AddressNamesCurrentDedupe, ChildrenCurrentRow,
     DatabaseConfig, ExecutionCacheKey, ExecutionOutcome, ExecutionTrace, HistoryEvent,
-    HistoryScope, NameCurrentRow, PermissionScope, PermissionsCurrentRow, PrimaryNameCurrentRow,
-    RecordInventoryCurrentRow, ResolverCurrentRow, SurfaceBindingKind,
+    HistoryScope, NameCurrentRow, PermissionScope, PermissionsCurrentRow, PrimaryNameClaimStatus,
+    PrimaryNameCurrentRow, RecordInventoryCurrentRow, ResolverCurrentRow, SurfaceBindingKind,
     VERIFIED_PRIMARY_NAME_REQUEST_TYPE, collapse_address_name_current_rows, load_address_history,
     load_address_names_current, load_children_current, load_execution_outcome,
     load_execution_trace, load_name_current, load_name_history, load_name_surface,
@@ -1186,6 +1186,23 @@ fn openapi_components() -> JsonValue {
                     "coin_type": { "type": "string" },
                 },
             }),
+            "PrimaryNameClaimedResult": primary_name_claimed_result_schema(),
+            "PrimaryNameDeclaredState": json!({
+                "type": "object",
+                "required": ["claimed_primary_name"],
+                "properties": {
+                    "claimed_primary_name": schema_ref("PrimaryNameClaimedResult"),
+                },
+                "additionalProperties": false,
+            }),
+            "PrimaryNameVerifiedState": json!({
+                "type": "object",
+                "required": ["verified_primary_name"],
+                "properties": {
+                    "verified_primary_name": schema_ref("JsonObject"),
+                },
+                "additionalProperties": false,
+            }),
             "ExactNameResponse": declared_response_schema(
                 schema_ref("ExactNameData"),
                 schema_ref("JsonObject"),
@@ -1195,7 +1212,7 @@ fn openapi_components() -> JsonValue {
                 schema_ref("JsonObject"),
             ),
             "ResolutionResponse": mixed_response_schema(schema_ref("ExactNameData")),
-            "PrimaryNameResponse": mixed_response_schema(schema_ref("PrimaryNameData")),
+            "PrimaryNameResponse": primary_name_response_schema(),
             "CollectionResponse": paginated_declared_response_schema(
                 json!({
                     "type": "array",
@@ -1392,6 +1409,92 @@ fn mixed_response_schema(data_schema: JsonValue) -> JsonValue {
     })
 }
 
+fn primary_name_response_schema() -> JsonValue {
+    json!({
+        "type": "object",
+        "required": [
+            "data",
+            "declared_state",
+            "verified_state",
+            "provenance",
+            "coverage",
+            "chain_positions",
+            "consistency",
+            "last_updated",
+        ],
+        "properties": {
+            "data": schema_ref("PrimaryNameData"),
+            "declared_state": nullable_ref_schema("PrimaryNameDeclaredState"),
+            "verified_state": nullable_ref_schema("PrimaryNameVerifiedState"),
+            "provenance": schema_ref("Provenance"),
+            "coverage": schema_ref("CoverageResponse"),
+            "chain_positions": schema_ref("ChainPositions"),
+            "consistency": schema_ref("Consistency"),
+            "last_updated": {
+                "type": "string",
+                "format": "date-time",
+            },
+        },
+    })
+}
+
+fn primary_name_claimed_result_schema() -> JsonValue {
+    json!({
+        "oneOf": [
+            json!({
+                "type": "object",
+                "required": ["status"],
+                "properties": {
+                    "status": {
+                        "type": "string",
+                        "const": "success",
+                    },
+                },
+                "additionalProperties": false,
+            }),
+            json!({
+                "type": "object",
+                "required": ["status"],
+                "properties": {
+                    "status": {
+                        "type": "string",
+                        "const": "not_found",
+                    },
+                },
+                "additionalProperties": false,
+            }),
+            json!({
+                "type": "object",
+                "required": ["status"],
+                "properties": {
+                    "status": {
+                        "type": "string",
+                        "const": "unsupported",
+                    },
+                    "unsupported_reason": {
+                        "type": "string",
+                    },
+                },
+                "additionalProperties": false,
+            }),
+            json!({
+                "type": "object",
+                "required": ["status", "raw_claim_name"],
+                "properties": {
+                    "status": {
+                        "type": "string",
+                        "const": "invalid_name",
+                    },
+                    "raw_claim_name": {
+                        "type": "string",
+                    },
+                },
+                "additionalProperties": false,
+            }),
+        ],
+    })
+}
+
 fn paginated_declared_response_schema(
     data_schema: JsonValue,
     declared_state_schema: JsonValue,
@@ -1467,6 +1570,15 @@ fn json_response(description: &'static str, schema_name: &'static str) -> JsonVa
 fn schema_ref(schema_name: &str) -> JsonValue {
     json!({
         "$ref": format!("#/components/schemas/{schema_name}"),
+    })
+}
+
+fn nullable_ref_schema(schema_name: &str) -> JsonValue {
+    json!({
+        "anyOf": [
+            schema_ref(schema_name),
+            schema_ref("NullValue"),
+        ],
     })
 }
 
@@ -3031,9 +3143,21 @@ fn primary_name_claim_result(tuple_state: &PrimaryNameTupleState) -> JsonValue {
             "declared primary-name claim surface is not yet supported",
         ),
         PrimaryNameTupleState::TupleMissing => primary_name_not_found_result(),
-        PrimaryNameTupleState::TuplePresent(row) => json!({
-            "status": row.claim_status.as_str(),
-        }),
+        PrimaryNameTupleState::TuplePresent(row) => {
+            let mut result = json!({
+                "status": row.claim_status.as_str(),
+            });
+            if row.claim_status == PrimaryNameClaimStatus::InvalidName {
+                insert_string_field(
+                    &mut result,
+                    "raw_claim_name",
+                    row.raw_claim_name
+                        .clone()
+                        .expect("invalid_name primary-name rows must include raw_claim_name"),
+                );
+            }
+            result
+        }
     }
 }
 
