@@ -2096,9 +2096,10 @@ async fn explain_resolution_execution_current(
             ))
         })?;
 
+    let cache_key_records = resolution_execution_cache_lookup_records(&row, &records);
     let cache_key = build_resolution_execution_cache_key(
         &row,
-        &records,
+        &cache_key_records,
         record_inventory_current.as_ref(),
     )
     .map_err(|cache_key_error| {
@@ -3009,7 +3010,7 @@ fn build_resolution_response(
         .then(|| build_resolution_declared_state(&row, record_inventory_row, records));
     let verified_state = mode
         .includes_verified()
-        .then(|| build_resolution_verified_state(records, persisted_verified_outcome))
+        .then(|| build_resolution_verified_state(&row, records, persisted_verified_outcome))
         .transpose()?;
     let provenance = build_name_provenance_with_execution_trace(
         &row.provenance,
@@ -3266,24 +3267,28 @@ fn build_resolution_declared_state(
 }
 
 fn build_resolution_verified_state(
+    row: &NameCurrentRow,
     records: &[ResolutionRecordKey],
     persisted_outcome: Option<&ExecutionOutcome>,
 ) -> Result<JsonValue> {
     let mut verified_state = empty_object();
     let persisted_queries_by_record_key = persisted_outcome
         .map(|outcome| {
-            let supported_records = supported_resolution_verified_records(records);
-            let persisted_queries =
-                reordered_persisted_verified_queries(outcome, &supported_records)?
-                    .as_array()
-                    .cloned()
-                    .context("persisted verified queries must serialize as an array")?;
-            persisted_queries
-                .into_iter()
-                .map(|query| {
-                    let record_key = string_field(provenance_field(&query, "record_key"))
-                        .context("persisted verified query must include record_key")?;
-                    Ok((record_key, query))
+            let supported_records = supported_resolution_verified_readback_records(row, records);
+            let persisted_queries = persisted_verified_queries_by_record_key(outcome)?;
+            supported_records
+                .iter()
+                .map(|record| {
+                    let query = persisted_queries
+                        .get(&record.record_key)
+                        .cloned()
+                        .with_context(|| {
+                            format!(
+                                "persisted execution outcome did not include selector {}",
+                                record.record_key
+                            )
+                        })?;
+                    Ok((record.record_key.clone(), query))
                 })
                 .collect::<Result<BTreeMap<_, _>>>()
         })
@@ -3339,7 +3344,7 @@ fn build_resolution_verified_query(record: &ResolutionRecordKey) -> JsonValue {
     query
 }
 
-fn supported_resolution_verified_records(
+fn supported_resolution_verified_lookup_records(
     records: &[ResolutionRecordKey],
 ) -> Vec<ResolutionRecordKey> {
     records
@@ -3352,6 +3357,20 @@ fn supported_resolution_verified_records(
             "contenthash" => record.record_key == "contenthash" && record.selector_key.is_none(),
             "text" => record.selector_key.is_some(),
             _ => false,
+        })
+        .cloned()
+        .collect()
+}
+
+fn supported_resolution_verified_readback_records(
+    row: &NameCurrentRow,
+    records: &[ResolutionRecordKey],
+) -> Vec<ResolutionRecordKey> {
+    records
+        .iter()
+        .filter(|record| {
+            supports_resolution_verified_lookup_record(record)
+                || (resolution_supports_avatar_readback(row) && is_resolution_avatar_record(record))
         })
         .cloned()
         .collect()
@@ -3370,7 +3389,7 @@ async fn load_resolution_verified_outcome(
         return Ok(None);
     }
 
-    let supported_records = supported_resolution_verified_records(records);
+    let supported_records = supported_resolution_verified_lookup_records(records);
     if supported_records.is_empty() {
         return Ok(None);
     }
@@ -3568,25 +3587,7 @@ fn reordered_persisted_verified_queries(
     outcome: &ExecutionOutcome,
     records: &[ResolutionRecordKey],
 ) -> Result<JsonValue> {
-    let outcome_payload = outcome
-        .outcome_payload
-        .as_ref()
-        .context("persisted execution outcome must set outcome_payload")?;
-    let verified_queries = provenance_field(outcome_payload, "verified_queries")
-        .and_then(JsonValue::as_array)
-        .context("persisted execution outcome must set verified_queries")?;
-
-    let mut queries_by_record_key = BTreeMap::new();
-    for query in verified_queries {
-        let record_key = string_field(provenance_field(query, "record_key"))
-            .context("persisted verified query must include record_key")?;
-        if queries_by_record_key
-            .insert(record_key.clone(), query.clone())
-            .is_some()
-        {
-            bail!("persisted execution outcome contained duplicate verified query {record_key}");
-        }
-    }
+    let queries_by_record_key = persisted_verified_queries_by_record_key(outcome)?;
 
     let requested_record_keys = records
         .iter()
@@ -3618,6 +3619,32 @@ fn reordered_persisted_verified_queries(
             })
             .collect::<Result<Vec<_>>>()?,
     ))
+}
+
+fn persisted_verified_queries_by_record_key(
+    outcome: &ExecutionOutcome,
+) -> Result<BTreeMap<String, JsonValue>> {
+    let outcome_payload = outcome
+        .outcome_payload
+        .as_ref()
+        .context("persisted execution outcome must set outcome_payload")?;
+    let verified_queries = provenance_field(outcome_payload, "verified_queries")
+        .and_then(JsonValue::as_array)
+        .context("persisted execution outcome must set verified_queries")?;
+
+    let mut queries_by_record_key = BTreeMap::new();
+    for query in verified_queries {
+        let record_key = string_field(provenance_field(query, "record_key"))
+            .context("persisted verified query must include record_key")?;
+        if queries_by_record_key
+            .insert(record_key.clone(), query.clone())
+            .is_some()
+        {
+            bail!("persisted execution outcome contained duplicate verified query {record_key}");
+        }
+    }
+
+    Ok(queries_by_record_key)
 }
 
 fn build_resolution_topology(
@@ -3907,6 +3934,27 @@ fn build_requested_chain_positions(chain_positions: &JsonValue) -> Result<JsonVa
     Ok(JsonValue::Array(positions))
 }
 
+fn resolution_execution_cache_lookup_records(
+    row: &NameCurrentRow,
+    records: &[ResolutionRecordKey],
+) -> Vec<ResolutionRecordKey> {
+    if !resolution_supports_avatar_readback(row) {
+        return records.to_vec();
+    }
+
+    let lookup_records = records
+        .iter()
+        .filter(|record| !is_resolution_avatar_record(record))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    if lookup_records.is_empty() || lookup_records.len() == records.len() {
+        records.to_vec()
+    } else {
+        lookup_records
+    }
+}
+
 fn persisted_trace_detail_object(trace: &ExecutionTrace, key: &str) -> Option<JsonValue> {
     provenance_field(&trace.request_metadata, key)
         .filter(|value| value.is_object())
@@ -3962,6 +4010,28 @@ fn record_inventory_lookup_key(row: &NameCurrentRow) -> Option<(Uuid, JsonValue)
         row.resource_id?,
         build_supported_resolution_verified_boundary(row)?,
     ))
+}
+
+fn supports_resolution_verified_lookup_record(record: &ResolutionRecordKey) -> bool {
+    match record.record_family.as_str() {
+        "addr" => record
+            .selector_key
+            .as_deref()
+            .is_some_and(|selector| selector.as_bytes().iter().all(u8::is_ascii_digit)),
+        "contenthash" => record.record_key == "contenthash" && record.selector_key.is_none(),
+        "text" => record.selector_key.is_some(),
+        _ => false,
+    }
+}
+
+fn is_resolution_avatar_record(record: &ResolutionRecordKey) -> bool {
+    record.record_key == "avatar"
+        && record.record_family == "avatar"
+        && record.selector_key.is_none()
+}
+
+fn resolution_supports_avatar_readback(row: &NameCurrentRow) -> bool {
+    build_supported_resolution_verified_boundary(row).is_some()
 }
 
 fn build_supported_resolution_verified_boundary(row: &NameCurrentRow) -> Option<JsonValue> {

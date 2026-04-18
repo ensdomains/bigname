@@ -2568,7 +2568,7 @@ mod shipped_api {
         }
 
         #[tokio::test]
-        async fn resolution_contract_reads_persisted_contenthash_answer_on_mixed_route()
+        async fn resolution_contract_reads_persisted_avatar_answer_on_mixed_route_and_preserves_request_order()
         -> Result<()> {
             let database = HarnessDatabase::new().await?;
             let logical_name_id = "ens:alice.eth";
@@ -2611,7 +2611,7 @@ mod shipped_api {
             let request_key = cache_key.request_key.clone();
             let persisted_verified_queries = resolution_execution_verified_queries(
                 execution_trace_id,
-                &["text:com.twitter", "contenthash", "addr:60"],
+                &["avatar", "text:com.twitter", "contenthash", "addr:60"],
             );
 
             upsert_execution_trace(
@@ -2619,7 +2619,7 @@ mod shipped_api {
                 &resolution_execution_trace(
                     execution_trace_id,
                     &request_key,
-                    &["text:com.twitter", "contenthash", "addr:60"],
+                    &["avatar", "text:com.twitter", "contenthash", "addr:60"],
                     persisted_verified_queries.clone(),
                 ),
             )
@@ -2655,49 +2655,20 @@ mod shipped_api {
                 &["avatar", "text:com.twitter", "contenthash", "addr:60"],
             );
             let expected_verified_state = json!({
-                "verified_queries": [
-                    {
-                        "record_key": "avatar",
-                        "status": "unsupported",
-                        "unsupported_reason": "verified resolution entrypoint is not yet supported",
-                    },
-                    {
-                        "record_key": "text:com.twitter",
-                        "status": "not_found",
-                        "failure_reason": "no_text_record",
-                        "provenance": {
-                            "execution_trace_id": execution_trace_id.to_string(),
-                        },
-                    },
-                    {
-                        "record_key": "contenthash",
-                        "status": "success",
-                        "value": {
-                            "value": resolution_contenthash_value(),
-                        },
-                        "provenance": {
-                            "execution_trace_id": execution_trace_id.to_string(),
-                        },
-                    },
-                    {
-                        "record_key": "addr:60",
-                        "status": "success",
-                        "value": {
-                            "coin_type": "60",
-                            "value": "0x00000000000000000000000000000000000000aa",
-                        },
-                        "provenance": {
-                            "execution_trace_id": execution_trace_id.to_string(),
-                        },
-                    }
-                ]
+                "verified_queries": resolution_execution_verified_queries(
+                    execution_trace_id,
+                    &["avatar", "text:com.twitter", "contenthash", "addr:60"],
+                ),
             });
 
             assert_eq!(
                 payload.provenance.get("execution_trace_id"),
                 Some(&Value::String(execution_trace_id.to_string()))
             );
-            assert_eq!(payload.declared_state.as_ref(), Some(&expected_declared_state));
+            assert_eq!(
+                payload.declared_state.as_ref(),
+                Some(&expected_declared_state)
+            );
             assert_eq!(payload.verified_state, Some(expected_verified_state));
 
             database.cleanup().await?;
@@ -2833,7 +2804,7 @@ mod shipped_api {
         }
 
         #[tokio::test]
-        async fn resolution_execution_explain_contract_reads_persisted_contenthash_answer_and_reuses_resolution_envelope()
+        async fn resolution_execution_explain_contract_reads_persisted_avatar_answer_and_reuses_resolution_envelope()
         -> Result<()> {
             let database = HarnessDatabase::new().await?;
             let logical_name_id = "ens:alice.eth";
@@ -2876,7 +2847,7 @@ mod shipped_api {
             let request_key = cache_key.request_key.clone();
             let persisted_verified_queries = resolution_execution_verified_queries(
                 execution_trace_id,
-                &["text:com.twitter", "contenthash", "addr:60"],
+                &["avatar", "text:com.twitter", "contenthash", "addr:60"],
             );
 
             upsert_execution_trace(
@@ -2884,7 +2855,7 @@ mod shipped_api {
                 &resolution_execution_trace(
                     execution_trace_id,
                     &request_key,
-                    &["text:com.twitter", "contenthash", "addr:60"],
+                    &["avatar", "text:com.twitter", "contenthash", "addr:60"],
                     persisted_verified_queries.clone(),
                 ),
             )
@@ -2903,7 +2874,7 @@ mod shipped_api {
                 .oneshot(
                     Request::builder()
                         .uri(
-                            "/v1/explain/resolutions/ens/alice.eth/execution?records=text:com.twitter,contenthash,addr:60",
+                            "/v1/explain/resolutions/ens/alice.eth/execution?records=avatar,text:com.twitter,contenthash,addr:60",
                         )
                         .body(Body::empty())
                         .expect("request must build"),
@@ -2914,7 +2885,7 @@ mod shipped_api {
                 .oneshot(
                     Request::builder()
                         .uri(
-                            "/v1/resolutions/ens/alice.eth?mode=verified&records=text:com.twitter,contenthash,addr:60",
+                            "/v1/resolutions/ens/alice.eth?mode=verified&records=avatar,text:com.twitter,contenthash,addr:60",
                         )
                         .body(Body::empty())
                         .expect("request must build"),
@@ -2929,15 +2900,12 @@ mod shipped_api {
             let resolution_payload: ResolutionResponse = read_json(resolution_response).await?;
             let expected_verified_queries = resolution_execution_verified_queries(
                 execution_trace_id,
-                &["text:com.twitter", "contenthash", "addr:60"],
+                &["avatar", "text:com.twitter", "contenthash", "addr:60"],
             );
 
             assert_eq!(explain_payload.data, resolution_payload.data);
             assert_eq!(explain_payload.coverage, resolution_payload.coverage);
-            assert_eq!(
-                explain_payload.provenance,
-                resolution_payload.provenance
-            );
+            assert_eq!(explain_payload.provenance, resolution_payload.provenance);
             assert_eq!(
                 explain_payload.chain_positions,
                 resolution_payload.chain_positions
@@ -2967,7 +2935,7 @@ mod shipped_api {
         }
 
         #[tokio::test]
-        async fn resolution_contract_reads_persisted_alias_only_answer_on_mixed_route()
+        async fn resolution_contract_reads_persisted_alias_only_avatar_answer_on_mixed_route()
         -> Result<()> {
             let database = HarnessDatabase::new().await?;
             let logical_name_id = "ens:alice.eth";
@@ -3017,28 +2985,20 @@ mod shipped_api {
                 Some(&record_inventory_row),
             )?;
             let request_key = cache_key.request_key.clone();
-            let persisted_verified_queries = json!([
-                {
-                    "record_key": "text:com.twitter",
-                    "status": "success",
-                    "value": {
-                        "value": "@alice-via-alias",
-                    },
-                    "provenance": {
-                        "execution_trace_id": execution_trace_id.to_string(),
-                    }
-                }
-            ]);
+            let persisted_verified_queries = resolution_alias_only_verified_queries(
+                execution_trace_id,
+                &["avatar", "text:com.twitter"],
+            );
 
             let mut trace = resolution_execution_trace(
                 execution_trace_id,
                 &request_key,
-                &["text:com.twitter"],
+                &["avatar", "text:com.twitter"],
                 persisted_verified_queries.clone(),
             );
             trace.request_metadata = json!({
                 "surface": "alice.eth",
-                "record_keys": ["text:com.twitter"],
+                "record_keys": ["avatar", "text:com.twitter"],
                 "entrypoint": "universal_resolver",
                 "contract_address": "0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe",
                 "alias": {
@@ -3060,7 +3020,7 @@ mod shipped_api {
             let response = app_router(database.app_state())
                 .oneshot(
                     Request::builder()
-                        .uri("/v1/resolutions/ens/alice.eth?mode=both&records=text:com.twitter")
+                        .uri("/v1/resolutions/ens/alice.eth?mode=both&records=avatar,text:com.twitter")
                         .body(Body::empty())
                         .expect("request must build"),
                 )
@@ -3096,18 +3056,10 @@ mod shipped_api {
             assert_eq!(
                 payload.verified_state,
                 Some(json!({
-                    "verified_queries": [
-                        {
-                            "record_key": "text:com.twitter",
-                            "status": "success",
-                            "value": {
-                                "value": "@alice-via-alias",
-                            },
-                            "provenance": {
-                                "execution_trace_id": execution_trace_id.to_string(),
-                            }
-                        }
-                    ]
+                    "verified_queries": resolution_alias_only_verified_queries(
+                        execution_trace_id,
+                        &["avatar", "text:com.twitter"],
+                    ),
                 }))
             );
 
@@ -3116,7 +3068,7 @@ mod shipped_api {
         }
 
         #[tokio::test]
-        async fn resolution_execution_explain_contract_reads_persisted_alias_only_answer_and_reuses_resolution_envelope()
+        async fn resolution_execution_explain_contract_reads_persisted_alias_only_avatar_answer_and_reuses_resolution_envelope()
         -> Result<()> {
             let database = HarnessDatabase::new().await?;
             let logical_name_id = "ens:alice.eth";
@@ -3166,28 +3118,20 @@ mod shipped_api {
                 Some(&record_inventory_row),
             )?;
             let request_key = cache_key.request_key.clone();
-            let persisted_verified_queries = json!([
-                {
-                    "record_key": "text:com.twitter",
-                    "status": "success",
-                    "value": {
-                        "value": "@alice-via-alias",
-                    },
-                    "provenance": {
-                        "execution_trace_id": execution_trace_id.to_string(),
-                    }
-                }
-            ]);
+            let persisted_verified_queries = resolution_alias_only_verified_queries(
+                execution_trace_id,
+                &["avatar", "text:com.twitter"],
+            );
 
             let mut trace = resolution_execution_trace(
                 execution_trace_id,
                 &request_key,
-                &["text:com.twitter"],
+                &["avatar", "text:com.twitter"],
                 persisted_verified_queries.clone(),
             );
             trace.request_metadata = json!({
                 "surface": "alice.eth",
-                "record_keys": ["text:com.twitter"],
+                "record_keys": ["avatar", "text:com.twitter"],
                 "entrypoint": "universal_resolver",
                 "contract_address": "0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe",
                 "alias": {
@@ -3210,7 +3154,7 @@ mod shipped_api {
                 .oneshot(
                     Request::builder()
                         .uri(
-                            "/v1/explain/resolutions/ens/alice.eth/execution?records=text:com.twitter",
+                            "/v1/explain/resolutions/ens/alice.eth/execution?records=avatar,text:com.twitter",
                         )
                         .body(Body::empty())
                         .expect("request must build"),
@@ -3220,7 +3164,7 @@ mod shipped_api {
             let resolution_response = app_router(database.app_state())
                 .oneshot(
                     Request::builder()
-                        .uri("/v1/resolutions/ens/alice.eth?mode=verified&records=text:com.twitter")
+                        .uri("/v1/resolutions/ens/alice.eth?mode=verified&records=avatar,text:com.twitter")
                         .body(Body::empty())
                         .expect("request must build"),
                 )
@@ -3232,7 +3176,8 @@ mod shipped_api {
 
             let explain_payload: ResolutionResponse = read_json(explain_response).await?;
             let resolution_payload: ResolutionResponse = read_json(resolution_response).await?;
-            let mut expected_execution = resolution_execution_summary(execution_trace_id, resource_id);
+            let mut expected_execution =
+                resolution_execution_summary(execution_trace_id, resource_id);
             expected_execution["alias"] = json!({
                 "final_target": alias_target.clone(),
                 "hops": [alias_target.clone()],
@@ -3240,10 +3185,7 @@ mod shipped_api {
 
             assert_eq!(explain_payload.data, resolution_payload.data);
             assert_eq!(explain_payload.coverage, resolution_payload.coverage);
-            assert_eq!(
-                explain_payload.provenance,
-                resolution_payload.provenance
-            );
+            assert_eq!(explain_payload.provenance, resolution_payload.provenance);
             assert_eq!(
                 explain_payload.chain_positions,
                 resolution_payload.chain_positions
@@ -4159,10 +4101,7 @@ mod shipped_api {
                     "verified_primary_name": verified_primary_name.clone(),
                 }))
             );
-            assert_eq!(
-                both_payload.declared_state,
-                declared_payload.declared_state
-            );
+            assert_eq!(both_payload.declared_state, declared_payload.declared_state);
             assert_eq!(both_payload.verified_state, verified_payload.verified_state);
 
             assert_primary_name_bootstrap_invariants(&declared_payload);
@@ -6607,6 +6546,14 @@ mod shipped_api {
             "ipfs://bafybeigdyrzt5sfp7udm7hu76fx4f2jv4jvgxk5csodx4d6vshv3zysn7u"
         }
 
+        fn resolution_avatar_value() -> &'static str {
+            "https://cdn.example.test/alice.png"
+        }
+
+        fn resolution_alias_avatar_value() -> &'static str {
+            "https://cdn.example.test/alice-via-alias.png"
+        }
+
         fn resolution_record_cache_entries(record_keys: &[&str]) -> Vec<Value> {
             record_keys
                 .iter()
@@ -6802,6 +6749,16 @@ mod shipped_api {
                 record_keys
                     .iter()
                     .map(|record_key| match *record_key {
+                        "avatar" => json!({
+                            "record_key": "avatar",
+                            "status": "success",
+                            "value": {
+                                "value": resolution_avatar_value(),
+                            },
+                            "provenance": {
+                                "execution_trace_id": execution_trace_id.to_string(),
+                            }
+                        }),
                         "addr:60" => json!({
                             "record_key": "addr:60",
                             "status": "success",
@@ -6833,6 +6790,42 @@ mod shipped_api {
                         }),
                         unexpected => panic!(
                             "unexpected persisted verified resolution selector {unexpected}"
+                        ),
+                    })
+                    .collect::<Vec<_>>()
+            )
+        }
+
+        fn resolution_alias_only_verified_queries(
+            execution_trace_id: Uuid,
+            record_keys: &[&str],
+        ) -> Value {
+            json!(
+                record_keys
+                    .iter()
+                    .map(|record_key| match *record_key {
+                        "avatar" => json!({
+                            "record_key": "avatar",
+                            "status": "success",
+                            "value": {
+                                "value": resolution_alias_avatar_value(),
+                            },
+                            "provenance": {
+                                "execution_trace_id": execution_trace_id.to_string(),
+                            }
+                        }),
+                        "text:com.twitter" => json!({
+                            "record_key": "text:com.twitter",
+                            "status": "success",
+                            "value": {
+                                "value": "@alice-via-alias",
+                            },
+                            "provenance": {
+                                "execution_trace_id": execution_trace_id.to_string(),
+                            }
+                        }),
+                        unexpected => panic!(
+                            "unexpected persisted alias-only verified resolution selector {unexpected}"
                         ),
                     })
                     .collect::<Vec<_>>()

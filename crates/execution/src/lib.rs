@@ -260,6 +260,7 @@ struct VerifiedQuerySummary {
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum SupportedVerifiedRecordKey {
     Addr { coin_type: String },
+    Avatar,
     Contenthash,
     Text,
 }
@@ -1289,6 +1290,10 @@ fn parse_supported_verified_record_key(record_key: &str) -> Result<SupportedVeri
         return Ok(SupportedVerifiedRecordKey::Contenthash);
     }
 
+    if record_key == "avatar" {
+        return Ok(SupportedVerifiedRecordKey::Avatar);
+    }
+
     if let Some(text_key) = record_key.strip_prefix("text:") {
         if !text_key.is_empty() {
             return Ok(SupportedVerifiedRecordKey::Text);
@@ -1296,7 +1301,7 @@ fn parse_supported_verified_record_key(record_key: &str) -> Result<SupportedVeri
     }
 
     bail!(
-        "ENS direct-path verified resolution only supports addr:<coin_type>, contenthash, and text:<key> selectors, found {}",
+        "ENS direct-path verified resolution only supports addr:<coin_type>, avatar, contenthash, and text:<key> selectors, found {}",
         record_key
     );
 }
@@ -1339,6 +1344,14 @@ fn validate_success_final_payload(
             if record_kind != "contenthash" {
                 bail!(
                     "ENS direct-path verified resolution success trace.final_payload.record_kind must be contenthash, found {}",
+                    record_kind
+                );
+            }
+        }
+        SupportedVerifiedRecordKey::Avatar => {
+            if record_kind != "avatar" {
+                bail!(
+                    "ENS direct-path verified resolution success trace.final_payload.record_kind must be avatar, found {}",
                     record_kind
                 );
             }
@@ -2279,6 +2292,42 @@ mod tests {
         request
     }
 
+    fn avatar_success_request() -> PersistEnsExactNameVerifiedResolutionRequest {
+        let mut request = success_request();
+        let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000027);
+        let request_key = "ens:alice.eth:avatar".to_owned();
+        let avatar = "https://cdn.example.test/alice.png";
+        request.trace.execution_trace_id = execution_trace_id;
+        request.trace.request_key = request_key.clone();
+        request.trace.final_payload = Some(json!({
+            "record_kind": "avatar",
+            "value": avatar
+        }));
+        request.trace.request_metadata = json!({
+            "surface": "alice.eth",
+            "record_key": "avatar",
+            "normalizer_version": "uts46-v1"
+        });
+        request.trace.steps[1].step_payload = json!({
+            "name": "alice.eth",
+            "avatar": avatar
+        });
+        request.outcome.cache_key.request_key = request_key;
+        request.outcome.execution_trace_id = execution_trace_id;
+        request.outcome.outcome_payload = Some(json!({
+            "verified_queries": [
+                {
+                    "record_key": "avatar",
+                    "status": "success",
+                    "value": {
+                        "value": avatar
+                    }
+                }
+            ]
+        }));
+        request
+    }
+
     fn contenthash_not_found_request() -> PersistEnsExactNameVerifiedResolutionRequest {
         let mut request = contenthash_success_request();
         request.trace.execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000019);
@@ -2442,6 +2491,71 @@ mod tests {
         request
     }
 
+    fn avatar_mixed_selector_request() -> PersistEnsExactNameVerifiedResolutionRequest {
+        let mut request = avatar_success_request();
+        let ordered_record_keys = vec![
+            "avatar".to_owned(),
+            "text:com.twitter".to_owned(),
+            "contenthash".to_owned(),
+            "addr:60".to_owned(),
+        ];
+        let request_key = normalized_request_key("alice.eth", &ordered_record_keys);
+        let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000028);
+        let finished_at = timestamp(1_717_171_930);
+        let avatar = "https://cdn.example.test/alice.png";
+        let contenthash = "ipfs://bafybeigdyrzt5sfp7udm7hu76fx4f2jv4jvgxk5csodx4d6vshv3zysn7u";
+        let verified_queries = json!([
+            {
+                "record_key": "avatar",
+                "status": "success",
+                "value": {
+                    "value": avatar
+                }
+            },
+            {
+                "record_key": "text:com.twitter",
+                "status": "not_found",
+                "failure_reason": "no_text_record"
+            },
+            {
+                "record_key": "contenthash",
+                "status": "success",
+                "value": {
+                    "value": contenthash
+                }
+            },
+            {
+                "record_key": "addr:60",
+                "status": "success",
+                "value": {
+                    "coin_type": "60",
+                    "value": "0x00000000000000000000000000000000000000aa"
+                }
+            }
+        ]);
+
+        request.trace.execution_trace_id = execution_trace_id;
+        request.trace.request_key = request_key.clone();
+        request.trace.final_payload = Some(json!({
+            "verified_queries": verified_queries.clone()
+        }));
+        request.trace.failure_payload = None;
+        request.trace.request_metadata = json!({
+            "surface": "alice.eth",
+            "record_keys": ordered_record_keys,
+            "normalizer_version": "uts46-v1"
+        });
+        request.trace.finished_at = Some(finished_at);
+        request.outcome.cache_key.request_key = request_key;
+        request.outcome.execution_trace_id = execution_trace_id;
+        request.outcome.outcome_payload = Some(json!({
+            "verified_queries": verified_queries
+        }));
+        request.outcome.failure_payload = None;
+        request.outcome.finished_at = finished_at;
+        request
+    }
+
     fn alias_only_text_request() -> PersistEnsExactNameVerifiedResolutionRequest {
         let mut request = success_request();
         let execution_trace_id = Uuid::from_u128(0x0e7ec7ace0000000000000000000001c);
@@ -2478,6 +2592,49 @@ mod tests {
                     "status": "success",
                     "value": {
                         "value": "@alice-via-alias"
+                    }
+                }
+            ]
+        }));
+        request
+    }
+
+    fn alias_only_avatar_request() -> PersistEnsExactNameVerifiedResolutionRequest {
+        let mut request = avatar_success_request();
+        let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000029);
+        let request_key = normalized_request_key("alice.eth", &["avatar".to_owned()]);
+        let alias_target = alias_target(Uuid::from_u128(0x0e7ec7ace0000000000000000000aab5));
+        let avatar = "https://cdn.example.test/alice-via-alias.png";
+
+        request.trace.execution_trace_id = execution_trace_id;
+        request.trace.request_key = request_key.clone();
+        request.trace.final_payload = Some(json!({
+            "record_kind": "avatar",
+            "value": avatar
+        }));
+        request.trace.request_metadata = json!({
+            "surface": "alice.eth",
+            "record_key": "avatar",
+            "binding_kind": RESOLVER_ALIAS_PATH_BINDING_KIND,
+            "alias": {
+                "final_target": alias_target.clone(),
+                "hops": [alias_target.clone()]
+            },
+            "normalizer_version": "uts46-v1"
+        });
+        request.trace.steps[1].step_payload = json!({
+            "name": "alice.eth",
+            "avatar": avatar
+        });
+        request.outcome.cache_key.request_key = request_key;
+        request.outcome.execution_trace_id = execution_trace_id;
+        request.outcome.outcome_payload = Some(json!({
+            "verified_queries": [
+                {
+                    "record_key": "avatar",
+                    "status": "success",
+                    "value": {
+                        "value": avatar
                     }
                 }
             ]
@@ -2535,6 +2692,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn persists_avatar_success_direct_path_and_reads_back_storage_identity() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let request = avatar_success_request();
+
+        let persisted =
+            persist_ens_exact_name_verified_resolution_direct(database.pool(), &request).await?;
+        assert_eq!(
+            persisted,
+            PersistedVerifiedResolutionIdentity {
+                execution_trace_id: request.trace.execution_trace_id,
+                cache_key: request.outcome.cache_key.clone(),
+            }
+        );
+
+        let loaded_trace = load_execution_trace(database.pool(), persisted.execution_trace_id)
+            .await?
+            .expect("execution trace must exist after avatar persistence");
+        assert_eq!(loaded_trace, request.trace);
+
+        let loaded_outcome = load_execution_outcome(database.pool(), &persisted.cache_key)
+            .await?
+            .expect("execution outcome must exist after avatar persistence");
+        assert_eq!(loaded_outcome, request.outcome);
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
     async fn persists_multi_selector_direct_path_with_ordered_mixed_results() -> Result<()> {
         let database = TestDatabase::new().await?;
         let request = multi_selector_request();
@@ -2575,6 +2760,48 @@ mod tests {
             .filter_map(Value::as_str)
             .collect::<Vec<_>>();
         assert_eq!(ordered_record_keys, vec!["addr:60", "addr:0", "addr:2"]);
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn persists_mixed_selector_direct_path_with_avatar_and_preserves_query_order()
+    -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let request = avatar_mixed_selector_request();
+
+        let persisted =
+            persist_ens_exact_name_verified_resolution_direct(database.pool(), &request).await?;
+        assert_eq!(
+            persisted.cache_key.request_key,
+            "ens:alice.eth:addr:60,avatar,contenthash,text:com.twitter"
+        );
+
+        let loaded_trace = load_execution_trace(database.pool(), persisted.execution_trace_id)
+            .await?
+            .expect("execution trace must exist after avatar mixed persistence");
+        assert_eq!(loaded_trace, request.trace);
+
+        let loaded_outcome = load_execution_outcome(database.pool(), &persisted.cache_key)
+            .await?
+            .expect("execution outcome must exist after avatar mixed persistence");
+        assert_eq!(loaded_outcome, request.outcome);
+
+        let loaded_verified_queries = loaded_outcome
+            .outcome_payload
+            .as_ref()
+            .and_then(|payload| payload.get("verified_queries"))
+            .and_then(Value::as_array)
+            .expect("verified_queries must be present");
+        let ordered_record_keys = loaded_verified_queries
+            .iter()
+            .filter_map(|query| query.get("record_key"))
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ordered_record_keys,
+            vec!["avatar", "text:com.twitter", "contenthash", "addr:60"]
+        );
 
         database.cleanup().await
     }
@@ -2766,6 +2993,35 @@ mod tests {
         let loaded_outcome = load_execution_outcome(database.pool(), &persisted.cache_key)
             .await?
             .expect("execution outcome must exist after alias-only persistence");
+        assert_eq!(loaded_outcome, request.outcome);
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn persists_exact_surface_alias_only_avatar_path_with_resolver_alias_binding()
+    -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let request = alias_only_avatar_request();
+
+        let persisted =
+            persist_ens_exact_name_verified_resolution_direct(database.pool(), &request).await?;
+        assert_eq!(
+            persisted,
+            PersistedVerifiedResolutionIdentity {
+                execution_trace_id: request.trace.execution_trace_id,
+                cache_key: request.outcome.cache_key.clone(),
+            }
+        );
+
+        let loaded_trace = load_execution_trace(database.pool(), persisted.execution_trace_id)
+            .await?
+            .expect("execution trace must exist after alias-only avatar persistence");
+        assert_eq!(loaded_trace, request.trace);
+
+        let loaded_outcome = load_execution_outcome(database.pool(), &persisted.cache_key)
+            .await?
+            .expect("execution outcome must exist after alias-only avatar persistence");
         assert_eq!(loaded_outcome, request.outcome);
 
         database.cleanup().await
@@ -2983,10 +3239,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_unsupported_selector_before_writing_any_storage() -> Result<()> {
+    async fn rejects_still_unsupported_selector_before_writing_any_storage() -> Result<()> {
         let database = TestDatabase::new().await?;
         let mut request = multi_selector_request();
-        let ordered_record_keys = vec!["addr:60".to_owned(), "avatar".to_owned()];
+        let ordered_record_keys = vec!["addr:60".to_owned(), "abi".to_owned()];
         let request_key = normalized_request_key("alice.eth", &ordered_record_keys);
         request.trace.execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000017);
         request.trace.request_key = request_key.clone();
@@ -3006,10 +3262,10 @@ mod tests {
                     }
                 },
                 {
-                    "record_key": "avatar",
+                    "record_key": "abi",
                     "status": "success",
                     "value": {
-                        "value": "ipfs://avatar"
+                        "value": "0x1234"
                     }
                 }
             ]
@@ -3022,9 +3278,9 @@ mod tests {
             .await
             .expect_err("unsupported selector must be rejected");
         assert!(
-            error
-                .to_string()
-                .contains("only supports addr:<coin_type>, contenthash, and text:<key> selectors"),
+            error.to_string().contains(
+                "only supports addr:<coin_type>, avatar, contenthash, and text:<key> selectors"
+            ),
             "unexpected error: {error:#}"
         );
         assert!(
@@ -3042,6 +3298,39 @@ mod tests {
             .await?
             .is_empty(),
             "rejected request must not persist raw call snapshots"
+        );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn rejects_basenames_path_before_writing_any_storage() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let mut request = avatar_success_request();
+        request.trace.execution_trace_id = Uuid::from_u128(0x0e7ec7ace0000000000000000000002a);
+        request.outcome.execution_trace_id = request.trace.execution_trace_id;
+        request.trace.steps[1].step_kind = "call_basenames_resolver".to_owned();
+
+        let error = persist_ens_exact_name_verified_resolution_direct(database.pool(), &request)
+            .await
+            .expect_err("Basenames execution paths must remain unsupported");
+        assert!(
+            error
+                .to_string()
+                .contains("must not persist non-direct step call_basenames_resolver"),
+            "unexpected error: {error:#}"
+        );
+        assert!(
+            load_execution_trace(database.pool(), request.trace.execution_trace_id)
+                .await?
+                .is_none(),
+            "rejected Basenames path must not persist trace rows"
+        );
+        assert!(
+            load_execution_outcome(database.pool(), &request.outcome.cache_key)
+                .await?
+                .is_none(),
+            "rejected Basenames path must not persist outcome rows"
         );
 
         database.cleanup().await

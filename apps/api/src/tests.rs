@@ -2774,7 +2774,7 @@ async fn get_resolution_execution_explain_returns_persisted_verified_state_and_r
 }
 
 #[tokio::test]
-async fn get_resolution_execution_explain_reads_persisted_alias_only_verified_answers_for_ens_alias_binding()
+async fn get_resolution_execution_explain_reads_persisted_alias_only_avatar_answers_for_ens_alias_binding()
 -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let logical_name_id = "ens:alice.eth";
@@ -2784,6 +2784,16 @@ async fn get_resolution_execution_explain_reads_persisted_alias_only_verified_an
     let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000025);
     let request_key = resolution_execution_request_key(&["text:com.twitter"]);
     let persisted_verified_queries = json!([
+        {
+            "record_key": "avatar",
+            "status": "success",
+            "value": {
+                "value": "https://cdn.example.test/alice-via-alias.png"
+            },
+            "provenance": {
+                "execution_trace_id": execution_trace_id.to_string()
+            }
+        },
         {
             "record_key": "text:com.twitter",
             "status": "success",
@@ -2832,12 +2842,12 @@ async fn get_resolution_execution_explain_reads_persisted_alias_only_verified_an
     let mut trace = resolution_execution_trace(
         execution_trace_id,
         &request_key,
-        &["text:com.twitter"],
+        &["avatar", "text:com.twitter"],
         persisted_verified_queries.clone(),
     );
     trace.request_metadata = json!({
         "surface": "alice.eth",
-        "record_keys": ["text:com.twitter"],
+        "record_keys": ["avatar", "text:com.twitter"],
         "entrypoint": "universal_resolver",
         "contract_address": "0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe",
         "alias": {
@@ -2858,7 +2868,7 @@ async fn get_resolution_execution_explain_reads_persisted_alias_only_verified_an
     let explain_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/explain/resolutions/ens/alice.eth/execution?records=text:com.twitter")
+                .uri("/v1/explain/resolutions/ens/alice.eth/execution?records=avatar,text:com.twitter")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -2867,7 +2877,7 @@ async fn get_resolution_execution_explain_reads_persisted_alias_only_verified_an
     let resolution_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=verified&records=text:com.twitter")
+                .uri("/v1/resolutions/ens/alice.eth?mode=verified&records=avatar,text:com.twitter")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -2881,6 +2891,16 @@ async fn get_resolution_execution_explain_reads_persisted_alias_only_verified_an
     let resolution_payload: ResolutionResponse = read_json(resolution_response).await?;
     let expected_resolution_verified_state = json!({
         "verified_queries": [
+            {
+                "record_key": "avatar",
+                "status": "success",
+                "value": {
+                    "value": "https://cdn.example.test/alice-via-alias.png"
+                },
+                "provenance": {
+                    "execution_trace_id": execution_trace_id.to_string()
+                }
+            },
             {
                 "record_key": "text:com.twitter",
                 "status": "success",
@@ -2975,6 +2995,16 @@ async fn get_resolution_execution_explain_reads_persisted_alias_only_verified_an
                 "finished_at": format_timestamp(timestamp(1_717_171_900))
             },
             "verified_queries": [
+                {
+                    "record_key": "avatar",
+                    "status": "success",
+                    "value": {
+                        "value": "https://cdn.example.test/alice-via-alias.png"
+                    },
+                    "provenance": {
+                        "execution_trace_id": execution_trace_id.to_string()
+                    }
+                },
                 {
                     "record_key": "text:com.twitter",
                     "status": "success",
@@ -3141,7 +3171,7 @@ async fn get_resolution_verified_state_uses_supported_persisted_answers_and_pres
 }
 
 #[tokio::test]
-async fn get_resolution_both_mode_reads_persisted_alias_only_verified_answers_for_ens_alias_binding()
+async fn get_resolution_both_mode_reads_persisted_alias_only_avatar_answers_for_ens_alias_binding()
 -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let logical_name_id = "ens:alice.eth";
@@ -3151,6 +3181,16 @@ async fn get_resolution_both_mode_reads_persisted_alias_only_verified_answers_fo
     let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000026);
     let request_key = resolution_execution_request_key(&["text:com.twitter"]);
     let persisted_verified_queries = json!([
+        {
+            "record_key": "avatar",
+            "status": "success",
+            "value": {
+                "value": "https://cdn.example.test/alice-via-alias.png"
+            },
+            "provenance": {
+                "execution_trace_id": execution_trace_id.to_string()
+            }
+        },
         {
             "record_key": "text:com.twitter",
             "status": "success",
@@ -3190,7 +3230,7 @@ async fn get_resolution_both_mode_reads_persisted_alias_only_verified_answers_fo
     let trace = resolution_execution_trace(
         execution_trace_id,
         &request_key,
-        &["text:com.twitter"],
+        &["avatar", "text:com.twitter"],
         persisted_verified_queries.clone(),
     );
     let outcome = resolution_execution_outcome(
@@ -3206,7 +3246,7 @@ async fn get_resolution_both_mode_reads_persisted_alias_only_verified_answers_fo
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=both&records=text:com.twitter")
+                .uri("/v1/resolutions/ens/alice.eth?mode=both&records=avatar,text:com.twitter")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -3244,6 +3284,16 @@ async fn get_resolution_both_mode_reads_persisted_alias_only_verified_answers_fo
         Some(json!({
             "verified_queries": [
                 {
+                    "record_key": "avatar",
+                    "status": "success",
+                    "value": {
+                        "value": "https://cdn.example.test/alice-via-alias.png"
+                    },
+                    "provenance": {
+                        "execution_trace_id": execution_trace_id.to_string()
+                    }
+                },
+                {
                     "record_key": "text:com.twitter",
                     "status": "success",
                     "value": {
@@ -3262,7 +3312,7 @@ async fn get_resolution_both_mode_reads_persisted_alias_only_verified_answers_fo
 }
 
 #[tokio::test]
-async fn get_resolution_verified_state_surfaces_persisted_contenthash_answers_and_preserves_request_order()
+async fn get_resolution_verified_state_surfaces_persisted_avatar_answers_and_preserves_request_order()
 -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let logical_name_id = "ens:alice.eth";
@@ -3274,6 +3324,16 @@ async fn get_resolution_verified_state_surfaces_persisted_contenthash_answers_an
     let request_key =
         resolution_execution_request_key(&["text:com.twitter", "contenthash", "addr:60"]);
     let persisted_verified_queries = json!([
+        {
+            "record_key": "avatar",
+            "status": "success",
+            "value": {
+                "value": "https://cdn.example.test/alice.png"
+            },
+            "provenance": {
+                "execution_trace_id": execution_trace_id.to_string()
+            }
+        },
         {
             "record_key": "text:com.twitter",
             "status": "not_found",
@@ -3328,7 +3388,7 @@ async fn get_resolution_verified_state_surfaces_persisted_contenthash_answers_an
     let trace = resolution_execution_trace(
         execution_trace_id,
         &request_key,
-        &["text:com.twitter", "contenthash", "addr:60"],
+        &["avatar", "text:com.twitter", "contenthash", "addr:60"],
         persisted_verified_queries.clone(),
     );
     let outcome = resolution_execution_outcome(
@@ -3369,8 +3429,13 @@ async fn get_resolution_verified_state_surfaces_persisted_contenthash_answers_an
         "verified_queries": [
             {
                 "record_key": "avatar",
-                "status": "unsupported",
-                "unsupported_reason": "verified resolution entrypoint is not yet supported"
+                "status": "success",
+                "value": {
+                    "value": "https://cdn.example.test/alice.png"
+                },
+                "provenance": {
+                    "execution_trace_id": execution_trace_id.to_string()
+                }
             },
             {
                 "record_key": "text:com.twitter",
@@ -3471,7 +3536,7 @@ async fn get_resolution_execution_explain_returns_not_found_when_persisted_answe
 }
 
 #[tokio::test]
-async fn get_resolution_execution_explain_surfaces_persisted_contenthash_answers_and_reuses_resolution_envelope_fields()
+async fn get_resolution_execution_explain_surfaces_persisted_avatar_answers_and_reuses_resolution_envelope_fields()
 -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let logical_name_id = "ens:alice.eth";
@@ -3483,6 +3548,16 @@ async fn get_resolution_execution_explain_surfaces_persisted_contenthash_answers
     let request_key =
         resolution_execution_request_key(&["text:com.twitter", "contenthash", "addr:60"]);
     let persisted_verified_queries = json!([
+        {
+            "record_key": "avatar",
+            "status": "success",
+            "value": {
+                "value": "https://cdn.example.test/alice.png"
+            },
+            "provenance": {
+                "execution_trace_id": execution_trace_id.to_string()
+            }
+        },
         {
             "record_key": "text:com.twitter",
             "status": "not_found",
@@ -3537,7 +3612,7 @@ async fn get_resolution_execution_explain_surfaces_persisted_contenthash_answers
     let trace = resolution_execution_trace(
         execution_trace_id,
         &request_key,
-        &["text:com.twitter", "contenthash", "addr:60"],
+        &["avatar", "text:com.twitter", "contenthash", "addr:60"],
         persisted_verified_queries.clone(),
     );
     let outcome = resolution_execution_outcome(
@@ -3553,7 +3628,7 @@ async fn get_resolution_execution_explain_surfaces_persisted_contenthash_answers
     let explain_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/explain/resolutions/ens/alice.eth/execution?records=text:com.twitter,contenthash,addr:60")
+                .uri("/v1/explain/resolutions/ens/alice.eth/execution?records=avatar,text:com.twitter,contenthash,addr:60")
                 .body(Body::empty())
                 .expect("explain request must build"),
         )
@@ -3562,7 +3637,7 @@ async fn get_resolution_execution_explain_surfaces_persisted_contenthash_answers
     let resolution_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=verified&records=text:com.twitter,contenthash,addr:60")
+                .uri("/v1/resolutions/ens/alice.eth?mode=verified&records=avatar,text:com.twitter,contenthash,addr:60")
                 .body(Body::empty())
                 .expect("resolution request must build"),
         )
@@ -3576,6 +3651,16 @@ async fn get_resolution_execution_explain_surfaces_persisted_contenthash_answers
     let resolution_payload: ResolutionResponse = read_json(resolution_response).await?;
     let expected_resolution_verified_state = json!({
         "verified_queries": [
+            {
+                "record_key": "avatar",
+                "status": "success",
+                "value": {
+                    "value": "https://cdn.example.test/alice.png"
+                },
+                "provenance": {
+                    "execution_trace_id": execution_trace_id.to_string()
+                }
+            },
             {
                 "record_key": "text:com.twitter",
                 "status": "not_found",
@@ -3686,6 +3771,16 @@ async fn get_resolution_execution_explain_surfaces_persisted_contenthash_answers
                 "finished_at": format_timestamp(timestamp(1_717_171_900))
             },
             "verified_queries": [
+                {
+                    "record_key": "avatar",
+                    "status": "success",
+                    "value": {
+                        "value": "https://cdn.example.test/alice.png"
+                    },
+                    "provenance": {
+                        "execution_trace_id": execution_trace_id.to_string()
+                    }
+                },
                 {
                     "record_key": "text:com.twitter",
                     "status": "not_found",
