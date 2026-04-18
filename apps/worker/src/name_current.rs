@@ -181,8 +181,8 @@ async fn build_name_current_row(pool: &PgPool, name: &NameSurfaceSeed) -> Result
         .map(|event| event.manifest_version)
         .max()
         .unwrap_or(1);
-    let last_recomputed_at =
-        max_timestamp(name, current_binding.as_ref(), &events).unwrap_or(OffsetDateTime::UNIX_EPOCH);
+    let last_recomputed_at = max_timestamp(name, current_binding.as_ref(), &events)
+        .unwrap_or(OffsetDateTime::UNIX_EPOCH);
 
     Ok(NameCurrentRow {
         logical_name_id: name.logical_name_id.clone(),
@@ -190,9 +190,13 @@ async fn build_name_current_row(pool: &PgPool, name: &NameSurfaceSeed) -> Result
         canonical_display_name: name.canonical_display_name.clone(),
         normalized_name: name.normalized_name.clone(),
         namehash: name.namehash.clone(),
-        surface_binding_id: current_binding.as_ref().map(|binding| binding.surface_binding_id),
+        surface_binding_id: current_binding
+            .as_ref()
+            .map(|binding| binding.surface_binding_id),
         resource_id: current_binding.as_ref().map(|binding| binding.resource_id),
-        token_lineage_id: current_binding.as_ref().and_then(|binding| binding.token_lineage_id),
+        token_lineage_id: current_binding
+            .as_ref()
+            .and_then(|binding| binding.token_lineage_id),
         binding_kind: current_binding.as_ref().map(|binding| binding.binding_kind),
         declared_summary: build_declared_summary(facts),
         provenance,
@@ -368,7 +372,11 @@ fn build_canonicality_summary(
     if let Some(binding) = current_binding {
         states.push(binding.surface_binding_state);
         states.push(binding.resource_state);
-        merge_chain_state(&mut chain_states, &binding.chain_id, binding.surface_binding_state);
+        merge_chain_state(
+            &mut chain_states,
+            &binding.chain_id,
+            binding.surface_binding_state,
+        );
         merge_chain_state(&mut chain_states, &binding.chain_id, binding.resource_state);
         if let Some(token_lineage_state) = binding.token_lineage_state {
             states.push(token_lineage_state);
@@ -383,7 +391,8 @@ fn build_canonicality_summary(
         }
     }
 
-    let status = weakest_canonicality(states.iter().copied()).unwrap_or(CanonicalityState::Canonical);
+    let status =
+        weakest_canonicality(states.iter().copied()).unwrap_or(CanonicalityState::Canonical);
     json!({
         "status": status.as_str(),
         "chains": chain_states
@@ -1002,7 +1011,10 @@ mod tests {
         assert_eq!(row.surface_binding_id, Some(binding.surface_binding_id));
         assert_eq!(row.resource_id, Some(binding.resource_id));
         assert_eq!(row.token_lineage_id, Some(binding.token_lineage_id));
-        assert_eq!(row.binding_kind, Some(SurfaceBindingKind::DeclaredRegistryPath));
+        assert_eq!(
+            row.binding_kind,
+            Some(SurfaceBindingKind::DeclaredRegistryPath)
+        );
         assert_eq!(
             row.declared_summary["registration"]["status"],
             Value::String("active".to_owned())
@@ -1151,8 +1163,15 @@ mod tests {
         )
         .await?;
         seed_identity(database.pool(), &binding, "0xgrant", 301, 1_717_171_901).await?;
-        seed_rebound_identity(database.pool(), &binding, &rebound, "0xrebind", 302, 1_717_171_902)
-            .await?;
+        seed_rebound_identity(
+            database.pool(),
+            &binding,
+            &rebound,
+            "0xrebind",
+            302,
+            1_717_171_902,
+        )
+        .await?;
         seed_events(
             database.pool(),
             &[
@@ -1377,8 +1396,15 @@ mod tests {
         block_number: i64,
         block_timestamp: i64,
     ) -> Result<()> {
-        upsert_token_lineages(pool, &[token_lineage(binding.token_lineage_id, block_hash, block_number)])
-            .await?;
+        upsert_token_lineages(
+            pool,
+            &[token_lineage(
+                binding.token_lineage_id,
+                block_hash,
+                block_number,
+            )],
+        )
+        .await?;
         upsert_resources(
             pool,
             &[resource(
@@ -1421,8 +1447,15 @@ mod tests {
         block_number: i64,
         block_timestamp: i64,
     ) -> Result<()> {
-        upsert_token_lineages(pool, &[token_lineage(rebound.token_lineage_id, block_hash, block_number)])
-            .await?;
+        upsert_token_lineages(
+            pool,
+            &[token_lineage(
+                rebound.token_lineage_id,
+                block_hash,
+                block_number,
+            )],
+        )
+        .await?;
         upsert_resources(
             pool,
             &[resource(
@@ -1460,7 +1493,12 @@ mod tests {
         Ok(())
     }
 
-    fn raw_block(chain_id: &str, block_hash: &str, block_number: i64, unix_timestamp: i64) -> RawBlock {
+    fn raw_block(
+        chain_id: &str,
+        block_hash: &str,
+        block_number: i64,
+        unix_timestamp: i64,
+    ) -> RawBlock {
         RawBlock {
             chain_id: chain_id.to_owned(),
             block_hash: block_hash.to_owned(),
