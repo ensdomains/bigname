@@ -18,11 +18,11 @@ use bigname_manifests::{
 use bigname_storage::{
     AddressNameCurrentEntry, AddressNameRelation, AddressNamesCurrentDedupe, ChildrenCurrentRow,
     DatabaseConfig, HistoryEvent, HistoryScope, NameCurrentRow, PermissionScope,
-    PermissionsCurrentRow, ResolverCurrentRow, collapse_address_name_current_rows,
-    load_address_history, load_address_names_current, load_children_current, load_name_current,
-    load_name_history, load_name_surface, load_permissions_current, load_resolver_current,
-    load_resource, load_resource_history, load_surface_bindings_by_logical_name_id,
-    load_surface_bindings_by_resource_id,
+    PermissionsCurrentRow, ResolverCurrentRow, SurfaceBindingKind,
+    collapse_address_name_current_rows, load_address_history, load_address_names_current,
+    load_children_current, load_name_current, load_name_history, load_name_surface,
+    load_permissions_current, load_resolver_current, load_resource, load_resource_history,
+    load_surface_bindings_by_logical_name_id, load_surface_bindings_by_resource_id,
 };
 use clap::{Args, Parser, Subcommand};
 use serde::{Deserialize, Serialize};
@@ -1167,19 +1167,28 @@ fn build_resolution_response(
     mode: ResolutionMode,
     records: &[ResolutionRecordKey],
 ) -> ResolutionResponse {
+    let data = build_name_data(&row);
+    let declared_state = mode
+        .includes_declared()
+        .then(|| build_resolution_declared_state(&row));
+    let verified_state = mode
+        .includes_verified()
+        .then(|| build_resolution_verified_state(records));
+    let provenance = build_name_provenance(&row.provenance);
+    let coverage = build_name_coverage(&row.coverage);
+    let chain_positions = ensure_object(&row.chain_positions);
+    let consistency = canonicality_consistency(&row.canonicality_summary).to_owned();
+    let last_updated = format_timestamp(row.last_recomputed_at);
+
     ResolutionResponse {
-        data: build_name_data(&row),
-        declared_state: mode
-            .includes_declared()
-            .then(build_resolution_declared_state),
-        verified_state: mode
-            .includes_verified()
-            .then(|| build_resolution_verified_state(records)),
-        provenance: build_name_provenance(&row.provenance),
-        coverage: build_name_coverage(&row.coverage),
-        chain_positions: ensure_object(&row.chain_positions),
-        consistency: canonicality_consistency(&row.canonicality_summary).to_owned(),
-        last_updated: format_timestamp(row.last_recomputed_at),
+        data,
+        declared_state,
+        verified_state,
+        provenance,
+        coverage,
+        chain_positions,
+        consistency,
+        last_updated,
     }
 }
 
@@ -1232,12 +1241,12 @@ fn build_children_response(
     }
 }
 
-fn build_resolution_declared_state() -> JsonValue {
+fn build_resolution_declared_state(row: &NameCurrentRow) -> JsonValue {
     let mut declared_state = empty_object();
     insert_value_field(
         &mut declared_state,
         "topology",
-        unsupported_section("declared resolution topology is not yet projected"),
+        build_resolution_topology(row),
     );
     insert_value_field(
         &mut declared_state,
@@ -1277,6 +1286,189 @@ fn build_resolution_verified_query(record: &ResolutionRecordKey) -> JsonValue {
         "verified resolution entrypoint is not yet supported".to_owned(),
     );
     query
+}
+
+fn build_resolution_topology(row: &NameCurrentRow) -> JsonValue {
+    if row.namespace != "ens"
+        || row.binding_kind != Some(SurfaceBindingKind::DeclaredRegistryPath)
+        || row.resource_id.is_none()
+    {
+        return unsupported_section("declared resolution topology is not yet projected");
+    }
+
+    let Some(resolver_summary) = provenance_field(&row.declared_summary, "resolver")
+        .filter(|value| value.is_object())
+        .filter(|value| !summary_is_unsupported(Some(value)))
+    else {
+        return unsupported_section("declared resolution topology is not yet projected");
+    };
+
+    let resolver_chain_id = string_field(provenance_field(resolver_summary, "chain_id"));
+    let resolver_address = string_field(provenance_field(resolver_summary, "address"));
+    if resolver_chain_id.is_some() != resolver_address.is_some() {
+        return unsupported_section("declared resolution topology is not yet projected");
+    }
+
+    let Some(chain_position) = build_resolution_boundary_chain_position(row) else {
+        return unsupported_section("declared resolution topology is not yet projected");
+    };
+    if !chain_position.chain_id.starts_with("ethereum") {
+        return unsupported_section("declared resolution topology is not yet projected");
+    }
+
+    let registry_ref = build_resolution_name_ref(row);
+    let resolver_hop = build_resolution_resolver_hop(
+        row,
+        resolver_chain_id,
+        resolver_address,
+        string_field(provenance_field(resolver_summary, "latest_event_kind")),
+    );
+    let boundary = build_resolution_version_boundary(row, &chain_position);
+
+    let mut wildcard = empty_object();
+    insert_value_field(&mut wildcard, "source", JsonValue::Null);
+    insert_value_field(
+        &mut wildcard,
+        "matched_labels",
+        JsonValue::Array(Vec::new()),
+    );
+
+    let mut alias = empty_object();
+    insert_value_field(&mut alias, "final_target", JsonValue::Null);
+    insert_value_field(&mut alias, "hops", JsonValue::Array(Vec::new()));
+
+    let mut version_boundaries = empty_object();
+    insert_value_field(
+        &mut version_boundaries,
+        "topology_version_boundary",
+        boundary.clone(),
+    );
+    insert_value_field(&mut version_boundaries, "record_version_boundary", boundary);
+
+    let mut transport = empty_object();
+    insert_value_field(&mut transport, "source_chain_id", JsonValue::Null);
+    insert_value_field(&mut transport, "target_chain_id", JsonValue::Null);
+    insert_value_field(&mut transport, "contract_address", JsonValue::Null);
+    insert_value_field(&mut transport, "latest_event_kind", JsonValue::Null);
+
+    let mut topology = empty_object();
+    insert_value_field(
+        &mut topology,
+        "registry_path",
+        JsonValue::Array(vec![registry_ref]),
+    );
+    insert_value_field(
+        &mut topology,
+        "subregistry_path",
+        JsonValue::Array(Vec::new()),
+    );
+    insert_value_field(
+        &mut topology,
+        "resolver_path",
+        JsonValue::Array(vec![resolver_hop]),
+    );
+    insert_value_field(&mut topology, "wildcard", wildcard);
+    insert_value_field(&mut topology, "alias", alias);
+    insert_value_field(&mut topology, "version_boundaries", version_boundaries);
+    insert_value_field(&mut topology, "transport", transport);
+    topology
+}
+
+fn build_resolution_name_ref(row: &NameCurrentRow) -> JsonValue {
+    let mut name_ref = empty_object();
+    insert_string_field(
+        &mut name_ref,
+        "logical_name_id",
+        row.logical_name_id.clone(),
+    );
+    insert_string_field(&mut name_ref, "namespace", row.namespace.clone());
+    insert_string_field(
+        &mut name_ref,
+        "normalized_name",
+        row.normalized_name.clone(),
+    );
+    insert_string_field(
+        &mut name_ref,
+        "canonical_display_name",
+        row.canonical_display_name.clone(),
+    );
+    insert_string_field(&mut name_ref, "namehash", row.namehash.clone());
+    insert_optional_string_field(
+        &mut name_ref,
+        "resource_id",
+        row.resource_id.map(|value| value.to_string()),
+    );
+    insert_optional_string_field(
+        &mut name_ref,
+        "binding_kind",
+        row.binding_kind.map(|value| value.as_str().to_owned()),
+    );
+    name_ref
+}
+
+fn build_resolution_resolver_hop(
+    row: &NameCurrentRow,
+    chain_id: Option<String>,
+    address: Option<String>,
+    latest_event_kind: Option<String>,
+) -> JsonValue {
+    let mut hop = empty_object();
+    insert_string_field(&mut hop, "logical_name_id", row.logical_name_id.clone());
+    insert_string_field(&mut hop, "namespace", row.namespace.clone());
+    insert_string_field(&mut hop, "normalized_name", row.normalized_name.clone());
+    insert_string_field(
+        &mut hop,
+        "canonical_display_name",
+        row.canonical_display_name.clone(),
+    );
+    insert_optional_string_field(
+        &mut hop,
+        "resource_id",
+        row.resource_id.map(|value| value.to_string()),
+    );
+    insert_nullable_string_field(&mut hop, "chain_id", chain_id);
+    insert_nullable_string_field(&mut hop, "address", address);
+    insert_nullable_string_field(&mut hop, "latest_event_kind", latest_event_kind);
+    hop
+}
+
+fn build_resolution_version_boundary(
+    row: &NameCurrentRow,
+    chain_position: &ChainPositionResponse,
+) -> JsonValue {
+    let mut boundary = empty_object();
+    insert_string_field(
+        &mut boundary,
+        "logical_name_id",
+        row.logical_name_id.clone(),
+    );
+    insert_optional_string_field(
+        &mut boundary,
+        "resource_id",
+        row.resource_id.map(|value| value.to_string()),
+    );
+    insert_value_field(&mut boundary, "normalized_event_id", JsonValue::Null);
+    insert_value_field(&mut boundary, "event_kind", JsonValue::Null);
+    insert_value_field(
+        &mut boundary,
+        "chain_position",
+        serde_json::to_value(chain_position).expect("chain position must serialize"),
+    );
+    boundary
+}
+
+fn build_resolution_boundary_chain_position(row: &NameCurrentRow) -> Option<ChainPositionResponse> {
+    let chain_positions = row.chain_positions.as_object()?;
+    chain_positions
+        .get("ethereum")
+        .and_then(chain_position_from_value)
+        .or_else(|| {
+            let mut parsed = chain_positions
+                .values()
+                .filter_map(chain_position_from_value);
+            let first = parsed.next()?;
+            parsed.next().is_none().then_some(first)
+        })
 }
 
 impl AddressNamesResponseSupplement {

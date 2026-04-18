@@ -849,7 +849,9 @@ fn exact_name_row(
                 "authority_kind": "registrar"
             },
             "resolver": {
-                "address": "0x0000000000000000000000000000000000000abc"
+                "chain_id": "ethereum-mainnet",
+                "address": "0x0000000000000000000000000000000000000abc",
+                "latest_event_kind": "ResolverChanged"
             }
         }),
         provenance: json!({
@@ -1654,7 +1656,7 @@ async fn get_resolution_rejects_malformed_records() -> Result<()> {
 }
 
 #[tokio::test]
-async fn get_resolution_returns_unsupported_declared_sections() -> Result<()> {
+async fn get_resolution_returns_supported_topology_for_direct_ens_binding() -> Result<()> {
     let database = TestDatabase::new_with_schemas(false, true).await?;
     let logical_name_id = "ens:alice.eth";
     let resource_id = Uuid::from_u128(0x2200);
@@ -1700,8 +1702,70 @@ async fn get_resolution_returns_unsupported_declared_sections() -> Result<()> {
         payload.declared_state,
         Some(json!({
             "topology": {
-                "status": "unsupported",
-                "unsupported_reason": "declared resolution topology is not yet projected",
+                "registry_path": [
+                    {
+                        "logical_name_id": "ens:alice.eth",
+                        "namespace": "ens",
+                        "normalized_name": "alice.eth",
+                        "canonical_display_name": "Alice.eth",
+                        "namehash": "namehash:alice.eth",
+                        "resource_id": resource_id.to_string(),
+                        "binding_kind": "declared_registry_path",
+                    }
+                ],
+                "subregistry_path": [],
+                "resolver_path": [
+                    {
+                        "logical_name_id": "ens:alice.eth",
+                        "namespace": "ens",
+                        "normalized_name": "alice.eth",
+                        "canonical_display_name": "Alice.eth",
+                        "resource_id": resource_id.to_string(),
+                        "chain_id": "ethereum-mainnet",
+                        "address": "0x0000000000000000000000000000000000000abc",
+                        "latest_event_kind": "ResolverChanged",
+                    }
+                ],
+                "wildcard": {
+                    "source": null,
+                    "matched_labels": [],
+                },
+                "alias": {
+                    "final_target": null,
+                    "hops": [],
+                },
+                "version_boundaries": {
+                    "topology_version_boundary": {
+                        "logical_name_id": "ens:alice.eth",
+                        "resource_id": resource_id.to_string(),
+                        "normalized_event_id": null,
+                        "event_kind": null,
+                        "chain_position": {
+                            "chain_id": "ethereum-mainnet",
+                            "block_number": 21_000_003,
+                            "block_hash": "0xbinding",
+                            "timestamp": "2026-04-17T00:00:03Z",
+                        },
+                    },
+                    "record_version_boundary": {
+                        "logical_name_id": "ens:alice.eth",
+                        "resource_id": resource_id.to_string(),
+                        "normalized_event_id": null,
+                        "event_kind": null,
+                        "chain_position": {
+                            "chain_id": "ethereum-mainnet",
+                            "block_number": 21_000_003,
+                            "block_hash": "0xbinding",
+                            "timestamp": "2026-04-17T00:00:03Z",
+                        },
+                    },
+                },
+                "transport": {
+                    "source_chain_id": null,
+                    "target_chain_id": null,
+                    "contract_address": null,
+                    "latest_event_kind": null,
+                },
             },
             "record_inventory": {
                 "status": "unsupported",
@@ -1712,6 +1776,158 @@ async fn get_resolution_returns_unsupported_declared_sections() -> Result<()> {
                 "unsupported_reason": "declared resolution record cache is not yet projected",
             }
         }))
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_resolution_returns_unsupported_topology_for_non_direct_bindings() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0x2200);
+    let token_lineage_id = Uuid::from_u128(0x1100);
+    let surface_binding_id = Uuid::from_u128(0x3300);
+
+    database
+        .seed_name_current_binding(
+            logical_name_id,
+            "ens",
+            "alice.eth",
+            "Alice.eth",
+            "namehash:alice.eth",
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+
+    let mut row = exact_name_row(
+        logical_name_id,
+        surface_binding_id,
+        resource_id,
+        token_lineage_id,
+    );
+    row.binding_kind = Some(bigname_storage::SurfaceBindingKind::ResolverAliasPath);
+    database.insert_name_current_row(row).await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resolutions/ens/alice.eth")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("resolution request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let payload: ResolutionResponse = read_json(response).await?;
+    assert_eq!(payload.verified_state, None);
+    assert_eq!(
+        payload
+            .declared_state
+            .as_ref()
+            .and_then(|state| state.get("topology")),
+        Some(&json!({
+            "status": "unsupported",
+            "unsupported_reason": "declared resolution topology is not yet projected",
+        }))
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_resolution_supported_topology_uses_terminal_null_hop_when_no_resolver_is_declared()
+-> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0x2200);
+    let token_lineage_id = Uuid::from_u128(0x1100);
+    let surface_binding_id = Uuid::from_u128(0x3300);
+
+    database
+        .seed_name_current_binding(
+            logical_name_id,
+            "ens",
+            "alice.eth",
+            "Alice.eth",
+            "namehash:alice.eth",
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+
+    let mut row = exact_name_row(
+        logical_name_id,
+        surface_binding_id,
+        resource_id,
+        token_lineage_id,
+    );
+    row.declared_summary = json!({
+        "registration": {
+            "status": "active",
+            "authority_kind": "registrar"
+        },
+        "resolver": {
+            "chain_id": null,
+            "address": null,
+            "latest_event_kind": null
+        }
+    });
+    database.insert_name_current_row(row).await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resolutions/ens/alice.eth")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("resolution request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let payload: ResolutionResponse = read_json(response).await?;
+    let topology = payload
+        .declared_state
+        .as_ref()
+        .and_then(|state| state.get("topology"))
+        .and_then(Value::as_object)
+        .expect("topology must be supported");
+    let resolver_path = topology
+        .get("resolver_path")
+        .and_then(Value::as_array)
+        .expect("resolver_path must be an array");
+    assert_eq!(resolver_path.len(), 1);
+    assert_eq!(
+        resolver_path.first(),
+        Some(&json!({
+            "logical_name_id": "ens:alice.eth",
+            "namespace": "ens",
+            "normalized_name": "alice.eth",
+            "canonical_display_name": "Alice.eth",
+            "resource_id": resource_id.to_string(),
+            "chain_id": null,
+            "address": null,
+            "latest_event_kind": null,
+        }))
+    );
+    assert_eq!(
+        topology
+            .get("version_boundaries")
+            .and_then(Value::as_object)
+            .and_then(|value| value.get("topology_version_boundary")),
+        topology
+            .get("version_boundaries")
+            .and_then(Value::as_object)
+            .and_then(|value| value.get("record_version_boundary"))
     );
 
     database.cleanup().await?;
