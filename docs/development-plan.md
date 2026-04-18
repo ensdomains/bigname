@@ -297,7 +297,7 @@ Expose the first stable native `v1` surface for declared-state product reads.
 
 - `phase6-surface-binding-authority-explain-contract-clarification`: `GET /v1/explain/names/{namespace}/{name}/surface-binding` and `GET /v1/explain/names/{namespace}/{name}/authority-control` are frozen in the shared docs and shipped by `apps/api/src/main.rs` as exact-name-scoped declared-state explain routes over existing truth families
 - `phase6-shipped-read-pagination`: `cursor` and `page_size` are frozen for `GET /v1/addresses/{address}/names`, `GET /v1/names/{namespace}/{name}/children`, `GET /v1/resources/{resource_id}/permissions`, `GET /v1/history/addresses/{address}`, `GET /v1/history/names/{namespace}/{name}`, and `GET /v1/history/resources/{resource_id}`; no other shipped route honors those query parameters in the initial contract
-- `phase6-openapi-contract-output-clarification`: machine-readable contract output is frozen to the publication location `docs/api-v1.openapi.json`; when generated, it covers only the routes currently shipped by `apps/api/src/main.rs`, and queued routes, currently `GET /v1/primary-names/{address}`, stay prose-frozen in `docs/api-v1.md` until their handlers ship
+- `phase6-openapi-contract-output-clarification`: machine-readable contract output is frozen to the publication location `docs/api-v1.openapi.json`; when generated, it covers only the routes currently shipped by `apps/api/src/main.rs`, including the shipped `GET /v1/primary-names/{address}` route
 - `phase6-resolver-overview-alias-summary-support`: supported `declared_state.aliases` on `GET /v1/resolvers/{chain_id}/{resolver_address}` is shipped as the `binding_kind=resolver_alias_path` subset of current resolver-linked bindings with the shared `{status, count, items}` summary envelope, including `count=0` with `items=[]` when no current alias binding exists
 
 ---
@@ -328,6 +328,10 @@ Add the execution plane that turns declared state into verified answers.
 - primary-name reads distinguish claim from verified result
 - every verified answer produces traceable provenance and execution traces
 - relevant topology or record changes invalidate cached verified answers deterministically
+
+### Current shipped progress
+
+- `phase7-primary-name-route-envelope-bootstrap`: `GET /v1/primary-names/{address}` is shipped as a head-only bootstrap on the already frozen mixed declared+verified route contract and enters machine-readable publication scope; it currently honors `namespace`, `coin_type`, and optional `mode`, and tuple-present reads may still surface explicit `unsupported` result objects while richer claim/verified payloads and broader Phase 7 verified execution deliverables remain pending
 
 ---
 

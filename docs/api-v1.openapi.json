@@ -498,6 +498,77 @@
       "NullValue": {
         "type": "null"
       },
+      "PrimaryNameData": {
+        "properties": {
+          "address": {
+            "type": "string"
+          },
+          "coin_type": {
+            "type": "string"
+          },
+          "namespace": {
+            "enum": [
+              "ens",
+              "basenames"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "address",
+          "namespace",
+          "coin_type"
+        ],
+        "type": "object"
+      },
+      "PrimaryNameResponse": {
+        "properties": {
+          "chain_positions": {
+            "$ref": "#/components/schemas/ChainPositions"
+          },
+          "consistency": {
+            "$ref": "#/components/schemas/Consistency"
+          },
+          "coverage": {
+            "$ref": "#/components/schemas/CoverageResponse"
+          },
+          "data": {
+            "$ref": "#/components/schemas/PrimaryNameData"
+          },
+          "declared_state": {
+            "additionalProperties": true,
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "last_updated": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "provenance": {
+            "$ref": "#/components/schemas/Provenance"
+          },
+          "verified_state": {
+            "additionalProperties": true,
+            "type": [
+              "object",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "data",
+          "declared_state",
+          "verified_state",
+          "provenance",
+          "coverage",
+          "chain_positions",
+          "consistency",
+          "last_updated"
+        ],
+        "type": "object"
+      },
       "Provenance": {
         "properties": {
           "derivation_kind": {
@@ -639,9 +710,9 @@
     }
   },
   "info": {
-    "description": "Machine-readable publication of the shipped Phase 6 public API surface derived from apps/api/src/main.rs.",
+    "description": "Machine-readable publication of the currently shipped public API surface derived from apps/api/src/main.rs.",
     "title": "bigname API v1",
-    "version": "phase-6"
+    "version": "phase-7"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -1584,6 +1655,106 @@
         "summary": "Namespace metadata and support status",
         "tags": [
           "Namespaces"
+        ]
+      }
+    },
+    "/v1/primary-names/{address}": {
+      "get": {
+        "operationId": "primary_names",
+        "parameters": [
+          {
+            "description": "Address anchor for the collection or history read. Addresses are normalized to lowercase.",
+            "in": "path",
+            "name": "address",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Required namespace identifier for the requested primary-name tuple.",
+            "in": "query",
+            "name": "namespace",
+            "required": true,
+            "schema": {
+              "enum": [
+                "ens",
+                "basenames"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Required `coin_type` selector for the requested primary-name tuple.",
+            "in": "query",
+            "name": "coin_type",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9]+$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Primary-name read mode.",
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "default": "declared",
+              "enum": [
+                "declared",
+                "verified",
+                "both"
+              ],
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PrimaryNameResponse"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Requested resource was not found"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "summary": "Claimed and verified primary-name answer",
+        "tags": [
+          "Resolution"
         ]
       }
     },

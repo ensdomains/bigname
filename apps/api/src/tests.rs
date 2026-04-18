@@ -482,6 +482,44 @@ impl TestDatabase {
         Ok(())
     }
 
+    async fn create_primary_names_current_table(&self) -> Result<()> {
+        sqlx::query(
+            r#"
+                CREATE TABLE primary_names_current (
+                    address TEXT NOT NULL,
+                    namespace TEXT NOT NULL,
+                    coin_type TEXT NOT NULL,
+                    PRIMARY KEY (address, namespace, coin_type)
+                )
+                "#,
+        )
+        .execute(&self.pool)
+        .await
+        .context("failed to create primary_names_current for API tests")?;
+        Ok(())
+    }
+
+    async fn insert_primary_name_current_row(
+        &self,
+        address: &str,
+        namespace: &str,
+        coin_type: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+                INSERT INTO primary_names_current (address, namespace, coin_type)
+                VALUES ($1, $2, $3)
+                "#,
+        )
+        .bind(address)
+        .bind(namespace)
+        .bind(coin_type)
+        .execute(&self.pool)
+        .await
+        .context("failed to insert primary_names_current row for API tests")?;
+        Ok(())
+    }
+
     async fn cleanup(self) -> Result<()> {
         self.pool.close().await;
         sqlx::query(&format!(
@@ -7412,6 +7450,323 @@ async fn get_namespace_manifests_returns_not_found_for_unknown_namespace() -> Re
     Ok(())
 }
 
+#[tokio::test]
+async fn get_primary_names_freezes_bootstrap_mode_envelopes() -> Result<()> {
+    let database = TestDatabase::new(false).await?;
+
+    let default_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/primary-names/0x0000000000000000000000000000000000000ABC?namespace=ens&coin_type=60")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("default primary-name request failed")?;
+    let declared_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/primary-names/0x0000000000000000000000000000000000000abc?namespace=ens&coin_type=60&mode=declared")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("declared primary-name request failed")?;
+    let verified_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/primary-names/0x0000000000000000000000000000000000000abc?namespace=ens&coin_type=60&mode=verified")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("verified primary-name request failed")?;
+    let both_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/primary-names/0x0000000000000000000000000000000000000abc?namespace=ens&coin_type=60&mode=both")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("both primary-name request failed")?;
+
+    assert_eq!(default_response.status(), StatusCode::OK);
+    assert_eq!(declared_response.status(), StatusCode::OK);
+    assert_eq!(verified_response.status(), StatusCode::OK);
+    assert_eq!(both_response.status(), StatusCode::OK);
+
+    let default_payload: PrimaryNameResponse = read_json(default_response).await?;
+    let declared_payload: PrimaryNameResponse = read_json(declared_response).await?;
+    let verified_payload: PrimaryNameResponse = read_json(verified_response).await?;
+    let both_payload: PrimaryNameResponse = read_json(both_response).await?;
+
+    assert_eq!(
+        default_payload.data,
+        json!({
+            "address": "0x0000000000000000000000000000000000000abc",
+            "namespace": "ens",
+            "coin_type": "60",
+        })
+    );
+    assert_eq!(default_payload.data, declared_payload.data);
+    assert_eq!(default_payload.data, verified_payload.data);
+    assert_eq!(default_payload.data, both_payload.data);
+
+    assert_eq!(
+        default_payload.declared_state,
+        Some(json!({
+            "claimed_primary_name": {
+                "status": "unsupported",
+                "unsupported_reason": "declared primary-name claim surface is not yet supported",
+            }
+        }))
+    );
+    assert_eq!(
+        declared_payload.declared_state,
+        default_payload.declared_state
+    );
+    assert_eq!(default_payload.verified_state, None);
+    assert_eq!(declared_payload.verified_state, None);
+    assert_eq!(verified_payload.declared_state, None);
+    assert_eq!(
+        verified_payload.verified_state,
+        Some(json!({
+            "verified_primary_name": {
+                "status": "unsupported",
+                "unsupported_reason": "verified primary-name entrypoint is not yet supported",
+            }
+        }))
+    );
+    assert_eq!(
+        both_payload.declared_state,
+        Some(json!({
+            "claimed_primary_name": {
+                "status": "unsupported",
+                "unsupported_reason": "declared primary-name claim surface is not yet supported",
+            }
+        }))
+    );
+    assert_eq!(both_payload.verified_state, verified_payload.verified_state);
+    assert_eq!(
+        default_payload.coverage,
+        json!({
+            "status": "unsupported",
+            "exhaustiveness": "not_applicable",
+            "source_classes_considered": [],
+            "enumeration_basis": "primary_name_lookup",
+            "unsupported_reason": "primary-name coverage is not yet supported",
+        })
+    );
+    assert_eq!(
+        default_payload.provenance.get("derivation_kind"),
+        Some(&json!("primary_name_route_bootstrap"))
+    );
+    assert_eq!(default_payload.chain_positions, json!({}));
+    assert_eq!(default_payload.consistency, "head");
+    assert!(default_payload.last_updated.ends_with('Z'));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_primary_names_returns_not_found_for_tuple_miss_when_projection_exists() -> Result<()> {
+    let database = TestDatabase::new(false).await?;
+    database.create_primary_names_current_table().await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/primary-names/0x0000000000000000000000000000000000000abc?namespace=ens&coin_type=60&mode=both")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("primary-name tuple miss request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let payload: PrimaryNameResponse = read_json(response).await?;
+    assert_eq!(
+        payload.declared_state,
+        Some(json!({
+            "claimed_primary_name": {
+                "status": "not_found",
+            }
+        }))
+    );
+    assert_eq!(
+        payload.verified_state,
+        Some(json!({
+            "verified_primary_name": {
+                "status": "not_found",
+            }
+        }))
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_primary_names_freezes_bootstrap_behavior_for_tuple_present() -> Result<()> {
+    let database = TestDatabase::new(false).await?;
+    database.create_primary_names_current_table().await?;
+    database
+        .insert_primary_name_current_row(
+            "0x0000000000000000000000000000000000000abc",
+            "ens",
+            "60",
+        )
+        .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/primary-names/0x0000000000000000000000000000000000000abc?namespace=ens&coin_type=60&mode=both")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("primary-name tuple present request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let payload: PrimaryNameResponse = read_json(response).await?;
+    assert_eq!(
+        payload.declared_state,
+        Some(json!({
+            "claimed_primary_name": {
+                "status": "unsupported",
+                "unsupported_reason": "declared primary-name claim surface is not yet supported",
+            }
+        }))
+    );
+    assert_eq!(
+        payload.verified_state,
+        Some(json!({
+            "verified_primary_name": {
+                "status": "unsupported",
+                "unsupported_reason": "verified primary-name entrypoint is not yet supported",
+            }
+        }))
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_primary_names_requires_namespace_and_coin_type() -> Result<()> {
+    let database = TestDatabase::new(false).await?;
+
+    let missing_namespace = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/primary-names/0x0000000000000000000000000000000000000abc?coin_type=60")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("missing-namespace request failed")?;
+    let missing_coin_type = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/primary-names/0x0000000000000000000000000000000000000abc?namespace=ens")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("missing-coin-type request failed")?;
+
+    assert_eq!(missing_namespace.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(missing_coin_type.status(), StatusCode::BAD_REQUEST);
+
+    let missing_namespace_payload: ErrorResponse = read_json(missing_namespace).await?;
+    let missing_coin_type_payload: ErrorResponse = read_json(missing_coin_type).await?;
+    assert_eq!(missing_namespace_payload.error.code, "invalid_input");
+    assert_eq!(
+        missing_namespace_payload.error.message,
+        "namespace is required"
+    );
+    assert_eq!(missing_coin_type_payload.error.code, "invalid_input");
+    assert_eq!(
+        missing_coin_type_payload.error.message,
+        "coin_type is required"
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_primary_names_rejects_malformed_input() -> Result<()> {
+    let database = TestDatabase::new(false).await?;
+
+    let malformed_address = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/primary-names/not-an-address?namespace=ens&coin_type=60")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("malformed-address request failed")?;
+    let malformed_coin_type = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/primary-names/0x0000000000000000000000000000000000000abc?namespace=ens&coin_type=60,61")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("malformed-coin-type request failed")?;
+
+    assert_eq!(malformed_address.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(malformed_coin_type.status(), StatusCode::BAD_REQUEST);
+
+    let malformed_address_payload: ErrorResponse = read_json(malformed_address).await?;
+    let malformed_coin_type_payload: ErrorResponse = read_json(malformed_coin_type).await?;
+    assert_eq!(malformed_address_payload.error.code, "invalid_input");
+    assert_eq!(
+        malformed_address_payload.error.message,
+        "address must be a 0x-prefixed 20-byte hex string"
+    );
+    assert_eq!(malformed_coin_type_payload.error.code, "invalid_input");
+    assert_eq!(
+        malformed_coin_type_payload.error.message,
+        "coin_type must contain only decimal digits"
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_primary_names_returns_not_found_for_unsupported_namespace() -> Result<()> {
+    let database = TestDatabase::new(false).await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/primary-names/0x0000000000000000000000000000000000000abc?namespace=unknown&coin_type=60")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("unsupported-namespace primary-name request failed")?;
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let payload: ErrorResponse = read_json(response).await?;
+    assert_eq!(payload.error.code, "not_found");
+    assert_eq!(payload.error.message, "namespace unknown is not supported");
+
+    database.cleanup().await?;
+    Ok(())
+}
+
 fn openapi_paths(document: &Value) -> &serde_json::Map<String, Value> {
     document
         .get("paths")
@@ -7460,7 +7815,7 @@ fn required_fields(schema: &Value) -> Vec<&str> {
 }
 
 #[test]
-fn openapi_document_publishes_only_shipped_phase6_routes() {
+fn openapi_document_publishes_only_shipped_routes() {
     let document = openapi_document();
     let actual = openapi_paths(&document).keys().cloned().collect::<Vec<_>>();
 
@@ -7478,12 +7833,12 @@ fn openapi_document_publishes_only_shipped_phase6_routes() {
             "/v1/names/{namespace}/{name}".to_owned(),
             "/v1/names/{namespace}/{name}/children".to_owned(),
             "/v1/namespaces/{namespace}".to_owned(),
+            "/v1/primary-names/{address}".to_owned(),
             "/v1/resolutions/{namespace}/{name}".to_owned(),
             "/v1/resolvers/{chain_id}/{resolver_address}".to_owned(),
             "/v1/resources/{resource_id}/permissions".to_owned(),
         ]
     );
-    assert!(!openapi_paths(&document).contains_key("/v1/primary-names/{address}"));
     assert!(!openapi_paths(&document).contains_key("/healthz"));
 }
 
@@ -7548,6 +7903,35 @@ fn openapi_document_freezes_query_params_and_shared_envelopes() {
     assert_eq!(records.get("style"), Some(&json!("form")));
     assert_eq!(records.get("explode"), Some(&json!(false)));
 
+    let primary_names = openapi_operation(&document, "/v1/primary-names/{address}");
+    let primary_namespace = openapi_parameter(primary_names, "namespace");
+    assert_eq!(primary_namespace.get("required"), Some(&json!(true)));
+    assert_eq!(
+        primary_namespace.get("schema"),
+        Some(&json!({
+            "type": "string",
+            "enum": ["ens", "basenames"],
+        }))
+    );
+    let primary_coin_type = openapi_parameter(primary_names, "coin_type");
+    assert_eq!(primary_coin_type.get("required"), Some(&json!(true)));
+    assert_eq!(
+        primary_coin_type.get("schema"),
+        Some(&json!({
+            "type": "string",
+            "pattern": "^[0-9]+$",
+        }))
+    );
+    let primary_mode = openapi_parameter(primary_names, "mode");
+    assert_eq!(
+        primary_mode.get("schema"),
+        Some(&json!({
+            "type": "string",
+            "enum": ["declared", "verified", "both"],
+            "default": "declared",
+        }))
+    );
+
     let exact_name = openapi_schema(&document, "ExactNameResponse");
     assert_eq!(
         required_fields(exact_name),
@@ -7606,6 +7990,35 @@ fn openapi_document_freezes_query_params_and_shared_envelopes() {
     );
     assert_eq!(
         resolution
+            .get("properties")
+            .and_then(Value::as_object)
+            .and_then(|properties| properties.get("verified_state")),
+        Some(&json!({
+            "type": ["object", "null"],
+            "additionalProperties": true,
+        }))
+    );
+
+    let primary_name = openapi_schema(&document, "PrimaryNameResponse");
+    assert_eq!(
+        primary_name
+            .get("properties")
+            .and_then(Value::as_object)
+            .and_then(|properties| properties.get("data")),
+        Some(&json!({ "$ref": "#/components/schemas/PrimaryNameData" }))
+    );
+    assert_eq!(
+        primary_name
+            .get("properties")
+            .and_then(Value::as_object)
+            .and_then(|properties| properties.get("declared_state")),
+        Some(&json!({
+            "type": ["object", "null"],
+            "additionalProperties": true,
+        }))
+    );
+    assert_eq!(
+        primary_name
             .get("properties")
             .and_then(Value::as_object)
             .and_then(|properties| properties.get("verified_state")),

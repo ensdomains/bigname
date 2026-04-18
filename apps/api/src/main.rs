@@ -78,6 +78,7 @@ enum ApiRouteId {
     Health,
     AddressNames,
     AddressHistory,
+    PrimaryNames,
     Coverage,
     ExplainSurfaceBinding,
     ExplainAuthorityControl,
@@ -106,6 +107,11 @@ const API_ROUTE_DEFINITIONS: &[ApiRouteDefinition] = &[
     ApiRouteDefinition {
         id: ApiRouteId::AddressHistory,
         path: "/v1/history/addresses/{address}",
+        published_in_contract: true,
+    },
+    ApiRouteDefinition {
+        id: ApiRouteId::PrimaryNames,
+        path: "/v1/primary-names/{address}",
         published_in_contract: true,
     },
     ApiRouteDefinition {
@@ -284,6 +290,18 @@ struct ResolutionResponse {
     last_updated: String,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct PrimaryNameResponse {
+    data: JsonValue,
+    declared_state: Option<JsonValue>,
+    verified_state: Option<JsonValue>,
+    provenance: JsonValue,
+    coverage: JsonValue,
+    chain_positions: JsonValue,
+    consistency: String,
+    last_updated: String,
+}
+
 type ResolverResponse = NameResponse;
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -339,6 +357,13 @@ struct ResolutionQuery {
     records: Option<String>,
 }
 
+#[derive(Clone, Debug, Default, Deserialize)]
+struct PrimaryNameQuery {
+    namespace: Option<String>,
+    coin_type: Option<String>,
+    mode: Option<String>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ResolutionMode {
     Declared,
@@ -361,6 +386,13 @@ struct ResolutionRecordKey {
     record_key: String,
     record_family: String,
     selector_key: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PrimaryNameLookupState {
+    ProjectionUnavailable,
+    TupleMissing,
+    TuplePresent,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -616,6 +648,7 @@ impl ApiRouteDefinition {
             ApiRouteId::Health => router.route(self.path, get(health)),
             ApiRouteId::AddressNames => router.route(self.path, get(address_names)),
             ApiRouteId::AddressHistory => router.route(self.path, get(address_history)),
+            ApiRouteId::PrimaryNames => router.route(self.path, get(primary_names)),
             ApiRouteId::Coverage => router.route(self.path, get(coverage_current)),
             ApiRouteId::ExplainSurfaceBinding => {
                 router.route(self.path, get(explain_surface_binding_current))
@@ -647,6 +680,7 @@ impl ApiRouteId {
             Self::Health => "health",
             Self::AddressNames => "address_names",
             Self::AddressHistory => "address_history",
+            Self::PrimaryNames => "primary_names",
             Self::Coverage => "coverage_current",
             Self::ExplainSurfaceBinding => "explain_surface_binding_current",
             Self::ExplainAuthorityControl => "explain_authority_control_current",
@@ -712,6 +746,20 @@ impl ApiRouteId {
                 "CollectionResponse",
                 true,
                 false,
+            ),
+            Self::PrimaryNames => openapi_json_get_operation(
+                self.operation_id(),
+                "Claimed and verified primary-name answer",
+                "Resolution",
+                vec![
+                    address_path_parameter(),
+                    required_namespace_query_parameter(),
+                    required_coin_type_query_parameter(),
+                    primary_name_mode_query_parameter(),
+                ],
+                "PrimaryNameResponse",
+                true,
+                true,
             ),
             Self::Coverage => openapi_json_get_operation(
                 self.operation_id(),
@@ -937,8 +985,8 @@ fn openapi_document() -> JsonValue {
         "openapi": "3.1.0",
         "info": {
             "title": "bigname API v1",
-            "version": "phase-6",
-            "description": "Machine-readable publication of the shipped Phase 6 public API surface derived from apps/api/src/main.rs.",
+            "version": "phase-7",
+            "description": "Machine-readable publication of the currently shipped public API surface derived from apps/api/src/main.rs.",
         },
         "paths": JsonValue::Object(paths),
         "components": openapi_components(),
@@ -1075,6 +1123,18 @@ fn openapi_components() -> JsonValue {
                     "resolver_address": { "type": "string" },
                 },
             }),
+            "PrimaryNameData": json!({
+                "type": "object",
+                "required": ["address", "namespace", "coin_type"],
+                "properties": {
+                    "address": { "type": "string" },
+                    "namespace": {
+                        "type": "string",
+                        "enum": PUBLIC_NAMESPACES,
+                    },
+                    "coin_type": { "type": "string" },
+                },
+            }),
             "ExactNameResponse": declared_response_schema(
                 schema_ref("ExactNameData"),
                 schema_ref("JsonObject"),
@@ -1083,38 +1143,8 @@ fn openapi_components() -> JsonValue {
                 schema_ref("ResolverData"),
                 schema_ref("JsonObject"),
             ),
-            "ResolutionResponse": json!({
-                "type": "object",
-                "required": [
-                    "data",
-                    "declared_state",
-                    "verified_state",
-                    "provenance",
-                    "coverage",
-                    "chain_positions",
-                    "consistency",
-                    "last_updated",
-                ],
-                "properties": {
-                    "data": schema_ref("ExactNameData"),
-                    "declared_state": {
-                        "type": ["object", "null"],
-                        "additionalProperties": true,
-                    },
-                    "verified_state": {
-                        "type": ["object", "null"],
-                        "additionalProperties": true,
-                    },
-                    "provenance": schema_ref("Provenance"),
-                    "coverage": schema_ref("CoverageResponse"),
-                    "chain_positions": schema_ref("ChainPositions"),
-                    "consistency": schema_ref("Consistency"),
-                    "last_updated": {
-                        "type": "string",
-                        "format": "date-time",
-                    },
-                },
-            }),
+            "ResolutionResponse": mixed_response_schema(schema_ref("ExactNameData")),
+            "PrimaryNameResponse": mixed_response_schema(schema_ref("PrimaryNameData")),
             "CollectionResponse": paginated_declared_response_schema(
                 json!({
                     "type": "array",
@@ -1276,6 +1306,41 @@ fn declared_response_schema(data_schema: JsonValue, declared_state_schema: JsonV
     })
 }
 
+fn mixed_response_schema(data_schema: JsonValue) -> JsonValue {
+    json!({
+        "type": "object",
+        "required": [
+            "data",
+            "declared_state",
+            "verified_state",
+            "provenance",
+            "coverage",
+            "chain_positions",
+            "consistency",
+            "last_updated",
+        ],
+        "properties": {
+            "data": data_schema,
+            "declared_state": {
+                "type": ["object", "null"],
+                "additionalProperties": true,
+            },
+            "verified_state": {
+                "type": ["object", "null"],
+                "additionalProperties": true,
+            },
+            "provenance": schema_ref("Provenance"),
+            "coverage": schema_ref("CoverageResponse"),
+            "chain_positions": schema_ref("ChainPositions"),
+            "consistency": schema_ref("Consistency"),
+            "last_updated": {
+                "type": "string",
+                "format": "date-time",
+            },
+        },
+    })
+}
+
 fn paginated_declared_response_schema(
     data_schema: JsonValue,
     declared_state_schema: JsonValue,
@@ -1389,6 +1454,19 @@ fn query_parameter(
     })
 }
 
+fn required_query_parameter(
+    name: &'static str,
+    description: impl Into<String>,
+    schema: JsonValue,
+) -> JsonValue {
+    let mut parameter = query_parameter(name, description, schema);
+    parameter
+        .as_object_mut()
+        .expect("required query parameter helper must create an object")
+        .insert("required".to_owned(), JsonValue::Bool(true));
+    parameter
+}
+
 fn csv_query_parameter(
     name: &'static str,
     description: impl Into<String>,
@@ -1476,6 +1554,17 @@ fn namespace_query_parameter() -> JsonValue {
     )
 }
 
+fn required_namespace_query_parameter() -> JsonValue {
+    required_query_parameter(
+        "namespace",
+        "Required namespace identifier for the requested primary-name tuple.",
+        json!({
+            "type": "string",
+            "enum": PUBLIC_NAMESPACES,
+        }),
+    )
+}
+
 fn relation_query_parameter() -> JsonValue {
     query_parameter(
         "relation",
@@ -1519,6 +1608,29 @@ fn resolution_mode_query_parameter() -> JsonValue {
             "type": "string",
             "enum": ["declared", "verified", "both"],
             "default": "declared",
+        }),
+    )
+}
+
+fn primary_name_mode_query_parameter() -> JsonValue {
+    query_parameter(
+        "mode",
+        "Primary-name read mode.",
+        json!({
+            "type": "string",
+            "enum": ["declared", "verified", "both"],
+            "default": "declared",
+        }),
+    )
+}
+
+fn required_coin_type_query_parameter() -> JsonValue {
+    required_query_parameter(
+        "coin_type",
+        "Required `coin_type` selector for the requested primary-name tuple.",
+        json!({
+            "type": "string",
+            "pattern": "^[0-9]+$",
         }),
     )
 }
@@ -1821,6 +1933,27 @@ async fn resolution_current(
         mode,
         &records,
         record_inventory_current.as_ref(),
+    )))
+}
+
+async fn primary_names(
+    Path(address): Path<String>,
+    Query(query): Query<PrimaryNameQuery>,
+    State(state): State<AppState>,
+) -> ApiResult<Json<PrimaryNameResponse>> {
+    let address = parse_primary_name_address(&address)?;
+    let namespace = parse_primary_name_namespace(query.namespace.as_deref())?;
+    let coin_type = parse_primary_name_coin_type(query.coin_type.as_deref())?;
+    let mode = parse_resolution_mode(query.mode.as_deref())?;
+    let lookup_state =
+        load_primary_name_lookup_state(&state.pool, &address, &namespace, &coin_type).await?;
+
+    Ok(Json(build_primary_name_response(
+        address,
+        namespace,
+        coin_type,
+        mode,
+        lookup_state,
     )))
 }
 
@@ -2532,6 +2665,37 @@ fn build_resolution_response(
     }
 }
 
+fn build_primary_name_response(
+    address: String,
+    namespace: String,
+    coin_type: String,
+    mode: ResolutionMode,
+    lookup_state: PrimaryNameLookupState,
+) -> PrimaryNameResponse {
+    let data = json!({
+        "address": address,
+        "namespace": namespace,
+        "coin_type": coin_type,
+    });
+    let declared_state = mode
+        .includes_declared()
+        .then(|| json!({ "claimed_primary_name": primary_name_claim_result(lookup_state) }));
+    let verified_state = mode
+        .includes_verified()
+        .then(|| json!({ "verified_primary_name": primary_name_verified_result(lookup_state) }));
+
+    PrimaryNameResponse {
+        data,
+        declared_state,
+        verified_state,
+        provenance: primary_name_bootstrap_provenance(),
+        coverage: primary_name_bootstrap_coverage(),
+        chain_positions: empty_object(),
+        consistency: "head".to_owned(),
+        last_updated: format_timestamp(OffsetDateTime::now_utc()),
+    }
+}
+
 fn build_resolver_response(row: ResolverCurrentRow) -> ResolverResponse {
     ResolverResponse {
         data: build_resolver_data(&row),
@@ -2576,6 +2740,57 @@ fn build_children_response(
             .to_owned(),
         last_updated,
     }
+}
+
+fn primary_name_claim_result(lookup_state: PrimaryNameLookupState) -> JsonValue {
+    match lookup_state {
+        PrimaryNameLookupState::ProjectionUnavailable | PrimaryNameLookupState::TuplePresent => {
+            primary_name_unsupported_result(
+                "declared primary-name claim surface is not yet supported",
+            )
+        }
+        PrimaryNameLookupState::TupleMissing => primary_name_not_found_result(),
+    }
+}
+
+fn primary_name_verified_result(lookup_state: PrimaryNameLookupState) -> JsonValue {
+    match lookup_state {
+        PrimaryNameLookupState::TupleMissing => primary_name_not_found_result(),
+        PrimaryNameLookupState::ProjectionUnavailable | PrimaryNameLookupState::TuplePresent => {
+            primary_name_unsupported_result("verified primary-name entrypoint is not yet supported")
+        }
+    }
+}
+
+fn primary_name_not_found_result() -> JsonValue {
+    json!({ "status": "not_found" })
+}
+
+fn primary_name_unsupported_result(reason: &str) -> JsonValue {
+    json!({
+        "status": "unsupported",
+        "unsupported_reason": reason,
+    })
+}
+
+fn primary_name_bootstrap_provenance() -> JsonValue {
+    json!({
+        "normalized_event_ids": [],
+        "raw_fact_refs": [],
+        "manifest_versions": [],
+        "execution_trace_id": null,
+        "derivation_kind": "primary_name_route_bootstrap",
+    })
+}
+
+fn primary_name_bootstrap_coverage() -> JsonValue {
+    json!({
+        "status": "unsupported",
+        "exhaustiveness": "not_applicable",
+        "source_classes_considered": [],
+        "enumeration_basis": "primary_name_lookup",
+        "unsupported_reason": "primary-name coverage is not yet supported",
+    })
 }
 
 fn build_resolution_declared_state(
@@ -4414,6 +4629,60 @@ fn parse_resolution_mode(mode: Option<&str>) -> ApiResult<ResolutionMode> {
     }
 }
 
+fn parse_primary_name_address(address: &str) -> ApiResult<String> {
+    let normalized = normalize_address(address.trim());
+    let is_valid = normalized.len() == 42
+        && normalized.starts_with("0x")
+        && normalized
+            .as_bytes()
+            .iter()
+            .skip(2)
+            .all(|byte| byte.is_ascii_hexdigit());
+
+    if is_valid {
+        Ok(normalized)
+    } else {
+        Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            code: "invalid_input",
+            message: "address must be a 0x-prefixed 20-byte hex string".to_owned(),
+        })
+    }
+}
+
+fn parse_primary_name_namespace(namespace: Option<&str>) -> ApiResult<String> {
+    let Some(namespace) = namespace.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            code: "invalid_input",
+            message: "namespace is required".to_owned(),
+        });
+    };
+
+    ensure_public_namespace(namespace)?;
+    Ok(namespace.to_owned())
+}
+
+fn parse_primary_name_coin_type(coin_type: Option<&str>) -> ApiResult<String> {
+    let Some(coin_type) = coin_type.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            code: "invalid_input",
+            message: "coin_type is required".to_owned(),
+        });
+    };
+
+    if coin_type.as_bytes().iter().all(u8::is_ascii_digit) {
+        Ok(coin_type.to_owned())
+    } else {
+        Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            code: "invalid_input",
+            message: "coin_type must contain only decimal digits".to_owned(),
+        })
+    }
+}
+
 fn parse_resolution_record_keys(
     records: Option<&str>,
     mode: ResolutionMode,
@@ -4876,6 +5145,50 @@ fn parse_children_include_counts(include: Option<&str>) -> ApiResult<bool> {
 
 fn normalize_address(address: &str) -> String {
     address.to_ascii_lowercase()
+}
+
+async fn load_primary_name_lookup_state(
+    pool: &PgPool,
+    address: &str,
+    namespace: &str,
+    coin_type: &str,
+) -> ApiResult<PrimaryNameLookupState> {
+    let query = sqlx::query(
+        r#"
+        SELECT 1
+        FROM primary_names_current
+        WHERE address = $1
+          AND namespace = $2
+          AND coin_type = $3
+        LIMIT 1
+        "#,
+    )
+    .bind(address)
+    .bind(namespace)
+    .bind(coin_type)
+    .fetch_optional(pool)
+    .await;
+
+    match query {
+        Ok(Some(_)) => Ok(PrimaryNameLookupState::TuplePresent),
+        Ok(None) => Ok(PrimaryNameLookupState::TupleMissing),
+        Err(sqlx::Error::Database(error)) if error.code().as_deref() == Some("42P01") => {
+            Ok(PrimaryNameLookupState::ProjectionUnavailable)
+        }
+        Err(load_error) => {
+            error!(
+                service = "api",
+                address = %address,
+                namespace = %namespace,
+                coin_type = %coin_type,
+                error = ?load_error,
+                "failed to load primary-name tuple state"
+            );
+            Err(ApiError::internal_error(format!(
+                "failed to load primary-name tuple for address {address}"
+            )))
+        }
+    }
 }
 
 fn address_names_dedupe_label(dedupe_by: AddressNamesCurrentDedupe) -> &'static str {

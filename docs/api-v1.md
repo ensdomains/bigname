@@ -396,7 +396,7 @@ The current API binary ships the routes marked `shipped` below. Queued routes re
 | `GET /v1/resources/{resource_id}/permissions` | Resource-centric effective permissions | shipped declared-state |
 | `GET /v1/resolvers/{chain_id}/{resolver_address}` | Resolver overview | shipped declared-state |
 | `GET /v1/resolutions/{namespace}/{name}` | Resolution topology, inventory, and verified reads | shipped mixed declared+verified |
-| `GET /v1/primary-names/{address}` | Claimed and verified primary-name answer | queued mixed declared+verified |
+| `GET /v1/primary-names/{address}` | Claimed and verified primary-name answer | shipped mixed declared+verified |
 | `GET /v1/coverage/{namespace}/{name}` | Single-name coverage and explain details | shipped declared-state |
 
 ### Machine-Readable Contract Publication
@@ -405,7 +405,7 @@ Phase 6 freezes `docs/api-v1.openapi.json` as the publication location for futur
 
 When generated, that artifact covers only the `v1` routes currently shipped by `apps/api/src/main.rs`.
 
-Queued routes stay prose-frozen in this document until their handlers ship. In the current route set, `GET /v1/primary-names/{address}` remains outside that machine-readable publication scope.
+Queued routes stay prose-frozen in this document until their handlers ship. In the current route set, no listed route remains outside that machine-readable publication scope.
 
 ## 5. Route-Level Semantics
 
@@ -881,8 +881,6 @@ Rules:
 
 Supported query parameters:
 
-- `at`
-- `consistency`
 - `mode=declared|verified|both`
 - `coin_type`
 - `namespace`
@@ -905,13 +903,15 @@ When `verified_state` is populated, it returns:
 
 Rules:
 
+- the shipped bootstrap route is head-only; it does not honor `at` or `consistency`, and additive snapshot-selector support remains pending
 - `claimed_primary_name` is the declared claim candidate only; it never implies that the requested address actually verifies to that name
 - `claimed_primary_name.status` uses the shared `ResultStatus` vocabulary; the initial declared contract uses `success`, `not_found`, `unsupported`, and `invalid_name`
 - `verified_primary_name.status` uses the same `ResultStatus` vocabulary; the initial verified contract uses `success`, `not_found`, `mismatch`, `unsupported`, `invalid_name`, and `execution_failed`
 - `claimed_primary_name` and `verified_primary_name` always include `status` when their containing section is populated
-- when a concrete claim target exists, `claimed_primary_name` includes the resolved surface identity fields; if the raw claim exists but cannot be normalized, it returns `status=invalid_name`, keeps the raw claim text in `raw_claim_name`, and omits normalized identity fields
+- in the shipped bootstrap slice, tuple-present reads may still return explicit `status=unsupported` result objects for `claimed_primary_name`, `verified_primary_name`, or both; richer tuple-present payloads remain pending additive support
+- concrete declared claim identity fields, `raw_claim_name` on `status=invalid_name`, and richer verified result payloads are reserved for that additive follow-up work; the shipped bootstrap handler does not yet surface them
 - `verified_primary_name` is authoritative only when `status=success`
-- `status=mismatch` means the claim normalized and resolved, but the verified target address for the requested `coin_type` did not equal the requested `{address}`; the result keeps the candidate name identity and the mismatching resolved target
+- `status=mismatch` remains reserved for the additive verified result shape where the claim normalizes and resolves but the verified target address for the requested `coin_type` does not equal the requested `{address}`
 - invalid address syntax, missing required `namespace` or `coin_type`, or a malformed query tuple returns `400 invalid_input`
 - an unsupported public namespace returns `404 not_found`
 - no declared or verified primary-name answer for the requested tuple returns `200` with `status=not_found`; it does not turn the route into `404`
