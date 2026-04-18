@@ -5,8 +5,9 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use bigname_storage::{
-    CanonicalityState, NameCurrentRow, SurfaceBindingKind, clear_name_current, delete_name_current,
-    upsert_name_current_rows,
+    CanonicalityState, HistoryEvent, HistoryScope, NameCurrentRow, SurfaceBindingKind,
+    clear_name_current, delete_name_current, load_name_history_head,
+    load_surface_bindings_by_logical_name_id, upsert_name_current_rows,
 };
 use serde_json::{Value, json};
 use sqlx::{
@@ -19,14 +20,12 @@ use uuid::Uuid;
 const ENS_NAMESPACE: &str = "ens";
 const ENS_V1_AUTHORITY_DERIVATION_KIND: &str = "ens_v1_unwrapped_authority";
 const NAME_CURRENT_DERIVATION_KIND: &str = "name_current_rebuild";
-const RESOLVER_UNSUPPORTED_REASON: &str =
-    "declared resolver summary is not yet projected for the ENSv1 name_current rebuild";
+const EVENT_KIND_RESOLVER_CHANGED: &str = "ResolverChanged";
 const RECORD_INVENTORY_UNSUPPORTED_REASON: &str =
     "record_inventory remains unsupported in the ENSv1 name_current rebuild";
-const HISTORY_UNSUPPORTED_REASON: &str =
-    "declared history pointers are not yet projected for the ENSv1 name_current rebuild";
 const COVERAGE_UNSUPPORTED_REASON: &str =
-    "current_resolver and record_inventory remain unsupported in this projection slice";
+    "record_inventory remains unsupported in the ENSv1 name_current rebuild";
+const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 const RELEVANT_EVENT_KINDS: &[&str] = &[
     "AuthorityEpochChanged",
     "AuthorityTransferred",
@@ -34,6 +33,7 @@ const RELEVANT_EVENT_KINDS: &[&str] = &[
     "RegistrationGranted",
     "RegistrationReleased",
     "RegistrationRenewed",
+    EVENT_KIND_RESOLVER_CHANGED,
     "SurfaceBound",
     "SurfaceUnbound",
     "TokenControlTransferred",
@@ -85,6 +85,7 @@ struct CurrentBindingContext {
 #[derive(Clone, Debug)]
 struct RelevantEvent {
     normalized_event_id: i64,
+    resource_id: Option<Uuid>,
     event_kind: String,
     source_family: String,
     manifest_version: i64,
@@ -109,6 +110,13 @@ struct ProjectedFacts {
     registry_owner: Option<String>,
     latest_registration_event_kind: Option<String>,
     latest_control_event_kind: Option<String>,
+    control_status_substrate: Option<String>,
+    control_expiry_substrate: Option<i64>,
+    resolver_chain_id: Option<String>,
+    resolver_address: Option<String>,
+    latest_resolver_event_kind: Option<String>,
+    surface_head: Option<HistoryPointer>,
+    resource_head: Option<HistoryPointer>,
 }
 
 #[derive(Clone, Debug)]
@@ -118,6 +126,25 @@ struct ChainPositionCandidate {
     block_number: i64,
     block_hash: String,
     timestamp: OffsetDateTime,
+}
+
+#[derive(Clone, Debug, Default)]
+struct HistoryHeads {
+    surface_head: Option<HistoryEvent>,
+    resource_head: Option<HistoryEvent>,
+}
+
+impl HistoryHeads {
+    fn iter(&self) -> impl Iterator<Item = &HistoryEvent> {
+        self.surface_head.iter().chain(self.resource_head.iter())
+    }
+}
+
+#[derive(Clone, Debug)]
+struct HistoryPointer {
+    normalized_event_id: i64,
+    event_kind: String,
+    chain_position: Value,
 }
 
 pub async fn rebuild_name_current(
@@ -172,16 +199,20 @@ async fn rebuild_one_name_current(
 async fn build_name_current_row(pool: &PgPool, name: &NameSurfaceSeed) -> Result<NameCurrentRow> {
     let current_binding = load_current_binding_context(pool, &name.logical_name_id).await?;
     let events = load_relevant_events(pool, &name.logical_name_id).await?;
-    let facts = project_facts(&events, current_binding.as_ref());
-    let chain_positions = build_chain_positions(name, current_binding.as_ref(), &events);
-    let canonicality_summary = build_canonicality_summary(name, current_binding.as_ref(), &events);
-    let provenance = build_provenance(&events)?;
+    let history_heads = load_history_heads(pool, &name.logical_name_id).await?;
+    let facts = project_facts(&events, current_binding.as_ref(), &history_heads)?;
+    let chain_positions =
+        build_chain_positions(name, current_binding.as_ref(), &events, &history_heads);
+    let canonicality_summary =
+        build_canonicality_summary(name, current_binding.as_ref(), &events, &history_heads);
+    let provenance = build_provenance(&events, &history_heads)?;
     let manifest_version = events
         .iter()
         .map(|event| event.manifest_version)
+        .chain(history_heads.iter().map(|event| event.manifest_version))
         .max()
         .unwrap_or(1);
-    let last_recomputed_at = max_timestamp(name, current_binding.as_ref(), &events)
+    let last_recomputed_at = max_timestamp(name, current_binding.as_ref(), &events, &history_heads)
         .unwrap_or(OffsetDateTime::UNIX_EPOCH);
 
     Ok(NameCurrentRow {
@@ -215,6 +246,17 @@ async fn build_name_current_row(pool: &PgPool, name: &NameSurfaceSeed) -> Result
 }
 
 fn build_declared_summary(facts: ProjectedFacts) -> Value {
+    let surface_head = facts
+        .surface_head
+        .as_ref()
+        .map(history_pointer_json)
+        .unwrap_or(Value::Null);
+    let resource_head = facts
+        .resource_head
+        .as_ref()
+        .map(history_pointer_json)
+        .unwrap_or(Value::Null);
+
     json!({
         "registration": {
             "status": facts.registration_status,
@@ -231,34 +273,46 @@ fn build_declared_summary(facts: ProjectedFacts) -> Value {
             "latest_event_kind": facts.latest_control_event_kind,
         },
         "resolver": {
-            "status": "unsupported",
-            "address": Value::Null,
-            "unsupported_reason": RESOLVER_UNSUPPORTED_REASON,
+            "chain_id": facts.resolver_chain_id,
+            "address": facts.resolver_address,
+            "latest_event_kind": facts.latest_resolver_event_kind,
         },
         "record_inventory": {
             "status": "unsupported",
             "unsupported_reason": RECORD_INVENTORY_UNSUPPORTED_REASON,
         },
         "history": {
-            "status": "unsupported",
-            "unsupported_reason": HISTORY_UNSUPPORTED_REASON,
+            "surface_head": surface_head,
+            "resource_head": resource_head,
         },
     })
 }
 
-fn build_provenance(events: &[RelevantEvent]) -> Result<Value> {
-    let normalized_event_ids = events
+fn build_provenance(events: &[RelevantEvent], history_heads: &HistoryHeads) -> Result<Value> {
+    let mut normalized_event_ids = Vec::new();
+    let mut seen_normalized_event_ids = BTreeSet::new();
+    for normalized_event_id in events
         .iter()
         .map(|event| event.normalized_event_id)
-        .collect::<Vec<_>>();
-    let raw_fact_refs = dedupe_json_values(events.iter().map(|event| event.raw_fact_ref.clone()))?;
-    let manifest_versions = dedupe_json_values(events.iter().map(|event| {
-        json!({
-            "source_manifest_id": event.source_manifest_id,
-            "source_family": event.source_family,
-            "manifest_version": event.manifest_version,
-        })
-    }))?;
+        .chain(history_heads.iter().map(|event| event.normalized_event_id))
+    {
+        if seen_normalized_event_ids.insert(normalized_event_id) {
+            normalized_event_ids.push(normalized_event_id);
+        }
+    }
+
+    let raw_fact_refs = dedupe_json_values(
+        events
+            .iter()
+            .map(|event| event.raw_fact_ref.clone())
+            .chain(history_heads.iter().map(|event| event.raw_fact_ref.clone())),
+    )?;
+    let manifest_versions = dedupe_json_values(
+        events
+            .iter()
+            .map(event_manifest_version)
+            .chain(history_heads.iter().map(history_manifest_version)),
+    )?;
 
     Ok(json!({
         "normalized_event_ids": normalized_event_ids,
@@ -273,6 +327,7 @@ fn build_chain_positions(
     name: &NameSurfaceSeed,
     current_binding: Option<&CurrentBindingContext>,
     events: &[RelevantEvent],
+    history_heads: &HistoryHeads,
 ) -> Value {
     let mut latest_positions = BTreeMap::<String, ChainPositionCandidate>::new();
 
@@ -305,6 +360,27 @@ fn build_chain_positions(
     }
 
     for event in events {
+        let (Some(chain_id), Some(block_number), Some(block_hash), Some(timestamp)) = (
+            event.chain_id.as_ref(),
+            event.block_number,
+            event.block_hash.as_ref(),
+            event.block_timestamp,
+        ) else {
+            continue;
+        };
+        push_chain_position(
+            &mut latest_positions,
+            ChainPositionCandidate {
+                slot: chain_slot(chain_id),
+                chain_id: chain_id.clone(),
+                block_number,
+                block_hash: block_hash.clone(),
+                timestamp,
+            },
+        );
+    }
+
+    for event in history_heads.iter() {
         let (Some(chain_id), Some(block_number), Some(block_hash), Some(timestamp)) = (
             event.chain_id.as_ref(),
             event.block_number,
@@ -364,6 +440,7 @@ fn build_canonicality_summary(
     name: &NameSurfaceSeed,
     current_binding: Option<&CurrentBindingContext>,
     events: &[RelevantEvent],
+    history_heads: &HistoryHeads,
 ) -> Value {
     let mut states = vec![name.canonicality_state];
     let mut chain_states = BTreeMap::<String, CanonicalityState>::new();
@@ -385,6 +462,13 @@ fn build_canonicality_summary(
     }
 
     for event in events {
+        states.push(event.canonicality_state);
+        if let Some(chain_id) = event.chain_id.as_ref() {
+            merge_chain_state(&mut chain_states, chain_id, event.canonicality_state);
+        }
+    }
+
+    for event in history_heads.iter() {
         states.push(event.canonicality_state);
         if let Some(chain_id) = event.chain_id.as_ref() {
             merge_chain_state(&mut chain_states, chain_id, event.canonicality_state);
@@ -419,10 +503,18 @@ fn merge_chain_state(
 fn project_facts(
     events: &[RelevantEvent],
     current_binding: Option<&CurrentBindingContext>,
-) -> ProjectedFacts {
+    history_heads: &HistoryHeads,
+) -> Result<ProjectedFacts> {
     let mut facts = ProjectedFacts::default();
 
     for event in events {
+        if let Some(status) = json_str(&event.after_state, &["status"]) {
+            facts.control_status_substrate = Some(status);
+        }
+        if let Some(expiry) = json_i64(&event.after_state, &["expiry"]) {
+            facts.control_expiry_substrate = Some(expiry);
+        }
+
         match event.event_kind.as_str() {
             "RegistrationGranted" => {
                 facts.registration_status = Some("active".to_owned());
@@ -461,6 +553,27 @@ fn project_facts(
                 facts.authority_key = json_str(&event.after_state, &["authority_key"]);
                 facts.latest_control_event_kind = Some(event.event_kind.clone());
             }
+            EVENT_KIND_RESOLVER_CHANGED
+                if current_binding.map(|binding| binding.resource_id) == event.resource_id =>
+            {
+                let resolver_address = normalize_resolver_address(
+                    json_str(&event.after_state, &["resolver"]).as_deref(),
+                );
+                if resolver_address.is_some() && event.chain_id.is_none() {
+                    bail!(
+                        "ResolverChanged event {} for logical_name_id {} is missing chain_id",
+                        event.normalized_event_id,
+                        current_binding
+                            .map(|binding| binding.surface_binding_id.to_string())
+                            .unwrap_or_default()
+                    );
+                }
+                facts.resolver_chain_id = resolver_address
+                    .as_ref()
+                    .and_then(|_| event.chain_id.clone());
+                facts.resolver_address = resolver_address;
+                facts.latest_resolver_event_kind = Some(event.event_kind.clone());
+            }
             _ => {}
         }
     }
@@ -469,13 +582,23 @@ fn project_facts(
         facts.registration_status = Some("active".to_owned());
     }
 
-    facts
+    facts.surface_head = history_heads
+        .surface_head
+        .as_ref()
+        .map(history_pointer_from_event);
+    facts.resource_head = history_heads
+        .resource_head
+        .as_ref()
+        .map(history_pointer_from_event);
+
+    Ok(facts)
 }
 
 fn max_timestamp(
     name: &NameSurfaceSeed,
     current_binding: Option<&CurrentBindingContext>,
     events: &[RelevantEvent],
+    history_heads: &HistoryHeads,
 ) -> Option<OffsetDateTime> {
     let mut timestamps = Vec::new();
     if let Some(timestamp) = name.block_timestamp {
@@ -487,7 +610,58 @@ fn max_timestamp(
         timestamps.push(timestamp);
     }
     timestamps.extend(events.iter().filter_map(|event| event.block_timestamp));
+    timestamps.extend(
+        history_heads
+            .iter()
+            .filter_map(|event| event.block_timestamp),
+    );
     timestamps.into_iter().max()
+}
+
+async fn load_history_heads(pool: &PgPool, logical_name_id: &str) -> Result<HistoryHeads> {
+    let resource_ids = load_name_resource_ids(pool, logical_name_id).await?;
+    let surface_head = load_name_history_head(
+        pool,
+        logical_name_id,
+        &resource_ids,
+        HistoryScope::Surface,
+        true,
+    )
+    .await
+    .with_context(|| {
+        format!("failed to load surface history head for logical_name_id {logical_name_id}")
+    })?;
+    let resource_head = load_name_history_head(
+        pool,
+        logical_name_id,
+        &resource_ids,
+        HistoryScope::Resource,
+        true,
+    )
+    .await
+    .with_context(|| {
+        format!("failed to load resource history head for logical_name_id {logical_name_id}")
+    })?;
+
+    Ok(HistoryHeads {
+        surface_head,
+        resource_head,
+    })
+}
+
+async fn load_name_resource_ids(pool: &PgPool, logical_name_id: &str) -> Result<Vec<Uuid>> {
+    let bindings = load_surface_bindings_by_logical_name_id(pool, logical_name_id)
+        .await
+        .with_context(|| {
+            format!("failed to load resource ids for logical_name_id {logical_name_id}")
+        })?;
+
+    Ok(bindings
+        .into_iter()
+        .map(|binding| binding.resource_id)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect())
 }
 
 async fn load_canonical_name_surfaces(pool: &PgPool) -> Result<Vec<NameSurfaceSeed>> {
@@ -608,6 +782,7 @@ async fn load_relevant_events(pool: &PgPool, logical_name_id: &str) -> Result<Ve
         r#"
         SELECT
             ne.normalized_event_id,
+            ne.resource_id,
             ne.event_kind,
             ne.source_family,
             ne.manifest_version,
@@ -729,6 +904,7 @@ fn decode_relevant_event(row: sqlx::postgres::PgRow) -> Result<RelevantEvent> {
         normalized_event_id: row
             .try_get("normalized_event_id")
             .context("missing normalized_event_id")?,
+        resource_id: row.try_get("resource_id").context("missing resource_id")?,
         event_kind: row.try_get("event_kind").context("missing event_kind")?,
         source_family: row
             .try_get("source_family")
@@ -831,6 +1007,64 @@ fn json_i64(value: &Value, path: &[&str]) -> Option<i64> {
     path.iter()
         .try_fold(value, |current, key| current.get(key))
         .and_then(Value::as_i64)
+}
+
+fn event_manifest_version(event: &RelevantEvent) -> Value {
+    json!({
+        "source_manifest_id": event.source_manifest_id,
+        "source_family": event.source_family,
+        "manifest_version": event.manifest_version,
+    })
+}
+
+fn history_manifest_version(event: &HistoryEvent) -> Value {
+    json!({
+        "source_manifest_id": event.source_manifest_id,
+        "source_family": event.source_family,
+        "manifest_version": event.manifest_version,
+    })
+}
+
+fn normalize_resolver_address(value: Option<&str>) -> Option<String> {
+    let normalized = value?.trim().to_ascii_lowercase();
+    if normalized.is_empty() || normalized == ZERO_ADDRESS {
+        None
+    } else {
+        Some(normalized)
+    }
+}
+
+fn history_pointer_from_event(event: &HistoryEvent) -> HistoryPointer {
+    HistoryPointer {
+        normalized_event_id: event.normalized_event_id,
+        event_kind: event.event_kind.clone(),
+        chain_position: history_pointer_chain_position(event),
+    }
+}
+
+fn history_pointer_chain_position(event: &HistoryEvent) -> Value {
+    match (
+        event.chain_id.as_ref(),
+        event.block_number,
+        event.block_hash.as_ref(),
+        event.block_timestamp,
+    ) {
+        (Some(chain_id), Some(block_number), Some(block_hash), Some(timestamp)) => json!({
+            "chain_id": chain_id,
+            "block_number": block_number,
+            "block_hash": block_hash,
+            "timestamp": format_timestamp(timestamp),
+        }),
+        _ => Value::Null,
+    }
+}
+
+fn history_pointer_json(pointer: &HistoryPointer) -> Value {
+    json!({
+        "normalized_event_id": pointer.normalized_event_id,
+        "event_kind": pointer.event_kind,
+        "chain_position": pointer.chain_position,
+    })
 }
 
 fn dedupe_json_values(values: impl IntoIterator<Item = Value>) -> Result<Vec<Value>> {
@@ -1028,19 +1262,171 @@ mod tests {
             Value::String("0x0000000000000000000000000000000000000aaa".to_owned())
         );
         assert_eq!(
-            row.declared_summary["resolver"]["status"],
-            Value::String("unsupported".to_owned())
+            row.declared_summary["resolver"],
+            json!({
+                "chain_id": Value::Null,
+                "address": Value::Null,
+                "latest_event_kind": Value::Null,
+            })
         );
         assert_eq!(
             row.declared_summary["record_inventory"]["status"],
             Value::String("unsupported".to_owned())
         );
-        assert_eq!(
-            row.declared_summary["history"]["status"],
-            Value::String("unsupported".to_owned())
+        assert!(
+            row.declared_summary["resolver"]
+                .as_object()
+                .and_then(|value| value.get("status"))
+                .is_none()
         );
+        assert!(
+            row.declared_summary["history"]
+                .as_object()
+                .and_then(|value| value.get("status"))
+                .is_none()
+        );
+        assert!(row.declared_summary["history"]["surface_head"].is_object());
+        assert!(row.declared_summary["history"]["resource_head"].is_object());
         assert_eq!(row.coverage["status"], Value::String("partial".to_owned()));
+        assert_eq!(
+            row.coverage["unsupported_reason"],
+            Value::String(COVERAGE_UNSUPPORTED_REASON.to_owned())
+        );
         assert_eq!(row.manifest_version, 3);
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn rebuild_projects_current_resolver_summary() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let binding =
+            IdentityBinding::new("ens:resolver.eth", "resolver.eth", 0x3100, 0x3200, 0x3300);
+        let resolver_address = "0x0000000000000000000000000000000000000abc";
+
+        seed_raw_blocks(
+            database.pool(),
+            &[
+                raw_block("ethereum-mainnet", "0xgrant", 210, 1_717_171_710),
+                raw_block("ethereum-mainnet", "0xresolver", 211, 1_717_171_711),
+            ],
+        )
+        .await?;
+        seed_identity(database.pool(), &binding, "0xgrant", 210, 1_717_171_710).await?;
+        seed_events(
+            database.pool(),
+            &[
+                authority_event(
+                    &binding,
+                    "grant-resolver",
+                    "RegistrationGranted",
+                    "0xgrant",
+                    210,
+                    Some(0),
+                    json!({}),
+                    json!({
+                        "authority_kind": "registrar",
+                        "authority_key": "registrar:ethereum-mainnet:7:resolver",
+                        "registrant": "0x0000000000000000000000000000000000000aaa",
+                        "expiry": 1_800_000_000_i64,
+                    }),
+                ),
+                resolver_event(
+                    &binding,
+                    "resolver-change",
+                    resolver_address,
+                    "0xresolver",
+                    211,
+                    0,
+                ),
+            ],
+        )
+        .await?;
+
+        rebuild_name_current(database.pool(), Some(&binding.logical_name_id)).await?;
+
+        let row = load_name_current(database.pool(), &binding.logical_name_id)
+            .await?
+            .context("rebuilt row must exist")?;
+        assert_eq!(
+            row.declared_summary["resolver"],
+            json!({
+                "chain_id": "ethereum-mainnet",
+                "address": resolver_address,
+                "latest_event_kind": EVENT_KIND_RESOLVER_CHANGED,
+            })
+        );
+        assert_eq!(
+            row.coverage["unsupported_reason"],
+            Value::String(COVERAGE_UNSUPPORTED_REASON.to_owned())
+        );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn rebuild_projects_null_resolver_summary_for_zero_address() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let binding = IdentityBinding::new(
+            "ens:no-resolver.eth",
+            "no-resolver.eth",
+            0x3400,
+            0x3500,
+            0x3600,
+        );
+
+        seed_raw_blocks(
+            database.pool(),
+            &[
+                raw_block("ethereum-mainnet", "0xgrant", 220, 1_717_171_720),
+                raw_block("ethereum-mainnet", "0xresolver", 221, 1_717_171_721),
+            ],
+        )
+        .await?;
+        seed_identity(database.pool(), &binding, "0xgrant", 220, 1_717_171_720).await?;
+        seed_events(
+            database.pool(),
+            &[
+                authority_event(
+                    &binding,
+                    "grant-null-resolver",
+                    "RegistrationGranted",
+                    "0xgrant",
+                    220,
+                    Some(0),
+                    json!({}),
+                    json!({
+                        "authority_kind": "registrar",
+                        "authority_key": "registrar:ethereum-mainnet:7:no-resolver",
+                        "registrant": "0x0000000000000000000000000000000000000aaa",
+                        "expiry": 1_800_000_000_i64,
+                    }),
+                ),
+                resolver_event(
+                    &binding,
+                    "resolver-cleared",
+                    ZERO_ADDRESS,
+                    "0xresolver",
+                    221,
+                    0,
+                ),
+            ],
+        )
+        .await?;
+
+        rebuild_name_current(database.pool(), Some(&binding.logical_name_id)).await?;
+
+        let row = load_name_current(database.pool(), &binding.logical_name_id)
+            .await?
+            .context("rebuilt row must exist")?;
+        assert_eq!(
+            row.declared_summary["resolver"],
+            json!({
+                "chain_id": Value::Null,
+                "address": Value::Null,
+                "latest_event_kind": EVENT_KIND_RESOLVER_CHANGED,
+            })
+        );
 
         database.cleanup().await
     }
@@ -1290,6 +1676,103 @@ mod tests {
         assert_eq!(
             row.declared_summary["control"]["registry_owner"],
             Value::String("0x0000000000000000000000000000000000000ccc".to_owned())
+        );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn rebuild_history_heads_match_canonical_name_history_ordering() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let binding =
+            IdentityBinding::new("ens:history.eth", "history.eth", 0x8100, 0x8200, 0x8300);
+        let historical_resource_id = Uuid::from_u128(0x8400);
+
+        seed_raw_blocks(
+            database.pool(),
+            &[
+                raw_block("ethereum-mainnet", "0xgrant", 510, 1_717_172_110),
+                raw_block("ethereum-mainnet", "0xsurface", 511, 1_717_172_111),
+                raw_block("ethereum-mainnet", "0xresource", 512, 1_717_172_112),
+            ],
+        )
+        .await?;
+        seed_identity(database.pool(), &binding, "0xgrant", 510, 1_717_172_110).await?;
+        seed_events(
+            database.pool(),
+            &[
+                authority_event(
+                    &binding,
+                    "grant-history",
+                    "RegistrationGranted",
+                    "0xgrant",
+                    510,
+                    Some(0),
+                    json!({}),
+                    json!({
+                        "authority_kind": "registrar",
+                        "authority_key": "registrar:ethereum-mainnet:7:history",
+                        "registrant": "0x0000000000000000000000000000000000000aaa",
+                        "expiry": 1_800_000_000_i64,
+                    }),
+                ),
+                history_event(
+                    "surface-head",
+                    Some(&binding.logical_name_id),
+                    Some(historical_resource_id),
+                    Some("ethereum-mainnet"),
+                    Some(511),
+                    Some("0xsurface"),
+                    Some("0xtx511"),
+                    Some(0),
+                ),
+                history_event(
+                    "resource-head",
+                    Some("ens:other.eth"),
+                    Some(binding.resource_id),
+                    Some("ethereum-mainnet"),
+                    Some(512),
+                    Some("0xresource"),
+                    Some("0xtx512"),
+                    Some(0),
+                ),
+            ],
+        )
+        .await?;
+
+        rebuild_name_current(database.pool(), Some(&binding.logical_name_id)).await?;
+
+        let row = load_name_current(database.pool(), &binding.logical_name_id)
+            .await?
+            .context("rebuilt row must exist")?;
+        let resource_ids =
+            load_name_resource_ids(database.pool(), &binding.logical_name_id).await?;
+        let expected_surface_head = load_name_history_head(
+            database.pool(),
+            &binding.logical_name_id,
+            &resource_ids,
+            HistoryScope::Surface,
+            true,
+        )
+        .await?
+        .context("surface head must exist")?;
+        let expected_resource_head = load_name_history_head(
+            database.pool(),
+            &binding.logical_name_id,
+            &resource_ids,
+            HistoryScope::Resource,
+            true,
+        )
+        .await?
+        .context("resource head must exist")?;
+
+        assert_eq!(
+            row.declared_summary["history"]["surface_head"],
+            history_pointer_json(&history_pointer_from_event(&expected_surface_head))
+        );
+        assert_eq!(
+            row.declared_summary["history"]["resource_head"],
+            history_pointer_json(&history_pointer_from_event(&expected_resource_head))
         );
 
         database.cleanup().await
@@ -1625,6 +2108,83 @@ mod tests {
             canonicality_state: CanonicalityState::Finalized,
             before_state,
             after_state,
+        }
+    }
+
+    fn resolver_event(
+        binding: &IdentityBinding,
+        identity_suffix: &str,
+        resolver_address: &str,
+        block_hash: &str,
+        block_number: i64,
+        log_index: i64,
+    ) -> NormalizedEvent {
+        NormalizedEvent {
+            event_identity: format!("worker-test:{EVENT_KIND_RESOLVER_CHANGED}:{identity_suffix}"),
+            namespace: "ens".to_owned(),
+            logical_name_id: Some(binding.logical_name_id.clone()),
+            resource_id: Some(binding.resource_id),
+            event_kind: EVENT_KIND_RESOLVER_CHANGED.to_owned(),
+            source_family: "ens_v1_unwrapped_authority".to_owned(),
+            manifest_version: 4,
+            source_manifest_id: None,
+            chain_id: Some("ethereum-mainnet".to_owned()),
+            block_number: Some(block_number),
+            block_hash: Some(block_hash.to_owned()),
+            transaction_hash: Some(format!("tx:{identity_suffix}")),
+            log_index: Some(log_index),
+            raw_fact_ref: json!({
+                "kind": "raw_log",
+                "chain_id": "ethereum-mainnet",
+                "block_hash": block_hash,
+                "block_number": block_number,
+                "transaction_hash": format!("tx:{identity_suffix}"),
+                "log_index": log_index,
+            }),
+            derivation_kind: ENS_V1_AUTHORITY_DERIVATION_KIND.to_owned(),
+            canonicality_state: CanonicalityState::Finalized,
+            before_state: json!({}),
+            after_state: json!({
+                "resolver": resolver_address,
+                "namehash": format!("namehash:{}", binding.display_name),
+            }),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn history_event(
+        identity_suffix: &str,
+        logical_name_id: Option<&str>,
+        resource_id: Option<Uuid>,
+        chain_id: Option<&str>,
+        block_number: Option<i64>,
+        block_hash: Option<&str>,
+        transaction_hash: Option<&str>,
+        log_index: Option<i64>,
+    ) -> NormalizedEvent {
+        NormalizedEvent {
+            event_identity: format!("worker-test:history:{identity_suffix}"),
+            namespace: "ens".to_owned(),
+            logical_name_id: logical_name_id.map(str::to_owned),
+            resource_id,
+            event_kind: "HistoryEvent".to_owned(),
+            source_family: "ens_v1_registry_l1".to_owned(),
+            manifest_version: 5,
+            source_manifest_id: None,
+            chain_id: chain_id.map(str::to_owned),
+            block_number,
+            block_hash: block_hash.map(str::to_owned),
+            transaction_hash: transaction_hash.map(str::to_owned),
+            log_index,
+            raw_fact_ref: json!({
+                "kind": "raw_log",
+                "event_identity": identity_suffix,
+                "transaction_hash": transaction_hash,
+            }),
+            derivation_kind: "history_test".to_owned(),
+            canonicality_state: CanonicalityState::Finalized,
+            before_state: json!({}),
+            after_state: json!({}),
         }
     }
 

@@ -87,6 +87,28 @@ pub async fn load_name_history(
     })
 }
 
+/// Load the first history row for one logical name anchor under the shared default sort.
+pub async fn load_name_history_head(
+    pool: &PgPool,
+    logical_name_id: &str,
+    resource_ids: &[Uuid],
+    scope: HistoryScope,
+    canonical_only: bool,
+) -> Result<Option<HistoryEvent>> {
+    load_history_head(
+        pool,
+        name_history_selector(logical_name_id, resource_ids, scope),
+        canonical_only,
+    )
+    .await
+    .with_context(|| {
+        format!(
+            "failed to load history head for logical_name_id {logical_name_id} with scope {}",
+            scope.as_str()
+        )
+    })
+}
+
 /// Load history rows for one resource anchor.
 pub async fn load_resource_history(
     pool: &PgPool,
@@ -424,6 +446,24 @@ async fn load_history(
     selector: HistorySelector,
     canonical_only: bool,
 ) -> Result<Vec<HistoryEvent>> {
+    load_history_internal(pool, selector, canonical_only, false).await
+}
+
+async fn load_history_head(
+    pool: &PgPool,
+    selector: HistorySelector,
+    canonical_only: bool,
+) -> Result<Option<HistoryEvent>> {
+    let mut rows = load_history_internal(pool, selector, canonical_only, true).await?;
+    Ok(rows.drain(..).next())
+}
+
+async fn load_history_internal(
+    pool: &PgPool,
+    selector: HistorySelector,
+    canonical_only: bool,
+    head_only: bool,
+) -> Result<Vec<HistoryEvent>> {
     if matches!(selector, HistorySelector::None) {
         return Ok(Vec::new());
     }
@@ -528,6 +568,10 @@ async fn load_history(
             ne.event_identity DESC
         "#,
     );
+
+    if head_only {
+        builder.push(" LIMIT 1");
+    }
 
     let rows = builder
         .build()
@@ -2073,6 +2117,132 @@ mod tests {
                 "no-chain-position",
             ]
         );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn name_history_head_matches_first_row_for_surface_and_resource_scopes() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let logical_name_id = "ens:alice.eth";
+        let resource_id = Uuid::from_u128(0xa301);
+        let other_resource_id = Uuid::from_u128(0xa302);
+
+        upsert_raw_blocks(
+            database.pool(),
+            &[
+                raw_block("ethereum-mainnet", "0x500", None, 500, 1_700_000_500),
+                raw_block(
+                    "ethereum-mainnet",
+                    "0x501",
+                    Some("0x500"),
+                    501,
+                    1_700_000_501,
+                ),
+                raw_block(
+                    "ethereum-mainnet",
+                    "0x502",
+                    Some("0x501"),
+                    502,
+                    1_700_000_502,
+                ),
+                raw_block(
+                    "ethereum-mainnet",
+                    "0x503",
+                    Some("0x502"),
+                    503,
+                    1_700_000_503,
+                ),
+            ],
+        )
+        .await?;
+
+        upsert_normalized_events(
+            database.pool(),
+            &[
+                history_event(
+                    "surface-earlier",
+                    Some(logical_name_id),
+                    None,
+                    Some("ethereum-mainnet"),
+                    Some(500),
+                    Some("0x500"),
+                    Some("0xtx500"),
+                    Some(0),
+                    CanonicalityState::Canonical,
+                ),
+                history_event(
+                    "resource-earlier",
+                    None,
+                    Some(resource_id),
+                    Some("ethereum-mainnet"),
+                    Some(501),
+                    Some("0x501"),
+                    Some("0xtx501"),
+                    Some(0),
+                    CanonicalityState::Canonical,
+                ),
+                history_event(
+                    "surface-latest",
+                    Some(logical_name_id),
+                    Some(other_resource_id),
+                    Some("ethereum-mainnet"),
+                    Some(503),
+                    Some("0x503"),
+                    Some("0xtx503"),
+                    Some(0),
+                    CanonicalityState::Finalized,
+                ),
+                history_event(
+                    "resource-latest",
+                    Some("ens:other.eth"),
+                    Some(resource_id),
+                    Some("ethereum-mainnet"),
+                    Some(502),
+                    Some("0x502"),
+                    Some("0xtx502"),
+                    Some(0),
+                    CanonicalityState::Safe,
+                ),
+            ],
+        )
+        .await?;
+
+        let surface_rows = load_name_history(
+            database.pool(),
+            logical_name_id,
+            &[resource_id],
+            HistoryScope::Surface,
+            true,
+        )
+        .await?;
+        let surface_head = load_name_history_head(
+            database.pool(),
+            logical_name_id,
+            &[resource_id],
+            HistoryScope::Surface,
+            true,
+        )
+        .await?;
+        assert_eq!(surface_head, surface_rows.first().cloned());
+
+        let resource_rows = load_name_history(
+            database.pool(),
+            logical_name_id,
+            &[resource_id],
+            HistoryScope::Resource,
+            true,
+        )
+        .await?;
+        let resource_head = load_name_history_head(
+            database.pool(),
+            logical_name_id,
+            &[resource_id],
+            HistoryScope::Resource,
+            true,
+        )
+        .await?;
+        assert_eq!(resource_head, resource_rows.first().cloned());
 
         database.cleanup().await
     }

@@ -40,7 +40,8 @@ pub use execution::{
     ExecutionTrace, ExecutionTraceStep, load_execution_trace, upsert_execution_trace,
 };
 pub use history::{
-    HistoryEvent, HistoryScope, load_address_history, load_name_history, load_resource_history,
+    HistoryEvent, HistoryScope, load_address_history, load_name_history, load_name_history_head,
+    load_resource_history,
 };
 pub use identity::{
     IdentityOrphanCounts, NameSurface, Resource, SurfaceBinding, SurfaceBindingKind, TokenLineage,
