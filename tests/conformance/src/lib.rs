@@ -7,8 +7,13 @@ mod shipped_api {
     mod conformance {
         use std::{
             collections::BTreeSet,
+            path::PathBuf,
+            process::Command,
             str::FromStr,
-            sync::atomic::{AtomicU64, Ordering},
+            sync::{
+                Mutex,
+                atomic::{AtomicU64, Ordering},
+            },
             time::{SystemTime, UNIX_EPOCH},
         };
 
@@ -26,7 +31,7 @@ mod shipped_api {
         use serde::de::DeserializeOwned;
         use serde_json::{Value, json};
         use sqlx::{
-            PgPool, Row,
+            ConnectOptions, PgPool, Row,
             postgres::{PgConnectOptions, PgPoolOptions},
             types::{Uuid, time::OffsetDateTime},
         };
@@ -35,11 +40,13 @@ mod shipped_api {
         use super::*;
 
         static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
+        static WORKER_CARGO_LOCK: Mutex<()> = Mutex::new(());
 
         struct HarnessDatabase {
             admin_pool: PgPool,
             pool: PgPool,
             database_name: String,
+            database_url: String,
         }
 
         impl HarnessDatabase {
@@ -74,9 +81,11 @@ mod shipped_api {
                         format!("failed to create conformance database {database_name}")
                     })?;
 
+                let pool_options = base_options.clone().database(&database_name);
+                let database_url = pool_options.to_url_lossy().to_string();
                 let pool = PgPoolOptions::new()
                     .max_connections(1)
-                    .connect_with(base_options.database(&database_name))
+                    .connect_with(pool_options)
                     .await
                     .context("failed to connect conformance pool")?;
 
@@ -89,6 +98,7 @@ mod shipped_api {
                     admin_pool,
                     pool,
                     database_name,
+                    database_url,
                 })
             }
 
@@ -175,19 +185,45 @@ mod shipped_api {
                 Ok(())
             }
 
-            async fn seed_name_current_binding(
+            async fn seed_exact_name_rebuild_inputs(
                 &self,
                 logical_name_id: &str,
                 resource_id: Uuid,
                 token_lineage_id: Uuid,
                 surface_binding_id: Uuid,
             ) -> Result<()> {
+                let historical_resource_id = Uuid::from_u128(0x4400);
+
+                bigname_storage::upsert_raw_blocks(
+                    &self.pool,
+                    &[
+                        raw_block("ethereum-mainnet", "0xsurface", None, 98, 1_717_171_698),
+                        raw_block("ethereum-mainnet", "0xbinding", None, 100, 1_717_171_700),
+                        raw_block("ethereum-mainnet", "0xgrant", None, 101, 1_717_171_701),
+                        raw_block("ethereum-mainnet", "0xtransfer", None, 102, 1_717_171_702),
+                        raw_block("ethereum-mainnet", "0xauthority", None, 103, 1_717_171_703),
+                        raw_block("ethereum-mainnet", "0xresolver", None, 104, 1_717_171_704),
+                        raw_block(
+                            "ethereum-mainnet",
+                            "0xhistoryresource",
+                            None,
+                            105,
+                            1_717_171_705,
+                        ),
+                        raw_block(
+                            "ethereum-mainnet",
+                            "0xhistorysurface",
+                            None,
+                            106,
+                            1_717_171_706,
+                        ),
+                    ],
+                )
+                .await
+                .context("failed to upsert raw blocks for exact-name conformance")?;
                 bigname_storage::upsert_name_surfaces(&self.pool, &[name_surface(logical_name_id)])
                     .await
                     .context("failed to upsert name surface for exact-name conformance")?;
-                bigname_storage::upsert_resources(&self.pool, &[resource(resource_id)])
-                    .await
-                    .context("failed to upsert resource for exact-name conformance")?;
                 bigname_storage::upsert_token_lineages(
                     &self.pool,
                     &[bigname_storage::TokenLineage {
@@ -201,6 +237,20 @@ mod shipped_api {
                 )
                 .await
                 .context("failed to upsert token lineage for exact-name conformance")?;
+                bigname_storage::upsert_resources(
+                    &self.pool,
+                    &[Resource {
+                        resource_id,
+                        token_lineage_id: Some(token_lineage_id),
+                        chain_id: "ethereum-mainnet".to_owned(),
+                        block_hash: "0xresource".to_owned(),
+                        block_number: 99,
+                        provenance: json!({"seed": "exact_name_resource"}),
+                        canonicality_state: CanonicalityState::Canonical,
+                    }],
+                )
+                .await
+                .context("failed to upsert resource for exact-name conformance")?;
                 bigname_storage::upsert_surface_bindings(
                     &self.pool,
                     &[surface_binding(
@@ -212,6 +262,133 @@ mod shipped_api {
                 )
                 .await
                 .context("failed to upsert surface binding for exact-name conformance")?;
+                bigname_storage::upsert_normalized_events(
+                    &self.pool,
+                    &[
+                        authority_history_event(
+                            "exact-name-grant",
+                            "ens",
+                            logical_name_id,
+                            resource_id,
+                            "RegistrationGranted",
+                            101,
+                            "0xgrant",
+                            json!({
+                                "authority_kind": "registrar",
+                                "authority_key": "registrar:ethereum-mainnet:7:alice",
+                                "registrant": "0x00000000000000000000000000000000000000aa",
+                                "expiry": 1_800_000_000_i64,
+                            }),
+                        ),
+                        authority_history_event(
+                            "exact-name-token-control",
+                            "ens",
+                            logical_name_id,
+                            resource_id,
+                            "TokenControlTransferred",
+                            102,
+                            "0xtransfer",
+                            json!({
+                                "to": "0x00000000000000000000000000000000000000aa",
+                            }),
+                        ),
+                        authority_history_event(
+                            "exact-name-authority",
+                            "ens",
+                            logical_name_id,
+                            resource_id,
+                            "AuthorityTransferred",
+                            103,
+                            "0xauthority",
+                            json!({
+                                "owner": "0x00000000000000000000000000000000000000bb",
+                            }),
+                        ),
+                        authority_history_event(
+                            "exact-name-resolver",
+                            "ens",
+                            logical_name_id,
+                            resource_id,
+                            "ResolverChanged",
+                            104,
+                            "0xresolver",
+                            json!({
+                                "resolver": "0x0000000000000000000000000000000000000abc",
+                                "namehash": "namehash:alice.eth",
+                            }),
+                        ),
+                        history_event(
+                            "exact-name-resource-head",
+                            Some("ens:other.eth"),
+                            Some(resource_id),
+                            Some("ethereum-mainnet"),
+                            Some(105),
+                            Some("0xhistoryresource"),
+                            Some("0xtx105"),
+                            Some(0),
+                            CanonicalityState::Canonical,
+                        ),
+                        history_event(
+                            "exact-name-surface-head",
+                            Some(logical_name_id),
+                            Some(historical_resource_id),
+                            Some("ethereum-mainnet"),
+                            Some(106),
+                            Some("0xhistorysurface"),
+                            Some("0xtx106"),
+                            Some(0),
+                            CanonicalityState::Canonical,
+                        ),
+                    ],
+                )
+                .await
+                .context("failed to upsert normalized events for exact-name conformance")?;
+
+                Ok(())
+            }
+
+            async fn rebuild_name_current(&self, logical_name_id: &str) -> Result<()> {
+                let database_url = self.database_url.clone();
+                let logical_name_id = logical_name_id.to_owned();
+                let worker_manifest_path =
+                    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../apps/worker/Cargo.toml");
+
+                tokio::task::spawn_blocking(move || -> Result<()> {
+                    let _guard = WORKER_CARGO_LOCK
+                        .lock()
+                        .expect("worker cargo lock must not be poisoned");
+                    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
+                    let output = Command::new(cargo)
+                        .arg("run")
+                        .arg("--quiet")
+                        .arg("--manifest-path")
+                        .arg(worker_manifest_path)
+                        .arg("--")
+                        .arg("name-current")
+                        .arg("rebuild")
+                        .arg("--database-url")
+                        .arg(&database_url)
+                        .arg("--logical-name-id")
+                        .arg(&logical_name_id)
+                        .output()
+                        .with_context(|| {
+                            format!(
+                                "failed to invoke worker name_current rebuild for {logical_name_id}"
+                            )
+                        })?;
+
+                    if !output.status.success() {
+                        return Err(anyhow::anyhow!(
+                            "worker name_current rebuild failed for {logical_name_id}\nstdout:\n{}\nstderr:\n{}",
+                            String::from_utf8_lossy(&output.stdout),
+                            String::from_utf8_lossy(&output.stderr),
+                        ));
+                    }
+
+                    Ok(())
+                })
+                .await
+                .context("worker name_current rebuild task panicked")??;
 
                 Ok(())
             }
@@ -1429,21 +1606,14 @@ mod shipped_api {
             let surface_binding_id = Uuid::from_u128(0x3300);
 
             database
-                .seed_name_current_binding(
+                .seed_exact_name_rebuild_inputs(
                     logical_name_id,
                     resource_id,
                     token_lineage_id,
                     surface_binding_id,
                 )
                 .await?;
-            database
-                .insert_name_current_row(exact_name_row(
-                    logical_name_id,
-                    surface_binding_id,
-                    resource_id,
-                    token_lineage_id,
-                ))
-                .await?;
+            database.rebuild_name_current(logical_name_id).await?;
 
             let response = app_router(database.app_state())
                 .oneshot(
@@ -1471,10 +1641,15 @@ mod shipped_api {
                 declared_state.get("resolver"),
                 Some(&exact_name_resolver_summary())
             );
-            assert_eq!(
-                declared_state.get("history"),
-                Some(&exact_name_history_summary())
-            );
+            assert_exact_name_history_summary_matches_history_route(
+                &database,
+                "ens",
+                "alice.eth",
+                declared_state
+                    .get("history")
+                    .expect("history summary must be present"),
+            )
+            .await?;
 
             database.cleanup().await?;
             Ok(())
@@ -1490,21 +1665,14 @@ mod shipped_api {
             let surface_binding_id = Uuid::from_u128(0x3300);
 
             database
-                .seed_name_current_binding(
+                .seed_exact_name_rebuild_inputs(
                     logical_name_id,
                     resource_id,
                     token_lineage_id,
                     surface_binding_id,
                 )
                 .await?;
-            database
-                .insert_name_current_row(exact_name_row(
-                    logical_name_id,
-                    surface_binding_id,
-                    resource_id,
-                    token_lineage_id,
-                ))
-                .await?;
+            database.rebuild_name_current(logical_name_id).await?;
 
             let coverage_response = app_router(database.app_state())
                 .oneshot(
@@ -1546,10 +1714,15 @@ mod shipped_api {
                 name_declared_state.get("resolver"),
                 Some(&exact_name_resolver_summary())
             );
-            assert_eq!(
-                name_declared_state.get("history"),
-                Some(&exact_name_history_summary())
-            );
+            assert_exact_name_history_summary_matches_history_route(
+                &database,
+                "ens",
+                "alice.eth",
+                name_declared_state
+                    .get("history")
+                    .expect("history summary must be present"),
+            )
+            .await?;
             assert_eq!(coverage_payload.declared_state, coverage_payload.coverage);
             assert_eq!(
                 coverage_payload.declared_state,
@@ -3633,77 +3806,6 @@ mod shipped_api {
             }
         }
 
-        fn exact_name_row(
-            logical_name_id: &str,
-            surface_binding_id: Uuid,
-            resource_id: Uuid,
-            token_lineage_id: Uuid,
-        ) -> bigname_storage::NameCurrentRow {
-            bigname_storage::NameCurrentRow {
-                logical_name_id: logical_name_id.to_owned(),
-                namespace: "ens".to_owned(),
-                canonical_display_name: "Alice.eth".to_owned(),
-                normalized_name: "alice.eth".to_owned(),
-                namehash: "namehash:alice.eth".to_owned(),
-                surface_binding_id: Some(surface_binding_id),
-                resource_id: Some(resource_id),
-                token_lineage_id: Some(token_lineage_id),
-                binding_kind: Some(bigname_storage::SurfaceBindingKind::DeclaredRegistryPath),
-                declared_summary: json!({
-                    "registration": {
-                        "status": "active",
-                        "authority_kind": "registrar"
-                    },
-                    "control": exact_name_control_summary(),
-                    "resolver": exact_name_resolver_summary(),
-                    "history": exact_name_history_summary(),
-                }),
-                provenance: json!({
-                    "normalized_event_ids": [101, 102],
-                    "raw_fact_refs": [
-                        {
-                            "kind": "log",
-                            "chain_id": "ethereum-mainnet",
-                            "block_hash": "0xabc"
-                        }
-                    ],
-                    "manifest_versions": [
-                        {
-                            "manifest_version": 3,
-                            "source_family": "ens_v1_registry",
-                            "chain": "ethereum-mainnet",
-                            "deployment_epoch": "ens_v1"
-                        }
-                    ],
-                    "execution_trace_id": null,
-                    "derivation_kind": "projection_apply"
-                }),
-                coverage: json!({
-                    "status": "full",
-                    "exhaustiveness": "authoritative",
-                    "source_classes_considered": ["ensv1_registry_path"],
-                    "unsupported_reason": null,
-                    "enumeration_basis": "exact_name"
-                }),
-                chain_positions: json!({
-                    "ethereum": {
-                        "chain_id": "ethereum-mainnet",
-                        "block_number": 21_000_003,
-                        "block_hash": "0xbinding",
-                        "timestamp": "2026-04-17T00:00:03Z"
-                    }
-                }),
-                canonicality_summary: json!({
-                    "status": "finalized",
-                    "chains": {
-                        "ethereum-mainnet": "finalized"
-                    }
-                }),
-                manifest_version: 3,
-                last_recomputed_at: timestamp(1_717_171_717),
-            }
-        }
-
         fn address_name_name_current_row(
             logical_name_id: &str,
             canonical_display_name: &str,
@@ -3775,7 +3877,7 @@ mod shipped_api {
             json!({
                 "registrant": "0x00000000000000000000000000000000000000aa",
                 "registry_owner": "0x00000000000000000000000000000000000000bb",
-                "latest_event_kind": "RegistryTransferred",
+                "latest_event_kind": "AuthorityTransferred",
             })
         }
 
@@ -3787,42 +3889,92 @@ mod shipped_api {
             })
         }
 
-        fn exact_name_history_summary() -> Value {
-            json!({
-                "surface_head": exact_name_history_pointer(
-                    301,
-                    "RegistryTransferred",
-                    21_000_010,
-                    "0xhistorysurface",
-                    "2026-04-17T00:00:10Z",
-                ),
-                "resource_head": exact_name_history_pointer(
-                    302,
-                    "ResolverChanged",
-                    21_000_009,
-                    "0xhistoryresource",
-                    "2026-04-17T00:00:09Z",
-                ),
-            })
+        async fn assert_exact_name_history_summary_matches_history_route(
+            database: &HarnessDatabase,
+            namespace: &str,
+            name: &str,
+            history: &Value,
+        ) -> Result<()> {
+            let history = history
+                .as_object()
+                .expect("exact-name history summary must be an object");
+            let surface_head = history
+                .get("surface_head")
+                .context("surface_head must be present")?;
+            let resource_head = history
+                .get("resource_head")
+                .context("resource_head must be present")?;
+
+            let surface_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/v1/history/names/{namespace}/{name}?scope=surface"
+                        ))
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("exact-name surface history request failed")?;
+            let resource_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/v1/history/names/{namespace}/{name}?scope=resource"
+                        ))
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("exact-name resource history request failed")?;
+
+            assert_eq!(surface_response.status(), StatusCode::OK);
+            assert_eq!(resource_response.status(), StatusCode::OK);
+
+            let surface_payload: HistoryResponse = read_json(surface_response).await?;
+            let resource_payload: HistoryResponse = read_json(resource_response).await?;
+
+            assert_eq!(
+                surface_head,
+                &history_pointer_from_history_row(
+                    surface_payload
+                        .data
+                        .first()
+                        .context("surface history route must return a head row")?,
+                )?
+            );
+            assert_eq!(
+                resource_head,
+                &history_pointer_from_history_row(
+                    resource_payload
+                        .data
+                        .first()
+                        .context("resource history route must return a head row")?,
+                )?
+            );
+
+            Ok(())
         }
 
-        fn exact_name_history_pointer(
-            normalized_event_id: i64,
-            event_kind: &str,
-            block_number: i64,
-            block_hash: &str,
-            timestamp: &str,
-        ) -> Value {
-            json!({
-                "normalized_event_id": normalized_event_id.to_string(),
-                "event_kind": event_kind,
-                "chain_position": {
-                    "chain_id": "ethereum-mainnet",
-                    "block_number": block_number,
-                    "block_hash": block_hash,
-                    "timestamp": timestamp,
-                },
-            })
+        fn history_pointer_from_history_row(row: &Value) -> Result<Value> {
+            let normalized_event_id = row
+                .get("normalized_event_id")
+                .and_then(Value::as_str)
+                .context("history row must include normalized_event_id")?
+                .parse::<i64>()
+                .context("history row normalized_event_id must parse as i64")?;
+
+            Ok(json!({
+                "normalized_event_id": normalized_event_id,
+                "event_kind": row
+                    .get("event_kind")
+                    .cloned()
+                    .context("history row must include event_kind")?,
+                "chain_position": row
+                    .get("chain_position")
+                    .cloned()
+                    .context("history row must include chain_position")?,
+            }))
         }
     }
 }
