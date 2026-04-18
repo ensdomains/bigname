@@ -25,7 +25,7 @@ Some declared-state route families are still queued in the API binary. Their pro
 | `resolver_current` | `(chain_id, resolver_address)` | resolver overview (queued) | resolver, alias, permission, inventory events |
 | `record_inventory_current` | `(resource_id, version_boundary)` | declared resolution | record and version-boundary events |
 | `primary_names_current` | `(address, coin_type, namespace)` | primary-name reads | reverse, primary claim, verified primary events |
-| `coverage_current` | route-specific key | coverage reads | `CoverageChanged`, capability changes |
+| `coverage_current` | `logical_name_id` | exact-name inline coverage, dedicated single-name coverage/explain reads | `CoverageChanged`, capability changes |
 
 History reads use normalized events plus thin cursor support rather than a separate denormalized history truth table. Future address-history views must compose address anchor selection with the same normalized-event history family rather than introducing a separate history projection.
 
@@ -38,6 +38,13 @@ History reads use normalized events plus thin cursor support rather than a separ
 - returns the current binding plus fixed declared summary sections for registration, authority, control, resolver, record inventory, and history
 - unsupported declared summary sections stay explicit in the read model; they are not omitted silently
 - authority may fall back to binding identifiers when a richer authority summary is not yet projected
+
+### Coverage by exact name
+
+- keyed by `logical_name_id`
+- serves the shared `Coverage` object for both `GET /v1/names/{namespace}/{name}` inline coverage and `GET /v1/coverage/{namespace}/{name}`
+- the dedicated coverage route adds declared explain detail for that same single-name answer; it does not introduce separate coverage enums or defaults
+- `CoverageChanged` updates this shared single-name coverage state; capability changes may invalidate or recompute it, but do not create a second coverage truth system
 
 ### Address to names
 

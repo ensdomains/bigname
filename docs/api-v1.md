@@ -125,6 +125,8 @@ Use this object when a declared-state subdocument is part of the route contract 
 - `enumeration_basis`
 - `unsupported_reason`
 
+This shared object is the route-level `coverage` summary on every response. For the same exact-name target and snapshot, `GET /v1/names/{namespace}/{name}` and `GET /v1/coverage/{namespace}/{name}` return the same top-level `Coverage` object.
+
 ### `Provenance`
 
 - `normalized_event_ids`
@@ -165,7 +167,7 @@ The current API binary ships only the declared-state subset below. Queued routes
 | `GET /v1/resolvers/{chain_id}/{resolver_address}` | Resolver overview | queued declared-state |
 | `GET /v1/resolutions/{namespace}/{name}` | Resolution topology, inventory, and verified reads | queued mixed declared+verified |
 | `GET /v1/primary-names/{address}` | Claimed and verified primary-name answer | queued mixed declared+verified |
-| `GET /v1/coverage/{namespace}/{name}` | Coverage and explain-oriented coverage details | queued declared-state |
+| `GET /v1/coverage/{namespace}/{name}` | Single-name coverage and explain details | queued declared-state |
 
 ## 5. Route-Level Semantics
 
@@ -205,8 +207,33 @@ Rules:
 - every declared summary section above is always present as an object
 - if a section is not yet projected, it returns `UnsupportedSummary`
 - `declared_state.authority` may fall back to `{resource_id, token_lineage_id, binding_kind}` when a dedicated authority summary is not yet projected but the current binding is known
+- for the same `{namespace}`, `{name}`, and snapshot selection, the top-level `coverage` object matches `GET /v1/coverage/{namespace}/{name}`
 - the shipped exact-name route does not support `include` expansions; history, permissions, resolution, and primary-name reads stay on their dedicated routes
 - `verified_state` is `null` for the shipped exact-name route
+
+### `GET /v1/coverage/{namespace}/{name}`
+
+This route is queued but frozen now to unblock single-name coverage and explain reads.
+
+Returns the declared-state coverage answer for one exact public surface.
+
+`data` identifies the same single surface and current binding as `GET /v1/names/{namespace}/{name}`.
+
+`declared_state` carries explain-oriented detail for that same single-name coverage answer.
+
+Supported query parameters:
+
+- `at`
+- `consistency`
+
+Rules:
+
+- this route honors only `at` and `consistency` from the common query set; if `at` is omitted, the common snapshot defaults apply and the route reads the latest available positions at `consistency=head` unless the caller supplies another supported `consistency`
+- this route is declared-state only and `verified_state` is `null`
+- the top-level `coverage` field is the shared `Coverage` object for the requested name and snapshot
+- for the same `{namespace}`, `{name}`, and snapshot selection, that top-level `coverage` object must match the inline `coverage` returned by `GET /v1/names/{namespace}/{name}`
+- `declared_state` explains `coverage.status`, `coverage.exhaustiveness`, `coverage.source_classes_considered`, `coverage.enumeration_basis`, and `coverage.unsupported_reason`; it does not redefine them
+- the initial contract defines no `include` expansions for this route
 
 ### `GET /v1/addresses/{address}/names`
 

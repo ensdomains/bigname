@@ -811,6 +811,8 @@ Source-specific values include:
 - `VerifiedResolutionInvalidated`
 - `CoverageChanged`
 
+`CoverageChanged` captures a change to the shared single-name coverage summary used both by exact-name inline coverage and by `GET /v1/coverage/{namespace}/{name}`.
+
 Every normalized event must carry:
 
 - namespace
@@ -992,6 +994,7 @@ Rules:
 - each declared summary section is always present as an object
 - any declared summary section that is not yet projected must return an explicit unsupported object instead of disappearing silently
 - `authority` may fall back to the current binding identifiers when the binding is known but a richer authority summary is not yet projected
+- for the same exact-name target and snapshot, the top-level `coverage` object matches the shared `Coverage` summary returned by `GET /v1/coverage/{namespace}/{name}`
 - verified resolution remains a separate route family; exact-name lookup does not inline verified execution in the declared-state baseline
 
 ### 21.2 Address → names
@@ -1103,6 +1106,19 @@ Rules:
 - any such summary that is not yet projected must remain explicit through an unsupported object
 - detailed effective permission rows still live on the resource-centric permissions route
 
+### 21.8 Coverage / explain by exact name
+
+`GET /v1/coverage/{namespace}/{name}` is a single-name declared-state coverage / explain route.
+
+It exists to explain the coverage contract for one exact public surface without introducing a second coverage truth model.
+
+Rules:
+
+- it is scoped to the same exact-name target and point-in-time snapshot rules as exact-name lookup
+- its top-level `coverage` field is the same shared `Coverage` object returned inline by `GET /v1/names/{namespace}/{name}` for that target and snapshot
+- its declared-state detail explains `coverage.status`, `coverage.exhaustiveness`, `coverage.source_classes_considered`, `coverage.enumeration_basis`, and `coverage.unsupported_reason`
+- it remains a declared-state route; it does not introduce verified execution semantics or collection semantics
+
 ---
 
 ## 22. Coverage And Exhaustiveness Rules
@@ -1113,6 +1129,7 @@ Rules:
 
 - exact name lookup must be authoritative for supported source classes
 - exact-name route coverage may still be authoritative when some declared summary subdocuments are explicitly unsupported
+- the dedicated single-name coverage route is the explain surface for the same shared `Coverage` object used inline on exact-name lookup
 - address-to-name enumeration is exhaustive only for source classes with enumerable ownership / assignment surfaces
 - wildcard and offchain name classes are not globally enumerable in general
 - record inventory is `best_effort` unless a resolver family exposes explicit enumeration or the platform has a source-specific index
