@@ -141,22 +141,25 @@ Every verified answer must be explainable through:
 - CCIP steps
 - final comparison or returned record value
 
-For resolution, the queued explain surface is `GET /v1/explain/resolutions/{namespace}/{name}/execution`.
+For resolution, the shipped explain surface is `GET /v1/explain/resolutions/{namespace}/{name}/execution`.
 
 Rules:
 
-- it is keyed by the same exact surface, snapshot selection, and explicit selector set as `GET /v1/resolutions/{namespace}/{name}`
+- it is keyed by the same current exact surface and explicit selector set as `GET /v1/resolutions/{namespace}/{name}`
 - it reads the persisted execution trace and selector-scoped results already stored for that request; it does not re-execute the request or synthesize explain detail from declared topology alone
 - top-level provenance and any selector-local provenance stay anchored to the same persisted `execution_trace_id`
 - the route surfaces the selected entrypoint, resolver discovery path, wildcard traversal, alias rewriting, and the ordered persisted step summary; CCIP-Read participation appears through persisted step kinds rather than a raw gateway transcript
 - it does not become a global trace-inspection API, a raw trace dump, or a second provenance / truth system
-- until a handler ships, the route remains prose-frozen only and stays outside `docs/api-v1.openapi.json`
+- it is shipped and published in `docs/api-v1.openapi.json`; the current handler contract exposes path parameters plus required `records` only
+- public explain support stays coupled to the same verified-resolution support boundary as the mixed route; deferred unsupported path classes do not gain a synthetic trace-shaped public contract
 
 ## 7. Initial Support Boundary
 
 For the first implementation slice:
 
-- ENS verified resolution on Ethereum Mainnet uses `ens_execution` with contract role `universal_resolver` at `0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe`; freezing this entrypoint does not by itself ship public verified-resolution reads
-- Basenames verified execution is scaffolded but may initially expose partial coverage until Base-side authority and L1 transport are both wired
+- ENS verified resolution on Ethereum Mainnet uses `ens_execution` with contract role `universal_resolver` at `0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe`; the shipped public verified slice is exact-surface direct-path only
+- for that support check, use the same declared topology snapshot as the mixed route: resolver selection must stay anchored to the requested surface, `wildcard.source` must be `null` with `matched_labels=[]`, `alias.final_target` must be `null` with `hops=[]`, and all `transport` fields must be `null`
+- ENS non-direct verified requests, including ancestor-selected resolver paths, wildcard-derived paths, alias-rewritten paths, and transport-assisted paths, remain deferred and return explicit selector-local `status=unsupported` on the mixed route; the shipped explain route does not synthesize public traces for them
+- Basenames verified execution is scaffolded but the public verified route remains bootstrap-scaffolded and explicit unsupported until Base-side authority and L1 transport are both wired
 - ENS primary-name support remains bootstrap-only: the public route may be present and the owning source families may be admitted, but route-level coverage stays in its bootstrap unsupported state; manifest rollout, manifest capability state, reverse tuple lookup, and resolver-backed verification detail do not by themselves graduate that public contract or unlock richer ENS claimed payloads, and any fallback beyond the reverse-only claim surface remains deferred
 - unsupported resolver families remain requestable but must return explicit `status=unsupported` results unless the route cannot attribute any section-level answer at all
