@@ -316,7 +316,9 @@ async fn load_active_subregistry_edges_by_observation_key(
                 observation_key: row
                     .try_get::<Option<String>, _>("observation_key")
                     .context("failed to read observation_key")?
-                    .context("active ENSv1 subregistry edge is missing provenance.observation_key")?,
+                    .context(
+                        "active ENSv1 subregistry edge is missing provenance.observation_key",
+                    )?,
                 from_contract_instance_id: row
                     .try_get("from_contract_instance_id")
                     .context("failed to read from_contract_instance_id")?,
@@ -1004,7 +1006,10 @@ proxy_kind = "none"
         );
         let normalized_events = load_normalized_events_by_namespace(database.pool(), "ens").await?;
         assert_eq!(normalized_events.len(), 1);
-        assert_eq!(normalized_events[0].event_kind, EVENT_KIND_SUBREGISTRY_CHANGED);
+        assert_eq!(
+            normalized_events[0].event_kind,
+            EVENT_KIND_SUBREGISTRY_CHANGED
+        );
         assert_eq!(
             normalized_events[0].block_hash.as_deref(),
             Some("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
@@ -1245,7 +1250,10 @@ proxy_kind = "none"
         assert_eq!(summary.deactivated_edge_count, 1);
         let normalized_events = load_normalized_events_by_namespace(database.pool(), "ens").await?;
         assert_eq!(normalized_events.len(), 2);
-        assert_eq!(normalized_events[1].event_kind, EVENT_KIND_SUBREGISTRY_CHANGED);
+        assert_eq!(
+            normalized_events[1].event_kind,
+            EVENT_KIND_SUBREGISTRY_CHANGED
+        );
         assert_eq!(
             normalized_events[1].after_state["owner"].as_str(),
             Some(ZERO_ADDRESS)
