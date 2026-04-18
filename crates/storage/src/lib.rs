@@ -44,7 +44,8 @@ pub use execution::{
     invalidate_execution_outcomes_for_manifest_version,
     invalidate_execution_outcomes_for_record_boundary,
     invalidate_execution_outcomes_for_topology_boundary, load_execution_outcome,
-    load_execution_trace, upsert_execution_outcome, upsert_execution_trace,
+    load_execution_trace, upsert_execution_outcome, upsert_execution_outcome_in_transaction,
+    upsert_execution_trace, upsert_execution_trace_in_transaction,
 };
 pub use history::{
     HistoryEvent, HistoryScope, load_address_history, load_name_history, load_name_history_head,

@@ -550,6 +550,45 @@ async fn upserts_and_loads_execution_outcome_by_cache_key() -> Result<()> {
 }
 
 #[tokio::test]
+async fn transaction_scoped_execution_upserts_stay_pending_until_commit() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let trace = execution_trace();
+    let outcome = execution_outcome(&trace);
+
+    let mut transaction = database.pool().begin().await?;
+    let inserted_trace = upsert_execution_trace_in_transaction(&mut transaction, &trace).await?;
+    let inserted_outcome =
+        upsert_execution_outcome_in_transaction(&mut transaction, &outcome).await?;
+    assert_eq!(inserted_trace, trace);
+    assert_eq!(inserted_outcome, outcome);
+    assert!(
+        load_execution_trace(database.pool(), trace.execution_trace_id)
+            .await?
+            .is_none(),
+        "transaction-scoped trace upsert must remain invisible before commit"
+    );
+    assert!(
+        load_execution_outcome(database.pool(), &outcome.cache_key)
+            .await?
+            .is_none(),
+        "transaction-scoped outcome upsert must remain invisible before commit"
+    );
+
+    transaction.commit().await?;
+
+    assert_eq!(
+        load_execution_trace(database.pool(), trace.execution_trace_id).await?,
+        Some(trace)
+    );
+    assert_eq!(
+        load_execution_outcome(database.pool(), &outcome.cache_key).await?,
+        Some(outcome)
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn execution_outcome_cache_key_is_order_insensitive_for_positions_and_manifests() -> Result<()>
 {
     let database = TestDatabase::new().await?;

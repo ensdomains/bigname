@@ -4,12 +4,16 @@ use std::collections::BTreeSet;
 
 use anyhow::{Context, Result, bail};
 use bigname_storage::{
-    ExecutionCacheKey, ExecutionOutcome, ExecutionTrace, RawCallSnapshot, upsert_execution_outcome,
-    upsert_execution_trace, upsert_raw_call_snapshots,
+    ExecutionCacheKey, ExecutionOutcome, ExecutionTrace, RawCallSnapshot,
+    upsert_execution_outcome_in_transaction, upsert_execution_trace_in_transaction,
+    upsert_raw_call_snapshots_in_transaction,
 };
 use serde_json::{Map, Value};
 use sqlx::PgPool;
 use uuid::Uuid;
+
+#[cfg(test)]
+use bigname_storage::{upsert_execution_outcome, upsert_execution_trace};
 
 pub use bigname_storage::{
     CanonicalityState, ExecutionTraceStep, load_execution_outcome, load_execution_trace,
@@ -51,12 +55,19 @@ pub async fn persist_ens_exact_name_verified_resolution_direct(
 ) -> Result<PersistedVerifiedResolutionIdentity> {
     validate_direct_request(request)?;
 
+    let mut transaction = pool
+        .begin()
+        .await
+        .context("failed to open transaction for ENS verified-resolution direct persistence")?;
+
     if !request.raw_call_snapshots.is_empty() {
-        upsert_raw_call_snapshots(pool, &request.raw_call_snapshots).await?;
+        upsert_raw_call_snapshots_in_transaction(&mut transaction, &request.raw_call_snapshots)
+            .await?;
     }
 
-    let trace = upsert_execution_trace(pool, &request.trace).await?;
-    let outcome = upsert_execution_outcome(pool, &request.outcome).await?;
+    let trace = upsert_execution_trace_in_transaction(&mut transaction, &request.trace).await?;
+    let outcome =
+        upsert_execution_outcome_in_transaction(&mut transaction, &request.outcome).await?;
 
     if trace.execution_trace_id != outcome.execution_trace_id {
         bail!(
@@ -72,6 +83,12 @@ pub async fn persist_ens_exact_name_verified_resolution_direct(
             trace.request_key
         );
     }
+
+    transaction
+        .commit()
+        .await
+        .context("failed to commit ENS verified-resolution direct persistence")?;
+
     Ok(PersistedVerifiedResolutionIdentity {
         execution_trace_id: trace.execution_trace_id,
         cache_key: outcome.cache_key,
@@ -1434,6 +1451,68 @@ mod tests {
             .await?
             .is_empty(),
             "execution failed direct path fixture should not persist raw call snapshots"
+        );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn rolls_back_raw_calls_and_trace_when_outcome_write_fails() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let request = success_request();
+
+        let mut conflicting_trace = request.trace.clone();
+        conflicting_trace.execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000016);
+        conflicting_trace.request_type = "verified_primary_name".to_owned();
+        conflicting_trace.final_payload = Some(json!({
+            "verified_primary_name": {
+                "status": "success",
+                "name": "alice.eth"
+            }
+        }));
+        upsert_execution_trace(database.pool(), &conflicting_trace).await?;
+
+        let mut conflicting_outcome = request.outcome.clone();
+        conflicting_outcome.execution_trace_id = conflicting_trace.execution_trace_id;
+        conflicting_outcome.request_type = conflicting_trace.request_type.clone();
+        conflicting_outcome.namespace = "basenames".to_owned();
+        conflicting_outcome.outcome_payload = Some(json!({
+            "verified_primary_name": {
+                "status": "success",
+                "name": "alice.eth"
+            }
+        }));
+        upsert_execution_outcome(database.pool(), &conflicting_outcome).await?;
+
+        let error = persist_ens_exact_name_verified_resolution_direct(database.pool(), &request)
+            .await
+            .expect_err("conflicting cache identity must roll back the whole direct-path write");
+        assert!(
+            error
+                .to_string()
+                .contains("execution outcome cache identity mismatch"),
+            "unexpected error: {error:#}"
+        );
+        assert!(
+            load_execution_trace(database.pool(), request.trace.execution_trace_id)
+                .await?
+                .is_none(),
+            "failed direct-path persistence must not leave a trace row behind"
+        );
+        assert!(
+            load_raw_call_snapshots_by_block_hash(
+                database.pool(),
+                ETHEREUM_MAINNET_CHAIN_ID,
+                "0xabc123",
+            )
+            .await?
+            .is_empty(),
+            "failed direct-path persistence must not leave raw call snapshots behind"
+        );
+        assert_eq!(
+            load_execution_outcome(database.pool(), &request.outcome.cache_key).await?,
+            Some(conflicting_outcome),
+            "the pre-existing conflicting outcome must remain untouched"
         );
 
         database.cleanup().await

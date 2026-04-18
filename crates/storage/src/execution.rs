@@ -100,22 +100,37 @@ pub async fn upsert_execution_trace(
     pool: &PgPool,
     trace: &ExecutionTrace,
 ) -> Result<ExecutionTrace> {
-    validate_execution_trace(trace)?;
-
     let mut transaction = pool
         .begin()
         .await
         .context("failed to open transaction for execution trace upsert")?;
+    let snapshot = upsert_execution_trace_in_transaction(&mut transaction, trace).await?;
 
-    if insert_execution_trace_row(&mut transaction, trace)
+    transaction
+        .commit()
+        .await
+        .context("failed to commit execution trace upsert")?;
+
+    Ok(snapshot)
+}
+
+/// Insert one execution trace and its ordered steps inside an existing
+/// transaction so callers can atomically persist related execution writes.
+pub async fn upsert_execution_trace_in_transaction(
+    transaction: &mut sqlx::Transaction<'_, Postgres>,
+    trace: &ExecutionTrace,
+) -> Result<ExecutionTrace> {
+    validate_execution_trace(trace)?;
+
+    if insert_execution_trace_row(&mut *transaction, trace)
         .await?
         .is_some()
     {
-        insert_execution_steps(&mut transaction, trace).await?;
+        insert_execution_steps(&mut *transaction, trace).await?;
     }
 
     let mut snapshot =
-        load_execution_trace_row_internal(&mut *transaction, trace.execution_trace_id)
+        load_execution_trace_row_internal(&mut **transaction, trace.execution_trace_id)
             .await?
             .with_context(|| {
                 format!(
@@ -124,13 +139,8 @@ pub async fn upsert_execution_trace(
                 )
             })?;
     snapshot.steps =
-        load_execution_steps_internal(&mut *transaction, trace.execution_trace_id).await?;
+        load_execution_steps_internal(&mut **transaction, trace.execution_trace_id).await?;
     ensure_execution_trace_identity_matches(&snapshot, trace)?;
-
-    transaction
-        .commit()
-        .await
-        .context("failed to commit execution trace upsert")?;
 
     Ok(snapshot)
 }
@@ -150,35 +160,45 @@ pub async fn upsert_execution_outcome(
     pool: &PgPool,
     outcome: &ExecutionOutcome,
 ) -> Result<ExecutionOutcome> {
-    let normalized = normalize_execution_outcome(outcome)?;
-    let execution_cache_key = execution_cache_key_storage_key(&normalized.cache_key)
-        .context("failed to derive execution cache key for execution outcome upsert")?;
-
     let mut transaction = pool
         .begin()
         .await
         .context("failed to open transaction for execution outcome upsert")?;
+    let snapshot = upsert_execution_outcome_in_transaction(&mut transaction, outcome).await?;
+
+    transaction
+        .commit()
+        .await
+        .context("failed to commit execution outcome upsert")?;
+
+    Ok(snapshot)
+}
+
+/// Insert or replace one verified execution outcome inside an existing
+/// transaction so callers can atomically persist related execution writes.
+pub async fn upsert_execution_outcome_in_transaction(
+    transaction: &mut sqlx::Transaction<'_, Postgres>,
+    outcome: &ExecutionOutcome,
+) -> Result<ExecutionOutcome> {
+    let normalized = normalize_execution_outcome(outcome)?;
+    let execution_cache_key = execution_cache_key_storage_key(&normalized.cache_key)
+        .context("failed to derive execution cache key for execution outcome upsert")?;
 
     if let Some(existing) =
-        load_execution_outcome_row_internal(&mut *transaction, &execution_cache_key).await?
+        load_execution_outcome_row_internal(&mut **transaction, &execution_cache_key).await?
     {
         ensure_execution_outcome_identity_matches(&existing, &normalized, &execution_cache_key)?;
     }
 
-    upsert_execution_outcome_row(&mut transaction, &normalized, &execution_cache_key).await?;
+    upsert_execution_outcome_row(&mut *transaction, &normalized, &execution_cache_key).await?;
 
-    let snapshot = load_execution_outcome_row_internal(&mut *transaction, &execution_cache_key)
+    let snapshot = load_execution_outcome_row_internal(&mut **transaction, &execution_cache_key)
         .await?
         .with_context(|| {
             format!(
                 "failed to reload execution outcome for cache key {execution_cache_key} after upsert"
             )
         })?;
-
-    transaction
-        .commit()
-        .await
-        .context("failed to commit execution outcome upsert")?;
 
     Ok(snapshot)
 }
