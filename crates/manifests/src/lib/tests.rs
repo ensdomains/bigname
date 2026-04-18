@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fs,
     path::PathBuf,
     str::FromStr,
@@ -12,6 +13,7 @@ use sqlx::{
     PgPool,
     postgres::{PgConnectOptions, PgPoolOptions},
     query_scalar,
+    Row,
 };
 use uuid::Uuid;
 
@@ -175,6 +177,61 @@ admission = "reachable_from_root"
     )
 }
 
+fn registry_manifest_contents(rollout_status: &str) -> String {
+    format!(
+        r#"
+manifest_version = 1
+namespace = "ens"
+source_family = "ens_v1_registry_l1"
+chain = "ethereum-mainnet"
+deployment_epoch = "ens_v1"
+rollout_status = "{rollout_status}"
+normalizer_version = "uts46-v1"
+
+[capability_flags]
+declared_children = {{ status = "supported", notes = "registry-controlled child surfaces are authoritative inputs" }}
+
+[[roots]]
+name = "ENSRegistry"
+address = "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E"
+
+[[contracts]]
+role = "registry"
+address = "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E"
+proxy_kind = "none"
+
+[[discovery_rules]]
+edge_kind = "subregistry"
+from_role = "registry"
+admission = "reachable_from_root"
+"#
+    )
+}
+
+fn execution_manifest_contents(rollout_status: &str) -> String {
+    format!(
+        r#"
+manifest_version = 1
+namespace = "ens"
+source_family = "ens_execution"
+chain = "ethereum-mainnet"
+deployment_epoch = "ens_v1"
+rollout_status = "{rollout_status}"
+normalizer_version = "uts46-v1"
+roots = []
+discovery_rules = []
+
+[capability_flags]
+verified_resolution = {{ status = "shadow", notes = "shadow execution traces and cache ownership are tracked before public verified-resolution reads ship" }}
+
+[[contracts]]
+role = "universal_resolver"
+address = "0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe"
+proxy_kind = "none"
+"#
+    )
+}
+
 async fn load_single_contract_instance_for_address(
     pool: &PgPool,
     chain: &str,
@@ -195,6 +252,78 @@ async fn load_single_contract_instance_for_address(
     .fetch_one(pool)
     .await
     .with_context(|| format!("failed to load contract instance for {chain} {address}"))
+}
+
+async fn load_manifest_rollout_statuses(
+    pool: &PgPool,
+    namespace: &str,
+) -> Result<Vec<(String, String)>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT source_family, rollout_status::TEXT AS rollout_status
+        FROM manifest_versions
+        WHERE namespace = $1
+        ORDER BY source_family, chain, deployment_epoch, manifest_version
+        "#,
+    )
+    .bind(namespace)
+    .fetch_all(pool)
+    .await
+    .with_context(|| format!("failed to load manifest rollout statuses for {namespace}"))?;
+
+    rows.into_iter()
+        .map(|row| {
+            Ok((
+                row.try_get("source_family")
+                    .context("failed to read source_family")?,
+                row.try_get("rollout_status")
+                    .context("failed to read rollout_status")?,
+            ))
+        })
+        .collect()
+}
+
+async fn load_capability_flags_for_source_family(
+    pool: &PgPool,
+    namespace: &str,
+    source_family: &str,
+) -> Result<BTreeMap<String, CapabilityFlag>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT mcf.capability_name, mcf.status::TEXT AS status, mcf.notes
+        FROM manifest_versions mv
+        JOIN manifest_capability_flags mcf ON mcf.manifest_id = mv.manifest_id
+        WHERE mv.namespace = $1
+          AND mv.source_family = $2
+        ORDER BY mcf.capability_name
+        "#,
+    )
+    .bind(namespace)
+    .bind(source_family)
+    .fetch_all(pool)
+    .await
+    .with_context(|| {
+        format!("failed to load capability flags for {namespace}/{source_family}")
+    })?;
+
+    rows.into_iter()
+        .map(|row| {
+            let capability_name = row
+                .try_get::<String, _>("capability_name")
+                .context("failed to read capability_name")?;
+            let status = row
+                .try_get::<String, _>("status")
+                .context("failed to read capability status")?;
+            let notes = row.try_get("notes").context("failed to read notes")?;
+            Ok((
+                capability_name,
+                CapabilityFlag {
+                    status: CapabilitySupportStatus::from_db_value(&status)?,
+                    notes,
+                },
+            ))
+        })
+        .collect()
 }
 
 #[test]
@@ -344,6 +473,156 @@ async fn reuses_contract_instance_ids_across_inactive_gaps() -> Result<()> {
             .await?,
             2
         );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn shadow_execution_family_persists_without_entering_active_views() -> Result<()> {
+    let test_dir = TestDir::new()?;
+    let database = TestDatabase::new().await?;
+
+    test_dir.write_manifest(
+        "ens",
+        "ens_v1_registry_l1",
+        "v1",
+        &registry_manifest_contents("active"),
+    )?;
+    test_dir.write_manifest(
+        "ens",
+        "ens_execution",
+        "v1",
+        &execution_manifest_contents("shadow"),
+    )?;
+
+    let summary = sync_repository(database.pool(), &load_repository(&test_dir.path)?).await?;
+    assert_eq!(summary.status, ManifestSyncStatus::Synced);
+    assert_eq!(summary.synced_manifest_count, 2);
+    assert_eq!(summary.active_manifest_count, 1);
+    assert_eq!(summary.root_count, 1);
+    assert_eq!(summary.contract_count, 2);
+    assert_eq!(summary.capability_count, 2);
+    assert_eq!(summary.discovery_rule_count, 1);
+
+    assert_eq!(
+        load_manifest_rollout_statuses(database.pool(), "ens").await?,
+        vec![
+            ("ens_execution".to_owned(), "shadow".to_owned()),
+            ("ens_v1_registry_l1".to_owned(), "active".to_owned()),
+        ]
+    );
+
+    assert_eq!(
+        load_capability_flags_for_source_family(database.pool(), "ens", "ens_v1_registry_l1")
+            .await?,
+        BTreeMap::from([(
+            "declared_children".to_owned(),
+            CapabilityFlag {
+                status: CapabilitySupportStatus::Supported,
+                notes: Some(
+                    "registry-controlled child surfaces are authoritative inputs".to_owned(),
+                ),
+            },
+        )])
+    );
+    assert_eq!(
+        load_capability_flags_for_source_family(database.pool(), "ens", "ens_execution").await?,
+        BTreeMap::from([(
+            "verified_resolution".to_owned(),
+            CapabilityFlag {
+                status: CapabilitySupportStatus::Shadow,
+                notes: Some(
+                    "shadow execution traces and cache ownership are tracked before public verified-resolution reads ship"
+                        .to_owned(),
+                ),
+            },
+        )])
+    );
+
+    let active_manifests = load_active_manifests_for_namespace(database.pool(), "ens").await?;
+    assert_eq!(active_manifests.len(), 1);
+    assert_eq!(active_manifests[0].source_family, "ens_v1_registry_l1");
+    assert!(!active_manifests[0]
+        .capability_flags
+        .contains_key("verified_resolution"));
+
+    let watched_contracts = load_watched_contracts(database.pool()).await?;
+    assert!(!watched_contracts.iter().any(|contract| {
+        contract.address == normalize_address("0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe")
+    }));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn active_execution_family_is_admitted_with_owned_capability_and_watch_target() -> Result<()>
+{
+    let test_dir = TestDir::new()?;
+    let database = TestDatabase::new().await?;
+
+    test_dir.write_manifest(
+        "ens",
+        "ens_v1_registry_l1",
+        "v1",
+        &registry_manifest_contents("active"),
+    )?;
+    test_dir.write_manifest(
+        "ens",
+        "ens_execution",
+        "v1",
+        &execution_manifest_contents("active"),
+    )?;
+
+    let summary = sync_repository(database.pool(), &load_repository(&test_dir.path)?).await?;
+    assert_eq!(summary.status, ManifestSyncStatus::Synced);
+    assert_eq!(summary.synced_manifest_count, 2);
+    assert_eq!(summary.active_manifest_count, 2);
+    assert_eq!(summary.root_count, 1);
+    assert_eq!(summary.contract_count, 2);
+    assert_eq!(summary.capability_count, 2);
+    assert_eq!(summary.discovery_rule_count, 1);
+
+    let active_manifests = load_active_manifests_for_namespace(database.pool(), "ens").await?;
+    assert_eq!(
+        active_manifests
+            .iter()
+            .map(|manifest| manifest.source_family.as_str())
+            .collect::<Vec<_>>(),
+        vec!["ens_execution", "ens_v1_registry_l1"]
+    );
+    assert_eq!(
+        active_manifests[0].capability_flags,
+        BTreeMap::from([(
+            "verified_resolution".to_owned(),
+            CapabilityFlag {
+                status: CapabilitySupportStatus::Shadow,
+                notes: Some(
+                    "shadow execution traces and cache ownership are tracked before public verified-resolution reads ship"
+                        .to_owned(),
+                ),
+            },
+        )])
+    );
+    assert_eq!(
+        active_manifests[1].capability_flags,
+        BTreeMap::from([(
+            "declared_children".to_owned(),
+            CapabilityFlag {
+                status: CapabilitySupportStatus::Supported,
+                notes: Some(
+                    "registry-controlled child surfaces are authoritative inputs".to_owned(),
+                ),
+            },
+        )])
+    );
+
+    let watched_contracts = load_watched_contracts(database.pool()).await?;
+    assert!(watched_contracts.iter().any(|contract| {
+        contract.address == normalize_address("0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe")
+            && contract.source == WatchedContractSource::ManifestContract
+    }));
 
     database.cleanup().await?;
     Ok(())

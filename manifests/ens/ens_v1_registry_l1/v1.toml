@@ -9,7 +9,6 @@ normalizer_version = "uts46-v1"
 
 [capability_flags]
 declared_children = { status = "supported", notes = "registry-controlled child surfaces are authoritative inputs" }
-verified_resolution = { status = "shadow", notes = "tracked for downstream execution work" }
 
 [[roots]]
 name = "ENSRegistry"

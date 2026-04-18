@@ -1,0 +1,18 @@
+# Shadow-scoped bootstrap for the canonical ENS execution entrypoint on Ethereum mainnet.
+manifest_version = 1
+namespace = "ens"
+source_family = "ens_execution"
+chain = "ethereum-mainnet"
+deployment_epoch = "ens_v1"
+rollout_status = "shadow"
+normalizer_version = "uts46-v1"
+roots = []
+discovery_rules = []
+
+[capability_flags]
+verified_resolution = { status = "shadow", notes = "shadow execution traces and cache ownership are tracked before public verified-resolution reads ship" }
+
+[[contracts]]
+role = "universal_resolver"
+address = "0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe"
+proxy_kind = "none"
