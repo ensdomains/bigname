@@ -1165,6 +1165,86 @@ async fn get_name_returns_current_projection_envelope() -> Result<()> {
 }
 
 #[tokio::test]
+async fn get_coverage_returns_declared_state_explain_with_shared_top_level_coverage() -> Result<()>
+{
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0x2200);
+    let token_lineage_id = Uuid::from_u128(0x1100);
+    let surface_binding_id = Uuid::from_u128(0x3300);
+
+    database
+        .seed_name_current_binding(
+            logical_name_id,
+            "ens",
+            "alice.eth",
+            "Alice.eth",
+            "namehash:alice.eth",
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    database
+        .insert_name_current_row(exact_name_row(
+            logical_name_id,
+            surface_binding_id,
+            resource_id,
+            token_lineage_id,
+        ))
+        .await?;
+
+    let coverage_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/coverage/ens/alice.eth")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("coverage request failed")?;
+    let name_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/names/ens/alice.eth")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("name request failed")?;
+
+    assert_eq!(coverage_response.status(), StatusCode::OK);
+    assert_eq!(name_response.status(), StatusCode::OK);
+
+    let coverage_payload: NameResponse = read_json(coverage_response).await?;
+    let name_payload: NameResponse = read_json(name_response).await?;
+
+    assert_eq!(coverage_payload.data, name_payload.data);
+    assert_eq!(coverage_payload.coverage, name_payload.coverage);
+    assert_eq!(coverage_payload.provenance, name_payload.provenance);
+    assert_eq!(
+        coverage_payload.chain_positions,
+        name_payload.chain_positions
+    );
+    assert_eq!(coverage_payload.consistency, name_payload.consistency);
+    assert_eq!(coverage_payload.last_updated, name_payload.last_updated);
+    assert_eq!(coverage_payload.verified_state, None);
+    assert_eq!(
+        coverage_payload.declared_state,
+        json!({
+            "status": "full",
+            "exhaustiveness": "authoritative",
+            "source_classes_considered": ["ensv1_registry_path"],
+            "enumeration_basis": "exact_name",
+            "unsupported_reason": null
+        })
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn get_name_children_returns_declared_rows_sorted_with_declared_only_coverage() -> Result<()>
 {
     let database = TestDatabase::new_migrated().await?;
@@ -1420,6 +1500,34 @@ async fn get_name_returns_not_found_when_projection_row_is_missing() -> Result<(
         )
         .await
         .context("name request failed")?;
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let payload: ErrorResponse = read_json(response).await?;
+    assert_eq!(payload.error.code, "not_found");
+    assert_eq!(
+        payload.error.message,
+        "name missing.eth was not found in namespace ens"
+    );
+    assert!(payload.error.details.is_empty());
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_coverage_returns_not_found_when_projection_row_is_missing() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/coverage/ens/missing.eth")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("coverage request failed")?;
 
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
@@ -1949,6 +2057,32 @@ async fn get_name_returns_not_found_for_unsupported_namespace_without_storage_re
 }
 
 #[tokio::test]
+async fn get_coverage_returns_not_found_for_unsupported_namespace_without_storage_read()
+-> Result<()> {
+    let database = TestDatabase::new(false).await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/coverage/unknown/alice.eth")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("coverage request failed")?;
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let payload: ErrorResponse = read_json(response).await?;
+    assert_eq!(payload.error.code, "not_found");
+    assert_eq!(payload.error.message, "namespace unknown is not supported");
+    assert!(payload.error.details.is_empty());
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn get_name_returns_internal_error_envelope_on_storage_failure() -> Result<()> {
     let database = TestDatabase::new(false).await?;
 
@@ -1961,6 +2095,34 @@ async fn get_name_returns_internal_error_envelope_on_storage_failure() -> Result
         )
         .await
         .context("name request failed")?;
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    let payload: ErrorResponse = read_json(response).await?;
+    assert_eq!(payload.error.code, "internal_error");
+    assert_eq!(
+        payload.error.message,
+        "failed to load current projection for name ens/alice.eth"
+    );
+    assert!(payload.error.details.is_empty());
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_coverage_returns_internal_error_envelope_on_storage_failure() -> Result<()> {
+    let database = TestDatabase::new(false).await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/coverage/ens/alice.eth")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("coverage request failed")?;
 
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
 

@@ -386,6 +386,7 @@ fn app_router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(health))
         .route("/v1/addresses/{address}/names", get(address_names))
+        .route("/v1/coverage/{namespace}/{name}", get(coverage_current))
         .route("/v1/namespaces/{namespace}", get(namespace_metadata))
         .route("/v1/names/{namespace}/{name}/children", get(name_children))
         .route("/v1/names/{namespace}/{name}", get(name_current))
@@ -487,6 +488,40 @@ async fn name_current(
     };
 
     Ok(Json(build_name_response(row)))
+}
+
+async fn coverage_current(
+    Path((namespace, name)): Path<(String, String)>,
+    State(state): State<AppState>,
+) -> ApiResult<Json<NameResponse>> {
+    ensure_public_namespace(&namespace)?;
+
+    let logical_name_id = format!("{namespace}:{name}");
+    let row = load_name_current(&state.pool, &logical_name_id)
+        .await
+        .map_err(|load_error| {
+            error!(
+                service = "api",
+                namespace = %namespace,
+                name = %name,
+                logical_name_id = %logical_name_id,
+                error = ?load_error,
+                "failed to load exact-name current projection for coverage route"
+            );
+            ApiError::internal_error(format!(
+                "failed to load current projection for name {namespace}/{name}"
+            ))
+        })?;
+
+    let Some(row) = row else {
+        return Err(ApiError {
+            status: StatusCode::NOT_FOUND,
+            code: "not_found",
+            message: format!("name {name} was not found in namespace {namespace}"),
+        });
+    };
+
+    Ok(Json(build_name_coverage_response(row)))
 }
 
 async fn address_names(
@@ -819,6 +854,19 @@ fn build_name_response(row: NameCurrentRow) -> NameResponse {
     }
 }
 
+fn build_name_coverage_response(row: NameCurrentRow) -> NameResponse {
+    NameResponse {
+        data: build_name_data(&row),
+        declared_state: build_name_coverage_declared_state(&row.coverage),
+        verified_state: None,
+        provenance: build_name_provenance(&row.provenance),
+        coverage: build_name_coverage(&row.coverage),
+        chain_positions: ensure_object(&row.chain_positions),
+        consistency: canonicality_consistency(&row.canonicality_summary).to_owned(),
+        last_updated: format_timestamp(row.last_recomputed_at),
+    }
+}
+
 fn build_children_response(
     rows: Vec<ChildrenCurrentRow>,
     include_counts: bool,
@@ -973,11 +1021,7 @@ fn build_permission_item(row: &PermissionsCurrentRow) -> JsonValue {
         "scope",
         build_permission_scope_value(&row.scope),
     );
-    insert_value_field(
-        &mut value,
-        "effective_powers",
-        row.effective_powers.clone(),
-    );
+    insert_value_field(&mut value, "effective_powers", row.effective_powers.clone());
     insert_value_field(&mut value, "grant_source", row.grant_source.clone());
     insert_value_field(
         &mut value,
@@ -1437,6 +1481,39 @@ fn build_name_coverage(coverage: &JsonValue) -> JsonValue {
         string_field(provenance_field(coverage, "unsupported_reason")),
     );
     normalized
+}
+
+fn build_name_coverage_declared_state(coverage: &JsonValue) -> JsonValue {
+    let mut declared_state = empty_object();
+    insert_string_field(
+        &mut declared_state,
+        "status",
+        string_field(provenance_field(coverage, "status"))
+            .unwrap_or_else(|| "unsupported".to_owned()),
+    );
+    insert_string_field(
+        &mut declared_state,
+        "exhaustiveness",
+        string_field(provenance_field(coverage, "exhaustiveness"))
+            .unwrap_or_else(|| "not_applicable".to_owned()),
+    );
+    insert_value_field(
+        &mut declared_state,
+        "source_classes_considered",
+        array_or_empty(provenance_field(coverage, "source_classes_considered")),
+    );
+    insert_string_field(
+        &mut declared_state,
+        "enumeration_basis",
+        string_field(provenance_field(coverage, "enumeration_basis"))
+            .unwrap_or_else(|| "exact_name".to_owned()),
+    );
+    insert_nullable_string_field(
+        &mut declared_state,
+        "unsupported_reason",
+        string_field(provenance_field(coverage, "unsupported_reason")),
+    );
+    declared_state
 }
 
 fn declared_authority_section(row: &NameCurrentRow) -> JsonValue {
