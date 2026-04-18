@@ -578,6 +578,26 @@ impl TestDatabase {
         claim_status: PrimaryNameClaimStatus,
         raw_claim_name: Option<&str>,
     ) -> Result<()> {
+        self.insert_primary_name_current_claim_row_with_provenance(
+            address,
+            namespace,
+            coin_type,
+            claim_status,
+            raw_claim_name,
+            json!({}),
+        )
+        .await
+    }
+
+    async fn insert_primary_name_current_claim_row_with_provenance(
+        &self,
+        address: &str,
+        namespace: &str,
+        coin_type: &str,
+        claim_status: PrimaryNameClaimStatus,
+        raw_claim_name: Option<&str>,
+        claim_provenance: Value,
+    ) -> Result<()> {
         upsert_primary_name_current_rows(
             &self.pool,
             &[PrimaryNameCurrentRow {
@@ -586,7 +606,7 @@ impl TestDatabase {
                 coin_type: coin_type.to_owned(),
                 claim_status,
                 raw_claim_name: raw_claim_name.map(str::to_owned),
-                claim_provenance: json!({}),
+                claim_provenance,
             }],
         )
         .await
@@ -9339,6 +9359,7 @@ async fn get_primary_names_reads_declared_claim_status_for_exact_tuple() -> Resu
         Some(json!({
             "claimed_primary_name": {
                 "status": "success",
+                "provenance": {},
             }
         }))
     );
@@ -9352,6 +9373,129 @@ async fn get_primary_names_reads_declared_claim_status_for_exact_tuple() -> Resu
                 "unsupported_reason": "verified primary-name entrypoint is not yet supported",
             }
         }))
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_primary_names_reads_declared_claim_provenance_for_exact_tuple() -> Result<()> {
+    let database = TestDatabase::new(false).await?;
+    database.create_primary_names_current_table().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    database
+        .insert_primary_name_current_claim_row_with_provenance(
+            address,
+            "ens",
+            "60",
+            PrimaryNameClaimStatus::Success,
+            None,
+            json!({
+                "source_family": "target_reverse",
+                "contract_role": "reverse_registrar",
+                "contract_instance_id": "00000000-0000-0000-0000-000000000123",
+                "emitting_address": "0x00000000000000000000000000000000000000ad",
+                "execution_trace_id": "must-be-omitted",
+                "verified_primary_name_lookup": {
+                    "address": address,
+                    "namespace": "ens",
+                    "coin_type": "60",
+                },
+                "verified_primary_name_invalidation": {
+                    "claim_status": "success",
+                    "primary_claim_source": {
+                        "seed": "ignored",
+                    },
+                },
+            }),
+        )
+        .await?;
+    database
+        .insert_primary_name_current_claim_row_with_provenance(
+            address,
+            "ens",
+            "61",
+            PrimaryNameClaimStatus::Success,
+            None,
+            json!({
+                "source_family": "sibling_reverse",
+            }),
+        )
+        .await?;
+
+    let declared_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/primary-names/{address}?namespace=ens&coin_type=60&mode=declared"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("declared primary-name provenance request failed")?;
+    let both_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/primary-names/{address}?namespace=ens&coin_type=60&mode=both"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("mixed primary-name provenance request failed")?;
+
+    assert_eq!(declared_response.status(), StatusCode::OK);
+    assert_eq!(both_response.status(), StatusCode::OK);
+
+    let declared_payload: PrimaryNameResponse = read_json(declared_response).await?;
+    let both_payload: PrimaryNameResponse = read_json(both_response).await?;
+    let expected_claimed_primary_name = json!({
+        "status": "success",
+        "provenance": {
+            "source_family": "target_reverse",
+            "contract_role": "reverse_registrar",
+            "contract_instance_id": "00000000-0000-0000-0000-000000000123",
+            "emitting_address": "0x00000000000000000000000000000000000000ad",
+        },
+    });
+
+    assert_eq!(
+        declared_payload.declared_state,
+        Some(json!({
+            "claimed_primary_name": expected_claimed_primary_name.clone(),
+        }))
+    );
+    assert_eq!(declared_payload.verified_state, None);
+    assert_eq!(both_payload.declared_state, declared_payload.declared_state);
+    assert_eq!(
+        both_payload.verified_state,
+        Some(json!({
+            "verified_primary_name": {
+                "status": "unsupported",
+                "unsupported_reason": "verified primary-name entrypoint is not yet supported",
+            }
+        }))
+    );
+
+    let claimed_primary_name = declared_payload
+        .declared_state
+        .as_ref()
+        .and_then(|declared_state| declared_state.get("claimed_primary_name"))
+        .and_then(Value::as_object)
+        .expect("declared claimed_primary_name must be present");
+    let provenance = claimed_primary_name
+        .get("provenance")
+        .and_then(Value::as_object)
+        .expect("declared claimed_primary_name provenance must be present");
+    assert!(!provenance.contains_key("execution_trace_id"));
+    assert!(!provenance.contains_key("verified_primary_name_lookup"));
+    assert!(!provenance.contains_key("verified_primary_name_invalidation"));
+    assert_eq!(
+        provenance.get("source_family"),
+        Some(&json!("target_reverse"))
     );
 
     database.cleanup().await?;
@@ -9400,6 +9544,7 @@ async fn get_primary_names_reads_raw_claim_name_for_invalid_name_exact_tuple() -
         claimed_primary_name.get("raw_claim_name"),
         Some(&json!("alice..eth"))
     );
+    assert_eq!(claimed_primary_name.get("provenance"), Some(&json!({})));
     assert!(
         !claimed_primary_name.contains_key("name"),
         "declared invalid-name readback must not backfill claimed_primary_name.name"
@@ -9543,6 +9688,7 @@ async fn get_primary_names_reads_persisted_verified_primary_name_for_exact_tuple
         Some(json!({
             "claimed_primary_name": {
                 "status": "unsupported",
+                "provenance": {},
             }
         }))
     );
@@ -9602,6 +9748,7 @@ async fn get_primary_names_freezes_bootstrap_behavior_for_tuple_present() -> Res
         Some(json!({
             "claimed_primary_name": {
                 "status": "unsupported",
+                "provenance": {},
             }
         }))
     );
@@ -10071,7 +10218,58 @@ fn openapi_document_freezes_query_params_and_shared_envelopes() {
         variant
             == &json!({
                 "type": "object",
-                "required": ["status", "raw_claim_name"],
+                "required": ["status", "provenance"],
+                "properties": {
+                    "status": {
+                        "type": "string",
+                        "const": "success",
+                    },
+                    "provenance": {
+                        "$ref": "#/components/schemas/JsonObject",
+                    },
+                },
+                "additionalProperties": false,
+            })
+    }));
+    assert!(primary_name_claimed_variants.iter().any(|variant| {
+        variant
+            == &json!({
+                "type": "object",
+                "required": ["status", "provenance"],
+                "properties": {
+                    "status": {
+                        "type": "string",
+                        "const": "not_found",
+                    },
+                    "provenance": {
+                        "$ref": "#/components/schemas/JsonObject",
+                    },
+                },
+                "additionalProperties": false,
+            })
+    }));
+    assert!(primary_name_claimed_variants.iter().any(|variant| {
+        variant
+            == &json!({
+                "type": "object",
+                "required": ["status", "provenance"],
+                "properties": {
+                    "status": {
+                        "type": "string",
+                        "const": "unsupported",
+                    },
+                    "provenance": {
+                        "$ref": "#/components/schemas/JsonObject",
+                    },
+                },
+                "additionalProperties": false,
+            })
+    }));
+    assert!(primary_name_claimed_variants.iter().any(|variant| {
+        variant
+            == &json!({
+                "type": "object",
+                "required": ["status", "raw_claim_name", "provenance"],
                 "properties": {
                     "status": {
                         "type": "string",
@@ -10079,6 +10277,9 @@ fn openapi_document_freezes_query_params_and_shared_envelopes() {
                     },
                     "raw_claim_name": {
                         "type": "string",
+                    },
+                    "provenance": {
+                        "$ref": "#/components/schemas/JsonObject",
                     },
                 },
                 "additionalProperties": false,

@@ -73,12 +73,18 @@ Execution notes:
   `declared_state.claimed_primary_name`, `verified` returns only
   `verified_state.verified_primary_name`, and `both` combines those sections. The tuple-miss case
   leaves the migrated `primary_names_current` table without that tuple and asserts per-mode
-  `status=not_found`; the tuple-present rebuild path now reads back the status-shaped declared
+  `status=not_found`; the tuple-present rebuild path reads back only the status-shaped declared
   `claimed_primary_name` from the rebuilt tuple while keeping the verified
   `verified_primary_name` section bootstrap `unsupported` until a persisted exact-tuple verified
-  answer exists, rather than implying any richer claimed or verified payload. The harness also
-  seeds persisted verified execution outcomes
-  and asserts exact-tuple readback for `verified_state.verified_primary_name` on
+  answer exists. A separate exact-tuple declared-claim readback case inserts
+  `claim_provenance` directly and asserts that `claimed_primary_name.provenance` returns only the
+  shipped declared fields for that tuple (`source_family`, `contract_role`,
+  `contract_instance_id`, and `emitting_address`), omitting execution- and verified-lookup
+  metadata and without implying `claimed_primary_name.name` or any fallback claim-source payload.
+  The exact-tuple invalid-name case asserts `claimed_primary_name.status=invalid_name` with the
+  tuple-scoped `raw_claim_name` and provenance read back from that tuple only, and explicitly
+  guards against implying `claimed_primary_name.name`. The harness also seeds persisted verified
+  execution outcomes and asserts exact-tuple readback for `verified_state.verified_primary_name` on
   `mode=verified` / `mode=both` only when that exact `(address, namespace, coin_type)` tuple has
   a cached answer; the route still keeps public coverage bootstrap `unsupported`, and `mode=both`
   still pairs that readback with the tuple-backed status-shaped declared `claimed_primary_name`

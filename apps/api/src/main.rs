@@ -21,6 +21,7 @@ use bigname_storage::{
     DatabaseConfig, ExecutionCacheKey, ExecutionOutcome, ExecutionTrace, HistoryEvent,
     HistoryScope, NameCurrentRow, PermissionScope, PermissionsCurrentRow, PrimaryNameClaimStatus,
     PrimaryNameCurrentRow, RecordInventoryCurrentRow, ResolverCurrentRow, SurfaceBindingKind,
+    VERIFIED_PRIMARY_NAME_INVALIDATION_KEY, VERIFIED_PRIMARY_NAME_LOOKUP_KEY,
     VERIFIED_PRIMARY_NAME_REQUEST_TYPE, collapse_address_name_current_rows, load_address_history,
     load_address_names_current, load_children_current, load_execution_outcome,
     load_execution_trace, load_name_current, load_name_history, load_name_surface,
@@ -1443,12 +1444,13 @@ fn primary_name_claimed_result_schema() -> JsonValue {
         "oneOf": [
             json!({
                 "type": "object",
-                "required": ["status"],
+                "required": ["status", "provenance"],
                 "properties": {
                     "status": {
                         "type": "string",
                         "const": "success",
                     },
+                    "provenance": schema_ref("JsonObject"),
                 },
                 "additionalProperties": false,
             }),
@@ -1460,6 +1462,18 @@ fn primary_name_claimed_result_schema() -> JsonValue {
                         "type": "string",
                         "const": "not_found",
                     },
+                },
+                "additionalProperties": false,
+            }),
+            json!({
+                "type": "object",
+                "required": ["status", "provenance"],
+                "properties": {
+                    "status": {
+                        "type": "string",
+                        "const": "not_found",
+                    },
+                    "provenance": schema_ref("JsonObject"),
                 },
                 "additionalProperties": false,
             }),
@@ -1479,7 +1493,19 @@ fn primary_name_claimed_result_schema() -> JsonValue {
             }),
             json!({
                 "type": "object",
-                "required": ["status", "raw_claim_name"],
+                "required": ["status", "provenance"],
+                "properties": {
+                    "status": {
+                        "type": "string",
+                        "const": "unsupported",
+                    },
+                    "provenance": schema_ref("JsonObject"),
+                },
+                "additionalProperties": false,
+            }),
+            json!({
+                "type": "object",
+                "required": ["status", "raw_claim_name", "provenance"],
                 "properties": {
                     "status": {
                         "type": "string",
@@ -1488,6 +1514,7 @@ fn primary_name_claimed_result_schema() -> JsonValue {
                     "raw_claim_name": {
                         "type": "string",
                     },
+                    "provenance": schema_ref("JsonObject"),
                 },
                 "additionalProperties": false,
             }),
@@ -3147,6 +3174,7 @@ fn primary_name_claim_result(tuple_state: &PrimaryNameTupleState) -> JsonValue {
         PrimaryNameTupleState::TuplePresent(row) => {
             let mut result = json!({
                 "status": row.claim_status.as_str(),
+                "provenance": primary_name_claim_provenance(row),
             });
             if row.claim_status == PrimaryNameClaimStatus::InvalidName {
                 insert_string_field(
@@ -3160,6 +3188,18 @@ fn primary_name_claim_result(tuple_state: &PrimaryNameTupleState) -> JsonValue {
             result
         }
     }
+}
+
+fn primary_name_claim_provenance(row: &PrimaryNameCurrentRow) -> JsonValue {
+    let mut provenance = row
+        .claim_provenance
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    provenance.remove(VERIFIED_PRIMARY_NAME_LOOKUP_KEY);
+    provenance.remove(VERIFIED_PRIMARY_NAME_INVALIDATION_KEY);
+    provenance.remove("execution_trace_id");
+    JsonValue::Object(provenance)
 }
 
 fn primary_name_verified_result(lookup_state: &PrimaryNameLookupState) -> JsonValue {

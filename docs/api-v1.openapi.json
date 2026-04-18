@@ -503,13 +503,17 @@
           {
             "additionalProperties": false,
             "properties": {
+              "provenance": {
+                "$ref": "#/components/schemas/JsonObject"
+              },
               "status": {
                 "const": "success",
                 "type": "string"
               }
             },
             "required": [
-              "status"
+              "status",
+              "provenance"
             ],
             "type": "object"
           },
@@ -523,6 +527,23 @@
             },
             "required": [
               "status"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "provenance": {
+                "$ref": "#/components/schemas/JsonObject"
+              },
+              "status": {
+                "const": "not_found",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "provenance"
             ],
             "type": "object"
           },
@@ -545,6 +566,26 @@
           {
             "additionalProperties": false,
             "properties": {
+              "provenance": {
+                "$ref": "#/components/schemas/JsonObject"
+              },
+              "status": {
+                "const": "unsupported",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "provenance"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "provenance": {
+                "$ref": "#/components/schemas/JsonObject"
+              },
               "raw_claim_name": {
                 "type": "string"
               },
@@ -555,7 +596,8 @@
             },
             "required": [
               "status",
-              "raw_claim_name"
+              "raw_claim_name",
+              "provenance"
             ],
             "type": "object"
           }
