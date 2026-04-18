@@ -19,7 +19,10 @@ use crate::{
         self, ProviderBlock, ProviderBlockBundle, ProviderBlockSelection, ProviderCodeObservation,
         ProviderHeadSnapshot, ProviderLog, ProviderReceipt, ProviderRegistry, ProviderTransaction,
     },
-    runtime::{IntakeChainTask, checkpoint_mode, log_block_derived_normalized_event_summary},
+    runtime::{
+        IntakeChainTask, checkpoint_mode, log_block_derived_normalized_event_summary,
+        log_ens_v1_reverse_claim_sync_summary,
+    },
 };
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CanonicalReconciliationStatus {
@@ -679,6 +682,8 @@ pub(crate) async fn persist_reconciled_raw_payloads(
     let normalized_event_summary =
         bigname_adapters::sync_block_derived_normalized_events(pool, chain, &block_hashes).await?;
     log_block_derived_normalized_event_summary(chain, &normalized_event_summary);
+    let reverse_claim_summary = bigname_adapters::sync_ens_v1_reverse_claim(pool, chain).await?;
+    log_ens_v1_reverse_claim_sync_summary(chain, &reverse_claim_summary);
     let unwrapped_authority_summary =
         bigname_adapters::sync_ens_v1_unwrapped_authority(pool, chain).await?;
     log_ens_v1_unwrapped_authority_sync_summary(chain, &unwrapped_authority_summary);

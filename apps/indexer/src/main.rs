@@ -89,6 +89,7 @@ async fn run(args: RunArgs) -> Result<()> {
 
     let pool = bigname_storage::connect(&args.database).await?;
     let manifest_runtime_state = build_manifest_runtime_state(&pool, &manifest_repository).await?;
+    sync_adapter_owned_raw_log_state(&pool, &manifest_runtime_state.watched_chain_plan).await?;
     log_manifest_runtime_state(&manifest_runtime_state);
     log_watched_chain_plan("startup", &manifest_runtime_state.watched_chain_plan);
     let watched_chain_plan_state =

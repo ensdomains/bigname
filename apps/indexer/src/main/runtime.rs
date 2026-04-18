@@ -5,8 +5,8 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use bigname_adapters::{
-    BlockDerivedNormalizedEventSyncSummary, EnsV1SubregistryDiscoverySyncSummary,
-    ManifestNormalizedEventSyncSummary,
+    BlockDerivedNormalizedEventSyncSummary, EnsV1ReverseClaimSyncSummary,
+    EnsV1SubregistryDiscoverySyncSummary, ManifestNormalizedEventSyncSummary,
 };
 use bigname_manifests::{
     DiscoveryAdmissionState, ManifestLoadStatus, ManifestLoadSummary, ManifestRepository,
@@ -240,6 +240,37 @@ pub(crate) fn log_block_derived_normalized_event_summary(
             normalized_event_sync_count = kind_summary.synced_count,
             normalized_event_inserted_count = kind_summary.inserted_count,
             "block-derived normalized-event kind synced"
+        );
+    }
+}
+
+pub(crate) fn log_ens_v1_reverse_claim_sync_summary(
+    chain: &str,
+    summary: &EnsV1ReverseClaimSyncSummary,
+) {
+    if summary.scanned_log_count == 0 && summary.total_synced_count == 0 {
+        return;
+    }
+
+    info!(
+        service = "indexer",
+        chain,
+        scanned_raw_log_count = summary.scanned_log_count,
+        matched_raw_log_count = summary.matched_log_count,
+        normalized_event_sync_total_count = summary.total_synced_count,
+        normalized_event_inserted_total_count = summary.total_inserted_count,
+        normalized_event_kind_count = summary.by_kind.len(),
+        "ENSv1 reverse claim synced from stored raw logs"
+    );
+
+    for (event_kind, kind_summary) in &summary.by_kind {
+        info!(
+            service = "indexer",
+            chain,
+            event_kind,
+            normalized_event_sync_count = kind_summary.synced_count,
+            normalized_event_inserted_count = kind_summary.inserted_count,
+            "ENSv1 reverse claim event kind synced"
         );
     }
 }
@@ -576,6 +607,25 @@ pub(crate) async fn refresh_intake_chain_tasks(
     }
 }
 
+pub(crate) async fn sync_adapter_owned_raw_log_state(
+    pool: &sqlx::PgPool,
+    watched_chain_plan: &[WatchedChainPlan],
+) -> Result<()> {
+    for chain in watched_chain_plan {
+        let summary = bigname_adapters::sync_ens_v1_reverse_claim(pool, &chain.chain)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to sync ENSv1 reverse claim from stored raw logs for chain {}",
+                    chain.chain
+                )
+            })?;
+        log_ens_v1_reverse_claim_sync_summary(&chain.chain, &summary);
+    }
+
+    Ok(())
+}
+
 pub(crate) async fn refresh_runtime_state_from_storage_discovery(
     pool: &sqlx::PgPool,
     manifest_runtime_state: &ManifestRuntimeState,
@@ -597,6 +647,7 @@ pub(crate) async fn refresh_runtime_state_from_storage_discovery(
     else {
         return Ok(None);
     };
+    sync_adapter_owned_raw_log_state(pool, &next_watched_chain_plan).await?;
     let next_intake_chain_tasks = sync_intake_chain_tasks(pool, &next_watched_chain_plan).await?;
     let mut next_manifest_runtime_state = manifest_runtime_state.clone();
     next_manifest_runtime_state.watched_contract_summary =
@@ -658,6 +709,34 @@ pub(crate) async fn run_poll_loop(
                                     let watched_plan_changed = next_manifest_runtime_state
                                         .watched_chain_plan
                                         != manifest_runtime_state.watched_chain_plan;
+
+                                    if (manifest_state_changed || watched_plan_changed)
+                                        && let Err(error) = sync_adapter_owned_raw_log_state(
+                                            pool,
+                                            &next_manifest_runtime_state.watched_chain_plan,
+                                        )
+                                        .await
+                                    {
+                                        let current_watch_state = watched_chain_plan_state(
+                                            &manifest_runtime_state.watched_chain_plan,
+                                        );
+                                        let current_intake_state =
+                                            intake_runtime_state(&intake_chain_tasks);
+                                        warn!(
+                                            service = "indexer",
+                                            refresh_reason = "timer",
+                                            plan_source = "repository_manifest_reload",
+                                            error = ?error,
+                                            watched_chain_count = current_watch_state.chain_count,
+                                            watched_address_count = current_watch_state.address_count,
+                                            watched_entry_count_total = current_watch_state.entry_count,
+                                            intake_chain_count = current_intake_state.chain_count,
+                                            intake_address_count = current_intake_state.address_count,
+                                            intake_entry_count_total = current_intake_state.entry_count,
+                                            "failed to sync adapter-owned raw-log state after repository manifest refresh; keeping last successful runtime state"
+                                        );
+                                        continue;
+                                    }
 
                                     if manifest_state_changed {
                                         let previous_watch_state = watched_chain_plan_state(

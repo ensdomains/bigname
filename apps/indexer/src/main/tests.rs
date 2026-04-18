@@ -824,6 +824,47 @@ async fn insert_raw_new_owner_log(
     Ok(())
 }
 
+async fn insert_raw_reverse_claimed_log(
+    pool: &PgPool,
+    chain: &str,
+    block: &ProviderBlock,
+    emitting_address: &str,
+    claimed_address: &str,
+    canonicality_state: CanonicalityState,
+) -> Result<()> {
+    upsert_raw_blocks(
+        pool,
+        &[provider_block_to_raw_block(
+            chain,
+            block,
+            canonicality_state,
+        )],
+    )
+    .await?;
+    upsert_raw_logs(
+        pool,
+        &[RawLog {
+            chain_id: chain.to_owned(),
+            block_hash: block.block_hash.clone(),
+            block_number: block.block_number,
+            transaction_hash: transaction_hash_for_block(block),
+            transaction_index: 0,
+            log_index: 0,
+            emitting_address: emitting_address.to_ascii_lowercase(),
+            topics: vec![
+                reverse_claimed_topic0(),
+                hex_string(&abi_word_address(claimed_address)),
+                reverse_node_for_address(claimed_address),
+            ],
+            data: Vec::new(),
+            canonicality_state,
+        }],
+    )
+    .await?;
+
+    Ok(())
+}
+
 async fn insert_contract_instance(
     pool: &PgPool,
     contract_instance_id: Uuid,
@@ -1251,6 +1292,40 @@ fn resolver_version_changed_topic0() -> String {
     keccak256_hex(b"VersionChanged(bytes32,uint64)")
 }
 
+fn reverse_claimed_topic0() -> String {
+    keccak256_hex(b"ReverseClaimed(address,bytes32)")
+}
+
+fn reverse_label_for_address(address: &str) -> String {
+    let normalized = address
+        .strip_prefix("0x")
+        .unwrap_or(address)
+        .to_ascii_lowercase();
+    assert_eq!(
+        normalized.len(),
+        40,
+        "reverse claim address must be 20 bytes"
+    );
+    normalized
+}
+
+fn reverse_name_for_address(address: &str) -> String {
+    format!("{}.addr.reverse", reverse_label_for_address(address))
+}
+
+fn reverse_node_for_address(address: &str) -> String {
+    let reverse_label = reverse_label_for_address(address);
+    let mut dns_name = Vec::new();
+    dns_name.push(u8::try_from(reverse_label.len()).expect("reverse label length must fit in u8"));
+    dns_name.extend_from_slice(reverse_label.as_bytes());
+    dns_name.push(4);
+    dns_name.extend_from_slice(b"addr");
+    dns_name.push(7);
+    dns_name.extend_from_slice(b"reverse");
+    dns_name.push(0);
+    namehash_for_dns_name(&dns_name)
+}
+
 fn namehash_for_dns_name(dns_name: &[u8]) -> String {
     let mut labels = Vec::<Vec<u8>>::new();
     let mut cursor = 0usize;
@@ -1385,6 +1460,28 @@ fn rpc_registrar_name_registered_log_payload(
             hex_string(&abi_word_address("0x0000000000000000000000000000000000000001"))
         ],
         "data": encode_registrar_name_registered_log_data(label, expiry_unix)
+    })
+}
+
+fn rpc_reverse_claimed_log_payload(
+    block: &ProviderBlock,
+    address: &str,
+    claimed_address: &str,
+    log_index: u64,
+) -> Value {
+    json!({
+        "blockHash": block.block_hash.clone(),
+        "blockNumber": format!("0x{:x}", block.block_number),
+        "transactionHash": transaction_hash_for_block(block),
+        "transactionIndex": "0x0",
+        "logIndex": format!("0x{log_index:x}"),
+        "address": address,
+        "topics": [
+            reverse_claimed_topic0(),
+            hex_string(&abi_word_address(claimed_address)),
+            reverse_node_for_address(claimed_address)
+        ],
+        "data": "0x"
     })
 }
 
@@ -2469,7 +2566,7 @@ async fn reconcile_fetched_heads_backfills_registrar_name_observation_events() -
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM normalized_events")
             .fetch_one(database.pool())
             .await?,
-        5
+        6
     );
     assert_eq!(
         sqlx::query_scalar::<_, String>(
@@ -2502,6 +2599,173 @@ async fn reconcile_fetched_heads_backfills_registrar_name_observation_events() -
         .fetch_one(database.pool())
         .await?,
         registrar_address.to_owned()
+    );
+
+    server.abort();
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn reconcile_fetched_heads_backfills_ensv1_reverse_claim_normalized_events() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let reverse_contract_instance_id = Uuid::from_u128(0x341);
+    let reverse_address = "0x00000000000000000000000000000000000000ad";
+    let claimed_address = "0x1234567890abcdef1234567890abcdef12345678";
+
+    sqlx::query(
+        r#"
+            INSERT INTO manifest_versions (
+                manifest_id,
+                manifest_version,
+                namespace,
+                source_family,
+                chain,
+                deployment_epoch,
+                rollout_status,
+                normalizer_version,
+                file_path,
+                manifest_payload
+            )
+            VALUES (
+                1,
+                1,
+                'ens',
+                'ens_v1_reverse_l1',
+                'ethereum-mainnet',
+                'ens_v1',
+                'active',
+                'uts46-v1',
+                'manifests/ens/ens_v1_reverse_l1/v1.toml',
+                '{}'::jsonb
+            )
+            "#,
+    )
+    .execute(database.pool())
+    .await
+    .context("failed to insert manifest_versions for ENSv1 reverse reconciliation test")?;
+    insert_contract_instance(
+        database.pool(),
+        reverse_contract_instance_id,
+        "ethereum-mainnet",
+        "contract",
+    )
+    .await?;
+    insert_active_contract_instance_address(
+        database.pool(),
+        reverse_contract_instance_id,
+        "ethereum-mainnet",
+        reverse_address,
+        Some(1),
+    )
+    .await?;
+    insert_manifest_contract_instance(
+        database.pool(),
+        1,
+        "reverse_registrar",
+        reverse_contract_instance_id,
+        reverse_address,
+        "none",
+        None,
+        None,
+    )
+    .await?;
+
+    let watched_plan = load_watched_chain_plan(database.pool()).await?;
+    let tasks = sync_intake_chain_tasks(database.pool(), &watched_plan).await?;
+    let canonical_head = provider_block(
+        "0xabababababababababababababababababababababababababababababababab",
+        Some("0xcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"),
+        63,
+    );
+    let (provider, server) = bundle_provider_with_fixtures(vec![ProviderBlockFixture {
+        logs: vec![rpc_reverse_claimed_log_payload(
+            &canonical_head,
+            reverse_address,
+            claimed_address,
+            0,
+        )],
+        block: canonical_head.clone(),
+    }])
+    .await?;
+
+    let (next_task, outcome) = reconcile_fetched_heads(
+        database.pool(),
+        &tasks[0],
+        &provider,
+        &ProviderHeadSnapshot {
+            canonical: canonical_head.clone(),
+            safe: None,
+            finalized: None,
+        },
+    )
+    .await?
+    .expect("ENSv1 reverse reconciliation must update task state");
+
+    assert_eq!(
+        outcome.canonical_status,
+        CanonicalReconciliationStatus::Initialized
+    );
+    assert_eq!(next_task.checkpoint.canonical_block_number, Some(63));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM raw_logs")
+            .fetch_one(database.pool())
+            .await?,
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM normalized_events")
+            .fetch_one(database.pool())
+            .await?,
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT event_kind FROM normalized_events WHERE event_kind = 'ReverseChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "ReverseChanged".to_owned()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT source_family FROM normalized_events WHERE event_kind = 'ReverseChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "ens_v1_reverse_l1".to_owned()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT derivation_kind FROM normalized_events WHERE event_kind = 'ReverseChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "ens_v1_reverse_claim".to_owned()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT after_state->>'address' FROM normalized_events WHERE event_kind = 'ReverseChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        claimed_address.to_ascii_lowercase()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT after_state->>'reverse_name' FROM normalized_events WHERE event_kind = 'ReverseChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        reverse_name_for_address(claimed_address)
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT after_state->>'reverse_node' FROM normalized_events WHERE event_kind = 'ReverseChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        reverse_node_for_address(claimed_address)
     );
 
     server.abort();
@@ -2964,21 +3228,21 @@ async fn build_manifest_runtime_state_loads_checked_in_repository_seed() -> Resu
         ManifestLoadStatus::Loaded
     );
     assert_eq!(runtime_state.manifest_summary.namespace_count, 2);
-    assert_eq!(runtime_state.manifest_summary.source_family_count, 3);
-    assert_eq!(runtime_state.manifest_summary.manifest_count, 3);
+    assert_eq!(runtime_state.manifest_summary.source_family_count, 5);
+    assert_eq!(runtime_state.manifest_summary.manifest_count, 5);
     assert_eq!(
         runtime_state.sync_summary.status,
         ManifestSyncStatus::Synced
     );
-    assert_eq!(runtime_state.sync_summary.synced_manifest_count, 3);
-    assert_eq!(runtime_state.sync_summary.active_manifest_count, 2);
+    assert_eq!(runtime_state.sync_summary.synced_manifest_count, 5);
+    assert_eq!(runtime_state.sync_summary.active_manifest_count, 3);
     assert_eq!(runtime_state.sync_summary.root_count, 2);
-    assert_eq!(runtime_state.sync_summary.contract_count, 2);
+    assert_eq!(runtime_state.sync_summary.contract_count, 4);
     assert_eq!(runtime_state.sync_summary.capability_count, 5);
     assert_eq!(runtime_state.sync_summary.discovery_rule_count, 1);
-    assert_eq!(runtime_state.discovery_admission.active_manifest_count, 2);
+    assert_eq!(runtime_state.discovery_admission.active_manifest_count, 3);
     assert_eq!(runtime_state.discovery_admission.active_root_count, 2);
-    assert_eq!(runtime_state.discovery_admission.active_contract_count, 2);
+    assert_eq!(runtime_state.discovery_admission.active_contract_count, 3);
     assert_eq!(runtime_state.discovery_admission.active_rule_count, 1);
     assert_eq!(
         runtime_state
@@ -2988,9 +3252,9 @@ async fn build_manifest_runtime_state_loads_checked_in_repository_seed() -> Resu
     );
     assert_eq!(
         runtime_state.watched_contract_summary.unique_contract_count,
-        2
+        3
     );
-    assert_eq!(runtime_state.watched_contract_summary.source_entry_count, 4);
+    assert_eq!(runtime_state.watched_contract_summary.source_entry_count, 5);
     assert_eq!(
         runtime_state.watched_contract_summary.manifest_root_count,
         2
@@ -2999,7 +3263,7 @@ async fn build_manifest_runtime_state_loads_checked_in_repository_seed() -> Resu
         runtime_state
             .watched_contract_summary
             .manifest_contract_count,
-        2
+        3
     );
     assert_eq!(
         runtime_state.watched_contract_summary.discovery_edge_count,
@@ -3012,15 +3276,16 @@ async fn build_manifest_runtime_state_loads_checked_in_repository_seed() -> Resu
             addresses: vec![
                 "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e".to_owned(),
                 "0x57f1887a8bf19b14fc0df6fd9b2acc9af147ea85".to_owned(),
+                "0xa58e81fe9b61b5c3fe2afd33cf304c454abfc7cb".to_owned(),
             ],
             manifest_root_entry_count: 2,
-            manifest_contract_entry_count: 2,
+            manifest_contract_entry_count: 3,
             discovery_edge_entry_count: 0,
         }]
     );
 
     let stored_admission = load_discovery_admission_state(database.pool()).await?;
-    assert_eq!(stored_admission.active_manifest_count, 2);
+    assert_eq!(stored_admission.active_manifest_count, 3);
 
     database.cleanup().await?;
     Ok(())
@@ -3886,6 +4151,127 @@ async fn storage_discovery_refresh_adds_ensv1_address_without_manifest_reload_an
             0
         );
     server.abort();
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn sync_adapter_owned_raw_log_state_backfills_reverse_claims_from_stored_raw_logs()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let reverse_contract_instance_id = Uuid::from_u128(0x342);
+    let reverse_address = "0x00000000000000000000000000000000000000ae";
+    let claimed_address = "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd";
+    let stored_block = provider_block(
+        "0xdededededededededededededededededededededededededededededededede",
+        Some("0xefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef"),
+        64,
+    );
+
+    sqlx::query(
+        r#"
+            INSERT INTO manifest_versions (
+                manifest_id,
+                manifest_version,
+                namespace,
+                source_family,
+                chain,
+                deployment_epoch,
+                rollout_status,
+                normalizer_version,
+                file_path,
+                manifest_payload
+            )
+            VALUES (
+                1,
+                1,
+                'ens',
+                'ens_v1_reverse_l1',
+                'ethereum-mainnet',
+                'ens_v1',
+                'active',
+                'uts46-v1',
+                'manifests/ens/ens_v1_reverse_l1/v1.toml',
+                '{}'::jsonb
+            )
+            "#,
+    )
+    .execute(database.pool())
+    .await
+    .context("failed to insert manifest_versions for reverse runtime bootstrap test")?;
+    insert_contract_instance(
+        database.pool(),
+        reverse_contract_instance_id,
+        "ethereum-mainnet",
+        "contract",
+    )
+    .await?;
+    insert_active_contract_instance_address(
+        database.pool(),
+        reverse_contract_instance_id,
+        "ethereum-mainnet",
+        reverse_address,
+        Some(1),
+    )
+    .await?;
+    insert_manifest_contract_instance(
+        database.pool(),
+        1,
+        "reverse_registrar",
+        reverse_contract_instance_id,
+        reverse_address,
+        "none",
+        None,
+        None,
+    )
+    .await?;
+    insert_raw_reverse_claimed_log(
+        database.pool(),
+        "ethereum-mainnet",
+        &stored_block,
+        reverse_address,
+        claimed_address,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+
+    let watched_plan = load_watched_chain_plan(database.pool()).await?;
+    sync_adapter_owned_raw_log_state(database.pool(), &watched_plan).await?;
+    sync_adapter_owned_raw_log_state(database.pool(), &watched_plan).await?;
+
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM normalized_events WHERE event_kind = 'ReverseChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT after_state->>'address' FROM normalized_events WHERE event_kind = 'ReverseChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        claimed_address.to_ascii_lowercase()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT after_state->>'reverse_name' FROM normalized_events WHERE event_kind = 'ReverseChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        reverse_name_for_address(claimed_address)
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT raw_fact_ref->>'block_hash' FROM normalized_events WHERE event_kind = 'ReverseChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        stored_block.block_hash
+    );
+
     database.cleanup().await?;
     Ok(())
 }
