@@ -590,6 +590,7 @@ Rules:
 - capability ownership attaches to the declaring `source_family`; it is never implied by a different family's presence alone
 - ENS verified resolution on Ethereum Mainnet belongs to `ens_execution`, whose canonical contract role is `universal_resolver` at `0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe` on the ENS Universal Resolver, not to `ens_v1_registry_l1`
 - ENS declared reverse-claim intake on Ethereum Mainnet belongs to `ens_v1_reverse_l1`, whose canonical contract role is `reverse_registrar` at `0xa58E81fe9b61B5c3fE2AFD33CF304c454AbFc7Cb` on the Ethereum `addr.reverse` Reverse Registrar, not to `ens_v1_registry_l1` or `ens_v1_resolver_l1`
+- that ENS reverse-family ownership freezes only the current reverse-only declared claim surface; later fallback claim-setting surfaces, if admitted, require their own source-family owner and a later doc-first contract update
 - draft or optional features may be enabled behind manifest flags without changing the public contract
 
 ---
@@ -1046,7 +1047,9 @@ Rules:
 - if the raw claim exists but cannot be normalized, the route surfaces `status=invalid_name` instead of silently dropping the claim
 - verified primary names require the verification algorithm to succeed
 - reverse claims alone are insufficient
-- later ENS declared primary-claim intake starts from the `ens_v1_reverse_l1` `reverse_registrar` entrypoint at `0xa58E81fe9b61B5c3fE2AFD33CF304c454AbFc7Cb`; this freeze does not choose default-reverse fallback precedence
+- for ENS on Ethereum Mainnet, the current declared claim precedence is reverse-only through `ens_v1_reverse_l1` and its `reverse_registrar` entrypoint at `0xa58E81fe9b61B5c3fE2AFD33CF304c454AbFc7Cb`
+- missing or unsupported ENS reverse claims do not trigger fallback to registry-, resolver-, or other claim-setting surfaces in this phase
+- any fallback beyond that reverse-only ENS claim surface remains deferred and requires a later doc-first contract update; manifest presence alone does not widen claim precedence
 - Basenames claim-setting operations affect the claim surface, but the read contract still distinguishes claim from verified primary name
 
 ---
@@ -1265,6 +1268,8 @@ Rules:
 - wildcard and offchain name classes are not globally enumerable in general
 - record inventory is `best_effort` unless a resolver family exposes explicit enumeration or the platform has a source-specific index
 - child enumeration is authoritative only for declared direct children unless the caller explicitly opts into other surface classes
+- the shipped primary-name route remains bootstrap-only for coverage: route presence or tuple lookup does not by itself graduate primary-name coverage beyond `status=unsupported` and `exhaustiveness=not_applicable`
+- deferred primary-claim fallback sources are outside the current primary-name coverage basis until a later doc-first contract change admits them explicitly
 
 Every response includes:
 

@@ -4,7 +4,7 @@ Status: Phase 0 baseline
 
 This document freezes the read-model boundaries between normalized events, current-state projections, and API reads.
 
-The exact-name explain routes for surface-binding and authority-control now ship in the API binary. Only the primary-name route family remains queued there. Its projection boundaries are nevertheless normative here so the remaining queued read contract can freeze before that handler ships. No separate history-explain route is queued: the shipped history routes remain the declared history answer, and exact-name `history` only stores head pointers into that contract.
+The exact-name explain routes for surface-binding and authority-control now ship in the API binary. The primary-name route family also ships there, but only as a bootstrap mixed route: tuple lookup is wired while richer claimed and verified payloads, deferred fallback policy, and graduated coverage remain additive. Its projection boundaries are nevertheless normative here so later support can land without changing the shared contract. No separate history-explain route is queued: the shipped history routes remain the declared history answer, and exact-name `history` only stores head pointers into that contract.
 
 ## 1. Projection Rules
 
@@ -115,9 +115,11 @@ History reads use normalized events plus thin cursor support rather than a separ
 
 - keyed by `(address, coin_type, namespace)`
 - serves declared `claimed_primary_name` plus the invalidation and provenance hooks needed to locate request-matching verified execution output
+- for ENS on Ethereum Mainnet, the current declared claim precedence is reverse-only through `ens_v1_reverse_l1`; missing or unsupported reverse claims do not trigger fallback to registry-, resolver-, or other claim-setting surfaces in this phase
 - the route-level `claimed_primary_name` and `verified_primary_name` objects share the API `ResultStatus` vocabulary, but they do not collapse declared claim state and verified execution state into one projection-owned field
 - projection-owned `claimed_primary_name` is limited to the declared subset `success|not_found|unsupported|invalid_name` plus declared-only payload fields such as optional normalized claim identity, optional `raw_claim_name`, and claim-local provenance
 - the shipped bootstrap projection may still be tuple-presence only; richer claimed payload fields stay additive until the route stops returning tuple-present `status=unsupported`
+- tuple presence is a bootstrap lookup and invalidation hook only; it does not by itself widen claim precedence, graduate route-level coverage, or imply richer tuple-present payload support
 - `raw_claim_name` is projection-owned claim state only; it exists to preserve the declared raw input when normalization fails and must not be copied into `verified_primary_name`
 - projection rows do not own verified-only states or failure payloads: `mismatch`, `execution_failed`, and verification-local `failure_reason` stay execution-derived even when the tuple row exists
 - projection-local provenance may explain the claimed tuple and its invalidation inputs, but it must not mint an execution trace or a second verified truth system

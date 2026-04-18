@@ -116,7 +116,7 @@ role = "reverse_registrar"
 address = "0xa58E81fe9b61B5c3fE2AFD33CF304c454AbFc7Cb"
 ```
 
-That freeze only fixes the authoritative reverse entrypoint and role mapping for later primary-claim intake. It does not define a new capability flag, does not choose default-reverse fallback behavior, and does not by itself ship public primary-name reads.
+That freeze fixes the authoritative reverse entrypoint, source-family owner, and reverse-only intake precedence for later ENS primary-claim support. It does not define a new capability flag, does not add manifest schema, does not authorize fallback to registry-, resolver-, or other claim-setting surfaces, and does not by itself ship graduated public primary-name reads.
 
 ## 5. Contract Instance Admission And Continuity
 
@@ -194,6 +194,7 @@ Rules:
 - capability ownership attaches to the manifest-declared `source_family`; it is never implied by another family's presence
 - ENS verified resolution on Ethereum Mainnet is owned by `ens_execution` through contract role `universal_resolver` at `0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe`, not by `ens_v1_registry_l1`
 - ENS reverse-claim intake on Ethereum Mainnet is anchored to `ens_v1_reverse_l1` through contract role `reverse_registrar` at `0xa58E81fe9b61B5c3fE2AFD33CF304c454AbFc7Cb`, not by `ens_v1_registry_l1` or `ens_v1_resolver_l1`
+- that reverse-family ownership freezes only the current reverse-only ENS claim surface; any later fallback claim-setting surface would need its own manifest-owned source family and a later doc-first contract update
 - adding a new capability is additive if it does not change prior semantics
 
 ## 10. Ownership And Workflow

@@ -430,7 +430,7 @@ The current API binary ships the routes marked `shipped` below. Queued routes re
 | `GET /v1/resolvers/{chain_id}/{resolver_address}` | Resolver overview | shipped declared-state |
 | `GET /v1/resolutions/{namespace}/{name}` | Resolution topology, inventory, and verified reads | shipped mixed declared+verified |
 | `GET /v1/explain/resolutions/{namespace}/{name}/execution` | Persisted verified execution explain for one exact-name resolution request | queued verified-state explain |
-| `GET /v1/primary-names/{address}` | Claimed and verified primary-name answer | shipped mixed declared+verified |
+| `GET /v1/primary-names/{address}` | Bootstrap claimed and verified primary-name answer | shipped bootstrap mixed declared+verified |
 | `GET /v1/coverage/{namespace}/{name}` | Single-name coverage and explain details | shipped declared-state |
 
 ### Machine-Readable Contract Publication
@@ -977,6 +977,9 @@ When `verified_state` is populated, it returns:
 Rules:
 
 - the shipped bootstrap route is head-only; it does not honor `at` or `consistency`, and additive snapshot-selector support remains pending
+- for ENS on Ethereum Mainnet, `claimed_primary_name` currently consults only the reverse-claim surface owned by `ens_v1_reverse_l1` through contract role `reverse_registrar` at `0xa58E81fe9b61B5c3fE2AFD33CF304c454AbFc7Cb`
+- missing or unsupported ENS reverse claims do not trigger fallback to registry-, resolver-, or other claim-setting surfaces in the current contract
+- any fallback beyond that reverse-only ENS claim surface remains deferred and requires a later doc-first contract update; manifest presence alone does not widen the shipped precedence rule
 - `claimed_primary_name` is the declared claim candidate only; it never implies that the requested address actually verifies to that name
 - `claimed_primary_name.status` uses the shared `ResultStatus` vocabulary; the initial declared contract uses `success`, `not_found`, `unsupported`, and `invalid_name`
 - `verified_primary_name.status` uses the same `ResultStatus` vocabulary; the initial verified contract uses `success`, `not_found`, `mismatch`, `unsupported`, `invalid_name`, and `execution_failed`
@@ -997,7 +1000,8 @@ Rules:
 - top-level `provenance` summarizes the declared claim inputs and, when an execution-derived verified answer is present, the verification trace
 - `claimed_primary_name.provenance`, when later shipped, is claim-local declared provenance and must not introduce a second `execution_trace_id`
 - `verified_primary_name.provenance`, when later shipped, is verification-local provenance and must stay within top-level `provenance.execution_trace_id`
-- route-level `coverage` explains completeness of the declared claim surface for the requested tuple; a verification mismatch or absence does not by itself change that coverage summary
+- in the shipped bootstrap handler, route-level `coverage` remains bootstrap-only for primary-name lookup: `status=unsupported`, `exhaustiveness=not_applicable`, `source_classes_considered=[]`, `enumeration_basis=primary_name_lookup`, and `unsupported_reason="primary-name coverage is not yet supported"`
+- tuple presence, tuple absence, or a verified mismatch does not by itself graduate that bootstrap primary-name coverage summary
 
 ## 6. Sorting And Pagination Defaults
 
