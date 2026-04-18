@@ -84,12 +84,16 @@ Collection reads replace `data` with an array and add:
 
 Rules:
 
-- `declared_state` is present whenever the route has declared semantics
-- `verified_state` is always present in the response envelope; routes without verified semantics return `null`
-- routes that support verified execution populate `verified_state` only when the request asks for verified output
+- `declared_state` and `verified_state` are always present in the response envelope
+- routes without declared or verified semantics return `null` for that top-level section
+- routes that support both declared and verified semantics use `mode` to decide which sections are populated:
+  `declared` populates `declared_state` and returns `verified_state=null`
+  `verified` populates `verified_state` and returns `declared_state=null`
+  `both` populates both sections
 - `coverage` explains completeness and enumeration basis, not just freshness
 - `chain_positions` may contain multiple chains for cross-chain answers
 - route-level `coverage` and subdocument support are separate: a read may be authoritative for exact lookup while one or more declared summary sections still return explicit unsupported objects
+- top-level `provenance` is a route-level summary; mixed declared+verified routes may add section-local `provenance` objects where declared and execution derivations differ
 
 ## 3. Shared Objects
 
@@ -116,6 +120,31 @@ Rules:
 - `unsupported_reason`
 
 Use this object when a declared-state subdocument is part of the route contract but is not yet projected. The field stays present; unsupported detail is never omitted silently.
+
+### `ResultStatus`
+
+- `success`
+- `not_found`
+- `mismatch`
+- `unsupported`
+- `invalid_name`
+- `execution_failed`
+
+Use this status vocabulary for:
+
+- `declared_state.record_cache.entries[*]`
+- `verified_state.verified_queries[*]`
+- `declared_state.claimed_primary_name`
+- `verified_state.verified_primary_name`
+
+Rules:
+
+- every result object above always includes `status`
+- route-specific request identity fields stay present even when `status` is not `success`
+- `unsupported_reason` is required when `status=unsupported`
+- `failure_reason` may appear for `not_found`, `mismatch`, `invalid_name`, or `execution_failed`
+- value and identity fields appear only when the route established a concrete record value or concrete name target for that result
+- not every status applies to every result object; routes document the subset they use
 
 ### `Coverage`
 
@@ -394,38 +423,87 @@ Rules:
 
 ### `GET /v1/resolutions/{namespace}/{name}`
 
-`declared_state` includes:
+This route freezes one mixed declared+verified envelope for resolution reads.
+
+Supported query parameters:
+
+- `at`
+- `consistency`
+- `mode=declared|verified|both`
+- `records`
+
+`data` identifies the same surface and current binding as `GET /v1/names/{namespace}/{name}` for the requested snapshot.
+
+When `declared_state` is populated, it includes:
 
 - `topology`
 - `record_inventory`
 - `record_cache`
 
-`verified_state` includes:
+When `verified_state` is populated, it includes:
 
-- explicit record answers for requested record keys
-- execution trace reference
-- failure state when verification cannot succeed
+- `verified_queries`
+
+Rules:
+
+- `topology`, `record_inventory`, and `record_cache` are always present as objects when `declared_state` is populated; any declared section that is not yet projected returns `UnsupportedSummary`
+- `record_inventory` defines the known record-selector space, explicit gaps, and the current version boundary for the requested surface; it does not imply global record enumeration
+- `record_cache` is the declared last-known-value view over that same selector space and version boundary; it never implies that verified execution was run
+- selector-level declared cache results live in `record_cache.entries`
+- `record_cache.entries[*]` and `verified_queries[*]` always echo the applicable `record_key`, even when the selector status is not `success`
+- `records` is a comma-separated list of explicit record selectors; selectors use the stable `record_key` strings surfaced by `record_inventory`, and the contract permits additive selector families without changing the envelope shape
+- in `mode=declared`, `records` is optional; if supplied, `record_cache` narrows to the requested selectors, otherwise it returns every cacheable selector visible at the current version boundary
+- in `mode=verified` or `mode=both`, `records` is required and duplicate selectors are rejected with `400 invalid_input`
+- malformed selector syntax returns `400 invalid_input`
+- if the exact surface does not exist for the requested namespace and snapshot, return `404 not_found`
+- `verified_queries` returns one result object per requested selector in request order
+- `verified_queries[*].status` uses the shared `ResultStatus` vocabulary; the initial resolution contract uses `success`, `not_found`, `unsupported`, and `execution_failed`
+- unsupported selector families, unsupported resolver families, or namespaces without a verified entrypoint return `200` with `verified_queries[*].status=unsupported`; they do not silently downgrade to declared cache values
+- supported verified queries that execute but do not produce a trustworthy answer return `status=execution_failed` with `failure_reason`
+- for `mode=verified` or `mode=both`, top-level `provenance` includes the request-scoped execution trace summary and each `verified_queries[*]` item may carry narrower provenance for the specific selector result
+- route-level `coverage` explains declared completeness for topology, inventory, and cache at the requested snapshot; per-selector verified misses or failures do not change that shared route-level `coverage` object by themselves
 
 ### `GET /v1/primary-names/{address}`
 
-Supports:
+Supported query parameters:
 
+- `at`
+- `consistency`
+- `mode=declared|verified|both`
 - `coin_type`
 - `namespace`
 
-Returns both:
+This route is keyed by one `(address, namespace, coin_type)` tuple. `namespace` and `coin_type` are required.
+
+`data` identifies the requested tuple:
+
+- `address`
+- `namespace`
+- `coin_type`
+
+When `declared_state` is populated, it returns:
 
 - `claimed_primary_name`
+
+When `verified_state` is populated, it returns:
+
 - `verified_primary_name`
 
-Verification statuses are:
+Rules:
 
-- `verified`
-- `claimed_only`
-- `mismatch`
-- `unnormalized`
-- `not_found`
-- `unsupported`
+- `claimed_primary_name` is the declared claim candidate only; it never implies that the requested address actually verifies to that name
+- `claimed_primary_name.status` uses the shared `ResultStatus` vocabulary; the initial declared contract uses `success`, `not_found`, `unsupported`, and `invalid_name`
+- `verified_primary_name.status` uses the same `ResultStatus` vocabulary; the initial verified contract uses `success`, `not_found`, `mismatch`, `unsupported`, `invalid_name`, and `execution_failed`
+- `claimed_primary_name` and `verified_primary_name` always include `status` when their containing section is populated
+- when a concrete claim target exists, `claimed_primary_name` includes the resolved surface identity fields; if the raw claim exists but cannot be normalized, it returns `status=invalid_name`, keeps the raw claim text in `raw_claim_name`, and omits normalized identity fields
+- `verified_primary_name` is authoritative only when `status=success`
+- `status=mismatch` means the claim normalized and resolved, but the verified target address for the requested `coin_type` did not equal the requested `{address}`; the result keeps the candidate name identity and the mismatching resolved target
+- invalid address syntax, missing required `namespace` or `coin_type`, or a malformed query tuple returns `400 invalid_input`
+- an unsupported public namespace returns `404 not_found`
+- no declared or verified primary-name answer for the requested tuple returns `200` with `status=not_found`; it does not turn the route into `404`
+- unsupported claim surfaces or unsupported verified entrypoints return `200` with the corresponding object `status=unsupported`
+- top-level `provenance` summarizes the declared claim inputs and, when `verified_state` is populated, the verification trace; `claimed_primary_name` and `verified_primary_name` may each carry narrower provenance objects
+- route-level `coverage` explains completeness of the declared claim surface for the requested tuple; a verification mismatch or absence does not by itself change that coverage summary
 
 ## 6. Sorting And Pagination Defaults
 
@@ -444,7 +522,7 @@ Every non-2xx response returns:
 {
   "error": {
     "code": "unsupported",
-    "message": "verified mode is not yet available for this namespace",
+    "message": "the requested route option is not supported",
     "details": {}
   }
 }
@@ -459,6 +537,11 @@ Every non-2xx response returns:
 - `verification_failed`
 - `conflict`
 - `internal_error`
+
+Rules:
+
+- use non-2xx `unsupported` only when the request cannot produce the route contract at all for the requested shape
+- when a mixed route can produce the envelope but one declared or verified subsection is unsupported, return `200` and surface that state through `UnsupportedSummary` or the shared `ResultStatus` vocabulary instead of raising a route-level `unsupported` error
 
 ## 8. Versioning Rules
 

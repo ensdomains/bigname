@@ -23,8 +23,8 @@ Some declared-state route families are still queued in the API binary. Their pro
 | `children_current` | `(parent_logical_name_id, child_logical_name_id, surface_class)` | child collections | registration, subregistry, alias, wildcard events |
 | `permissions_current` | `(resource_id, subject, scope)` | resource permissions reads (queued) | permission and transfer events |
 | `resolver_current` | `(chain_id, resolver_address)` | resolver overview (queued) | resolver, alias, permission, inventory events |
-| `record_inventory_current` | `(resource_id, version_boundary)` | declared resolution | record and version-boundary events |
-| `primary_names_current` | `(address, coin_type, namespace)` | primary-name reads | reverse, primary claim, verified primary events |
+| `record_inventory_current` | `(resource_id, version_boundary)` | declared resolution inventory + cache | record and version-boundary events |
+| `primary_names_current` | `(address, coin_type, namespace)` | declared primary claim + verification lookup key | reverse, primary claim, verified primary events |
 | `coverage_current` | `logical_name_id` | exact-name inline coverage, dedicated single-name coverage/explain reads | `CoverageChanged`, capability changes |
 
 History reads use normalized events plus thin cursor support rather than a separate denormalized history truth table. Queued address-history views must compose address anchor selection across current and historical matches with the same normalized-event history family rather than introducing a separate history projection or ledger.
@@ -81,6 +81,21 @@ History reads use normalized events plus thin cursor support rather than a separ
 - keyed by `(chain_id, resolver_address)`
 - serves declared summary sections for bindings, aliases, permissions, role holders, and event/count summaries
 - unsupported declared summary sections stay explicit until the corresponding overview detail is projected
+
+### Resolution
+
+- `record_inventory_current` is keyed by `(resource_id, version_boundary)` and serves both declared `record_inventory` and declared `record_cache`
+- `record_inventory` and `record_cache` are two declared subdocuments over the same selector space and version boundary; they are not separate truth systems
+- `record_inventory` carries selector space, explicit gaps, and unsupported families
+- `record_cache` carries last-known values for cacheable selectors at that same boundary and may be narrowed to requested selectors without changing the projection family
+- `verified_queries` remain execution output keyed by the explicit selector request; projection rows do not become a second verified-resolution ledger
+
+### Primary names
+
+- keyed by `(address, coin_type, namespace)`
+- serves declared `claimed_primary_name` plus the invalidation and provenance hooks needed to locate request-matching verified execution output
+- the route-level `claimed_primary_name` and `verified_primary_name` objects share the API `ResultStatus` vocabulary, but they do not collapse declared claim state and verified execution state into one projection-owned field
+- `verified_primary_name` in `mode=verified|both` remains execution-derived even when verified-primary normalized events are also projected for lookup and invalidation support
 
 ## 4. Invalidation Rules
 

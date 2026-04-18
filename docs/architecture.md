@@ -234,6 +234,8 @@ Every externally visible answer returns, directly or by expansion:
 - `coverage` must explain completeness and exhaustiveness, not merely freshness.
 - `chain_positions` must be explicit whenever an answer depends on multiple chains or execution checkpoints.
 - `consistency` is caller-visible and not inferred implicitly.
+- mixed declared+verified routes keep the same top-level envelope shape as declared-only routes; `mode=declared|verified|both` decides which of `declared_state` and `verified_state` is populated and the unrequested section becomes `null`
+- when one mixed route carries both declared and verified material, top-level provenance is a route summary and section-local provenance may be attached to preserve the declared-vs-execution boundary explicitly
 
 ### Coverage status vocabulary
 
@@ -254,6 +256,25 @@ Expected `coverage.exhaustiveness` values vary by surface, but must explicitly d
 - `observed_only`
 - `non_enumerable`
 - `not_applicable`
+
+### `ResultStatus` Vocabulary
+
+Mixed resolution and primary-name routes reuse one per-result `ResultStatus` vocabulary:
+
+- `success`
+- `not_found`
+- `mismatch`
+- `unsupported`
+- `invalid_name`
+- `execution_failed`
+
+Rules:
+
+- every route-local result object always carries `status`
+- `unsupported_reason` is required when `status=unsupported`
+- `failure_reason` may refine `not_found`, `mismatch`, `invalid_name`, or `execution_failed`
+- only `success` guarantees a concrete record value or concrete name target
+- not every status applies to every result object; the route contract defines the valid subset
 
 ---
 
@@ -830,11 +851,12 @@ Every normalized event must carry:
 
 ## 18. Resolution Model
 
-`Resolution` is split into three layers:
+`Resolution` is one mixed route envelope with three declared sections and one verified section:
 
-- `topology`
-- `record_inventory`
-- `verified_queries`
+- declared `topology`
+- declared `record_inventory`
+- declared `record_cache`
+- verified `verified_queries`
 
 ### 18.1 `topology`
 
@@ -866,6 +888,7 @@ Rules:
 
 - record inventory is not the same thing as canonical global enumeration
 - record inventory is usually observed or capability-driven
+- record inventory defines the stable record-selector space admitted by the route, including explicit gaps and unsupported families
 - version changes invalidate record inventory and cached record values for the prior version boundary
 
 ### 18.3 `record_cache`
@@ -875,7 +898,9 @@ Rules:
 Rules:
 
 - `record_cache` is keyed by node and version boundary
+- `record_cache` is the declared last-known-value view over the same selector space and version boundary defined by `record_inventory`
 - `record_cache` is capability-driven, not resolver-family hardcoded
+- callers may request an explicit selector subset without changing the route envelope or inventing a second declared-state truth system
 - unsupported records must remain requestable through verified execution where possible
 
 ### 18.4 `verified_queries`
@@ -884,7 +909,9 @@ Rules:
 
 Rules:
 
+- verified queries return one result object per requested record selector and reuse the shared `ResultStatus` vocabulary
 - explicit record reads may succeed even when inventory is partial
+- verified queries do not backfill `record_inventory` or `record_cache` inside the same response; they are the execution-derived counterpart to those declared sections
 - verified answers must persist an execution trace
 - wildcard traversal, alias rewriting, and CCIP flows must be explainable end-to-end
 
@@ -955,16 +982,18 @@ Persist:
 - `reverse_namespace`
 - `coin_type`
 - `resolver`
-- `verification_status`
-- `failure_reason`
 - provenance
 - coverage
 
 Rules:
 
+- `claimed_primary_name` and `verified_primary_name` are separate route-local result objects under the shared mixed-route envelope
+- both objects reuse the shared `ResultStatus` vocabulary; `mismatch` and `execution_failed` apply only to `verified_primary_name`
+- `claimed_primary_name` is the declared candidate only and never implies that verification succeeded
+- `verified_primary_name` is authoritative only when `status=success`
+- if the raw claim exists but cannot be normalized, the route surfaces `status=invalid_name` instead of silently dropping the claim
 - verified primary names require the verification algorithm to succeed
 - reverse claims alone are insufficient
-- the system must distinguish `claimed_only`, `mismatch`, `unnormalized`, `not_found`, and `unsupported`
 - Basenames claim-setting operations affect the claim surface, but the read contract still distinguishes claim from verified primary name
 
 ---
@@ -1288,14 +1317,14 @@ The checked-in baseline lives in `docs/consumer-capabilities.md`. The summary be
 | names owned / controlled by address | dashboard and search flows | `Address.names` |
 | names owned / controlled by address with role summary | dashboard lists | `Address.names` with `include=role_summary` |
 | declared child subnames and child counts | subname pages and creation flows | `Name.children` |
-| record inventory for editing | profile / records screens | `Resolution.record_inventory` |
+| record inventory for editing | profile / records screens | `Resolution.record_inventory` + `Resolution.record_cache` |
 | verified record reads | profile / send / address resolution | `Resolution.verified_queries` |
 | name history | profile history pages | `History(scope=both)` |
 | address history across names | address activity views | `Address.history` |
 | role holders for a name / resource | roles pages | `Permissions.by_resource` |
 | role change history | roles history pages | `History(filter=permissions)` |
 | resolver-centric overview | resolver pages | `Resolver` |
-| claimed vs verified primary names | dashboard / profile | `PrimaryName` |
+| claimed vs verified primary names | dashboard / profile | `PrimaryName.claimed_primary_name` + `PrimaryName.verified_primary_name` |
 
 This matrix is the replacement contract for first-party consumers and must be frozen in phase 0.
 

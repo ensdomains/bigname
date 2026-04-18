@@ -19,6 +19,17 @@ The execution plane consumes:
 
 It does not read adapter-specific internals directly.
 
+Mixed resolution and primary-name routes reuse one shared `ResultStatus` vocabulary:
+
+- `success`
+- `not_found`
+- `mismatch`
+- `unsupported`
+- `invalid_name`
+- `execution_failed`
+
+Execution uses `ResultStatus` for verified route-local result objects, and the same vocabulary is reused by the paired declared primary-name claim object. The route contract decides which subset applies to each object.
+
 ## 2. Resolution Flow
 
 Verified resolution follows this sequence:
@@ -33,8 +44,11 @@ Verified resolution follows this sequence:
 Rules:
 
 - every step is attributable in provenance
+- one verified resolution request may cover multiple explicit record selectors under one request-scoped execution trace
+- execution returns one `verified_queries` result object per requested selector and uses the shared `ResultStatus` vocabulary
 - wildcard traversal and alias rewriting must be explicit in the trace
-- unsupported record families fail explicitly rather than silently degrading
+- unsupported record families stay explicit as `status=unsupported`; they do not silently degrade to declared cache values
+- supported selector requests that cannot produce a trustworthy answer return `status=execution_failed` with a typed `failure_reason`
 
 ## 3. Primary-Name Verification Flow
 
@@ -46,14 +60,12 @@ Primary verification follows this sequence:
 4. compare the resolved target with the requested address
 5. persist both the claim state and verification result
 
-Verification statuses:
+Rules:
 
-- `verified`
-- `claimed_only`
-- `mismatch`
-- `unnormalized`
-- `not_found`
-- `unsupported`
+- the route keeps claimed state separate from the execution-derived verification result
+- `claimed_primary_name` and `verified_primary_name` both use the shared `ResultStatus` vocabulary
+- `verified_primary_name` uses `success`, `not_found`, `mismatch`, `unsupported`, `invalid_name`, and `execution_failed`
+- a raw claim that cannot be normalized surfaces `status=invalid_name`; it is not silently treated as missing
 
 ## 4. Trace Schema
 
@@ -71,6 +83,8 @@ Each verified answer persists:
 - final value
 - failure reason
 - finished timestamp
+
+For resolution, one persisted answer may include multiple selector-scoped outputs under the same `execution_trace_id`.
 
 Each step records:
 
@@ -100,6 +114,8 @@ Invalidate on:
 - relevant record change
 - primary claim change
 
+For resolution, `request key` includes the normalized explicit selector set so the cache boundary matches `verified_queries`.
+
 ## 6. Explain Requirements
 
 Every verified answer must be explainable through:
@@ -117,5 +133,4 @@ For the first implementation slice:
 
 - ENS uses the canonical Universal Resolver path on Ethereum L1
 - Basenames verified execution is scaffolded but may initially expose partial coverage until Base-side authority and L1 transport are both wired
-- unsupported resolver families remain requestable but must return explicit unsupported coverage or typed verification failure
-
+- unsupported resolver families remain requestable but must return explicit `status=unsupported` results unless the route cannot attribute any section-level answer at all
