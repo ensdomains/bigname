@@ -81,9 +81,11 @@ Rules:
 - that slice uses stable execution identity `request_type=verified_primary_name`
 - its `request key` identity is the exact normalized route tuple `{namespace}:{normalized_address}:{coin_type}`, where `normalized_address` uses the same lowercase normalization as `GET /v1/primary-names/{address}`; claimed text, normalized claim or verified name identity, verified target address, result status, and section-local provenance do not participate in that key
 - `primary_names_current(address, coin_type, namespace)` is the claim-side lookup / invalidation anchor for that same tuple; projection-owned claim state may explain tuple admission or claim invalidation, but it must not persist `execution_trace_id` or `verified_primary_name`
+- the shipped Phase 7 ENS primary-name path still does not require dedicated manifest capability flags such as `claimed_primary_name` or `verified_primary_name`; reverse claim admission stays owned by the active `ens_v1_reverse_l1` manifest, while verified-primary readback stays execution-derived under the already frozen `ens_execution` owner
 - top-level route provenance joins claim-side and verification-side context; section-local provenance stays narrower, and only the verified section may carry data anchored to the persisted `execution_trace_id`
 - missing or unsupported ENS reverse claims do not trigger fallback to registry-, resolver-, or other claim-setting surfaces in this phase
 - manifest rollout and capability state remain source-family-local inputs only: they may admit reverse claim intake or shadow execution traces and cache ownership, but they do not by themselves widen ENS claim precedence, graduate route-level primary-name coverage, or ship richer tuple-present `claimed_primary_name` or `verified_primary_name` payloads
+- introducing any dedicated primary-name manifest capability flag would therefore be a later additive contract change, not a prerequisite for the shipped persisted-readback or reverse-claim slices
 - the shipped bootstrap route may still return explicit verified `status=unsupported` without surfacing the richer tuple-present claimed or verified payloads above
 
 ## 4. Trace Schema
