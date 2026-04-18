@@ -23,8 +23,6 @@ const NAME_CURRENT_DERIVATION_KIND: &str = "name_current_rebuild";
 const EVENT_KIND_RESOLVER_CHANGED: &str = "ResolverChanged";
 const RECORD_INVENTORY_UNSUPPORTED_REASON: &str =
     "record_inventory remains unsupported in the ENSv1 name_current rebuild";
-const COVERAGE_UNSUPPORTED_REASON: &str =
-    "record_inventory remains unsupported in the ENSv1 name_current rebuild";
 const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 const RELEVANT_EVENT_KINDS: &[&str] = &[
     "AuthorityEpochChanged",
@@ -232,10 +230,10 @@ async fn build_name_current_row(pool: &PgPool, name: &NameSurfaceSeed) -> Result
         declared_summary: build_declared_summary(facts),
         provenance,
         coverage: json!({
-            "status": "partial",
+            "status": "full",
             "exhaustiveness": "authoritative",
             "source_classes_considered": ["ensv1_registry_path"],
-            "unsupported_reason": COVERAGE_UNSUPPORTED_REASON,
+            "unsupported_reason": Value::Null,
             "enumeration_basis": "exact_name",
         }),
         chain_positions,
@@ -268,6 +266,8 @@ fn build_declared_summary(facts: ProjectedFacts) -> Value {
             "latest_event_kind": facts.latest_registration_event_kind,
         },
         "control": {
+            "status": facts.control_status_substrate,
+            "expiry": format_unix_timestamp_value(facts.control_expiry_substrate),
             "registrant": facts.registrant,
             "registry_owner": facts.registry_owner,
             "latest_event_kind": facts.latest_control_event_kind,
@@ -996,6 +996,16 @@ fn format_timestamp(timestamp: OffsetDateTime) -> String {
     )
 }
 
+fn format_unix_timestamp_value(timestamp: Option<i64>) -> Value {
+    match timestamp {
+        Some(timestamp) => OffsetDateTime::from_unix_timestamp(timestamp)
+            .map(format_timestamp)
+            .map(Value::String)
+            .unwrap_or_else(|_| Value::Number(timestamp.into())),
+        None => Value::Null,
+    }
+}
+
 fn json_str(value: &Value, path: &[&str]) -> Option<String> {
     path.iter()
         .try_fold(value, |current, key| current.get(key))
@@ -1262,6 +1272,10 @@ mod tests {
             Value::String("0x0000000000000000000000000000000000000aaa".to_owned())
         );
         assert_eq!(
+            row.declared_summary["control"]["expiry"],
+            Value::String(format_timestamp(timestamp(1_800_000_000)))
+        );
+        assert_eq!(
             row.declared_summary["resolver"],
             json!({
                 "chain_id": Value::Null,
@@ -1287,11 +1301,8 @@ mod tests {
         );
         assert!(row.declared_summary["history"]["surface_head"].is_object());
         assert!(row.declared_summary["history"]["resource_head"].is_object());
-        assert_eq!(row.coverage["status"], Value::String("partial".to_owned()));
-        assert_eq!(
-            row.coverage["unsupported_reason"],
-            Value::String(COVERAGE_UNSUPPORTED_REASON.to_owned())
-        );
+        assert_eq!(row.coverage["status"], Value::String("full".to_owned()));
+        assert_eq!(row.coverage["unsupported_reason"], Value::Null);
         assert_eq!(row.manifest_version, 3);
 
         database.cleanup().await
@@ -1356,10 +1367,7 @@ mod tests {
                 "latest_event_kind": EVENT_KIND_RESOLVER_CHANGED,
             })
         );
-        assert_eq!(
-            row.coverage["unsupported_reason"],
-            Value::String(COVERAGE_UNSUPPORTED_REASON.to_owned())
-        );
+        assert_eq!(row.coverage["unsupported_reason"], Value::Null);
 
         database.cleanup().await
     }
@@ -1605,6 +1613,8 @@ mod tests {
                     json!({
                         "authority_kind": "registry_only",
                         "authority_key": "registry:ethereum-mainnet:alice",
+                        "status": "wrapped",
+                        "expiry": 1_900_000_000_i64,
                     }),
                 ),
                 authority_event(
@@ -1676,6 +1686,14 @@ mod tests {
         assert_eq!(
             row.declared_summary["control"]["registry_owner"],
             Value::String("0x0000000000000000000000000000000000000ccc".to_owned())
+        );
+        assert_eq!(
+            row.declared_summary["control"]["status"],
+            Value::String("wrapped".to_owned())
+        );
+        assert_eq!(
+            row.declared_summary["control"]["expiry"],
+            Value::String(format_timestamp(timestamp(1_900_000_000)))
         );
 
         database.cleanup().await

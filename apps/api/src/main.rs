@@ -1667,13 +1667,17 @@ fn build_address_name_role_summary(rows: &[PermissionsCurrentRow]) -> JsonValue 
 }
 
 fn build_address_name_expansion_facts(row: &NameCurrentRow) -> AddressNameExpansionFacts {
-    let declared_state = build_name_declared_state(row);
-
     AddressNameExpansionFacts {
-        status: supported_summary_field(provenance_field(&declared_state, "control"), "status"),
-        expiry: supported_summary_field(provenance_field(&declared_state, "control"), "expiry"),
+        status: supported_summary_field(
+            provenance_field(&row.declared_summary, "control"),
+            "status",
+        ),
+        expiry: supported_summary_field(
+            provenance_field(&row.declared_summary, "control"),
+            "expiry",
+        ),
         record_count: supported_summary_field(
-            provenance_field(&declared_state, "record_inventory"),
+            provenance_field(&row.declared_summary, "record_inventory"),
             "count",
         ),
     }
@@ -1753,11 +1757,7 @@ fn build_name_declared_state(row: &NameCurrentRow) -> JsonValue {
     insert_value_field(
         &mut declared_state,
         "control",
-        declared_summary_section(
-            &row.declared_summary,
-            "control",
-            "declared control summary is not yet projected",
-        ),
+        declared_name_control_section(&row.declared_summary),
     );
     insert_value_field(
         &mut declared_state,
@@ -1966,6 +1966,41 @@ fn declared_authority_section(row: &NameCurrentRow) -> JsonValue {
         row.binding_kind.map(|value| value.as_str().to_owned()),
     );
     authority
+}
+
+fn declared_name_control_section(summary: &JsonValue) -> JsonValue {
+    let Some(section) = provenance_field(summary, "control").filter(|value| value.is_object())
+    else {
+        return unsupported_section("declared control summary is not yet projected");
+    };
+
+    if summary_is_unsupported(Some(section)) {
+        return section.clone();
+    }
+
+    let mut control = empty_object();
+    insert_value_field(
+        &mut control,
+        "registrant",
+        provenance_field(section, "registrant")
+            .cloned()
+            .unwrap_or(JsonValue::Null),
+    );
+    insert_value_field(
+        &mut control,
+        "registry_owner",
+        provenance_field(section, "registry_owner")
+            .cloned()
+            .unwrap_or(JsonValue::Null),
+    );
+    insert_value_field(
+        &mut control,
+        "latest_event_kind",
+        provenance_field(section, "latest_event_kind")
+            .cloned()
+            .unwrap_or(JsonValue::Null),
+    );
+    control
 }
 
 fn declared_summary_section(summary: &JsonValue, key: &str, unsupported_reason: &str) -> JsonValue {

@@ -2545,12 +2545,23 @@ async fn get_address_names_include_role_summary_adds_projection_backed_expansion
         )
         .await
         .context("role summary request failed")?;
+    let name_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/names/ens/alpha.eth")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("exact-name request failed")?;
 
     assert_eq!(base_response.status(), StatusCode::OK);
     assert_eq!(include_response.status(), StatusCode::OK);
+    assert_eq!(name_response.status(), StatusCode::OK);
 
     let base_payload: AddressNamesResponse = read_json(base_response).await?;
     let payload: AddressNamesResponse = read_json(include_response).await?;
+    let name_payload: NameResponse = read_json(name_response).await?;
 
     assert_eq!(payload.coverage, base_payload.coverage);
     assert_eq!(payload.page, base_payload.page);
@@ -2572,6 +2583,50 @@ async fn get_address_names_include_role_summary_adds_projection_backed_expansion
     assert_eq!(
         payload.data[0].get("expiry"),
         Some(&json!("2026-09-01T00:00:00Z"))
+    );
+    assert_eq!(
+        name_payload.coverage.get("status").and_then(Value::as_str),
+        Some("full")
+    );
+    assert_eq!(
+        name_payload
+            .declared_state
+            .get("control")
+            .and_then(Value::as_object)
+            .and_then(|value| value.get("registrant")),
+        Some(&json!(address))
+    );
+    assert_eq!(
+        name_payload
+            .declared_state
+            .get("control")
+            .and_then(Value::as_object)
+            .and_then(|value| value.get("registry_owner")),
+        Some(&json!(subject))
+    );
+    assert_eq!(
+        name_payload
+            .declared_state
+            .get("control")
+            .and_then(Value::as_object)
+            .and_then(|value| value.get("latest_event_kind")),
+        Some(&json!("NameWrapped"))
+    );
+    assert!(
+        name_payload
+            .declared_state
+            .get("control")
+            .and_then(Value::as_object)
+            .and_then(|value| value.get("status"))
+            .is_none()
+    );
+    assert!(
+        name_payload
+            .declared_state
+            .get("control")
+            .and_then(Value::as_object)
+            .and_then(|value| value.get("expiry"))
+            .is_none()
     );
     assert_eq!(payload.data[0].get("record_count"), Some(&json!(2)));
     assert_eq!(payload.data[0].get("subname_count"), Some(&json!(2)));
