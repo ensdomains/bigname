@@ -53,8 +53,10 @@ Execution notes:
   modes, including required and invalid `records` handling, the supported declared `topology`,
   `record_inventory`, and `record_cache` sections, the shared record-version-boundary invariant
   across those declared sections, selector identity and cache-subset invariants between
-  `record_inventory` and `record_cache`, and verified query entries that remain explicitly
-  unsupported until their own slice lands
+  `record_inventory` and `record_cache`, explicit unsupported verified entries when no shipped
+  verified answer applies, and mixed-route readback of a persisted ENS exact-surface direct-path
+  `contenthash` answer without widening wildcard-, transport-, Basenames-, or broader non-direct
+  verified support
 - the coverage contract reuses the same exact-name rebuild seed and asserts that
   `GET /v1/coverage/{namespace}/{name}` keeps the same single-name `data` and top-level
   `coverage` object as exact-name lookup while exposing the explain-only coverage block in
@@ -125,8 +127,10 @@ Execution notes:
   execution trace/outcome rows directly, and covers
   `GET /v1/explain/resolutions/{namespace}/{name}/execution`, asserting shared top-level envelope
   invariants with `GET /v1/resolutions/{namespace}/{name}`, request-order preservation for
-  `verified_queries`, presence of the persisted execution summary, and `404 not_found` when the
-  current exact surface has no persisted answer for the requested selector set; it also reuses the
-  shipped execution-outcome invalidation APIs to assert that exact manifest, topology-boundary,
-  and record-boundary invalidation evicts the persisted ENS verified-resolution answer from the
-  mixed `GET /v1/resolutions/{namespace}/{name}?mode=both` route and the execution explain route
+  `verified_queries`, presence of the persisted execution summary, explain-route readback of the
+  same persisted ENS exact-surface direct-path `contenthash` answer for the requested selector
+  set, and `404 not_found` when the current exact surface has no persisted answer for the
+  requested selector set; it also reuses the shipped execution-outcome invalidation APIs to assert
+  that exact manifest, topology-boundary, and record-boundary invalidation evicts the persisted
+  ENS verified-resolution answer from the mixed
+  `GET /v1/resolutions/{namespace}/{name}?mode=both` route and the execution explain route

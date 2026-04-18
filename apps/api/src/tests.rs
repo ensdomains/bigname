@@ -2875,7 +2875,169 @@ async fn get_resolution_verified_state_uses_supported_persisted_answers_and_pres
         verified_payload.provenance.get("execution_trace_id"),
         Some(&Value::String(execution_trace_id.to_string()))
     );
-    assert_eq!(verified_payload.verified_state, Some(expected_verified_state.clone()));
+    assert_eq!(
+        verified_payload.verified_state,
+        Some(expected_verified_state.clone())
+    );
+    assert_eq!(
+        both_payload.provenance.get("execution_trace_id"),
+        Some(&Value::String(execution_trace_id.to_string()))
+    );
+    assert!(both_payload.declared_state.is_some());
+    assert_eq!(both_payload.verified_state, Some(expected_verified_state));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_resolution_verified_state_surfaces_persisted_contenthash_answers_and_preserves_request_order()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0x2200);
+    let token_lineage_id = Uuid::from_u128(0x1100);
+    let surface_binding_id = Uuid::from_u128(0x3300);
+    let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000023);
+    let contenthash = "ipfs://bafybeigdyrzt5sfp7udm7hu76fx4f2jv4jvgxk5csodx4d6vshv3zysn7u";
+    let request_key =
+        resolution_execution_request_key(&["text:com.twitter", "contenthash", "addr:60"]);
+    let persisted_verified_queries = json!([
+        {
+            "record_key": "text:com.twitter",
+            "status": "not_found",
+            "failure_reason": "no_text_record"
+        },
+        {
+            "record_key": "contenthash",
+            "status": "success",
+            "value": {
+                "value": contenthash
+            },
+            "provenance": {
+                "execution_trace_id": execution_trace_id.to_string()
+            }
+        },
+        {
+            "record_key": "addr:60",
+            "status": "success",
+            "value": {
+                "coin_type": "60",
+                "value": "0x00000000000000000000000000000000000000aa"
+            },
+            "provenance": {
+                "execution_trace_id": execution_trace_id.to_string()
+            }
+        }
+    ]);
+
+    database
+        .seed_name_current_binding_migrated(
+            logical_name_id,
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    database
+        .insert_name_current_row(exact_name_row(
+            logical_name_id,
+            surface_binding_id,
+            resource_id,
+            token_lineage_id,
+        ))
+        .await?;
+    database
+        .insert_record_inventory_current_row(record_inventory_current_row(
+            logical_name_id,
+            resource_id,
+        ))
+        .await?;
+
+    let trace = resolution_execution_trace(
+        execution_trace_id,
+        &request_key,
+        &["text:com.twitter", "contenthash", "addr:60"],
+        persisted_verified_queries.clone(),
+    );
+    let outcome = resolution_execution_outcome(
+        execution_trace_id,
+        &request_key,
+        persisted_verified_queries,
+        logical_name_id,
+        resource_id,
+    );
+    upsert_execution_trace(&database.pool, &trace).await?;
+    upsert_execution_outcome(&database.pool, &outcome).await?;
+
+    let verified_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resolutions/ens/alice.eth?mode=verified&records=avatar,text:com.twitter,contenthash,addr:60")
+                .body(Body::empty())
+                .expect("verified request must build"),
+        )
+        .await
+        .context("verified resolution request with contenthash failed")?;
+    let both_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resolutions/ens/alice.eth?mode=both&records=avatar,text:com.twitter,contenthash,addr:60")
+                .body(Body::empty())
+                .expect("mixed request must build"),
+        )
+        .await
+        .context("mixed resolution request with contenthash failed")?;
+
+    assert_eq!(verified_response.status(), StatusCode::OK);
+    assert_eq!(both_response.status(), StatusCode::OK);
+
+    let verified_payload: ResolutionResponse = read_json(verified_response).await?;
+    let both_payload: ResolutionResponse = read_json(both_response).await?;
+    let expected_verified_state = json!({
+        "verified_queries": [
+            {
+                "record_key": "avatar",
+                "status": "unsupported",
+                "unsupported_reason": "verified resolution entrypoint is not yet supported"
+            },
+            {
+                "record_key": "text:com.twitter",
+                "status": "not_found",
+                "failure_reason": "no_text_record"
+            },
+            {
+                "record_key": "contenthash",
+                "status": "success",
+                "value": {
+                    "value": contenthash
+                },
+                "provenance": {
+                    "execution_trace_id": execution_trace_id.to_string()
+                }
+            },
+            {
+                "record_key": "addr:60",
+                "status": "success",
+                "value": {
+                    "coin_type": "60",
+                    "value": "0x00000000000000000000000000000000000000aa"
+                },
+                "provenance": {
+                    "execution_trace_id": execution_trace_id.to_string()
+                }
+            }
+        ]
+    });
+
+    assert_eq!(
+        verified_payload.provenance.get("execution_trace_id"),
+        Some(&Value::String(execution_trace_id.to_string()))
+    );
+    assert_eq!(
+        verified_payload.verified_state,
+        Some(expected_verified_state.clone())
+    );
     assert_eq!(
         both_payload.provenance.get("execution_trace_id"),
         Some(&Value::String(execution_trace_id.to_string()))
@@ -2932,6 +3094,256 @@ async fn get_resolution_execution_explain_returns_not_found_when_persisted_answe
         "persisted resolution execution explain was not found for name alice.eth in namespace ens"
     );
     assert!(payload.error.details.is_empty());
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_resolution_execution_explain_surfaces_persisted_contenthash_answers_and_reuses_resolution_envelope_fields()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0x2200);
+    let token_lineage_id = Uuid::from_u128(0x1100);
+    let surface_binding_id = Uuid::from_u128(0x3300);
+    let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000024);
+    let contenthash = "ipfs://bafybeigdyrzt5sfp7udm7hu76fx4f2jv4jvgxk5csodx4d6vshv3zysn7u";
+    let request_key =
+        resolution_execution_request_key(&["text:com.twitter", "contenthash", "addr:60"]);
+    let persisted_verified_queries = json!([
+        {
+            "record_key": "text:com.twitter",
+            "status": "not_found",
+            "failure_reason": "no_text_record"
+        },
+        {
+            "record_key": "contenthash",
+            "status": "success",
+            "value": {
+                "value": contenthash
+            },
+            "provenance": {
+                "execution_trace_id": execution_trace_id.to_string()
+            }
+        },
+        {
+            "record_key": "addr:60",
+            "status": "success",
+            "value": {
+                "coin_type": "60",
+                "value": "0x00000000000000000000000000000000000000aa"
+            },
+            "provenance": {
+                "execution_trace_id": execution_trace_id.to_string()
+            }
+        }
+    ]);
+
+    database
+        .seed_name_current_binding_migrated(
+            logical_name_id,
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    database
+        .insert_name_current_row(exact_name_row(
+            logical_name_id,
+            surface_binding_id,
+            resource_id,
+            token_lineage_id,
+        ))
+        .await?;
+    database
+        .insert_record_inventory_current_row(record_inventory_current_row(
+            logical_name_id,
+            resource_id,
+        ))
+        .await?;
+
+    let trace = resolution_execution_trace(
+        execution_trace_id,
+        &request_key,
+        &["text:com.twitter", "contenthash", "addr:60"],
+        persisted_verified_queries.clone(),
+    );
+    let outcome = resolution_execution_outcome(
+        execution_trace_id,
+        &request_key,
+        persisted_verified_queries,
+        logical_name_id,
+        resource_id,
+    );
+    upsert_execution_trace(&database.pool, &trace).await?;
+    upsert_execution_outcome(&database.pool, &outcome).await?;
+
+    let explain_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/explain/resolutions/ens/alice.eth/execution?records=text:com.twitter,contenthash,addr:60")
+                .body(Body::empty())
+                .expect("explain request must build"),
+        )
+        .await
+        .context("resolution execution explain request with contenthash failed")?;
+    let resolution_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resolutions/ens/alice.eth?mode=verified&records=text:com.twitter,contenthash,addr:60")
+                .body(Body::empty())
+                .expect("resolution request must build"),
+        )
+        .await
+        .context("resolution request with contenthash failed")?;
+
+    assert_eq!(explain_response.status(), StatusCode::OK);
+    assert_eq!(resolution_response.status(), StatusCode::OK);
+
+    let explain_payload: ResolutionResponse = read_json(explain_response).await?;
+    let resolution_payload: ResolutionResponse = read_json(resolution_response).await?;
+    let expected_resolution_verified_state = json!({
+        "verified_queries": [
+            {
+                "record_key": "text:com.twitter",
+                "status": "not_found",
+                "failure_reason": "no_text_record"
+            },
+            {
+                "record_key": "contenthash",
+                "status": "success",
+                "value": {
+                    "value": contenthash
+                },
+                "provenance": {
+                    "execution_trace_id": execution_trace_id.to_string()
+                }
+            },
+            {
+                "record_key": "addr:60",
+                "status": "success",
+                "value": {
+                    "coin_type": "60",
+                    "value": "0x00000000000000000000000000000000000000aa"
+                },
+                "provenance": {
+                    "execution_trace_id": execution_trace_id.to_string()
+                }
+            }
+        ]
+    });
+
+    assert_eq!(explain_payload.data, resolution_payload.data);
+    assert_eq!(explain_payload.coverage, resolution_payload.coverage);
+    assert_eq!(explain_payload.provenance, resolution_payload.provenance);
+    assert_eq!(
+        explain_payload.chain_positions,
+        resolution_payload.chain_positions
+    );
+    assert_eq!(explain_payload.consistency, resolution_payload.consistency);
+    assert_eq!(
+        explain_payload.last_updated,
+        resolution_payload.last_updated
+    );
+    assert_eq!(explain_payload.declared_state, None);
+    assert_eq!(
+        resolution_payload.verified_state,
+        Some(expected_resolution_verified_state)
+    );
+    assert_eq!(
+        explain_payload.verified_state,
+        Some(json!({
+            "execution": {
+                "execution_trace_id": execution_trace_id.to_string(),
+                "selected_entrypoint": {
+                    "source_family": "ens_execution",
+                    "role": "universal_resolver",
+                    "chain_id": "ethereum-mainnet",
+                    "contract_address": "0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe"
+                },
+                "resolver_discovery_path": [
+                    {
+                        "logical_name_id": "ens:alice.eth",
+                        "namespace": "ens",
+                        "normalized_name": "alice.eth",
+                        "canonical_display_name": "Alice.eth",
+                        "resource_id": resource_id.to_string(),
+                        "chain_id": "ethereum-mainnet",
+                        "address": "0x0000000000000000000000000000000000000abc",
+                        "latest_event_kind": "ResolverChanged"
+                    }
+                ],
+                "wildcard": {
+                    "source": null,
+                    "matched_labels": []
+                },
+                "alias": {
+                    "final_target": null,
+                    "hops": []
+                },
+                "steps": [
+                    {
+                        "step_index": 0,
+                        "step_kind": "load_declared_topology",
+                        "input_digest": "sha256:topology-input",
+                        "output_digest": "sha256:topology-output",
+                        "latency": 4,
+                        "canonicality_dependency": {
+                            "ethereum-mainnet": {
+                                "block_hash": "0xbinding",
+                                "block_number": 21_000_003,
+                                "state": "finalized"
+                            }
+                        }
+                    },
+                    {
+                        "step_index": 1,
+                        "step_kind": "call_universal_resolver",
+                        "input_digest": "sha256:resolver-input",
+                        "output_digest": "sha256:resolver-output",
+                        "latency": 28,
+                        "canonicality_dependency": {
+                            "ethereum-mainnet": {
+                                "block_hash": "0xbinding",
+                                "block_number": 21_000_003,
+                                "state": "finalized"
+                            }
+                        }
+                    }
+                ],
+                "finished_at": format_timestamp(timestamp(1_717_171_900))
+            },
+            "verified_queries": [
+                {
+                    "record_key": "text:com.twitter",
+                    "status": "not_found",
+                    "failure_reason": "no_text_record"
+                },
+                {
+                    "record_key": "contenthash",
+                    "status": "success",
+                    "value": {
+                        "value": contenthash
+                    },
+                    "provenance": {
+                        "execution_trace_id": execution_trace_id.to_string()
+                    }
+                },
+                {
+                    "record_key": "addr:60",
+                    "status": "success",
+                    "value": {
+                        "coin_type": "60",
+                        "value": "0x00000000000000000000000000000000000000aa"
+                    },
+                    "provenance": {
+                        "execution_trace_id": execution_trace_id.to_string()
+                    }
+                }
+            ]
+        }))
+    );
 
     database.cleanup().await?;
     Ok(())
@@ -5823,10 +6235,7 @@ async fn get_name_history_returns_canonical_only_rows_with_provenance_and_covera
             .and_then(Value::as_str),
         Some("normalized_event_history")
     );
-    assert_eq!(
-        payload.provenance.get("execution_trace_id"),
-        Some(&Value::Null)
-    );
+    assert_eq!(payload.provenance.get("execution_trace_id"), Some(&Value::Null));
     assert_eq!(
         payload.provenance.get("manifest_versions"),
         Some(&json!([
@@ -8408,7 +8817,10 @@ async fn get_primary_names_returns_not_found_for_tuple_miss_when_projection_exis
             }
         }))
     );
-    assert_eq!(payload.provenance.get("execution_trace_id"), Some(&Value::Null));
+    assert_eq!(
+        payload.provenance.get("execution_trace_id"),
+        Some(&Value::Null)
+    );
 
     database.cleanup().await?;
     Ok(())

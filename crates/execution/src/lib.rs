@@ -254,6 +254,7 @@ struct VerifiedQuerySummary {
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum SupportedVerifiedRecordKey {
     Addr { coin_type: String },
+    Contenthash,
     Text,
 }
 
@@ -1254,6 +1255,10 @@ fn parse_supported_verified_record_key(record_key: &str) -> Result<SupportedVeri
         }
     }
 
+    if record_key == "contenthash" {
+        return Ok(SupportedVerifiedRecordKey::Contenthash);
+    }
+
     if let Some(text_key) = record_key.strip_prefix("text:") {
         if !text_key.is_empty() {
             return Ok(SupportedVerifiedRecordKey::Text);
@@ -1261,7 +1266,7 @@ fn parse_supported_verified_record_key(record_key: &str) -> Result<SupportedVeri
     }
 
     bail!(
-        "ENS direct-path verified resolution only supports addr:<coin_type> and text:<key> selectors, found {}",
+        "ENS direct-path verified resolution only supports addr:<coin_type>, contenthash, and text:<key> selectors, found {}",
         record_key
     );
 }
@@ -1297,6 +1302,14 @@ fn validate_success_final_payload(
                     "ENS direct-path verified resolution success trace.final_payload.coin_type {} does not match outcome record_key {}",
                     payload_coin_type,
                     query.record_key
+                );
+            }
+        }
+        SupportedVerifiedRecordKey::Contenthash => {
+            if record_kind != "contenthash" {
+                bail!(
+                    "ENS direct-path verified resolution success trace.final_payload.record_kind must be contenthash, found {}",
+                    record_kind
                 );
             }
         }
@@ -1947,6 +1960,96 @@ mod tests {
         request
     }
 
+    fn contenthash_success_request() -> PersistEnsExactNameVerifiedResolutionRequest {
+        let mut request = success_request();
+        let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000018);
+        let request_key = "ens:alice.eth:contenthash".to_owned();
+        request.trace.execution_trace_id = execution_trace_id;
+        request.trace.request_key = request_key.clone();
+        request.trace.final_payload = Some(json!({
+            "record_kind": "contenthash",
+            "value": "ipfs://bafybeigdyrzt5sfp7udm7hu76fx4f2jv4jvgxk5csodx4d6vshv3zysn7u"
+        }));
+        request.trace.request_metadata = json!({
+            "surface": "alice.eth",
+            "record_key": "contenthash",
+            "normalizer_version": "uts46-v1"
+        });
+        request.trace.steps[1].step_payload = json!({
+            "name": "alice.eth",
+            "contenthash": "ipfs://bafybeigdyrzt5sfp7udm7hu76fx4f2jv4jvgxk5csodx4d6vshv3zysn7u"
+        });
+        request.outcome.cache_key.request_key = request_key;
+        request.outcome.execution_trace_id = execution_trace_id;
+        request.outcome.outcome_payload = Some(json!({
+            "verified_queries": [
+                {
+                    "record_key": "contenthash",
+                    "status": "success",
+                    "value": {
+                        "value": "ipfs://bafybeigdyrzt5sfp7udm7hu76fx4f2jv4jvgxk5csodx4d6vshv3zysn7u"
+                    }
+                }
+            ]
+        }));
+        request
+    }
+
+    fn contenthash_not_found_request() -> PersistEnsExactNameVerifiedResolutionRequest {
+        let mut request = contenthash_success_request();
+        request.trace.execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000019);
+        request.trace.final_payload = Some(json!({
+            "failure_reason": "no_contenthash_record"
+        }));
+        request.trace.finished_at = Some(timestamp(1_717_171_760));
+        request.outcome.execution_trace_id = request.trace.execution_trace_id;
+        request.outcome.outcome_payload = Some(json!({
+            "verified_queries": [
+                {
+                    "record_key": "contenthash",
+                    "status": "not_found",
+                    "failure_reason": "no_contenthash_record"
+                }
+            ]
+        }));
+        request.outcome.finished_at = request
+            .trace
+            .finished_at
+            .expect("contenthash not_found test trace must finish");
+        request
+    }
+
+    fn contenthash_execution_failed_request() -> PersistEnsExactNameVerifiedResolutionRequest {
+        let mut request = contenthash_success_request();
+        request.raw_call_snapshots.clear();
+        request.trace.execution_trace_id = Uuid::from_u128(0x0e7ec7ace0000000000000000000001a);
+        request.trace.final_payload = None;
+        request.trace.failure_payload = Some(json!({
+            "failure_reason": "resolver_call_reverted",
+            "stage": "call_universal_resolver"
+        }));
+        request.trace.finished_at = Some(timestamp(1_717_171_810));
+        request.outcome.execution_trace_id = request.trace.execution_trace_id;
+        request.outcome.outcome_payload = Some(json!({
+            "verified_queries": [
+                {
+                    "record_key": "contenthash",
+                    "status": "execution_failed",
+                    "failure_reason": "resolver_call_reverted"
+                }
+            ]
+        }));
+        request.outcome.failure_payload = Some(json!({
+            "failure_reason": "resolver_call_reverted",
+            "reverted": true
+        }));
+        request.outcome.finished_at = request
+            .trace
+            .finished_at
+            .expect("contenthash execution_failed test trace must finish");
+        request
+    }
+
     fn multi_selector_request() -> PersistEnsExactNameVerifiedResolutionRequest {
         let mut request = success_request();
         let ordered_record_keys = vec![
@@ -1975,6 +2078,61 @@ mod tests {
                 "record_key": "addr:2",
                 "status": "execution_failed",
                 "failure_reason": "resolver_call_reverted"
+            }
+        ]);
+
+        request.trace.execution_trace_id = execution_trace_id;
+        request.trace.request_key = request_key.clone();
+        request.trace.final_payload = Some(json!({
+            "verified_queries": verified_queries.clone()
+        }));
+        request.trace.failure_payload = None;
+        request.trace.request_metadata = json!({
+            "surface": "alice.eth",
+            "record_keys": ordered_record_keys,
+            "normalizer_version": "uts46-v1"
+        });
+        request.trace.finished_at = Some(finished_at);
+        request.outcome.cache_key.request_key = request_key;
+        request.outcome.execution_trace_id = execution_trace_id;
+        request.outcome.outcome_payload = Some(json!({
+            "verified_queries": verified_queries
+        }));
+        request.outcome.failure_payload = None;
+        request.outcome.finished_at = finished_at;
+        request
+    }
+
+    fn contenthash_mixed_selector_request() -> PersistEnsExactNameVerifiedResolutionRequest {
+        let mut request = contenthash_success_request();
+        let ordered_record_keys = vec![
+            "text:com.twitter".to_owned(),
+            "contenthash".to_owned(),
+            "addr:60".to_owned(),
+        ];
+        let request_key = normalized_request_key("alice.eth", &ordered_record_keys);
+        let execution_trace_id = Uuid::from_u128(0x0e7ec7ace0000000000000000000001b);
+        let finished_at = timestamp(1_717_171_920);
+        let verified_queries = json!([
+            {
+                "record_key": "text:com.twitter",
+                "status": "not_found",
+                "failure_reason": "no_text_record"
+            },
+            {
+                "record_key": "contenthash",
+                "status": "success",
+                "value": {
+                    "value": "ipfs://bafybeigdyrzt5sfp7udm7hu76fx4f2jv4jvgxk5csodx4d6vshv3zysn7u"
+                }
+            },
+            {
+                "record_key": "addr:60",
+                "status": "success",
+                "value": {
+                    "coin_type": "60",
+                    "value": "0x00000000000000000000000000000000000000aa"
+                }
             }
         ]);
 
@@ -2125,6 +2283,134 @@ mod tests {
             .await?
             .is_empty(),
             "execution failed direct path fixture should not persist raw call snapshots"
+        );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn persists_contenthash_success_direct_path() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let request = contenthash_success_request();
+
+        let persisted =
+            persist_ens_exact_name_verified_resolution_direct(database.pool(), &request).await?;
+        assert_eq!(
+            persisted,
+            PersistedVerifiedResolutionIdentity {
+                execution_trace_id: request.trace.execution_trace_id,
+                cache_key: request.outcome.cache_key.clone(),
+            }
+        );
+
+        let loaded_trace = load_execution_trace(database.pool(), persisted.execution_trace_id)
+            .await?
+            .expect("execution trace must exist after persistence");
+        assert_eq!(loaded_trace, request.trace);
+
+        let loaded_outcome = load_execution_outcome(database.pool(), &persisted.cache_key)
+            .await?
+            .expect("execution outcome must exist after persistence");
+        assert_eq!(loaded_outcome, request.outcome);
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn persists_contenthash_not_found_direct_path() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let request = contenthash_not_found_request();
+
+        let persisted =
+            persist_ens_exact_name_verified_resolution_direct(database.pool(), &request).await?;
+
+        let loaded_trace = load_execution_trace(database.pool(), persisted.execution_trace_id)
+            .await?
+            .expect("execution trace must exist after persistence");
+        assert_eq!(loaded_trace, request.trace);
+
+        let loaded_outcome = load_execution_outcome(database.pool(), &persisted.cache_key)
+            .await?
+            .expect("execution outcome must exist after persistence");
+        assert_eq!(loaded_outcome, request.outcome);
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn persists_contenthash_execution_failed_direct_path_without_raw_call_snapshots()
+    -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let request = contenthash_execution_failed_request();
+
+        let persisted =
+            persist_ens_exact_name_verified_resolution_direct(database.pool(), &request).await?;
+        assert_eq!(
+            persisted.execution_trace_id,
+            request.trace.execution_trace_id
+        );
+
+        let loaded_trace = load_execution_trace(database.pool(), persisted.execution_trace_id)
+            .await?
+            .expect("execution trace must exist after persistence");
+        assert_eq!(loaded_trace, request.trace);
+
+        let loaded_outcome = load_execution_outcome(database.pool(), &persisted.cache_key)
+            .await?
+            .expect("execution outcome must exist after persistence");
+        assert_eq!(loaded_outcome, request.outcome);
+
+        assert!(
+            load_raw_call_snapshots_by_block_hash(
+                database.pool(),
+                ETHEREUM_MAINNET_CHAIN_ID,
+                "0xabc123",
+            )
+            .await?
+            .is_empty(),
+            "contenthash execution failed direct path fixture should not persist raw call snapshots"
+        );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn persists_mixed_selector_direct_path_with_contenthash_and_preserves_query_order()
+    -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let request = contenthash_mixed_selector_request();
+
+        let persisted =
+            persist_ens_exact_name_verified_resolution_direct(database.pool(), &request).await?;
+        assert_eq!(
+            persisted.cache_key.request_key,
+            "ens:alice.eth:addr:60,contenthash,text:com.twitter"
+        );
+
+        let loaded_trace = load_execution_trace(database.pool(), persisted.execution_trace_id)
+            .await?
+            .expect("execution trace must exist after persistence");
+        assert_eq!(loaded_trace, request.trace);
+
+        let loaded_outcome = load_execution_outcome(database.pool(), &persisted.cache_key)
+            .await?
+            .expect("execution outcome must exist after persistence");
+        assert_eq!(loaded_outcome, request.outcome);
+
+        let loaded_verified_queries = loaded_outcome
+            .outcome_payload
+            .as_ref()
+            .and_then(|payload| payload.get("verified_queries"))
+            .and_then(Value::as_array)
+            .expect("verified_queries must be present");
+        let ordered_record_keys = loaded_verified_queries
+            .iter()
+            .filter_map(|query| query.get("record_key"))
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ordered_record_keys,
+            vec!["text:com.twitter", "contenthash", "addr:60"]
         );
 
         database.cleanup().await
@@ -2383,7 +2669,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("only supports addr:<coin_type> and text:<key> selectors"),
+                .contains("only supports addr:<coin_type>, contenthash, and text:<key> selectors"),
             "unexpected error: {error:#}"
         );
         assert!(

@@ -2568,6 +2568,143 @@ mod shipped_api {
         }
 
         #[tokio::test]
+        async fn resolution_contract_reads_persisted_contenthash_answer_on_mixed_route()
+        -> Result<()> {
+            let database = HarnessDatabase::new().await?;
+            let logical_name_id = "ens:alice.eth";
+            let resource_id = Uuid::from_u128(0x2200);
+            let token_lineage_id = Uuid::from_u128(0x1100);
+            let surface_binding_id = Uuid::from_u128(0x3300);
+            let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000023);
+
+            database
+                .seed_exact_name_rebuild_inputs(
+                    logical_name_id,
+                    resource_id,
+                    token_lineage_id,
+                    surface_binding_id,
+                )
+                .await?;
+            database.rebuild_name_current(logical_name_id).await?;
+            database
+                .insert_record_inventory_current_row(resolution_record_inventory_current_row(
+                    logical_name_id,
+                    resource_id,
+                ))
+                .await?;
+
+            let name_row = bigname_storage::load_name_current(&database.pool, logical_name_id)
+                .await?
+                .context("mixed contenthash resolution requires an exact-name current row")?;
+            let record_inventory_row =
+                resolution_record_inventory_current_row(logical_name_id, resource_id);
+            let persisted_records = parse_resolution_record_keys(
+                Some("text:com.twitter,contenthash,addr:60"),
+                ResolutionMode::Verified,
+            )
+            .map_err(|error| anyhow::anyhow!(error.message))?;
+            let cache_key = build_resolution_execution_cache_key(
+                &name_row,
+                &persisted_records,
+                Some(&record_inventory_row),
+            )?;
+            let request_key = cache_key.request_key.clone();
+            let persisted_verified_queries = resolution_execution_verified_queries(
+                execution_trace_id,
+                &["text:com.twitter", "contenthash", "addr:60"],
+            );
+
+            upsert_execution_trace(
+                &database.pool,
+                &resolution_execution_trace(
+                    execution_trace_id,
+                    &request_key,
+                    &["text:com.twitter", "contenthash", "addr:60"],
+                    persisted_verified_queries.clone(),
+                ),
+            )
+            .await?;
+            upsert_execution_outcome(
+                &database.pool,
+                &resolution_execution_outcome(
+                    execution_trace_id,
+                    cache_key,
+                    persisted_verified_queries,
+                ),
+            )
+            .await?;
+
+            let response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(
+                            "/v1/resolutions/ens/alice.eth?mode=both&records=avatar,text:com.twitter,contenthash,addr:60",
+                        )
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("mixed contenthash resolution request failed")?;
+
+            assert_eq!(response.status(), StatusCode::OK);
+
+            let payload: ResolutionResponse = read_json(response).await?;
+            let expected_declared_state = resolution_supported_declared_state(
+                logical_name_id,
+                resource_id,
+                &["avatar", "text:com.twitter", "contenthash", "addr:60"],
+            );
+            let expected_verified_state = json!({
+                "verified_queries": [
+                    {
+                        "record_key": "avatar",
+                        "status": "unsupported",
+                        "unsupported_reason": "verified resolution entrypoint is not yet supported",
+                    },
+                    {
+                        "record_key": "text:com.twitter",
+                        "status": "not_found",
+                        "failure_reason": "no_text_record",
+                        "provenance": {
+                            "execution_trace_id": execution_trace_id.to_string(),
+                        },
+                    },
+                    {
+                        "record_key": "contenthash",
+                        "status": "success",
+                        "value": {
+                            "value": resolution_contenthash_value(),
+                        },
+                        "provenance": {
+                            "execution_trace_id": execution_trace_id.to_string(),
+                        },
+                    },
+                    {
+                        "record_key": "addr:60",
+                        "status": "success",
+                        "value": {
+                            "coin_type": "60",
+                            "value": "0x00000000000000000000000000000000000000aa",
+                        },
+                        "provenance": {
+                            "execution_trace_id": execution_trace_id.to_string(),
+                        },
+                    }
+                ]
+            });
+
+            assert_eq!(
+                payload.provenance.get("execution_trace_id"),
+                Some(&Value::String(execution_trace_id.to_string()))
+            );
+            assert_eq!(payload.declared_state.as_ref(), Some(&expected_declared_state));
+            assert_eq!(payload.verified_state, Some(expected_verified_state));
+
+            database.cleanup().await?;
+            Ok(())
+        }
+
+        #[tokio::test]
         async fn resolution_execution_explain_contract_reads_persisted_answer_and_reuses_resolution_envelope()
         -> Result<()> {
             let database = HarnessDatabase::new().await?;
@@ -2683,6 +2820,140 @@ mod shipped_api {
                 Some(&Value::String(execution_trace_id.to_string()))
             );
             assert_eq!(explain_payload.declared_state, None);
+            assert_eq!(
+                explain_payload.verified_state,
+                Some(json!({
+                    "execution": resolution_execution_summary(execution_trace_id, resource_id),
+                    "verified_queries": expected_verified_queries,
+                }))
+            );
+
+            database.cleanup().await?;
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn resolution_execution_explain_contract_reads_persisted_contenthash_answer_and_reuses_resolution_envelope()
+        -> Result<()> {
+            let database = HarnessDatabase::new().await?;
+            let logical_name_id = "ens:alice.eth";
+            let resource_id = Uuid::from_u128(0x2200);
+            let token_lineage_id = Uuid::from_u128(0x1100);
+            let surface_binding_id = Uuid::from_u128(0x3300);
+            let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000024);
+
+            database
+                .seed_exact_name_rebuild_inputs(
+                    logical_name_id,
+                    resource_id,
+                    token_lineage_id,
+                    surface_binding_id,
+                )
+                .await?;
+            database.rebuild_name_current(logical_name_id).await?;
+            database
+                .insert_record_inventory_current_row(resolution_record_inventory_current_row(
+                    logical_name_id,
+                    resource_id,
+                ))
+                .await?;
+
+            let name_row = bigname_storage::load_name_current(&database.pool, logical_name_id)
+                .await?
+                .context("resolution execution explain requires an exact-name current row")?;
+            let record_inventory_row =
+                resolution_record_inventory_current_row(logical_name_id, resource_id);
+            let explain_records = parse_resolution_record_keys(
+                Some("text:com.twitter,contenthash,addr:60"),
+                ResolutionMode::Verified,
+            )
+            .map_err(|error| anyhow::anyhow!(error.message))?;
+            let cache_key = build_resolution_execution_cache_key(
+                &name_row,
+                &explain_records,
+                Some(&record_inventory_row),
+            )?;
+            let request_key = cache_key.request_key.clone();
+            let persisted_verified_queries = resolution_execution_verified_queries(
+                execution_trace_id,
+                &["text:com.twitter", "contenthash", "addr:60"],
+            );
+
+            upsert_execution_trace(
+                &database.pool,
+                &resolution_execution_trace(
+                    execution_trace_id,
+                    &request_key,
+                    &["text:com.twitter", "contenthash", "addr:60"],
+                    persisted_verified_queries.clone(),
+                ),
+            )
+            .await?;
+            upsert_execution_outcome(
+                &database.pool,
+                &resolution_execution_outcome(
+                    execution_trace_id,
+                    cache_key,
+                    persisted_verified_queries,
+                ),
+            )
+            .await?;
+
+            let explain_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(
+                            "/v1/explain/resolutions/ens/alice.eth/execution?records=text:com.twitter,contenthash,addr:60",
+                        )
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("contenthash execution explain request failed")?;
+            let resolution_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(
+                            "/v1/resolutions/ens/alice.eth?mode=verified&records=text:com.twitter,contenthash,addr:60",
+                        )
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("contenthash verified resolution request failed")?;
+
+            assert_eq!(explain_response.status(), StatusCode::OK);
+            assert_eq!(resolution_response.status(), StatusCode::OK);
+
+            let explain_payload: ResolutionResponse = read_json(explain_response).await?;
+            let resolution_payload: ResolutionResponse = read_json(resolution_response).await?;
+            let expected_verified_queries = resolution_execution_verified_queries(
+                execution_trace_id,
+                &["text:com.twitter", "contenthash", "addr:60"],
+            );
+
+            assert_eq!(explain_payload.data, resolution_payload.data);
+            assert_eq!(explain_payload.coverage, resolution_payload.coverage);
+            assert_eq!(
+                explain_payload.provenance,
+                resolution_payload.provenance
+            );
+            assert_eq!(
+                explain_payload.chain_positions,
+                resolution_payload.chain_positions
+            );
+            assert_eq!(explain_payload.consistency, resolution_payload.consistency);
+            assert_eq!(
+                explain_payload.last_updated,
+                resolution_payload.last_updated
+            );
+            assert_eq!(explain_payload.declared_state, None);
+            assert_eq!(
+                resolution_payload.verified_state,
+                Some(json!({
+                    "verified_queries": expected_verified_queries.clone(),
+                }))
+            );
             assert_eq!(
                 explain_payload.verified_state,
                 Some(json!({
@@ -6029,6 +6300,10 @@ mod shipped_api {
             })
         }
 
+        fn resolution_contenthash_value() -> &'static str {
+            "ipfs://bafybeigdyrzt5sfp7udm7hu76fx4f2jv4jvgxk5csodx4d6vshv3zysn7u"
+        }
+
         fn resolution_record_cache_entries(record_keys: &[&str]) -> Vec<Value> {
             record_keys
                 .iter()
@@ -6054,6 +6329,12 @@ mod shipped_api {
                         "record_key": "text:com.twitter",
                         "record_family": "text",
                         "selector_key": "com.twitter",
+                        "status": "not_found",
+                    }),
+                    "contenthash" => json!({
+                        "record_key": "contenthash",
+                        "record_family": "contenthash",
+                        "selector_key": null,
                         "status": "not_found",
                     }),
                     unexpected => panic!("unexpected direct ENS record selector {unexpected}"),
@@ -6233,6 +6514,16 @@ mod shipped_api {
                             "record_key": "text:com.twitter",
                             "status": "not_found",
                             "failure_reason": "no_text_record",
+                            "provenance": {
+                                "execution_trace_id": execution_trace_id.to_string(),
+                            }
+                        }),
+                        "contenthash" => json!({
+                            "record_key": "contenthash",
+                            "status": "success",
+                            "value": {
+                                "value": resolution_contenthash_value(),
+                            },
                             "provenance": {
                                 "execution_trace_id": execution_trace_id.to_string(),
                             }
