@@ -1,3 +1,8 @@
+const BASENAMES_NAMESPACE: &str = "basenames";
+const BASENAMES_COMPAT_SOURCE_CHAIN_ID: &str = "base-mainnet";
+const BASENAMES_COMPAT_TARGET_CHAIN_ID: &str = "ethereum-mainnet";
+const BASENAMES_COMPAT_CONTRACT_ADDRESS: &str = "0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31";
+
 fn build_resolution_declared_state(
     row: &NameCurrentRow,
     record_inventory_row: Option<&RecordInventoryCurrentRow>,
@@ -421,8 +426,10 @@ fn build_legacy_resolution_topology(
     row: &NameCurrentRow,
     record_inventory_row: Option<&RecordInventoryCurrentRow>,
 ) -> JsonValue {
-    if row.namespace != "ens"
-        || row.binding_kind != Some(SurfaceBindingKind::DeclaredRegistryPath)
+    if !matches!(
+        row.namespace.as_str(),
+        "ens" | BASENAMES_NAMESPACE
+    ) || row.binding_kind != Some(SurfaceBindingKind::DeclaredRegistryPath)
         || row.resource_id.is_none()
     {
         return unsupported_section("declared resolution topology is not yet projected");
@@ -473,12 +480,6 @@ fn build_legacy_resolution_topology(
     );
     insert_value_field(&mut version_boundaries, "record_version_boundary", boundary);
 
-    let mut transport = empty_object();
-    insert_value_field(&mut transport, "source_chain_id", JsonValue::Null);
-    insert_value_field(&mut transport, "target_chain_id", JsonValue::Null);
-    insert_value_field(&mut transport, "contract_address", JsonValue::Null);
-    insert_value_field(&mut transport, "latest_event_kind", JsonValue::Null);
-
     let mut topology = empty_object();
     insert_value_field(
         &mut topology,
@@ -498,7 +499,7 @@ fn build_legacy_resolution_topology(
     insert_value_field(&mut topology, "wildcard", wildcard);
     insert_value_field(&mut topology, "alias", alias);
     insert_value_field(&mut topology, "version_boundaries", version_boundaries);
-    insert_value_field(&mut topology, "transport", transport);
+    insert_value_field(&mut topology, "transport", build_resolution_transport(row));
     topology
 }
 
@@ -605,7 +606,7 @@ fn resolution_record_version_boundary(
 ) -> Option<JsonValue> {
     record_inventory_row
         .map(|record_inventory_row| record_inventory_row.record_version_boundary.clone())
-        .or_else(|| build_supported_resolution_verified_boundary(row))
+        .or_else(|| build_supported_resolution_declared_boundary(row))
 }
 
 fn build_resolution_execution_cache_key(
@@ -783,10 +784,7 @@ async fn load_supported_record_inventory_current(
 }
 
 fn record_inventory_lookup_key(row: &NameCurrentRow) -> Option<(Uuid, JsonValue)> {
-    Some((
-        row.resource_id?,
-        build_supported_resolution_verified_boundary(row)?,
-    ))
+    Some((row.resource_id?, build_supported_resolution_declared_boundary(row)?))
 }
 
 fn supports_resolution_verified_lookup_record(record: &ResolutionRecordKey) -> bool {
@@ -828,6 +826,31 @@ fn build_supported_resolution_verified_boundary(row: &NameCurrentRow) -> Option<
     let chain_position = build_resolution_boundary_chain_position(row)?;
     if !chain_position.chain_id.starts_with("ethereum") {
         return None;
+    }
+
+    Some(build_resolution_version_boundary(row, &chain_position))
+}
+
+fn build_supported_resolution_declared_boundary(row: &NameCurrentRow) -> Option<JsonValue> {
+    let binding_supported = match row.namespace.as_str() {
+        "ens" => matches!(
+            row.binding_kind,
+            Some(SurfaceBindingKind::DeclaredRegistryPath | SurfaceBindingKind::ResolverAliasPath)
+        ),
+        BASENAMES_NAMESPACE => {
+            row.binding_kind == Some(SurfaceBindingKind::DeclaredRegistryPath)
+        }
+        _ => false,
+    };
+    if !binding_supported || row.resource_id.is_none() {
+        return None;
+    }
+
+    let chain_position = build_resolution_boundary_chain_position(row)?;
+    match row.namespace.as_str() {
+        "ens" if chain_position.chain_id.starts_with("ethereum") => {}
+        BASENAMES_NAMESPACE if chain_position.chain_id == BASENAMES_COMPAT_SOURCE_CHAIN_ID => {}
+        _ => return None,
     }
 
     Some(build_resolution_version_boundary(row, &chain_position))
@@ -977,6 +1000,24 @@ fn resolution_topology_transport_is_null(topology: &JsonValue) -> bool {
     }
 
     true
+}
+
+fn build_resolution_transport(row: &NameCurrentRow) -> JsonValue {
+    if row.namespace == BASENAMES_NAMESPACE {
+        return json!({
+            "source_chain_id": BASENAMES_COMPAT_SOURCE_CHAIN_ID,
+            "target_chain_id": BASENAMES_COMPAT_TARGET_CHAIN_ID,
+            "contract_address": BASENAMES_COMPAT_CONTRACT_ADDRESS,
+            "latest_event_kind": JsonValue::Null,
+        });
+    }
+
+    let mut transport = empty_object();
+    insert_value_field(&mut transport, "source_chain_id", JsonValue::Null);
+    insert_value_field(&mut transport, "target_chain_id", JsonValue::Null);
+    insert_value_field(&mut transport, "contract_address", JsonValue::Null);
+    insert_value_field(&mut transport, "latest_event_kind", JsonValue::Null);
+    transport
 }
 
 fn record_version_boundary_has_pointer(record_version_boundary: &JsonValue) -> bool {

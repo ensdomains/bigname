@@ -18,7 +18,8 @@ use uuid::Uuid;
 
 const EVENT_KIND_RECORD_CHANGED: &str = "RecordChanged";
 const EVENT_KIND_RECORD_VERSION_CHANGED: &str = "RecordVersionChanged";
-const SOURCE_FAMILY_ENS_V1_UNWRAPPED_AUTHORITY: &str = "ens_v1_unwrapped_authority";
+const DERIVATION_KIND_DECLARED_AUTHORITY: &str = "ens_v1_unwrapped_authority";
+const SOURCE_FAMILY_BASENAMES_BASE_RESOLVER: &str = "basenames_base_resolver";
 const RECORD_INVENTORY_CURRENT_DERIVATION_KIND: &str = "record_inventory_current_rebuild";
 const RECORD_INVENTORY_ENUMERATION_BASIS: &str = "declared_record_inventory";
 const GAP_REASON_NOT_OBSERVED: &str = "not_observed_on_current_resolver";
@@ -157,14 +158,14 @@ async fn load_target_resource_ids(pool: &PgPool) -> Result<Vec<Uuid>> {
         r#"
         SELECT DISTINCT resource_id
         FROM normalized_events
-        WHERE source_family = $1
+        WHERE derivation_kind = $1
           AND event_kind IN ($2, $3)
           AND resource_id IS NOT NULL
           AND canonicality_state {CANONICAL_STATE_FILTER}
         ORDER BY resource_id
         "#
     ))
-    .bind(SOURCE_FAMILY_ENS_V1_UNWRAPPED_AUTHORITY)
+    .bind(DERIVATION_KIND_DECLARED_AUTHORITY)
     .bind(EVENT_KIND_RECORD_CHANGED)
     .bind(EVENT_KIND_RECORD_VERSION_CHANGED)
     .fetch_all(pool)
@@ -275,7 +276,7 @@ async fn load_relevant_events(pool: &PgPool, resource_id: Uuid) -> Result<Vec<Re
         LEFT JOIN raw_blocks rb
           ON rb.chain_id = ne.chain_id
          AND rb.block_hash = ne.block_hash
-        WHERE ne.source_family = $1
+        WHERE ne.derivation_kind = $1
           AND ne.event_kind IN ($2, $3)
           AND ne.resource_id = $4
           AND ne.logical_name_id IS NOT NULL
@@ -289,7 +290,7 @@ async fn load_relevant_events(pool: &PgPool, resource_id: Uuid) -> Result<Vec<Re
             ne.normalized_event_id ASC
         "#
     ))
-    .bind(SOURCE_FAMILY_ENS_V1_UNWRAPPED_AUTHORITY)
+    .bind(DERIVATION_KIND_DECLARED_AUTHORITY)
     .bind(EVENT_KIND_RECORD_CHANGED)
     .bind(EVENT_KIND_RECORD_VERSION_CHANGED)
     .bind(resource_id)
@@ -851,6 +852,7 @@ mod tests {
                 1000,
                 "0xrec1000",
                 1_776_200_000,
+                "ethereum-mainnet",
             ),
         )
         .await?
@@ -876,6 +878,7 @@ mod tests {
                 1002,
                 "0xrec1002",
                 1_776_200_002,
+                "ethereum-mainnet",
             ),
         )
         .await?
@@ -998,6 +1001,7 @@ mod tests {
                 1010,
                 "0xrec1010",
                 1_776_200_010,
+                "ethereum-mainnet",
             ),
         )
         .await?
@@ -1031,6 +1035,7 @@ mod tests {
                 1012,
                 "0xrec1012",
                 1_776_200_012,
+                "ethereum-mainnet",
             ),
         )
         .await?
@@ -1103,6 +1108,7 @@ mod tests {
                 1020,
                 "0xrec1020",
                 1_776_200_020,
+                "ethereum-mainnet",
             ),
         )
         .await?
@@ -1219,6 +1225,7 @@ mod tests {
                 1031,
                 "0xrec1031",
                 1_776_200_031,
+                "ethereum-mainnet",
             ),
         )
         .await?
@@ -1251,6 +1258,7 @@ mod tests {
                 1031,
                 "0xrec1031",
                 1_776_200_031,
+                "ethereum-mainnet",
             )
         );
         assert_eq!(
@@ -1315,6 +1323,7 @@ mod tests {
                 1040,
                 "0xrec1040",
                 1_776_200_040,
+                "ethereum-mainnet",
             ),
         )
         .await?
@@ -1343,6 +1352,129 @@ mod tests {
         database.cleanup().await
     }
 
+    #[tokio::test]
+    async fn rebuild_projects_basenames_base_authority_record_inventory() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let resource_id = Uuid::from_u128(0x9800);
+
+        seed_basenames_resources(database.pool(), &[resource_id]).await?;
+        seed_raw_blocks(
+            database.pool(),
+            &[
+                raw_block("base-mainnet", "0xbase-rec1050", 1050, 1_776_200_050),
+                raw_block("base-mainnet", "0xbase-rec1051", 1051, 1_776_200_051),
+                raw_block("base-mainnet", "0xbase-rec1052", 1052, 1_776_200_052),
+            ],
+        )
+        .await?;
+        seed_events(
+            database.pool(),
+            &[
+                basenames_record_version_changed_event(
+                    "base-boundary",
+                    "basenames:alice.base.eth",
+                    resource_id,
+                    21,
+                    1050,
+                    0,
+                ),
+                basenames_record_changed_event(
+                    "base-native-addr",
+                    "basenames:alice.base.eth",
+                    resource_id,
+                    "addr:60",
+                    "addr",
+                    Some("60"),
+                    1051,
+                    0,
+                ),
+                basenames_record_changed_event(
+                    "base-twitter",
+                    "basenames:alice.base.eth",
+                    resource_id,
+                    "text",
+                    "text",
+                    None,
+                    1052,
+                    0,
+                ),
+            ],
+        )
+        .await?;
+
+        let summary =
+            rebuild_record_inventory_current(database.pool(), Some(&resource_id.to_string()))
+                .await?;
+        assert_eq!(summary.requested_resource_count, 1);
+        assert_eq!(summary.upserted_row_count, 1);
+        assert_eq!(summary.deleted_row_count, 0);
+
+        let row = load_record_inventory_current(
+            database.pool(),
+            resource_id,
+            &record_version_boundary(
+                "basenames:alice.base.eth",
+                resource_id,
+                Some(1),
+                Some(EVENT_KIND_RECORD_VERSION_CHANGED),
+                1050,
+                "0xbase-rec1050",
+                1_776_200_050,
+                "base-mainnet",
+            ),
+        )
+        .await?
+        .context("basenames record_inventory_current row must exist")?;
+
+        assert_eq!(
+            row.selectors,
+            json!([
+                {
+                    "record_key": "addr:60",
+                    "record_family": "addr",
+                    "selector_key": "60",
+                    "cacheable": true,
+                },
+                {
+                    "record_key": "text",
+                    "record_family": "text",
+                    "selector_key": null,
+                    "cacheable": true,
+                }
+            ])
+        );
+        assert_eq!(
+            row.record_version_boundary,
+            record_version_boundary(
+                "basenames:alice.base.eth",
+                resource_id,
+                Some(1),
+                Some(EVENT_KIND_RECORD_VERSION_CHANGED),
+                1050,
+                "0xbase-rec1050",
+                1_776_200_050,
+                "base-mainnet",
+            )
+        );
+        assert_eq!(
+            row.coverage["source_classes_considered"],
+            json!([SOURCE_FAMILY_BASENAMES_BASE_RESOLVER])
+        );
+        assert_eq!(
+            row.chain_positions,
+            json!({
+                "base-mainnet": {
+                    "chain_id": "base-mainnet",
+                    "block_number": 1052,
+                    "block_hash": "0xbase-rec1052",
+                    "timestamp": "2026-04-14T20:54:12Z",
+                }
+            })
+        );
+
+        database.cleanup().await
+    }
+
     async fn seed_resources(database: &PgPool, resource_ids: &[Uuid]) -> Result<()> {
         let resources = resource_ids
             .iter()
@@ -1356,6 +1488,27 @@ mod tests {
                 provenance: json!({
                     "source": "worker_record_inventory_current_test",
                     "anchor": "resource",
+                }),
+                canonicality_state: CanonicalityState::Finalized,
+            })
+            .collect::<Vec<_>>();
+        upsert_resources(database, &resources).await?;
+        Ok(())
+    }
+
+    async fn seed_basenames_resources(database: &PgPool, resource_ids: &[Uuid]) -> Result<()> {
+        let resources = resource_ids
+            .iter()
+            .enumerate()
+            .map(|(index, resource_id)| Resource {
+                resource_id: *resource_id,
+                token_lineage_id: None,
+                chain_id: "base-mainnet".to_owned(),
+                block_hash: format!("0xbase-resource{index:02x}"),
+                block_number: 40_000_000 + index as i64,
+                provenance: json!({
+                    "source": "worker_record_inventory_current_test",
+                    "anchor": "basenames_resource",
                 }),
                 canonicality_state: CanonicalityState::Finalized,
             })
@@ -1406,7 +1559,7 @@ mod tests {
             logical_name_id: Some(logical_name_id.to_owned()),
             resource_id: Some(resource_id),
             event_kind: EVENT_KIND_RECORD_CHANGED.to_owned(),
-            source_family: SOURCE_FAMILY_ENS_V1_UNWRAPPED_AUTHORITY.to_owned(),
+            source_family: DERIVATION_KIND_DECLARED_AUTHORITY.to_owned(),
             manifest_version: 1,
             source_manifest_id: None,
             chain_id: Some("ethereum-mainnet".to_owned()),
@@ -1420,7 +1573,48 @@ mod tests {
                 "block_hash": format!("0xrec{block_number}"),
                 "log_index": log_index,
             }),
-            derivation_kind: SOURCE_FAMILY_ENS_V1_UNWRAPPED_AUTHORITY.to_owned(),
+            derivation_kind: DERIVATION_KIND_DECLARED_AUTHORITY.to_owned(),
+            canonicality_state: CanonicalityState::Finalized,
+            before_state: json!({}),
+            after_state: json!({
+                "record_key": record_key,
+                "record_family": record_family,
+                "selector_key": selector_key,
+            }),
+        }
+    }
+
+    fn basenames_record_changed_event(
+        event_identity: &str,
+        logical_name_id: &str,
+        resource_id: Uuid,
+        record_key: &str,
+        record_family: &str,
+        selector_key: Option<&str>,
+        block_number: i64,
+        log_index: i64,
+    ) -> NormalizedEvent {
+        NormalizedEvent {
+            event_identity: event_identity.to_owned(),
+            namespace: "basenames".to_owned(),
+            logical_name_id: Some(logical_name_id.to_owned()),
+            resource_id: Some(resource_id),
+            event_kind: EVENT_KIND_RECORD_CHANGED.to_owned(),
+            source_family: SOURCE_FAMILY_BASENAMES_BASE_RESOLVER.to_owned(),
+            manifest_version: 1,
+            source_manifest_id: None,
+            chain_id: Some("base-mainnet".to_owned()),
+            block_number: Some(block_number),
+            block_hash: Some(format!("0xbase-rec{block_number}")),
+            transaction_hash: Some(format!("0xbase-tx{block_number}")),
+            log_index: Some(log_index),
+            raw_fact_ref: json!({
+                "kind": "raw_log",
+                "chain_id": "base-mainnet",
+                "block_hash": format!("0xbase-rec{block_number}"),
+                "log_index": log_index,
+            }),
+            derivation_kind: DERIVATION_KIND_DECLARED_AUTHORITY.to_owned(),
             canonicality_state: CanonicalityState::Finalized,
             before_state: json!({}),
             after_state: json!({
@@ -1445,7 +1639,7 @@ mod tests {
             logical_name_id: Some(logical_name_id.to_owned()),
             resource_id: Some(resource_id),
             event_kind: EVENT_KIND_RECORD_VERSION_CHANGED.to_owned(),
-            source_family: SOURCE_FAMILY_ENS_V1_UNWRAPPED_AUTHORITY.to_owned(),
+            source_family: DERIVATION_KIND_DECLARED_AUTHORITY.to_owned(),
             manifest_version: 1,
             source_manifest_id: None,
             chain_id: Some("ethereum-mainnet".to_owned()),
@@ -1459,7 +1653,46 @@ mod tests {
                 "block_hash": format!("0xrec{block_number}"),
                 "log_index": log_index,
             }),
-            derivation_kind: SOURCE_FAMILY_ENS_V1_UNWRAPPED_AUTHORITY.to_owned(),
+            derivation_kind: DERIVATION_KIND_DECLARED_AUTHORITY.to_owned(),
+            canonicality_state: CanonicalityState::Finalized,
+            before_state: json!({
+                "record_version": record_version - 1,
+            }),
+            after_state: json!({
+                "record_version": record_version,
+            }),
+        }
+    }
+
+    fn basenames_record_version_changed_event(
+        event_identity: &str,
+        logical_name_id: &str,
+        resource_id: Uuid,
+        record_version: i64,
+        block_number: i64,
+        log_index: i64,
+    ) -> NormalizedEvent {
+        NormalizedEvent {
+            event_identity: event_identity.to_owned(),
+            namespace: "basenames".to_owned(),
+            logical_name_id: Some(logical_name_id.to_owned()),
+            resource_id: Some(resource_id),
+            event_kind: EVENT_KIND_RECORD_VERSION_CHANGED.to_owned(),
+            source_family: SOURCE_FAMILY_BASENAMES_BASE_RESOLVER.to_owned(),
+            manifest_version: 1,
+            source_manifest_id: None,
+            chain_id: Some("base-mainnet".to_owned()),
+            block_number: Some(block_number),
+            block_hash: Some(format!("0xbase-rec{block_number}")),
+            transaction_hash: Some(format!("0xbase-tx{block_number}")),
+            log_index: Some(log_index),
+            raw_fact_ref: json!({
+                "kind": "raw_log",
+                "chain_id": "base-mainnet",
+                "block_hash": format!("0xbase-rec{block_number}"),
+                "log_index": log_index,
+            }),
+            derivation_kind: DERIVATION_KIND_DECLARED_AUTHORITY.to_owned(),
             canonicality_state: CanonicalityState::Finalized,
             before_state: json!({
                 "record_version": record_version - 1,
@@ -1478,6 +1711,7 @@ mod tests {
         block_number: i64,
         block_hash: &str,
         timestamp: i64,
+        chain_id: &str,
     ) -> Value {
         json!({
             "logical_name_id": logical_name_id,
@@ -1485,7 +1719,7 @@ mod tests {
             "normalized_event_id": normalized_event_id,
             "event_kind": event_kind,
             "chain_position": {
-                "chain_id": "ethereum-mainnet",
+                "chain_id": chain_id,
                 "block_number": block_number,
                 "block_hash": block_hash,
                 "timestamp": format_timestamp(

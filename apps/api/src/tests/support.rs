@@ -693,6 +693,60 @@ impl TestDatabase {
         Ok(())
     }
 
+    async fn rebuild_record_inventory_current(&self, resource_id: Uuid) -> Result<()> {
+        let database_url = std::env::var("BIGNAME_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| default_database_url().to_owned());
+        let base_options = PgConnectOptions::from_str(&database_url)
+            .context("failed to parse database URL for API worker record_inventory rebuild")?;
+        let rebuild_database_url = base_options
+            .database(&self.database_name)
+            .to_url_lossy()
+            .to_string();
+        let resource_id = resource_id.to_string();
+        let worker_manifest_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../apps/worker/Cargo.toml");
+
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let _guard = WORKER_CARGO_LOCK
+                .lock()
+                .expect("worker cargo lock must not be poisoned");
+            let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
+            let output = std::process::Command::new(cargo)
+                .arg("run")
+                .arg("--quiet")
+                .arg("--manifest-path")
+                .arg(worker_manifest_path)
+                .arg("--")
+                .arg("record-inventory-current")
+                .arg("rebuild")
+                .arg("--database-url")
+                .arg(&rebuild_database_url)
+                .arg("--resource-id")
+                .arg(&resource_id)
+                .output()
+                .with_context(|| {
+                    format!(
+                        "failed to invoke worker record_inventory_current rebuild for {resource_id}"
+                    )
+                })?;
+
+            if !output.status.success() {
+                return Err(anyhow::anyhow!(
+                    "worker record_inventory_current rebuild failed for {resource_id}\nstdout:\n{}\nstderr:\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr),
+                ));
+            }
+
+            Ok(())
+        })
+        .await
+        .context("worker record_inventory_current rebuild task panicked")??;
+
+        Ok(())
+    }
+
     async fn seed_basenames_exact_name_rebuild_inputs(
         &self,
         logical_name_id: &str,
@@ -858,6 +912,104 @@ impl TestDatabase {
         )
         .await
         .context("failed to upsert basenames normalized events for API test")?;
+
+        Ok(())
+    }
+
+    async fn seed_basenames_resolution_rebuild_inputs(
+        &self,
+        logical_name_id: &str,
+        resource_id: Uuid,
+        token_lineage_id: Uuid,
+        surface_binding_id: Uuid,
+    ) -> Result<()> {
+        self.seed_basenames_exact_name_rebuild_inputs(
+            logical_name_id,
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+
+        bigname_storage::upsert_normalized_events(
+            &self.pool,
+            &[
+                NormalizedEvent {
+                    event_identity: "api-test:basenames:record-version".to_owned(),
+                    namespace: "basenames".to_owned(),
+                    logical_name_id: Some(logical_name_id.to_owned()),
+                    resource_id: Some(resource_id),
+                    event_kind: "RecordVersionChanged".to_owned(),
+                    source_family: "basenames_base_resolver".to_owned(),
+                    manifest_version: 4,
+                    source_manifest_id: None,
+                    chain_id: Some("base-mainnet".to_owned()),
+                    block_number: Some(103),
+                    block_hash: Some("0xbase-resolver".to_owned()),
+                    transaction_hash: Some("0xtxbaseresolver".to_owned()),
+                    log_index: Some(1),
+                    raw_fact_ref: json!({"kind": "raw_log", "event_identity": "api-test:basenames:record-version"}),
+                    derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+                    canonicality_state: CanonicalityState::Canonical,
+                    before_state: json!({
+                        "record_version": 6,
+                    }),
+                    after_state: json!({
+                        "record_version": 7,
+                    }),
+                },
+                NormalizedEvent {
+                    event_identity: "api-test:basenames:addr".to_owned(),
+                    namespace: "basenames".to_owned(),
+                    logical_name_id: Some(logical_name_id.to_owned()),
+                    resource_id: Some(resource_id),
+                    event_kind: "RecordChanged".to_owned(),
+                    source_family: "basenames_base_resolver".to_owned(),
+                    manifest_version: 4,
+                    source_manifest_id: None,
+                    chain_id: Some("base-mainnet".to_owned()),
+                    block_number: Some(103),
+                    block_hash: Some("0xbase-resolver".to_owned()),
+                    transaction_hash: Some("0xtxbaseresolver".to_owned()),
+                    log_index: Some(2),
+                    raw_fact_ref: json!({"kind": "raw_log", "event_identity": "api-test:basenames:addr"}),
+                    derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+                    canonicality_state: CanonicalityState::Canonical,
+                    before_state: json!({}),
+                    after_state: json!({
+                        "record_key": "addr:60",
+                        "record_family": "addr",
+                        "selector_key": "60",
+                    }),
+                },
+                NormalizedEvent {
+                    event_identity: "api-test:basenames:text".to_owned(),
+                    namespace: "basenames".to_owned(),
+                    logical_name_id: Some(logical_name_id.to_owned()),
+                    resource_id: Some(resource_id),
+                    event_kind: "RecordChanged".to_owned(),
+                    source_family: "basenames_base_resolver".to_owned(),
+                    manifest_version: 4,
+                    source_manifest_id: None,
+                    chain_id: Some("base-mainnet".to_owned()),
+                    block_number: Some(103),
+                    block_hash: Some("0xbase-resolver".to_owned()),
+                    transaction_hash: Some("0xtxbaseresolver".to_owned()),
+                    log_index: Some(3),
+                    raw_fact_ref: json!({"kind": "raw_log", "event_identity": "api-test:basenames:text"}),
+                    derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+                    canonicality_state: CanonicalityState::Canonical,
+                    before_state: json!({}),
+                    after_state: json!({
+                        "record_key": "text",
+                        "record_family": "text",
+                        "selector_key": null,
+                    }),
+                },
+            ],
+        )
+        .await
+        .context("failed to upsert basenames resolution events for API test")?;
 
         Ok(())
     }

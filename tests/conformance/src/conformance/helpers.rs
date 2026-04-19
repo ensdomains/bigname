@@ -82,6 +82,316 @@
             }
         }
 
+        async fn seed_basenames_exact_name_rebuild_inputs(
+            database: &HarnessDatabase,
+            logical_name_id: &str,
+            resource_id: Uuid,
+            token_lineage_id: Uuid,
+            surface_binding_id: Uuid,
+        ) -> Result<()> {
+            bigname_storage::upsert_raw_blocks(
+                &database.pool,
+                &[
+                    raw_block("base-mainnet", "0xbase-surface", None, 98, 1_717_171_698),
+                    raw_block("base-mainnet", "0xbase-resource", None, 99, 1_717_171_699),
+                    raw_block("base-mainnet", "0xbase-binding", None, 100, 1_717_171_700),
+                    raw_block("base-mainnet", "0xbase-grant", None, 101, 1_717_171_701),
+                    raw_block("base-mainnet", "0xbase-authority", None, 102, 1_717_171_702),
+                    raw_block("base-mainnet", "0xbase-resolver", None, 103, 1_717_171_703),
+                ],
+            )
+            .await?;
+            bigname_storage::upsert_name_surfaces(
+                &database.pool,
+                &[NameSurface {
+                    logical_name_id: logical_name_id.to_owned(),
+                    namespace: "basenames".to_owned(),
+                    input_name: "alice.base.eth".to_owned(),
+                    canonical_display_name: "Alice.base.eth".to_owned(),
+                    normalized_name: "alice.base.eth".to_owned(),
+                    dns_encoded_name: b"alice.base.eth".to_vec(),
+                    namehash: "namehash:alice.base.eth".to_owned(),
+                    labelhashes: vec!["labelhash:alice.base.eth".to_owned()],
+                    normalizer_version: "ensip15@2026-04-16".to_owned(),
+                    normalization_warnings: json!([]),
+                    normalization_errors: json!([]),
+                    chain_id: "base-mainnet".to_owned(),
+                    block_hash: "0xbase-surface".to_owned(),
+                    block_number: 98,
+                    provenance: json!({"seed": "basenames_exact_name_surface"}),
+                    canonicality_state: CanonicalityState::Canonical,
+                }],
+            )
+            .await?;
+            bigname_storage::upsert_token_lineages(
+                &database.pool,
+                &[TokenLineage {
+                    token_lineage_id,
+                    chain_id: "base-mainnet".to_owned(),
+                    block_hash: "0xbase-resource".to_owned(),
+                    block_number: 99,
+                    provenance: json!({"seed": "basenames_exact_name_token_lineage"}),
+                    canonicality_state: CanonicalityState::Canonical,
+                }],
+            )
+            .await?;
+            bigname_storage::upsert_resources(
+                &database.pool,
+                &[Resource {
+                    resource_id,
+                    token_lineage_id: Some(token_lineage_id),
+                    chain_id: "base-mainnet".to_owned(),
+                    block_hash: "0xbase-resource".to_owned(),
+                    block_number: 99,
+                    provenance: json!({"seed": "basenames_exact_name_resource"}),
+                    canonicality_state: CanonicalityState::Canonical,
+                }],
+            )
+            .await?;
+            bigname_storage::upsert_surface_bindings(
+                &database.pool,
+                &[SurfaceBinding {
+                    surface_binding_id,
+                    logical_name_id: logical_name_id.to_owned(),
+                    resource_id,
+                    binding_kind: SurfaceBindingKind::DeclaredRegistryPath,
+                    active_from: timestamp(1_717_171_700),
+                    active_to: None,
+                    chain_id: "base-mainnet".to_owned(),
+                    block_hash: "0xbase-binding".to_owned(),
+                    block_number: 100,
+                    provenance: json!({"seed": "basenames_exact_name_binding"}),
+                    canonicality_state: CanonicalityState::Canonical,
+                }],
+            )
+            .await?;
+            bigname_storage::upsert_normalized_events(
+                &database.pool,
+                &[
+                    NormalizedEvent {
+                        event_identity: "conformance:basenames:grant".to_owned(),
+                        namespace: "basenames".to_owned(),
+                        logical_name_id: Some(logical_name_id.to_owned()),
+                        resource_id: Some(resource_id),
+                        event_kind: "RegistrationGranted".to_owned(),
+                        source_family: "basenames_base_registrar".to_owned(),
+                        manifest_version: 3,
+                        source_manifest_id: None,
+                        chain_id: Some("base-mainnet".to_owned()),
+                        block_number: Some(101),
+                        block_hash: Some("0xbase-grant".to_owned()),
+                        transaction_hash: Some("0xtxbasegrant".to_owned()),
+                        log_index: Some(0),
+                        raw_fact_ref: json!({"kind": "raw_log", "event_identity": "conformance:basenames:grant"}),
+                        derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+                        canonicality_state: CanonicalityState::Canonical,
+                        before_state: json!({}),
+                        after_state: json!({
+                            "authority_kind": "registrar",
+                            "authority_key": "registrar:base-mainnet:alice",
+                            "registrant": "0x00000000000000000000000000000000000000aa",
+                            "expiry": 1_900_000_000_i64,
+                        }),
+                    },
+                    NormalizedEvent {
+                        event_identity: "conformance:basenames:authority".to_owned(),
+                        namespace: "basenames".to_owned(),
+                        logical_name_id: Some(logical_name_id.to_owned()),
+                        resource_id: Some(resource_id),
+                        event_kind: "AuthorityTransferred".to_owned(),
+                        source_family: "basenames_base_registry".to_owned(),
+                        manifest_version: 3,
+                        source_manifest_id: None,
+                        chain_id: Some("base-mainnet".to_owned()),
+                        block_number: Some(102),
+                        block_hash: Some("0xbase-authority".to_owned()),
+                        transaction_hash: Some("0xtxbaseauthority".to_owned()),
+                        log_index: Some(0),
+                        raw_fact_ref: json!({"kind": "raw_log", "event_identity": "conformance:basenames:authority"}),
+                        derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+                        canonicality_state: CanonicalityState::Canonical,
+                        before_state: json!({}),
+                        after_state: json!({
+                            "owner": "0x00000000000000000000000000000000000000bb",
+                        }),
+                    },
+                    NormalizedEvent {
+                        event_identity: "conformance:basenames:resolver".to_owned(),
+                        namespace: "basenames".to_owned(),
+                        logical_name_id: Some(logical_name_id.to_owned()),
+                        resource_id: Some(resource_id),
+                        event_kind: "ResolverChanged".to_owned(),
+                        source_family: "basenames_base_resolver".to_owned(),
+                        manifest_version: 4,
+                        source_manifest_id: None,
+                        chain_id: Some("base-mainnet".to_owned()),
+                        block_number: Some(103),
+                        block_hash: Some("0xbase-resolver".to_owned()),
+                        transaction_hash: Some("0xtxbaseresolver".to_owned()),
+                        log_index: Some(0),
+                        raw_fact_ref: json!({"kind": "raw_log", "event_identity": "conformance:basenames:resolver"}),
+                        derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+                        canonicality_state: CanonicalityState::Canonical,
+                        before_state: json!({}),
+                        after_state: json!({
+                            "resolver": "0x0000000000000000000000000000000000000abc",
+                            "namehash": "namehash:alice.base.eth",
+                        }),
+                    },
+                ],
+            )
+            .await?;
+
+            Ok(())
+        }
+
+        async fn seed_basenames_resolution_rebuild_inputs(
+            database: &HarnessDatabase,
+            logical_name_id: &str,
+            resource_id: Uuid,
+            token_lineage_id: Uuid,
+            surface_binding_id: Uuid,
+        ) -> Result<()> {
+            seed_basenames_exact_name_rebuild_inputs(
+                database,
+                logical_name_id,
+                resource_id,
+                token_lineage_id,
+                surface_binding_id,
+            )
+            .await?;
+
+            bigname_storage::upsert_normalized_events(
+                &database.pool,
+                &[
+                    NormalizedEvent {
+                        event_identity: "conformance:basenames:record-version".to_owned(),
+                        namespace: "basenames".to_owned(),
+                        logical_name_id: Some(logical_name_id.to_owned()),
+                        resource_id: Some(resource_id),
+                        event_kind: "RecordVersionChanged".to_owned(),
+                        source_family: "basenames_base_resolver".to_owned(),
+                        manifest_version: 4,
+                        source_manifest_id: None,
+                        chain_id: Some("base-mainnet".to_owned()),
+                        block_number: Some(103),
+                        block_hash: Some("0xbase-resolver".to_owned()),
+                        transaction_hash: Some("0xtxbaseresolver".to_owned()),
+                        log_index: Some(1),
+                        raw_fact_ref: json!({"kind": "raw_log", "event_identity": "conformance:basenames:record-version"}),
+                        derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+                        canonicality_state: CanonicalityState::Canonical,
+                        before_state: json!({
+                            "record_version": 6,
+                        }),
+                        after_state: json!({
+                            "record_version": 7,
+                        }),
+                    },
+                    NormalizedEvent {
+                        event_identity: "conformance:basenames:addr".to_owned(),
+                        namespace: "basenames".to_owned(),
+                        logical_name_id: Some(logical_name_id.to_owned()),
+                        resource_id: Some(resource_id),
+                        event_kind: "RecordChanged".to_owned(),
+                        source_family: "basenames_base_resolver".to_owned(),
+                        manifest_version: 4,
+                        source_manifest_id: None,
+                        chain_id: Some("base-mainnet".to_owned()),
+                        block_number: Some(103),
+                        block_hash: Some("0xbase-resolver".to_owned()),
+                        transaction_hash: Some("0xtxbaseresolver".to_owned()),
+                        log_index: Some(2),
+                        raw_fact_ref: json!({"kind": "raw_log", "event_identity": "conformance:basenames:addr"}),
+                        derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+                        canonicality_state: CanonicalityState::Canonical,
+                        before_state: json!({}),
+                        after_state: json!({
+                            "record_key": "addr:60",
+                            "record_family": "addr",
+                            "selector_key": "60",
+                        }),
+                    },
+                    NormalizedEvent {
+                        event_identity: "conformance:basenames:text".to_owned(),
+                        namespace: "basenames".to_owned(),
+                        logical_name_id: Some(logical_name_id.to_owned()),
+                        resource_id: Some(resource_id),
+                        event_kind: "RecordChanged".to_owned(),
+                        source_family: "basenames_base_resolver".to_owned(),
+                        manifest_version: 4,
+                        source_manifest_id: None,
+                        chain_id: Some("base-mainnet".to_owned()),
+                        block_number: Some(103),
+                        block_hash: Some("0xbase-resolver".to_owned()),
+                        transaction_hash: Some("0xtxbaseresolver".to_owned()),
+                        log_index: Some(3),
+                        raw_fact_ref: json!({"kind": "raw_log", "event_identity": "conformance:basenames:text"}),
+                        derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+                        canonicality_state: CanonicalityState::Canonical,
+                        before_state: json!({}),
+                        after_state: json!({
+                            "record_key": "text",
+                            "record_family": "text",
+                            "selector_key": null,
+                        }),
+                    },
+                ],
+            )
+            .await?;
+
+            Ok(())
+        }
+
+        async fn rebuild_record_inventory_current(
+            database: &HarnessDatabase,
+            resource_id: Uuid,
+        ) -> Result<()> {
+            let database_url = database.database_url.clone();
+            let resource_id = resource_id.to_string();
+            let worker_manifest_path =
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../apps/worker/Cargo.toml");
+
+            tokio::task::spawn_blocking(move || -> Result<()> {
+                let _guard = WORKER_CARGO_LOCK
+                    .lock()
+                    .expect("worker cargo lock must not be poisoned");
+                let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
+                let output = Command::new(cargo)
+                    .arg("run")
+                    .arg("--quiet")
+                    .arg("--manifest-path")
+                    .arg(worker_manifest_path)
+                    .arg("--")
+                    .arg("record-inventory-current")
+                    .arg("rebuild")
+                    .arg("--database-url")
+                    .arg(&database_url)
+                    .arg("--resource-id")
+                    .arg(&resource_id)
+                    .output()
+                    .with_context(|| {
+                        format!(
+                            "failed to invoke worker record_inventory_current rebuild for {resource_id}"
+                        )
+                    })?;
+
+                if !output.status.success() {
+                    return Err(anyhow::anyhow!(
+                        "worker record_inventory_current rebuild failed for {resource_id}\nstdout:\n{}\nstderr:\n{}",
+                        String::from_utf8_lossy(&output.stdout),
+                        String::from_utf8_lossy(&output.stderr),
+                    ));
+                }
+
+                Ok(())
+            })
+            .await
+            .context("worker record_inventory_current rebuild task panicked")??;
+
+            Ok(())
+        }
+
         #[allow(clippy::too_many_arguments)]
         fn history_event(
             event_identity: &str,

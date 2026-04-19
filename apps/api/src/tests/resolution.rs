@@ -482,6 +482,196 @@ async fn get_resolution_execution_explain_reads_persisted_alias_only_avatar_answ
 }
 
 #[tokio::test]
+async fn get_resolution_both_mode_returns_basenames_declared_transport_inventory_and_cache()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let logical_name_id = "basenames:alice.base.eth";
+    let resource_id = Uuid::from_u128(0x6200);
+    let token_lineage_id = Uuid::from_u128(0x6100);
+    let surface_binding_id = Uuid::from_u128(0x6300);
+
+    database
+        .seed_basenames_resolution_rebuild_inputs(
+            logical_name_id,
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    database.rebuild_name_current(logical_name_id).await?;
+    database
+        .rebuild_record_inventory_current(resource_id)
+        .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(
+                    "/v1/resolutions/basenames/alice.base.eth?mode=both&records=addr:60,text",
+                )
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("basenames mixed resolution request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let payload: ResolutionResponse = read_json(response).await?;
+    let declared_state = payload
+        .declared_state
+        .as_ref()
+        .context("basenames mixed resolution must include declared_state")?;
+    let record_inventory_boundary = declared_state
+        .get("record_inventory")
+        .and_then(|value| value.get("record_version_boundary"))
+        .cloned()
+        .context("basenames mixed resolution must include record_inventory boundary")?;
+    let worker_row = bigname_storage::load_record_inventory_current(
+        &database.pool,
+        resource_id,
+        &record_inventory_boundary,
+    )
+    .await?
+    .context("worker-produced basenames record_inventory_current row must exist")?;
+
+    assert_eq!(
+        declared_state.get("topology"),
+        Some(&json!({
+            "registry_path": [
+                {
+                    "logical_name_id": logical_name_id,
+                    "namespace": "basenames",
+                    "normalized_name": "alice.base.eth",
+                    "canonical_display_name": "Alice.base.eth",
+                    "namehash": "namehash:alice.base.eth",
+                    "resource_id": resource_id.to_string(),
+                    "binding_kind": "declared_registry_path",
+                }
+            ],
+            "subregistry_path": [],
+            "resolver_path": [
+                {
+                    "logical_name_id": logical_name_id,
+                    "namespace": "basenames",
+                    "normalized_name": "alice.base.eth",
+                    "canonical_display_name": "Alice.base.eth",
+                    "resource_id": resource_id.to_string(),
+                    "chain_id": "base-mainnet",
+                    "address": "0x0000000000000000000000000000000000000abc",
+                    "latest_event_kind": "ResolverChanged",
+                }
+            ],
+            "wildcard": {
+                "source": null,
+                "matched_labels": [],
+            },
+            "alias": {
+                "final_target": null,
+                "hops": [],
+            },
+            "version_boundaries": {
+                "topology_version_boundary": worker_row.record_version_boundary.clone(),
+                "record_version_boundary": worker_row.record_version_boundary.clone(),
+            },
+            "transport": {
+                "source_chain_id": "base-mainnet",
+                "target_chain_id": "ethereum-mainnet",
+                "contract_address": "0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31",
+                "latest_event_kind": null,
+            },
+        }))
+    );
+    assert_eq!(
+        declared_state.get("record_inventory"),
+        Some(&json!({
+            "record_version_boundary": worker_row.record_version_boundary.clone(),
+            "enumeration_basis": worker_row.enumeration_basis.clone(),
+            "selectors": worker_row.selectors.clone(),
+            "explicit_gaps": worker_row.explicit_gaps.clone(),
+            "unsupported_families": worker_row.unsupported_families.clone(),
+            "last_change": worker_row.last_change.clone().unwrap_or(Value::Null),
+        }))
+    );
+    assert_eq!(
+        declared_state.get("record_cache"),
+        Some(&json!({
+            "record_version_boundary": worker_row.record_version_boundary.clone(),
+            "entries": worker_row.entries.clone(),
+        }))
+    );
+    assert_eq!(
+        payload.verified_state,
+        Some(json!({
+            "verified_queries": [
+                {
+                    "record_key": "addr:60",
+                    "status": "unsupported",
+                    "unsupported_reason": "verified resolution entrypoint is not yet supported",
+                },
+                {
+                    "record_key": "text",
+                    "status": "unsupported",
+                    "unsupported_reason": "verified resolution entrypoint is not yet supported",
+                }
+            ]
+        }))
+    );
+    assert_eq!(
+        payload.provenance.get("execution_trace_id"),
+        Some(&Value::Null)
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_resolution_execution_explain_returns_not_found_for_basenames_while_execution_is_shadow()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let logical_name_id = "basenames:alice.base.eth";
+    let resource_id = Uuid::from_u128(0x6400);
+    let token_lineage_id = Uuid::from_u128(0x6500);
+    let surface_binding_id = Uuid::from_u128(0x6600);
+
+    database
+        .seed_basenames_resolution_rebuild_inputs(
+            logical_name_id,
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    database.rebuild_name_current(logical_name_id).await?;
+    database
+        .rebuild_record_inventory_current(resource_id)
+        .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/explain/resolutions/basenames/alice.base.eth/execution?records=addr:60,text")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("basenames resolution execution explain request failed")?;
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let payload: ErrorResponse = read_json(response).await?;
+    assert_eq!(payload.error.code, "not_found");
+    assert_eq!(
+        payload.error.message,
+        "persisted resolution execution explain was not found for name alice.base.eth in namespace basenames"
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn get_resolution_verified_state_uses_supported_persisted_answers_and_preserves_request_order()
 -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
