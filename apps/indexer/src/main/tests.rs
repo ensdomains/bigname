@@ -2886,6 +2886,160 @@ async fn reconcile_fetched_heads_backfills_ensv1_reverse_claim_normalized_events
 }
 
 #[tokio::test]
+async fn reconcile_fetched_heads_backfills_basenames_reverse_claim_normalized_events() -> Result<()>
+{
+    let database = TestDatabase::new().await?;
+    let reverse_contract_instance_id = Uuid::from_u128(0x346);
+    let reverse_address = "0x79ea96012eea67a83431f1701b3dff7e37f9e282";
+    let claimed_address = "0x1234567890abcdef1234567890abcdef12345678";
+
+    sqlx::query(
+        r#"
+            INSERT INTO manifest_versions (
+                manifest_id,
+                manifest_version,
+                namespace,
+                source_family,
+                chain,
+                deployment_epoch,
+                rollout_status,
+                normalizer_version,
+                file_path,
+                manifest_payload
+            )
+            VALUES (
+                1,
+                1,
+                'basenames',
+                'basenames_base_primary',
+                'base-mainnet',
+                'basenames_v1',
+                'active',
+                'uts46-v1',
+                'manifests/basenames/basenames_base_primary/v1.toml',
+                '{}'::jsonb
+            )
+            "#,
+    )
+    .execute(database.pool())
+    .await
+    .context("failed to insert manifest_versions for Basenames reverse reconciliation test")?;
+    insert_contract_instance(
+        database.pool(),
+        reverse_contract_instance_id,
+        "base-mainnet",
+        "contract",
+    )
+    .await?;
+    insert_active_contract_instance_address(
+        database.pool(),
+        reverse_contract_instance_id,
+        "base-mainnet",
+        reverse_address,
+        Some(1),
+    )
+    .await?;
+    insert_manifest_contract_instance(
+        database.pool(),
+        1,
+        "reverse_registrar",
+        reverse_contract_instance_id,
+        reverse_address,
+        "none",
+        None,
+        None,
+    )
+    .await?;
+
+    let watched_plan = load_watched_chain_plan(database.pool()).await?;
+    let tasks = sync_intake_chain_tasks(database.pool(), &watched_plan).await?;
+    let canonical_head = provider_block(
+        "0xbabababababababababababababababababababababababababababababababa",
+        Some("0xcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"),
+        63,
+    );
+    let (provider, server) = bundle_provider_with_fixtures(vec![ProviderBlockFixture {
+        logs: vec![rpc_reverse_claimed_log_payload(
+            &canonical_head,
+            reverse_address,
+            claimed_address,
+            0,
+        )],
+        block: canonical_head.clone(),
+    }])
+    .await?;
+
+    let (next_task, outcome) = reconcile_fetched_heads(
+        database.pool(),
+        &tasks[0],
+        &provider,
+        &ProviderHeadSnapshot {
+            canonical: canonical_head.clone(),
+            safe: None,
+            finalized: None,
+        },
+    )
+    .await?
+    .expect("Basenames reverse reconciliation must update task state");
+
+    assert_eq!(
+        outcome.canonical_status,
+        CanonicalReconciliationStatus::Initialized
+    );
+    assert_eq!(next_task.checkpoint.canonical_block_number, Some(63));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM normalized_events")
+            .fetch_one(database.pool())
+            .await?,
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT source_family FROM normalized_events WHERE event_kind = 'ReverseChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "basenames_base_primary".to_owned()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT namespace FROM normalized_events WHERE event_kind = 'ReverseChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "basenames".to_owned()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT after_state->>'namespace' FROM normalized_events WHERE event_kind = 'ReverseChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "basenames".to_owned()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT after_state->>'reverse_namespace' FROM normalized_events WHERE event_kind = 'ReverseChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "basenames".to_owned()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT after_state->'claim_provenance'->>'source_family' FROM normalized_events WHERE event_kind = 'ReverseChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "basenames_base_primary".to_owned()
+    );
+
+    server.abort();
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn reconcile_fetched_heads_backfills_ensv1_primary_claim_source_observations() -> Result<()> {
     let database = TestDatabase::new().await?;
     let reverse_contract_instance_id = Uuid::from_u128(0x343);

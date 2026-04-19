@@ -8,6 +8,7 @@ use sha3::{Digest, Keccak256};
 use sqlx::{PgPool, Row};
 
 const SOURCE_FAMILY_ENS_V1_REVERSE_L1: &str = "ens_v1_reverse_l1";
+const SOURCE_FAMILY_BASENAMES_BASE_PRIMARY: &str = "basenames_base_primary";
 const SOURCE_EVENT_REVERSE_CLAIMED: &str = "ReverseClaimed";
 const DERIVATION_KIND_ENS_V1_REVERSE_CLAIM: &str = "ens_v1_reverse_claim";
 const EVENT_KIND_REVERSE_CHANGED: &str = "ReverseChanged";
@@ -150,7 +151,7 @@ pub async fn sync_ens_v1_reverse_claim(
 }
 
 fn build_reverse_changed_event(raw_log: &ReverseRawLogRow) -> Result<Option<NormalizedEvent>> {
-    if raw_log.source_family != SOURCE_FAMILY_ENS_V1_REVERSE_L1 {
+    if !supports_reverse_claim_source_family(&raw_log.source_family) {
         return Ok(None);
     }
 
@@ -238,6 +239,13 @@ fn build_reverse_changed_event(raw_log: &ReverseRawLogRow) -> Result<Option<Norm
             },
         }),
     }))
+}
+
+fn supports_reverse_claim_source_family(source_family: &str) -> bool {
+    matches!(
+        source_family,
+        SOURCE_FAMILY_ENS_V1_REVERSE_L1 | SOURCE_FAMILY_BASENAMES_BASE_PRIMARY
+    )
 }
 
 async fn load_reverse_raw_logs(
@@ -363,7 +371,7 @@ async fn load_active_emitters(pool: &PgPool, chain: &str) -> Result<Vec<ActiveEm
                 source_manifest_id
             );
         }
-        if manifest.source_family != SOURCE_FAMILY_ENS_V1_REVERSE_L1 {
+        if !supports_reverse_claim_source_family(&manifest.source_family) {
             continue;
         }
 
@@ -615,6 +623,14 @@ mod tests {
         database_name: String,
     }
 
+    struct TestReverseClaimConfig<'a> {
+        namespace: &'a str,
+        source_family: &'a str,
+        chain: &'a str,
+        deployment_epoch: &'a str,
+        file_path: &'a str,
+    }
+
     impl TestDatabase {
         async fn new() -> Result<Self> {
             let database_url = std::env::var("BIGNAME_DATABASE_URL")
@@ -682,7 +698,10 @@ mod tests {
     async fn insert_manifest_version(
         pool: &PgPool,
         manifest_version: i64,
+        namespace: &str,
         source_family: &str,
+        chain: &str,
+        deployment_epoch: &str,
         rollout_status: &str,
         file_path: &str,
     ) -> Result<i64> {
@@ -701,20 +720,23 @@ mod tests {
             )
             VALUES (
                 $1,
-                'ens',
                 $2,
-                'ethereum-mainnet',
-                'ens_v1',
-                $3::manifest_rollout_status,
-                'uts46-v1',
+                $3,
                 $4,
+                $5,
+                $6::manifest_rollout_status,
+                'uts46-v1',
+                $7,
                 '{}'::jsonb
             )
             RETURNING manifest_id
             "#,
         )
         .bind(manifest_version)
+        .bind(namespace)
         .bind(source_family)
+        .bind(chain)
+        .bind(deployment_epoch)
         .bind(rollout_status)
         .bind(file_path)
         .fetch_one(pool)
@@ -722,7 +744,11 @@ mod tests {
         .context("failed to insert manifest version")
     }
 
-    async fn insert_contract_instance(pool: &PgPool, contract_instance_id: Uuid) -> Result<()> {
+    async fn insert_contract_instance(
+        pool: &PgPool,
+        chain: &str,
+        contract_instance_id: Uuid,
+    ) -> Result<()> {
         sqlx::query(
             r#"
             INSERT INTO contract_instances (
@@ -731,10 +757,11 @@ mod tests {
                 contract_kind,
                 provenance
             )
-            VALUES ($1, 'ethereum-mainnet', 'contract', '{}'::jsonb)
+            VALUES ($1, $2, 'contract', '{}'::jsonb)
             "#,
         )
         .bind(contract_instance_id)
+        .bind(chain)
         .execute(pool)
         .await
         .context("failed to insert contract instance")?;
@@ -772,6 +799,7 @@ mod tests {
 
     async fn insert_contract_instance_address(
         pool: &PgPool,
+        chain: &str,
         contract_instance_id: Uuid,
         address: &str,
         source_manifest_id: i64,
@@ -785,10 +813,11 @@ mod tests {
                 source_manifest_id,
                 provenance
             )
-            VALUES ($1, 'ethereum-mainnet', $2, $3, '{}'::jsonb)
+            VALUES ($1, $2, $3, $4, '{}'::jsonb)
             "#,
         )
         .bind(contract_instance_id)
+        .bind(chain)
         .bind(address)
         .bind(source_manifest_id)
         .execute(pool)
@@ -799,6 +828,7 @@ mod tests {
 
     async fn insert_raw_reverse_claim_log(
         pool: &PgPool,
+        chain: &str,
         block_hash: &str,
         block_number: i64,
         emitting_address: &str,
@@ -808,7 +838,7 @@ mod tests {
         upsert_raw_blocks(
             pool,
             &[RawBlock {
-                chain_id: "ethereum-mainnet".to_owned(),
+                chain_id: chain.to_owned(),
                 block_hash: block_hash.to_owned(),
                 parent_hash: None,
                 block_number,
@@ -824,7 +854,7 @@ mod tests {
         upsert_raw_logs(
             pool,
             &[RawLog {
-                chain_id: "ethereum-mainnet".to_owned(),
+                chain_id: chain.to_owned(),
                 block_hash: block_hash.to_owned(),
                 block_number,
                 transaction_hash: format!("0xtx{block_number:02x}"),
@@ -844,37 +874,30 @@ mod tests {
         Ok(())
     }
 
-    fn abi_word_address(value: &str) -> [u8; 32] {
-        let value = value.strip_prefix("0x").unwrap_or(value);
-        assert_eq!(value.len(), 40, "test address must be 20 bytes");
-        let mut word = [0u8; 32];
-        for (index, chunk) in value.as_bytes().chunks(2).enumerate() {
-            let hex = std::str::from_utf8(chunk).expect("test address chunk must be utf-8");
-            word[12 + index] =
-                u8::from_str_radix(hex, 16).expect("test address chunk must be valid hex");
-        }
-        word
-    }
-
-    #[tokio::test]
-    async fn sync_ens_v1_reverse_claim_is_idempotent() -> Result<()> {
+    async fn run_idempotence_case(config: TestReverseClaimConfig<'_>) -> Result<()> {
         let _permit = crate::acquire_test_db_permit().await;
         let database = TestDatabase::new().await?;
 
         let active_manifest_id = insert_manifest_version(
             database.pool(),
             1,
-            SOURCE_FAMILY_ENS_V1_REVERSE_L1,
+            config.namespace,
+            config.source_family,
+            config.chain,
+            config.deployment_epoch,
             "active",
-            "manifests/ens/ens_v1_reverse_l1/v1.toml",
+            config.file_path,
         )
         .await?;
         let draft_manifest_id = insert_manifest_version(
             database.pool(),
             2,
-            SOURCE_FAMILY_ENS_V1_REVERSE_L1,
+            config.namespace,
+            config.source_family,
+            config.chain,
+            config.deployment_epoch,
             "draft",
-            "manifests/ens/ens_v1_reverse_l1/v2.toml",
+            "manifests/test/draft.toml",
         )
         .await?;
         let active_contract_instance_id = Uuid::new_v4();
@@ -883,8 +906,9 @@ mod tests {
         let draft_emitter = "0x00000000000000000000000000000000000000bb";
         let claimed_address = "0x1111111111111111111111111111111111111111";
 
-        insert_contract_instance(database.pool(), active_contract_instance_id).await?;
-        insert_contract_instance(database.pool(), draft_contract_instance_id).await?;
+        insert_contract_instance(database.pool(), config.chain, active_contract_instance_id)
+            .await?;
+        insert_contract_instance(database.pool(), config.chain, draft_contract_instance_id).await?;
         insert_manifest_contract_instance(
             database.pool(),
             active_manifest_id,
@@ -901,6 +925,7 @@ mod tests {
         .await?;
         insert_contract_instance_address(
             database.pool(),
+            config.chain,
             active_contract_instance_id,
             active_emitter,
             active_manifest_id,
@@ -908,6 +933,7 @@ mod tests {
         .await?;
         insert_contract_instance_address(
             database.pool(),
+            config.chain,
             draft_contract_instance_id,
             draft_emitter,
             draft_manifest_id,
@@ -916,6 +942,7 @@ mod tests {
 
         insert_raw_reverse_claim_log(
             database.pool(),
+            config.chain,
             "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             42,
             active_emitter,
@@ -925,6 +952,7 @@ mod tests {
         .await?;
         insert_raw_reverse_claim_log(
             database.pool(),
+            config.chain,
             "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
             43,
             draft_emitter,
@@ -933,7 +961,7 @@ mod tests {
         )
         .await?;
 
-        let first = sync_ens_v1_reverse_claim(database.pool(), "ethereum-mainnet").await?;
+        let first = sync_ens_v1_reverse_claim(database.pool(), config.chain).await?;
         assert_eq!(first.scanned_log_count, 1);
         assert_eq!(first.matched_log_count, 1);
         assert_eq!(first.total_synced_count, 1);
@@ -949,21 +977,23 @@ mod tests {
             )])
         );
 
-        let events = load_normalized_events_by_namespace(database.pool(), "ens").await?;
+        let events = load_normalized_events_by_namespace(database.pool(), config.namespace).await?;
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].event_kind, EVENT_KIND_REVERSE_CHANGED);
         assert_eq!(
             events[0].derivation_kind,
             DERIVATION_KIND_ENS_V1_REVERSE_CLAIM
         );
-        assert_eq!(events[0].source_family, SOURCE_FAMILY_ENS_V1_REVERSE_L1);
+        assert_eq!(events[0].source_family, config.source_family);
         assert_eq!(events[0].source_manifest_id, Some(active_manifest_id));
+        assert_eq!(events[0].chain_id.as_deref(), Some(config.chain));
         assert_eq!(
             events[0].after_state["address"],
             claimed_address.to_ascii_lowercase()
         );
         assert_eq!(events[0].after_state["coin_type"], ENS_NATIVE_COIN_TYPE);
-        assert_eq!(events[0].after_state["namespace"], "ens");
+        assert_eq!(events[0].after_state["namespace"], config.namespace);
+        assert_eq!(events[0].after_state["reverse_namespace"], config.namespace);
         assert_eq!(
             events[0].after_state["reverse_node"],
             reverse_node_for_address(claimed_address)?
@@ -979,7 +1009,7 @@ mod tests {
         );
         assert_eq!(
             events[0].after_state["claim_provenance"]["source_family"],
-            SOURCE_FAMILY_ENS_V1_REVERSE_L1
+            config.source_family
         );
         assert_eq!(
             events[0].after_state["claim_provenance"]["contract_role"],
@@ -994,13 +1024,14 @@ mod tests {
             active_emitter
         );
 
-        let second = sync_ens_v1_reverse_claim(database.pool(), "ethereum-mainnet").await?;
+        let second = sync_ens_v1_reverse_claim(database.pool(), config.chain).await?;
         assert_eq!(second.scanned_log_count, 1);
         assert_eq!(second.matched_log_count, 1);
         assert_eq!(second.total_synced_count, 1);
         assert_eq!(second.total_inserted_count, 0);
 
-        let counts = load_normalized_event_counts_by_kind(database.pool(), "ens").await?;
+        let counts =
+            load_normalized_event_counts_by_kind(database.pool(), config.namespace).await?;
         assert_eq!(
             counts,
             BTreeMap::from([(EVENT_KIND_REVERSE_CHANGED.to_owned(), 1_usize)])
@@ -1009,24 +1040,26 @@ mod tests {
         database.cleanup().await
     }
 
-    #[tokio::test]
-    async fn sync_ens_v1_reverse_claim_updates_event_canonicality() -> Result<()> {
+    async fn run_canonicality_case(config: TestReverseClaimConfig<'_>) -> Result<()> {
         let _permit = crate::acquire_test_db_permit().await;
         let database = TestDatabase::new().await?;
 
         let manifest_id = insert_manifest_version(
             database.pool(),
             1,
-            SOURCE_FAMILY_ENS_V1_REVERSE_L1,
+            config.namespace,
+            config.source_family,
+            config.chain,
+            config.deployment_epoch,
             "active",
-            "manifests/ens/ens_v1_reverse_l1/v1.toml",
+            config.file_path,
         )
         .await?;
         let contract_instance_id = Uuid::new_v4();
         let emitter = "0x00000000000000000000000000000000000000aa";
         let claimed_address = "0x3333333333333333333333333333333333333333";
 
-        insert_contract_instance(database.pool(), contract_instance_id).await?;
+        insert_contract_instance(database.pool(), config.chain, contract_instance_id).await?;
         insert_manifest_contract_instance(
             database.pool(),
             manifest_id,
@@ -1036,6 +1069,7 @@ mod tests {
         .await?;
         insert_contract_instance_address(
             database.pool(),
+            config.chain,
             contract_instance_id,
             emitter,
             manifest_id,
@@ -1044,6 +1078,7 @@ mod tests {
 
         insert_raw_reverse_claim_log(
             database.pool(),
+            config.chain,
             "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
             44,
             emitter,
@@ -1052,14 +1087,16 @@ mod tests {
         )
         .await?;
 
-        let first = sync_ens_v1_reverse_claim(database.pool(), "ethereum-mainnet").await?;
+        let first = sync_ens_v1_reverse_claim(database.pool(), config.chain).await?;
         assert_eq!(first.total_inserted_count, 1);
-        let mut events = load_normalized_events_by_namespace(database.pool(), "ens").await?;
+        let mut events =
+            load_normalized_events_by_namespace(database.pool(), config.namespace).await?;
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].canonicality_state, CanonicalityState::Safe);
 
         insert_raw_reverse_claim_log(
             database.pool(),
+            config.chain,
             "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
             44,
             emitter,
@@ -1068,12 +1105,15 @@ mod tests {
         )
         .await?;
 
-        let second = sync_ens_v1_reverse_claim(database.pool(), "ethereum-mainnet").await?;
+        let second = sync_ens_v1_reverse_claim(database.pool(), config.chain).await?;
         assert_eq!(second.total_inserted_count, 0);
-        events = load_normalized_events_by_namespace(database.pool(), "ens").await?;
+        events = load_normalized_events_by_namespace(database.pool(), config.namespace).await?;
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].canonicality_state, CanonicalityState::Finalized);
-        assert_eq!(events[0].after_state["namespace"], "ens");
+        assert_eq!(events[0].source_family, config.source_family);
+        assert_eq!(events[0].chain_id.as_deref(), Some(config.chain));
+        assert_eq!(events[0].after_state["namespace"], config.namespace);
+        assert_eq!(events[0].after_state["reverse_namespace"], config.namespace);
         assert_eq!(
             events[0].after_state["claim_provenance"]["contract_role"],
             CONTRACT_ROLE_REVERSE_REGISTRAR
@@ -1088,5 +1128,65 @@ mod tests {
         );
 
         database.cleanup().await
+    }
+
+    fn abi_word_address(value: &str) -> [u8; 32] {
+        let value = value.strip_prefix("0x").unwrap_or(value);
+        assert_eq!(value.len(), 40, "test address must be 20 bytes");
+        let mut word = [0u8; 32];
+        for (index, chunk) in value.as_bytes().chunks(2).enumerate() {
+            let hex = std::str::from_utf8(chunk).expect("test address chunk must be utf-8");
+            word[12 + index] =
+                u8::from_str_radix(hex, 16).expect("test address chunk must be valid hex");
+        }
+        word
+    }
+
+    #[tokio::test]
+    async fn sync_ens_v1_reverse_claim_is_idempotent() -> Result<()> {
+        run_idempotence_case(TestReverseClaimConfig {
+            namespace: "ens",
+            source_family: SOURCE_FAMILY_ENS_V1_REVERSE_L1,
+            chain: "ethereum-mainnet",
+            deployment_epoch: "ens_v1",
+            file_path: "manifests/ens/ens_v1_reverse_l1/v1.toml",
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn sync_ens_v1_reverse_claim_is_idempotent_for_basenames_base_primary() -> Result<()> {
+        run_idempotence_case(TestReverseClaimConfig {
+            namespace: "basenames",
+            source_family: SOURCE_FAMILY_BASENAMES_BASE_PRIMARY,
+            chain: "base-mainnet",
+            deployment_epoch: "basenames_v1",
+            file_path: "manifests/basenames/basenames_base_primary/v1.toml",
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn sync_ens_v1_reverse_claim_updates_event_canonicality() -> Result<()> {
+        run_canonicality_case(TestReverseClaimConfig {
+            namespace: "ens",
+            source_family: SOURCE_FAMILY_ENS_V1_REVERSE_L1,
+            chain: "ethereum-mainnet",
+            deployment_epoch: "ens_v1",
+            file_path: "manifests/ens/ens_v1_reverse_l1/v1.toml",
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn sync_ens_v1_reverse_claim_updates_basenames_event_canonicality() -> Result<()> {
+        run_canonicality_case(TestReverseClaimConfig {
+            namespace: "basenames",
+            source_family: SOURCE_FAMILY_BASENAMES_BASE_PRIMARY,
+            chain: "base-mainnet",
+            deployment_epoch: "basenames_v1",
+            file_path: "manifests/basenames/basenames_base_primary/v1.toml",
+        })
+        .await
     }
 }
