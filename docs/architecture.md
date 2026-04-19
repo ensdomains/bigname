@@ -608,6 +608,7 @@ Rules:
 - for ENS primary-name reads in Phase 7, that reverse-family ownership admits only the reverse-claim tuple; it does not authorize combining reverse-only claim precedence with resolver-backed or execution-derived name identity to manufacture richer `claimed_primary_name` payloads
 - Basenames declared authority on the shipped mainnet profile is split across `basenames_base_registry` through contract role `registry` at `0xb94704422c2a1e396835a571837aa5ae53285a95`, `basenames_base_registrar` through contract role `registrar` at `0x03c4738ee98ae44591e1a4a4f3cab6641d95dd9a`, and `basenames_base_resolver` through contract role `resolver` at `0xC6d566A56A1aFf6508b41f6c90ff131615583BCD`
 - Basenames declared primary-claim intake on the shipped mainnet profile belongs to `basenames_base_primary`, whose canonical contract role is `reverse_registrar` at `0x79ea96012eea67a83431f1701b3dff7e37f9e282`
+- that six-family Basenames split freezes the first declared read-plane boundary: exact-name, address-name, and children reads take declared truth from the Base registry / registrar / resolver families, while `basenames_base_primary` stays a separate claim-intake family
 - Basenames L1 compatibility transport on the shipped mainnet profile belongs to `basenames_l1_compat`, whose canonical contract role is `l1_resolver` at `0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31`
 - Basenames verified resolution on the shipped mainnet profile belongs to `basenames_execution`, whose canonical contract role is `l1_resolver` at `0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31`; `basenames_execution` stays shadow-scoped until public verified Basenames reads ship, and the shared L1 Resolver address does not collapse transport ownership into execution ownership
 - `basenames_offchain` remains reserved for later explicit gateway admission; the current admitted Basenames family split is the six families above, not seven
@@ -1086,11 +1087,13 @@ Rules:
 - verified primary names require the verification algorithm to succeed
 - reverse claims alone are insufficient
 - for ENS on Ethereum Mainnet, the current declared claim precedence is reverse-only through `ens_v1_reverse_l1` and its `reverse_registrar` entrypoint at `0xa58E81fe9b61B5c3fE2AFD33CF304c454AbFc7Cb`
+- for Basenames on the shipped mainnet profile, the admitted declared primary-claim family is `basenames_base_primary` through contract role `reverse_registrar` at `0x79ea96012eea67a83431f1701b3dff7e37f9e282`; it remains claim intake only and does not replace the Base registry / registrar / resolver families as the declared truth for exact-name, address-name, or children reads
 - missing or unsupported ENS reverse claims do not trigger fallback to registry-, resolver-, or other claim-setting surfaces in this phase
 - any fallback beyond that reverse-only ENS claim surface remains deferred and requires a later doc-first contract update; manifest presence alone does not widen claim precedence
 - `claimed_primary_name.name`, when present, comes only from the exact requested `primary_names_current(address, coin_type, namespace)` row's declared normalized claim-identity source for that same tuple, aligned with the currently admitted reverse-only claim precedence
 - it must not be synthesized or backfilled from manifest presence, resolver-backed identity, verified execution identity, tuple presence alone, a different tuple, or any fallback claim source
 - `claimed_primary_name.name` remains distinct from execution-derived `verified_primary_name.name`; this clarification does not change when `verified_primary_name.name` appears, and it does not by itself change route-level primary-name coverage, which stays bootstrap `unsupported` unless a separate doc-first coverage change lands
+- for Basenames as well as ENS, admitted claim intake does not collapse `claimed_primary_name` and `verified_primary_name`: claim-local state stays separate from execution-local state, and Base authority reads plus shadow execution admission do not let one backfill the other
 - in Phase 7, that reverse-only ENS claim precedence does not combine with resolver-backed or execution-derived name data to enrich `claimed_primary_name`; `claimed_primary_name.name` stays limited to that exact requested row's declared normalized claim-identity source, `claimed_primary_name.provenance` is limited to exact-tuple declared row provenance, and richer fallback-expanded claimed payloads remain blocked
 - the first additive ENS verified-primary readback slice uses stable execution identity `request_type=verified_primary_name` with request-key identity `{namespace}:{normalized_address}:{coin_type}` for the exact route tuple; claimed text, normalized name identity, verified target address, result status, and section-local provenance are outside that cache identity
 - the matching `primary_names_current(address, coin_type, namespace)` row is the only admitted claim-side lookup / invalidation anchor for that verified request; the projection may carry claim-local lookup and invalidation inputs only, and it does not become a second verified ledger
@@ -1125,6 +1128,7 @@ Rules:
 - route-level exact-lookup coverage and subdocument support are separate concerns
 - each declared summary section is always present as an object
 - any declared summary section that is not yet projected must return an explicit unsupported object instead of disappearing silently
+- for `namespace=basenames`, exact-name declared truth stays on the admitted Base authority split `basenames_base_registry`, `basenames_base_registrar`, and `basenames_base_resolver`; `basenames_base_primary` remains primary-claim intake only, and neither `basenames_l1_compat` nor `basenames_execution` widens this declared route
 - `authority` may fall back to the current binding identifiers when the binding is known but a richer authority summary is not yet projected
 - exact-name `control` is a narrow current-control summary for the bound `resource_id`; in the initial contract it carries `registrant`, `registry_owner`, and `latest_event_kind`, and it stays narrower than both the internal `ControlVector` and the dedicated resource-permissions truth family
 - exact-name `control` may repeat the current `registrant` already visible in `registration` when the same canonical facts drive both summaries; that duplication is intentional and does not create a second control truth system
@@ -1155,6 +1159,7 @@ Rules:
 - default sort is `display_name_asc`
 - exhaustiveness is only authoritative for source classes with enumerable ownership / assignment surfaces
 - wildcard- and offchain-derived names are never silently treated as exhaustive enumeration results
+- for `namespace=basenames`, address-to-name membership and relation facets derive from the admitted Base authority split rather than reverse-claim or transport state; `basenames_base_primary`, `basenames_l1_compat`, and `basenames_execution` do not add rows or widen relation semantics on this route
 - role-summary expansion is additive; it must not change item identity, supported filters, grouping semantics, default sort, cursor behavior, or coverage meaning
 
 ### 21.3 Address → names with `include=role_summary`
@@ -1199,6 +1204,7 @@ Rules:
 - `subname_count` in the main name summary means declared direct children only
 - linked, alias-derived, and wildcard-observed child counts are separate metrics
 - a child can appear in multiple public surfaces when backing resources are shared
+- for `namespace=basenames`, declared direct child surfaces come from the admitted Base authority split only; `basenames_base_primary` claim intake, `basenames_l1_compat` transport, and shadow `basenames_execution` do not create child rows or widen supported child buckets
 
 ### 21.5 Resource → permissions
 
@@ -1337,6 +1343,7 @@ Default verified resolution paths:
 
 - ENS uses `ens_execution` with contract role `universal_resolver` at `0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe` as the canonical verified-resolution entrypoint on Ethereum Mainnet; the shipped public verified slice covers exact-surface direct-path requests, the already frozen exact-surface alias-only non-direct class, and the first additive exact-surface wildcard-derived class, using the same route-level support check over declared topology
 - Basenames uses `basenames_execution` with contract role `l1_resolver` at `0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31` as the canonical verified-resolution entrypoint on Ethereum Mainnet; `basenames_l1_compat` owns that same L1 Resolver address as compatibility transport, and public verified Basenames reads remain bootstrap-scaffolded and explicit unsupported until that L1 path plus the admitted Base authority families are wired end-to-end
+- that verified-only Basenames `unsupported` boundary does not suppress the separate declared read plane: exact-name, address-name, children, and declared exact-name explain reads stay on Base-side declared truth while verified execution and public execution explain remain deferred
 
 The execution engine must support:
 

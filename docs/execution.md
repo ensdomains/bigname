@@ -47,6 +47,8 @@ For Basenames on the shipped mainnet profile, step 2 is frozen to the `basenames
 
 That Basenames execution owner stays shadow-scoped for now. `basenames_l1_compat` owns the same L1 Resolver address for transport attribution, and public verified Basenames reads remain explicit unsupported until that L1 compatibility path plus the admitted Base authority families are wired end-to-end.
 
+The declared read plane stays separate from that shadow Basenames execution pairing: exact-name, address-name, and children reads remain sourced from the admitted Base registry / registrar / resolver families, while `basenames_base_primary` stays claim intake only.
+
 Rules:
 
 - every step is attributable in provenance
@@ -79,7 +81,9 @@ Rules:
 - when verification establishes a concrete normalized name target, `verified_primary_name` may carry that name identity for `status=success` or `status=mismatch`; it omits that identity for `status=not_found`, `status=unsupported`, `status=invalid_name`, and `status=execution_failed`
 - claim-local provenance and verification-local provenance may both contribute to the route, but the claim-local side is exact-tuple declared provenance from the requested `primary_names_current(address, coin_type, namespace)` row and the shipped verification-local side is `verified_primary_name.provenance = {execution_trace_id, manifest_versions}` under the same top-level `provenance.execution_trace_id` for that exact tuple
 - for ENS on Ethereum Mainnet in the current contract, the admitted declared claim surface is reverse-only: `ens_v1_reverse_l1` through contract role `reverse_registrar` at `0xa58E81fe9b61B5c3fE2AFD33CF304c454AbFc7Cb`
+- for Basenames on the shipped mainnet profile, the admitted declared primary-claim family is `basenames_base_primary` through contract role `reverse_registrar` at `0x79ea96012eea67a83431f1701b3dff7e37f9e282`; it remains claim intake only, so exact-name, address-name, and children declared truth stays on the Base registry / registrar / resolver families
 - for ENS on Ethereum Mainnet, the verification step for that claimed name reuses the `ens_execution` source family and its manifest-declared `universal_resolver` entrypoint at `0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe`; declared claim ownership and verified execution ownership stay separate
+- for Basenames as well as ENS, `claimed_primary_name` and `verified_primary_name` stay separate route-local objects: declared claim intake does not backfill verified identity, and Base authority reads plus shadow execution admission do not collapse them into one truth system
 - `claimed_primary_name.name`, when present, comes only from the exact requested `primary_names_current(address, coin_type, namespace)` row's declared normalized claim-identity source for that same tuple, aligned with the currently admitted reverse-only claim precedence
 - it must not be synthesized or backfilled from manifest presence, resolver-backed identity, verified execution identity, tuple presence alone, a different tuple, or any fallback claim source
 - `claimed_primary_name.name` remains distinct from execution-derived `verified_primary_name.name`; this clarification does not change when `verified_primary_name.name` appears, and it does not by itself change route-level primary-name coverage, which stays bootstrap `unsupported` unless a separate doc-first coverage change lands
@@ -173,6 +177,7 @@ Rules:
 - it does not become a global trace-inspection API, a raw trace dump, or a second provenance / truth system
 - it is shipped and published in `docs/api-v1.openapi.json`; the current handler contract exposes path parameters plus required `records` only
 - public explain support stays coupled to the same verified-resolution support boundary as the mixed route; deferred unsupported path classes do not gain a synthetic trace-shaped public contract
+- for Basenames, that `unsupported` explain boundary applies to public execution explain only; the separate declared exact-name explain routes stay on the Base-side declared read plane
 
 ## 7. Initial Support Boundary
 
@@ -184,6 +189,6 @@ For the shipped Phase 7 slice:
 - the first additive ENS wildcard-derived support class is the exact-surface class where `wildcard.source` is non-`null` with `matched_labels` non-empty, `resolver_path[0].logical_name_id` equals `wildcard.source.logical_name_id`, `alias.final_target` is `null` with `hops=[]`, `subregistry_path=[]`, and all `transport` fields are `null`
 - supported direct-path, alias-only, and wildcard-derived answers remain attributable through the same persisted execution trace and explain contract: the public explain route must surface the selected entrypoint, resolver discovery path, ordered persisted steps, and the participating alias or wildcard detail for that persisted answer without inventing a second trace family
 - ENS verified requests outside the direct-path, alias-only, and wildcard-derived classes, including other non-alias ancestor-selected paths, linked-subregistry ancestor-selected paths, any transport-assisted path, and any request whose persisted execution used CCIP-Read, remain deferred and return explicit selector-local `status=unsupported` on the mixed route; the shipped explain route does not synthesize public traces for them
-- Basenames verified execution is scaffolded but the public verified route remains bootstrap-scaffolded and explicit unsupported until Base-side authority and L1 transport are both wired
+- Basenames verified execution is scaffolded but the public verified route and execution-explain surface remain bootstrap-scaffolded and explicit unsupported until the Base-side authority families that serve exact-name/address-name/children reads and L1 compatibility transport are both wired
 - ENS primary-name support remains bootstrap-only: the public route may be present, the owning source families may be admitted, and later persisted ENS `verified_primary_name` readback may land, but route-level coverage stays in its bootstrap unsupported state; manifest rollout, manifest capability state, reverse tuple lookup, and resolver-backed verification detail do not by themselves graduate that public contract or unlock richer ENS claimed payloads, and any fallback beyond the reverse-only claim surface remains deferred
 - unsupported resolver families remain requestable but must return explicit `status=unsupported` results unless the route cannot attribute any section-level answer at all

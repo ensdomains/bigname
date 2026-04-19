@@ -493,6 +493,7 @@ Rules:
 - every declared summary section above is always present as an object
 - if a section is not yet projected, it returns `UnsupportedSummary`
 - `declared_state.authority` may fall back to `{resource_id, token_lineage_id, binding_kind}` when a dedicated authority summary is not yet projected but the current binding is known
+- for `namespace=basenames`, exact-name declared truth stays on the admitted Base authority split: `basenames_base_registry`, `basenames_base_registrar`, and `basenames_base_resolver`; `basenames_base_primary` remains primary-claim intake only, and neither `basenames_l1_compat` nor `basenames_execution` widens this declared route
 - `declared_state.control` is the narrow current-`resource_id` control summary only; it does not inline full resource permissions, role-holder detail, or the entire internal `ControlVector`
 - supported `declared_state.resolver` uses `chain_id` plus `address` as the same resolver target key used by `GET /v1/resolvers/{chain_id}/{resolver_address}` when a resolver exists; `chain_id=null` and `address=null` mean no declared current resolver rather than unsupported projection
 - supported `declared_state.record_inventory` reuses the same `ResolutionRecordInventory` object shape as `GET /v1/resolutions/{namespace}/{name}` and, for the same snapshot, must expose the same `record_version_boundary`
@@ -624,6 +625,7 @@ Rules:
 - the default sort remains `display_name_asc`
 - `cursor` and `page_size` page over the frozen default sort only; they do not alter item shape, grouping semantics, supported filters, or coverage meaning
 - `include=role_summary` is additive; it does not change supported filters, default `dedupe_by`, enumeration basis, route-level coverage meaning, default sort, cursor behavior, or item identity
+- for `namespace=basenames`, address-name membership and relation facets derive from the admitted Base authority split rather than reverse-claim or transport state; `basenames_base_primary`, `basenames_l1_compat`, and `basenames_execution` do not add rows or widen relation semantics on this route
 - the `role_summary` expansion derives from the current item `resource_id` plus the existing resource-permissions truth family; it does not introduce a separate address-role ledger
 - `role_summary` groups the current `GET /v1/resources/{resource_id}/permissions` rows by `subject`; each grouped subject keeps the current `(scope, effective_powers)` pairs for that `resource_id`, while row-granular grant and revocation detail stays on the dedicated permissions route
 - `subname_count` counts the same declared direct child surfaces returned by `GET /v1/names/{namespace}/{name}/children` by default; it does not include linked, alias-derived, or wildcard-observed child buckets
@@ -677,6 +679,7 @@ Optional query parameters:
 Rules:
 
 - requesting `linked`, `alias`, or `wildcard` surface classes is reserved for additive expansion and currently returns `unsupported`
+- for `namespace=basenames`, declared direct child surfaces come from the admitted Base authority split only; `basenames_base_primary` claim intake, `basenames_l1_compat` transport, and shadow `basenames_execution` do not create child rows or widen supported `surface_classes`
 - `cursor` and `page_size` page over the frozen `display_name_asc` order only; they do not alter supported `surface_classes`, row shape, or coverage meaning
 
 ### `GET /v1/history/names/{namespace}/{name}`
@@ -927,6 +930,7 @@ Rules:
 - the first additive ENS wildcard-derived support class is the exact-surface class where `wildcard.source` is non-`null` with `matched_labels` non-empty, `resolver_path[0].logical_name_id` equals `wildcard.source.logical_name_id`, `alias.final_target=null` with `hops=[]`, `subregistry_path=[]`, and all `transport` fields are `null`
 - ENS verified requests outside the direct-path, alias-only, and wildcard-derived classes, including other non-alias ancestor-selected paths, linked-subregistry ancestor-selected paths, any transport-assisted path, and any request whose persisted execution used CCIP-Read, remain deferred and return `200` with `verified_queries[*].status=unsupported` for every requested selector
 - `namespace=basenames` verified requests remain bootstrap-scaffolded only in the shipped contract; until Base-side authority plus L1 compatibility transport are both wired into the verified plane, they return `200` with `verified_queries[*].status=unsupported` for every requested selector
+- that Basenames verified-only `unsupported` boundary does not change the declared read plane: exact-name, address-name, and children reads remain on the separate Base-side declared contract above
 - supported verified queries that execute but do not produce a trustworthy answer return `status=execution_failed` with `failure_reason`
 - for `mode=verified` or `mode=both`, top-level `provenance` includes the request-scoped execution trace summary and each `verified_queries[*]` item may carry narrower provenance for the specific selector result
 - the additive alias-only and wildcard-derived support classes, and the remaining support-boundary `unsupported` results, do not change the mixed route envelope, selector order, query parameters, the shared route-level `coverage` object, or the already-published machine-readable route shape in `docs/api-v1.openapi.json`
@@ -967,6 +971,7 @@ Rules:
 - the first additive ENS wildcard-derived support class uses the same exact-surface predicate as the mixed route: `wildcard.source` is non-`null` with `matched_labels` non-empty, `resolver_path[0].logical_name_id` equals `wildcard.source.logical_name_id`, `alias.final_target=null` with `hops=[]`, `subregistry_path=[]`, and all `transport` fields are `null`
 - `verified_state.execution.steps` is the ordered persisted step summary for the trace and must not be treated as raw calldata, raw gateway payloads, or a replayable execution dump
 - ENS paths outside the direct-path, alias-only, and wildcard-derived classes, any request whose persisted execution used CCIP-Read, and all `namespace=basenames` verified requests remain outside the shipped public explain surface until a later doc-first contract change broadens verified support; this route does not synthesize trace-shaped `unsupported` responses from declared topology or bootstrap execution scaffolding
+- for `namespace=basenames`, that `unsupported` clause applies to execution explain only; the separate declared exact-name explain routes remain on the Base-side declared read plane
 - the route does not trigger fresh execution and does not synthesize explanation from declared topology alone; if no persisted verified resolution answer exists for the requested current surface and explicit selector set, return `404 not_found`
 - for the same `{namespace}`, `{name}`, and `records` request, the top-level `coverage` object matches `GET /v1/resolutions/{namespace}/{name}`
 - the initial contract defines no `include` expansions for this route
@@ -1000,6 +1005,7 @@ Rules:
 - the shipped bootstrap route is head-only; it does not honor `at` or `consistency`, and additive snapshot-selector support remains pending
 - for ENS on Ethereum Mainnet, bootstrap declared `claimed_primary_name` handling is keyed by the exact `primary_names_current(address, coin_type, namespace)` row for the requested tuple; the route does not trigger a fresh reverse-claim lookup while serving that declared status-shaped response
 - for ENS on Ethereum Mainnet, the admitted claim state behind that row remains reverse-only through `ens_v1_reverse_l1` and contract role `reverse_registrar` at `0xa58E81fe9b61B5c3fE2AFD33CF304c454AbFc7Cb`
+- for Basenames on the shipped mainnet profile, the admitted primary-claim family is `basenames_base_primary` through contract role `reverse_registrar` at `0x79ea96012eea67a83431f1701b3dff7e37f9e282`; it remains claim intake only and does not replace the Base registry / registrar / resolver families as the declared truth for exact-name, address-name, or children reads
 - missing or unsupported ENS reverse claims do not trigger fallback to registry-, resolver-, or other claim-setting surfaces in the current contract
 - any fallback beyond that reverse-only ENS claim surface remains deferred and requires a later doc-first contract update; manifest presence alone does not widen the shipped precedence rule
 - in Phase 7, that reverse-only ENS claim precedence and bootstrap exact-tuple projection readback do not combine with resolver-backed name data or verification-derived identity to populate richer `claimed_primary_name` fields
@@ -1023,6 +1029,7 @@ Rules:
 - `primary_names_current(address, coin_type, namespace)` is the only admitted claim-side lookup / invalidation anchor for the current bootstrap declared handling and for the verified tuple; persisted claim-local inputs there may publish `claimed_primary_name.name` only through that exact requested row's declared normalized claim-identity source, and they still do not admit fallback-expanded claim sources or publish `verified_primary_name` fields beyond the separately frozen verified readback slice
 - in the shipped persisted-readback slice, `verified_primary_name.name` appears only for `status=success` or `status=mismatch`, where the route established a concrete normalized name target for verification
 - `claimed_primary_name.name` remains distinct from execution-derived `verified_primary_name.name`; this clarification does not change when `verified_primary_name.name` appears, and it does not by itself change route-level primary-name coverage, which stays bootstrap `unsupported` unless a separate doc-first coverage change lands
+- for `namespace=basenames`, claim intake does not collapse `claimed_primary_name` and `verified_primary_name` into one truth system: declared claim state stays route-local and claim-local, while verified state stays execution-local and must not be backfilled from Base authority reads
 - the mixed route continues to use the same already-published bootstrap envelope in `docs/api-v1.openapi.json`; this claimed-primary clarification does not widen query parameters, add snapshot handling, admit fallback claim sources, or change route-level coverage
 - `verified_primary_name` is authoritative only when `status=success`
 - `status=mismatch` applies only to `verified_primary_name` and remains reserved for the shipped persisted-readback verified result shape where the claim normalizes and resolves for the requested `coin_type`, but the verified target address does not equal the requested `{address}`
@@ -1032,6 +1039,7 @@ Rules:
 - an unsupported public namespace returns `404 not_found`
 - no declared or verified primary-name answer for the requested tuple returns `200` with `status=not_found`; it does not turn the route into `404`
 - unsupported claim surfaces or unsupported verified entrypoints return `200` with the corresponding object `status=unsupported`; for `verified_primary_name`, that same bootstrap fallback still applies to tuple-present reads that do not have a shipped persisted ENS exact-tuple readback
+- for `namespace=basenames`, `verified_primary_name` remains bootstrap-scaffolded only in the shipped contract; until Base-side authority plus L1 compatibility transport are both wired into the verified plane, return `200` with `verified_primary_name.status=unsupported`
 - top-level `provenance` summarizes the declared claim inputs and, when an execution-derived verified answer is present, the verification trace
 - top-level `provenance` is the only response-wide join between claim-side inputs and any persisted verification trace; `claimed_primary_name.provenance` and `verified_primary_name.provenance`, when present, must remain strict refinements of that top-level identity rather than a second route-level truth system
 - `claimed_primary_name.provenance` is exact-tuple declared provenance from the requested `primary_names_current(address, coin_type, namespace)` row; it must strip any `verified_primary_name_lookup` / `verified_primary_name_invalidation` hook material and must not include `execution_trace_id`

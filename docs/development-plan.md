@@ -385,6 +385,10 @@ Add Basenames as a first-class public namespace, using the same architecture rat
 - Base authority and L1 transport are clearly separated in provenance
 - Basenames transfer scenarios map correctly onto `ControlVector`
 
+### Shared-Interface Freezes
+
+- `phase8-basenames-read-plane-boundary-clarification`: the first public Basenames read-plane boundary is frozen across the shared docs, aligned to the existing six-family manifest split: exact-name, address-name, and children reads take declared truth from `basenames_base_registry`, `basenames_base_registrar`, and `basenames_base_resolver`; `basenames_base_primary` remains claim intake only; `claimed_primary_name` and `verified_primary_name` stay distinct route-local objects; and public Basenames verified plus execution-explain reads remain explicit unsupported until both the admitted Base authority families and `basenames_l1_compat` transport are wired end-to-end
+
 ---
 
 ## 12. Phase 9: Reorg, Replay, And Backfill

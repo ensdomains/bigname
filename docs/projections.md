@@ -35,6 +35,7 @@ History reads use normalized events plus thin cursor support rather than a separ
 
 - keyed by `logical_name_id`
 - authoritative for supported source classes
+- for `namespace=basenames`, `name_current` remains a Base-authority read family: exact-name declared truth comes from `basenames_base_registry`, `basenames_base_registrar`, and `basenames_base_resolver`; `basenames_base_primary` is claim-intake-only, and `basenames_l1_compat` plus `basenames_execution` do not become alternate exact-name truth
 - returns the current binding plus fixed declared summary sections for registration, authority, control, resolver, record inventory, and history
 - unsupported declared summary sections stay explicit in the read model; they are not omitted silently
 - authority may fall back to binding identifiers when a richer authority summary is not yet projected
@@ -55,6 +56,7 @@ History reads use normalized events plus thin cursor support rather than a separ
 ### Address to names
 
 - default unit is the surface, not the resource
+- for `namespace=basenames`, `address_names_current` membership and relation facets derive from the same Base-side authority/control truth as exact-name lookup; reverse-claim intake and L1 compatibility transport do not create membership rows or widen relation facets
 - the initial declared-state relation vocabulary is `registrant`, `token_holder`, and `effective_controller`
 - callers may request `dedupe_by=resource`
 - default sort is `display_name_asc`
@@ -69,6 +71,7 @@ History reads use normalized events plus thin cursor support rather than a separ
 ### Name to children
 
 - default unit is declared direct child surfaces
+- for `namespace=basenames`, `children_current` remains a Base-authority family: declared direct child rows come from the admitted Base registry / registrar / resolver split, not from primary-claim intake or L1 compatibility transport
 - linked, alias-derived, and wildcard-observed children are separate `surface_class` buckets
 - default sort is `display_name_asc`
 
@@ -116,7 +119,9 @@ History reads use normalized events plus thin cursor support rather than a separ
 - keyed by `(address, coin_type, namespace)`
 - serves the exact-tuple declared claim anchor plus the invalidation context needed for current bootstrap handling and any later additive claimed-local readback
 - for ENS on Ethereum Mainnet, the current declared claim precedence is reverse-only through `ens_v1_reverse_l1`; missing or unsupported reverse claims do not trigger fallback to registry-, resolver-, or other claim-setting surfaces, and admitting those fallback sources remains deferred
+- for Basenames on the shipped mainnet profile, `basenames_base_primary` is the declared primary-claim intake owner only; `primary_names_current(address, coin_type, namespace)` may carry claim-local lookup and invalidation inputs for that intake, but it does not become the declared truth family for exact-name, address-name, or children reads
 - the route-level `claimed_primary_name` and `verified_primary_name` objects share the API `ResultStatus` vocabulary, but they do not collapse declared claim state and verified execution state into one projection-owned field
+- for Basenames as well as ENS, projection-owned claim state and execution-owned verification state stay distinct: Base authority projections do not synthesize public primary-name payloads from exact-name/address-name/children truth, and `primary_names_current` does not persist or backfill `verified_primary_name`
 - projection-owned `claimed_primary_name` is limited to the declared subset `success|not_found|unsupported|invalid_name`; richer claimed payload fields remain additive-only except exact-tuple declared `claimed_primary_name.name`, exact-tuple declared `claimed_primary_name.provenance`, and the exact-tuple `invalid_name` `raw_claim_name` allowance
 - for ENS on Ethereum Mainnet in Phase 7, the shipped projection is the exact-tuple claim anchor plus declared claim-side inputs only: reverse tuple admission supplies lookup and invalidation state, and it does not join resolver-backed or execution-derived name identity into public `claimed_primary_name` fields
 - `primary_names_current(address, coin_type, namespace)` is the frozen exact-tuple claim-side lookup / invalidation anchor only for this route family; it owns the declared claim-side inputs and invalidation context for the requested tuple, not verified result publication
