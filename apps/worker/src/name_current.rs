@@ -18,7 +18,11 @@ use sqlx::{
 use uuid::Uuid;
 
 const ENS_NAMESPACE: &str = "ens";
+const BASENAMES_NAMESPACE: &str = "basenames";
 const ENS_V1_AUTHORITY_DERIVATION_KIND: &str = "ens_v1_unwrapped_authority";
+const SOURCE_FAMILY_BASENAMES_BASE_REGISTRAR: &str = "basenames_base_registrar";
+const SOURCE_FAMILY_BASENAMES_BASE_REGISTRY: &str = "basenames_base_registry";
+const SOURCE_FAMILY_BASENAMES_BASE_RESOLVER: &str = "basenames_base_resolver";
 const NAME_CURRENT_DERIVATION_KIND: &str = "name_current_rebuild";
 const EVENT_KIND_RESOLVER_CHANGED: &str = "ResolverChanged";
 const RECORD_INVENTORY_UNSUPPORTED_REASON: &str =
@@ -196,7 +200,7 @@ async fn rebuild_one_name_current(
 
 async fn build_name_current_row(pool: &PgPool, name: &NameSurfaceSeed) -> Result<NameCurrentRow> {
     let current_binding = load_current_binding_context(pool, &name.logical_name_id).await?;
-    let events = load_relevant_events(pool, &name.logical_name_id).await?;
+    let events = load_relevant_events(pool, name).await?;
     let history_heads = load_history_heads(pool, &name.logical_name_id).await?;
     let facts = project_facts(&events, current_binding.as_ref(), &history_heads)?;
     let chain_positions =
@@ -232,7 +236,7 @@ async fn build_name_current_row(pool: &PgPool, name: &NameSurfaceSeed) -> Result
         coverage: json!({
             "status": "full",
             "exhaustiveness": "authoritative",
-            "source_classes_considered": ["ensv1_registry_path"],
+            "source_classes_considered": exact_name_coverage_source_classes(&name.namespace),
             "unsupported_reason": Value::Null,
             "enumeration_basis": "exact_name",
         }),
@@ -773,51 +777,110 @@ async fn load_current_binding_context(
     row.map(decode_current_binding_context).transpose()
 }
 
-async fn load_relevant_events(pool: &PgPool, logical_name_id: &str) -> Result<Vec<RelevantEvent>> {
+async fn load_relevant_events(pool: &PgPool, name: &NameSurfaceSeed) -> Result<Vec<RelevantEvent>> {
     let event_kinds = RELEVANT_EVENT_KINDS
         .iter()
         .map(|kind| (*kind).to_owned())
         .collect::<Vec<_>>();
-    let rows = sqlx::query(&format!(
-        r#"
-        SELECT
-            ne.normalized_event_id,
-            ne.resource_id,
-            ne.event_kind,
-            ne.source_family,
-            ne.manifest_version,
-            ne.source_manifest_id,
-            ne.chain_id,
-            ne.block_number,
-            ne.block_hash,
-            rb.block_timestamp,
-            ne.raw_fact_ref,
-            ne.canonicality_state::TEXT AS canonicality_state,
-            ne.after_state
-        FROM normalized_events ne
-        LEFT JOIN raw_blocks rb
-          ON rb.chain_id = ne.chain_id
-         AND rb.block_hash = ne.block_hash
-        WHERE ne.namespace = $1
-          AND ne.logical_name_id = $2
-          AND ne.derivation_kind = $3
-          AND ne.event_kind = ANY($4::TEXT[])
-          AND ne.canonicality_state {CANONICAL_STATE_FILTER}
-        ORDER BY
-            ne.block_number NULLS FIRST,
-            COALESCE(ne.log_index, 2147483647),
-            ne.event_identity
-        "#
-    ))
-    .bind(ENS_NAMESPACE)
-    .bind(logical_name_id)
-    .bind(ENS_V1_AUTHORITY_DERIVATION_KIND)
-    .bind(&event_kinds)
-    .fetch_all(pool)
-    .await
-    .with_context(|| format!("failed to load ENSv1 normalized events for {logical_name_id}"))?;
+    let rows = if name.namespace == BASENAMES_NAMESPACE {
+        let source_families = [
+            SOURCE_FAMILY_BASENAMES_BASE_REGISTRAR.to_owned(),
+            SOURCE_FAMILY_BASENAMES_BASE_REGISTRY.to_owned(),
+            SOURCE_FAMILY_BASENAMES_BASE_RESOLVER.to_owned(),
+        ];
+        sqlx::query(&format!(
+            r#"
+            SELECT
+                ne.normalized_event_id,
+                ne.resource_id,
+                ne.event_kind,
+                ne.source_family,
+                ne.manifest_version,
+                ne.source_manifest_id,
+                ne.chain_id,
+                ne.block_number,
+                ne.block_hash,
+                rb.block_timestamp,
+                ne.raw_fact_ref,
+                ne.canonicality_state::TEXT AS canonicality_state,
+                ne.after_state
+            FROM normalized_events ne
+            LEFT JOIN raw_blocks rb
+              ON rb.chain_id = ne.chain_id
+             AND rb.block_hash = ne.block_hash
+            WHERE ne.namespace = $1
+              AND ne.logical_name_id = $2
+              AND ne.derivation_kind = $3
+              AND ne.event_kind = ANY($4::TEXT[])
+              AND ne.source_family = ANY($5::TEXT[])
+              AND ne.canonicality_state {CANONICAL_STATE_FILTER}
+            ORDER BY
+                ne.block_number NULLS FIRST,
+                COALESCE(ne.log_index, 2147483647),
+                ne.event_identity
+            "#
+        ))
+        .bind(&name.namespace)
+        .bind(&name.logical_name_id)
+        .bind(ENS_V1_AUTHORITY_DERIVATION_KIND)
+        .bind(&event_kinds)
+        .bind(&source_families)
+        .fetch_all(pool)
+        .await
+    } else {
+        sqlx::query(&format!(
+            r#"
+            SELECT
+                ne.normalized_event_id,
+                ne.resource_id,
+                ne.event_kind,
+                ne.source_family,
+                ne.manifest_version,
+                ne.source_manifest_id,
+                ne.chain_id,
+                ne.block_number,
+                ne.block_hash,
+                rb.block_timestamp,
+                ne.raw_fact_ref,
+                ne.canonicality_state::TEXT AS canonicality_state,
+                ne.after_state
+            FROM normalized_events ne
+            LEFT JOIN raw_blocks rb
+              ON rb.chain_id = ne.chain_id
+             AND rb.block_hash = ne.block_hash
+            WHERE ne.namespace = $1
+              AND ne.logical_name_id = $2
+              AND ne.derivation_kind = $3
+              AND ne.event_kind = ANY($4::TEXT[])
+              AND ne.canonicality_state {CANONICAL_STATE_FILTER}
+            ORDER BY
+                ne.block_number NULLS FIRST,
+                COALESCE(ne.log_index, 2147483647),
+                ne.event_identity
+            "#
+        ))
+        .bind(&name.namespace)
+        .bind(&name.logical_name_id)
+        .bind(ENS_V1_AUTHORITY_DERIVATION_KIND)
+        .bind(&event_kinds)
+        .fetch_all(pool)
+        .await
+    }
+    .with_context(|| {
+        format!(
+            "failed to load authority normalized events for {}",
+            name.logical_name_id
+        )
+    })?;
 
     rows.into_iter().map(decode_relevant_event).collect()
+}
+
+fn exact_name_coverage_source_classes(namespace: &str) -> &'static [&'static str] {
+    match namespace {
+        ENS_NAMESPACE | BASENAMES_NAMESPACE => &["ensv1_registry_path"],
+        _ => &[],
+    }
 }
 
 fn decode_name_surface_seed(row: sqlx::postgres::PgRow) -> Result<NameSurfaceSeed> {
@@ -1440,6 +1503,121 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rebuild_projects_basenames_base_authority_into_name_current() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let binding = IdentityBinding::new(
+            "basenames:alice.base.eth",
+            "alice.base.eth",
+            0x4401,
+            0x4402,
+            0x4403,
+        );
+
+        seed_raw_blocks(
+            database.pool(),
+            &[
+                raw_block("base-mainnet", "0xbase-surface", 500, 1_717_172_500),
+                raw_block("base-mainnet", "0xbase-grant", 501, 1_717_172_501),
+                raw_block("base-mainnet", "0xbase-transfer", 502, 1_717_172_502),
+                raw_block("base-mainnet", "0xbase-resolver", 503, 1_717_172_503),
+            ],
+        )
+        .await?;
+        seed_basenames_identity(
+            database.pool(),
+            &binding,
+            "0xbase-grant",
+            501,
+            1_717_172_501,
+        )
+        .await?;
+        seed_events(
+            database.pool(),
+            &[
+                basenames_authority_event(
+                    &binding,
+                    "base-grant",
+                    "RegistrationGranted",
+                    SOURCE_FAMILY_BASENAMES_BASE_REGISTRAR,
+                    "0xbase-grant",
+                    501,
+                    Some(0),
+                    json!({}),
+                    json!({
+                        "authority_kind": "registrar",
+                        "authority_key": "registrar:base-mainnet:alice",
+                        "registrant": "0x0000000000000000000000000000000000000aaa",
+                        "expiry": 1_900_000_000_i64,
+                    }),
+                ),
+                basenames_authority_event(
+                    &binding,
+                    "base-transfer",
+                    "AuthorityTransferred",
+                    SOURCE_FAMILY_BASENAMES_BASE_REGISTRY,
+                    "0xbase-transfer",
+                    502,
+                    Some(0),
+                    json!({}),
+                    json!({
+                        "owner": "0x0000000000000000000000000000000000000bbb",
+                    }),
+                ),
+                basenames_resolver_event(
+                    &binding,
+                    "base-resolver",
+                    "0x0000000000000000000000000000000000000abc",
+                    "0xbase-resolver",
+                    503,
+                    0,
+                ),
+            ],
+        )
+        .await?;
+
+        rebuild_name_current(database.pool(), Some(&binding.logical_name_id)).await?;
+
+        let row = load_name_current(database.pool(), &binding.logical_name_id)
+            .await?
+            .context("rebuilt basenames row must exist")?;
+        assert_eq!(row.namespace, BASENAMES_NAMESPACE);
+        assert_eq!(row.surface_binding_id, Some(binding.surface_binding_id));
+        assert_eq!(row.resource_id, Some(binding.resource_id));
+        assert_eq!(row.token_lineage_id, Some(binding.token_lineage_id));
+        assert_eq!(
+            row.declared_summary["registration"]["status"],
+            Value::String("active".to_owned())
+        );
+        assert_eq!(
+            row.declared_summary["registration"]["authority_key"],
+            Value::String("registrar:base-mainnet:alice".to_owned())
+        );
+        assert_eq!(
+            row.declared_summary["control"]["registry_owner"],
+            Value::String("0x0000000000000000000000000000000000000bbb".to_owned())
+        );
+        assert_eq!(
+            row.declared_summary["resolver"],
+            json!({
+                "chain_id": "base-mainnet",
+                "address": "0x0000000000000000000000000000000000000abc",
+                "latest_event_kind": EVENT_KIND_RESOLVER_CHANGED,
+            })
+        );
+        assert_eq!(
+            row.coverage["source_classes_considered"],
+            json!(["ensv1_registry_path"])
+        );
+        assert_eq!(
+            row.chain_positions["base"]["chain_id"],
+            Value::String("base-mainnet".to_owned())
+        );
+        assert_eq!(row.coverage["unsupported_reason"], Value::Null);
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
     async fn rebuild_keeps_same_binding_for_renewal_and_transfer() -> Result<()> {
         let database = TestDatabase::new().await?;
         let binding = IdentityBinding::new("ens:alice.eth", "alice.eth", 0x4100, 0x4200, 0x4300);
@@ -2040,6 +2218,80 @@ mod tests {
         Ok(())
     }
 
+    async fn seed_basenames_identity(
+        pool: &PgPool,
+        binding: &IdentityBinding,
+        block_hash: &str,
+        block_number: i64,
+        _block_timestamp: i64,
+    ) -> Result<()> {
+        upsert_token_lineages(
+            pool,
+            &[TokenLineage {
+                token_lineage_id: binding.token_lineage_id,
+                chain_id: "base-mainnet".to_owned(),
+                block_hash: block_hash.to_owned(),
+                block_number,
+                provenance: json!({"source": "worker_name_current_test", "kind": "token_lineage"}),
+                canonicality_state: CanonicalityState::Finalized,
+            }],
+        )
+        .await?;
+        upsert_resources(
+            pool,
+            &[Resource {
+                resource_id: binding.resource_id,
+                token_lineage_id: Some(binding.token_lineage_id),
+                chain_id: "base-mainnet".to_owned(),
+                block_hash: block_hash.to_owned(),
+                block_number,
+                provenance: json!({"source": "worker_name_current_test", "kind": "resource"}),
+                canonicality_state: CanonicalityState::Finalized,
+            }],
+        )
+        .await?;
+        upsert_name_surfaces(
+            pool,
+            &[NameSurface {
+                logical_name_id: binding.logical_name_id.clone(),
+                namespace: BASENAMES_NAMESPACE.to_owned(),
+                input_name: binding.display_name.clone(),
+                canonical_display_name: "Alice.base.eth".to_owned(),
+                normalized_name: binding.display_name.clone(),
+                dns_encoded_name: binding.display_name.as_bytes().to_vec(),
+                namehash: format!("namehash:{}", binding.display_name),
+                labelhashes: vec![format!("labelhash:{}", binding.display_name)],
+                normalizer_version: "ensip15@2026-04-16".to_owned(),
+                normalization_warnings: json!([]),
+                normalization_errors: json!([]),
+                chain_id: "base-mainnet".to_owned(),
+                block_hash: "0xbase-surface".to_owned(),
+                block_number: 500,
+                provenance: json!({"source": "worker_name_current_test", "kind": "name_surface"}),
+                canonicality_state: CanonicalityState::Finalized,
+            }],
+        )
+        .await?;
+        upsert_surface_bindings(
+            pool,
+            &[SurfaceBinding {
+                surface_binding_id: binding.surface_binding_id,
+                logical_name_id: binding.logical_name_id.clone(),
+                resource_id: binding.resource_id,
+                binding_kind: SurfaceBindingKind::DeclaredRegistryPath,
+                active_from: timestamp(1_717_172_501),
+                active_to: None,
+                chain_id: "base-mainnet".to_owned(),
+                block_hash: block_hash.to_owned(),
+                block_number,
+                provenance: json!({"source": "worker_name_current_test", "kind": "surface_binding"}),
+                canonicality_state: CanonicalityState::Finalized,
+            }],
+        )
+        .await?;
+        Ok(())
+    }
+
     async fn seed_raw_blocks(pool: &PgPool, blocks: &[RawBlock]) -> Result<()> {
         upsert_raw_blocks(pool, blocks).await?;
         Ok(())
@@ -2210,6 +2462,86 @@ mod tests {
             raw_fact_ref: json!({
                 "kind": "raw_log",
                 "chain_id": "ethereum-mainnet",
+                "block_hash": block_hash,
+                "block_number": block_number,
+                "transaction_hash": format!("tx:{identity_suffix}"),
+                "log_index": log_index,
+            }),
+            derivation_kind: ENS_V1_AUTHORITY_DERIVATION_KIND.to_owned(),
+            canonicality_state: CanonicalityState::Finalized,
+            before_state: json!({}),
+            after_state: json!({
+                "resolver": resolver_address,
+                "namehash": format!("namehash:{}", binding.display_name),
+            }),
+        }
+    }
+
+    fn basenames_authority_event(
+        binding: &IdentityBinding,
+        identity_suffix: &str,
+        event_kind: &str,
+        source_family: &str,
+        block_hash: &str,
+        block_number: i64,
+        log_index: Option<i64>,
+        before_state: Value,
+        after_state: Value,
+    ) -> NormalizedEvent {
+        NormalizedEvent {
+            event_identity: format!("worker-test:{event_kind}:{identity_suffix}"),
+            namespace: BASENAMES_NAMESPACE.to_owned(),
+            logical_name_id: Some(binding.logical_name_id.clone()),
+            resource_id: Some(binding.resource_id),
+            event_kind: event_kind.to_owned(),
+            source_family: source_family.to_owned(),
+            manifest_version: 3,
+            source_manifest_id: None,
+            chain_id: Some("base-mainnet".to_owned()),
+            block_number: Some(block_number),
+            block_hash: Some(block_hash.to_owned()),
+            transaction_hash: Some(format!("tx:{identity_suffix}")),
+            log_index,
+            raw_fact_ref: json!({
+                "kind": "raw_log",
+                "chain_id": "base-mainnet",
+                "block_hash": block_hash,
+                "block_number": block_number,
+                "transaction_hash": format!("tx:{identity_suffix}"),
+                "log_index": log_index,
+            }),
+            derivation_kind: ENS_V1_AUTHORITY_DERIVATION_KIND.to_owned(),
+            canonicality_state: CanonicalityState::Finalized,
+            before_state,
+            after_state,
+        }
+    }
+
+    fn basenames_resolver_event(
+        binding: &IdentityBinding,
+        identity_suffix: &str,
+        resolver_address: &str,
+        block_hash: &str,
+        block_number: i64,
+        log_index: i64,
+    ) -> NormalizedEvent {
+        NormalizedEvent {
+            event_identity: format!("worker-test:{EVENT_KIND_RESOLVER_CHANGED}:{identity_suffix}"),
+            namespace: BASENAMES_NAMESPACE.to_owned(),
+            logical_name_id: Some(binding.logical_name_id.clone()),
+            resource_id: Some(binding.resource_id),
+            event_kind: EVENT_KIND_RESOLVER_CHANGED.to_owned(),
+            source_family: SOURCE_FAMILY_BASENAMES_BASE_RESOLVER.to_owned(),
+            manifest_version: 4,
+            source_manifest_id: None,
+            chain_id: Some("base-mainnet".to_owned()),
+            block_number: Some(block_number),
+            block_hash: Some(block_hash.to_owned()),
+            transaction_hash: Some(format!("tx:{identity_suffix}")),
+            log_index: Some(log_index),
+            raw_fact_ref: json!({
+                "kind": "raw_log",
+                "chain_id": "base-mainnet",
                 "block_hash": block_hash,
                 "block_number": block_number,
                 "transaction_hash": format!("tx:{identity_suffix}"),
