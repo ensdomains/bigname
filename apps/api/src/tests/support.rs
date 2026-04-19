@@ -2845,11 +2845,22 @@ fn primary_name_execution_requested_chain_positions() -> Value {
     }])
 }
 
+fn primary_name_execution_manifest_versions_for_namespace(namespace: &str) -> Value {
+    match namespace {
+        "ens" => json!([{
+            "manifest_version": 3,
+            "source_family": "ens_execution"
+        }]),
+        "basenames" => json!([{
+            "manifest_version": 4,
+            "source_family": "basenames_execution"
+        }]),
+        other => panic!("unsupported primary-name test namespace {other}"),
+    }
+}
+
 fn primary_name_execution_manifest_versions() -> Value {
-    json!([{
-        "manifest_version": 3,
-        "source_family": "ens_v1_registry"
-    }])
+    primary_name_execution_manifest_versions_for_namespace("ens")
 }
 
 fn primary_name_execution_request_key(namespace: &str, address: &str, coin_type: &str) -> String {
@@ -2865,6 +2876,152 @@ fn primary_name_execution_trace(
     finished_at: OffsetDateTime,
 ) -> ExecutionTrace {
     let normalized_address = address.to_ascii_lowercase();
+    let manifest_versions = primary_name_execution_manifest_versions_for_namespace(namespace);
+    let status = verified_primary_name
+        .get("status")
+        .and_then(Value::as_str)
+        .expect("verified_primary_name payload must include string status");
+    let (contracts_called, gateway_digests, steps) = match (namespace, status) {
+        ("ens", "success" | "mismatch" | "execution_failed") => (
+            json!([{
+                "chain_id": "ethereum-mainnet",
+                "contract_address": "0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe",
+                "selector": "0x9061b923"
+            }]),
+            json!([]),
+            vec![ExecutionTraceStep {
+                step_index: 0,
+                step_kind: "call_universal_resolver".to_owned(),
+                input_digest: Some("sha256:primary-input".to_owned()),
+                output_digest: Some("sha256:primary-output".to_owned()),
+                latency_ms: Some(14),
+                canonicality_dependency: json!({
+                    "ethereum-mainnet": {
+                        "block_hash": "0xprimary",
+                        "block_number": 21_000_010,
+                        "state": "finalized"
+                    }
+                }),
+                step_payload: json!({
+                    "address": normalized_address,
+                    "coin_type": coin_type
+                }),
+            }],
+        ),
+        ("basenames", "success" | "mismatch" | "execution_failed") => (
+            json!([{
+                "chain_id": "ethereum-mainnet",
+                "contract_address": "0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31",
+                "selector": "0x9061b923"
+            }]),
+            json!(["sha256:basenames-primary-name"]),
+            vec![
+                ExecutionTraceStep {
+                    step_index: 0,
+                    step_kind: "call_l1_resolver".to_owned(),
+                    input_digest: Some("sha256:primary-input".to_owned()),
+                    output_digest: Some("sha256:primary-output".to_owned()),
+                    latency_ms: Some(14),
+                    canonicality_dependency: json!({
+                        "ethereum-mainnet": {
+                            "block_hash": "0xprimary",
+                            "block_number": 21_000_010,
+                            "state": "finalized"
+                        }
+                    }),
+                    step_payload: json!({
+                        "address": normalized_address,
+                        "coin_type": coin_type
+                    }),
+                },
+                ExecutionTraceStep {
+                    step_index: 1,
+                    step_kind: "complete_offchain_lookup".to_owned(),
+                    input_digest: Some("sha256:gateway-input".to_owned()),
+                    output_digest: Some("sha256:gateway-output".to_owned()),
+                    latency_ms: Some(19),
+                    canonicality_dependency: json!({
+                        "ethereum-mainnet": {
+                            "block_hash": "0xprimary",
+                            "block_number": 21_000_010,
+                            "state": "finalized"
+                        }
+                    }),
+                    step_payload: json!({
+                        "gateway": "https://basenames.example.test"
+                    }),
+                },
+            ],
+        ),
+        ("ens" | "basenames", "not_found") => (
+            json!([]),
+            json!([]),
+            vec![ExecutionTraceStep {
+                step_index: 0,
+                step_kind: "load_primary_name_claim".to_owned(),
+                input_digest: Some("sha256:claim-input".to_owned()),
+                output_digest: Some("sha256:claim-output".to_owned()),
+                latency_ms: Some(2),
+                canonicality_dependency: json!({
+                    "ethereum-mainnet": {
+                        "block_hash": "0xprimary",
+                        "block_number": 21_000_010,
+                        "state": "finalized"
+                    }
+                }),
+                step_payload: json!({
+                    "address": normalized_address,
+                    "coin_type": coin_type
+                }),
+            }],
+        ),
+        ("ens" | "basenames", "invalid_name") => (
+            json!([]),
+            json!([]),
+            vec![
+                ExecutionTraceStep {
+                    step_index: 0,
+                    step_kind: "load_primary_name_claim".to_owned(),
+                    input_digest: Some("sha256:claim-input".to_owned()),
+                    output_digest: Some("sha256:claim-output".to_owned()),
+                    latency_ms: Some(2),
+                    canonicality_dependency: json!({
+                        "ethereum-mainnet": {
+                            "block_hash": "0xprimary",
+                            "block_number": 21_000_010,
+                            "state": "finalized"
+                        }
+                    }),
+                    step_payload: json!({
+                        "address": normalized_address,
+                        "coin_type": coin_type
+                    }),
+                },
+                ExecutionTraceStep {
+                    step_index: 1,
+                    step_kind: "normalize_claimed_name".to_owned(),
+                    input_digest: Some("sha256:normalize-input".to_owned()),
+                    output_digest: Some("sha256:normalize-output".to_owned()),
+                    latency_ms: Some(1),
+                    canonicality_dependency: json!({
+                        "ethereum-mainnet": {
+                            "block_hash": "0xprimary",
+                            "block_number": 21_000_010,
+                            "state": "finalized"
+                        }
+                    }),
+                    step_payload: json!({
+                        "normalizer_version": "uts46-v1",
+                        "error": "claim_name_not_normalizable"
+                    }),
+                },
+            ],
+        ),
+        (other, _) if other != "ens" && other != "basenames" => {
+            panic!("unsupported primary-name test namespace {other}")
+        }
+        (_, other) => panic!("unsupported primary-name test status {other}"),
+    };
     ExecutionTrace {
         execution_trace_id,
         request_type: bigname_storage::VERIFIED_PRIMARY_NAME_REQUEST_TYPE.to_owned(),
@@ -2874,14 +3031,10 @@ fn primary_name_execution_trace(
             "requested_positions": primary_name_execution_requested_chain_positions(),
         }),
         manifest_context: json!({
-            "manifest_versions": primary_name_execution_manifest_versions(),
+            "manifest_versions": manifest_versions,
         }),
-        contracts_called: json!([{
-            "chain_id": "ethereum-mainnet",
-            "contract_address": "0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe",
-            "selector": "0x9061b923"
-        }]),
-        gateway_digests: json!([]),
+        contracts_called,
+        gateway_digests,
         final_payload: Some(json!({
             "verified_primary_name": verified_primary_name.clone()
         })),
@@ -2892,24 +3045,7 @@ fn primary_name_execution_trace(
             "namespace": namespace
         }),
         finished_at: Some(finished_at),
-        steps: vec![ExecutionTraceStep {
-            step_index: 0,
-            step_kind: "call_universal_resolver".to_owned(),
-            input_digest: Some("sha256:primary-input".to_owned()),
-            output_digest: Some("sha256:primary-output".to_owned()),
-            latency_ms: Some(14),
-            canonicality_dependency: json!({
-                "ethereum-mainnet": {
-                    "block_hash": "0xprimary",
-                    "block_number": 21_000_010,
-                    "state": "finalized"
-                }
-            }),
-            step_payload: json!({
-                "address": normalized_address,
-                "coin_type": coin_type
-            }),
-        }],
+        steps,
     }
 }
 
@@ -2930,7 +3066,7 @@ fn primary_name_execution_outcome(
                 coin_type,
             ),
             requested_chain_positions: primary_name_execution_requested_chain_positions(),
-            manifest_versions: primary_name_execution_manifest_versions(),
+            manifest_versions: primary_name_execution_manifest_versions_for_namespace(namespace),
             topology_version_boundary: record_inventory_boundary(
                 "ens:alice.eth",
                 Uuid::from_u128(0x0e7ec7ace0000000000000000000bbb1),

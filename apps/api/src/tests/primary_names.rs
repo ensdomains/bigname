@@ -879,6 +879,448 @@ async fn get_primary_names_reads_persisted_verified_primary_name_for_exact_tuple
 }
 
 #[tokio::test]
+async fn get_primary_names_reads_persisted_basenames_verified_primary_name_for_exact_tuple()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000bcd";
+    let execution_trace_id = Uuid::from_u128(0x0e7ec7ace0000000000000000000004a);
+    let finished_at = timestamp(1_717_172_410);
+    let verified_primary_name = json!({
+        "status": "success",
+        "name": {
+            "logical_name_id": "basenames:alice.base.eth",
+            "namespace": "basenames",
+            "normalized_name": "alice.base.eth",
+            "canonical_display_name": "Alice.base.eth",
+            "namehash": "0x0000000000000000000000000000000000000000000000000000000000000b45",
+            "resource_id": "00000000-0000-0000-0000-000000000654",
+            "binding_kind": "declared_registry_path"
+        }
+    });
+
+    upsert_normalized_events(
+        &database.pool,
+        &[
+            basenames_primary_name_reverse_changed_event(
+                "basenames-reverse-b-60",
+                address,
+                "60",
+                360,
+                0,
+                CanonicalityState::Canonical,
+            ),
+            basenames_primary_name_reverse_linked_name_event(
+                "basenames-record-b-60-success",
+                address,
+                "60",
+                Some("Alice.base.eth"),
+                361,
+                0,
+                CanonicalityState::Canonical,
+            ),
+        ],
+    )
+    .await?;
+    worker_primary_name::rebuild_primary_names_current(
+        &database.pool,
+        Some(address),
+        Some("basenames"),
+        Some("60"),
+    )
+    .await?;
+
+    let trace = primary_name_execution_trace(
+        execution_trace_id,
+        "basenames",
+        address,
+        "60",
+        verified_primary_name.clone(),
+        finished_at,
+    );
+    let outcome = primary_name_execution_outcome(
+        execution_trace_id,
+        "basenames",
+        address,
+        "60",
+        verified_primary_name.clone(),
+        finished_at,
+    );
+    upsert_execution_trace(&database.pool, &trace).await?;
+    upsert_execution_outcome(&database.pool, &outcome).await?;
+
+    let verified_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/primary-names/{address}?namespace=basenames&coin_type=60&mode=verified"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("verified basenames primary-name persisted readback request failed")?;
+    let both_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/primary-names/{address}?namespace=basenames&coin_type=60&mode=both"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("mixed basenames primary-name persisted readback request failed")?;
+
+    assert_eq!(verified_response.status(), StatusCode::OK);
+    assert_eq!(both_response.status(), StatusCode::OK);
+
+    let verified_payload: PrimaryNameResponse = read_json(verified_response).await?;
+    let both_payload: PrimaryNameResponse = read_json(both_response).await?;
+    let verified_section_provenance = json!({
+        "manifest_versions": primary_name_execution_manifest_versions_for_namespace("basenames"),
+        "execution_trace_id": execution_trace_id.to_string(),
+    });
+
+    assert_eq!(verified_payload.declared_state, None);
+    assert_eq!(
+        verified_payload.verified_state,
+        Some(json!({
+            "verified_primary_name": {
+                "status": "success",
+                "name": {
+                    "logical_name_id": "basenames:alice.base.eth",
+                    "namespace": "basenames",
+                    "normalized_name": "alice.base.eth",
+                    "canonical_display_name": "Alice.base.eth",
+                    "namehash": "0x0000000000000000000000000000000000000000000000000000000000000b45",
+                    "resource_id": "00000000-0000-0000-0000-000000000654",
+                    "binding_kind": "declared_registry_path"
+                },
+                "provenance": verified_section_provenance.clone(),
+            }
+        }))
+    );
+    assert_eq!(
+        both_payload.declared_state,
+        Some(json!({
+            "claimed_primary_name": {
+                "status": "success",
+                "name": "alice.base.eth",
+                "provenance": {
+                    "source_family": "basenames_base_primary",
+                    "contract_role": "reverse_registrar",
+                    "contract_instance_id": "00000000-0000-0000-0000-000000000168",
+                    "emitting_address": "0x00000000000000000000000000000000000000ad",
+                },
+            }
+        }))
+    );
+    assert_eq!(both_payload.verified_state, verified_payload.verified_state);
+    assert_eq!(
+        verified_payload.provenance,
+        json!({
+            "normalized_event_ids": [],
+            "raw_fact_refs": [],
+            "manifest_versions": primary_name_execution_manifest_versions_for_namespace("basenames"),
+            "execution_trace_id": execution_trace_id.to_string(),
+            "derivation_kind": "primary_name_route_bootstrap",
+        })
+    );
+    assert_eq!(both_payload.provenance, verified_payload.provenance);
+    assert_eq!(
+        verified_payload.coverage,
+        json!({
+            "status": "unsupported",
+            "exhaustiveness": "not_applicable",
+            "source_classes_considered": [],
+            "enumeration_basis": "primary_name_lookup",
+            "unsupported_reason": "primary-name coverage is not yet supported",
+        })
+    );
+    assert_eq!(both_payload.coverage, verified_payload.coverage);
+    assert_eq!(verified_payload.last_updated, "2024-05-31T16:20:10Z");
+    assert_eq!(both_payload.last_updated, "2024-05-31T16:20:10Z");
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_primary_names_reads_persisted_basenames_verified_primary_name_not_found_without_l1_resolver_call()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000bce";
+    let execution_trace_id = Uuid::from_u128(0x0e7ec7ace0000000000000000000004b);
+    let finished_at = timestamp(1_717_172_411);
+    let verified_primary_name = json!({
+        "status": "not_found"
+    });
+
+    database
+        .insert_primary_name_current_claim_row(
+            address,
+            "basenames",
+            "60",
+            PrimaryNameClaimStatus::NotFound,
+            None,
+        )
+        .await?;
+
+    let trace = primary_name_execution_trace(
+        execution_trace_id,
+        "basenames",
+        address,
+        "60",
+        verified_primary_name.clone(),
+        finished_at,
+    );
+    let outcome = primary_name_execution_outcome(
+        execution_trace_id,
+        "basenames",
+        address,
+        "60",
+        verified_primary_name,
+        finished_at,
+    );
+    upsert_execution_trace(&database.pool, &trace).await?;
+    upsert_execution_outcome(&database.pool, &outcome).await?;
+
+    let verified_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/primary-names/{address}?namespace=basenames&coin_type=60&mode=verified"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("verified basenames not_found primary-name request failed")?;
+    let both_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/primary-names/{address}?namespace=basenames&coin_type=60&mode=both"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("mixed basenames not_found primary-name request failed")?;
+
+    assert_eq!(verified_response.status(), StatusCode::OK);
+    assert_eq!(both_response.status(), StatusCode::OK);
+
+    let verified_payload: PrimaryNameResponse = read_json(verified_response).await?;
+    let both_payload: PrimaryNameResponse = read_json(both_response).await?;
+    let verified_section_provenance = json!({
+        "manifest_versions": primary_name_execution_manifest_versions_for_namespace("basenames"),
+        "execution_trace_id": execution_trace_id.to_string(),
+    });
+
+    assert_eq!(
+        verified_payload.data,
+        json!({
+            "address": address,
+            "namespace": "basenames",
+            "coin_type": "60",
+        })
+    );
+    assert_eq!(both_payload.data, verified_payload.data);
+    assert_eq!(verified_payload.declared_state, None);
+    assert_eq!(
+        verified_payload.verified_state,
+        Some(json!({
+            "verified_primary_name": {
+                "status": "not_found",
+                "provenance": verified_section_provenance.clone(),
+            }
+        }))
+    );
+    assert_eq!(
+        both_payload.declared_state,
+        Some(json!({
+            "claimed_primary_name": {
+                "status": "not_found",
+                "provenance": {},
+            }
+        }))
+    );
+    assert_eq!(both_payload.verified_state, verified_payload.verified_state);
+    assert_eq!(
+        verified_payload.provenance,
+        json!({
+            "normalized_event_ids": [],
+            "raw_fact_refs": [],
+            "manifest_versions": primary_name_execution_manifest_versions_for_namespace("basenames"),
+            "execution_trace_id": execution_trace_id.to_string(),
+            "derivation_kind": "primary_name_route_bootstrap",
+        })
+    );
+    assert_eq!(both_payload.provenance, verified_payload.provenance);
+    assert_eq!(
+        verified_payload.coverage,
+        json!({
+            "status": "unsupported",
+            "exhaustiveness": "not_applicable",
+            "source_classes_considered": [],
+            "enumeration_basis": "primary_name_lookup",
+            "unsupported_reason": "primary-name coverage is not yet supported",
+        })
+    );
+    assert_eq!(both_payload.coverage, verified_payload.coverage);
+    assert_eq!(verified_payload.last_updated, "2024-05-31T16:20:11Z");
+    assert_eq!(both_payload.last_updated, "2024-05-31T16:20:11Z");
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_primary_names_reads_persisted_basenames_verified_primary_name_invalid_name_without_l1_resolver_call()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000bcf";
+    let execution_trace_id = Uuid::from_u128(0x0e7ec7ace0000000000000000000004c);
+    let finished_at = timestamp(1_717_172_412);
+    let verified_primary_name = json!({
+        "status": "invalid_name",
+        "failure_reason": "claim_name_not_normalizable"
+    });
+
+    database
+        .insert_primary_name_current_claim_row(
+            address,
+            "basenames",
+            "60",
+            PrimaryNameClaimStatus::InvalidName,
+            Some("alice..base.eth"),
+        )
+        .await?;
+
+    let trace = primary_name_execution_trace(
+        execution_trace_id,
+        "basenames",
+        address,
+        "60",
+        verified_primary_name.clone(),
+        finished_at,
+    );
+    let outcome = primary_name_execution_outcome(
+        execution_trace_id,
+        "basenames",
+        address,
+        "60",
+        verified_primary_name,
+        finished_at,
+    );
+    upsert_execution_trace(&database.pool, &trace).await?;
+    upsert_execution_outcome(&database.pool, &outcome).await?;
+
+    let verified_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/primary-names/{address}?namespace=basenames&coin_type=60&mode=verified"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("verified basenames invalid_name primary-name request failed")?;
+    let both_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/primary-names/{address}?namespace=basenames&coin_type=60&mode=both"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("mixed basenames invalid_name primary-name request failed")?;
+
+    assert_eq!(verified_response.status(), StatusCode::OK);
+    assert_eq!(both_response.status(), StatusCode::OK);
+
+    let verified_payload: PrimaryNameResponse = read_json(verified_response).await?;
+    let both_payload: PrimaryNameResponse = read_json(both_response).await?;
+    let verified_section_provenance = json!({
+        "manifest_versions": primary_name_execution_manifest_versions_for_namespace("basenames"),
+        "execution_trace_id": execution_trace_id.to_string(),
+    });
+
+    assert_eq!(
+        verified_payload.data,
+        json!({
+            "address": address,
+            "namespace": "basenames",
+            "coin_type": "60",
+        })
+    );
+    assert_eq!(both_payload.data, verified_payload.data);
+    assert_eq!(verified_payload.declared_state, None);
+    assert_eq!(
+        verified_payload.verified_state,
+        Some(json!({
+            "verified_primary_name": {
+                "status": "invalid_name",
+                "failure_reason": "claim_name_not_normalizable",
+                "provenance": verified_section_provenance.clone(),
+            }
+        }))
+    );
+    assert_eq!(
+        both_payload.declared_state,
+        Some(json!({
+            "claimed_primary_name": {
+                "status": "invalid_name",
+                "raw_claim_name": "alice..base.eth",
+                "provenance": {},
+            }
+        }))
+    );
+    assert_eq!(both_payload.verified_state, verified_payload.verified_state);
+    let claimed_primary_name = both_payload
+        .declared_state
+        .as_ref()
+        .and_then(|declared_state| declared_state.get("claimed_primary_name"))
+        .and_then(Value::as_object)
+        .expect("claimed_primary_name must be present");
+    assert!(
+        !claimed_primary_name.contains_key("name"),
+        "invalid_name readback must not backfill claimed_primary_name.name"
+    );
+    assert_eq!(
+        verified_payload.provenance,
+        json!({
+            "normalized_event_ids": [],
+            "raw_fact_refs": [],
+            "manifest_versions": primary_name_execution_manifest_versions_for_namespace("basenames"),
+            "execution_trace_id": execution_trace_id.to_string(),
+            "derivation_kind": "primary_name_route_bootstrap",
+        })
+    );
+    assert_eq!(both_payload.provenance, verified_payload.provenance);
+    assert_eq!(
+        verified_payload.coverage,
+        json!({
+            "status": "unsupported",
+            "exhaustiveness": "not_applicable",
+            "source_classes_considered": [],
+            "enumeration_basis": "primary_name_lookup",
+            "unsupported_reason": "primary-name coverage is not yet supported",
+        })
+    );
+    assert_eq!(both_payload.coverage, verified_payload.coverage);
+    assert_eq!(verified_payload.last_updated, "2024-05-31T16:20:12Z");
+    assert_eq!(both_payload.last_updated, "2024-05-31T16:20:12Z");
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn get_primary_names_reads_persisted_verified_primary_name_mismatch_for_exact_tuple()
 -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
@@ -1157,6 +1599,85 @@ async fn get_primary_names_rejects_persisted_verified_primary_name_manifest_vers
 }
 
 #[tokio::test]
+async fn get_primary_names_rejects_persisted_basenames_verified_primary_name_without_basenames_execution_source_family()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000bc0";
+    let execution_trace_id = Uuid::from_u128(0x0e7ec7ace0000000000000000000004d);
+    let finished_at = timestamp(1_717_172_413);
+    let verified_primary_name = json!({
+        "status": "success",
+        "name": {
+            "logical_name_id": "basenames:alice.base.eth",
+            "namespace": "basenames",
+            "normalized_name": "alice.base.eth",
+            "canonical_display_name": "Alice.base.eth",
+            "namehash": "0x0000000000000000000000000000000000000000000000000000000000000b45",
+            "resource_id": "00000000-0000-0000-0000-000000000654",
+            "binding_kind": "declared_registry_path"
+        }
+    });
+
+    database
+        .insert_primary_name_current_row(address, "basenames", "60")
+        .await?;
+
+    let mut trace = primary_name_execution_trace(
+        execution_trace_id,
+        "basenames",
+        address,
+        "60",
+        verified_primary_name.clone(),
+        finished_at,
+    );
+    trace.manifest_context = json!({
+        "manifest_versions": [{
+            "manifest_version": 99,
+            "source_family": "basenames_base_primary"
+        }],
+    });
+    let mut outcome = primary_name_execution_outcome(
+        execution_trace_id,
+        "basenames",
+        address,
+        "60",
+        verified_primary_name,
+        finished_at,
+    );
+    outcome.cache_key.manifest_versions = json!([{
+        "manifest_version": 99,
+        "source_family": "basenames_base_primary"
+    }]);
+
+    upsert_execution_trace(&database.pool, &trace).await?;
+    upsert_execution_outcome(&database.pool, &outcome).await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/primary-names/{address}?namespace=basenames&coin_type=60&mode=verified"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("Basenames wrong-source-family verified primary-name request failed")?;
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    let payload: ErrorResponse = read_json(response).await?;
+    assert_eq!(payload.error.code, "internal_error");
+    assert_eq!(
+        payload.error.message,
+        format!("persisted verified primary-name provenance mismatch for address {address}")
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn get_primary_names_omits_verified_section_provenance_for_unsupported_boundaries()
 -> Result<()> {
     let database = TestDatabase::new(false).await?;
@@ -1381,4 +1902,3 @@ async fn get_primary_names_returns_not_found_for_unsupported_namespace() -> Resu
     database.cleanup().await?;
     Ok(())
 }
-

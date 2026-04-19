@@ -610,10 +610,6 @@ async fn load_persisted_primary_name_verified_readback(
     namespace: &str,
     coin_type: &str,
 ) -> ApiResult<Option<PersistedPrimaryNameVerifiedReadback>> {
-    if namespace != "ens" {
-        return Ok(None);
-    }
-
     let request_key = primary_name_verified_request_key(namespace, address, coin_type);
     let row = sqlx::query(
         r#"
@@ -884,6 +880,94 @@ fn primary_name_verified_request_key(namespace: &str, address: &str, coin_type: 
     format!("{namespace}:{address}:{coin_type}")
 }
 
+fn manifest_versions_contain_source_family(
+    manifest_versions: &JsonValue,
+    expected_source_family: &str,
+    context: &str,
+) -> Result<bool> {
+    let manifest_versions = manifest_versions
+        .as_array()
+        .with_context(|| format!("{context} must be a JSON array"))?;
+
+    for (index, manifest_version) in manifest_versions.iter().enumerate() {
+        let manifest_version = manifest_version
+            .as_object()
+            .with_context(|| format!("{context}[{index}] must be a JSON object"))?;
+        if manifest_version
+            .get("source_family")
+            .and_then(JsonValue::as_str)
+            .is_some_and(|source_family| source_family == expected_source_family)
+        {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
+fn ensure_persisted_primary_name_execution_source_family(
+    outcome: &ExecutionOutcome,
+    address: &str,
+    namespace: &str,
+    coin_type: &str,
+) -> ApiResult<()> {
+    let expected_source_family = match namespace {
+        "ens" => "ens_execution",
+        "basenames" => "basenames_execution",
+        _ => {
+            error!(
+                service = "api",
+                address = %address,
+                namespace = %namespace,
+                coin_type = %coin_type,
+                "persisted verified primary-name namespace unsupported for execution source-family check"
+            );
+            return Err(ApiError::internal_error(format!(
+                "persisted verified primary-name provenance mismatch for address {address}"
+            )));
+        }
+    };
+
+    let includes_expected_source_family = manifest_versions_contain_source_family(
+        &outcome.cache_key.manifest_versions,
+        expected_source_family,
+        "persisted verified primary-name cache_key.manifest_versions",
+    )
+    .map_err(|load_error| {
+        error!(
+            service = "api",
+            address = %address,
+            namespace = %namespace,
+            coin_type = %coin_type,
+            execution_trace_id = %outcome.execution_trace_id,
+            error = ?load_error,
+            manifest_versions = ?outcome.cache_key.manifest_versions,
+            "persisted verified primary-name manifest_versions malformed"
+        );
+        ApiError::internal_error(format!(
+            "persisted verified primary-name provenance mismatch for address {address}"
+        ))
+    })?;
+
+    if !includes_expected_source_family {
+        error!(
+            service = "api",
+            address = %address,
+            namespace = %namespace,
+            coin_type = %coin_type,
+            execution_trace_id = %outcome.execution_trace_id,
+            expected_source_family = %expected_source_family,
+            manifest_versions = ?outcome.cache_key.manifest_versions,
+            "persisted verified primary-name execution source-family mismatch"
+        );
+        return Err(ApiError::internal_error(format!(
+            "persisted verified primary-name provenance mismatch for address {address}"
+        )));
+    }
+
+    Ok(())
+}
+
 fn persisted_verified_primary_name_section(
     trace: &ExecutionTrace,
     outcome: &ExecutionOutcome,
@@ -948,9 +1032,14 @@ fn persisted_verified_primary_name_section(
         )));
     }
 
+    ensure_persisted_primary_name_execution_source_family(
+        outcome, address, namespace, coin_type,
+    )?;
+
     let verified_primary_name = extract_persisted_verified_primary_name_section(
         outcome.outcome_payload.as_ref(),
         "persisted verified primary-name outcome_payload",
+        namespace,
     )
     .map_err(|load_error| {
         error!(
@@ -1024,6 +1113,7 @@ fn persisted_verified_primary_name_section(
         let trace_verified_primary_name = extract_persisted_verified_primary_name_section(
             trace.final_payload.as_ref(),
             "persisted verified primary-name trace.final_payload",
+            namespace,
         )
         .map_err(|load_error| {
             error!(
@@ -1063,6 +1153,7 @@ fn persisted_verified_primary_name_section(
 fn extract_persisted_verified_primary_name_section(
     payload: Option<&JsonValue>,
     context: &str,
+    namespace: &str,
 ) -> Result<Option<JsonValue>> {
     let Some(payload) = payload else {
         return Ok(None);
@@ -1088,6 +1179,7 @@ fn extract_persisted_verified_primary_name_section(
             validate_persisted_verified_primary_name_ref(
                 section.get("name"),
                 &format!("{section_context}.name"),
+                namespace,
             )?;
             ensure_json_field_absent(section, "failure_reason", &section_context)?;
         }
@@ -1099,6 +1191,7 @@ fn extract_persisted_verified_primary_name_section(
             validate_persisted_verified_primary_name_ref(
                 section.get("name"),
                 &format!("{section_context}.name"),
+                namespace,
             )?;
             optional_nonempty_json_string_field(section, "failure_reason", &section_context)?;
         }
@@ -1123,6 +1216,7 @@ fn extract_persisted_verified_primary_name_section(
 fn validate_persisted_verified_primary_name_ref(
     value: Option<&JsonValue>,
     context: &str,
+    expected_namespace: &str,
 ) -> Result<()> {
     let name = value
         .and_then(JsonValue::as_object)
@@ -1149,10 +1243,10 @@ fn validate_persisted_verified_primary_name_ref(
     optional_nonempty_json_string_field(name, "resource_id", context)?;
     optional_nonempty_json_string_field(name, "binding_kind", context)?;
 
-    if namespace != "ens" {
-        bail!("{context}.namespace must be ens");
+    if namespace != expected_namespace {
+        bail!("{context}.namespace must be {expected_namespace}");
     }
-    if logical_name_id != format!("ens:{normalized_name}") {
+    if logical_name_id != format!("{expected_namespace}:{normalized_name}") {
         bail!(
             "{context}.logical_name_id {logical_name_id} does not match normalized_name {normalized_name}"
         );
