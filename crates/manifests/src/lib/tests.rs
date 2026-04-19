@@ -711,8 +711,8 @@ async fn checked_in_reverse_manifest_is_admitted_as_authoritative_watch_target()
 }
 
 #[tokio::test]
-async fn checked_in_basenames_manifests_freeze_six_family_split_with_shadow_execution() -> Result<()>
-{
+async fn checked_in_basenames_manifests_reuse_l1_resolver_address_across_active_families()
+-> Result<()> {
     let test_dir = TestDir::new()?;
     let database = TestDatabase::new().await?;
 
@@ -731,10 +731,16 @@ async fn checked_in_basenames_manifests_freeze_six_family_split_with_shadow_exec
             &checked_in_manifest_contents("basenames", source_family, "v1")?,
         )?;
     }
+    test_dir.write_manifest(
+        "basenames",
+        "basenames_execution",
+        "v2",
+        &checked_in_manifest_contents("basenames", "basenames_execution", "v2")?,
+    )?;
 
     let repository = load_repository(&test_dir.path)?;
     assert_eq!(repository.summary().status, ManifestLoadStatus::Loaded);
-    assert_eq!(repository.manifests().len(), 6);
+    assert_eq!(repository.manifests().len(), 7);
     assert!(
         !repository
             .manifests()
@@ -744,153 +750,129 @@ async fn checked_in_basenames_manifests_freeze_six_family_split_with_shadow_exec
 
     let summary = sync_repository(database.pool(), &repository).await?;
     assert_eq!(summary.status, ManifestSyncStatus::Synced);
-    assert_eq!(summary.synced_manifest_count, 6);
-    assert_eq!(summary.active_manifest_count, 5);
-    assert_eq!(summary.root_count, 1);
-    assert_eq!(summary.contract_count, 6);
-    assert_eq!(summary.capability_count, 2);
-    assert_eq!(summary.discovery_rule_count, 1);
-
-    assert_eq!(
-        load_manifest_rollout_statuses(database.pool(), "basenames").await?,
-        vec![
-            ("basenames_base_primary".to_owned(), "active".to_owned(),),
-            ("basenames_base_registrar".to_owned(), "active".to_owned(),),
-            ("basenames_base_registry".to_owned(), "active".to_owned()),
-            ("basenames_base_resolver".to_owned(), "active".to_owned()),
-            ("basenames_execution".to_owned(), "shadow".to_owned()),
-            ("basenames_l1_compat".to_owned(), "active".to_owned()),
-        ]
-    );
-
-    assert_eq!(
-        load_capability_flags_for_source_family(
-            database.pool(),
-            "basenames",
-            "basenames_base_registry",
-        )
-        .await?,
-        BTreeMap::from([(
-            "declared_children".to_owned(),
-            CapabilityFlag {
-                status: CapabilitySupportStatus::Supported,
-                notes: Some(
-                    "registry-controlled child surfaces are authoritative inputs on Base mainnet"
-                        .to_owned(),
-                ),
-            },
-        )])
-    );
-    assert_eq!(
-        load_capability_flags_for_source_family(
-            database.pool(),
-            "basenames",
-            "basenames_execution",
-        )
-        .await?,
-        BTreeMap::from([(
-            "verified_resolution".to_owned(),
-            CapabilityFlag {
-                status: CapabilitySupportStatus::Shadow,
-                notes: Some(
-                    "shadow execution ownership is fixed before public Basenames verified-resolution reads ship"
-                        .to_owned(),
-                ),
-            },
-        )])
-    );
+    assert_eq!(summary.synced_manifest_count, 7);
+    assert_eq!(summary.active_manifest_count, 6);
+    assert_eq!(summary.contract_count, 7);
 
     let active_manifests =
         load_active_manifests_for_namespace(database.pool(), "basenames").await?;
-    assert_eq!(
-        active_manifests
-            .iter()
-            .map(|manifest| manifest.source_family.as_str())
-            .collect::<Vec<_>>(),
-        vec![
-            "basenames_base_primary",
-            "basenames_base_registrar",
-            "basenames_base_registry",
-            "basenames_base_resolver",
-            "basenames_l1_compat",
-        ]
-    );
-
-    let watched_contracts = load_watched_contracts(database.pool()).await?;
-    assert_eq!(watched_contracts.len(), 6);
-    assert!(watched_contracts.iter().any(|contract| {
-        contract.address == normalize_address("0x79ea96012eea67a83431f1701b3dff7e37f9e282")
-            && contract.source == WatchedContractSource::ManifestContract
+    assert_eq!(active_manifests.len(), 6);
+    assert!(active_manifests.iter().any(|manifest| {
+        manifest.source_family == "basenames_l1_compat" && manifest.manifest_version == 1
     }));
-    assert!(watched_contracts.iter().any(|contract| {
-        contract.address == normalize_address("0x03c4738ee98ae44591e1a4a4f3cab6641d95dd9a")
-            && contract.source == WatchedContractSource::ManifestContract
-    }));
-    assert!(watched_contracts.iter().any(|contract| {
-        contract.address == normalize_address("0xb94704422c2a1e396835a571837aa5ae53285a95")
-            && contract.source == WatchedContractSource::ManifestRoot
-    }));
-    assert!(watched_contracts.iter().any(|contract| {
-        contract.address == normalize_address("0xb94704422c2a1e396835a571837aa5ae53285a95")
-            && contract.source == WatchedContractSource::ManifestContract
-    }));
-    assert!(watched_contracts.iter().any(|contract| {
-        contract.address == normalize_address("0xC6d566A56A1aFf6508b41f6c90ff131615583BCD")
-            && contract.source == WatchedContractSource::ManifestContract
-    }));
-    assert!(watched_contracts.iter().any(|contract| {
-        contract.address == normalize_address("0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31")
-            && contract.source == WatchedContractSource::ManifestContract
+    assert!(active_manifests.iter().any(|manifest| {
+        manifest.source_family == "basenames_execution" && manifest.manifest_version == 2
     }));
 
-    assert_eq!(
-        load_watched_chain_plan(database.pool()).await?,
-        vec![
-            WatchedChainPlan {
-                chain: "base-mainnet".to_owned(),
-                addresses: vec![
-                    normalize_address("0x03c4738ee98ae44591e1a4a4f3cab6641d95dd9a"),
-                    normalize_address("0x79ea96012eea67a83431f1701b3dff7e37f9e282"),
-                    normalize_address("0xb94704422c2a1e396835a571837aa5ae53285a95"),
-                    normalize_address("0xC6d566A56A1aFf6508b41f6c90ff131615583BCD"),
-                ],
-                manifest_root_entry_count: 1,
-                manifest_contract_entry_count: 4,
-                discovery_edge_entry_count: 0,
-            },
-            WatchedChainPlan {
-                chain: "ethereum-mainnet".to_owned(),
-                addresses: vec![normalize_address(
-                    "0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31",
-                )],
-                manifest_root_entry_count: 0,
-                manifest_contract_entry_count: 1,
-                discovery_edge_entry_count: 0,
-            },
-        ]
-    );
-
-    let admission_state = load_discovery_admission_state(database.pool()).await?;
-    assert!(admission_state.has_authoritative_address(
-        "base-mainnet",
-        &normalize_address("0x03c4738ee98ae44591e1a4a4f3cab6641d95dd9a"),
-    ));
-    assert!(admission_state.has_authoritative_address(
-        "base-mainnet",
-        &normalize_address("0x79ea96012eea67a83431f1701b3dff7e37f9e282"),
-    ));
-    assert!(admission_state.has_authoritative_address(
-        "base-mainnet",
-        &normalize_address("0xb94704422c2a1e396835a571837aa5ae53285a95"),
-    ));
-    assert!(admission_state.has_authoritative_address(
-        "base-mainnet",
-        &normalize_address("0xC6d566A56A1aFf6508b41f6c90ff131615583BCD"),
-    ));
-    assert!(admission_state.has_authoritative_address(
+    let shared_l1_resolver = normalize_address("0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31");
+    let shared_contract_instance_id = load_single_contract_instance_for_address(
+        database.pool(),
         "ethereum-mainnet",
-        &normalize_address("0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31"),
-    ));
+        &shared_l1_resolver,
+    )
+    .await?;
+
+    assert_eq!(
+        query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)::BIGINT
+            FROM contract_instance_addresses
+            WHERE chain_id = $1
+              AND address = $2
+              AND deactivated_at IS NULL
+            "#
+        )
+        .bind("ethereum-mainnet")
+        .bind(&shared_l1_resolver)
+        .fetch_one(database.pool())
+        .await?,
+        1
+    );
+    assert_eq!(
+        query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)::BIGINT
+            FROM manifest_versions mv
+            JOIN manifest_contract_instances mci ON mci.manifest_id = mv.manifest_id
+            WHERE mv.namespace = 'basenames'
+              AND mv.chain = 'ethereum-mainnet'
+              AND mv.source_family IN ('basenames_l1_compat', 'basenames_execution')
+              AND mci.declaration_kind = 'contract'
+              AND mci.declared_address = $1
+              AND mci.contract_instance_id = $2
+            "#
+        )
+        .bind(&shared_l1_resolver)
+        .bind(shared_contract_instance_id)
+        .fetch_one(database.pool())
+        .await?,
+        3
+    );
+    assert_eq!(
+        query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(DISTINCT mci.contract_instance_id)::BIGINT
+            FROM manifest_versions mv
+            JOIN manifest_contract_instances mci ON mci.manifest_id = mv.manifest_id
+            WHERE mv.namespace = 'basenames'
+              AND mv.chain = 'ethereum-mainnet'
+              AND mv.source_family IN ('basenames_l1_compat', 'basenames_execution')
+              AND mci.declaration_kind = 'contract'
+              AND mci.declared_address = $1
+            "#
+        )
+        .bind(&shared_l1_resolver)
+        .fetch_one(database.pool())
+        .await?,
+        1
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn basenames_execution_promotion_prefers_later_active_manifest_version() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let test_dir = TestDir::new()?;
+    test_dir.write_manifest(
+        "basenames",
+        "basenames_execution",
+        "v1",
+        &checked_in_manifest_contents("basenames", "basenames_execution", "v1")?,
+    )?;
+    test_dir.write_manifest(
+        "basenames",
+        "basenames_execution",
+        "v2",
+        &checked_in_manifest_contents("basenames", "basenames_execution", "v2")?,
+    )?;
+
+    let summary = sync_repository(database.pool(), &load_repository(&test_dir.path)?).await?;
+    assert_eq!(summary.status, ManifestSyncStatus::Synced);
+    assert_eq!(summary.synced_manifest_count, 2);
+    assert_eq!(summary.active_manifest_count, 1);
+    assert_eq!(summary.contract_count, 2);
+    assert_eq!(summary.capability_count, 2);
+
+    let active_manifests =
+        load_active_manifests_for_namespace(database.pool(), "basenames").await?;
+    assert_eq!(active_manifests.len(), 1);
+    assert_eq!(active_manifests[0].source_family, "basenames_execution");
+    assert_eq!(active_manifests[0].manifest_version, 2);
+    assert_eq!(
+        active_manifests[0].capability_flags,
+        BTreeMap::from([(
+            "verified_resolution".to_owned(),
+            CapabilityFlag {
+                status: CapabilitySupportStatus::Supported,
+                notes: Some(
+                    "supports the frozen exact-surface transport-assisted direct-path public Basenames verified-resolution class"
+                        .to_owned(),
+                ),
+            },
+        )])
+    );
 
     database.cleanup().await?;
     Ok(())

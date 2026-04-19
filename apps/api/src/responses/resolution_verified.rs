@@ -508,6 +508,7 @@ enum SupportedResolutionPathClass {
     Direct,
     AliasOnly,
     WildcardDerived,
+    BasenamesTransportDirect,
 }
 
 struct ResolutionVerifiedSupportBoundary {
@@ -650,6 +651,15 @@ fn build_resolution_execution_cache_key(
 
 fn build_resolution_boundary_chain_position(row: &NameCurrentRow) -> Option<ChainPositionResponse> {
     let chain_positions = row.chain_positions.as_object()?;
+    if row.namespace == BASENAMES_NAMESPACE {
+        if let Some(position) = chain_positions
+            .values()
+            .filter_map(chain_position_from_value)
+            .find(|position| position.chain_id == BASENAMES_COMPAT_SOURCE_CHAIN_ID)
+        {
+            return Some(position);
+        }
+    }
     chain_positions
         .get("ethereum")
         .and_then(chain_position_from_value)
@@ -874,13 +884,19 @@ fn resolution_verified_support_boundary(
     row: &NameCurrentRow,
     record_inventory_row: Option<&RecordInventoryCurrentRow>,
 ) -> Option<ResolutionVerifiedSupportBoundary> {
-    if row.namespace != "ens" {
+    if !matches!(row.namespace.as_str(), "ens" | BASENAMES_NAMESPACE) {
         return None;
     }
 
     if let Some(projected_topology) = projected_resolution_topology(&row.declared_summary) {
-        let path_class =
-            classify_supported_resolution_topology(&row.logical_name_id, &projected_topology)?;
+        if row.namespace == BASENAMES_NAMESPACE && !row_has_basenames_supported_chain_positions(row) {
+            return None;
+        }
+        let path_class = classify_supported_resolution_topology(
+            &row.namespace,
+            &row.logical_name_id,
+            &projected_topology,
+        )?;
         let version_boundaries = provenance_field(&projected_topology, "version_boundaries")?;
         let topology_version_boundary =
             provenance_field(version_boundaries, "topology_version_boundary")?.clone();
@@ -893,12 +909,18 @@ fn resolution_verified_support_boundary(
         });
     }
 
-    let topology_version_boundary = build_supported_resolution_verified_boundary(row)?;
+    let topology_version_boundary = match row.namespace.as_str() {
+        "ens" => build_supported_resolution_verified_boundary(row)?,
+        BASENAMES_NAMESPACE => return None,
+        _ => return None,
+    };
     let record_version_boundary = resolution_record_version_boundary(row, record_inventory_row)
         .or_else(|| Some(topology_version_boundary.clone()))?;
-    let path_class = match row.binding_kind {
-        Some(SurfaceBindingKind::ResolverAliasPath) => SupportedResolutionPathClass::AliasOnly,
-        _ => SupportedResolutionPathClass::Direct,
+    let path_class = match row.namespace.as_str() {
+        _ => match row.binding_kind {
+            Some(SurfaceBindingKind::ResolverAliasPath) => SupportedResolutionPathClass::AliasOnly,
+            _ => SupportedResolutionPathClass::Direct,
+        },
     };
 
     Some(ResolutionVerifiedSupportBoundary {
@@ -909,16 +931,35 @@ fn resolution_verified_support_boundary(
 }
 
 fn classify_supported_resolution_topology(
+    namespace: &str,
     logical_name_id: &str,
     topology: &JsonValue,
 ) -> Option<SupportedResolutionPathClass> {
-    if summary_is_unsupported(Some(topology)) || !resolution_topology_transport_is_null(topology) {
+    if summary_is_unsupported(Some(topology)) {
         return None;
     }
 
     let resolver_logical_name_id = resolution_topology_resolver_logical_name_id(topology)?;
     let alias_present = resolution_topology_alias_is_present(topology)?;
     let wildcard_source_logical_name_id = resolution_topology_wildcard_state(topology)?;
+    let transport_is_null = resolution_topology_transport_is_null(topology);
+
+    if namespace == BASENAMES_NAMESPACE {
+        if !transport_is_null {
+            return resolution_topology_subregistry_path_is_empty(topology)
+                .then_some(())
+                .filter(|_| resolver_logical_name_id == logical_name_id)
+                .filter(|_| !alias_present)
+                .filter(|_| wildcard_source_logical_name_id.is_none())
+                .filter(|_| resolution_topology_transport_matches_basenames_supported_class(topology))
+                .map(|_| SupportedResolutionPathClass::BasenamesTransportDirect);
+        }
+        return None;
+    }
+
+    if !transport_is_null {
+        return None;
+    }
 
     if wildcard_source_logical_name_id.is_some() {
         if alias_present || !resolution_topology_subregistry_path_is_empty(topology) {
@@ -1000,6 +1041,37 @@ fn resolution_topology_transport_is_null(topology: &JsonValue) -> bool {
     }
 
     true
+}
+
+fn resolution_topology_transport_matches_basenames_supported_class(topology: &JsonValue) -> bool {
+    let Some(transport) = provenance_field(topology, "transport") else {
+        return false;
+    };
+
+    string_field(provenance_field(transport, "source_chain_id"))
+        .is_some_and(|value| value == BASENAMES_COMPAT_SOURCE_CHAIN_ID)
+        && string_field(provenance_field(transport, "target_chain_id"))
+            .is_some_and(|value| value == BASENAMES_COMPAT_TARGET_CHAIN_ID)
+        && string_field(provenance_field(transport, "contract_address"))
+            .is_some_and(|value| value.eq_ignore_ascii_case(BASENAMES_COMPAT_CONTRACT_ADDRESS))
+}
+
+fn row_has_basenames_supported_chain_positions(row: &NameCurrentRow) -> bool {
+    let Some(chain_positions) = row.chain_positions.as_object() else {
+        return false;
+    };
+
+    let mut saw_base = false;
+    let mut saw_ethereum = false;
+    for position in chain_positions.values() {
+        match chain_position_from_value(position).map(|position| position.chain_id) {
+            Some(chain_id) if chain_id == BASENAMES_COMPAT_SOURCE_CHAIN_ID => saw_base = true,
+            Some(chain_id) if chain_id == BASENAMES_COMPAT_TARGET_CHAIN_ID => saw_ethereum = true,
+            Some(_) | None => {}
+        }
+    }
+
+    saw_base && saw_ethereum
 }
 
 fn build_resolution_transport(row: &NameCurrentRow) -> JsonValue {

@@ -104,6 +104,13 @@ pub async fn sync_repository(
             &planned_entries,
         )
         .await?;
+        seed_planned_manifest_entry_addresses(
+            transaction.as_mut(),
+            manifest_id,
+            loaded_manifest,
+            &planned_entries,
+        )
+        .await?;
 
         sync_summary.root_count += loaded_manifest.manifest.roots.len();
         sync_summary.contract_count += loaded_manifest.manifest.contracts.len();
@@ -155,6 +162,55 @@ pub async fn sync_repository(
         .context("failed to commit manifest sync transaction")?;
 
     Ok(sync_summary)
+}
+
+async fn seed_planned_manifest_entry_addresses(
+    executor: &mut sqlx::postgres::PgConnection,
+    manifest_id: i64,
+    loaded_manifest: &LoadedManifest,
+    planned_entries: &[PersistedManifestEntry],
+) -> Result<()> {
+    for entry in planned_entries {
+        ensure_contract_instance_address_seed(
+            executor,
+            entry.contract_instance_id,
+            &loaded_manifest.manifest.chain,
+            &entry.declared_address,
+            Some(manifest_id),
+            &serde_json::json!({
+                "source": "manifest_declaration_seed",
+                "manifest_id": manifest_id,
+                "declaration_kind": entry.key.declaration_kind,
+                "declaration_name": entry.key.declaration_name,
+                "source_family": loaded_manifest.manifest.source_family,
+            }),
+        )
+        .await?;
+
+        if let (Some(implementation_contract_instance_id), Some(implementation_address)) = (
+            entry.implementation_contract_instance_id,
+            entry.declared_implementation_address.as_deref(),
+        ) {
+            ensure_contract_instance_address_seed(
+                executor,
+                implementation_contract_instance_id,
+                &loaded_manifest.manifest.chain,
+                implementation_address,
+                Some(manifest_id),
+                &serde_json::json!({
+                    "source": "manifest_proxy_implementation_seed",
+                    "manifest_id": manifest_id,
+                    "declaration_name": entry.key.declaration_name,
+                    "source_family": loaded_manifest.manifest.source_family,
+                    "proxy_contract_instance_id": entry.contract_instance_id,
+                    "proxy_address": entry.declared_address,
+                }),
+            )
+            .await?;
+        }
+    }
+
+    Ok(())
 }
 
 async fn upsert_manifest_version(

@@ -1,18 +1,18 @@
-# Shadow-scoped bootstrap for the canonical Basenames execution entrypoint on
-# Ethereum mainnet before the promoted public route becomes active
+# Active public Basenames verified-resolution promotion for the frozen
+# exact-surface transport-assisted direct-path class on Ethereum mainnet
 # (upstream: .refs/basenames/README.md:L22 @ basenames@1809bbc).
-manifest_version = 1
+manifest_version = 2
 namespace = "basenames"
 source_family = "basenames_execution"
 chain = "ethereum-mainnet"
 deployment_epoch = "basenames_v1"
-rollout_status = "shadow"
+rollout_status = "active"
 normalizer_version = "uts46-v1"
 roots = []
 discovery_rules = []
 
 [capability_flags]
-verified_resolution = { status = "shadow", notes = "shadow execution ownership is fixed before the promoted public Basenames verified-resolution manifest version becomes active" }
+verified_resolution = { status = "supported", notes = "supports the frozen exact-surface transport-assisted direct-path public Basenames verified-resolution class" }
 
 [[contracts]]
 role = "l1_resolver"

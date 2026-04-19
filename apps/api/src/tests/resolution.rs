@@ -481,14 +481,111 @@ async fn get_resolution_execution_explain_reads_persisted_alias_only_avatar_answ
     Ok(())
 }
 
+fn basenames_resolution_request_key(records: &[&str]) -> String {
+    let mut records = records.iter().map(|record| (*record).to_owned()).collect::<Vec<_>>();
+    records.sort_unstable();
+    format!("basenames:alice.base.eth:{}", records.join(","))
+}
+
+fn requested_chain_positions_from_name_current(chain_positions: &Value) -> Value {
+    let mut positions = chain_positions
+        .as_object()
+        .expect("name_current.chain_positions must be an object")
+        .values()
+        .map(|position| {
+            json!({
+                "chain_id": position
+                    .get("chain_id")
+                    .and_then(Value::as_str)
+                    .expect("chain_position.chain_id must be present"),
+                "block_number": position
+                    .get("block_number")
+                    .and_then(Value::as_i64)
+                    .expect("chain_position.block_number must be present"),
+                "block_hash": position
+                    .get("block_hash")
+                    .and_then(Value::as_str)
+                    .expect("chain_position.block_hash must be present"),
+            })
+        })
+        .collect::<Vec<_>>();
+    positions.sort_by(|left, right| {
+        left.get("chain_id")
+            .and_then(Value::as_str)
+            .cmp(&right.get("chain_id").and_then(Value::as_str))
+    });
+    Value::Array(positions)
+}
+
+fn basenames_execution_manifest_version() -> Value {
+    json!({
+        "source_family": "basenames_execution",
+        "manifest_version": 2,
+        "chain": "ethereum-mainnet",
+        "deployment_epoch": "basenames_v1",
+    })
+}
+
+fn append_basenames_execution_manifest_version(name_row: &mut bigname_storage::NameCurrentRow) {
+    let manifest_versions = name_row.provenance["manifest_versions"]
+        .as_array_mut()
+        .expect("name_current.provenance.manifest_versions must be an array");
+    if manifest_versions.iter().any(|item| {
+        item.get("source_family").and_then(Value::as_str) == Some("basenames_execution")
+            && item.get("manifest_version").and_then(Value::as_i64) == Some(2)
+    }) {
+        return;
+    }
+    manifest_versions.push(basenames_execution_manifest_version());
+}
+
+fn insert_basenames_supported_ethereum_position(name_row: &mut bigname_storage::NameCurrentRow) {
+    let chain_positions = name_row
+        .chain_positions
+        .as_object_mut()
+        .expect("name_current.chain_positions must be an object");
+    chain_positions.insert(
+        "ethereum".to_owned(),
+        json!({
+            "chain_id": "ethereum-mainnet",
+            "block_number": 21_000_100,
+            "block_hash": "0xbasenamesl1",
+            "timestamp": "2026-04-17T00:01:40Z",
+        }),
+    );
+}
+
 #[tokio::test]
-async fn get_resolution_both_mode_returns_basenames_declared_transport_inventory_and_cache()
+async fn get_resolution_both_mode_reads_persisted_basenames_transport_direct_answers()
 -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let logical_name_id = "basenames:alice.base.eth";
     let resource_id = Uuid::from_u128(0x6200);
     let token_lineage_id = Uuid::from_u128(0x6100);
     let surface_binding_id = Uuid::from_u128(0x6300);
+    let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000033);
+    let request_key = basenames_resolution_request_key(&["text:com.twitter", "addr:60"]);
+    let persisted_verified_queries = json!([
+        {
+            "record_key": "text:com.twitter",
+            "status": "not_found",
+            "failure_reason": "no_text_record",
+            "provenance": {
+                "execution_trace_id": execution_trace_id.to_string()
+            }
+        },
+        {
+            "record_key": "addr:60",
+            "status": "success",
+            "value": {
+                "coin_type": "60",
+                "value": "0x00000000000000000000000000000000000000aa"
+            },
+            "provenance": {
+                "execution_trace_id": execution_trace_id.to_string()
+            }
+        }
+    ]);
 
     database
         .seed_basenames_resolution_rebuild_inputs(
@@ -502,31 +599,24 @@ async fn get_resolution_both_mode_returns_basenames_declared_transport_inventory
     database
         .rebuild_record_inventory_current(resource_id)
         .await?;
-
-    let response = app_router(database.app_state())
+    let declared_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri(
-                    "/v1/resolutions/basenames/alice.base.eth?mode=both&records=addr:60,text",
-                )
+                .uri("/v1/resolutions/basenames/alice.base.eth?mode=declared&records=text:com.twitter,addr:60")
                 .body(Body::empty())
                 .expect("request must build"),
         )
         .await
-        .context("basenames mixed resolution request failed")?;
-
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let payload: ResolutionResponse = read_json(response).await?;
-    let declared_state = payload
+        .context("basenames declared resolution request failed before seeding execution")?;
+    assert_eq!(declared_response.status(), StatusCode::OK);
+    let declared_payload: ResolutionResponse = read_json(declared_response).await?;
+    let record_inventory_boundary = declared_payload
         .declared_state
         .as_ref()
-        .context("basenames mixed resolution must include declared_state")?;
-    let record_inventory_boundary = declared_state
-        .get("record_inventory")
+        .and_then(|state| state.get("record_inventory"))
         .and_then(|value| value.get("record_version_boundary"))
         .cloned()
-        .context("basenames mixed resolution must include record_inventory boundary")?;
+        .context("basenames declared resolution must expose record_inventory boundary")?;
     let worker_row = bigname_storage::load_record_inventory_current(
         &database.pool,
         resource_id,
@@ -534,54 +624,220 @@ async fn get_resolution_both_mode_returns_basenames_declared_transport_inventory
     )
     .await?
     .context("worker-produced basenames record_inventory_current row must exist")?;
+    let mut name_row = bigname_storage::load_name_current(&database.pool, logical_name_id)
+        .await?
+        .context("basenames supported resolution test requires name_current row")?;
+    let topology = json!({
+        "registry_path": [
+            {
+                "logical_name_id": logical_name_id,
+                "namespace": "basenames",
+                "normalized_name": "alice.base.eth",
+                "canonical_display_name": "Alice.base.eth",
+                "namehash": "namehash:alice.base.eth",
+                "resource_id": resource_id.to_string(),
+                "binding_kind": "declared_registry_path",
+            }
+        ],
+        "subregistry_path": [],
+        "resolver_path": [
+            {
+                "logical_name_id": logical_name_id,
+                "namespace": "basenames",
+                "normalized_name": "alice.base.eth",
+                "canonical_display_name": "Alice.base.eth",
+                "resource_id": resource_id.to_string(),
+                "chain_id": "base-mainnet",
+                "address": "0x0000000000000000000000000000000000000abc",
+                "latest_event_kind": "ResolverChanged",
+            }
+        ],
+        "wildcard": {
+            "source": null,
+            "matched_labels": [],
+        },
+        "alias": {
+            "final_target": null,
+            "hops": [],
+        },
+        "version_boundaries": {
+            "topology_version_boundary": worker_row.record_version_boundary.clone(),
+            "record_version_boundary": worker_row.record_version_boundary.clone(),
+        },
+        "transport": {
+            "source_chain_id": "base-mainnet",
+            "target_chain_id": "ethereum-mainnet",
+            "contract_address": "0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31",
+            "latest_event_kind": null,
+        },
+    });
+    append_basenames_execution_manifest_version(&mut name_row);
+    insert_basenames_supported_ethereum_position(&mut name_row);
+    name_row.declared_summary["topology"] = topology.clone();
+    database.insert_name_current_row(name_row.clone()).await?;
 
-    assert_eq!(
-        declared_state.get("topology"),
-        Some(&json!({
-            "registry_path": [
-                {
-                    "logical_name_id": logical_name_id,
-                    "namespace": "basenames",
-                    "normalized_name": "alice.base.eth",
-                    "canonical_display_name": "Alice.base.eth",
-                    "namehash": "namehash:alice.base.eth",
-                    "resource_id": resource_id.to_string(),
-                    "binding_kind": "declared_registry_path",
-                }
-            ],
-            "subregistry_path": [],
-            "resolver_path": [
-                {
-                    "logical_name_id": logical_name_id,
-                    "namespace": "basenames",
-                    "normalized_name": "alice.base.eth",
-                    "canonical_display_name": "Alice.base.eth",
-                    "resource_id": resource_id.to_string(),
-                    "chain_id": "base-mainnet",
-                    "address": "0x0000000000000000000000000000000000000abc",
-                    "latest_event_kind": "ResolverChanged",
-                }
-            ],
-            "wildcard": {
-                "source": null,
-                "matched_labels": [],
-            },
-            "alias": {
-                "final_target": null,
-                "hops": [],
-            },
-            "version_boundaries": {
-                "topology_version_boundary": worker_row.record_version_boundary.clone(),
-                "record_version_boundary": worker_row.record_version_boundary.clone(),
-            },
-            "transport": {
-                "source_chain_id": "base-mainnet",
-                "target_chain_id": "ethereum-mainnet",
-                "contract_address": "0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31",
-                "latest_event_kind": null,
-            },
-        }))
+    let requested_chain_positions = requested_chain_positions_from_name_current(&name_row.chain_positions);
+    let mut trace = resolution_execution_trace(
+        execution_trace_id,
+        &request_key,
+        &["text:com.twitter", "addr:60"],
+        persisted_verified_queries.clone(),
     );
+    trace.namespace = "basenames".to_owned();
+    trace.request_key = request_key.clone();
+    trace.chain_context = json!({
+        "requested_positions": requested_chain_positions.clone(),
+    });
+    trace.manifest_context = json!({
+        "manifest_versions": [{
+            "source_family": "basenames_execution",
+            "manifest_version": 2
+        }]
+    });
+    trace.contracts_called = json!([
+        {
+            "chain_id": "ethereum-mainnet",
+            "contract_address": "0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31",
+            "selector": "0x9061b923"
+        }
+    ]);
+    trace.gateway_digests = json!(["sha256:ccip-request", "sha256:ccip-response"]);
+    trace.request_metadata = json!({
+        "surface": "alice.base.eth",
+        "record_keys": ["text:com.twitter", "addr:60"],
+        "entrypoint": "l1_resolver",
+        "contract_address": "0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31",
+        "transport": {
+            "source_chain_id": "base-mainnet",
+            "target_chain_id": "ethereum-mainnet",
+            "contract_address": "0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31",
+            "latest_event_kind": null
+        }
+    });
+    trace.steps = vec![
+        ExecutionTraceStep {
+            step_index: 0,
+            step_kind: "load_declared_topology".to_owned(),
+            input_digest: Some("sha256:topology-input".to_owned()),
+            output_digest: Some("sha256:topology-output".to_owned()),
+            latency_ms: Some(4),
+            canonicality_dependency: json!({
+                "base-mainnet": {
+                    "block_hash": "0xbase-binding",
+                    "block_number": 100,
+                    "state": "finalized"
+                }
+            }),
+            step_payload: json!({
+                "entrypoint": "l1_resolver",
+                "resolver": "0x0000000000000000000000000000000000000abc"
+            }),
+        },
+        ExecutionTraceStep {
+            step_index: 1,
+            step_kind: "call_l1_resolver".to_owned(),
+            input_digest: Some("sha256:l1-input".to_owned()),
+            output_digest: Some("sha256:l1-output".to_owned()),
+            latency_ms: Some(17),
+            canonicality_dependency: json!({
+                "ethereum-mainnet": {
+                    "block_hash": "0xbase-binding",
+                    "block_number": 100,
+                    "state": "finalized"
+                }
+            }),
+            step_payload: json!({
+                "name": "alice.base.eth",
+                "record_count": 2
+            }),
+        },
+        ExecutionTraceStep {
+            step_index: 2,
+            step_kind: "ccip_offchain_lookup".to_owned(),
+            input_digest: Some("sha256:ccip-input".to_owned()),
+            output_digest: Some("sha256:ccip-output".to_owned()),
+            latency_ms: Some(29),
+            canonicality_dependency: json!({
+                "ethereum-mainnet": {
+                    "block_hash": "0xbase-binding",
+                    "block_number": 100,
+                    "state": "finalized"
+                }
+            }),
+            step_payload: json!({
+                "gateway_digest": "sha256:ccip-request"
+            }),
+        },
+        ExecutionTraceStep {
+            step_index: 3,
+            step_kind: "resolve_with_proof".to_owned(),
+            input_digest: Some("sha256:proof-input".to_owned()),
+            output_digest: Some("sha256:proof-output".to_owned()),
+            latency_ms: Some(11),
+            canonicality_dependency: json!({
+                "ethereum-mainnet": {
+                    "block_hash": "0xbase-binding",
+                    "block_number": 100,
+                    "state": "finalized"
+                }
+            }),
+            step_payload: json!({
+                "proof_kind": "signature"
+            }),
+        },
+    ];
+
+    let mut outcome = resolution_execution_outcome_with_boundaries(
+        execution_trace_id,
+        &request_key,
+        persisted_verified_queries.clone(),
+        worker_row.record_version_boundary.clone(),
+        worker_row.record_version_boundary.clone(),
+    );
+    outcome.namespace = "basenames".to_owned();
+    outcome.cache_key.requested_chain_positions = requested_chain_positions.clone();
+    outcome.cache_key.manifest_versions = name_row
+        .provenance
+        .get("manifest_versions")
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+    upsert_execution_trace(&database.pool, &trace).await?;
+    upsert_execution_outcome(&database.pool, &outcome).await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(
+                    "/v1/resolutions/basenames/alice.base.eth?mode=both&records=text:com.twitter,addr:60",
+                )
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("basenames mixed resolution request failed")?;
+    let explain_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(
+                    "/v1/explain/resolutions/basenames/alice.base.eth/execution?records=text:com.twitter,addr:60",
+                )
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("basenames execution explain request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(explain_response.status(), StatusCode::OK);
+
+    let payload: ResolutionResponse = read_json(response).await?;
+    let explain_payload: ResolutionResponse = read_json(explain_response).await?;
+    let declared_state = payload
+        .declared_state
+        .as_ref()
+        .context("basenames mixed resolution must include declared_state")?;
+
+    assert_eq!(declared_state.get("topology"), Some(&topology));
     assert_eq!(
         declared_state.get("record_inventory"),
         Some(&json!({
@@ -597,7 +853,21 @@ async fn get_resolution_both_mode_returns_basenames_declared_transport_inventory
         declared_state.get("record_cache"),
         Some(&json!({
             "record_version_boundary": worker_row.record_version_boundary.clone(),
-            "entries": worker_row.entries.clone(),
+            "entries": [
+                {
+                    "record_key": "text:com.twitter",
+                    "record_family": "text",
+                    "selector_key": "com.twitter",
+                    "status": "not_found",
+                },
+                {
+                    "record_key": "addr:60",
+                    "record_family": "addr",
+                    "selector_key": "60",
+                    "status": "unsupported",
+                    "unsupported_reason": "value_not_retained_in_normalized_events",
+                }
+            ],
         }))
     );
     assert_eq!(
@@ -605,21 +875,117 @@ async fn get_resolution_both_mode_returns_basenames_declared_transport_inventory
         Some(json!({
             "verified_queries": [
                 {
-                    "record_key": "addr:60",
-                    "status": "unsupported",
-                    "unsupported_reason": "verified resolution entrypoint is not yet supported",
+                    "record_key": "text:com.twitter",
+                    "status": "not_found",
+                    "failure_reason": "no_text_record",
+                    "provenance": {
+                        "execution_trace_id": execution_trace_id.to_string(),
+                    }
                 },
                 {
-                    "record_key": "text",
-                    "status": "unsupported",
-                    "unsupported_reason": "verified resolution entrypoint is not yet supported",
+                    "record_key": "addr:60",
+                    "status": "success",
+                    "value": {
+                        "coin_type": "60",
+                        "value": "0x00000000000000000000000000000000000000aa",
+                    },
+                    "provenance": {
+                        "execution_trace_id": execution_trace_id.to_string(),
+                    }
                 }
             ]
         }))
     );
     assert_eq!(
         payload.provenance.get("execution_trace_id"),
-        Some(&Value::Null)
+        Some(&Value::String(execution_trace_id.to_string()))
+    );
+    assert_eq!(
+        payload.provenance.get("manifest_versions"),
+        name_row.provenance.get("manifest_versions")
+    );
+    assert_eq!(
+        explain_payload.verified_state,
+        Some(json!({
+            "execution": {
+                "execution_trace_id": execution_trace_id.to_string(),
+                "selected_entrypoint": {
+                    "source_family": "basenames_execution",
+                    "role": "l1_resolver",
+                    "chain_id": "ethereum-mainnet",
+                    "contract_address": "0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31"
+                },
+                "resolver_discovery_path": topology.get("resolver_path").cloned().expect("topology must include resolver_path"),
+                "wildcard": {
+                    "source": null,
+                    "matched_labels": []
+                },
+                "alias": {
+                    "final_target": null,
+                    "hops": []
+                },
+                "steps": [
+                    {
+                        "step_index": 0,
+                        "step_kind": "load_declared_topology",
+                        "input_digest": "sha256:topology-input",
+                        "output_digest": "sha256:topology-output",
+                        "latency": 4,
+                        "canonicality_dependency": {
+                            "base-mainnet": {
+                                "block_hash": "0xbase-binding",
+                                "block_number": 100,
+                                "state": "finalized"
+                            }
+                        }
+                    },
+                    {
+                        "step_index": 1,
+                        "step_kind": "call_l1_resolver",
+                        "input_digest": "sha256:l1-input",
+                        "output_digest": "sha256:l1-output",
+                        "latency": 17,
+                        "canonicality_dependency": {
+                            "ethereum-mainnet": {
+                                "block_hash": "0xbase-binding",
+                                "block_number": 100,
+                                "state": "finalized"
+                            }
+                        }
+                    },
+                    {
+                        "step_index": 2,
+                        "step_kind": "ccip_offchain_lookup",
+                        "input_digest": "sha256:ccip-input",
+                        "output_digest": "sha256:ccip-output",
+                        "latency": 29,
+                        "canonicality_dependency": {
+                            "ethereum-mainnet": {
+                                "block_hash": "0xbase-binding",
+                                "block_number": 100,
+                                "state": "finalized"
+                            }
+                        }
+                    },
+                    {
+                        "step_index": 3,
+                        "step_kind": "resolve_with_proof",
+                        "input_digest": "sha256:proof-input",
+                        "output_digest": "sha256:proof-output",
+                        "latency": 11,
+                        "canonicality_dependency": {
+                            "ethereum-mainnet": {
+                                "block_hash": "0xbase-binding",
+                                "block_number": 100,
+                                "state": "finalized"
+                            }
+                        }
+                    }
+                ],
+                "finished_at": format_timestamp(timestamp(1_717_171_900))
+            },
+            "verified_queries": payload.verified_state.as_ref().and_then(|state| state.get("verified_queries")).cloned().expect("verified_state must include verified_queries")
+        }))
     );
 
     database.cleanup().await?;
@@ -627,7 +993,552 @@ async fn get_resolution_both_mode_returns_basenames_declared_transport_inventory
 }
 
 #[tokio::test]
-async fn get_resolution_execution_explain_returns_not_found_for_basenames_while_execution_is_shadow()
+async fn get_resolution_keeps_basenames_transport_explicit_without_ethereum_position()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let logical_name_id = "basenames:alice.base.eth";
+    let resource_id = Uuid::from_u128(0x6404);
+    let token_lineage_id = Uuid::from_u128(0x6504);
+    let surface_binding_id = Uuid::from_u128(0x6604);
+    let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000035);
+    let request_key = basenames_resolution_request_key(&["text:com.twitter", "addr:60"]);
+    let persisted_verified_queries = json!([
+        {
+            "record_key": "text:com.twitter",
+            "status": "not_found",
+            "failure_reason": "no_text_record",
+            "provenance": {
+                "execution_trace_id": execution_trace_id.to_string()
+            }
+        },
+        {
+            "record_key": "addr:60",
+            "status": "success",
+            "value": {
+                "coin_type": "60",
+                "value": "0x00000000000000000000000000000000000000aa"
+            },
+            "provenance": {
+                "execution_trace_id": execution_trace_id.to_string()
+            }
+        }
+    ]);
+
+    database
+        .seed_basenames_resolution_rebuild_inputs(
+            logical_name_id,
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    database.rebuild_name_current(logical_name_id).await?;
+    database
+        .rebuild_record_inventory_current(resource_id)
+        .await?;
+    let declared_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resolutions/basenames/alice.base.eth?mode=declared&records=text:com.twitter,addr:60")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("basenames declared resolution request failed before missing-ethereum assertions")?;
+    assert_eq!(declared_response.status(), StatusCode::OK);
+    let declared_payload: ResolutionResponse = read_json(declared_response).await?;
+    let record_inventory_boundary = declared_payload
+        .declared_state
+        .as_ref()
+        .and_then(|state| state.get("record_inventory"))
+        .and_then(|value| value.get("record_version_boundary"))
+        .cloned()
+        .context("basenames declared resolution must expose record_inventory boundary")?;
+    let worker_row = bigname_storage::load_record_inventory_current(
+        &database.pool,
+        resource_id,
+        &record_inventory_boundary,
+    )
+    .await?
+    .context("worker-produced basenames record_inventory_current row must exist")?;
+    let mut name_row = bigname_storage::load_name_current(&database.pool, logical_name_id)
+        .await?
+        .context("basenames missing-ethereum test requires name_current row")?;
+    append_basenames_execution_manifest_version(&mut name_row);
+    name_row.declared_summary["topology"] = json!({
+        "registry_path": [{
+            "logical_name_id": logical_name_id,
+            "namespace": "basenames",
+            "normalized_name": "alice.base.eth",
+            "canonical_display_name": "Alice.base.eth",
+            "namehash": "namehash:alice.base.eth",
+            "resource_id": resource_id.to_string(),
+            "binding_kind": "declared_registry_path"
+        }],
+        "subregistry_path": [],
+        "resolver_path": [{
+            "logical_name_id": logical_name_id,
+            "namespace": "basenames",
+            "normalized_name": "alice.base.eth",
+            "canonical_display_name": "Alice.base.eth",
+            "resource_id": resource_id.to_string(),
+            "chain_id": "base-mainnet",
+            "address": "0x0000000000000000000000000000000000000abc",
+            "latest_event_kind": "ResolverChanged"
+        }],
+        "wildcard": {
+            "source": null,
+            "matched_labels": []
+        },
+        "alias": {
+            "final_target": null,
+            "hops": []
+        },
+        "version_boundaries": {
+            "topology_version_boundary": worker_row.record_version_boundary.clone(),
+            "record_version_boundary": worker_row.record_version_boundary.clone()
+        },
+        "transport": {
+            "source_chain_id": "base-mainnet",
+            "target_chain_id": "ethereum-mainnet",
+            "contract_address": "0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31",
+            "latest_event_kind": null
+        }
+    });
+    database.insert_name_current_row(name_row.clone()).await?;
+
+    let requested_chain_positions = requested_chain_positions_from_name_current(&name_row.chain_positions);
+    let mut trace = resolution_execution_trace(
+        execution_trace_id,
+        &request_key,
+        &["text:com.twitter", "addr:60"],
+        persisted_verified_queries.clone(),
+    );
+    trace.namespace = "basenames".to_owned();
+    trace.request_key = request_key.clone();
+    trace.chain_context = json!({
+        "requested_positions": requested_chain_positions.clone(),
+    });
+    trace.manifest_context = json!({
+        "manifest_versions": [{
+            "source_family": "basenames_execution",
+            "manifest_version": 2
+        }]
+    });
+    trace.contracts_called = json!([
+        {
+            "chain_id": "ethereum-mainnet",
+            "contract_address": "0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31",
+            "selector": "0x9061b923"
+        }
+    ]);
+    trace.gateway_digests = json!(["sha256:ccip-request", "sha256:ccip-response"]);
+    trace.request_metadata = json!({
+        "surface": "alice.base.eth",
+        "record_keys": ["text:com.twitter", "addr:60"],
+        "entrypoint": "l1_resolver",
+        "contract_address": "0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31",
+        "transport": {
+            "source_chain_id": "base-mainnet",
+            "target_chain_id": "ethereum-mainnet",
+            "contract_address": "0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31",
+            "latest_event_kind": null
+        }
+    });
+    trace.steps = vec![
+        ExecutionTraceStep {
+            step_index: 0,
+            step_kind: "load_declared_topology".to_owned(),
+            input_digest: Some("sha256:topology-input".to_owned()),
+            output_digest: Some("sha256:topology-output".to_owned()),
+            latency_ms: Some(4),
+            canonicality_dependency: json!({
+                "base-mainnet": {
+                    "block_hash": "0xbase-binding",
+                    "block_number": 100,
+                    "state": "finalized"
+                }
+            }),
+            step_payload: json!({
+                "entrypoint": "l1_resolver",
+                "resolver": "0x0000000000000000000000000000000000000abc"
+            }),
+        },
+        ExecutionTraceStep {
+            step_index: 1,
+            step_kind: "call_l1_resolver".to_owned(),
+            input_digest: Some("sha256:l1-input".to_owned()),
+            output_digest: Some("sha256:l1-output".to_owned()),
+            latency_ms: Some(17),
+            canonicality_dependency: json!({
+                "ethereum-mainnet": {
+                    "block_hash": "0xbase-binding",
+                    "block_number": 100,
+                    "state": "finalized"
+                }
+            }),
+            step_payload: json!({
+                "name": "alice.base.eth",
+                "record_count": 2
+            }),
+        },
+        ExecutionTraceStep {
+            step_index: 2,
+            step_kind: "ccip_offchain_lookup".to_owned(),
+            input_digest: Some("sha256:ccip-input".to_owned()),
+            output_digest: Some("sha256:ccip-output".to_owned()),
+            latency_ms: Some(29),
+            canonicality_dependency: json!({
+                "ethereum-mainnet": {
+                    "block_hash": "0xbase-binding",
+                    "block_number": 100,
+                    "state": "finalized"
+                }
+            }),
+            step_payload: json!({
+                "gateway_digest": "sha256:ccip-request"
+            }),
+        },
+        ExecutionTraceStep {
+            step_index: 3,
+            step_kind: "resolve_with_proof".to_owned(),
+            input_digest: Some("sha256:proof-input".to_owned()),
+            output_digest: Some("sha256:proof-output".to_owned()),
+            latency_ms: Some(11),
+            canonicality_dependency: json!({
+                "ethereum-mainnet": {
+                    "block_hash": "0xbase-binding",
+                    "block_number": 100,
+                    "state": "finalized"
+                }
+            }),
+            step_payload: json!({
+                "proof_kind": "signature"
+            }),
+        },
+    ];
+
+    let mut outcome = resolution_execution_outcome_with_boundaries(
+        execution_trace_id,
+        &request_key,
+        persisted_verified_queries,
+        worker_row.record_version_boundary.clone(),
+        worker_row.record_version_boundary.clone(),
+    );
+    outcome.namespace = "basenames".to_owned();
+    outcome.cache_key.requested_chain_positions = requested_chain_positions;
+    outcome.cache_key.manifest_versions = name_row
+        .provenance
+        .get("manifest_versions")
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+    upsert_execution_trace(&database.pool, &trace).await?;
+    upsert_execution_outcome(&database.pool, &outcome).await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resolutions/basenames/alice.base.eth?mode=both&records=text:com.twitter,addr:60")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("missing-ethereum basenames mixed resolution request failed")?;
+    let explain_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/explain/resolutions/basenames/alice.base.eth/execution?records=text:com.twitter,addr:60")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("missing-ethereum basenames execution explain request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(explain_response.status(), StatusCode::NOT_FOUND);
+
+    let payload: ResolutionResponse = read_json(response).await?;
+    assert_eq!(
+        payload.verified_state,
+        Some(json!({
+            "verified_queries": [
+                {
+                    "record_key": "text:com.twitter",
+                    "status": "unsupported",
+                    "unsupported_reason": "verified resolution entrypoint is not yet supported",
+                },
+                {
+                    "record_key": "addr:60",
+                    "status": "unsupported",
+                    "unsupported_reason": "verified resolution entrypoint is not yet supported",
+                }
+            ]
+        }))
+    );
+    assert_eq!(payload.provenance.get("execution_trace_id"), Some(&Value::Null));
+
+    let explain_payload: ErrorResponse = read_json(explain_response).await?;
+    assert_eq!(explain_payload.error.code, "not_found");
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_resolution_keeps_basenames_transport_explicit_without_projected_topology()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let logical_name_id = "basenames:alice.base.eth";
+    let resource_id = Uuid::from_u128(0x6405);
+    let token_lineage_id = Uuid::from_u128(0x6505);
+    let surface_binding_id = Uuid::from_u128(0x6605);
+    let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000036);
+    let request_key = basenames_resolution_request_key(&["text:com.twitter", "addr:60"]);
+    let persisted_verified_queries = json!([
+        {
+            "record_key": "text:com.twitter",
+            "status": "not_found",
+            "failure_reason": "no_text_record",
+            "provenance": {
+                "execution_trace_id": execution_trace_id.to_string()
+            }
+        },
+        {
+            "record_key": "addr:60",
+            "status": "success",
+            "value": {
+                "coin_type": "60",
+                "value": "0x00000000000000000000000000000000000000aa"
+            },
+            "provenance": {
+                "execution_trace_id": execution_trace_id.to_string()
+            }
+        }
+    ]);
+
+    database
+        .seed_basenames_resolution_rebuild_inputs(
+            logical_name_id,
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    database.rebuild_name_current(logical_name_id).await?;
+    database
+        .rebuild_record_inventory_current(resource_id)
+        .await?;
+    let declared_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resolutions/basenames/alice.base.eth?mode=declared&records=text:com.twitter,addr:60")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("basenames declared resolution request failed before missing-topology assertions")?;
+    assert_eq!(declared_response.status(), StatusCode::OK);
+    let declared_payload: ResolutionResponse = read_json(declared_response).await?;
+    let record_inventory_boundary = declared_payload
+        .declared_state
+        .as_ref()
+        .and_then(|state| state.get("record_inventory"))
+        .and_then(|value| value.get("record_version_boundary"))
+        .cloned()
+        .context("basenames declared resolution must expose record_inventory boundary")?;
+    let worker_row = bigname_storage::load_record_inventory_current(
+        &database.pool,
+        resource_id,
+        &record_inventory_boundary,
+    )
+    .await?
+    .context("worker-produced basenames record_inventory_current row must exist")?;
+    let mut name_row = bigname_storage::load_name_current(&database.pool, logical_name_id)
+        .await?
+        .context("basenames missing-topology test requires name_current row")?;
+    append_basenames_execution_manifest_version(&mut name_row);
+    insert_basenames_supported_ethereum_position(&mut name_row);
+    database.insert_name_current_row(name_row.clone()).await?;
+
+    let requested_chain_positions = requested_chain_positions_from_name_current(&name_row.chain_positions);
+    let mut trace = resolution_execution_trace(
+        execution_trace_id,
+        &request_key,
+        &["text:com.twitter", "addr:60"],
+        persisted_verified_queries.clone(),
+    );
+    trace.namespace = "basenames".to_owned();
+    trace.request_key = request_key.clone();
+    trace.chain_context = json!({
+        "requested_positions": requested_chain_positions.clone(),
+    });
+    trace.manifest_context = json!({
+        "manifest_versions": [{
+            "source_family": "basenames_execution",
+            "manifest_version": 2
+        }]
+    });
+    trace.contracts_called = json!([
+        {
+            "chain_id": "ethereum-mainnet",
+            "contract_address": "0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31",
+            "selector": "0x9061b923"
+        }
+    ]);
+    trace.gateway_digests = json!(["sha256:ccip-request", "sha256:ccip-response"]);
+    trace.request_metadata = json!({
+        "surface": "alice.base.eth",
+        "record_keys": ["text:com.twitter", "addr:60"],
+        "entrypoint": "l1_resolver",
+        "contract_address": "0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31",
+        "transport": {
+            "source_chain_id": "base-mainnet",
+            "target_chain_id": "ethereum-mainnet",
+            "contract_address": "0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31",
+            "latest_event_kind": null
+        }
+    });
+    trace.steps = vec![
+        ExecutionTraceStep {
+            step_index: 0,
+            step_kind: "load_declared_topology".to_owned(),
+            input_digest: Some("sha256:topology-input".to_owned()),
+            output_digest: Some("sha256:topology-output".to_owned()),
+            latency_ms: Some(4),
+            canonicality_dependency: json!({
+                "base-mainnet": {
+                    "block_hash": "0xbase-binding",
+                    "block_number": 100,
+                    "state": "finalized"
+                }
+            }),
+            step_payload: json!({
+                "entrypoint": "l1_resolver",
+                "resolver": "0x0000000000000000000000000000000000000abc"
+            }),
+        },
+        ExecutionTraceStep {
+            step_index: 1,
+            step_kind: "call_l1_resolver".to_owned(),
+            input_digest: Some("sha256:l1-input".to_owned()),
+            output_digest: Some("sha256:l1-output".to_owned()),
+            latency_ms: Some(17),
+            canonicality_dependency: json!({
+                "ethereum-mainnet": {
+                    "block_hash": "0xbase-binding",
+                    "block_number": 100,
+                    "state": "finalized"
+                }
+            }),
+            step_payload: json!({
+                "name": "alice.base.eth",
+                "record_count": 2
+            }),
+        },
+        ExecutionTraceStep {
+            step_index: 2,
+            step_kind: "ccip_offchain_lookup".to_owned(),
+            input_digest: Some("sha256:ccip-input".to_owned()),
+            output_digest: Some("sha256:ccip-output".to_owned()),
+            latency_ms: Some(29),
+            canonicality_dependency: json!({
+                "ethereum-mainnet": {
+                    "block_hash": "0xbase-binding",
+                    "block_number": 100,
+                    "state": "finalized"
+                }
+            }),
+            step_payload: json!({
+                "gateway_digest": "sha256:ccip-request"
+            }),
+        },
+        ExecutionTraceStep {
+            step_index: 3,
+            step_kind: "resolve_with_proof".to_owned(),
+            input_digest: Some("sha256:proof-input".to_owned()),
+            output_digest: Some("sha256:proof-output".to_owned()),
+            latency_ms: Some(11),
+            canonicality_dependency: json!({
+                "ethereum-mainnet": {
+                    "block_hash": "0xbase-binding",
+                    "block_number": 100,
+                    "state": "finalized"
+                }
+            }),
+            step_payload: json!({
+                "proof_kind": "signature"
+            }),
+        },
+    ];
+
+    let mut outcome = resolution_execution_outcome_with_boundaries(
+        execution_trace_id,
+        &request_key,
+        persisted_verified_queries,
+        worker_row.record_version_boundary.clone(),
+        worker_row.record_version_boundary.clone(),
+    );
+    outcome.namespace = "basenames".to_owned();
+    outcome.cache_key.requested_chain_positions = requested_chain_positions;
+    outcome.cache_key.manifest_versions = name_row
+        .provenance
+        .get("manifest_versions")
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+    upsert_execution_trace(&database.pool, &trace).await?;
+    upsert_execution_outcome(&database.pool, &outcome).await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resolutions/basenames/alice.base.eth?mode=both&records=text:com.twitter,addr:60")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("missing-topology basenames mixed resolution request failed")?;
+    let explain_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/explain/resolutions/basenames/alice.base.eth/execution?records=text:com.twitter,addr:60")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("missing-topology basenames execution explain request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(explain_response.status(), StatusCode::NOT_FOUND);
+
+    let payload: ResolutionResponse = read_json(response).await?;
+    assert_eq!(
+        payload.verified_state,
+        Some(json!({
+            "verified_queries": [
+                {
+                    "record_key": "text:com.twitter",
+                    "status": "unsupported",
+                    "unsupported_reason": "verified resolution entrypoint is not yet supported",
+                },
+                {
+                    "record_key": "addr:60",
+                    "status": "unsupported",
+                    "unsupported_reason": "verified resolution entrypoint is not yet supported",
+                }
+            ]
+        }))
+    );
+    assert_eq!(payload.provenance.get("execution_trace_id"), Some(&Value::Null));
+
+    let explain_payload: ErrorResponse = read_json(explain_response).await?;
+    assert_eq!(explain_payload.error.code, "not_found");
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_resolution_keeps_out_of_class_basenames_transport_explicit()
 -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let logical_name_id = "basenames:alice.base.eth";
@@ -647,23 +1558,124 @@ async fn get_resolution_execution_explain_returns_not_found_for_basenames_while_
     database
         .rebuild_record_inventory_current(resource_id)
         .await?;
-
-    let response = app_router(database.app_state())
+    let declared_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/explain/resolutions/basenames/alice.base.eth/execution?records=addr:60,text")
+                .uri("/v1/resolutions/basenames/alice.base.eth?mode=declared&records=text:com.twitter,addr:60")
                 .body(Body::empty())
                 .expect("request must build"),
         )
         .await
-        .context("basenames resolution execution explain request failed")?;
+        .context("basenames declared resolution request failed before negative assertions")?;
+    assert_eq!(declared_response.status(), StatusCode::OK);
+    let declared_payload: ResolutionResponse = read_json(declared_response).await?;
+    let record_inventory_boundary = declared_payload
+        .declared_state
+        .as_ref()
+        .and_then(|state| state.get("record_inventory"))
+        .and_then(|value| value.get("record_version_boundary"))
+        .cloned()
+        .context("basenames declared resolution must expose record_inventory boundary")?;
+    let worker_row = bigname_storage::load_record_inventory_current(
+        &database.pool,
+        resource_id,
+        &record_inventory_boundary,
+    )
+    .await?
+    .context("worker-produced basenames record_inventory_current row must exist")?;
+    let mut name_row = bigname_storage::load_name_current(&database.pool, logical_name_id)
+        .await?
+        .context("basenames negative resolution test requires name_current row")?;
+    append_basenames_execution_manifest_version(&mut name_row);
+    insert_basenames_supported_ethereum_position(&mut name_row);
+    name_row.declared_summary["topology"] = json!({
+        "registry_path": [{
+            "logical_name_id": logical_name_id,
+            "namespace": "basenames",
+            "normalized_name": "alice.base.eth",
+            "canonical_display_name": "Alice.base.eth",
+            "namehash": "namehash:alice.base.eth",
+            "resource_id": resource_id.to_string(),
+            "binding_kind": "declared_registry_path"
+        }],
+        "subregistry_path": [],
+        "resolver_path": [{
+            "logical_name_id": logical_name_id,
+            "namespace": "basenames",
+            "normalized_name": "alice.base.eth",
+            "canonical_display_name": "Alice.base.eth",
+            "resource_id": resource_id.to_string(),
+            "chain_id": "base-mainnet",
+            "address": "0x0000000000000000000000000000000000000abc",
+            "latest_event_kind": "ResolverChanged"
+        }],
+        "wildcard": {
+            "source": null,
+            "matched_labels": []
+        },
+        "alias": {
+            "final_target": null,
+            "hops": []
+        },
+        "version_boundaries": {
+            "topology_version_boundary": worker_row.record_version_boundary.clone(),
+            "record_version_boundary": worker_row.record_version_boundary.clone()
+        },
+        "transport": {
+            "source_chain_id": "base-mainnet",
+            "target_chain_id": "ethereum-mainnet",
+            "contract_address": "0x0000000000000000000000000000000000000bad",
+            "latest_event_kind": null
+        }
+    });
+    database.insert_name_current_row(name_row).await?;
 
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resolutions/basenames/alice.base.eth?mode=both&records=text:com.twitter,addr:60")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("out-of-class basenames mixed resolution request failed")?;
+    let explain_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/explain/resolutions/basenames/alice.base.eth/execution?records=text:com.twitter,addr:60")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("out-of-class basenames execution explain request failed")?;
 
-    let payload: ErrorResponse = read_json(response).await?;
-    assert_eq!(payload.error.code, "not_found");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(explain_response.status(), StatusCode::NOT_FOUND);
+
+    let payload: ResolutionResponse = read_json(response).await?;
     assert_eq!(
-        payload.error.message,
+        payload.verified_state,
+        Some(json!({
+            "verified_queries": [
+                {
+                    "record_key": "text:com.twitter",
+                    "status": "unsupported",
+                    "unsupported_reason": "verified resolution entrypoint is not yet supported",
+                },
+                {
+                    "record_key": "addr:60",
+                    "status": "unsupported",
+                    "unsupported_reason": "verified resolution entrypoint is not yet supported",
+                }
+            ]
+        }))
+    );
+    assert_eq!(payload.provenance.get("execution_trace_id"), Some(&Value::Null));
+
+    let explain_payload: ErrorResponse = read_json(explain_response).await?;
+    assert_eq!(explain_payload.error.code, "not_found");
+    assert_eq!(
+        explain_payload.error.message,
         "persisted resolution execution explain was not found for name alice.base.eth in namespace basenames"
     );
 

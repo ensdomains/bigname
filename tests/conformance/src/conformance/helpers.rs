@@ -1693,6 +1693,330 @@
             })
         }
 
+        fn basenames_resolution_execution_request_key(records: &[&str]) -> String {
+            let mut records = records
+                .iter()
+                .map(|record| (*record).to_owned())
+                .collect::<Vec<_>>();
+            records.sort_unstable();
+            format!("basenames:alice.base.eth:{}", records.join(","))
+        }
+
+        fn requested_chain_positions_from_name_current(chain_positions: &Value) -> Value {
+            let mut positions = chain_positions
+                .as_object()
+                .expect("name_current.chain_positions must be an object")
+                .values()
+                .map(|position| {
+                    json!({
+                        "chain_id": position
+                            .get("chain_id")
+                            .and_then(Value::as_str)
+                            .expect("chain_position.chain_id must be present"),
+                        "block_number": position
+                            .get("block_number")
+                            .and_then(Value::as_i64)
+                            .expect("chain_position.block_number must be present"),
+                        "block_hash": position
+                            .get("block_hash")
+                            .and_then(Value::as_str)
+                            .expect("chain_position.block_hash must be present"),
+                    })
+                })
+                .collect::<Vec<_>>();
+            positions.sort_by(|left, right| {
+                left.get("chain_id")
+                    .and_then(Value::as_str)
+                    .cmp(&right.get("chain_id").and_then(Value::as_str))
+            });
+            Value::Array(positions)
+        }
+
+        fn basenames_execution_manifest_version() -> Value {
+            json!({
+                "source_family": "basenames_execution",
+                "manifest_version": 2,
+                "chain": "ethereum-mainnet",
+                "deployment_epoch": "basenames_v1",
+            })
+        }
+
+        fn append_basenames_execution_manifest_version(
+            name_row: &mut bigname_storage::NameCurrentRow,
+        ) {
+            let manifest_versions = name_row.provenance["manifest_versions"]
+                .as_array_mut()
+                .expect("name_current.provenance.manifest_versions must be an array");
+            if manifest_versions.iter().any(|item| {
+                item.get("source_family").and_then(Value::as_str) == Some("basenames_execution")
+                    && item.get("manifest_version").and_then(Value::as_i64) == Some(2)
+            }) {
+                return;
+            }
+            manifest_versions.push(basenames_execution_manifest_version());
+        }
+
+        fn insert_basenames_supported_ethereum_position(
+            name_row: &mut bigname_storage::NameCurrentRow,
+        ) {
+            let chain_positions = name_row
+                .chain_positions
+                .as_object_mut()
+                .expect("name_current.chain_positions must be an object");
+            chain_positions.insert(
+                "ethereum".to_owned(),
+                json!({
+                    "chain_id": "ethereum-mainnet",
+                    "block_number": 21_000_100,
+                    "block_hash": "0xbasenamesl1",
+                    "timestamp": "2026-04-17T00:01:40Z",
+                }),
+            );
+        }
+
+        fn basenames_resolution_execution_trace(
+            execution_trace_id: Uuid,
+            request_key: &str,
+            request_record_keys: &[&str],
+            requested_chain_positions: Value,
+            verified_queries: Value,
+        ) -> ExecutionTrace {
+            ExecutionTrace {
+                execution_trace_id,
+                request_type: "verified_resolution".to_owned(),
+                request_key: request_key.to_owned(),
+                namespace: "basenames".to_owned(),
+                chain_context: json!({
+                    "requested_positions": requested_chain_positions,
+                }),
+                manifest_context: json!({
+                    "manifest_versions": [{
+                        "source_family": "basenames_execution",
+                        "manifest_version": 2,
+                    }]
+                }),
+                contracts_called: json!([
+                    {
+                        "chain_id": "ethereum-mainnet",
+                        "contract_address": "0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31",
+                        "selector": "0x9061b923",
+                    }
+                ]),
+                gateway_digests: json!(["sha256:ccip-request", "sha256:ccip-response"]),
+                final_payload: Some(json!({
+                    "verified_queries": verified_queries.clone(),
+                })),
+                failure_payload: None,
+                request_metadata: json!({
+                    "surface": "alice.base.eth",
+                    "record_keys": request_record_keys,
+                    "entrypoint": "l1_resolver",
+                    "contract_address": "0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31",
+                    "transport": {
+                        "source_chain_id": "base-mainnet",
+                        "target_chain_id": "ethereum-mainnet",
+                        "contract_address": "0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31",
+                        "latest_event_kind": null,
+                    }
+                }),
+                finished_at: Some(timestamp(1_717_171_900)),
+                steps: vec![
+                    ExecutionTraceStep {
+                        step_index: 0,
+                        step_kind: "load_declared_topology".to_owned(),
+                        input_digest: Some("sha256:topology-input".to_owned()),
+                        output_digest: Some("sha256:topology-output".to_owned()),
+                        latency_ms: Some(4),
+                        canonicality_dependency: json!({
+                            "base-mainnet": {
+                                "block_hash": "0xbase-binding",
+                                "block_number": 100,
+                                "state": "finalized",
+                            }
+                        }),
+                        step_payload: json!({
+                            "entrypoint": "l1_resolver",
+                            "resolver": "0x0000000000000000000000000000000000000abc",
+                        }),
+                    },
+                    ExecutionTraceStep {
+                        step_index: 1,
+                        step_kind: "call_l1_resolver".to_owned(),
+                        input_digest: Some("sha256:l1-input".to_owned()),
+                        output_digest: Some("sha256:l1-output".to_owned()),
+                        latency_ms: Some(17),
+                        canonicality_dependency: json!({
+                            "ethereum-mainnet": {
+                                "block_hash": "0xbase-binding",
+                                "block_number": 100,
+                                "state": "finalized",
+                            }
+                        }),
+                        step_payload: json!({
+                            "name": "alice.base.eth",
+                            "record_count": request_record_keys.len(),
+                        }),
+                    },
+                    ExecutionTraceStep {
+                        step_index: 2,
+                        step_kind: "ccip_offchain_lookup".to_owned(),
+                        input_digest: Some("sha256:ccip-input".to_owned()),
+                        output_digest: Some("sha256:ccip-output".to_owned()),
+                        latency_ms: Some(29),
+                        canonicality_dependency: json!({
+                            "ethereum-mainnet": {
+                                "block_hash": "0xbase-binding",
+                                "block_number": 100,
+                                "state": "finalized",
+                            }
+                        }),
+                        step_payload: json!({
+                            "gateway_digest": "sha256:ccip-request",
+                        }),
+                    },
+                    ExecutionTraceStep {
+                        step_index: 3,
+                        step_kind: "resolve_with_proof".to_owned(),
+                        input_digest: Some("sha256:proof-input".to_owned()),
+                        output_digest: Some("sha256:proof-output".to_owned()),
+                        latency_ms: Some(11),
+                        canonicality_dependency: json!({
+                            "ethereum-mainnet": {
+                                "block_hash": "0xbase-binding",
+                                "block_number": 100,
+                                "state": "finalized",
+                            }
+                        }),
+                        step_payload: json!({
+                            "proof_kind": "signature",
+                        }),
+                    },
+                ],
+            }
+        }
+
+        fn basenames_resolution_execution_outcome(
+            execution_trace_id: Uuid,
+            request_key: &str,
+            requested_chain_positions: Value,
+            manifest_versions: Value,
+            record_version_boundary: Value,
+            verified_queries: Value,
+        ) -> ExecutionOutcome {
+            ExecutionOutcome {
+                cache_key: ExecutionCacheKey {
+                    request_key: request_key.to_owned(),
+                    requested_chain_positions,
+                    manifest_versions,
+                    topology_version_boundary: record_version_boundary.clone(),
+                    record_version_boundary,
+                },
+                execution_trace_id,
+                request_type: "verified_resolution".to_owned(),
+                namespace: "basenames".to_owned(),
+                outcome_payload: Some(json!({
+                    "verified_queries": verified_queries,
+                })),
+                failure_payload: None,
+                finished_at: timestamp(1_717_171_900),
+            }
+        }
+
+        fn basenames_resolution_execution_summary(
+            execution_trace_id: Uuid,
+            logical_name_id: &str,
+            resource_id: Uuid,
+        ) -> Value {
+            json!({
+                "execution_trace_id": execution_trace_id.to_string(),
+                "selected_entrypoint": {
+                    "source_family": "basenames_execution",
+                    "role": "l1_resolver",
+                    "chain_id": "ethereum-mainnet",
+                    "contract_address": "0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31",
+                },
+                "resolver_discovery_path": [
+                    {
+                        "logical_name_id": logical_name_id,
+                        "namespace": "basenames",
+                        "normalized_name": "alice.base.eth",
+                        "canonical_display_name": "Alice.base.eth",
+                        "resource_id": resource_id.to_string(),
+                        "chain_id": "base-mainnet",
+                        "address": "0x0000000000000000000000000000000000000abc",
+                        "latest_event_kind": "ResolverChanged",
+                    }
+                ],
+                "wildcard": {
+                    "source": null,
+                    "matched_labels": [],
+                },
+                "alias": {
+                    "final_target": null,
+                    "hops": [],
+                },
+                "steps": [
+                    {
+                        "step_index": 0,
+                        "step_kind": "load_declared_topology",
+                        "input_digest": "sha256:topology-input",
+                        "output_digest": "sha256:topology-output",
+                        "latency": 4,
+                        "canonicality_dependency": {
+                            "base-mainnet": {
+                                "block_hash": "0xbase-binding",
+                                "block_number": 100,
+                                "state": "finalized",
+                            }
+                        }
+                    },
+                    {
+                        "step_index": 1,
+                        "step_kind": "call_l1_resolver",
+                        "input_digest": "sha256:l1-input",
+                        "output_digest": "sha256:l1-output",
+                        "latency": 17,
+                        "canonicality_dependency": {
+                            "ethereum-mainnet": {
+                                "block_hash": "0xbase-binding",
+                                "block_number": 100,
+                                "state": "finalized",
+                            }
+                        }
+                    },
+                    {
+                        "step_index": 2,
+                        "step_kind": "ccip_offchain_lookup",
+                        "input_digest": "sha256:ccip-input",
+                        "output_digest": "sha256:ccip-output",
+                        "latency": 29,
+                        "canonicality_dependency": {
+                            "ethereum-mainnet": {
+                                "block_hash": "0xbase-binding",
+                                "block_number": 100,
+                                "state": "finalized",
+                            }
+                        }
+                    },
+                    {
+                        "step_index": 3,
+                        "step_kind": "resolve_with_proof",
+                        "input_digest": "sha256:proof-input",
+                        "output_digest": "sha256:proof-output",
+                        "latency": 11,
+                        "canonicality_dependency": {
+                            "ethereum-mainnet": {
+                                "block_hash": "0xbase-binding",
+                                "block_number": 100,
+                                "state": "finalized",
+                            }
+                        }
+                    }
+                ],
+                "finished_at": format_timestamp(timestamp(1_717_171_900)),
+            })
+        }
+
         fn resolution_wildcard_source(
             wildcard_source_logical_name_id: &str,
             wildcard_source_resource_id: Uuid,

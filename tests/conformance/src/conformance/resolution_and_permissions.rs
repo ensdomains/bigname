@@ -269,13 +269,18 @@
         }
 
         #[tokio::test]
-        async fn resolution_contract_returns_basenames_declared_transport_inventory_and_explicit_unsupported_verified()
+        async fn resolution_contract_reads_persisted_basenames_transport_direct_answers()
         -> Result<()> {
             let database = HarnessDatabase::new().await?;
             let logical_name_id = "basenames:alice.base.eth";
             let resource_id = Uuid::from_u128(0x7200);
             let token_lineage_id = Uuid::from_u128(0x7100);
             let surface_binding_id = Uuid::from_u128(0x7300);
+            let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000034);
+            let request_key =
+                basenames_resolution_execution_request_key(&["text:com.twitter", "addr:60"]);
+            let persisted_verified_queries =
+                resolution_execution_verified_queries(execution_trace_id, &["text:com.twitter", "addr:60"]);
 
             seed_basenames_resolution_rebuild_inputs(
                 &database,
@@ -287,31 +292,26 @@
             .await?;
             database.rebuild_name_current(logical_name_id).await?;
             rebuild_record_inventory_current(&database, resource_id).await?;
-
-            let response = app_router(database.app_state())
+            let declared_response = app_router(database.app_state())
                 .oneshot(
                     Request::builder()
                         .uri(
-                            "/v1/resolutions/basenames/alice.base.eth?mode=both&records=addr:60,text",
+                            "/v1/resolutions/basenames/alice.base.eth?mode=declared&records=text:com.twitter,addr:60",
                         )
                         .body(Body::empty())
                         .expect("request must build"),
                 )
                 .await
-                .context("basenames mixed resolution request failed")?;
-
-            assert_eq!(response.status(), StatusCode::OK);
-
-            let payload: ResolutionResponse = read_json(response).await?;
-            let declared_state = payload
+                .context("basenames declared resolution request failed before seeding execution")?;
+            assert_eq!(declared_response.status(), StatusCode::OK);
+            let declared_payload: ResolutionResponse = read_json(declared_response).await?;
+            let record_inventory_boundary = declared_payload
                 .declared_state
                 .as_ref()
-                .context("basenames mixed resolution must include declared_state")?;
-            let record_inventory_boundary = declared_state
-                .get("record_inventory")
+                .and_then(|state| state.get("record_inventory"))
                 .and_then(|value| value.get("record_version_boundary"))
                 .cloned()
-                .context("basenames mixed resolution must include record_inventory boundary")?;
+                .context("basenames declared resolution must include record_inventory boundary")?;
             let worker_row = bigname_storage::load_record_inventory_current(
                 &database.pool,
                 resource_id,
@@ -319,54 +319,122 @@
             )
             .await?
             .context("worker-produced basenames record_inventory_current row must exist")?;
+            let mut name_row = bigname_storage::load_name_current(&database.pool, logical_name_id)
+                .await?
+                .context("basenames supported resolution test requires name_current row")?;
+            let topology = json!({
+                "registry_path": [
+                    {
+                        "logical_name_id": logical_name_id,
+                        "namespace": "basenames",
+                        "normalized_name": "alice.base.eth",
+                        "canonical_display_name": "Alice.base.eth",
+                        "namehash": "namehash:alice.base.eth",
+                        "resource_id": resource_id.to_string(),
+                        "binding_kind": "declared_registry_path",
+                    }
+                ],
+                "subregistry_path": [],
+                "resolver_path": [
+                    {
+                        "logical_name_id": logical_name_id,
+                        "namespace": "basenames",
+                        "normalized_name": "alice.base.eth",
+                        "canonical_display_name": "Alice.base.eth",
+                        "resource_id": resource_id.to_string(),
+                        "chain_id": "base-mainnet",
+                        "address": "0x0000000000000000000000000000000000000abc",
+                        "latest_event_kind": "ResolverChanged",
+                    }
+                ],
+                "wildcard": {
+                    "source": null,
+                    "matched_labels": [],
+                },
+                "alias": {
+                    "final_target": null,
+                    "hops": [],
+                },
+                "version_boundaries": {
+                    "topology_version_boundary": worker_row.record_version_boundary.clone(),
+                    "record_version_boundary": worker_row.record_version_boundary.clone(),
+                },
+                "transport": {
+                    "source_chain_id": "base-mainnet",
+                    "target_chain_id": "ethereum-mainnet",
+                    "contract_address": "0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31",
+                    "latest_event_kind": null,
+                },
+            });
+            append_basenames_execution_manifest_version(&mut name_row);
+            insert_basenames_supported_ethereum_position(&mut name_row);
+            name_row.declared_summary["topology"] = topology.clone();
+            database.insert_name_current_row(name_row.clone()).await?;
+            let requested_chain_positions =
+                requested_chain_positions_from_name_current(&name_row.chain_positions);
 
-            assert_eq!(
-                declared_state.get("topology"),
-                Some(&json!({
-                    "registry_path": [
-                        {
-                            "logical_name_id": logical_name_id,
-                            "namespace": "basenames",
-                            "normalized_name": "alice.base.eth",
-                            "canonical_display_name": "Alice.base.eth",
-                            "namehash": "namehash:alice.base.eth",
-                            "resource_id": resource_id.to_string(),
-                            "binding_kind": "declared_registry_path",
-                        }
-                    ],
-                    "subregistry_path": [],
-                    "resolver_path": [
-                        {
-                            "logical_name_id": logical_name_id,
-                            "namespace": "basenames",
-                            "normalized_name": "alice.base.eth",
-                            "canonical_display_name": "Alice.base.eth",
-                            "resource_id": resource_id.to_string(),
-                            "chain_id": "base-mainnet",
-                            "address": "0x0000000000000000000000000000000000000abc",
-                            "latest_event_kind": "ResolverChanged",
-                        }
-                    ],
-                    "wildcard": {
-                        "source": null,
-                        "matched_labels": [],
-                    },
-                    "alias": {
-                        "final_target": null,
-                        "hops": [],
-                    },
-                    "version_boundaries": {
-                        "topology_version_boundary": worker_row.record_version_boundary.clone(),
-                        "record_version_boundary": worker_row.record_version_boundary.clone(),
-                    },
-                    "transport": {
-                        "source_chain_id": "base-mainnet",
-                        "target_chain_id": "ethereum-mainnet",
-                        "contract_address": "0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31",
-                        "latest_event_kind": null,
-                    },
-                }))
-            );
+            upsert_execution_trace(
+                &database.pool,
+                &basenames_resolution_execution_trace(
+                    execution_trace_id,
+                    &request_key,
+                    &["text:com.twitter", "addr:60"],
+                    requested_chain_positions.clone(),
+                    persisted_verified_queries.clone(),
+                ),
+            )
+            .await?;
+            upsert_execution_outcome(
+                &database.pool,
+                &basenames_resolution_execution_outcome(
+                    execution_trace_id,
+                    &request_key,
+                    requested_chain_positions,
+                    name_row
+                        .provenance
+                        .get("manifest_versions")
+                        .cloned()
+                        .unwrap_or_else(|| json!([])),
+                    worker_row.record_version_boundary.clone(),
+                    persisted_verified_queries.clone(),
+                ),
+            )
+            .await?;
+
+            let response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(
+                            "/v1/resolutions/basenames/alice.base.eth?mode=both&records=text:com.twitter,addr:60",
+                        )
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("basenames mixed resolution request failed")?;
+            let explain_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(
+                            "/v1/explain/resolutions/basenames/alice.base.eth/execution?records=text:com.twitter,addr:60",
+                        )
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("basenames resolution execution explain request failed")?;
+
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(explain_response.status(), StatusCode::OK);
+
+            let payload: ResolutionResponse = read_json(response).await?;
+            let explain_payload: ResolutionResponse = read_json(explain_response).await?;
+            let declared_state = payload
+                .declared_state
+                .as_ref()
+                .context("basenames mixed resolution must include declared_state")?;
+
+            assert_eq!(declared_state.get("topology"), Some(&topology));
             assert_eq!(
                 declared_state.get("record_inventory"),
                 Some(&json!({
@@ -382,7 +450,21 @@
                 declared_state.get("record_cache"),
                 Some(&json!({
                     "record_version_boundary": worker_row.record_version_boundary.clone(),
-                    "entries": worker_row.entries.clone(),
+                    "entries": [
+                        {
+                            "record_key": "text:com.twitter",
+                            "record_family": "text",
+                            "selector_key": "com.twitter",
+                            "status": "not_found",
+                        },
+                        {
+                            "record_key": "addr:60",
+                            "record_family": "addr",
+                            "selector_key": "60",
+                            "status": "unsupported",
+                            "unsupported_reason": "value_not_retained_in_normalized_events",
+                        }
+                    ],
                 }))
             );
             assert_eq!(
@@ -390,21 +472,50 @@
                 Some(json!({
                     "verified_queries": [
                         {
-                            "record_key": "addr:60",
-                            "status": "unsupported",
-                            "unsupported_reason": "verified resolution entrypoint is not yet supported",
+                            "record_key": "text:com.twitter",
+                            "status": "not_found",
+                            "failure_reason": "no_text_record",
+                            "provenance": {
+                                "execution_trace_id": execution_trace_id.to_string(),
+                            }
                         },
                         {
-                            "record_key": "text",
-                            "status": "unsupported",
-                            "unsupported_reason": "verified resolution entrypoint is not yet supported",
+                            "record_key": "addr:60",
+                            "status": "success",
+                            "value": {
+                                "coin_type": "60",
+                                "value": "0x00000000000000000000000000000000000000aa",
+                            },
+                            "provenance": {
+                                "execution_trace_id": execution_trace_id.to_string(),
+                            }
                         }
                     ]
                 }))
             );
             assert_eq!(
                 payload.provenance.get("execution_trace_id"),
-                Some(&Value::Null)
+                Some(&Value::String(execution_trace_id.to_string()))
+            );
+            assert_eq!(
+                payload.provenance.get("manifest_versions"),
+                name_row.provenance.get("manifest_versions")
+            );
+            assert_eq!(
+                explain_payload.verified_state,
+                Some(json!({
+                    "execution": basenames_resolution_execution_summary(
+                        execution_trace_id,
+                        logical_name_id,
+                        resource_id,
+                    ),
+                    "verified_queries": payload
+                        .verified_state
+                        .as_ref()
+                        .and_then(|state| state.get("verified_queries"))
+                        .cloned()
+                        .expect("verified_state must include verified_queries"),
+                }))
             );
 
             database.cleanup().await?;
@@ -412,7 +523,148 @@
         }
 
         #[tokio::test]
-        async fn resolution_execution_explain_returns_not_found_for_basenames_while_execution_is_shadow()
+        async fn resolution_contract_keeps_basenames_transport_explicit_without_projected_topology()
+        -> Result<()> {
+            let database = HarnessDatabase::new().await?;
+            let logical_name_id = "basenames:alice.base.eth";
+            let resource_id = Uuid::from_u128(0x7403);
+            let token_lineage_id = Uuid::from_u128(0x7404);
+            let surface_binding_id = Uuid::from_u128(0x7405);
+            let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000037);
+            let request_key =
+                basenames_resolution_execution_request_key(&["text:com.twitter", "addr:60"]);
+            let persisted_verified_queries =
+                resolution_execution_verified_queries(execution_trace_id, &["text:com.twitter", "addr:60"]);
+
+            seed_basenames_resolution_rebuild_inputs(
+                &database,
+                logical_name_id,
+                resource_id,
+                token_lineage_id,
+                surface_binding_id,
+            )
+            .await?;
+            database.rebuild_name_current(logical_name_id).await?;
+            rebuild_record_inventory_current(&database, resource_id).await?;
+            let declared_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(
+                            "/v1/resolutions/basenames/alice.base.eth?mode=declared&records=text:com.twitter,addr:60",
+                        )
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("basenames declared resolution request failed before missing-topology conformance assertions")?;
+            assert_eq!(declared_response.status(), StatusCode::OK);
+            let declared_payload: ResolutionResponse = read_json(declared_response).await?;
+            let record_inventory_boundary = declared_payload
+                .declared_state
+                .as_ref()
+                .and_then(|state| state.get("record_inventory"))
+                .and_then(|value| value.get("record_version_boundary"))
+                .cloned()
+                .context("basenames declared resolution must include record_inventory boundary")?;
+            let worker_row = bigname_storage::load_record_inventory_current(
+                &database.pool,
+                resource_id,
+                &record_inventory_boundary,
+            )
+            .await?
+            .context("worker-produced basenames record_inventory_current row must exist")?;
+            let mut name_row = bigname_storage::load_name_current(&database.pool, logical_name_id)
+                .await?
+                .context("basenames missing-topology conformance test requires name_current row")?;
+            append_basenames_execution_manifest_version(&mut name_row);
+            insert_basenames_supported_ethereum_position(&mut name_row);
+            database.insert_name_current_row(name_row.clone()).await?;
+            let requested_chain_positions =
+                requested_chain_positions_from_name_current(&name_row.chain_positions);
+
+            upsert_execution_trace(
+                &database.pool,
+                &basenames_resolution_execution_trace(
+                    execution_trace_id,
+                    &request_key,
+                    &["text:com.twitter", "addr:60"],
+                    requested_chain_positions.clone(),
+                    persisted_verified_queries.clone(),
+                ),
+            )
+            .await?;
+            upsert_execution_outcome(
+                &database.pool,
+                &basenames_resolution_execution_outcome(
+                    execution_trace_id,
+                    &request_key,
+                    requested_chain_positions,
+                    name_row
+                        .provenance
+                        .get("manifest_versions")
+                        .cloned()
+                        .unwrap_or_else(|| json!([])),
+                    worker_row.record_version_boundary.clone(),
+                    persisted_verified_queries,
+                ),
+            )
+            .await?;
+
+            let response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(
+                            "/v1/resolutions/basenames/alice.base.eth?mode=both&records=text:com.twitter,addr:60",
+                        )
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("missing-topology basenames mixed resolution request failed")?;
+            let explain_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(
+                            "/v1/explain/resolutions/basenames/alice.base.eth/execution?records=text:com.twitter,addr:60",
+                        )
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("missing-topology basenames execution explain request failed")?;
+
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(explain_response.status(), StatusCode::NOT_FOUND);
+
+            let payload: ResolutionResponse = read_json(response).await?;
+            assert_eq!(
+                payload.verified_state,
+                Some(json!({
+                    "verified_queries": [
+                        {
+                            "record_key": "text:com.twitter",
+                            "status": "unsupported",
+                            "unsupported_reason": "verified resolution entrypoint is not yet supported",
+                        },
+                        {
+                            "record_key": "addr:60",
+                            "status": "unsupported",
+                            "unsupported_reason": "verified resolution entrypoint is not yet supported",
+                        }
+                    ]
+                }))
+            );
+            assert_eq!(payload.provenance.get("execution_trace_id"), Some(&Value::Null));
+
+            let explain_payload: ErrorResponse = read_json(explain_response).await?;
+            assert_eq!(explain_payload.error.code, "not_found");
+
+            database.cleanup().await?;
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn resolution_contract_keeps_out_of_class_basenames_transport_explicit()
         -> Result<()> {
             let database = HarnessDatabase::new().await?;
             let logical_name_id = "basenames:alice.base.eth";
@@ -430,25 +682,120 @@
             .await?;
             database.rebuild_name_current(logical_name_id).await?;
             rebuild_record_inventory_current(&database, resource_id).await?;
-
-            let response = app_router(database.app_state())
+            let declared_response = app_router(database.app_state())
                 .oneshot(
                     Request::builder()
                         .uri(
-                            "/v1/explain/resolutions/basenames/alice.base.eth/execution?records=addr:60,text",
+                            "/v1/resolutions/basenames/alice.base.eth?mode=declared&records=text:com.twitter,addr:60",
                         )
                         .body(Body::empty())
                         .expect("request must build"),
                 )
                 .await
-                .context("basenames resolution execution explain request failed")?;
+                .context("basenames declared resolution request failed before negative assertions")?;
+            assert_eq!(declared_response.status(), StatusCode::OK);
+            let declared_payload: ResolutionResponse = read_json(declared_response).await?;
+            let record_inventory_boundary = declared_payload
+                .declared_state
+                .as_ref()
+                .and_then(|state| state.get("record_inventory"))
+                .and_then(|value| value.get("record_version_boundary"))
+                .cloned()
+                .context("basenames declared resolution must include record_inventory boundary")?;
+            let worker_row = bigname_storage::load_record_inventory_current(
+                &database.pool,
+                resource_id,
+                &record_inventory_boundary,
+            )
+            .await?
+            .context("worker-produced basenames record_inventory_current row must exist")?;
+            let mut name_row = bigname_storage::load_name_current(&database.pool, logical_name_id)
+                .await?
+                .context("basenames negative resolution test requires name_current row")?;
+            append_basenames_execution_manifest_version(&mut name_row);
+            insert_basenames_supported_ethereum_position(&mut name_row);
+            name_row.declared_summary["topology"] = json!({
+                "registry_path": [{
+                    "logical_name_id": logical_name_id,
+                    "namespace": "basenames",
+                    "normalized_name": "alice.base.eth",
+                    "canonical_display_name": "Alice.base.eth",
+                    "namehash": "namehash:alice.base.eth",
+                    "resource_id": resource_id.to_string(),
+                    "binding_kind": "declared_registry_path",
+                }],
+                "subregistry_path": [],
+                "resolver_path": [{
+                    "logical_name_id": logical_name_id,
+                    "namespace": "basenames",
+                    "normalized_name": "alice.base.eth",
+                    "canonical_display_name": "Alice.base.eth",
+                    "resource_id": resource_id.to_string(),
+                    "chain_id": "base-mainnet",
+                    "address": "0x0000000000000000000000000000000000000abc",
+                    "latest_event_kind": "ResolverChanged",
+                }],
+                "wildcard": {
+                    "source": null,
+                    "matched_labels": [],
+                },
+                "alias": {
+                    "final_target": null,
+                    "hops": [],
+                },
+                "version_boundaries": {
+                    "topology_version_boundary": worker_row.record_version_boundary.clone(),
+                    "record_version_boundary": worker_row.record_version_boundary.clone(),
+                },
+                "transport": {
+                    "source_chain_id": "base-mainnet",
+                    "target_chain_id": "ethereum-mainnet",
+                    "contract_address": "0x0000000000000000000000000000000000000bad",
+                    "latest_event_kind": null,
+                },
+            });
+            database.insert_name_current_row(name_row).await?;
 
-            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+            let response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(
+                            "/v1/resolutions/basenames/alice.base.eth?mode=both&records=text:com.twitter,addr:60",
+                        )
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("out-of-class basenames mixed resolution request failed")?;
+            let explain_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(
+                            "/v1/explain/resolutions/basenames/alice.base.eth/execution?records=text:com.twitter,addr:60",
+                        )
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("out-of-class basenames resolution execution explain request failed")?;
 
-            let payload: ErrorResponse = read_json(response).await?;
-            assert_eq!(payload.error.code, "not_found");
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(explain_response.status(), StatusCode::NOT_FOUND);
+
+            let payload: ResolutionResponse = read_json(response).await?;
             assert_eq!(
-                payload.error.message,
+                payload.verified_state,
+                Some(resolution_unsupported_verified_state(&[
+                    "text:com.twitter",
+                    "addr:60",
+                ]))
+            );
+            assert_eq!(payload.provenance.get("execution_trace_id"), Some(&Value::Null));
+
+            let explain_payload: ErrorResponse = read_json(explain_response).await?;
+            assert_eq!(explain_payload.error.code, "not_found");
+            assert_eq!(
+                explain_payload.error.message,
                 "persisted resolution execution explain was not found for name alice.base.eth in namespace basenames"
             );
 

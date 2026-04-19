@@ -26,10 +26,15 @@ pub use bigname_storage::{
 pub const VERIFIED_RESOLUTION_REQUEST_TYPE: &str = "verified_resolution";
 pub const VERIFIED_PRIMARY_NAME_REQUEST_TYPE: &str = "verified_primary_name";
 pub const ENS_NAMESPACE: &str = "ens";
+pub const BASENAMES_NAMESPACE: &str = "basenames";
+pub const BASE_MAINNET_CHAIN_ID: &str = "base-mainnet";
 pub const ETHEREUM_MAINNET_CHAIN_ID: &str = "ethereum-mainnet";
 pub const ENS_EXECUTION_SOURCE_FAMILY: &str = "ens_execution";
 pub const ENS_UNIVERSAL_RESOLVER_ROLE: &str = "universal_resolver";
 pub const ENS_UNIVERSAL_RESOLVER_ADDRESS: &str = "0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe";
+pub const BASENAMES_EXECUTION_SOURCE_FAMILY: &str = "basenames_execution";
+pub const BASENAMES_L1_RESOLVER_ROLE: &str = "l1_resolver";
+pub const BASENAMES_L1_RESOLVER_ADDRESS: &str = "0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31";
 pub const DECLARED_REGISTRY_PATH_BINDING_KIND: &str = "declared_registry_path";
 pub const LINKED_SUBREGISTRY_PATH_BINDING_KIND: &str = "linked_subregistry_path";
 pub const RESOLVER_ALIAS_PATH_BINDING_KIND: &str = "resolver_alias_path";
@@ -86,7 +91,7 @@ pub struct LoadedEnsVerifiedPrimaryName {
 
 /// Current execution bootstrap status.
 pub const fn bootstrap_status() -> &'static str {
-    "ens-verified-resolution-direct-producer-ready"
+    "ens-direct-and-basenames-transport-verified-resolution-producer-ready"
 }
 
 /// Persist one exact-name ENS verified-resolution supported-path result and return
@@ -130,6 +135,53 @@ pub async fn persist_ens_exact_name_verified_resolution_direct(
         .commit()
         .await
         .context("failed to commit ENS verified-resolution direct persistence")?;
+
+    Ok(PersistedVerifiedResolutionIdentity {
+        execution_trace_id: trace.execution_trace_id,
+        cache_key: outcome.cache_key,
+    })
+}
+
+/// Persist one exact-name Basenames verified-resolution transport-assisted direct-path result and
+/// return the storage identity the route layer can load back.
+pub async fn persist_basenames_exact_name_verified_resolution_transport_direct(
+    pool: &PgPool,
+    request: &PersistEnsExactNameVerifiedResolutionRequest,
+) -> Result<PersistedVerifiedResolutionIdentity> {
+    validate_basenames_transport_direct_request(request)?;
+
+    let mut transaction = pool.begin().await.context(
+        "failed to open transaction for Basenames verified-resolution transport-direct persistence",
+    )?;
+
+    if !request.raw_call_snapshots.is_empty() {
+        upsert_raw_call_snapshots_in_transaction(&mut transaction, &request.raw_call_snapshots)
+            .await?;
+    }
+
+    let trace = upsert_execution_trace_in_transaction(&mut transaction, &request.trace).await?;
+    let outcome =
+        upsert_execution_outcome_in_transaction(&mut transaction, &request.outcome).await?;
+
+    if trace.execution_trace_id != outcome.execution_trace_id {
+        bail!(
+            "persisted Basenames verified-resolution transport-direct trace {} does not match outcome trace {}",
+            trace.execution_trace_id,
+            outcome.execution_trace_id
+        );
+    }
+    if outcome.cache_key.request_key != trace.request_key {
+        bail!(
+            "persisted Basenames verified-resolution transport-direct request_key {} does not match trace request_key {}",
+            outcome.cache_key.request_key,
+            trace.request_key
+        );
+    }
+
+    transaction
+        .commit()
+        .await
+        .context("failed to commit Basenames verified-resolution transport-direct persistence")?;
 
     Ok(PersistedVerifiedResolutionIdentity {
         execution_trace_id: trace.execution_trace_id,
@@ -392,6 +444,219 @@ fn validate_direct_request(
         &requested_selectors,
     )?;
     Ok(queries)
+}
+
+fn validate_basenames_transport_direct_request(
+    request: &PersistEnsExactNameVerifiedResolutionRequest,
+) -> Result<Vec<VerifiedQuerySummary>> {
+    let requested_selectors = extract_requested_selectors(&request.trace)?;
+    let queries = extract_supported_verified_queries(&request.outcome)?;
+    ensure_requested_selectors_match_queries(&requested_selectors, &queries)?;
+    validate_basenames_transport_direct_trace(
+        &request.trace,
+        &request.outcome,
+        &requested_selectors,
+        &queries,
+    )?;
+    validate_basenames_transport_direct_outcome(
+        &request.outcome,
+        &request.trace,
+        &requested_selectors,
+        &queries,
+    )?;
+    if !request.raw_call_snapshots.is_empty() {
+        bail!(
+            "Basenames transport-assisted direct persistence does not admit raw_call_snapshots yet"
+        );
+    }
+    Ok(queries)
+}
+
+fn validate_basenames_transport_direct_trace(
+    trace: &ExecutionTrace,
+    outcome: &ExecutionOutcome,
+    requested_selectors: &RequestedSelectorSet,
+    queries: &[VerifiedQuerySummary],
+) -> Result<()> {
+    if trace.request_type != VERIFIED_RESOLUTION_REQUEST_TYPE {
+        bail!(
+            "Basenames transport-direct verified resolution trace {} must use request_type {}",
+            trace.execution_trace_id,
+            VERIFIED_RESOLUTION_REQUEST_TYPE
+        );
+    }
+    if trace.namespace != BASENAMES_NAMESPACE {
+        bail!(
+            "Basenames transport-direct verified resolution trace {} must use namespace {}",
+            trace.execution_trace_id,
+            BASENAMES_NAMESPACE
+        );
+    }
+    if outcome.execution_trace_id != trace.execution_trace_id {
+        bail!(
+            "Basenames transport-direct verified resolution outcome trace {} does not match trace {}",
+            outcome.execution_trace_id,
+            trace.execution_trace_id
+        );
+    }
+
+    let expected_request_key = normalized_request_key(
+        BASENAMES_NAMESPACE,
+        &requested_selectors.surface,
+        &requested_selectors.ordered_record_keys,
+    );
+    if trace.request_key != expected_request_key {
+        bail!(
+            "Basenames transport-direct verified resolution trace {} request_key {} does not match expected {}",
+            trace.execution_trace_id,
+            trace.request_key,
+            expected_request_key
+        );
+    }
+
+    let requested_positions = required_chain_positions(
+        trace.chain_context.get("requested_positions"),
+        "Basenames transport-direct verified resolution trace.chain_context.requested_positions",
+    )?;
+    ensure_basenames_requested_positions(
+        &requested_positions,
+        "Basenames transport-direct verified resolution trace.chain_context.requested_positions",
+    )?;
+
+    let gateway_digests = required_array(
+        Some(&trace.gateway_digests),
+        "Basenames transport-direct verified resolution trace.gateway_digests",
+    )?;
+    if gateway_digests.is_empty() {
+        bail!(
+            "Basenames transport-direct verified resolution must record gateway_digests for CCIP readback"
+        );
+    }
+
+    if !manifest_versions_include_source_family_for_context(
+        Some(&trace.manifest_context),
+        Some(&outcome.cache_key.manifest_versions),
+        BASENAMES_EXECUTION_SOURCE_FAMILY,
+        "Basenames transport-direct verified resolution",
+    )? {
+        bail!(
+            "Basenames transport-direct verified resolution must include source_family {} in manifest context or cache key",
+            BASENAMES_EXECUTION_SOURCE_FAMILY
+        );
+    }
+
+    ensure_contains_basenames_l1_resolver_call(
+        &trace.contracts_called,
+        trace.execution_trace_id,
+        "Basenames transport-direct verified resolution",
+    )?;
+    ensure_steps_are_supported_basenames_transport_direct_path(
+        trace,
+        requested_selectors,
+        trace.execution_trace_id,
+    )?;
+    validate_trace_terminal_payloads(trace, queries)?;
+
+    Ok(())
+}
+
+fn validate_basenames_transport_direct_outcome(
+    outcome: &ExecutionOutcome,
+    trace: &ExecutionTrace,
+    requested_selectors: &RequestedSelectorSet,
+    queries: &[VerifiedQuerySummary],
+) -> Result<()> {
+    if outcome.request_type != VERIFIED_RESOLUTION_REQUEST_TYPE {
+        bail!(
+            "Basenames transport-direct verified resolution outcome for request_key {} must use request_type {}",
+            outcome.cache_key.request_key,
+            VERIFIED_RESOLUTION_REQUEST_TYPE
+        );
+    }
+    if outcome.namespace != BASENAMES_NAMESPACE {
+        bail!(
+            "Basenames transport-direct verified resolution outcome for request_key {} must use namespace {}",
+            outcome.cache_key.request_key,
+            BASENAMES_NAMESPACE
+        );
+    }
+    if outcome.execution_trace_id != trace.execution_trace_id {
+        bail!(
+            "Basenames transport-direct verified resolution outcome trace {} does not match trace {}",
+            outcome.execution_trace_id,
+            trace.execution_trace_id
+        );
+    }
+
+    let trace_finished_at = trace.finished_at.with_context(|| {
+        format!(
+            "Basenames transport-direct verified resolution trace {} must set finished_at",
+            trace.execution_trace_id
+        )
+    })?;
+    if outcome.finished_at != trace_finished_at {
+        bail!(
+            "Basenames transport-direct verified resolution outcome finished_at {} does not match trace finished_at {}",
+            outcome.finished_at,
+            trace_finished_at
+        );
+    }
+
+    let expected_request_key = normalized_request_key(
+        BASENAMES_NAMESPACE,
+        &requested_selectors.surface,
+        &requested_selectors.ordered_record_keys,
+    );
+    if outcome.cache_key.request_key != expected_request_key {
+        bail!(
+            "Basenames transport-direct verified resolution outcome request_key {} does not match expected {}",
+            outcome.cache_key.request_key,
+            expected_request_key
+        );
+    }
+    if outcome.cache_key.request_key != trace.request_key {
+        bail!(
+            "Basenames transport-direct verified resolution outcome request_key {} does not match trace request_key {}",
+            outcome.cache_key.request_key,
+            trace.request_key
+        );
+    }
+
+    let requested_positions = required_chain_positions(
+        Some(&outcome.cache_key.requested_chain_positions),
+        "Basenames transport-direct verified resolution cache_key.requested_chain_positions",
+    )?;
+    ensure_basenames_requested_positions(
+        &requested_positions,
+        "Basenames transport-direct verified resolution cache_key.requested_chain_positions",
+    )?;
+
+    let trace_positions = required_chain_positions(
+        trace.chain_context.get("requested_positions"),
+        "Basenames transport-direct verified resolution trace.chain_context.requested_positions",
+    )?;
+    if trace_positions != requested_positions {
+        bail!(
+            "Basenames transport-direct verified resolution trace.chain_context.requested_positions must match cache_key.requested_chain_positions"
+        );
+    }
+
+    if queries
+        .iter()
+        .all(|query| query.status == VerifiedQueryStatus::ExecutionFailed)
+    {
+        required_object(
+            outcome.failure_payload.as_ref(),
+            "Basenames transport-direct verified resolution execution_failed outcome.failure_payload",
+        )?;
+    } else if outcome.failure_payload.is_some() {
+        bail!(
+            "Basenames transport-direct verified resolution outcome for request_key {} must not set failure_payload unless every selector status is execution_failed",
+            outcome.cache_key.request_key
+        );
+    }
+
+    Ok(())
 }
 
 fn extract_verified_primary_tuple(trace: &ExecutionTrace) -> Result<VerifiedPrimaryNameTuple> {
@@ -1071,6 +1336,7 @@ fn validate_trace(
     }
 
     let expected_request_key = normalized_request_key(
+        ENS_NAMESPACE,
         &requested_selectors.surface,
         &requested_selectors.ordered_record_keys,
     );
@@ -1302,6 +1568,7 @@ fn validate_raw_call_snapshots(
             bail!(
                 "ENS direct-path verified resolution raw call snapshot for request {} must align with requested chain position {} {} {}",
                 normalized_request_key(
+                    ENS_NAMESPACE,
                     &requested_selectors.surface,
                     &requested_selectors.ordered_record_keys,
                 ),
@@ -1453,13 +1720,14 @@ fn final_payload_contains_verified_queries(final_payload: &Value) -> Result<bool
     .contains_key("verified_queries"))
 }
 
-fn normalized_request_key(surface: &str, ordered_record_keys: &[String]) -> String {
+fn normalized_request_key(
+    namespace: &str,
+    surface: &str,
+    ordered_record_keys: &[String],
+) -> String {
     let mut normalized_record_keys = ordered_record_keys.to_vec();
     normalized_record_keys.sort_unstable();
-    format!(
-        "{ENS_NAMESPACE}:{surface}:{}",
-        normalized_record_keys.join(",")
-    )
+    format!("{namespace}:{surface}:{}", normalized_record_keys.join(","))
 }
 
 fn normalized_verified_primary_name_request_key(
@@ -1566,6 +1834,51 @@ fn ensure_contains_universal_resolver_call(
     )
 }
 
+fn ensure_contains_basenames_l1_resolver_call(
+    contracts_called: &Value,
+    execution_trace_id: Uuid,
+    context: &str,
+) -> Result<()> {
+    let calls = required_array(
+        Some(contracts_called),
+        &format!("{context} trace.contracts_called"),
+    )?;
+    for (index, call) in calls.iter().enumerate() {
+        let object = required_object(
+            Some(call),
+            &format!("{context} trace.contracts_called[{index}]"),
+        )?;
+        let chain_id = required_string(
+            object,
+            "chain_id",
+            &format!("{context} trace.contracts_called entry"),
+        )?;
+        let contract_address = required_string(
+            object,
+            "contract_address",
+            &format!("{context} trace.contracts_called entry"),
+        )?;
+        let selector = required_string(
+            object,
+            "selector",
+            &format!("{context} trace.contracts_called entry"),
+        )?;
+        if chain_id == ETHEREUM_MAINNET_CHAIN_ID
+            && contract_address.eq_ignore_ascii_case(BASENAMES_L1_RESOLVER_ADDRESS)
+            && !selector.is_empty()
+        {
+            return Ok(());
+        }
+    }
+
+    bail!(
+        "{context} trace {} must include one {} contract call on {}",
+        execution_trace_id,
+        BASENAMES_L1_RESOLVER_ROLE,
+        ETHEREUM_MAINNET_CHAIN_ID
+    )
+}
+
 fn ensure_steps_are_supported_exact_surface_path(
     trace: &ExecutionTrace,
     requested_selectors: &RequestedSelectorSet,
@@ -1615,6 +1928,89 @@ fn ensure_steps_are_supported_exact_surface_path(
             }
         }
     }
+
+    Ok(())
+}
+
+fn ensure_steps_are_supported_basenames_transport_direct_path(
+    trace: &ExecutionTrace,
+    requested_selectors: &RequestedSelectorSet,
+    execution_trace_id: Uuid,
+) -> Result<()> {
+    match requested_selectors.binding_kind.as_deref() {
+        None | Some(DECLARED_REGISTRY_PATH_BINDING_KIND) => {}
+        Some(other) => bail!(
+            "Basenames transport-direct verified resolution trace {} must use binding_kind {} or omit binding_kind; found {}",
+            execution_trace_id,
+            DECLARED_REGISTRY_PATH_BINDING_KIND,
+            other
+        ),
+    }
+
+    let mut saw_l1_resolver_call = false;
+    let mut saw_ccip_or_proof = false;
+    for step in &trace.steps {
+        let normalized = step.step_kind.to_ascii_lowercase();
+        if normalized.contains("alias")
+            || normalized.contains("wildcard")
+            || normalized.contains("subregistry")
+            || normalized.contains("ancestor")
+            || normalized.contains("universal_resolver")
+        {
+            bail!(
+                "Basenames transport-direct verified resolution trace {} must not persist out-of-class step {}",
+                execution_trace_id,
+                step.step_kind
+            );
+        }
+        if normalized.contains("l1_resolver") {
+            saw_l1_resolver_call = true;
+            let payload = required_object(
+                Some(&step.step_payload),
+                "Basenames transport-direct verified resolution trace.steps.l1_resolver.step_payload",
+            )?;
+            if let Some(name) = payload.get("name").and_then(Value::as_str) {
+                if name != requested_selectors.surface {
+                    bail!(
+                        "Basenames transport-direct verified resolution trace {} must anchor L1 resolver name {} to request surface {}",
+                        execution_trace_id,
+                        name,
+                        requested_selectors.surface
+                    );
+                }
+            }
+        }
+        if normalized.contains("ccip")
+            || normalized.contains("offchain")
+            || normalized.contains("resolve_with_proof")
+            || normalized.contains("proof")
+        {
+            saw_ccip_or_proof = true;
+        }
+    }
+
+    if !saw_l1_resolver_call {
+        bail!(
+            "Basenames transport-direct verified resolution trace {} must include an L1 resolver step",
+            execution_trace_id
+        );
+    }
+    if !saw_ccip_or_proof {
+        bail!(
+            "Basenames transport-direct verified resolution trace {} must include CCIP or proof-completion steps",
+            execution_trace_id
+        );
+    }
+
+    ensure_basenames_alias_detail_absent(trace, "Basenames transport-direct verified resolution")?;
+    ensure_basenames_wildcard_detail_absent(
+        trace,
+        "Basenames transport-direct verified resolution",
+    )?;
+    ensure_basenames_transport_detail_supported(
+        trace,
+        "Basenames transport-direct verified resolution",
+    )?;
 
     Ok(())
 }
@@ -1897,6 +2293,90 @@ fn ensure_transport_detail_absent(trace: &ExecutionTrace, context: &str) -> Resu
     Ok(())
 }
 
+fn ensure_basenames_alias_detail_absent(trace: &ExecutionTrace, context: &str) -> Result<()> {
+    let Some(alias) = persisted_trace_detail_object(trace, "alias") else {
+        return Ok(());
+    };
+    let alias = required_object(Some(&alias), &format!("{context} trace alias detail"))?;
+    let final_target_present = !matches!(alias.get("final_target"), None | Some(Value::Null));
+    let hops = required_array(
+        alias.get("hops"),
+        &format!("{context} trace alias detail.hops"),
+    )?;
+    if final_target_present || !hops.is_empty() {
+        bail!("{context} must keep alias.final_target null with alias.hops empty");
+    }
+    Ok(())
+}
+
+fn ensure_basenames_wildcard_detail_absent(trace: &ExecutionTrace, context: &str) -> Result<()> {
+    let Some(wildcard) = persisted_trace_detail_object(trace, "wildcard") else {
+        return Ok(());
+    };
+    let wildcard = required_object(Some(&wildcard), &format!("{context} trace wildcard detail"))?;
+    let source_present = !matches!(wildcard.get("source"), None | Some(Value::Null));
+    let matched_labels = required_array(
+        wildcard.get("matched_labels"),
+        &format!("{context} trace wildcard detail.matched_labels"),
+    )?;
+    if source_present || !matched_labels.is_empty() {
+        bail!("{context} must keep wildcard.source null with matched_labels empty");
+    }
+    Ok(())
+}
+
+fn ensure_basenames_transport_detail_supported(
+    trace: &ExecutionTrace,
+    context: &str,
+) -> Result<()> {
+    let transport = persisted_trace_detail_object(trace, "transport")
+        .context(format!("{context} must persist transport detail"))?;
+    let transport = required_object(
+        Some(&transport),
+        &format!("{context} trace transport detail"),
+    )?;
+    ensure_only_allowed_fields(
+        transport,
+        &[
+            "source_chain_id",
+            "target_chain_id",
+            "contract_address",
+            "latest_event_kind",
+        ],
+        &format!("{context} trace transport detail"),
+    )?;
+
+    let source_chain_id = required_string(
+        transport,
+        "source_chain_id",
+        &format!("{context} trace transport detail"),
+    )?;
+    let target_chain_id = required_string(
+        transport,
+        "target_chain_id",
+        &format!("{context} trace transport detail"),
+    )?;
+    let contract_address = required_string(
+        transport,
+        "contract_address",
+        &format!("{context} trace transport detail"),
+    )?;
+
+    if source_chain_id != BASE_MAINNET_CHAIN_ID
+        || target_chain_id != ETHEREUM_MAINNET_CHAIN_ID
+        || !contract_address.eq_ignore_ascii_case(BASENAMES_L1_RESOLVER_ADDRESS)
+    {
+        bail!(
+            "{context} must use transport {} -> {} via {}",
+            BASE_MAINNET_CHAIN_ID,
+            ETHEREUM_MAINNET_CHAIN_ID,
+            BASENAMES_L1_RESOLVER_ADDRESS
+        );
+    }
+
+    Ok(())
+}
+
 fn persisted_trace_detail_object(trace: &ExecutionTrace, key: &str) -> Option<Value> {
     trace
         .request_metadata
@@ -1929,6 +2409,48 @@ fn ensure_single_ethereum_mainnet_position(
             "{context} must target chain_id {}, found {}",
             ETHEREUM_MAINNET_CHAIN_ID,
             position.chain_id
+        );
+    }
+    Ok(())
+}
+
+fn ensure_basenames_requested_positions(
+    positions: &[RequestedChainPosition],
+    context: &str,
+) -> Result<()> {
+    if positions.len() != 2 {
+        bail!(
+            "{context} must include exactly two chain positions for {} -> {}, found {}",
+            BASE_MAINNET_CHAIN_ID,
+            ETHEREUM_MAINNET_CHAIN_ID,
+            positions.len()
+        );
+    }
+
+    let mut saw_base = false;
+    let mut saw_ethereum = false;
+    for position in positions {
+        match position.chain_id.as_str() {
+            BASE_MAINNET_CHAIN_ID => saw_base = true,
+            ETHEREUM_MAINNET_CHAIN_ID => saw_ethereum = true,
+            other => {
+                bail!(
+                    "{context} only supports chain_id {} and {}, found {}",
+                    BASE_MAINNET_CHAIN_ID,
+                    ETHEREUM_MAINNET_CHAIN_ID,
+                    other
+                )
+            }
+        }
+    }
+
+    if !saw_base {
+        bail!("{context} must include chain_id {}", BASE_MAINNET_CHAIN_ID);
+    }
+    if !saw_ethereum {
+        bail!(
+            "{context} must include chain_id {}",
+            ETHEREUM_MAINNET_CHAIN_ID
         );
     }
     Ok(())
@@ -2180,6 +2702,49 @@ mod tests {
         ])
     }
 
+    fn basenames_manifest_versions() -> Value {
+        json!([
+            {
+                "source_family": BASENAMES_EXECUTION_SOURCE_FAMILY,
+                "manifest_version": 2
+            },
+            {
+                "source_manifest_id": 9,
+                "manifest_version": 4
+            }
+        ])
+    }
+
+    fn basenames_requested_chain_positions() -> Value {
+        json!([
+            {
+                "chain_id": BASE_MAINNET_CHAIN_ID,
+                "block_number": 31_000_000,
+                "block_hash": "0xbase123"
+            },
+            {
+                "chain_id": ETHEREUM_MAINNET_CHAIN_ID,
+                "block_number": 21_000_000,
+                "block_hash": "0xl1abc"
+            }
+        ])
+    }
+
+    fn basenames_version_boundary(resource_id: Uuid) -> Value {
+        json!({
+            "logical_name_id": "basenames:alice.base.eth",
+            "resource_id": resource_id.to_string(),
+            "normalized_event_id": 1_300,
+            "event_kind": "RecordVersionChanged",
+            "chain_position": {
+                "chain_id": BASE_MAINNET_CHAIN_ID,
+                "block_number": 31_000_000,
+                "block_hash": "0xbase123",
+                "timestamp": "2024-06-01T00:00:17Z",
+            }
+        })
+    }
+
     fn raw_call_snapshot() -> RawCallSnapshot {
         RawCallSnapshot {
             chain_id: ETHEREUM_MAINNET_CHAIN_ID.to_owned(),
@@ -2208,6 +2773,165 @@ mod tests {
             "resource_id": resource_id.to_string(),
             "binding_kind": RESOLVER_ALIAS_PATH_BINDING_KIND
         })
+    }
+
+    fn basenames_transport_direct_request() -> PersistEnsExactNameVerifiedResolutionRequest {
+        let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000031);
+        let finished_at = timestamp(1_717_171_930);
+        let request_key = "basenames:alice.base.eth:addr:60,text:com.twitter".to_owned();
+        let verified_queries = json!([
+            {
+                "record_key": "addr:60",
+                "status": "success",
+                "value": {
+                    "coin_type": "60",
+                    "value": "0x00000000000000000000000000000000000000aa"
+                }
+            },
+            {
+                "record_key": "text:com.twitter",
+                "status": "not_found",
+                "failure_reason": "no_text_record"
+            }
+        ]);
+
+        PersistEnsExactNameVerifiedResolutionRequest {
+            raw_call_snapshots: Vec::new(),
+            trace: ExecutionTrace {
+                execution_trace_id,
+                request_type: VERIFIED_RESOLUTION_REQUEST_TYPE.to_owned(),
+                request_key: request_key.clone(),
+                namespace: BASENAMES_NAMESPACE.to_owned(),
+                chain_context: json!({
+                    "requested_positions": basenames_requested_chain_positions(),
+                    "topology_version_boundary": {
+                        BASE_MAINNET_CHAIN_ID: 31_000_000
+                    }
+                }),
+                manifest_context: json!({
+                    "manifest_versions": basenames_manifest_versions(),
+                    "rollout_boundary": "supported"
+                }),
+                contracts_called: json!([
+                    {
+                        "chain_id": ETHEREUM_MAINNET_CHAIN_ID,
+                        "contract_address": BASENAMES_L1_RESOLVER_ADDRESS,
+                        "selector": "0x9061b923"
+                    }
+                ]),
+                gateway_digests: json!(["sha256:ccip-request", "sha256:ccip-response"]),
+                final_payload: Some(json!({
+                    "verified_queries": verified_queries.clone()
+                })),
+                failure_payload: None,
+                request_metadata: json!({
+                    "surface": "alice.base.eth",
+                    "record_keys": ["addr:60", "text:com.twitter"],
+                    "entrypoint": BASENAMES_L1_RESOLVER_ROLE,
+                    "contract_address": BASENAMES_L1_RESOLVER_ADDRESS,
+                    "transport": {
+                        "source_chain_id": BASE_MAINNET_CHAIN_ID,
+                        "target_chain_id": ETHEREUM_MAINNET_CHAIN_ID,
+                        "contract_address": BASENAMES_L1_RESOLVER_ADDRESS,
+                        "latest_event_kind": null
+                    }
+                }),
+                finished_at: Some(finished_at),
+                steps: vec![
+                    ExecutionTraceStep {
+                        step_index: 0,
+                        step_kind: "load_declared_topology".to_owned(),
+                        input_digest: Some("sha256:topology-input".to_owned()),
+                        output_digest: Some("sha256:topology-output".to_owned()),
+                        latency_ms: Some(4),
+                        canonicality_dependency: json!({
+                            BASE_MAINNET_CHAIN_ID: {
+                                "block_hash": "0xbase123",
+                                "block_number": 31_000_000,
+                                "state": "canonical"
+                            }
+                        }),
+                        step_payload: json!({
+                            "entrypoint": BASENAMES_L1_RESOLVER_ROLE,
+                            "resolver": "0x0000000000000000000000000000000000000abc"
+                        }),
+                    },
+                    ExecutionTraceStep {
+                        step_index: 1,
+                        step_kind: "call_l1_resolver".to_owned(),
+                        input_digest: Some("sha256:l1-resolver-input".to_owned()),
+                        output_digest: Some("sha256:l1-resolver-output".to_owned()),
+                        latency_ms: Some(18),
+                        canonicality_dependency: json!({
+                            ETHEREUM_MAINNET_CHAIN_ID: {
+                                "block_hash": "0xl1abc",
+                                "block_number": 21_000_000,
+                                "state": "canonical"
+                            }
+                        }),
+                        step_payload: json!({
+                            "name": "alice.base.eth",
+                            "record_count": 2
+                        }),
+                    },
+                    ExecutionTraceStep {
+                        step_index: 2,
+                        step_kind: "ccip_offchain_lookup".to_owned(),
+                        input_digest: Some("sha256:ccip-input".to_owned()),
+                        output_digest: Some("sha256:ccip-output".to_owned()),
+                        latency_ms: Some(32),
+                        canonicality_dependency: json!({
+                            ETHEREUM_MAINNET_CHAIN_ID: {
+                                "block_hash": "0xl1abc",
+                                "block_number": 21_000_000,
+                                "state": "canonical"
+                            }
+                        }),
+                        step_payload: json!({
+                            "gateway_digest": "sha256:ccip-request"
+                        }),
+                    },
+                    ExecutionTraceStep {
+                        step_index: 3,
+                        step_kind: "resolve_with_proof".to_owned(),
+                        input_digest: Some("sha256:proof-input".to_owned()),
+                        output_digest: Some("sha256:proof-output".to_owned()),
+                        latency_ms: Some(11),
+                        canonicality_dependency: json!({
+                            ETHEREUM_MAINNET_CHAIN_ID: {
+                                "block_hash": "0xl1abc",
+                                "block_number": 21_000_000,
+                                "state": "canonical"
+                            }
+                        }),
+                        step_payload: json!({
+                            "proof_kind": "signature"
+                        }),
+                    },
+                ],
+            },
+            outcome: ExecutionOutcome {
+                cache_key: ExecutionCacheKey {
+                    request_key,
+                    requested_chain_positions: basenames_requested_chain_positions(),
+                    manifest_versions: basenames_manifest_versions(),
+                    topology_version_boundary: basenames_version_boundary(Uuid::from_u128(
+                        0x0e7ec7ace0000000000000000000bab1,
+                    )),
+                    record_version_boundary: basenames_version_boundary(Uuid::from_u128(
+                        0x0e7ec7ace0000000000000000000bab2,
+                    )),
+                },
+                execution_trace_id,
+                request_type: VERIFIED_RESOLUTION_REQUEST_TYPE.to_owned(),
+                namespace: BASENAMES_NAMESPACE.to_owned(),
+                outcome_payload: Some(json!({
+                    "verified_queries": verified_queries
+                })),
+                failure_payload: None,
+                finished_at,
+            },
+        }
     }
 
     fn success_request() -> PersistEnsExactNameVerifiedResolutionRequest {
@@ -2489,7 +3213,7 @@ mod tests {
             "addr:0".to_owned(),
             "addr:2".to_owned(),
         ];
-        let request_key = normalized_request_key("alice.eth", &ordered_record_keys);
+        let request_key = normalized_request_key(ENS_NAMESPACE, "alice.eth", &ordered_record_keys);
         let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000014);
         let finished_at = timestamp(1_717_171_900);
         let verified_queries = json!([
@@ -2542,7 +3266,7 @@ mod tests {
             "contenthash".to_owned(),
             "addr:60".to_owned(),
         ];
-        let request_key = normalized_request_key("alice.eth", &ordered_record_keys);
+        let request_key = normalized_request_key(ENS_NAMESPACE, "alice.eth", &ordered_record_keys);
         let execution_trace_id = Uuid::from_u128(0x0e7ec7ace0000000000000000000001b);
         let finished_at = timestamp(1_717_171_920);
         let verified_queries = json!([
@@ -2598,7 +3322,7 @@ mod tests {
             "contenthash".to_owned(),
             "addr:60".to_owned(),
         ];
-        let request_key = normalized_request_key("alice.eth", &ordered_record_keys);
+        let request_key = normalized_request_key(ENS_NAMESPACE, "alice.eth", &ordered_record_keys);
         let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000028);
         let finished_at = timestamp(1_717_171_930);
         let avatar = "https://cdn.example.test/alice.png";
@@ -2658,7 +3382,8 @@ mod tests {
     fn alias_only_text_request() -> PersistEnsExactNameVerifiedResolutionRequest {
         let mut request = success_request();
         let execution_trace_id = Uuid::from_u128(0x0e7ec7ace0000000000000000000001c);
-        let request_key = normalized_request_key("alice.eth", &["text:com.twitter".to_owned()]);
+        let request_key =
+            normalized_request_key(ENS_NAMESPACE, "alice.eth", &["text:com.twitter".to_owned()]);
         let alias_target = alias_target(Uuid::from_u128(0x0e7ec7ace0000000000000000000aab3));
 
         request.trace.execution_trace_id = execution_trace_id;
@@ -2701,7 +3426,8 @@ mod tests {
     fn alias_only_avatar_request() -> PersistEnsExactNameVerifiedResolutionRequest {
         let mut request = avatar_success_request();
         let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000029);
-        let request_key = normalized_request_key("alice.eth", &["avatar".to_owned()]);
+        let request_key =
+            normalized_request_key(ENS_NAMESPACE, "alice.eth", &["avatar".to_owned()]);
         let alias_target = alias_target(Uuid::from_u128(0x0e7ec7ace0000000000000000000aab5));
         let avatar = "https://cdn.example.test/alice-via-alias.png";
 
@@ -3219,7 +3945,8 @@ mod tests {
         let database = TestDatabase::new().await?;
         let mut request = multi_selector_request();
         let duplicate_record_keys = vec!["addr:60".to_owned(), "addr:60".to_owned()];
-        let request_key = normalized_request_key("alice.eth", &duplicate_record_keys);
+        let request_key =
+            normalized_request_key(ENS_NAMESPACE, "alice.eth", &duplicate_record_keys);
         request.trace.execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000015);
         request.trace.request_key = request_key.clone();
         request.trace.request_metadata = json!({
@@ -3288,7 +4015,7 @@ mod tests {
         let database = TestDatabase::new().await?;
         let mut request = multi_selector_request();
         let ordered_record_keys = vec!["addr:60".to_owned(), "text:com.twitter".to_owned()];
-        let request_key = normalized_request_key("alice.eth", &ordered_record_keys);
+        let request_key = normalized_request_key(ENS_NAMESPACE, "alice.eth", &ordered_record_keys);
         request.trace.execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000013);
         request.trace.request_key = request_key.clone();
         request.trace.request_metadata = json!({
@@ -3342,7 +4069,7 @@ mod tests {
         let database = TestDatabase::new().await?;
         let mut request = multi_selector_request();
         let ordered_record_keys = vec!["addr:60".to_owned(), "abi".to_owned()];
-        let request_key = normalized_request_key("alice.eth", &ordered_record_keys);
+        let request_key = normalized_request_key(ENS_NAMESPACE, "alice.eth", &ordered_record_keys);
         request.trace.execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000017);
         request.trace.request_key = request_key.clone();
         request.trace.request_metadata = json!({
@@ -3612,6 +4339,121 @@ mod tests {
                 .await?
                 .is_none(),
             "rejected transport-assisted request must not persist outcome rows"
+        );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn persists_basenames_transport_assisted_direct_path() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let request = basenames_transport_direct_request();
+
+        let persisted = persist_basenames_exact_name_verified_resolution_transport_direct(
+            database.pool(),
+            &request,
+        )
+        .await?;
+        assert_eq!(
+            persisted,
+            PersistedVerifiedResolutionIdentity {
+                execution_trace_id: request.trace.execution_trace_id,
+                cache_key: request.outcome.cache_key.clone(),
+            }
+        );
+
+        let loaded_trace = load_execution_trace(database.pool(), persisted.execution_trace_id)
+            .await?
+            .expect("execution trace must exist after Basenames transport persistence");
+        assert_eq!(loaded_trace, request.trace);
+
+        let loaded_outcome = load_execution_outcome(database.pool(), &persisted.cache_key)
+            .await?
+            .expect("execution outcome must exist after Basenames transport persistence");
+        assert_eq!(loaded_outcome, request.outcome);
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn rejects_basenames_transport_direct_with_wrong_transport_contract() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let mut request = basenames_transport_direct_request();
+        request.trace.execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000032);
+        request.outcome.execution_trace_id = request.trace.execution_trace_id;
+        request.trace.request_metadata["transport"]["contract_address"] =
+            json!("0x0000000000000000000000000000000000000bad");
+
+        let error = persist_basenames_exact_name_verified_resolution_transport_direct(
+            database.pool(),
+            &request,
+        )
+        .await
+        .expect_err("Basenames transport-direct persistence must reject out-of-class transport");
+        assert!(
+            error
+                .to_string()
+                .contains("must use transport base-mainnet -> ethereum-mainnet"),
+            "unexpected error: {error:#}"
+        );
+        assert!(
+            load_execution_trace(database.pool(), request.trace.execution_trace_id)
+                .await?
+                .is_none(),
+            "rejected Basenames transport request must not persist trace rows"
+        );
+        assert!(
+            load_execution_outcome(database.pool(), &request.outcome.cache_key)
+                .await?
+                .is_none(),
+            "rejected Basenames transport request must not persist outcome rows"
+        );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn rejects_basenames_transport_direct_without_ethereum_position() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let mut request = basenames_transport_direct_request();
+        request.trace.execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000035);
+        request.outcome.execution_trace_id = request.trace.execution_trace_id;
+        request.trace.chain_context = json!({
+            "requested_positions": [{
+                "chain_id": BASE_MAINNET_CHAIN_ID,
+                "block_number": 31_000_000,
+                "block_hash": "0xbase123"
+            }]
+        });
+        request.outcome.cache_key.requested_chain_positions =
+            request.trace.chain_context["requested_positions"].clone();
+
+        let error = persist_basenames_exact_name_verified_resolution_transport_direct(
+            database.pool(),
+            &request,
+        )
+        .await
+        .expect_err("Basenames transport-direct persistence must require Ethereum position");
+        assert!(
+            error
+                .to_string()
+                .contains("must include exactly two chain positions")
+                || error
+                    .to_string()
+                    .contains("must include chain_id ethereum-mainnet"),
+            "unexpected error: {error:#}"
+        );
+        assert!(
+            load_execution_trace(database.pool(), request.trace.execution_trace_id)
+                .await?
+                .is_none(),
+            "rejected Basenames request missing Ethereum position must not persist trace rows"
+        );
+        assert!(
+            load_execution_outcome(database.pool(), &request.outcome.cache_key)
+                .await?
+                .is_none(),
+            "rejected Basenames request missing Ethereum position must not persist outcome rows"
         );
 
         database.cleanup().await
