@@ -7475,6 +7475,145 @@ async fn get_address_names_dedupe_by_resource_changes_grouping_only() -> Result<
 }
 
 #[tokio::test]
+async fn get_address_names_returns_basenames_base_authority_relation_facets() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000bcd";
+    let resource_id = Uuid::from_u128(0x85a0);
+    let token_lineage_id = Uuid::from_u128(0x85a1);
+    let surface_binding_id = Uuid::from_u128(0x85a2);
+
+    bigname_storage::upsert_raw_blocks(
+        &database.pool,
+        &[raw_block(
+            "base-mainnet",
+            "0xbase-alpha",
+            None,
+            41,
+            1_717_173_041,
+        )],
+    )
+    .await?;
+    bigname_storage::upsert_token_lineages(
+        &database.pool,
+        &[address_name_token_lineage(
+            token_lineage_id,
+            "0xbase-alpha",
+            41,
+        )],
+    )
+    .await?;
+    bigname_storage::upsert_resources(
+        &database.pool,
+        &[address_name_resource(
+            resource_id,
+            Some(token_lineage_id),
+            "0xbase-alpha",
+            41,
+        )],
+    )
+    .await?;
+    bigname_storage::upsert_name_surfaces(
+        &database.pool,
+        &[collection_name_surface(
+            "basenames:alice.base.eth",
+            "alice.base.eth",
+            "node:alice.base.eth",
+            41,
+        )],
+    )
+    .await?;
+    bigname_storage::upsert_surface_bindings(
+        &database.pool,
+        &[address_name_surface_binding(
+            surface_binding_id,
+            "basenames:alice.base.eth",
+            resource_id,
+            "0xbase-alpha",
+            41,
+            1_717_173_041,
+        )],
+    )
+    .await?;
+    bigname_storage::upsert_address_names_current_rows(
+        &database.pool,
+        &[
+            address_name_current_row(
+                address,
+                "basenames:alice.base.eth",
+                bigname_storage::AddressNameRelation::Registrant,
+                "alice.base.eth",
+                "alice.base.eth",
+                "node:alice.base.eth",
+                surface_binding_id,
+                resource_id,
+                Some(token_lineage_id),
+                41,
+            ),
+            address_name_current_row(
+                address,
+                "basenames:alice.base.eth",
+                bigname_storage::AddressNameRelation::TokenHolder,
+                "alice.base.eth",
+                "alice.base.eth",
+                "node:alice.base.eth",
+                surface_binding_id,
+                resource_id,
+                Some(token_lineage_id),
+                41,
+            ),
+            address_name_current_row(
+                address,
+                "basenames:alice.base.eth",
+                bigname_storage::AddressNameRelation::EffectiveController,
+                "alice.base.eth",
+                "alice.base.eth",
+                "node:alice.base.eth",
+                surface_binding_id,
+                resource_id,
+                Some(token_lineage_id),
+                41,
+            ),
+        ],
+    )
+    .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/addresses/{address}/names?namespace=basenames"))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("basenames address names request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let payload: AddressNamesResponse = read_json(response).await?;
+    assert_eq!(payload.data.len(), 1);
+    assert_eq!(
+        payload.data[0].get("logical_name_id"),
+        Some(&Value::String("basenames:alice.base.eth".to_owned()))
+    );
+    assert_eq!(
+        payload.data[0].get("relation_facets"),
+        Some(&json!([
+            "registrant",
+            "token_holder",
+            "effective_controller"
+        ]))
+    );
+    assert_eq!(
+        payload.coverage.source_classes_considered,
+        vec!["ensv1_registry_path".to_owned()]
+    );
+    assert!(payload.data[0].get("role_summary").is_none());
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn get_address_names_include_role_summary_adds_projection_backed_expansion_fields()
 -> Result<()> {
     let database = TestDatabase::new_migrated().await?;

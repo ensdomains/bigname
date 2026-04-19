@@ -16,10 +16,15 @@ use sqlx::{
 };
 use uuid::Uuid;
 
-const ENS_NAMESPACE: &str = "ens";
 const ENS_V1_AUTHORITY_DERIVATION_KIND: &str = "ens_v1_unwrapped_authority";
 const ADDRESS_NAMES_CURRENT_DERIVATION_KIND: &str = "address_names_current_rebuild";
 const ADDRESS_NAMES_ENUMERATION_BASIS: &str = "surface_current_relations";
+const ENS_V1_REGISTRAR_SOURCE_FAMILY: &str = "ens_v1_registrar_l1";
+const ENS_V1_REGISTRY_SOURCE_FAMILY: &str = "ens_v1_registry_l1";
+const ENS_V1_RESOLVER_SOURCE_FAMILY: &str = "ens_v1_resolver_l1";
+const BASENAMES_BASE_REGISTRAR_SOURCE_FAMILY: &str = "basenames_base_registrar";
+const BASENAMES_BASE_REGISTRY_SOURCE_FAMILY: &str = "basenames_base_registry";
+const BASENAMES_BASE_RESOLVER_SOURCE_FAMILY: &str = "basenames_base_resolver";
 const RELEVANT_EVENT_KINDS: &[&str] = &[
     "RegistrationGranted",
     "TokenControlTransferred",
@@ -151,7 +156,13 @@ async fn build_rows(
     let mut rows = Vec::new();
 
     for binding in bindings {
-        let events = load_relevant_events(pool, &binding.logical_name_id).await?;
+        let events = load_relevant_events(
+            pool,
+            &binding.namespace,
+            &binding.logical_name_id,
+            &binding.surface_chain_id,
+        )
+        .await?;
         let relations = project_relations(binding, &events);
         rows.extend(build_relation_rows(
             binding,
@@ -487,11 +498,17 @@ async fn load_current_bindings(pool: &PgPool) -> Result<Vec<CurrentBindingSeed>>
     rows.into_iter().map(decode_current_binding_seed).collect()
 }
 
-async fn load_relevant_events(pool: &PgPool, logical_name_id: &str) -> Result<Vec<RelevantEvent>> {
+async fn load_relevant_events(
+    pool: &PgPool,
+    namespace: &str,
+    logical_name_id: &str,
+    authority_chain_id: &str,
+) -> Result<Vec<RelevantEvent>> {
     let event_kinds = RELEVANT_EVENT_KINDS
         .iter()
         .map(|kind| (*kind).to_owned())
         .collect::<Vec<_>>();
+    let source_families = authority_source_families(namespace);
 
     let rows = sqlx::query(&format!(
         r#"
@@ -516,6 +533,8 @@ async fn load_relevant_events(pool: &PgPool, logical_name_id: &str) -> Result<Ve
           AND ne.logical_name_id = $2
           AND ne.derivation_kind = $3
           AND ne.event_kind = ANY($4::TEXT[])
+          AND ne.source_family = ANY($5::TEXT[])
+          AND ne.chain_id = $6
           AND ne.canonicality_state {CANONICAL_STATE_FILTER}
         ORDER BY
             ne.block_number NULLS FIRST,
@@ -523,10 +542,12 @@ async fn load_relevant_events(pool: &PgPool, logical_name_id: &str) -> Result<Ve
             ne.event_identity
         "#
     ))
-    .bind(ENS_NAMESPACE)
+    .bind(namespace)
     .bind(logical_name_id)
     .bind(ENS_V1_AUTHORITY_DERIVATION_KIND)
     .bind(&event_kinds)
+    .bind(&source_families)
+    .bind(authority_chain_id)
     .fetch_all(pool)
     .await
     .with_context(|| {
@@ -640,6 +661,21 @@ fn decode_relevant_event(row: sqlx::postgres::PgRow) -> Result<RelevantEvent> {
 
 fn normalize_address(value: impl AsRef<str>) -> String {
     value.as_ref().to_ascii_lowercase()
+}
+
+fn authority_source_families(namespace: &str) -> Vec<&'static str> {
+    match namespace {
+        "basenames" => vec![
+            BASENAMES_BASE_REGISTRAR_SOURCE_FAMILY,
+            BASENAMES_BASE_REGISTRY_SOURCE_FAMILY,
+            BASENAMES_BASE_RESOLVER_SOURCE_FAMILY,
+        ],
+        _ => vec![
+            ENS_V1_REGISTRAR_SOURCE_FAMILY,
+            ENS_V1_REGISTRY_SOURCE_FAMILY,
+            ENS_V1_RESOLVER_SOURCE_FAMILY,
+        ],
+    }
 }
 
 fn parse_canonicality_state(value: &str) -> Result<CanonicalityState> {
@@ -855,6 +891,7 @@ mod tests {
                     &tokenized,
                     "grant",
                     "RegistrationGranted",
+                    ENS_V1_REGISTRAR_SOURCE_FAMILY,
                     "0xalpha-grant",
                     100,
                     Some(0),
@@ -869,6 +906,7 @@ mod tests {
                     &tokenized,
                     "transfer",
                     "TokenControlTransferred",
+                    ENS_V1_REGISTRAR_SOURCE_FAMILY,
                     "0xalpha-transfer",
                     101,
                     Some(0),
@@ -883,6 +921,7 @@ mod tests {
                     &registry_only,
                     "epoch",
                     "AuthorityEpochChanged",
+                    ENS_V1_REGISTRY_SOURCE_FAMILY,
                     "0xbeta-control",
                     102,
                     Some(0),
@@ -896,6 +935,7 @@ mod tests {
                     &registry_only,
                     "owner",
                     "AuthorityTransferred",
+                    ENS_V1_REGISTRY_SOURCE_FAMILY,
                     "0xbeta-control",
                     102,
                     Some(1),
@@ -997,6 +1037,7 @@ mod tests {
                 &binding,
                 "grant",
                 "RegistrationGranted",
+                ENS_V1_REGISTRAR_SOURCE_FAMILY,
                 "0xgrant",
                 200,
                 Some(0),
@@ -1024,6 +1065,7 @@ mod tests {
                 &binding,
                 "transfer",
                 "TokenControlTransferred",
+                ENS_V1_REGISTRAR_SOURCE_FAMILY,
                 "0xtransfer",
                 201,
                 Some(0),
@@ -1059,8 +1101,217 @@ mod tests {
         database.cleanup().await
     }
 
+    #[tokio::test]
+    async fn rebuilds_basenames_base_authority_rows_without_leaking_ignored_state() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let tokenized = IdentityBinding::with_namespace_and_chain(
+            "basenames",
+            "base-mainnet",
+            "basenames:alice.base.eth",
+            "alice.base.eth",
+            Some(0x7100),
+            0x7200,
+            0x7300,
+        );
+        let registry_only = IdentityBinding::with_namespace_and_chain(
+            "basenames",
+            "base-mainnet",
+            "basenames:beta.base.eth",
+            "beta.base.eth",
+            None,
+            0x7400,
+            0x7500,
+        );
+
+        seed_raw_blocks(
+            database.pool(),
+            &[
+                raw_block("base-mainnet", "0xbase-grant", 400, 1_717_180_400),
+                raw_block("base-mainnet", "0xbase-transfer", 401, 1_717_180_401),
+                raw_block("base-mainnet", "0xbase-registry", 402, 1_717_180_402),
+                raw_block("base-mainnet", "0xbase-ignored", 403, 1_717_180_403),
+            ],
+        )
+        .await?;
+        seed_identity(
+            database.pool(),
+            &tokenized,
+            "0xbase-grant",
+            400,
+            1_717_180_400,
+        )
+        .await?;
+        seed_identity(
+            database.pool(),
+            &registry_only,
+            "0xbase-registry",
+            402,
+            1_717_180_402,
+        )
+        .await?;
+        seed_events(
+            database.pool(),
+            &[
+                authority_event(
+                    &tokenized,
+                    "grant",
+                    "RegistrationGranted",
+                    BASENAMES_BASE_REGISTRAR_SOURCE_FAMILY,
+                    "0xbase-grant",
+                    400,
+                    Some(0),
+                    json!({}),
+                    json!({
+                        "authority_kind": "registrar",
+                        "authority_key": "registrar:base-mainnet:alice",
+                        "registrant": "0x0000000000000000000000000000000000000aaa",
+                    }),
+                ),
+                authority_event(
+                    &tokenized,
+                    "transfer",
+                    "TokenControlTransferred",
+                    BASENAMES_BASE_REGISTRAR_SOURCE_FAMILY,
+                    "0xbase-transfer",
+                    401,
+                    Some(0),
+                    json!({
+                        "from": "0x0000000000000000000000000000000000000aaa",
+                    }),
+                    json!({
+                        "to": "0x0000000000000000000000000000000000000bbb",
+                    }),
+                ),
+                ignored_event(
+                    &tokenized,
+                    "reverse-claim",
+                    "ens_v1_reverse_claim",
+                    "ignored_projection_state",
+                    "AuthorityTransferred",
+                    "0xbase-ignored",
+                    403,
+                    Some(0),
+                    json!({
+                        "owner": "0x0000000000000000000000000000000000000ddd",
+                    }),
+                ),
+                ignored_event(
+                    &tokenized,
+                    "transport",
+                    "basenames_l1_compat_projection",
+                    "ignored_projection_state",
+                    "AuthorityTransferred",
+                    "0xbase-ignored",
+                    403,
+                    Some(1),
+                    json!({
+                        "owner": "0x0000000000000000000000000000000000000eee",
+                    }),
+                ),
+                authority_event(
+                    &registry_only,
+                    "epoch",
+                    "AuthorityEpochChanged",
+                    BASENAMES_BASE_REGISTRY_SOURCE_FAMILY,
+                    "0xbase-registry",
+                    402,
+                    Some(0),
+                    json!({}),
+                    json!({
+                        "authority_kind": "registry_only",
+                        "authority_key": "registry:base-mainnet:beta",
+                    }),
+                ),
+                authority_event(
+                    &registry_only,
+                    "owner",
+                    "AuthorityTransferred",
+                    BASENAMES_BASE_REGISTRY_SOURCE_FAMILY,
+                    "0xbase-registry",
+                    402,
+                    Some(1),
+                    json!({
+                        "owner": "0x0000000000000000000000000000000000000aaa",
+                    }),
+                    json!({
+                        "owner": "0x0000000000000000000000000000000000000ccc",
+                    }),
+                ),
+                ignored_event(
+                    &registry_only,
+                    "primary-family-reuse",
+                    ENS_V1_AUTHORITY_DERIVATION_KIND,
+                    "basenames_base_primary",
+                    "AuthorityTransferred",
+                    "0xbase-ignored",
+                    403,
+                    Some(2),
+                    json!({
+                        "owner": "0x0000000000000000000000000000000000000ddd",
+                    }),
+                ),
+            ],
+        )
+        .await?;
+
+        let summary = rebuild_address_names_current(database.pool(), None).await?;
+        assert_eq!(summary.requested_address_count, 2);
+        assert_eq!(summary.upserted_row_count, 4);
+
+        let token_rows = load_address_names_current(
+            database.pool(),
+            "0x0000000000000000000000000000000000000bbb",
+            Some("basenames"),
+            None,
+        )
+        .await?;
+        assert_eq!(token_rows.len(), 3);
+        assert!(
+            token_rows
+                .iter()
+                .all(|row| row.logical_name_id == tokenized.logical_name_id)
+        );
+        assert!(
+            token_rows
+                .iter()
+                .all(|row| row.chain_positions.get("base").is_some())
+        );
+        assert!(token_rows.iter().all(|row| {
+            row.provenance["normalized_event_ids"]
+                .as_array()
+                .is_some_and(|values| values.len() == 2)
+        }));
+        assert!(token_rows.iter().all(|row| {
+            row.provenance["raw_fact_refs"]
+                .as_array()
+                .is_some_and(|values| values.len() == 2)
+        }));
+
+        let controller_rows = load_address_names_current(
+            database.pool(),
+            "0x0000000000000000000000000000000000000ccc",
+            Some("basenames"),
+            None,
+        )
+        .await?;
+        assert_eq!(controller_rows.len(), 1);
+        assert_eq!(
+            controller_rows[0].relation,
+            AddressNameRelation::EffectiveController
+        );
+        assert_eq!(
+            controller_rows[0].logical_name_id,
+            registry_only.logical_name_id
+        );
+        assert_eq!(controller_rows[0].token_lineage_id, None);
+
+        database.cleanup().await
+    }
+
     #[derive(Clone, Debug)]
     struct IdentityBinding {
+        namespace: String,
+        chain_id: String,
         logical_name_id: String,
         display_name: String,
         token_lineage_id: Option<Uuid>,
@@ -1076,7 +1327,29 @@ mod tests {
             resource: u128,
             binding: u128,
         ) -> Self {
+            Self::with_namespace_and_chain(
+                "ens",
+                "ethereum-mainnet",
+                logical_name_id,
+                display_name,
+                token_lineage,
+                resource,
+                binding,
+            )
+        }
+
+        fn with_namespace_and_chain(
+            namespace: &str,
+            chain_id: &str,
+            logical_name_id: &str,
+            display_name: &str,
+            token_lineage: Option<u128>,
+            resource: u128,
+            binding: u128,
+        ) -> Self {
             Self {
+                namespace: namespace.to_owned(),
+                chain_id: chain_id.to_owned(),
                 logical_name_id: logical_name_id.to_owned(),
                 display_name: display_name.to_owned(),
                 token_lineage_id: token_lineage.map(Uuid::from_u128),
@@ -1096,13 +1369,19 @@ mod tests {
         if let Some(token_lineage_id) = binding.token_lineage_id {
             upsert_token_lineages(
                 pool,
-                &[token_lineage(token_lineage_id, block_hash, block_number)],
+                &[token_lineage(
+                    binding,
+                    token_lineage_id,
+                    block_hash,
+                    block_number,
+                )],
             )
             .await?;
         }
         upsert_resources(
             pool,
             &[resource(
+                binding,
                 binding.resource_id,
                 binding.token_lineage_id,
                 block_hash,
@@ -1113,6 +1392,7 @@ mod tests {
         upsert_name_surfaces(
             pool,
             &[name_surface(
+                binding,
                 &binding.logical_name_id,
                 &binding.display_name,
                 block_hash,
@@ -1163,10 +1443,15 @@ mod tests {
         }
     }
 
-    fn token_lineage(token_lineage_id: Uuid, block_hash: &str, block_number: i64) -> TokenLineage {
+    fn token_lineage(
+        binding: &IdentityBinding,
+        token_lineage_id: Uuid,
+        block_hash: &str,
+        block_number: i64,
+    ) -> TokenLineage {
         TokenLineage {
             token_lineage_id,
-            chain_id: "ethereum-mainnet".to_owned(),
+            chain_id: binding.chain_id.clone(),
             block_hash: block_hash.to_owned(),
             block_number,
             provenance: json!({"source": "worker_address_names_test", "kind": "token_lineage"}),
@@ -1175,6 +1460,7 @@ mod tests {
     }
 
     fn resource(
+        binding: &IdentityBinding,
         resource_id: Uuid,
         token_lineage_id: Option<Uuid>,
         block_hash: &str,
@@ -1183,7 +1469,7 @@ mod tests {
         Resource {
             resource_id,
             token_lineage_id,
-            chain_id: "ethereum-mainnet".to_owned(),
+            chain_id: binding.chain_id.clone(),
             block_hash: block_hash.to_owned(),
             block_number,
             provenance: json!({"source": "worker_address_names_test", "kind": "resource"}),
@@ -1192,6 +1478,7 @@ mod tests {
     }
 
     fn name_surface(
+        binding: &IdentityBinding,
         logical_name_id: &str,
         display_name: &str,
         block_hash: &str,
@@ -1199,7 +1486,7 @@ mod tests {
     ) -> NameSurface {
         NameSurface {
             logical_name_id: logical_name_id.to_owned(),
-            namespace: "ens".to_owned(),
+            namespace: binding.namespace.clone(),
             input_name: display_name.to_owned(),
             canonical_display_name: display_name.to_owned(),
             normalized_name: display_name.to_owned(),
@@ -1209,7 +1496,7 @@ mod tests {
             normalizer_version: "ensip15@2026-04-16".to_owned(),
             normalization_warnings: json!([]),
             normalization_errors: json!([]),
-            chain_id: "ethereum-mainnet".to_owned(),
+            chain_id: binding.chain_id.clone(),
             block_hash: block_hash.to_owned(),
             block_number,
             provenance: json!({"source": "worker_address_names_test", "kind": "name_surface"}),
@@ -1230,7 +1517,7 @@ mod tests {
             binding_kind: SurfaceBindingKind::DeclaredRegistryPath,
             active_from: timestamp(active_from_unix),
             active_to: None,
-            chain_id: "ethereum-mainnet".to_owned(),
+            chain_id: binding.chain_id.clone(),
             block_hash: block_hash.to_owned(),
             block_number,
             provenance: json!({"source": "worker_address_names_test", "kind": "surface_binding"}),
@@ -1242,6 +1529,7 @@ mod tests {
         binding: &IdentityBinding,
         identity_suffix: &str,
         event_kind: &str,
+        source_family: &str,
         block_hash: &str,
         block_number: i64,
         log_index: Option<i64>,
@@ -1250,21 +1538,21 @@ mod tests {
     ) -> NormalizedEvent {
         NormalizedEvent {
             event_identity: format!("worker-address-names:{event_kind}:{identity_suffix}"),
-            namespace: "ens".to_owned(),
+            namespace: binding.namespace.clone(),
             logical_name_id: Some(binding.logical_name_id.clone()),
             resource_id: Some(binding.resource_id),
             event_kind: event_kind.to_owned(),
-            source_family: "ens_v1_registrar_l1".to_owned(),
+            source_family: source_family.to_owned(),
             manifest_version: 3,
             source_manifest_id: None,
-            chain_id: Some("ethereum-mainnet".to_owned()),
+            chain_id: Some(binding.chain_id.clone()),
             block_number: Some(block_number),
             block_hash: Some(block_hash.to_owned()),
             transaction_hash: Some(format!("tx:{identity_suffix}")),
             log_index,
             raw_fact_ref: json!({
                 "kind": "raw_log",
-                "chain_id": "ethereum-mainnet",
+                "chain_id": binding.chain_id,
                 "block_hash": block_hash,
                 "block_number": block_number,
                 "transaction_hash": format!("tx:{identity_suffix}"),
@@ -1273,6 +1561,46 @@ mod tests {
             derivation_kind: ENS_V1_AUTHORITY_DERIVATION_KIND.to_owned(),
             canonicality_state: CanonicalityState::Finalized,
             before_state,
+            after_state,
+        }
+    }
+
+    fn ignored_event(
+        binding: &IdentityBinding,
+        identity_suffix: &str,
+        derivation_kind: &str,
+        source_family: &str,
+        event_kind: &str,
+        block_hash: &str,
+        block_number: i64,
+        log_index: Option<i64>,
+        after_state: Value,
+    ) -> NormalizedEvent {
+        NormalizedEvent {
+            event_identity: format!("worker-address-names:ignored:{event_kind}:{identity_suffix}"),
+            namespace: binding.namespace.clone(),
+            logical_name_id: Some(binding.logical_name_id.clone()),
+            resource_id: Some(binding.resource_id),
+            event_kind: event_kind.to_owned(),
+            source_family: source_family.to_owned(),
+            manifest_version: 3,
+            source_manifest_id: None,
+            chain_id: Some(binding.chain_id.clone()),
+            block_number: Some(block_number),
+            block_hash: Some(block_hash.to_owned()),
+            transaction_hash: Some(format!("tx:ignored:{identity_suffix}")),
+            log_index,
+            raw_fact_ref: json!({
+                "kind": "raw_log",
+                "chain_id": binding.chain_id,
+                "block_hash": block_hash,
+                "block_number": block_number,
+                "transaction_hash": format!("tx:ignored:{identity_suffix}"),
+                "log_index": log_index,
+            }),
+            derivation_kind: derivation_kind.to_owned(),
+            canonicality_state: CanonicalityState::Finalized,
+            before_state: json!({}),
             after_state,
         }
     }
