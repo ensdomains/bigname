@@ -795,6 +795,126 @@
             Ok(())
         }
 
+        async fn rebuild_permissions_current(
+            database: &HarnessDatabase,
+            resource_id: Option<Uuid>,
+        ) -> Result<()> {
+            let database_url = database.database_url.clone();
+            let resource_id = resource_id.map(|value| value.to_string());
+            let worker_manifest_path =
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../apps/worker/Cargo.toml");
+
+            tokio::task::spawn_blocking(move || -> Result<()> {
+                let _guard = WORKER_CARGO_LOCK
+                    .lock()
+                    .expect("worker cargo lock must not be poisoned");
+                let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
+                let mut command = Command::new(cargo);
+                command
+                    .arg("run")
+                    .arg("--quiet")
+                    .arg("--manifest-path")
+                    .arg(worker_manifest_path)
+                    .arg("--")
+                    .arg("permissions-current")
+                    .arg("rebuild")
+                    .arg("--database-url")
+                    .arg(&database_url);
+                if let Some(resource_id) = resource_id.as_deref() {
+                    command.arg("--resource-id").arg(resource_id);
+                }
+
+                let output = command.output().with_context(|| {
+                    format!(
+                        "failed to invoke worker permissions_current rebuild for {}",
+                        resource_id.as_deref().unwrap_or("all")
+                    )
+                })?;
+
+                if !output.status.success() {
+                    return Err(anyhow::anyhow!(
+                        "worker permissions_current rebuild failed for {}\nstdout:\n{}\nstderr:\n{}",
+                        resource_id.as_deref().unwrap_or("all"),
+                        String::from_utf8_lossy(&output.stdout),
+                        String::from_utf8_lossy(&output.stderr),
+                    ));
+                }
+
+                Ok(())
+            })
+            .await
+            .context("worker permissions_current rebuild task panicked")??;
+
+            Ok(())
+        }
+
+        async fn rebuild_resolver_current(
+            database: &HarnessDatabase,
+            chain_id: Option<&str>,
+            resolver_address: Option<&str>,
+        ) -> Result<()> {
+            match (chain_id, resolver_address) {
+                (Some(_), Some(_)) | (None, None) => {}
+                _ => {
+                    return Err(anyhow::anyhow!(
+                        "resolver_current rebuild requires both chain_id and resolver_address when targeting one resolver"
+                    ));
+                }
+            }
+
+            let database_url = database.database_url.clone();
+            let chain_id = chain_id.map(str::to_owned);
+            let resolver_address = resolver_address.map(str::to_owned);
+            let worker_manifest_path =
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../apps/worker/Cargo.toml");
+
+            tokio::task::spawn_blocking(move || -> Result<()> {
+                let _guard = WORKER_CARGO_LOCK
+                    .lock()
+                    .expect("worker cargo lock must not be poisoned");
+                let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
+                let mut command = Command::new(cargo);
+                command
+                    .arg("run")
+                    .arg("--quiet")
+                    .arg("--manifest-path")
+                    .arg(worker_manifest_path)
+                    .arg("--")
+                    .arg("resolver-current")
+                    .arg("rebuild")
+                    .arg("--database-url")
+                    .arg(&database_url);
+                if let (Some(chain_id), Some(resolver_address)) =
+                    (chain_id.as_deref(), resolver_address.as_deref())
+                {
+                    command.arg("--chain-id").arg(chain_id);
+                    command.arg("--resolver-address").arg(resolver_address);
+                }
+
+                let output = command.output().with_context(|| {
+                    format!(
+                        "failed to invoke worker resolver_current rebuild for {}",
+                        resolver_address.as_deref().unwrap_or("all")
+                    )
+                })?;
+
+                if !output.status.success() {
+                    return Err(anyhow::anyhow!(
+                        "worker resolver_current rebuild failed for {}\nstdout:\n{}\nstderr:\n{}",
+                        resolver_address.as_deref().unwrap_or("all"),
+                        String::from_utf8_lossy(&output.stdout),
+                        String::from_utf8_lossy(&output.stderr),
+                    ));
+                }
+
+                Ok(())
+            })
+            .await
+            .context("worker resolver_current rebuild task panicked")??;
+
+            Ok(())
+        }
+
         #[allow(clippy::too_many_arguments)]
         fn history_event(
             event_identity: &str,

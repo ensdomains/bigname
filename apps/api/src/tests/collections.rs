@@ -183,6 +183,184 @@ async fn get_resolver_overview_returns_not_found_when_projection_is_missing() ->
 }
 
 #[tokio::test]
+async fn get_resolver_overview_reads_basenames_resolver_and_permissions_from_normalized_events()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let logical_name_id = "basenames:alice.base.eth";
+    let resource_id = Uuid::from_u128(0x8a10);
+    let token_lineage_id = Uuid::from_u128(0x8a11);
+    let surface_binding_id = Uuid::from_u128(0x8a12);
+    let resolver_address = "0x0000000000000000000000000000000000000abc";
+    let subject = BasenamesControlVectorScenario::ManagementOnly.current_effective_controller();
+
+    database
+        .seed_basenames_control_vector_rebuild_inputs(
+            logical_name_id,
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+            BasenamesControlVectorScenario::ManagementOnly,
+        )
+        .await?;
+    bigname_storage::upsert_raw_blocks(
+        &database.pool,
+        &[
+            raw_block("base-mainnet", "0xbase-permission-1", None, 106, 1_717_181_706),
+            raw_block("base-mainnet", "0xbase-permission-2", None, 107, 1_717_181_707),
+        ],
+    )
+    .await?;
+    bigname_storage::upsert_normalized_events(
+        &database.pool,
+        &[
+            bigname_storage::NormalizedEvent {
+                event_identity: "api-test:basenames:resolver-permission-1".to_owned(),
+                namespace: "basenames".to_owned(),
+                logical_name_id: Some(logical_name_id.to_owned()),
+                resource_id: Some(resource_id),
+                event_kind: "PermissionChanged".to_owned(),
+                source_family: "basenames_base_registry".to_owned(),
+                manifest_version: 5,
+                source_manifest_id: None,
+                chain_id: Some("base-mainnet".to_owned()),
+                block_number: Some(106),
+                block_hash: Some("0xbase-permission-1".to_owned()),
+                transaction_hash: Some("0xtxbasepermission1".to_owned()),
+                log_index: Some(0),
+                raw_fact_ref: json!({"kind": "raw_log", "event_identity": "api-test:basenames:resolver-permission-1"}),
+                derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+                canonicality_state: CanonicalityState::Canonical,
+                before_state: json!({}),
+                after_state: json!({
+                    "subject": subject,
+                    "scope": {
+                        "kind": "resolver",
+                        "chain_id": "base-mainnet",
+                        "resolver_address": "0x0000000000000000000000000000000000000AbC",
+                    },
+                    "effective_powers": ["resolver_control"],
+                    "grant_source": {
+                        "kind": "normalized_event",
+                        "event_identity": "api-test:basenames:resolver-permission-1",
+                    },
+                    "revocation_source": null,
+                    "inheritance_path": [],
+                    "transfer_behavior": {},
+                }),
+            },
+            bigname_storage::NormalizedEvent {
+                event_identity: "api-test:basenames:resolver-permission-2".to_owned(),
+                namespace: "basenames".to_owned(),
+                logical_name_id: Some(logical_name_id.to_owned()),
+                resource_id: Some(resource_id),
+                event_kind: "PermissionChanged".to_owned(),
+                source_family: "basenames_base_resolver".to_owned(),
+                manifest_version: 6,
+                source_manifest_id: None,
+                chain_id: Some("base-mainnet".to_owned()),
+                block_number: Some(107),
+                block_hash: Some("0xbase-permission-2".to_owned()),
+                transaction_hash: Some("0xtxbasepermission2".to_owned()),
+                log_index: Some(0),
+                raw_fact_ref: json!({"kind": "raw_log", "event_identity": "api-test:basenames:resolver-permission-2"}),
+                derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+                canonicality_state: CanonicalityState::Canonical,
+                before_state: json!({}),
+                after_state: json!({
+                    "subject": subject,
+                    "scope": {
+                        "kind": "resolver",
+                        "chain_id": "base-mainnet",
+                        "resolver_address": resolver_address,
+                    },
+                    "effective_powers": ["resolver_control", "resource_control"],
+                    "grant_source": {
+                        "kind": "normalized_event",
+                        "event_identity": "api-test:basenames:resolver-permission-2",
+                    },
+                    "revocation_source": null,
+                    "inheritance_path": [],
+                    "transfer_behavior": {},
+                }),
+            },
+        ],
+    )
+    .await?;
+    database
+        .rebuild_resolver_current(Some("base-mainnet"), Some(resolver_address))
+        .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resolvers/base-mainnet/0x0000000000000000000000000000000000000ABC")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("Basenames resolver overview request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let payload: ResolverResponse = read_json(response).await?;
+    assert_eq!(
+        payload.data,
+        json!({
+            "chain_id": "base-mainnet",
+            "resolver_address": resolver_address,
+        })
+    );
+    assert_eq!(payload.declared_state["bindings"]["count"], json!(1));
+    assert_eq!(payload.declared_state["aliases"], json!({
+        "status": "supported",
+        "count": 0,
+        "items": [],
+    }));
+    assert_eq!(
+        payload.declared_state["bindings"]["items"][0]["logical_name_id"],
+        json!(logical_name_id)
+    );
+    assert_eq!(
+        payload.declared_state["permissions"]["items"][0],
+        json!({
+            "resource_id": resource_id.to_string(),
+            "subject": subject,
+            "effective_powers": ["resolver_control", "resource_control"],
+            "grant_source": {
+                "kind": "normalized_event",
+                "event_identity": "api-test:basenames:resolver-permission-2",
+            },
+            "revocation_source": null,
+        })
+    );
+    assert_eq!(
+        payload.declared_state["role_holders"]["items"][0],
+        json!({
+            "subject": subject,
+            "resource_count": 1,
+            "permission_row_count": 1,
+            "effective_powers": ["resolver_control", "resource_control"],
+            "resource_ids": [resource_id.to_string()],
+        })
+    );
+    assert_eq!(
+        payload.declared_state["event_summary"],
+        json!({
+            "status": "supported",
+            "count": 3,
+            "by_kind": {
+                "PermissionChanged": 2,
+                "ResolverChanged": 1,
+            },
+        })
+    );
+    assert_eq!(payload.verified_state, None);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn get_name_children_returns_declared_rows_sorted_with_declared_only_coverage() -> Result<()>
 {
     let database = TestDatabase::new_migrated().await?;
@@ -1823,6 +2001,171 @@ async fn get_address_names_include_role_summary_adds_projection_backed_expansion
                     ],
                 },
             ],
+        }))
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_address_names_include_role_summary_reads_basenames_permissions_from_permission_changed_rows()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let logical_name_id = "basenames:management-only.base.eth";
+    let resource_id = Uuid::from_u128(0x8b10);
+    let token_lineage_id = Uuid::from_u128(0x8b11);
+    let surface_binding_id = Uuid::from_u128(0x8b12);
+    let resolver_address = "0x0000000000000000000000000000000000000abc";
+    let subject = BasenamesControlVectorScenario::ManagementOnly.current_effective_controller();
+
+    database
+        .seed_basenames_control_vector_rebuild_inputs(
+            logical_name_id,
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+            BasenamesControlVectorScenario::ManagementOnly,
+        )
+        .await?;
+    bigname_storage::upsert_raw_blocks(
+        &database.pool,
+        &[
+            raw_block("base-mainnet", "0xbase-permission-3", None, 106, 1_717_181_706),
+            raw_block("base-mainnet", "0xbase-permission-4", None, 107, 1_717_181_707),
+        ],
+    )
+    .await?;
+    bigname_storage::upsert_normalized_events(
+        &database.pool,
+        &[
+            bigname_storage::NormalizedEvent {
+                event_identity: "api-test:basenames:resource-permission".to_owned(),
+                namespace: "basenames".to_owned(),
+                logical_name_id: Some(logical_name_id.to_owned()),
+                resource_id: Some(resource_id),
+                event_kind: "PermissionChanged".to_owned(),
+                source_family: "basenames_base_registry".to_owned(),
+                manifest_version: 5,
+                source_manifest_id: None,
+                chain_id: Some("base-mainnet".to_owned()),
+                block_number: Some(106),
+                block_hash: Some("0xbase-permission-3".to_owned()),
+                transaction_hash: Some("0xtxbasepermission3".to_owned()),
+                log_index: Some(0),
+                raw_fact_ref: json!({"kind": "raw_log", "event_identity": "api-test:basenames:resource-permission"}),
+                derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+                canonicality_state: CanonicalityState::Canonical,
+                before_state: json!({}),
+                after_state: json!({
+                    "subject": subject,
+                    "scope": {
+                        "kind": "resource",
+                    },
+                    "effective_powers": ["resource_control"],
+                    "grant_source": {
+                        "kind": "normalized_event",
+                        "event_identity": "api-test:basenames:resource-permission",
+                    },
+                    "revocation_source": null,
+                    "inheritance_path": [],
+                    "transfer_behavior": {},
+                }),
+            },
+            bigname_storage::NormalizedEvent {
+                event_identity: "api-test:basenames:resolver-permission-role-summary".to_owned(),
+                namespace: "basenames".to_owned(),
+                logical_name_id: Some(logical_name_id.to_owned()),
+                resource_id: Some(resource_id),
+                event_kind: "PermissionChanged".to_owned(),
+                source_family: "basenames_base_resolver".to_owned(),
+                manifest_version: 6,
+                source_manifest_id: None,
+                chain_id: Some("base-mainnet".to_owned()),
+                block_number: Some(107),
+                block_hash: Some("0xbase-permission-4".to_owned()),
+                transaction_hash: Some("0xtxbasepermission4".to_owned()),
+                log_index: Some(0),
+                raw_fact_ref: json!({"kind": "raw_log", "event_identity": "api-test:basenames:resolver-permission-role-summary"}),
+                derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+                canonicality_state: CanonicalityState::Canonical,
+                before_state: json!({}),
+                after_state: json!({
+                    "subject": subject,
+                    "scope": {
+                        "kind": "resolver",
+                        "chain_id": "base-mainnet",
+                        "resolver_address": resolver_address,
+                    },
+                    "effective_powers": ["resolver_control"],
+                    "grant_source": {
+                        "kind": "normalized_event",
+                        "event_identity": "api-test:basenames:resolver-permission-role-summary",
+                    },
+                    "revocation_source": null,
+                    "inheritance_path": [],
+                    "transfer_behavior": {},
+                }),
+            },
+        ],
+    )
+    .await?;
+    database
+        .rebuild_permissions_current(Some(resource_id))
+        .await?;
+    database
+        .rebuild_address_names_current(Some(subject))
+        .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/addresses/{subject}/names?namespace=basenames&include=role_summary"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("Basenames role_summary request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let payload: AddressNamesResponse = read_json(response).await?;
+    assert_eq!(payload.data.len(), 1);
+    assert_eq!(
+        payload.data[0].get("logical_name_id"),
+        Some(&json!(logical_name_id))
+    );
+    assert_eq!(
+        payload.data[0].get("relation_facets"),
+        Some(&json!(["effective_controller"]))
+    );
+    assert_eq!(
+        payload.data[0].get("role_summary"),
+        Some(&json!({
+            "subjects": [{
+                "subject": subject,
+                "scopes": [
+                    {
+                        "scope": {
+                            "kind": "resolver",
+                            "detail": {
+                                "chain_id": "base-mainnet",
+                                "resolver_address": resolver_address,
+                            },
+                        },
+                        "effective_powers": ["resolver_control"],
+                    },
+                    {
+                        "scope": {
+                            "kind": "resource",
+                            "detail": {},
+                        },
+                        "effective_powers": ["resource_control"],
+                    }
+                ],
+            }]
         }))
     );
 

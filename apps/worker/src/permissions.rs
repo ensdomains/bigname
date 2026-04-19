@@ -73,6 +73,51 @@ pub async fn rebuild_permissions_current(
     }
 }
 
+pub(crate) async fn load_current_resolver_permission_targets(
+    pool: &PgPool,
+) -> Result<Vec<(String, String)>> {
+    let resource_ids = load_target_resource_ids(pool).await?;
+    let rows = build_rows(pool, &resource_ids).await?;
+    let mut targets = BTreeSet::new();
+
+    for row in rows {
+        if let PermissionScope::Resolver {
+            chain_id,
+            resolver_address,
+        } = row.scope
+        {
+            targets.insert((chain_id, resolver_address));
+        }
+    }
+
+    Ok(targets.into_iter().collect())
+}
+
+pub(crate) async fn build_current_resolver_permission_rows(
+    pool: &PgPool,
+    chain_id: &str,
+    resolver_address: &str,
+) -> Result<Vec<PermissionsCurrentRow>> {
+    let target_resource_ids =
+        load_target_resource_ids_for_resolver_scope(pool, chain_id, resolver_address).await?;
+    let rows = build_rows(pool, &target_resource_ids).await?;
+    let normalized_resolver_address = resolver_address.to_ascii_lowercase();
+
+    Ok(rows
+        .into_iter()
+        .filter(|row| {
+            matches!(
+                &row.scope,
+                PermissionScope::Resolver {
+                    chain_id: row_chain_id,
+                    resolver_address: row_resolver_address,
+                } if row_chain_id == chain_id
+                    && row_resolver_address == &normalized_resolver_address
+            )
+        })
+        .collect())
+}
+
 async fn rebuild_all_resources(pool: &PgPool) -> Result<PermissionsCurrentRebuildSummary> {
     let resource_ids = load_target_resource_ids(pool).await?;
     let deleted_row_count = clear_permissions_current(pool).await?;
@@ -195,6 +240,40 @@ async fn load_target_resource_ids(pool: &PgPool) -> Result<Vec<Uuid>> {
     .fetch_all(pool)
     .await
     .context("failed to load resource_ids for permissions_current rebuild")?;
+
+    rows.into_iter()
+        .map(|row| row.try_get("resource_id").context("missing resource_id"))
+        .collect()
+}
+
+async fn load_target_resource_ids_for_resolver_scope(
+    pool: &PgPool,
+    chain_id: &str,
+    resolver_address: &str,
+) -> Result<Vec<Uuid>> {
+    let rows = sqlx::query(&format!(
+        r#"
+        SELECT DISTINCT resource_id
+        FROM normalized_events
+        WHERE event_kind = $1
+          AND resource_id IS NOT NULL
+          AND canonicality_state {CANONICAL_STATE_FILTER}
+          AND after_state->'scope'->>'kind' = 'resolver'
+          AND after_state->'scope'->>'chain_id' = $2
+          AND LOWER(after_state->'scope'->>'resolver_address') = $3
+        ORDER BY resource_id
+        "#
+    ))
+    .bind(EVENT_KIND_PERMISSION_CHANGED)
+    .bind(chain_id)
+    .bind(resolver_address.to_ascii_lowercase())
+    .fetch_all(pool)
+    .await
+    .with_context(|| {
+        format!(
+            "failed to load resource_ids for resolver-scoped PermissionChanged rows on chain {chain_id} resolver {resolver_address}"
+        )
+    })?;
 
     rows.into_iter()
         .map(|row| row.try_get("resource_id").context("missing resource_id"))
@@ -864,6 +943,96 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn permissions_current_keyed_rebuild_projects_basenames_resolver_scope_from_permission_changed_rows()
+    -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let resource_id = Uuid::from_u128(0x73b0);
+
+        seed_resources(database.pool(), &[resource_id]).await?;
+        seed_raw_blocks(
+            database.pool(),
+            &[
+                raw_block("base-mainnet", "0xperm008c", 140, 1_776_100_140),
+                raw_block("base-mainnet", "0xperm008d", 141, 1_776_100_141),
+            ],
+        )
+        .await?;
+        seed_permission_events(
+            database.pool(),
+            &[
+                permission_event_with_context(
+                    "basenames-resolver-grant-1",
+                    "basenames",
+                    "basenames_base_registry",
+                    "base-mainnet",
+                    3,
+                    resource_id,
+                    "0x0000000000000000000000000000000000000abc",
+                    json!({
+                        "kind": "resolver",
+                        "chain_id": "base-mainnet",
+                        "resolver_address": "0x0000000000000000000000000000000000000AbC"
+                    }),
+                    json!(["resolver_control"]),
+                    Some(json!({"kind": "normalized_event", "normalized_event_id": 40})),
+                    None,
+                    140,
+                    0,
+                ),
+                permission_event_with_context(
+                    "basenames-resolver-grant-2",
+                    "basenames",
+                    "basenames_base_resolver",
+                    "base-mainnet",
+                    4,
+                    resource_id,
+                    "0x0000000000000000000000000000000000000abc",
+                    json!({
+                        "kind": "resolver",
+                        "chain_id": "base-mainnet",
+                        "resolver_address": "0x0000000000000000000000000000000000000abc"
+                    }),
+                    json!(["resolver_control", "resource_control"]),
+                    Some(json!({"kind": "normalized_event", "normalized_event_id": 41})),
+                    None,
+                    141,
+                    0,
+                ),
+            ],
+        )
+        .await?;
+
+        let summary =
+            rebuild_permissions_current(database.pool(), Some(&resource_id.to_string())).await?;
+        assert_eq!(summary.upserted_row_count, 1);
+
+        let rows = load_permissions_current(database.pool(), resource_id, None, None).await?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].scope,
+            PermissionScope::Resolver {
+                chain_id: "base-mainnet".to_owned(),
+                resolver_address: "0x0000000000000000000000000000000000000abc".to_owned(),
+            }
+        );
+        assert_eq!(
+            rows[0].effective_powers,
+            json!(["resolver_control", "resource_control"])
+        );
+        assert_eq!(rows[0].provenance["normalized_event_ids"], json!([1, 2]));
+        assert_eq!(
+            rows[0].coverage["source_classes_considered"],
+            json!(["basenames_base_registry", "basenames_base_resolver"])
+        );
+        assert_eq!(
+            rows[0].chain_positions["base-mainnet"]["block_number"],
+            json!(141)
+        );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
     async fn full_rebuild_clears_stale_rows_and_partitions_by_resource_id() -> Result<()> {
         let database = TestDatabase::new().await?;
         let first_resource_id = Uuid::from_u128(0x7400);
@@ -1015,23 +1184,56 @@ mod tests {
         block_number: i64,
         log_index: i64,
     ) -> NormalizedEvent {
+        permission_event_with_context(
+            event_identity,
+            "ens",
+            "ens_v1_unwrapped_authority",
+            "ethereum-mainnet",
+            1,
+            resource_id,
+            subject,
+            scope,
+            effective_powers,
+            grant_source,
+            revocation_source,
+            block_number,
+            log_index,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn permission_event_with_context(
+        event_identity: &str,
+        namespace: &str,
+        source_family: &str,
+        chain_id: &str,
+        manifest_version: i64,
+        resource_id: Uuid,
+        subject: &str,
+        scope: Value,
+        effective_powers: Value,
+        grant_source: Option<Value>,
+        revocation_source: Option<Value>,
+        block_number: i64,
+        log_index: i64,
+    ) -> NormalizedEvent {
         NormalizedEvent {
             event_identity: event_identity.to_owned(),
-            namespace: "ens".to_owned(),
-            logical_name_id: Some(format!("ens:{resource_id}")),
+            namespace: namespace.to_owned(),
+            logical_name_id: Some(format!("{namespace}:{resource_id}")),
             resource_id: Some(resource_id),
             event_kind: EVENT_KIND_PERMISSION_CHANGED.to_owned(),
-            source_family: "ens_v1_unwrapped_authority".to_owned(),
-            manifest_version: 1,
+            source_family: source_family.to_owned(),
+            manifest_version,
             source_manifest_id: None,
-            chain_id: Some("ethereum-mainnet".to_owned()),
+            chain_id: Some(chain_id.to_owned()),
             block_number: Some(block_number),
             block_hash: Some(format!("0xperm{block_number:04x}")),
             transaction_hash: Some(format!("0xtx{block_number:04x}")),
             log_index: Some(log_index),
             raw_fact_ref: json!({
                 "kind": "raw_log",
-                "chain_id": "ethereum-mainnet",
+                "chain_id": chain_id,
                 "block_number": block_number,
                 "log_index": log_index
             }),

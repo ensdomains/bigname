@@ -5,8 +5,8 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use bigname_storage::{
-    CanonicalityState, ResolverCurrentRow, SurfaceBindingKind, clear_resolver_current,
-    delete_resolver_current, upsert_resolver_current_rows,
+    CanonicalityState, PermissionsCurrentRow, ResolverCurrentRow, SurfaceBindingKind,
+    clear_resolver_current, delete_resolver_current, upsert_resolver_current_rows,
 };
 use serde_json::{Value, json};
 use sqlx::{
@@ -15,6 +15,10 @@ use sqlx::{
     types::time::{OffsetDateTime, UtcOffset},
 };
 use uuid::Uuid;
+
+use crate::permissions::{
+    build_current_resolver_permission_rows, load_current_resolver_permission_targets,
+};
 
 const EVENT_KIND_PERMISSION_CHANGED: &str = "PermissionChanged";
 const EVENT_KIND_RESOLVER_CHANGED: &str = "ResolverChanged";
@@ -61,21 +65,6 @@ struct CurrentBindingSeed {
     block_timestamp: Option<OffsetDateTime>,
     raw_fact_ref: Value,
     canonicality_state: CanonicalityState,
-}
-
-#[derive(Clone, Debug)]
-struct ResolverPermissionSeed {
-    resource_id: Uuid,
-    subject: String,
-    effective_powers: Value,
-    grant_source: Value,
-    revocation_source: Option<Value>,
-    provenance: Value,
-    coverage: Value,
-    chain_positions: Value,
-    canonicality_summary: Value,
-    manifest_version: i64,
-    last_recomputed_at: OffsetDateTime,
 }
 
 #[derive(Clone, Debug)]
@@ -238,16 +227,6 @@ async fn load_target_resolvers(pool: &PgPool) -> Result<Vec<ResolverTarget>> {
             WHERE lre.resolver_address IS NOT NULL
               AND lre.resolver_address <> ''
               AND lre.resolver_address <> $2
-
-            UNION
-
-            SELECT
-                scope_detail->>'chain_id' AS chain_id,
-                LOWER(scope_detail->>'resolver_address') AS resolver_address
-            FROM permissions_current
-            WHERE scope_kind = 'resolver'
-              AND COALESCE(scope_detail->>'chain_id', '') <> ''
-              AND COALESCE(scope_detail->>'resolver_address', '') <> ''
         ) targets
         ORDER BY chain_id, resolver_address
         "#
@@ -258,7 +237,8 @@ async fn load_target_resolvers(pool: &PgPool) -> Result<Vec<ResolverTarget>> {
     .await
     .context("failed to load resolver_current rebuild targets")?;
 
-    rows.into_iter()
+    let mut targets = rows
+        .into_iter()
         .map(|row| {
             Ok(ResolverTarget {
                 chain_id: row.try_get("chain_id").context("missing chain_id")?,
@@ -268,7 +248,16 @@ async fn load_target_resolvers(pool: &PgPool) -> Result<Vec<ResolverTarget>> {
                 ),
             })
         })
-        .collect()
+        .collect::<Result<BTreeSet<_>>>()?;
+
+    for (chain_id, resolver_address) in load_current_resolver_permission_targets(pool).await? {
+        targets.insert(ResolverTarget {
+            chain_id,
+            resolver_address,
+        });
+    }
+
+    Ok(targets.into_iter().collect())
 }
 
 async fn load_current_bindings(
@@ -394,61 +383,22 @@ async fn load_current_bindings(
 async fn load_resolver_permissions(
     pool: &PgPool,
     target: &ResolverTarget,
-) -> Result<Vec<ResolverPermissionSeed>> {
-    let rows = sqlx::query(
-        r#"
-        SELECT
-            resource_id,
-            subject,
-            effective_powers,
-            grant_source,
-            revocation_source,
-            provenance,
-            coverage,
-            chain_positions,
-            canonicality_summary,
-            manifest_version,
-            last_recomputed_at
-        FROM permissions_current
-        WHERE scope_kind = 'resolver'
-          AND scope_detail->>'chain_id' = $1
-          AND LOWER(scope_detail->>'resolver_address') = $2
-        ORDER BY subject, resource_id, manifest_version
-        "#,
-    )
-    .bind(&target.chain_id)
-    .bind(&target.resolver_address)
-    .fetch_all(pool)
-    .await
-    .with_context(|| {
-        format!(
-            "failed to load resolver-scoped permissions for resolver {} on chain {}",
-            target.resolver_address, target.chain_id
-        )
-    })?;
-
-    rows.into_iter()
-        .map(|row| {
-            Ok(ResolverPermissionSeed {
-                resource_id: row.try_get("resource_id")?,
-                subject: row.try_get("subject")?,
-                effective_powers: row.try_get("effective_powers")?,
-                grant_source: row.try_get("grant_source")?,
-                revocation_source: row.try_get("revocation_source")?,
-                provenance: row.try_get("provenance")?,
-                coverage: row.try_get("coverage")?,
-                chain_positions: row.try_get("chain_positions")?,
-                canonicality_summary: row.try_get("canonicality_summary")?,
-                manifest_version: row.try_get("manifest_version")?,
-                last_recomputed_at: row.try_get("last_recomputed_at")?,
-            })
-        })
-        .collect()
+) -> Result<Vec<PermissionsCurrentRow>> {
+    let mut rows =
+        build_current_resolver_permission_rows(pool, &target.chain_id, &target.resolver_address)
+            .await?;
+    rows.sort_by(|left, right| {
+        left.subject
+            .cmp(&right.subject)
+            .then_with(|| left.resource_id.cmp(&right.resource_id))
+            .then_with(|| left.manifest_version.cmp(&right.manifest_version))
+    });
+    Ok(rows)
 }
 
 fn build_declared_summary(
     bindings: &[CurrentBindingSeed],
-    permissions: &[ResolverPermissionSeed],
+    permissions: &[PermissionsCurrentRow],
 ) -> Value {
     json!({
         "bindings": build_binding_summary(bindings.iter()),
@@ -499,7 +449,7 @@ fn build_binding_item(binding: &CurrentBindingSeed) -> Value {
     })
 }
 
-fn build_role_holders_summary(permissions: &[ResolverPermissionSeed]) -> Value {
+fn build_role_holders_summary(permissions: &[PermissionsCurrentRow]) -> Value {
     let mut holders = BTreeMap::<String, (BTreeSet<String>, BTreeSet<String>)>::new();
 
     for permission in permissions {
@@ -532,7 +482,7 @@ fn build_role_holders_summary(permissions: &[ResolverPermissionSeed]) -> Value {
 
 fn build_event_summary(
     bindings: &[CurrentBindingSeed],
-    permissions: &[ResolverPermissionSeed],
+    permissions: &[PermissionsCurrentRow],
 ) -> Value {
     let resolver_changed_count = bindings.len();
     let permission_changed_count = permissions
@@ -560,7 +510,7 @@ fn build_event_summary(
 
 fn build_provenance(
     bindings: &[CurrentBindingSeed],
-    permissions: &[ResolverPermissionSeed],
+    permissions: &[PermissionsCurrentRow],
 ) -> Result<Value> {
     let normalized_event_ids = bindings
         .iter()
@@ -602,10 +552,7 @@ fn build_provenance(
     }))
 }
 
-fn build_coverage(
-    bindings: &[CurrentBindingSeed],
-    permissions: &[ResolverPermissionSeed],
-) -> Value {
+fn build_coverage(bindings: &[CurrentBindingSeed], permissions: &[PermissionsCurrentRow]) -> Value {
     let mut source_classes = bindings
         .iter()
         .map(|binding| binding.source_family.clone())
@@ -628,7 +575,7 @@ fn build_coverage(
 
 fn build_chain_positions(
     bindings: &[CurrentBindingSeed],
-    permissions: &[ResolverPermissionSeed],
+    permissions: &[PermissionsCurrentRow],
 ) -> Value {
     let mut chain_positions = BTreeMap::<String, ChainPositionCandidate>::new();
 
@@ -677,7 +624,7 @@ fn build_chain_positions(
 
 fn build_canonicality_summary(
     bindings: &[CurrentBindingSeed],
-    permissions: &[ResolverPermissionSeed],
+    permissions: &[PermissionsCurrentRow],
 ) -> Result<Value> {
     let mut statuses = bindings
         .iter()
@@ -879,9 +826,8 @@ mod tests {
 
     use anyhow::Result;
     use bigname_storage::{
-        NameSurface, NormalizedEvent, PermissionsCurrentRow, RawBlock, Resource, SurfaceBinding,
-        default_database_url, load_resolver_current, upsert_name_surfaces,
-        upsert_normalized_events, upsert_permissions_current_rows, upsert_raw_blocks,
+        NameSurface, NormalizedEvent, RawBlock, Resource, SurfaceBinding, default_database_url,
+        load_resolver_current, upsert_name_surfaces, upsert_normalized_events, upsert_raw_blocks,
         upsert_resolver_current_rows, upsert_resources, upsert_surface_bindings,
     };
 
@@ -1014,48 +960,41 @@ mod tests {
             ],
         )
         .await?;
-        seed_permissions(
+        seed_permission_events(
             database.pool(),
             &[
-                resolver_permission_row(
+                resolver_permission_event(
+                    "permission-alpha-1",
+                    Some("ens:alpha.eth"),
                     resource_id,
                     "0x0000000000000000000000000000000000000abc",
                     "ethereum-mainnet",
                     "0x0000000000000000000000000000000000000aaa",
-                    json!([1, 2]),
-                    json!([{
-                        "kind": "raw_log",
-                        "chain_id": "ethereum-mainnet",
-                        "block_number": 101,
-                        "log_index": 0
-                    }]),
-                    json!([{
-                        "source_family": "ens_v1_unwrapped_authority",
-                        "source_manifest_id": null,
-                        "manifest_version": 7
-                    }]),
+                    json!(["set_resolver"]),
                     101,
-                    1_776_200_101,
+                    0,
                 ),
-                resolver_permission_row(
+                resolver_permission_event(
+                    "permission-alpha-2",
+                    Some("ens:alpha.eth"),
+                    resource_id,
+                    "0x0000000000000000000000000000000000000abc",
+                    "ethereum-mainnet",
+                    "0x0000000000000000000000000000000000000aaa",
+                    json!(["set_resolver", "set_records"]),
+                    101,
+                    1,
+                ),
+                resolver_permission_event(
+                    "permission-only",
+                    None,
                     database_resource_id(1),
                     "0x0000000000000000000000000000000000000def",
                     "ethereum-mainnet",
                     "0x0000000000000000000000000000000000000aaa",
-                    json!([3]),
-                    json!([{
-                        "kind": "raw_log",
-                        "chain_id": "ethereum-mainnet",
-                        "block_number": 101,
-                        "log_index": 1
-                    }]),
-                    json!([{
-                        "source_family": "ens_v1_unwrapped_authority",
-                        "source_manifest_id": null,
-                        "manifest_version": 8
-                    }]),
+                    json!(["set_resolver"]),
                     101,
-                    1_776_200_101,
+                    2,
                 ),
             ],
         )
@@ -1115,7 +1054,10 @@ mod tests {
             row.declared_summary["event_summary"]["by_kind"][EVENT_KIND_PERMISSION_CHANGED],
             json!(3)
         );
-        assert_eq!(row.provenance["normalized_event_ids"], json!([1, 2, 3]));
+        assert_eq!(
+            row.provenance["normalized_event_ids"],
+            json!([1, 2, 3, 4, 5])
+        );
         assert_eq!(
             row.coverage["enumeration_basis"],
             json!(RESOLVER_CURRENT_ENUMERATION_BASIS)
@@ -1148,12 +1090,10 @@ mod tests {
         .await?;
         seed_raw_blocks(
             database.pool(),
-            &[raw_block(
-                "ethereum-mainnet",
-                "0xres0200",
-                200,
-                1_776_200_200,
-            )],
+            &[
+                raw_block("ethereum-mainnet", "0xres0200", 200, 1_776_200_200),
+                raw_block("ethereum-mainnet", "0xres0210", 210, 1_776_200_210),
+            ],
         )
         .await?;
         seed_resolver_events(
@@ -1168,27 +1108,18 @@ mod tests {
             )],
         )
         .await?;
-        seed_permissions(
+        seed_permission_events(
             database.pool(),
-            &[resolver_permission_row(
+            &[resolver_permission_event(
+                "permission-only-target",
+                None,
                 permission_only_resource_id,
                 "0x0000000000000000000000000000000000000abc",
                 "ethereum-mainnet",
                 "0x0000000000000000000000000000000000000ccc",
-                json!([11]),
-                json!([{
-                    "kind": "raw_log",
-                    "chain_id": "ethereum-mainnet",
-                    "block_number": 210,
-                    "log_index": 0
-                }]),
-                json!([{
-                    "source_family": "permissions_current",
-                    "source_manifest_id": null,
-                    "manifest_version": 5
-                }]),
+                json!(["set_resolver"]),
                 210,
-                1_776_200_210,
+                0,
             )],
         )
         .await?;
@@ -1278,13 +1209,16 @@ mod tests {
         Ok(())
     }
 
-    async fn seed_permissions(pool: &PgPool, rows: &[PermissionsCurrentRow]) -> Result<()> {
-        let mut resource_ids = rows.iter().map(|row| row.resource_id).collect::<Vec<_>>();
+    async fn seed_permission_events(pool: &PgPool, events: &[NormalizedEvent]) -> Result<()> {
+        let mut resource_ids = events
+            .iter()
+            .filter_map(|event| event.resource_id)
+            .collect::<Vec<_>>();
         resource_ids.sort();
         resource_ids.dedup();
         let resources = resource_ids.into_iter().map(resource).collect::<Vec<_>>();
         upsert_resources(pool, &resources).await?;
-        upsert_permissions_current_rows(pool, rows).await?;
+        upsert_normalized_events(pool, events).await?;
         Ok(())
     }
 
@@ -1400,59 +1334,56 @@ mod tests {
         }
     }
 
-    fn resolver_permission_row(
+    fn resolver_permission_event(
+        event_identity: &str,
+        logical_name_id: Option<&str>,
         resource_id: Uuid,
         subject: &str,
         chain_id: &str,
         resolver_address: &str,
-        normalized_event_ids: Value,
-        raw_fact_refs: Value,
-        manifest_versions: Value,
+        effective_powers: Value,
         block_number: i64,
-        unix_timestamp: i64,
-    ) -> PermissionsCurrentRow {
-        PermissionsCurrentRow {
-            resource_id,
-            subject: subject.to_owned(),
-            scope: bigname_storage::PermissionScope::Resolver {
-                chain_id: chain_id.to_owned(),
-                resolver_address: resolver_address.to_ascii_lowercase(),
-            },
-            effective_powers: json!(["set_resolver"]),
-            grant_source: json!({"kind": "normalized_event"}),
-            revocation_source: None,
-            inheritance_path: json!([]),
-            transfer_behavior: json!({"inherits": false}),
-            provenance: json!({
-                "normalized_event_ids": normalized_event_ids,
-                "raw_fact_refs": raw_fact_refs,
-                "manifest_versions": manifest_versions,
-                "execution_trace_id": Value::Null,
-                "derivation_kind": "permissions_current_rebuild",
-            }),
-            coverage: json!({
-                "status": "full",
-                "exhaustiveness": "authoritative",
-                "source_classes_considered": ["permissions_current"],
-                "unsupported_reason": Value::Null,
-                "enumeration_basis": "resource_permissions",
-            }),
-            chain_positions: json!({
-                chain_id: {
-                    "chain_id": chain_id,
-                    "block_number": block_number,
-                    "block_hash": format!("0xperm{block_number:04x}"),
-                    "timestamp": format_timestamp(timestamp(unix_timestamp)),
-                }
-            }),
-            canonicality_summary: json!({
-                "status": "finalized",
-                "chains": {
-                    chain_id: "finalized",
-                }
-            }),
+        log_index: i64,
+    ) -> NormalizedEvent {
+        NormalizedEvent {
+            event_identity: event_identity.to_owned(),
+            namespace: "ens".to_owned(),
+            logical_name_id: logical_name_id.map(str::to_owned),
+            resource_id: Some(resource_id),
+            event_kind: EVENT_KIND_PERMISSION_CHANGED.to_owned(),
+            source_family: "ens_v1_unwrapped_authority".to_owned(),
             manifest_version: 9,
-            last_recomputed_at: timestamp(unix_timestamp),
+            source_manifest_id: None,
+            chain_id: Some(chain_id.to_owned()),
+            block_number: Some(block_number),
+            block_hash: Some(format!("0xres{block_number:04}")),
+            transaction_hash: Some(format!("0xperm{block_number:04x}")),
+            log_index: Some(log_index),
+            raw_fact_ref: json!({
+                "kind": "raw_log",
+                "chain_id": chain_id,
+                "block_number": block_number,
+                "log_index": log_index,
+            }),
+            derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+            canonicality_state: CanonicalityState::Finalized,
+            before_state: json!({}),
+            after_state: json!({
+                "subject": subject,
+                "scope": {
+                    "kind": "resolver",
+                    "chain_id": chain_id,
+                    "resolver_address": resolver_address,
+                },
+                "effective_powers": effective_powers,
+                "grant_source": {
+                    "kind": "normalized_event",
+                    "event_identity": event_identity,
+                },
+                "revocation_source": Value::Null,
+                "inheritance_path": [],
+                "transfer_behavior": {},
+            }),
         }
     }
 
