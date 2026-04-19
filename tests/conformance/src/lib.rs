@@ -3227,6 +3227,185 @@ mod shipped_api {
         }
 
         #[tokio::test]
+        async fn resolution_contract_reads_persisted_wildcard_derived_answer_on_mixed_route_and_reuses_execution_explain_envelope()
+        -> Result<()> {
+            let database = HarnessDatabase::new().await?;
+            let logical_name_id = "ens:alice.eth";
+            let resource_id = Uuid::from_u128(0x2200);
+            let wildcard_source_logical_name_id = "ens:eth";
+            let wildcard_source_resource_id = Uuid::from_u128(0x4400);
+            let token_lineage_id = Uuid::from_u128(0x1100);
+            let surface_binding_id = Uuid::from_u128(0x3300);
+            let execution_trace_id = Uuid::from_u128(0x0e7ec7ace0000000000000000000002a);
+
+            database
+                .seed_exact_name_rebuild_inputs(
+                    logical_name_id,
+                    resource_id,
+                    token_lineage_id,
+                    surface_binding_id,
+                )
+                .await?;
+            database.rebuild_name_current(logical_name_id).await?;
+            let mut name_row = bigname_storage::load_name_current(&database.pool, logical_name_id)
+                .await?
+                .context("wildcard-derived mixed resolution requires an exact-name current row")?;
+            let projected_topology = resolution_wildcard_projected_topology(
+                logical_name_id,
+                resource_id,
+                wildcard_source_logical_name_id,
+                wildcard_source_resource_id,
+            );
+            name_row.binding_kind = Some(SurfaceBindingKind::ObservedWildcardPath);
+            name_row.declared_summary = json!({
+                "topology": projected_topology.clone(),
+            });
+            database.insert_name_current_row(name_row.clone()).await?;
+
+            let records = parse_resolution_record_keys(Some("addr:60"), ResolutionMode::Verified)
+                .map_err(|error| anyhow::anyhow!(error.message))?;
+            let cache_key = build_resolution_execution_cache_key(&name_row, &records, None)?;
+            let request_key = cache_key.request_key.clone();
+            let expected_verified_queries =
+                resolution_execution_verified_queries(execution_trace_id, &["addr:60"]);
+
+            let mut trace = resolution_execution_trace(
+                execution_trace_id,
+                &request_key,
+                &["addr:60"],
+                expected_verified_queries.clone(),
+            );
+            trace.request_metadata = json!({
+                "surface": "alice.eth",
+                "record_keys": ["addr:60"],
+                "entrypoint": "universal_resolver",
+                "contract_address": "0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe",
+                "binding_kind": "observed_wildcard_path",
+                "wildcard": {
+                    "source": resolution_wildcard_source(
+                        wildcard_source_logical_name_id,
+                        wildcard_source_resource_id,
+                    ),
+                    "matched_labels": ["alice"],
+                }
+            });
+            trace.steps.push(ExecutionTraceStep {
+                step_index: 2,
+                step_kind: "call_wildcard_resolver".to_owned(),
+                input_digest: Some("sha256:wildcard-input".to_owned()),
+                output_digest: Some("sha256:wildcard-output".to_owned()),
+                latency_ms: Some(19),
+                canonicality_dependency: json!({
+                    "ethereum-mainnet": {
+                        "block_hash": "0xabc123",
+                        "block_number": 21_000_000,
+                        "state": "canonical",
+                    }
+                }),
+                step_payload: json!({
+                    "name": "alice.eth",
+                    "wildcard": {
+                        "source": resolution_wildcard_source(
+                            wildcard_source_logical_name_id,
+                            wildcard_source_resource_id,
+                        ),
+                        "matched_labels": ["alice"],
+                    }
+                }),
+            });
+
+            upsert_execution_trace(&database.pool, &trace).await?;
+            upsert_execution_outcome(
+                &database.pool,
+                &resolution_execution_outcome(
+                    execution_trace_id,
+                    cache_key,
+                    expected_verified_queries.clone(),
+                ),
+            )
+            .await?;
+
+            let mixed_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri("/v1/resolutions/ens/alice.eth?mode=both&records=addr:60")
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("wildcard-derived mixed resolution request failed")?;
+            let explain_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri("/v1/explain/resolutions/ens/alice.eth/execution?records=addr:60")
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("wildcard-derived resolution execution explain request failed")?;
+
+            assert_eq!(mixed_response.status(), StatusCode::OK);
+            assert_eq!(explain_response.status(), StatusCode::OK);
+
+            let mixed_payload: ResolutionResponse = read_json(mixed_response).await?;
+            let explain_payload: ResolutionResponse = read_json(explain_response).await?;
+            let expected_declared_state = json!({
+                "topology": projected_topology.clone(),
+                "record_inventory": {
+                    "status": "unsupported",
+                    "unsupported_reason": "declared resolution record inventory is not yet projected",
+                },
+                "record_cache": {
+                    "status": "unsupported",
+                    "unsupported_reason": "declared resolution record cache is not yet projected",
+                },
+            });
+            let expected_execution = resolution_wildcard_execution_summary(
+                execution_trace_id,
+                wildcard_source_logical_name_id,
+                wildcard_source_resource_id,
+            );
+
+            assert_eq!(mixed_payload.data, explain_payload.data);
+            assert_eq!(mixed_payload.coverage, explain_payload.coverage);
+            assert_eq!(
+                mixed_payload.chain_positions,
+                explain_payload.chain_positions
+            );
+            assert_eq!(mixed_payload.consistency, explain_payload.consistency);
+            assert_eq!(mixed_payload.last_updated, explain_payload.last_updated);
+            assert_eq!(
+                mixed_payload.provenance.get("execution_trace_id"),
+                Some(&Value::String(execution_trace_id.to_string()))
+            );
+            assert_eq!(
+                mixed_payload.declared_state.as_ref(),
+                Some(&expected_declared_state)
+            );
+            assert_eq!(
+                mixed_payload.verified_state,
+                Some(json!({
+                    "verified_queries": expected_verified_queries.clone(),
+                }))
+            );
+            assert_eq!(
+                explain_payload.provenance.get("execution_trace_id"),
+                Some(&Value::String(execution_trace_id.to_string()))
+            );
+            assert_eq!(explain_payload.declared_state, None);
+            assert_eq!(
+                explain_payload.verified_state,
+                Some(json!({
+                    "execution": expected_execution,
+                    "verified_queries": expected_verified_queries,
+                }))
+            );
+
+            database.cleanup().await?;
+            Ok(())
+        }
+
+        #[tokio::test]
         async fn resolution_contract_returns_selector_local_unsupported_for_non_alias_ancestor_selected_requests()
         -> Result<()> {
             run_resolution_negative_verified_path_case(
@@ -7313,6 +7492,131 @@ mod shipped_api {
             })
         }
 
+        fn resolution_wildcard_source(
+            wildcard_source_logical_name_id: &str,
+            wildcard_source_resource_id: Uuid,
+        ) -> Value {
+            json!({
+                "logical_name_id": wildcard_source_logical_name_id,
+                "namespace": "ens",
+                "normalized_name": "eth",
+                "canonical_display_name": "Eth",
+                "namehash": "namehash:eth",
+                "resource_id": wildcard_source_resource_id.to_string(),
+                "binding_kind": "observed_wildcard_path",
+            })
+        }
+
+        fn resolution_wildcard_projected_topology(
+            logical_name_id: &str,
+            resource_id: Uuid,
+            wildcard_source_logical_name_id: &str,
+            wildcard_source_resource_id: Uuid,
+        ) -> Value {
+            let wildcard_source = resolution_wildcard_source(
+                wildcard_source_logical_name_id,
+                wildcard_source_resource_id,
+            );
+            let wildcard_boundary = resolution_record_inventory_boundary(
+                wildcard_source_logical_name_id,
+                wildcard_source_resource_id,
+            );
+
+            json!({
+                "registry_path": [
+                    {
+                        "logical_name_id": logical_name_id,
+                        "namespace": "ens",
+                        "normalized_name": "alice.eth",
+                        "canonical_display_name": "Alice.eth",
+                        "namehash": "namehash:alice.eth",
+                        "resource_id": resource_id.to_string(),
+                        "binding_kind": "observed_wildcard_path",
+                    }
+                ],
+                "subregistry_path": [],
+                "resolver_path": [
+                    {
+                        "logical_name_id": wildcard_source_logical_name_id,
+                        "namespace": "ens",
+                        "normalized_name": "eth",
+                        "canonical_display_name": "Eth",
+                        "resource_id": wildcard_source_resource_id.to_string(),
+                        "chain_id": "ethereum-mainnet",
+                        "address": "0x0000000000000000000000000000000000000def",
+                        "latest_event_kind": "ResolverChanged",
+                    }
+                ],
+                "wildcard": {
+                    "source": wildcard_source,
+                    "matched_labels": ["alice"],
+                },
+                "alias": {
+                    "final_target": null,
+                    "hops": [],
+                },
+                "version_boundaries": {
+                    "topology_version_boundary": wildcard_boundary.clone(),
+                    "record_version_boundary": wildcard_boundary,
+                },
+                "transport": {
+                    "source_chain_id": null,
+                    "target_chain_id": null,
+                    "contract_address": null,
+                    "latest_event_kind": null,
+                },
+            })
+        }
+
+        fn resolution_wildcard_execution_summary(
+            execution_trace_id: Uuid,
+            wildcard_source_logical_name_id: &str,
+            wildcard_source_resource_id: Uuid,
+        ) -> Value {
+            let wildcard_source = resolution_wildcard_source(
+                wildcard_source_logical_name_id,
+                wildcard_source_resource_id,
+            );
+            let mut execution =
+                resolution_execution_summary(execution_trace_id, wildcard_source_resource_id);
+
+            execution["resolver_discovery_path"] = json!([
+                {
+                    "logical_name_id": wildcard_source_logical_name_id,
+                    "namespace": "ens",
+                    "normalized_name": "eth",
+                    "canonical_display_name": "Eth",
+                    "resource_id": wildcard_source_resource_id.to_string(),
+                    "chain_id": "ethereum-mainnet",
+                    "address": "0x0000000000000000000000000000000000000def",
+                    "latest_event_kind": "ResolverChanged",
+                }
+            ]);
+            execution["wildcard"] = json!({
+                "source": wildcard_source,
+                "matched_labels": ["alice"],
+            });
+            execution["steps"]
+                .as_array_mut()
+                .expect("resolution execution summary must expose steps")
+                .push(json!({
+                    "step_index": 2,
+                    "step_kind": "call_wildcard_resolver",
+                    "input_digest": "sha256:wildcard-input",
+                    "output_digest": "sha256:wildcard-output",
+                    "latency": 19,
+                    "canonicality_dependency": {
+                        "ethereum-mainnet": {
+                            "block_hash": "0xabc123",
+                            "block_number": 21_000_000,
+                            "state": "canonical",
+                        }
+                    }
+                }));
+
+            execution
+        }
+
         #[derive(Clone, Copy, Debug)]
         enum UnsupportedEnsVerifiedResolutionPathCase {
             NonAliasAncestorSelected,
@@ -7553,11 +7857,9 @@ mod shipped_api {
                 bigname_storage::load_name_current(&database.pool, logical_name_id)
                     .await?
                     .context("resolution negative fixture requires an exact-name current row")?;
-            let records = parse_resolution_record_keys(
-                Some("text:com.twitter"),
-                ResolutionMode::Verified,
-            )
-            .map_err(|error| anyhow::anyhow!(error.message))?;
+            let records =
+                parse_resolution_record_keys(Some("text:com.twitter"), ResolutionMode::Verified)
+                    .map_err(|error| anyhow::anyhow!(error.message))?;
             let cache_key = build_resolution_execution_cache_key(
                 &supported_name_row,
                 &records,
