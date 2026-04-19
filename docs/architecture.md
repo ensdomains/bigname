@@ -966,10 +966,11 @@ Rules:
 - verified queries return one result object per requested record selector and reuse the shared `ResultStatus` vocabulary
 - explicit record reads may succeed even when inventory is partial
 - verified queries do not backfill `record_inventory` or `record_cache` inside the same response; they are the execution-derived counterpart to those declared sections
-- public verified support is narrower than the full resolution model: the shipped Phase 7 slice supports `ens` exact-surface direct-path requests first, and the first additive non-direct support class is exact-surface alias-only paths
+- public verified support is narrower than the full resolution model: the shipped Phase 7 slice supports `ens` exact-surface direct-path requests first, the already frozen exact-surface alias-only non-direct class, and the first additive exact-surface wildcard-derived class
 - for that support check, use the same declared topology snapshot that would populate the mixed route's declared `topology`; a request is direct-path only when `resolver_path[0].logical_name_id` equals the route surface `logical_name_id`, `wildcard.source=null` with `matched_labels=[]`, `alias.final_target=null` with `hops=[]`, and all `transport` fields are `null`
-- the first additive ENS alias-only non-direct support class is the exact-surface class where that same declared topology snapshot keeps `resolver_path[0].logical_name_id` equal to the route surface `logical_name_id`, `alias.final_target` non-`null` with `hops` non-empty, `wildcard.source=null` with `matched_labels=[]`, and all `transport` fields are `null`
-- ENS non-direct verified paths outside that alias-only class, including ancestor-selected resolver paths without alias rewriting, wildcard-derived paths, and any transport-assisted path, remain deferred and return explicit selector-local `unsupported` results rather than silently widening support
+- the already frozen ENS alias-only non-direct support class is the exact-surface class where that same declared topology snapshot keeps `resolver_path[0].logical_name_id` equal to the route surface `logical_name_id`, `alias.final_target` non-`null` with `hops` non-empty, `wildcard.source=null` with `matched_labels=[]`, and all `transport` fields are `null`
+- the first additive ENS wildcard-derived support class is the exact-surface class where `wildcard.source` is non-`null` with `matched_labels` non-empty, `resolver_path[0].logical_name_id` equals `wildcard.source.logical_name_id`, `alias.final_target=null` with `hops=[]`, `subregistry_path=[]`, and all `transport` fields are `null`
+- ENS verified paths outside the direct-path, alias-only, and wildcard-derived classes, including other non-alias ancestor-selected paths, linked-subregistry ancestor-selected paths, any transport-assisted path, and any request whose persisted execution used CCIP-Read, remain deferred and return explicit selector-local `unsupported` results rather than silently widening support
 - Basenames verified reads remain bootstrap-scaffolded and selector-local `unsupported` until Base-side authority plus L1 compatibility transport are both wired into the verified plane
 - verified answers must persist an execution trace
 - wildcard traversal, alias rewriting, and CCIP flows must be explainable end-to-end
@@ -988,7 +989,7 @@ Rules:
 Rules:
 
 - the shipped explain route stays coupled to the same public verified-support boundary and explains persisted supported answers only; it does not fabricate trace-shaped public responses for deferred ENS non-direct paths or Basenames scaffolding
-- for the supported ENS alias-only class, explainability must stay trace-backed and exact-surface-scoped: the persisted explain payload makes the alias rewrite explicit while wildcard-derived, transport-assisted, non-alias ancestor-selected, and Basenames paths remain outside the shipped public explain surface
+- for the supported ENS alias-only and wildcard-derived classes, explainability must stay trace-backed and exact-surface-scoped: the persisted explain payload makes the participating alias rewrite or wildcard traversal explicit while transport-assisted, CCIP-participating, other non-alias ancestor-selected, linked-subregistry ancestor-selected, and Basenames paths remain outside the shipped public explain surface
 
 For Basenames, resolution must expose both:
 
@@ -1065,7 +1066,8 @@ Rules:
 - the first additive ENS verified-primary readback slice uses stable execution identity `request_type=verified_primary_name` with request-key identity `{namespace}:{normalized_address}:{coin_type}` for the exact route tuple; claimed text, normalized name identity, verified target address, result status, and section-local provenance are outside that cache identity
 - the matching `primary_names_current(address, coin_type, namespace)` row is the only admitted claim-side lookup / invalidation anchor for that verified request; the projection may carry claim-local lookup and invalidation inputs only, and it does not become a second verified ledger
 - `claimed_primary_name.provenance` is the first public claim-local section provenance on this route: exact-tuple declared-only provenance from the requested `primary_names_current(address, coin_type, namespace)` row, stripped of `verified_primary_name_lookup` / `verified_primary_name_invalidation`, and with no `execution_trace_id`
-- top-level route provenance joins declared claim inputs with any persisted verification trace; `claimed_primary_name.provenance` stays row-scoped and declared-only, and section-local verified provenance stays within the top-level `execution_trace_id`
+- `verified_primary_name.provenance` is frozen as an additive-to-publication invariant even before the field is published: when admitted, it reuses `Provenance` as a strict verification-local refinement for the exact tuple, `verified_primary_name.provenance.execution_trace_id` must equal top-level `provenance.execution_trace_id`, any `normalized_event_ids`, `raw_fact_refs`, `manifest_versions`, or `derivation_kind` it carries must narrow that same persisted verification trace, and it must not publish `verified_primary_name_lookup` / `verified_primary_name_invalidation` hook material or restate claimed-row provenance
+- top-level route provenance joins declared claim inputs with any persisted verification trace; `claimed_primary_name.provenance` stays row-scoped and declared-only, and `verified_primary_name.provenance`, when present, stays verification-local within that same top-level `execution_trace_id`
 - Basenames claim-setting operations affect the claim surface, but the read contract still distinguishes claim from verified primary name
 
 ---
