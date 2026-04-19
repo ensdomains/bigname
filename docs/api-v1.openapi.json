@@ -503,6 +503,9 @@
           {
             "additionalProperties": false,
             "properties": {
+              "name": {
+                "type": "string"
+              },
               "provenance": {
                 "$ref": "#/components/schemas/JsonObject"
               },

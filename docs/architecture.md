@@ -588,7 +588,7 @@ Rules:
 - declared proxy implementations resolve to separate implementation `contract_instance_id` nodes; a proxy implementation change updates the proxy / implementation edge, not the proxy identity
 - manifest versions are carried forward into normalized events and projections
 - capability ownership attaches to the declaring `source_family`; it is never implied by a different family's presence alone
-- ENS verified resolution on Ethereum Mainnet belongs to `ens_execution`, whose canonical contract role is `universal_resolver` at `0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe` on the ENS Universal Resolver, not to `ens_v1_registry_l1`; that ownership freeze does not by itself widen public verified support beyond the separately frozen exact-surface ENS direct-path class and first additive alias-only non-direct class
+- ENS verified resolution on Ethereum Mainnet belongs to `ens_execution`, whose canonical contract role is `universal_resolver` at `0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe` on the ENS Universal Resolver, not to `ens_v1_registry_l1`; that ownership freeze does not by itself widen public verified support beyond the separately frozen exact-surface ENS direct-path class, the already frozen exact-surface alias-only non-direct class, and the first additive exact-surface wildcard-derived class
 - ENS declared reverse-claim intake on Ethereum Mainnet belongs to `ens_v1_reverse_l1`, whose canonical contract role is `reverse_registrar` at `0xa58E81fe9b61B5c3fE2AFD33CF304c454AbFc7Cb` on the Ethereum `addr.reverse` Reverse Registrar, not to `ens_v1_registry_l1` or `ens_v1_resolver_l1`
 - that ENS reverse-family ownership freezes only the current reverse-only declared claim surface; later fallback claim-setting surfaces, if admitted, require their own source-family owner and a later doc-first contract update
 - for ENS primary-name reads in Phase 7, that reverse-family ownership admits only the reverse-claim tuple; it does not authorize combining reverse-only claim precedence with resolver-backed or execution-derived name identity to manufacture richer `claimed_primary_name` payloads
@@ -1309,7 +1309,7 @@ Verified execution is a required subsystem.
 
 Default verified resolution paths:
 
-- ENS uses `ens_execution` with contract role `universal_resolver` at `0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe` as the canonical verified-resolution entrypoint on Ethereum Mainnet; the shipped public verified slice covers exact-surface direct-path requests plus the first additive exact-surface alias-only non-direct class, using the same route-level support check over declared topology
+- ENS uses `ens_execution` with contract role `universal_resolver` at `0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe` as the canonical verified-resolution entrypoint on Ethereum Mainnet; the shipped public verified slice covers exact-surface direct-path requests, the already frozen exact-surface alias-only non-direct class, and the first additive exact-surface wildcard-derived class, using the same route-level support check over declared topology
 - Basenames' eventual verified path uses the L1 compatibility path plus Base-native state, with provenance showing both transport and Base authority surfaces; until both pieces are wired, public verified Basenames reads remain bootstrap-scaffolded and explicit unsupported
 
 The execution engine must support:

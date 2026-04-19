@@ -83,11 +83,13 @@ pub use permissions::{
     load_permissions_current, upsert_permissions_current_rows,
 };
 pub use primary_name::{
-    PrimaryNameClaimStatus, PrimaryNameCurrentRow, VERIFIED_PRIMARY_NAME_INVALIDATION_KEY,
-    VERIFIED_PRIMARY_NAME_LOOKUP_KEY, VERIFIED_PRIMARY_NAME_REQUEST_TYPE,
-    VerifiedPrimaryNameClaimHooks, VerifiedPrimaryNameInvalidationHook,
-    VerifiedPrimaryNameLookupHook, clear_primary_names_current, delete_primary_name_current,
-    load_primary_name_current, upsert_primary_name_current_rows, verified_primary_name_claim_hooks,
+    PrimaryNameClaimStatus, PrimaryNameCurrentRow, PrimaryNameCurrentSnapshot,
+    VERIFIED_PRIMARY_NAME_INVALIDATION_KEY, VERIFIED_PRIMARY_NAME_LOOKUP_KEY,
+    VERIFIED_PRIMARY_NAME_REQUEST_TYPE, VerifiedPrimaryNameClaimHooks,
+    VerifiedPrimaryNameInvalidationHook, VerifiedPrimaryNameLookupHook,
+    clear_primary_names_current, delete_primary_name_current, load_primary_name_current,
+    load_primary_name_current_snapshot, upsert_primary_name_current_rows,
+    upsert_primary_name_current_snapshots, verified_primary_name_claim_hooks,
 };
 pub use raw::{
     RawBlock, load_raw_block, load_raw_blocks_by_hashes, mark_raw_block_range_orphaned,

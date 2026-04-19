@@ -2,9 +2,10 @@ use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, bail};
 use bigname_storage::{
-    PrimaryNameClaimStatus, PrimaryNameCurrentRow, VERIFIED_PRIMARY_NAME_INVALIDATION_KEY,
-    VERIFIED_PRIMARY_NAME_LOOKUP_KEY, clear_primary_names_current, delete_primary_name_current,
-    upsert_primary_name_current_rows,
+    PrimaryNameClaimStatus, PrimaryNameCurrentRow, PrimaryNameCurrentSnapshot,
+    VERIFIED_PRIMARY_NAME_INVALIDATION_KEY, VERIFIED_PRIMARY_NAME_LOOKUP_KEY,
+    clear_primary_names_current, delete_primary_name_current,
+    upsert_primary_name_current_snapshots,
 };
 use serde_json::{Map, Value, json};
 use sqlx::{
@@ -73,14 +74,20 @@ async fn rebuild_all_primary_names(pool: &PgPool) -> Result<PrimaryNamesCurrentR
     let tuples = load_reverse_claim_tuples(pool).await?;
     let claim_observations = load_latest_name_claim_observations(pool).await?;
     let deleted_row_count = clear_primary_names_current(pool).await?;
-    let rows = tuples
+    let projections = tuples
         .iter()
         .map(|tuple| {
             let observation = claim_observations.get(&tuple.key);
             primary_name_row(tuple, observation)
         })
-        .collect::<Result<Vec<PrimaryNameCurrentRow>>>()?;
-    let upserted_row_count = upsert_primary_name_current_rows(pool, &rows).await?.len();
+        .collect::<Result<Vec<PrimaryNameCurrentSnapshot>>>()?;
+    let rows = projections
+        .iter()
+        .map(|projection| projection.row.clone())
+        .collect::<Vec<_>>();
+    let upserted_row_count = upsert_primary_name_current_snapshots(pool, &projections)
+        .await?
+        .len();
     let status_counts = count_statuses(&rows);
 
     Ok(PrimaryNamesCurrentRebuildSummary {
@@ -116,12 +123,17 @@ async fn rebuild_one_primary_name(
         None => None,
     };
     let upserted_row_count = match projected_row.as_ref() {
-        Some(row) => upsert_primary_name_current_rows(pool, std::slice::from_ref(row))
-            .await?
-            .len(),
+        Some(projection) => {
+            upsert_primary_name_current_snapshots(pool, std::slice::from_ref(projection))
+                .await?
+                .len()
+        }
         None => 0,
     };
-    let projected_rows = projected_row.into_iter().collect::<Vec<_>>();
+    let projected_rows = projected_row
+        .iter()
+        .map(|projection| projection.row.clone())
+        .collect::<Vec<_>>();
     let status_counts = count_statuses(&projected_rows);
 
     Ok(PrimaryNamesCurrentRebuildSummary {
@@ -364,7 +376,7 @@ fn decode_tuple_key(row: &PgRow) -> Result<PrimaryNameTupleKey> {
 fn primary_name_row(
     tuple: &ReverseClaimTuple,
     claim_observation: Option<&NameClaimObservation>,
-) -> Result<PrimaryNameCurrentRow> {
+) -> Result<PrimaryNameCurrentSnapshot> {
     let (claim_status, raw_claim_name) =
         match claim_observation.and_then(|observation| observation.raw_name.as_deref()) {
             Some(raw_name) if claim_name_looks_normalizable(raw_name) => {
@@ -377,13 +389,21 @@ fn primary_name_row(
             None => (PrimaryNameClaimStatus::NotFound, None),
         };
 
-    Ok(PrimaryNameCurrentRow {
-        address: tuple.key.address.clone(),
-        namespace: tuple.key.namespace.clone(),
-        coin_type: tuple.key.coin_type.clone(),
-        claim_status,
-        raw_claim_name,
-        claim_provenance: build_claim_provenance(tuple, claim_status, claim_observation)?,
+    let normalized_claim_name = claim_observation
+        .and_then(|observation| observation.raw_name.as_deref())
+        .filter(|_| claim_status == PrimaryNameClaimStatus::Success)
+        .map(normalize_claim_name);
+
+    Ok(PrimaryNameCurrentSnapshot {
+        row: PrimaryNameCurrentRow {
+            address: tuple.key.address.clone(),
+            namespace: tuple.key.namespace.clone(),
+            coin_type: tuple.key.coin_type.clone(),
+            claim_status,
+            raw_claim_name,
+            claim_provenance: build_claim_provenance(tuple, claim_status, claim_observation)?,
+        },
+        normalized_claim_name,
     })
 }
 
@@ -432,7 +452,11 @@ fn verified_primary_name_invalidation_hook(
 }
 
 fn claim_name_looks_normalizable(raw_name: &str) -> bool {
-    if raw_name.is_empty() || raw_name.trim() != raw_name || raw_name.len() > 255 {
+    if raw_name.is_empty()
+        || raw_name.trim() != raw_name
+        || raw_name.len() > 255
+        || !raw_name.is_ascii()
+    {
         return false;
     }
 
@@ -443,6 +467,10 @@ fn claim_name_looks_normalizable(raw_name: &str) -> bool {
                 .chars()
                 .any(|character| character.is_control() || character.is_whitespace())
     })
+}
+
+fn normalize_claim_name(raw_name: &str) -> String {
+    raw_name.to_ascii_lowercase()
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -482,7 +510,8 @@ mod tests {
     use anyhow::Result;
     use bigname_storage::{
         CanonicalityState, NormalizedEvent, default_database_url, load_primary_name_current,
-        upsert_normalized_events, upsert_primary_name_current_rows,
+        load_primary_name_current_snapshot, upsert_normalized_events,
+        upsert_primary_name_current_rows,
     };
 
     use super::*;
@@ -851,6 +880,17 @@ mod tests {
             })
         );
         assert_eq!(
+            load_primary_name_current_snapshot(
+                database.pool(),
+                "0x0000000000000000000000000000000000000aaa",
+                "ens",
+                "60",
+            )
+            .await?
+            .map(|snapshot| snapshot.normalized_claim_name),
+            Some(Some("alice.eth".to_owned()))
+        );
+        assert_eq!(
             load_primary_name_current(
                 database.pool(),
                 "0x0000000000000000000000000000000000000aaa",
@@ -874,6 +914,17 @@ mod tests {
             })
         );
         assert_eq!(
+            load_primary_name_current_snapshot(
+                database.pool(),
+                "0x0000000000000000000000000000000000000aaa",
+                "ens",
+                "61",
+            )
+            .await?
+            .map(|snapshot| snapshot.normalized_claim_name),
+            Some(None)
+        );
+        assert_eq!(
             load_primary_name_current(
                 database.pool(),
                 "0x0000000000000000000000000000000000000bbb",
@@ -895,6 +946,17 @@ mod tests {
                     Some(202),
                 ),
             })
+        );
+        assert_eq!(
+            load_primary_name_current_snapshot(
+                database.pool(),
+                "0x0000000000000000000000000000000000000bbb",
+                "ens",
+                "60",
+            )
+            .await?
+            .map(|snapshot| snapshot.normalized_claim_name),
+            Some(None)
         );
         assert!(
             load_primary_name_current(
@@ -1051,6 +1113,186 @@ mod tests {
                 ),
             })
         );
+        assert_eq!(
+            load_primary_name_current_snapshot(
+                database.pool(),
+                "0x0000000000000000000000000000000000000abc",
+                "ens",
+                "60",
+            )
+            .await?
+            .map(|snapshot| snapshot.normalized_claim_name),
+            Some(None)
+        );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn targeted_rebuild_rejects_non_ascii_claim_name_source() -> Result<()> {
+        let database = TestDatabase::new().await?;
+
+        upsert_normalized_events(
+            database.pool(),
+            &[
+                reverse_changed_event(
+                    "reverse-a-60",
+                    "0x0000000000000000000000000000000000000aaa",
+                    "60",
+                    101,
+                    0,
+                    CanonicalityState::Canonical,
+                ),
+                reverse_linked_name_event(
+                    "record-a-60-non-ascii",
+                    "0x0000000000000000000000000000000000000aaa",
+                    "60",
+                    Some("Älice.eth"),
+                    201,
+                    0,
+                    CanonicalityState::Canonical,
+                ),
+            ],
+        )
+        .await?;
+
+        let summary = rebuild_primary_names_current(
+            database.pool(),
+            Some("0x0000000000000000000000000000000000000aaa"),
+            Some("ens"),
+            Some("60"),
+        )
+        .await?;
+        assert_eq!(
+            summary,
+            PrimaryNamesCurrentRebuildSummary {
+                requested_tuple_count: 1,
+                upserted_row_count: 1,
+                deleted_row_count: 0,
+                success_row_count: 0,
+                not_found_row_count: 0,
+                invalid_name_row_count: 1,
+            }
+        );
+
+        assert_eq!(
+            load_primary_name_current(
+                database.pool(),
+                "0x0000000000000000000000000000000000000aaa",
+                "ens",
+                "60",
+            )
+            .await?,
+            Some(PrimaryNameCurrentRow {
+                address: "0x0000000000000000000000000000000000000aaa".to_owned(),
+                namespace: "ens".to_owned(),
+                coin_type: "60".to_owned(),
+                claim_status: PrimaryNameClaimStatus::InvalidName,
+                raw_claim_name: Some("Älice.eth".to_owned()),
+                claim_provenance: expected_claim_provenance(
+                    "0x0000000000000000000000000000000000000aaa",
+                    "60",
+                    101,
+                    PrimaryNameClaimStatus::InvalidName,
+                    Some(201),
+                ),
+            })
+        );
+        assert_eq!(
+            load_primary_name_current_snapshot(
+                database.pool(),
+                "0x0000000000000000000000000000000000000aaa",
+                "ens",
+                "60",
+            )
+            .await?
+            .map(|snapshot| snapshot.normalized_claim_name),
+            Some(None)
+        );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn targeted_rebuild_projects_declared_claim_name_source_for_success_rows() -> Result<()> {
+        let database = TestDatabase::new().await?;
+
+        upsert_normalized_events(
+            database.pool(),
+            &[
+                reverse_changed_event(
+                    "reverse-a-60",
+                    "0x0000000000000000000000000000000000000abc",
+                    "60",
+                    250,
+                    0,
+                    CanonicalityState::Canonical,
+                ),
+                reverse_linked_name_event(
+                    "record-a-60-success",
+                    "0x0000000000000000000000000000000000000abc",
+                    "60",
+                    Some("alice.eth"),
+                    251,
+                    0,
+                    CanonicalityState::Canonical,
+                ),
+            ],
+        )
+        .await?;
+
+        let summary = rebuild_primary_names_current(
+            database.pool(),
+            Some("0x0000000000000000000000000000000000000abc"),
+            Some("ens"),
+            Some("60"),
+        )
+        .await?;
+        assert_eq!(
+            summary,
+            PrimaryNamesCurrentRebuildSummary {
+                requested_tuple_count: 1,
+                upserted_row_count: 1,
+                deleted_row_count: 0,
+                success_row_count: 1,
+                not_found_row_count: 0,
+                invalid_name_row_count: 0,
+            }
+        );
+        assert_eq!(
+            load_primary_name_current(
+                database.pool(),
+                "0x0000000000000000000000000000000000000abc",
+                "ens",
+                "60",
+            )
+            .await?,
+            Some(PrimaryNameCurrentRow {
+                address: "0x0000000000000000000000000000000000000abc".to_owned(),
+                namespace: "ens".to_owned(),
+                coin_type: "60".to_owned(),
+                claim_status: PrimaryNameClaimStatus::Success,
+                raw_claim_name: None,
+                claim_provenance: expected_claim_provenance(
+                    "0x0000000000000000000000000000000000000abc",
+                    "60",
+                    250,
+                    PrimaryNameClaimStatus::Success,
+                    Some(251),
+                ),
+            })
+        );
+        assert_eq!(
+            load_primary_name_current_snapshot(
+                database.pool(),
+                "0x0000000000000000000000000000000000000abc",
+                "ens",
+                "60",
+            )
+            .await?
+            .map(|snapshot| snapshot.normalized_claim_name),
+            Some(Some("alice.eth".to_owned()))
+        );
 
         database.cleanup().await
     }
@@ -1123,6 +1365,17 @@ mod tests {
                     Some(401),
                 ),
             })
+        );
+        assert_eq!(
+            load_primary_name_current_snapshot(
+                database.pool(),
+                "0x0000000000000000000000000000000000000abc",
+                "ens",
+                "60",
+            )
+            .await?
+            .map(|snapshot| snapshot.normalized_claim_name),
+            Some(None)
         );
 
         database.cleanup().await

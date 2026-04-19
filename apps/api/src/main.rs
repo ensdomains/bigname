@@ -27,7 +27,7 @@ use bigname_storage::{
     VERIFIED_PRIMARY_NAME_REQUEST_TYPE, collapse_address_name_current_rows, load_address_history,
     load_address_names_current, load_children_current, load_execution_outcome,
     load_execution_trace, load_name_current, load_name_history, load_name_surface,
-    load_permissions_current, load_primary_name_current, load_record_inventory_current,
+    load_permissions_current, load_primary_name_current_snapshot, load_record_inventory_current,
     load_resolver_current, load_resource, load_resource_history,
     load_surface_bindings_by_logical_name_id, load_surface_bindings_by_resource_id,
 };
@@ -414,6 +414,7 @@ enum PrimaryNameTupleState {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PrimaryNameLookupState {
     tuple_state: PrimaryNameTupleState,
+    normalized_claim_name: Option<String>,
     persisted_verified: Option<PersistedPrimaryNameVerifiedReadback>,
 }
 
@@ -1452,6 +1453,9 @@ fn primary_name_claimed_result_schema() -> JsonValue {
                     "status": {
                         "type": "string",
                         "const": "success",
+                    },
+                    "name": {
+                        "type": "string",
                     },
                     "provenance": schema_ref("JsonObject"),
                 },
@@ -3144,9 +3148,9 @@ fn build_primary_name_response(
         "namespace": namespace,
         "coin_type": coin_type,
     });
-    let declared_state = mode.includes_declared().then(
-        || json!({ "claimed_primary_name": primary_name_claim_result(&lookup_state.tuple_state) }),
-    );
+    let declared_state = mode
+        .includes_declared()
+        .then(|| json!({ "claimed_primary_name": primary_name_claim_result(lookup_state) }));
     let verified_state = mode
         .includes_verified()
         .then(|| json!({ "verified_primary_name": primary_name_verified_result(lookup_state) }));
@@ -3209,8 +3213,8 @@ fn build_children_response(
     }
 }
 
-fn primary_name_claim_result(tuple_state: &PrimaryNameTupleState) -> JsonValue {
-    match tuple_state {
+fn primary_name_claim_result(lookup_state: &PrimaryNameLookupState) -> JsonValue {
+    match &lookup_state.tuple_state {
         PrimaryNameTupleState::ProjectionUnavailable => primary_name_unsupported_result(
             "declared primary-name claim surface is not yet supported",
         ),
@@ -3220,6 +3224,11 @@ fn primary_name_claim_result(tuple_state: &PrimaryNameTupleState) -> JsonValue {
                 "status": row.claim_status.as_str(),
                 "provenance": primary_name_claim_provenance(row),
             });
+            if row.claim_status == PrimaryNameClaimStatus::Success {
+                if let Some(normalized_claim_name) = lookup_state.normalized_claim_name.as_deref() {
+                    insert_string_field(&mut result, "name", normalized_claim_name.to_owned());
+                }
+            }
             if row.claim_status == PrimaryNameClaimStatus::InvalidName {
                 insert_string_field(
                     &mut result,
@@ -6512,9 +6521,13 @@ async fn load_primary_name_lookup_state(
     coin_type: &str,
     mode: ResolutionMode,
 ) -> ApiResult<PrimaryNameLookupState> {
-    match load_primary_name_current(pool, address, namespace, coin_type).await {
-        Ok(Some(row)) => Ok(PrimaryNameLookupState {
-            tuple_state: PrimaryNameTupleState::TuplePresent(row),
+    match load_primary_name_current_snapshot(pool, address, namespace, coin_type).await {
+        Ok(Some(snapshot)) => Ok(PrimaryNameLookupState {
+            tuple_state: PrimaryNameTupleState::TuplePresent(snapshot.row),
+            normalized_claim_name: mode
+                .includes_declared()
+                .then_some(snapshot.normalized_claim_name)
+                .flatten(),
             persisted_verified: if mode.includes_verified() {
                 load_persisted_primary_name_verified_readback(pool, address, namespace, coin_type)
                     .await?
@@ -6524,11 +6537,13 @@ async fn load_primary_name_lookup_state(
         }),
         Ok(None) => Ok(PrimaryNameLookupState {
             tuple_state: PrimaryNameTupleState::TupleMissing,
+            normalized_claim_name: None,
             persisted_verified: None,
         }),
         Err(load_error) if primary_name_projection_unavailable(&load_error) => {
             Ok(PrimaryNameLookupState {
                 tuple_state: PrimaryNameTupleState::ProjectionUnavailable,
+                normalized_claim_name: None,
                 persisted_verified: None,
             })
         }

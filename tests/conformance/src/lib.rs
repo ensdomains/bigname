@@ -27,9 +27,10 @@ mod shipped_api {
             CanonicalityState, ExecutionBoundaryInvalidation, ExecutionCacheKey,
             ExecutionManifestInvalidation, ExecutionOutcome, ExecutionTrace, ExecutionTraceStep,
             NameSurface, NormalizedEvent, PermissionScope, PermissionsCurrentRow,
-            PrimaryNameClaimStatus, PrimaryNameCurrentRow, RawBlock, RecordInventoryCurrentRow,
-            ResolverCurrentRow, Resource, SurfaceBinding, SurfaceBindingKind, TokenLineage,
-            default_database_url, invalidate_execution_outcomes_for_manifest_version,
+            PrimaryNameClaimStatus, PrimaryNameCurrentRow, PrimaryNameCurrentSnapshot, RawBlock,
+            RecordInventoryCurrentRow, ResolverCurrentRow, Resource, SurfaceBinding,
+            SurfaceBindingKind, TokenLineage, default_database_url,
+            invalidate_execution_outcomes_for_manifest_version,
             invalidate_execution_outcomes_for_manifest_version_and_request_key,
             invalidate_execution_outcomes_for_record_boundary,
             invalidate_execution_outcomes_for_record_boundary_and_request_key,
@@ -37,6 +38,7 @@ mod shipped_api {
             invalidate_execution_outcomes_for_topology_boundary_and_request_key,
             load_execution_outcome, load_execution_trace, upsert_execution_outcome,
             upsert_execution_trace, upsert_primary_name_current_rows,
+            upsert_primary_name_current_snapshots,
         };
         use serde::de::DeserializeOwned;
         use serde_json::{Value, json};
@@ -4095,57 +4097,70 @@ mod shipped_api {
         }
 
         #[tokio::test]
-        async fn primary_names_contract_reads_declared_claim_provenance_for_exact_tuple()
+        async fn primary_names_contract_reads_declared_claimed_name_for_exact_tuple()
         -> Result<()> {
             let database = HarnessDatabase::new().await?;
             let address = "0x0000000000000000000000000000000000000abc";
-            let expected_data = json!({
+            let target_expected_data = json!({
                 "address": address,
                 "namespace": "ens",
                 "coin_type": "60",
             });
+            let sibling_expected_data = json!({
+                "address": address,
+                "namespace": "ens",
+                "coin_type": "61",
+            });
 
-            database
-                .insert_primary_name_current_row(PrimaryNameCurrentRow {
-                    address: address.to_owned(),
-                    namespace: "ens".to_owned(),
-                    coin_type: "60".to_owned(),
-                    claim_status: PrimaryNameClaimStatus::Success,
-                    raw_claim_name: None,
-                    claim_provenance: json!({
-                        "source_family": "target_reverse",
-                        "contract_role": "reverse_registrar",
-                        "contract_instance_id": "00000000-0000-0000-0000-000000000123",
-                        "emitting_address": "0x00000000000000000000000000000000000000ad",
-                        "execution_trace_id": "must-be-omitted",
-                        "verified_primary_name_lookup": {
-                            "address": address,
-                            "namespace": "ens",
-                            "coin_type": "60",
+            upsert_primary_name_current_snapshots(
+                &database.pool,
+                &[
+                    PrimaryNameCurrentSnapshot {
+                        row: PrimaryNameCurrentRow {
+                            address: address.to_owned(),
+                            namespace: "ens".to_owned(),
+                            coin_type: "60".to_owned(),
+                            claim_status: PrimaryNameClaimStatus::Success,
+                            raw_claim_name: None,
+                            claim_provenance: json!({
+                                "source_family": "target_reverse",
+                                "contract_role": "reverse_registrar",
+                                "contract_instance_id": "00000000-0000-0000-0000-000000000123",
+                                "emitting_address": "0x00000000000000000000000000000000000000ad",
+                                "execution_trace_id": "must-be-omitted",
+                                "verified_primary_name_lookup": {
+                                    "address": address,
+                                    "namespace": "ens",
+                                    "coin_type": "60",
+                                },
+                                "verified_primary_name_invalidation": {
+                                    "claim_status": "success",
+                                    "primary_claim_source": {
+                                        "seed": "ignored",
+                                    },
+                                },
+                            }),
                         },
-                        "verified_primary_name_invalidation": {
-                            "claim_status": "success",
-                            "primary_claim_source": {
-                                "seed": "ignored",
-                            },
+                        normalized_claim_name: Some("alice.eth".to_owned()),
+                    },
+                    PrimaryNameCurrentSnapshot {
+                        row: PrimaryNameCurrentRow {
+                            address: address.to_owned(),
+                            namespace: "ens".to_owned(),
+                            coin_type: "61".to_owned(),
+                            claim_status: PrimaryNameClaimStatus::Success,
+                            raw_claim_name: None,
+                            claim_provenance: json!({
+                                "source_family": "sibling_reverse",
+                            }),
                         },
-                    }),
-                })
-                .await?;
-            database
-                .insert_primary_name_current_row(PrimaryNameCurrentRow {
-                    address: address.to_owned(),
-                    namespace: "ens".to_owned(),
-                    coin_type: "61".to_owned(),
-                    claim_status: PrimaryNameClaimStatus::Success,
-                    raw_claim_name: None,
-                    claim_provenance: json!({
-                        "source_family": "sibling_reverse",
-                    }),
-                })
-                .await?;
+                        normalized_claim_name: Some("beta.eth".to_owned()),
+                    },
+                ],
+            )
+            .await?;
 
-            let declared_response = app_router(database.app_state())
+            let target_declared_response = app_router(database.app_state())
                 .oneshot(
                     Request::builder()
                         .uri(format!(
@@ -4155,8 +4170,8 @@ mod shipped_api {
                         .expect("request must build"),
                 )
                 .await
-                .context("declared primary-name provenance request failed")?;
-            let both_response = app_router(database.app_state())
+                .context("declared primary-name claimed-name request failed")?;
+            let target_both_response = app_router(database.app_state())
                 .oneshot(
                     Request::builder()
                         .uri(format!(
@@ -4166,15 +4181,44 @@ mod shipped_api {
                         .expect("request must build"),
                 )
                 .await
-                .context("mixed primary-name provenance request failed")?;
+                .context("mixed primary-name claimed-name request failed")?;
+            let sibling_declared_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/v1/primary-names/{address}?namespace=ens&coin_type=61&mode=declared"
+                        ))
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("sibling declared primary-name claimed-name request failed")?;
+            let sibling_both_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/v1/primary-names/{address}?namespace=ens&coin_type=61&mode=both"
+                        ))
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("sibling mixed primary-name claimed-name request failed")?;
 
-            assert_eq!(declared_response.status(), StatusCode::OK);
-            assert_eq!(both_response.status(), StatusCode::OK);
+            assert_eq!(target_declared_response.status(), StatusCode::OK);
+            assert_eq!(target_both_response.status(), StatusCode::OK);
+            assert_eq!(sibling_declared_response.status(), StatusCode::OK);
+            assert_eq!(sibling_both_response.status(), StatusCode::OK);
 
-            let declared_payload: PrimaryNameResponse = read_json(declared_response).await?;
-            let both_payload: PrimaryNameResponse = read_json(both_response).await?;
+            let target_declared_payload: PrimaryNameResponse =
+                read_json(target_declared_response).await?;
+            let target_both_payload: PrimaryNameResponse = read_json(target_both_response).await?;
+            let sibling_declared_payload: PrimaryNameResponse =
+                read_json(sibling_declared_response).await?;
+            let sibling_both_payload: PrimaryNameResponse = read_json(sibling_both_response).await?;
             let expected_claimed_primary_name = json!({
                 "status": "success",
+                "name": "alice.eth",
                 "provenance": {
                     "source_family": "target_reverse",
                     "contract_role": "reverse_registrar",
@@ -4182,19 +4226,51 @@ mod shipped_api {
                     "emitting_address": "0x00000000000000000000000000000000000000ad",
                 },
             });
+            let expected_sibling_claimed_primary_name = json!({
+                "status": "success",
+                "name": "beta.eth",
+                "provenance": {
+                    "source_family": "sibling_reverse",
+                },
+            });
 
-            assert_eq!(declared_payload.data, expected_data);
-            assert_eq!(both_payload.data, expected_data);
+            assert_eq!(target_declared_payload.data, target_expected_data);
+            assert_eq!(target_both_payload.data, target_expected_data);
+            assert_eq!(sibling_declared_payload.data, sibling_expected_data);
+            assert_eq!(sibling_both_payload.data, sibling_expected_data);
             assert_eq!(
-                declared_payload.declared_state,
+                target_declared_payload.declared_state,
                 Some(json!({
                     "claimed_primary_name": expected_claimed_primary_name.clone(),
                 }))
             );
-            assert_eq!(declared_payload.verified_state, None);
-            assert_eq!(both_payload.declared_state, declared_payload.declared_state);
+            assert_eq!(target_declared_payload.verified_state, None);
             assert_eq!(
-                both_payload.verified_state,
+                target_both_payload.declared_state,
+                target_declared_payload.declared_state
+            );
+            assert_eq!(
+                target_both_payload.verified_state,
+                Some(json!({
+                    "verified_primary_name": {
+                        "status": "unsupported",
+                        "unsupported_reason": "verified primary-name entrypoint is not yet supported",
+                    }
+                }))
+            );
+            assert_eq!(
+                sibling_declared_payload.declared_state,
+                Some(json!({
+                    "claimed_primary_name": expected_sibling_claimed_primary_name.clone(),
+                }))
+            );
+            assert_eq!(sibling_declared_payload.verified_state, None);
+            assert_eq!(
+                sibling_both_payload.declared_state,
+                sibling_declared_payload.declared_state
+            );
+            assert_eq!(
+                sibling_both_payload.verified_state,
                 Some(json!({
                     "verified_primary_name": {
                         "status": "unsupported",
@@ -4203,13 +4279,13 @@ mod shipped_api {
                 }))
             );
 
-            let claimed_primary_name = declared_payload
+            let target_claimed_primary_name = target_declared_payload
                 .declared_state
                 .as_ref()
                 .and_then(|declared_state| declared_state.get("claimed_primary_name"))
                 .and_then(Value::as_object)
                 .expect("declared claimed_primary_name must be present");
-            let provenance = claimed_primary_name
+            let provenance = target_claimed_primary_name
                 .get("provenance")
                 .and_then(Value::as_object)
                 .expect("declared claimed_primary_name provenance must be present");
@@ -4220,8 +4296,28 @@ mod shipped_api {
                 provenance.get("source_family"),
                 Some(&json!("target_reverse"))
             );
+            assert_eq!(
+                target_claimed_primary_name.get("name"),
+                Some(&json!("alice.eth"))
+            );
 
-            for payload in [&declared_payload, &both_payload] {
+            let sibling_claimed_primary_name = sibling_declared_payload
+                .declared_state
+                .as_ref()
+                .and_then(|declared_state| declared_state.get("claimed_primary_name"))
+                .and_then(Value::as_object)
+                .expect("sibling declared claimed_primary_name must be present");
+            assert_eq!(
+                sibling_claimed_primary_name.get("name"),
+                Some(&json!("beta.eth"))
+            );
+
+            for payload in [
+                &target_declared_payload,
+                &target_both_payload,
+                &sibling_declared_payload,
+                &sibling_both_payload,
+            ] {
                 assert_primary_name_bootstrap_invariants(payload);
             }
 

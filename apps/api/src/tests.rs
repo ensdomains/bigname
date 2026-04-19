@@ -13,9 +13,11 @@ use axum::{
 use bigname_storage::{
     CanonicalityState, ExecutionCacheKey, ExecutionOutcome, ExecutionTrace, ExecutionTraceStep,
     NameSurface, NormalizedEvent, PermissionScope, PermissionsCurrentRow, PrimaryNameClaimStatus,
-    PrimaryNameCurrentRow, RawBlock, ResolverCurrentRow, Resource, SurfaceBinding,
-    SurfaceBindingKind, TokenLineage, default_database_url, upsert_execution_outcome,
-    upsert_execution_trace, upsert_primary_name_current_rows,
+    PrimaryNameCurrentRow, PrimaryNameCurrentSnapshot, RawBlock, ResolverCurrentRow, Resource,
+    SurfaceBinding, SurfaceBindingKind, TokenLineage, default_database_url,
+    load_primary_name_current, upsert_execution_outcome, upsert_execution_trace,
+    upsert_normalized_events, upsert_primary_name_current_rows,
+    upsert_primary_name_current_snapshots,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -27,6 +29,9 @@ use sqlx::{
 use tower::ServiceExt;
 
 use super::*;
+
+#[path = "../../worker/src/primary_name.rs"]
+mod worker_primary_name;
 
 static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -543,6 +548,7 @@ impl TestDatabase {
                     coin_type TEXT NOT NULL,
                     claim_status TEXT NOT NULL,
                     raw_claim_name TEXT,
+                    normalized_claim_name TEXT,
                     claim_provenance JSONB NOT NULL DEFAULT '{}'::jsonb,
                     PRIMARY KEY (address, namespace, coin_type)
                 )
@@ -614,6 +620,35 @@ impl TestDatabase {
         Ok(())
     }
 
+    async fn insert_primary_name_current_normalized_claim_name(
+        &self,
+        address: &str,
+        namespace: &str,
+        coin_type: &str,
+        normalized_claim_name: Option<&str>,
+    ) -> Result<()> {
+        let row = load_primary_name_current(&self.pool, address, namespace, coin_type)
+            .await
+            .context("failed to load primary_names_current row for API test")?
+            .with_context(|| {
+                format!(
+                    "missing primary_names_current row for API test address {} namespace {} coin_type {}",
+                    address, namespace, coin_type
+                )
+            })?;
+
+        upsert_primary_name_current_snapshots(
+            &self.pool,
+            &[PrimaryNameCurrentSnapshot {
+                row,
+                normalized_claim_name: normalized_claim_name.map(str::to_owned),
+            }],
+        )
+        .await
+        .context("failed to upsert primary_names_current snapshot for API test")?;
+        Ok(())
+    }
+
     async fn cleanup(self) -> Result<()> {
         self.pool.close().await;
         sqlx::query(&format!(
@@ -637,6 +672,122 @@ async fn read_json<T: DeserializeOwned>(response: Response) -> Result<T> {
 
 fn timestamp(seconds: i64) -> OffsetDateTime {
     OffsetDateTime::from_unix_timestamp(seconds).expect("test timestamp must be valid")
+}
+
+fn primary_name_reverse_changed_event(
+    event_identity: &str,
+    address: &str,
+    coin_type: &str,
+    block_number: i64,
+    log_index: i64,
+    canonicality_state: CanonicalityState,
+) -> NormalizedEvent {
+    let normalized_address = address.to_ascii_lowercase();
+    let reverse_label = normalized_address.trim_start_matches("0x").to_owned();
+
+    NormalizedEvent {
+        event_identity: event_identity.to_owned(),
+        namespace: "ens".to_owned(),
+        logical_name_id: None,
+        resource_id: None,
+        event_kind: "ReverseChanged".to_owned(),
+        source_family: "ens_v1_reverse_l1".to_owned(),
+        manifest_version: 1,
+        source_manifest_id: None,
+        chain_id: Some("ethereum-mainnet".to_owned()),
+        block_number: Some(block_number),
+        block_hash: Some(format!("0xblock{block_number:064x}")),
+        transaction_hash: Some(format!("0xtx{block_number:064x}")),
+        log_index: Some(log_index),
+        raw_fact_ref: json!({
+            "kind": "raw_log",
+            "chain_id": "ethereum-mainnet",
+            "block_number": block_number,
+            "log_index": log_index,
+        }),
+        derivation_kind: "ens_v1_reverse_claim".to_owned(),
+        canonicality_state,
+        before_state: json!({}),
+        after_state: json!({
+            "source_event": "ReverseClaimed",
+            "address": normalized_address,
+            "coin_type": coin_type,
+            "namespace": "ens",
+            "reverse_namespace": "ens",
+            "reverse_label": reverse_label,
+            "reverse_name": format!("{reverse_label}.addr.reverse"),
+            "reverse_node": format!("0x{block_number:064x}"),
+            "claim_provenance": {
+                "source_family": "ens_v1_reverse_l1",
+                "contract_role": "reverse_registrar",
+                "contract_instance_id": format!("00000000-0000-0000-0000-{block_number:012x}"),
+                "emitting_address": "0x00000000000000000000000000000000000000ad",
+            },
+        }),
+    }
+}
+
+fn primary_name_reverse_linked_name_event(
+    event_identity: &str,
+    address: &str,
+    coin_type: &str,
+    raw_name: Option<&str>,
+    block_number: i64,
+    log_index: i64,
+    canonicality_state: CanonicalityState,
+) -> NormalizedEvent {
+    let normalized_address = address.to_ascii_lowercase();
+    let reverse_label = normalized_address.trim_start_matches("0x").to_owned();
+    let mut after_state = serde_json::Map::from_iter([
+        ("record_key".to_owned(), json!("name")),
+        ("record_family".to_owned(), json!("name")),
+        ("selector_key".to_owned(), Value::Null),
+        (
+            "primary_claim_source".to_owned(),
+            json!({
+                "address": normalized_address,
+                "namespace": "ens",
+                "coin_type": coin_type,
+                "reverse_name": format!("{reverse_label}.addr.reverse"),
+                "reverse_node": format!("0x{block_number:064x}"),
+                "claim_provenance": {
+                    "source_family": "ens_v1_reverse_l1",
+                    "contract_role": "reverse_registrar",
+                    "contract_instance_id": format!("00000000-0000-0000-0000-{block_number:012x}"),
+                    "emitting_address": "0x00000000000000000000000000000000000000ad",
+                },
+            }),
+        ),
+    ]);
+    if let Some(raw_name) = raw_name {
+        after_state.insert("raw_name".to_owned(), json!(raw_name));
+    }
+
+    NormalizedEvent {
+        event_identity: event_identity.to_owned(),
+        namespace: "ens".to_owned(),
+        logical_name_id: None,
+        resource_id: None,
+        event_kind: "RecordChanged".to_owned(),
+        source_family: "ens_v1_unwrapped_authority".to_owned(),
+        manifest_version: 1,
+        source_manifest_id: None,
+        chain_id: Some("ethereum-mainnet".to_owned()),
+        block_number: Some(block_number),
+        block_hash: Some(format!("0xclaimblock{block_number:064x}")),
+        transaction_hash: Some(format!("0xclaimtx{block_number:064x}")),
+        log_index: Some(log_index),
+        raw_fact_ref: json!({
+            "kind": "raw_log",
+            "chain_id": "ethereum-mainnet",
+            "block_number": block_number,
+            "log_index": log_index,
+        }),
+        derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+        canonicality_state,
+        before_state: json!({}),
+        after_state: Value::Object(after_state),
+    }
 }
 
 fn raw_block(
@@ -10051,17 +10202,37 @@ async fn get_primary_names_returns_not_found_for_tuple_miss_when_projection_exis
 
 #[tokio::test]
 async fn get_primary_names_reads_declared_claim_status_for_exact_tuple() -> Result<()> {
-    let database = TestDatabase::new(false).await?;
-    database.create_primary_names_current_table().await?;
-    database
-        .insert_primary_name_current_claim_row(
-            "0x0000000000000000000000000000000000000abc",
-            "ens",
-            "60",
-            PrimaryNameClaimStatus::Success,
-            None,
-        )
-        .await?;
+    let database = TestDatabase::new_migrated().await?;
+    upsert_normalized_events(
+        &database.pool,
+        &[
+            primary_name_reverse_changed_event(
+                "reverse-a-60",
+                "0x0000000000000000000000000000000000000abc",
+                "60",
+                250,
+                0,
+                CanonicalityState::Canonical,
+            ),
+            primary_name_reverse_linked_name_event(
+                "record-a-60-success",
+                "0x0000000000000000000000000000000000000abc",
+                "60",
+                Some("Alice.eth"),
+                251,
+                0,
+                CanonicalityState::Canonical,
+            ),
+        ],
+    )
+    .await?;
+    worker_primary_name::rebuild_primary_names_current(
+        &database.pool,
+        Some("0x0000000000000000000000000000000000000abc"),
+        Some("ens"),
+        Some("60"),
+    )
+    .await?;
 
     let declared_response = app_router(database.app_state())
         .oneshot(
@@ -10093,7 +10264,13 @@ async fn get_primary_names_reads_declared_claim_status_for_exact_tuple() -> Resu
         Some(json!({
             "claimed_primary_name": {
                 "status": "success",
-                "provenance": {},
+                "name": "alice.eth",
+                "provenance": {
+                    "source_family": "ens_v1_reverse_l1",
+                    "contract_role": "reverse_registrar",
+                    "contract_instance_id": "00000000-0000-0000-0000-0000000000fa",
+                    "emitting_address": "0x00000000000000000000000000000000000000ad",
+                },
             }
         }))
     );
@@ -10146,6 +10323,9 @@ async fn get_primary_names_reads_declared_claim_provenance_for_exact_tuple() -> 
         )
         .await?;
     database
+        .insert_primary_name_current_normalized_claim_name(address, "ens", "60", Some("alice.eth"))
+        .await?;
+    database
         .insert_primary_name_current_claim_row_with_provenance(
             address,
             "ens",
@@ -10156,6 +10336,9 @@ async fn get_primary_names_reads_declared_claim_provenance_for_exact_tuple() -> 
                 "source_family": "sibling_reverse",
             }),
         )
+        .await?;
+    database
+        .insert_primary_name_current_normalized_claim_name(address, "ens", "61", Some("beta.eth"))
         .await?;
 
     let declared_response = app_router(database.app_state())
@@ -10188,6 +10371,7 @@ async fn get_primary_names_reads_declared_claim_provenance_for_exact_tuple() -> 
     let both_payload: PrimaryNameResponse = read_json(both_response).await?;
     let expected_claimed_primary_name = json!({
         "status": "success",
+        "name": "alice.eth",
         "provenance": {
             "source_family": "target_reverse",
             "contract_role": "reverse_registrar",
@@ -10201,6 +10385,15 @@ async fn get_primary_names_reads_declared_claim_provenance_for_exact_tuple() -> 
         Some(json!({
             "claimed_primary_name": expected_claimed_primary_name.clone(),
         }))
+    );
+    assert_eq!(
+        declared_payload
+            .declared_state
+            .as_ref()
+            .and_then(|declared_state| declared_state.get("claimed_primary_name"))
+            .and_then(Value::as_object)
+            .and_then(|claimed_primary_name| claimed_primary_name.get("name")),
+        Some(&json!("alice.eth"))
     );
     assert_eq!(declared_payload.verified_state, None);
     assert_eq!(both_payload.declared_state, declared_payload.declared_state);
@@ -10283,6 +10476,108 @@ async fn get_primary_names_reads_raw_claim_name_for_invalid_name_exact_tuple() -
         !claimed_primary_name.contains_key("name"),
         "declared invalid-name readback must not backfill claimed_primary_name.name"
     );
+    assert_eq!(
+        payload.verified_state,
+        Some(json!({
+            "verified_primary_name": {
+                "status": "unsupported",
+                "unsupported_reason": "verified primary-name entrypoint is not yet supported",
+            }
+        }))
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_primary_names_rejects_non_ascii_claim_name_for_exact_tuple() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    upsert_normalized_events(
+        &database.pool,
+        &[
+            primary_name_reverse_changed_event(
+                "reverse-a-60",
+                address,
+                "60",
+                350,
+                0,
+                CanonicalityState::Canonical,
+            ),
+            primary_name_reverse_linked_name_event(
+                "record-a-60-non-ascii",
+                address,
+                "60",
+                Some("Älice.eth"),
+                351,
+                0,
+                CanonicalityState::Canonical,
+            ),
+        ],
+    )
+    .await?;
+    worker_primary_name::rebuild_primary_names_current(
+        &database.pool,
+        Some(address),
+        Some("ens"),
+        Some("60"),
+    )
+    .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/primary-names/{address}?namespace=ens&coin_type=60&mode=both"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("mixed non-ascii primary-name request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let payload: PrimaryNameResponse = read_json(response).await?;
+    let claimed_primary_name = payload
+        .declared_state
+        .as_ref()
+        .and_then(|declared_state| declared_state.get("claimed_primary_name"))
+        .and_then(Value::as_object)
+        .expect("declared claimed_primary_name must be present");
+
+    assert_eq!(
+        claimed_primary_name.get("status"),
+        Some(&json!("invalid_name"))
+    );
+    assert_eq!(
+        claimed_primary_name.get("raw_claim_name"),
+        Some(&json!("Älice.eth"))
+    );
+    assert!(
+        !claimed_primary_name.contains_key("name"),
+        "non-ascii raw claims must not publish claimed_primary_name.name in bootstrap mode"
+    );
+    let provenance = claimed_primary_name
+        .get("provenance")
+        .and_then(Value::as_object)
+        .expect("declared invalid-name provenance must be present");
+    assert_eq!(
+        provenance.get("source_family"),
+        Some(&json!("ens_v1_reverse_l1"))
+    );
+    assert_eq!(
+        provenance.get("contract_role"),
+        Some(&json!("reverse_registrar"))
+    );
+    assert_eq!(
+        provenance.get("emitting_address"),
+        Some(&json!("0x00000000000000000000000000000000000000ad"))
+    );
+    assert!(!provenance.contains_key("execution_trace_id"));
+    assert!(!provenance.contains_key("verified_primary_name_lookup"));
+    assert!(!provenance.contains_key("verified_primary_name_invalidation"));
     assert_eq!(
         payload.verified_state,
         Some(json!({
@@ -11408,6 +11703,9 @@ fn openapi_document_freezes_query_params_and_shared_envelopes() {
                         "type": "string",
                         "const": "success",
                     },
+                    "name": {
+                        "type": "string",
+                    },
                     "provenance": {
                         "$ref": "#/components/schemas/JsonObject",
                     },
@@ -11469,11 +11767,29 @@ fn openapi_document_freezes_query_params_and_shared_envelopes() {
                 "additionalProperties": false,
             })
     }));
-    assert!(primary_name_claimed_variants.iter().all(|variant| {
-        !variant
+    assert!(primary_name_claimed_variants.iter().any(|variant| {
+        variant
             .get("properties")
             .and_then(Value::as_object)
-            .is_some_and(|properties| properties.contains_key("name"))
+            .is_some_and(|properties| {
+                properties.get("status") == Some(&json!({"type": "string", "const": "success"}))
+                    && properties.contains_key("name")
+            })
+    }));
+    assert!(primary_name_claimed_variants.iter().all(|variant| {
+        let status_is_success = variant
+            .get("properties")
+            .and_then(Value::as_object)
+            .and_then(|properties| properties.get("status"))
+            == Some(&json!({
+                "type": "string",
+                "const": "success",
+            }));
+        status_is_success
+            || !variant
+                .get("properties")
+                .and_then(Value::as_object)
+                .is_some_and(|properties| properties.contains_key("name"))
     }));
 
     let coverage = openapi_schema(&document, "CoverageResponse");

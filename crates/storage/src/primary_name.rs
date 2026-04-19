@@ -13,6 +13,13 @@ pub struct PrimaryNameCurrentRow {
     pub claim_provenance: Value,
 }
 
+/// Persisted exact-tuple declared claim-state plus claimed-name source.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PrimaryNameCurrentSnapshot {
+    pub row: PrimaryNameCurrentRow,
+    pub normalized_claim_name: Option<String>,
+}
+
 /// Stable storage representation for projection-owned declared primary-name status.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PrimaryNameClaimStatus {
@@ -90,6 +97,18 @@ pub async fn load_primary_name_current(
     namespace: &str,
     coin_type: &str,
 ) -> Result<Option<PrimaryNameCurrentRow>> {
+    load_primary_name_current_snapshot(pool, address, namespace, coin_type)
+        .await
+        .map(|snapshot| snapshot.map(|snapshot| snapshot.row))
+}
+
+/// Load one declared primary-name claim snapshot by exact address, namespace, and coin_type.
+pub async fn load_primary_name_current_snapshot(
+    pool: &PgPool,
+    address: &str,
+    namespace: &str,
+    coin_type: &str,
+) -> Result<Option<PrimaryNameCurrentSnapshot>> {
     let normalized_address = normalize_address(address);
     let row = sqlx::query(
         r#"
@@ -99,6 +118,7 @@ pub async fn load_primary_name_current(
             coin_type,
             claim_status,
             raw_claim_name,
+            normalized_claim_name,
             claim_provenance
         FROM primary_names_current
         WHERE address = $1
@@ -113,11 +133,11 @@ pub async fn load_primary_name_current(
     .await
     .with_context(|| {
         format!(
-            "failed to load primary_names_current row for address {normalized_address} namespace {namespace} coin_type {coin_type}"
+            "failed to load primary_names_current snapshot for address {normalized_address} namespace {namespace} coin_type {coin_type}"
         )
     })?;
 
-    row.map(decode_primary_name_current_row).transpose()
+    row.map(decode_primary_name_current_snapshot).transpose()
 }
 
 /// Insert or replace declared primary-name claim-state rows.
@@ -125,27 +145,51 @@ pub async fn upsert_primary_name_current_rows(
     pool: &PgPool,
     rows: &[PrimaryNameCurrentRow],
 ) -> Result<Vec<PrimaryNameCurrentRow>> {
-    if rows.is_empty() {
+    let snapshots = rows
+        .iter()
+        .cloned()
+        .map(|row| PrimaryNameCurrentSnapshot {
+            row,
+            normalized_claim_name: None,
+        })
+        .collect::<Vec<_>>();
+
+    upsert_primary_name_current_snapshots(pool, &snapshots)
+        .await
+        .map(|snapshots| {
+            snapshots
+                .into_iter()
+                .map(|snapshot| snapshot.row)
+                .collect::<Vec<_>>()
+        })
+}
+
+/// Insert or replace declared primary-name claim-state snapshots atomically.
+pub async fn upsert_primary_name_current_snapshots(
+    pool: &PgPool,
+    snapshots: &[PrimaryNameCurrentSnapshot],
+) -> Result<Vec<PrimaryNameCurrentSnapshot>> {
+    if snapshots.is_empty() {
         return Ok(Vec::new());
     }
 
     let mut transaction = pool
         .begin()
         .await
-        .context("failed to open transaction for primary_names_current upsert")?;
+        .context("failed to open transaction for primary_names_current snapshot upsert")?;
 
-    let mut snapshots = Vec::with_capacity(rows.len());
-    for row in rows {
-        validate_primary_name_current_row(row)?;
-        snapshots.push(upsert_primary_name_current_row(&mut transaction, row).await?);
+    let mut persisted = Vec::with_capacity(snapshots.len());
+    for snapshot in snapshots {
+        validate_primary_name_current_snapshot(snapshot)?;
+        persisted.push(upsert_primary_name_current_snapshot(&mut transaction, snapshot).await?);
     }
 
     transaction
         .commit()
         .await
-        .context("failed to commit primary_names_current upsert")?;
+        .context("failed to commit primary_names_current snapshot upsert")?;
 
-    Ok(snapshots)
+    Ok(persisted)
 }
 
 /// Delete one declared primary-name claim-state row so a worker can rebuild that exact key.
@@ -221,14 +265,14 @@ pub fn verified_primary_name_claim_hooks(
     })
 }
 
-async fn upsert_primary_name_current_row(
+async fn upsert_primary_name_current_snapshot(
     executor: &mut sqlx::Transaction<'_, Postgres>,
-    row: &PrimaryNameCurrentRow,
-) -> Result<PrimaryNameCurrentRow> {
-    let claim_provenance = serde_json::to_string(&row.claim_provenance)
+    snapshot: &PrimaryNameCurrentSnapshot,
+) -> Result<PrimaryNameCurrentSnapshot> {
+    let claim_provenance = serde_json::to_string(&snapshot.row.claim_provenance)
         .context("failed to serialize primary_names_current claim_provenance")?;
 
-    let snapshot = sqlx::query(
+    let persisted = sqlx::query(
         r#"
         INSERT INTO primary_names_current (
             address,
@@ -236,13 +280,15 @@ async fn upsert_primary_name_current_row(
             namespace,
             claim_status,
             raw_claim_name,
+            normalized_claim_name,
             claim_provenance
         )
-        VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+        VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
         ON CONFLICT (address, coin_type, namespace) DO UPDATE
         SET
             claim_status = EXCLUDED.claim_status,
             raw_claim_name = EXCLUDED.raw_claim_name,
+            normalized_claim_name = EXCLUDED.normalized_claim_name,
             claim_provenance = EXCLUDED.claim_provenance
         RETURNING
             address,
@@ -250,25 +296,27 @@ async fn upsert_primary_name_current_row(
             coin_type,
             claim_status,
             raw_claim_name,
+            normalized_claim_name,
             claim_provenance
         "#,
     )
-    .bind(normalize_address(&row.address))
-    .bind(&row.coin_type)
-    .bind(&row.namespace)
-    .bind(row.claim_status.as_str())
-    .bind(&row.raw_claim_name)
+    .bind(normalize_address(&snapshot.row.address))
+    .bind(&snapshot.row.coin_type)
+    .bind(&snapshot.row.namespace)
+    .bind(snapshot.row.claim_status.as_str())
+    .bind(&snapshot.row.raw_claim_name)
+    .bind(&snapshot.normalized_claim_name)
     .bind(claim_provenance)
     .fetch_one(&mut **executor)
     .await
     .with_context(|| {
         format!(
-            "failed to upsert primary_names_current row for address {} namespace {} coin_type {}",
-            row.address, row.namespace, row.coin_type
+            "failed to upsert primary_names_current snapshot for address {} namespace {} coin_type {}",
+            snapshot.row.address, snapshot.row.namespace, snapshot.row.coin_type
         )
     })?;
 
-    decode_primary_name_current_row(snapshot)
+    decode_primary_name_current_snapshot(persisted)
 }
 
 fn validate_primary_name_current_row(row: &PrimaryNameCurrentRow) -> Result<()> {
@@ -317,24 +365,62 @@ fn validate_primary_name_current_row(row: &PrimaryNameCurrentRow) -> Result<()> 
     Ok(())
 }
 
-fn decode_primary_name_current_row(row: PgRow) -> Result<PrimaryNameCurrentRow> {
-    Ok(PrimaryNameCurrentRow {
-        address: row
-            .try_get::<String, _>("address")
-            .context("missing address")?
-            .to_ascii_lowercase(),
-        namespace: row.try_get("namespace").context("missing namespace")?,
-        coin_type: row.try_get("coin_type").context("missing coin_type")?,
-        claim_status: PrimaryNameClaimStatus::parse(
-            &row.try_get::<String, _>("claim_status")
-                .context("missing claim_status")?,
-        )?,
-        raw_claim_name: row
-            .try_get("raw_claim_name")
-            .context("missing raw_claim_name")?,
-        claim_provenance: row
-            .try_get("claim_provenance")
-            .context("missing claim_provenance")?,
+fn validate_primary_name_current_snapshot(snapshot: &PrimaryNameCurrentSnapshot) -> Result<()> {
+    validate_primary_name_current_row(&snapshot.row)?;
+
+    let normalized_claim_name = snapshot.normalized_claim_name.as_deref();
+    if normalized_claim_name.is_some()
+        && snapshot.row.claim_status != PrimaryNameClaimStatus::Success
+    {
+        bail!(
+            "primary_names_current normalized_claim_name may appear only for claim_status success"
+        );
+    }
+    if normalized_claim_name.is_some_and(|value| value.trim().is_empty()) {
+        bail!(
+            "primary_names_current normalized_claim_name for address {} namespace {} coin_type {} must not be blank",
+            snapshot.row.address,
+            snapshot.row.namespace,
+            snapshot.row.coin_type
+        );
+    }
+    if normalized_claim_name
+        .is_some_and(|value| !value.is_ascii() || value != value.to_ascii_lowercase())
+    {
+        bail!(
+            "primary_names_current normalized_claim_name for address {} namespace {} coin_type {} must already be ASCII-normalized",
+            snapshot.row.address,
+            snapshot.row.namespace,
+            snapshot.row.coin_type
+        );
+    }
+
+    Ok(())
+}
+
+fn decode_primary_name_current_snapshot(row: PgRow) -> Result<PrimaryNameCurrentSnapshot> {
+    Ok(PrimaryNameCurrentSnapshot {
+        row: PrimaryNameCurrentRow {
+            address: row
+                .try_get::<String, _>("address")
+                .context("missing address")?
+                .to_ascii_lowercase(),
+            namespace: row.try_get("namespace").context("missing namespace")?,
+            coin_type: row.try_get("coin_type").context("missing coin_type")?,
+            claim_status: PrimaryNameClaimStatus::parse(
+                &row.try_get::<String, _>("claim_status")
+                    .context("missing claim_status")?,
+            )?,
+            raw_claim_name: row
+                .try_get("raw_claim_name")
+                .context("missing raw_claim_name")?,
+            claim_provenance: row
+                .try_get("claim_provenance")
+                .context("missing claim_provenance")?,
+        },
+        normalized_claim_name: row
+            .try_get("normalized_claim_name")
+            .context("missing normalized_claim_name")?,
     })
 }
 
@@ -716,6 +802,74 @@ mod tests {
         )
         .await?;
         assert_eq!(loaded, Some(row));
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn round_trips_primary_name_snapshots_with_normalized_claim_name() -> Result<()> {
+        let database = TestDatabase::new().await?;
+
+        let snapshot = PrimaryNameCurrentSnapshot {
+            row: PrimaryNameCurrentRow {
+                address: "0x0000000000000000000000000000000000000abc".to_owned(),
+                namespace: "ens".to_owned(),
+                coin_type: "60".to_owned(),
+                claim_status: PrimaryNameClaimStatus::Success,
+                raw_claim_name: None,
+                claim_provenance: serde_json::json!({
+                    "source_family": "ens_v1_reverse_l1",
+                    "contract_role": "reverse_registrar",
+                }),
+            },
+            normalized_claim_name: Some("alice.eth".to_owned()),
+        };
+
+        let inserted =
+            upsert_primary_name_current_snapshots(database.pool(), std::slice::from_ref(&snapshot))
+                .await?;
+        assert_eq!(inserted, vec![snapshot.clone()]);
+
+        assert_eq!(
+            load_primary_name_current_snapshot(
+                database.pool(),
+                "0x0000000000000000000000000000000000000abc",
+                "ens",
+                "60",
+            )
+            .await?,
+            Some(snapshot)
+        );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn rejects_mixed_case_normalized_claim_name_sources() -> Result<()> {
+        let database = TestDatabase::new().await?;
+
+        let error = upsert_primary_name_current_snapshots(
+            database.pool(),
+            &[PrimaryNameCurrentSnapshot {
+                row: PrimaryNameCurrentRow {
+                    address: "0x0000000000000000000000000000000000000abc".to_owned(),
+                    namespace: "ens".to_owned(),
+                    coin_type: "60".to_owned(),
+                    claim_status: PrimaryNameClaimStatus::Success,
+                    raw_claim_name: None,
+                    claim_provenance: serde_json::json!({}),
+                },
+                normalized_claim_name: Some("Alice.eth".to_owned()),
+            }],
+        )
+        .await
+        .expect_err("mixed-case claimed names must be rejected");
+
+        assert!(
+            error
+                .to_string()
+                .contains("must already be ASCII-normalized")
+        );
 
         database.cleanup().await
     }

@@ -55,10 +55,12 @@ Execution notes:
   across those declared sections, selector identity and cache-subset invariants between
   `record_inventory` and `record_cache`, explicit unsupported verified entries when no shipped
   verified answer applies, mixed-route readback of a persisted ENS exact-surface direct-path
-  `contenthash` answer, and shipped persisted verified `avatar` readback only for ENS
-  exact-surface direct-path and `resolver_alias_path` alias-only cases on the mixed route;
-  wildcard-, transport-assisted, Basenames-, and broader non-alias non-direct verified support
-  remain out of scope
+  `contenthash` answer, shipped persisted verified `avatar` readback only for ENS exact-surface
+  direct-path and `resolver_alias_path` alias-only cases on the mixed route, and persisted ENS
+  wildcard-derived `addr:60` readback on `mode=both` with projected wildcard topology while
+  declared `record_inventory` / `record_cache` remain unsupported for that lane; beyond that
+  shipped wildcard-derived lane, transport-assisted, other non-alias ancestor-selected,
+  Basenames-, and broader non-wildcard non-direct verified support remain out of scope
 - the coverage contract reuses the same exact-name rebuild seed and asserts that
   `GET /v1/coverage/{namespace}/{name}` keeps the same single-name `data` and top-level
   `coverage` object as exact-name lookup while exposing the explain-only coverage block in
@@ -74,22 +76,26 @@ Execution notes:
   `verified_state.verified_primary_name`, and `both` combines those sections. The tuple-miss case
   leaves the migrated `primary_names_current` table without that tuple and asserts per-mode
   `status=not_found`; the tuple-present rebuild path reads back only the status-shaped declared
-  `claimed_primary_name` from the rebuilt tuple while keeping the verified
+  `claimed_primary_name` from that rebuilt tuple while keeping the verified
   `verified_primary_name` section bootstrap `unsupported` until a persisted exact-tuple verified
   answer exists. A separate exact-tuple declared-claim readback case inserts
-  `claim_provenance` directly and asserts that `claimed_primary_name.provenance` returns only the
-  shipped declared fields for that tuple (`source_family`, `contract_role`,
-  `contract_instance_id`, and `emitting_address`), omitting execution- and verified-lookup
-  metadata and without implying `claimed_primary_name.name` or any fallback claim-source payload.
-  The exact-tuple invalid-name case asserts `claimed_primary_name.status=invalid_name` with the
-  tuple-scoped `raw_claim_name` and provenance read back from that tuple only, and explicitly
-  guards against implying `claimed_primary_name.name`. The harness also seeds persisted verified
-  execution outcomes and asserts exact-tuple readback for `verified_state.verified_primary_name` on
-  `mode=verified` / `mode=both` only when that exact `(address, namespace, coin_type)` tuple has
-  a cached answer; the route still keeps public coverage bootstrap `unsupported`, and `mode=both`
-  still pairs that readback with the tuple-backed status-shaped declared `claimed_primary_name`
-  section instead of implying a broader claimed or verified contract. Exact-tuple invalidation coverage
-  then evicts only the targeted persisted verified answer across manifest, topology-boundary, and
+  `claim_provenance` plus normalized claim names directly and asserts exact-tuple
+  `claimed_primary_name.name` readback for the requested success tuple on `mode=declared` and on
+  the declared section of `mode=both`, while
+  `claimed_primary_name.provenance` returns only the shipped declared fields for that tuple
+  (`source_family`, `contract_role`, `contract_instance_id`, and `emitting_address`), omitting
+  execution- and verified-lookup metadata and without implying any fallback claim-source payload
+  or broader primary-name coverage. The exact-tuple invalid-name case asserts
+  `claimed_primary_name.status=invalid_name` with the tuple-scoped `raw_claim_name` and
+  provenance read back from that tuple only, and explicitly guards against implying
+  `claimed_primary_name.name`. The harness also seeds persisted verified execution outcomes and
+  asserts exact-tuple readback for `verified_state.verified_primary_name` on `mode=verified` /
+  `mode=both` only when that exact `(address, namespace, coin_type)` tuple has a cached answer;
+  the route still keeps public coverage bootstrap `unsupported`, and that persisted-verified
+  fixture's `mode=both` response still pairs the verified readback with the tuple-backed
+  status-shaped declared `claimed_primary_name` section instead of implying a broader claimed or
+  verified contract. Exact-tuple invalidation coverage then evicts only the targeted persisted
+  verified answer across manifest, topology-boundary, and
   record-boundary cases, confirms sibling tuple outcomes remain readable, and confirms the evicted
   tuple falls back to the same tuple-backed declared status plus bootstrap verified unsupported
   section. It also requires both
@@ -140,11 +146,15 @@ Execution notes:
   invariants with `GET /v1/resolutions/{namespace}/{name}`, request-order preservation for
   `verified_queries`, presence of the persisted execution summary, explain-route readback of the
   same persisted ENS exact-surface direct-path `contenthash` answer for the requested selector
-  set, and shipped persisted verified `avatar` explain-route readback only for ENS exact-surface
-  direct-path and `resolver_alias_path` alias-only cases; wildcard-, transport-assisted,
-  Basenames-, and broader non-alias non-direct lanes remain out of scope. It also asserts
-  `404 not_found` when the current exact surface has no persisted answer for the requested
-  selector set and reuses the shipped execution-outcome invalidation APIs to assert that exact
-  manifest, topology-boundary, and record-boundary invalidation evicts the persisted ENS
-  verified-resolution answer from the mixed
+  set, shipped persisted verified `avatar` explain-route readback only for ENS exact-surface
+  direct-path and `resolver_alias_path` alias-only cases, and persisted ENS wildcard-derived
+  `addr:60` explain-route readback with the same envelope plus a persisted execution summary;
+  beyond that shipped wildcard-derived lane, transport-assisted, other non-alias ancestor-
+  selected, Basenames-, and broader non-wildcard non-direct lanes remain out of scope. It also
+  asserts `404 not_found` when the current exact surface has no persisted answer for the requested
+  selector set, and that deferred transport-assisted and other non-alias ancestor-selected
+  requests stay outside the shipped public explain surface even when persisted outcomes exist, and
+  reuses the shipped execution-outcome invalidation APIs to assert that exact manifest,
+  topology-boundary, and record-boundary
+  invalidation evicts the persisted ENS verified-resolution answer from the mixed
   `GET /v1/resolutions/{namespace}/{name}?mode=both` route and the execution explain route
