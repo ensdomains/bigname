@@ -552,6 +552,17 @@ Design consequence:
 - `basenames_execution`
 - `basenames_offchain`
 
+Current admitted Basenames split:
+
+- `basenames_base_registry`
+- `basenames_base_registrar`
+- `basenames_base_resolver`
+- `basenames_base_primary`
+- `basenames_l1_compat`
+- `basenames_execution`
+
+`basenames_offchain` remains a reserved catalog family for later explicit gateway admission and is not part of the current admitted split.
+
 ### Shared families
 
 - `shared_manifests`
@@ -595,6 +606,12 @@ Rules:
 - ENS declared reverse-claim intake on Ethereum Mainnet belongs to `ens_v1_reverse_l1`, whose canonical contract role is `reverse_registrar` at `0xa58E81fe9b61B5c3fE2AFD33CF304c454AbFc7Cb` on the Ethereum `addr.reverse` Reverse Registrar, not to `ens_v1_registry_l1` or `ens_v1_resolver_l1`
 - that ENS reverse-family ownership freezes only the current reverse-only declared claim surface; later fallback claim-setting surfaces, if admitted, require their own source-family owner and a later doc-first contract update
 - for ENS primary-name reads in Phase 7, that reverse-family ownership admits only the reverse-claim tuple; it does not authorize combining reverse-only claim precedence with resolver-backed or execution-derived name identity to manufacture richer `claimed_primary_name` payloads
+- Basenames declared authority on the shipped mainnet profile is split across `basenames_base_registry` through contract role `registry` at `0xb94704422c2a1e396835a571837aa5ae53285a95`, `basenames_base_registrar` through contract role `registrar` at `0x03c4738ee98ae44591e1a4a4f3cab6641d95dd9a`, and `basenames_base_resolver` through contract role `resolver` at `0xC6d566A56A1aFf6508b41f6c90ff131615583BCD`
+- Basenames declared primary-claim intake on the shipped mainnet profile belongs to `basenames_base_primary`, whose canonical contract role is `reverse_registrar` at `0x79ea96012eea67a83431f1701b3dff7e37f9e282`
+- Basenames L1 compatibility transport on the shipped mainnet profile belongs to `basenames_l1_compat`, whose canonical contract role is `l1_resolver` at `0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31`
+- Basenames verified resolution on the shipped mainnet profile belongs to `basenames_execution`, whose canonical contract role is `l1_resolver` at `0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31`; `basenames_execution` stays shadow-scoped until public verified Basenames reads ship, and the shared L1 Resolver address does not collapse transport ownership into execution ownership
+- `basenames_offchain` remains reserved for later explicit gateway admission; the current admitted Basenames family split is the six families above, not seven
+- that Basenames freeze does not create separate current source-family owners for registrar-controller, oracle, migration, proxy-admin, or offchain-gateway deployment artifacts
 - draft or optional features may be enabled behind manifest flags without changing the public contract
 
 ---
@@ -1319,7 +1336,7 @@ Verified execution is a required subsystem.
 Default verified resolution paths:
 
 - ENS uses `ens_execution` with contract role `universal_resolver` at `0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe` as the canonical verified-resolution entrypoint on Ethereum Mainnet; the shipped public verified slice covers exact-surface direct-path requests, the already frozen exact-surface alias-only non-direct class, and the first additive exact-surface wildcard-derived class, using the same route-level support check over declared topology
-- Basenames' eventual verified path uses the L1 compatibility path plus Base-native state, with provenance showing both transport and Base authority surfaces; until both pieces are wired, public verified Basenames reads remain bootstrap-scaffolded and explicit unsupported
+- Basenames uses `basenames_execution` with contract role `l1_resolver` at `0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31` as the canonical verified-resolution entrypoint on Ethereum Mainnet; `basenames_l1_compat` owns that same L1 Resolver address as compatibility transport, and public verified Basenames reads remain bootstrap-scaffolded and explicit unsupported until that L1 path plus the admitted Base authority families are wired end-to-end
 
 The execution engine must support:
 

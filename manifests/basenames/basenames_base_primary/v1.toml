@@ -1,0 +1,18 @@
+# Bootstrap seed for the canonical Basenames declared-primary surface on Base mainnet.
+# Address confirmed from the upstream base/basenames deployment metadata.
+manifest_version = 1
+namespace = "basenames"
+source_family = "basenames_base_primary"
+chain = "base-mainnet"
+deployment_epoch = "basenames_v1"
+rollout_status = "active"
+normalizer_version = "uts46-v1"
+roots = []
+discovery_rules = []
+
+[capability_flags]
+
+[[contracts]]
+role = "reverse_registrar"
+address = "0x79ea96012eea67a83431f1701b3dff7e37f9e282"
+proxy_kind = "none"

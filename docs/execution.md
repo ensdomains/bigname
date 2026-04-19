@@ -43,6 +43,10 @@ Verified resolution follows this sequence:
 
 For ENS on Ethereum Mainnet, step 2 is frozen to the `ens_execution` source family. Its canonical manifest-declared execution entrypoint is the ENS Universal Resolver: `[[contracts]] role = "universal_resolver"` at `0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe`.
 
+For Basenames on the shipped mainnet profile, step 2 is frozen to the `basenames_execution` source family. Its canonical manifest-declared execution entrypoint is the Basenames L1 Resolver: `[[contracts]] role = "l1_resolver"` at `0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31`.
+
+That Basenames execution owner stays shadow-scoped for now. `basenames_l1_compat` owns the same L1 Resolver address for transport attribution, and public verified Basenames reads remain explicit unsupported until that L1 compatibility path plus the admitted Base authority families are wired end-to-end.
+
 Rules:
 
 - every step is attributable in provenance

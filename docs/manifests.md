@@ -131,6 +131,23 @@ Within the claimed-vs-verified primary-name contract, that reverse family owns o
 
 That absence is intentional for the shipped Phase 7 route: `ens_v1_reverse_l1` does not need a dedicated `claimed_primary_name`, `primary_name_claim`, or similar capability flag to admit the declared reverse-claim tuple. Later primary-name capability flagging, if ever needed, would be additive and would have to preserve the existing truth split between reverse-owned declared intake and execution-derived verification.
 
+Basenames source-family ownership on the shipped mainnet profile is frozen across six admitted families:
+
+- `basenames_base_registry` owns registry-controlled declared authority through contract role `registry` at `0xb94704422c2a1e396835a571837aa5ae53285a95` on Base Mainnet
+- `basenames_base_registrar` owns tokenized registrar authority through contract role `registrar` at `0x03c4738ee98ae44591e1a4a4f3cab6641d95dd9a` on Base Mainnet
+- `basenames_base_resolver` owns Base-native declared resolver state through contract role `resolver` at `0xC6d566A56A1aFf6508b41f6c90ff131615583BCD` on Base Mainnet
+- `basenames_base_primary` owns declared primary-claim intake through contract role `reverse_registrar` at `0x79ea96012eea67a83431f1701b3dff7e37f9e282` on Base Mainnet
+- `basenames_l1_compat` owns L1 compatibility transport through contract role `l1_resolver` at `0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31` on Ethereum Mainnet
+- `basenames_execution` owns verified-resolution entrypoint selection through contract role `l1_resolver` at `0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31` on Ethereum Mainnet with `verified_resolution = "shadow"`
+
+That freeze maps declared authority to the Base registry / registrar / resolver families, declared primary to `basenames_base_primary`, compatibility transport to `basenames_l1_compat`, and execution entrypoint selection to `basenames_execution`.
+
+The same Ethereum Mainnet L1 Resolver address may therefore be declared in both `basenames_l1_compat` and `basenames_execution`. That duplication is intentional: transport ownership remains with `basenames_l1_compat`, while execution entrypoint ownership and shadow verified-resolution capability remain with `basenames_execution`.
+
+`basenames_offchain` remains a reserved catalog family for later explicit gateway admission and is not part of the current admitted Basenames split.
+
+This freeze does not create separate current source-family owners for registrar-controller, oracle, migration, proxy-admin, or offchain-gateway deployment artifacts. Later admission of those surfaces would be additive and doc-first.
+
 ## 5. Contract Instance Admission And Continuity
 
 Manifest loading admits source-graph nodes as `contract_instance_id`s, not as raw addresses.

@@ -1,0 +1,19 @@
+# Shadow-scoped bootstrap for the canonical Basenames execution entrypoint on Ethereum mainnet.
+# Address confirmed from the upstream base/basenames deployment metadata.
+manifest_version = 1
+namespace = "basenames"
+source_family = "basenames_execution"
+chain = "ethereum-mainnet"
+deployment_epoch = "basenames_v1"
+rollout_status = "shadow"
+normalizer_version = "uts46-v1"
+roots = []
+discovery_rules = []
+
+[capability_flags]
+verified_resolution = { status = "shadow", notes = "shadow execution ownership is fixed before public Basenames verified-resolution reads ship" }
+
+[[contracts]]
+role = "l1_resolver"
+address = "0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31"
+proxy_kind = "none"
