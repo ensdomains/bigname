@@ -3,6 +3,38 @@
                 .expect("conformance timestamp must be valid")
         }
 
+        #[derive(Clone, Copy)]
+        enum BasenamesControlVectorScenario {
+            NftOnly,
+            ManagementOnly,
+            FullTransfer,
+        }
+
+        impl BasenamesControlVectorScenario {
+            fn current_token_subject(self) -> &'static str {
+                match self {
+                    Self::NftOnly => "0x00000000000000000000000000000000000000c1",
+                    Self::ManagementOnly => "0x00000000000000000000000000000000000000a2",
+                    Self::FullTransfer => "0x00000000000000000000000000000000000000c3",
+                }
+            }
+
+            fn current_effective_controller(self) -> &'static str {
+                match self {
+                    Self::NftOnly => "0x00000000000000000000000000000000000000b1",
+                    Self::ManagementOnly => "0x00000000000000000000000000000000000000b2",
+                    Self::FullTransfer => "0x00000000000000000000000000000000000000c3",
+                }
+            }
+
+            fn previous_effective_controller(self) -> Option<&'static str> {
+                match self {
+                    Self::FullTransfer => Some("0x00000000000000000000000000000000000000b3"),
+                    _ => None,
+                }
+            }
+        }
+
         fn raw_block(
             chain_id: &str,
             block_hash: &str,
@@ -241,6 +273,377 @@
                 ],
             )
             .await?;
+
+            Ok(())
+        }
+
+        async fn rebuild_address_names_current(
+            database: &HarnessDatabase,
+            address: Option<&str>,
+        ) -> Result<()> {
+            let database_url = std::env::var("BIGNAME_DATABASE_URL")
+                .or_else(|_| std::env::var("DATABASE_URL"))
+                .unwrap_or_else(|_| default_database_url().to_owned());
+            let base_options = PgConnectOptions::from_str(&database_url)
+                .context("failed to parse database URL for conformance address_names rebuild")?;
+            let rebuild_database_url = base_options
+                .database(&database.database_name)
+                .to_url_lossy()
+                .to_string();
+            let address = address.map(str::to_owned);
+            let worker_manifest_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../apps/worker/Cargo.toml");
+
+            tokio::task::spawn_blocking(move || -> Result<()> {
+                let _guard = WORKER_CARGO_LOCK
+                    .lock()
+                    .expect("worker cargo lock must not be poisoned");
+                let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
+                let mut command = std::process::Command::new(cargo);
+                command
+                    .arg("run")
+                    .arg("--quiet")
+                    .arg("--manifest-path")
+                    .arg(worker_manifest_path)
+                    .arg("--")
+                    .arg("address-names-current")
+                    .arg("rebuild")
+                    .arg("--database-url")
+                    .arg(&rebuild_database_url);
+                if let Some(address) = address.as_deref() {
+                    command.arg("--address").arg(address);
+                }
+
+                let output = command.output().with_context(|| {
+                    format!(
+                        "failed to invoke worker address_names_current rebuild for {}",
+                        address.as_deref().unwrap_or("all")
+                    )
+                })?;
+
+                if !output.status.success() {
+                    return Err(anyhow::anyhow!(
+                        "worker address_names_current rebuild failed for {}\nstdout:\n{}\nstderr:\n{}",
+                        address.as_deref().unwrap_or("all"),
+                        String::from_utf8_lossy(&output.stdout),
+                        String::from_utf8_lossy(&output.stderr),
+                    ));
+                }
+
+                Ok(())
+            })
+            .await
+            .context("worker address_names_current rebuild task panicked")??;
+
+            Ok(())
+        }
+
+        async fn seed_basenames_control_vector_rebuild_inputs(
+            database: &HarnessDatabase,
+            logical_name_id: &str,
+            resource_id: Uuid,
+            token_lineage_id: Uuid,
+            surface_binding_id: Uuid,
+            scenario: BasenamesControlVectorScenario,
+        ) -> Result<()> {
+            let normalized_name = logical_name_id
+                .split_once(':')
+                .map(|(_, normalized_name)| normalized_name)
+                .expect("logical_name_id must include namespace");
+
+            bigname_storage::upsert_raw_blocks(
+                &database.pool,
+                &[
+                    raw_block("base-mainnet", "0xbase-surface", None, 98, 1_717_181_698),
+                    raw_block("base-mainnet", "0xbase-resource", None, 99, 1_717_181_699),
+                    raw_block("base-mainnet", "0xbase-binding", None, 100, 1_717_181_700),
+                    raw_block("base-mainnet", "0xbase-grant", None, 101, 1_717_181_701),
+                    raw_block("base-mainnet", "0xbase-authority", None, 102, 1_717_181_702),
+                    raw_block("base-mainnet", "0xbase-token", None, 103, 1_717_181_703),
+                    raw_block(
+                        "base-mainnet",
+                        "0xbase-authority-final",
+                        None,
+                        104,
+                        1_717_181_704,
+                    ),
+                    raw_block("base-mainnet", "0xbase-resolver", None, 105, 1_717_181_705),
+                ],
+            )
+            .await?;
+            bigname_storage::upsert_name_surfaces(
+                &database.pool,
+                &[NameSurface {
+                    logical_name_id: logical_name_id.to_owned(),
+                    namespace: "basenames".to_owned(),
+                    input_name: normalized_name.to_owned(),
+                    canonical_display_name: normalized_name.to_owned(),
+                    normalized_name: normalized_name.to_owned(),
+                    dns_encoded_name: normalized_name.as_bytes().to_vec(),
+                    namehash: format!("namehash:{normalized_name}"),
+                    labelhashes: vec![format!("labelhash:{normalized_name}")],
+                    normalizer_version: "ensip15@2026-04-16".to_owned(),
+                    normalization_warnings: json!([]),
+                    normalization_errors: json!([]),
+                    chain_id: "base-mainnet".to_owned(),
+                    block_hash: "0xbase-surface".to_owned(),
+                    block_number: 98,
+                    provenance: json!({"seed": "basenames_control_vector_surface"}),
+                    canonicality_state: CanonicalityState::Canonical,
+                }],
+            )
+            .await?;
+            bigname_storage::upsert_token_lineages(
+                &database.pool,
+                &[TokenLineage {
+                    token_lineage_id,
+                    chain_id: "base-mainnet".to_owned(),
+                    block_hash: "0xbase-resource".to_owned(),
+                    block_number: 99,
+                    provenance: json!({"seed": "basenames_control_vector_token_lineage"}),
+                    canonicality_state: CanonicalityState::Canonical,
+                }],
+            )
+            .await?;
+            bigname_storage::upsert_resources(
+                &database.pool,
+                &[Resource {
+                    resource_id,
+                    token_lineage_id: Some(token_lineage_id),
+                    chain_id: "base-mainnet".to_owned(),
+                    block_hash: "0xbase-resource".to_owned(),
+                    block_number: 99,
+                    provenance: json!({"seed": "basenames_control_vector_resource"}),
+                    canonicality_state: CanonicalityState::Canonical,
+                }],
+            )
+            .await?;
+            bigname_storage::upsert_surface_bindings(
+                &database.pool,
+                &[SurfaceBinding {
+                    surface_binding_id,
+                    logical_name_id: logical_name_id.to_owned(),
+                    resource_id,
+                    binding_kind: SurfaceBindingKind::DeclaredRegistryPath,
+                    active_from: timestamp(1_717_181_700),
+                    active_to: None,
+                    chain_id: "base-mainnet".to_owned(),
+                    block_hash: "0xbase-binding".to_owned(),
+                    block_number: 100,
+                    provenance: json!({"seed": "basenames_control_vector_binding"}),
+                    canonicality_state: CanonicalityState::Canonical,
+                }],
+            )
+            .await?;
+
+            let mut events = vec![NormalizedEvent {
+                event_identity: format!("conformance:{logical_name_id}:grant"),
+                namespace: "basenames".to_owned(),
+                logical_name_id: Some(logical_name_id.to_owned()),
+                resource_id: Some(resource_id),
+                event_kind: "RegistrationGranted".to_owned(),
+                source_family: "basenames_base_registrar".to_owned(),
+                manifest_version: 3,
+                source_manifest_id: None,
+                chain_id: Some("base-mainnet".to_owned()),
+                block_number: Some(101),
+                block_hash: Some("0xbase-grant".to_owned()),
+                transaction_hash: Some(format!("0xtx:{logical_name_id}:grant")),
+                log_index: Some(0),
+                raw_fact_ref: json!({"kind": "raw_log", "event_identity": format!("conformance:{logical_name_id}:grant")}),
+                derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+                canonicality_state: CanonicalityState::Canonical,
+                before_state: json!({}),
+                after_state: json!({
+                    "authority_kind": "registrar",
+                    "authority_key": format!("registrar:base-mainnet:{normalized_name}"),
+                    "registrant": match scenario {
+                        BasenamesControlVectorScenario::NftOnly => "0x00000000000000000000000000000000000000a1",
+                        BasenamesControlVectorScenario::ManagementOnly => "0x00000000000000000000000000000000000000a2",
+                        BasenamesControlVectorScenario::FullTransfer => "0x00000000000000000000000000000000000000a3",
+                    },
+                    "expiry": 1_900_000_000_i64,
+                }),
+            }];
+
+            match scenario {
+                BasenamesControlVectorScenario::NftOnly => {
+                    events.push(NormalizedEvent {
+                        event_identity: format!("conformance:{logical_name_id}:authority"),
+                        namespace: "basenames".to_owned(),
+                        logical_name_id: Some(logical_name_id.to_owned()),
+                        resource_id: Some(resource_id),
+                        event_kind: "AuthorityTransferred".to_owned(),
+                        source_family: "basenames_base_registry".to_owned(),
+                        manifest_version: 3,
+                        source_manifest_id: None,
+                        chain_id: Some("base-mainnet".to_owned()),
+                        block_number: Some(102),
+                        block_hash: Some("0xbase-authority".to_owned()),
+                        transaction_hash: Some(format!("0xtx:{logical_name_id}:authority")),
+                        log_index: Some(0),
+                        raw_fact_ref: json!({"kind": "raw_log", "event_identity": format!("conformance:{logical_name_id}:authority")}),
+                        derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+                        canonicality_state: CanonicalityState::Canonical,
+                        before_state: json!({
+                            "owner": "0x00000000000000000000000000000000000000a1",
+                        }),
+                        after_state: json!({
+                            "owner": "0x00000000000000000000000000000000000000b1",
+                        }),
+                    });
+                    events.push(NormalizedEvent {
+                        event_identity: format!("conformance:{logical_name_id}:token"),
+                        namespace: "basenames".to_owned(),
+                        logical_name_id: Some(logical_name_id.to_owned()),
+                        resource_id: Some(resource_id),
+                        event_kind: "TokenControlTransferred".to_owned(),
+                        source_family: "basenames_base_registrar".to_owned(),
+                        manifest_version: 3,
+                        source_manifest_id: None,
+                        chain_id: Some("base-mainnet".to_owned()),
+                        block_number: Some(103),
+                        block_hash: Some("0xbase-token".to_owned()),
+                        transaction_hash: Some(format!("0xtx:{logical_name_id}:token")),
+                        log_index: Some(0),
+                        raw_fact_ref: json!({"kind": "raw_log", "event_identity": format!("conformance:{logical_name_id}:token")}),
+                        derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+                        canonicality_state: CanonicalityState::Canonical,
+                        before_state: json!({
+                            "from": "0x00000000000000000000000000000000000000a1",
+                        }),
+                        after_state: json!({
+                            "to": "0x00000000000000000000000000000000000000c1",
+                        }),
+                    });
+                }
+                BasenamesControlVectorScenario::ManagementOnly => {
+                    events.push(NormalizedEvent {
+                        event_identity: format!("conformance:{logical_name_id}:authority"),
+                        namespace: "basenames".to_owned(),
+                        logical_name_id: Some(logical_name_id.to_owned()),
+                        resource_id: Some(resource_id),
+                        event_kind: "AuthorityTransferred".to_owned(),
+                        source_family: "basenames_base_registry".to_owned(),
+                        manifest_version: 3,
+                        source_manifest_id: None,
+                        chain_id: Some("base-mainnet".to_owned()),
+                        block_number: Some(102),
+                        block_hash: Some("0xbase-authority".to_owned()),
+                        transaction_hash: Some(format!("0xtx:{logical_name_id}:authority")),
+                        log_index: Some(0),
+                        raw_fact_ref: json!({"kind": "raw_log", "event_identity": format!("conformance:{logical_name_id}:authority")}),
+                        derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+                        canonicality_state: CanonicalityState::Canonical,
+                        before_state: json!({
+                            "owner": "0x00000000000000000000000000000000000000a2",
+                        }),
+                        after_state: json!({
+                            "owner": "0x00000000000000000000000000000000000000b2",
+                        }),
+                    });
+                }
+                BasenamesControlVectorScenario::FullTransfer => {
+                    events.push(NormalizedEvent {
+                        event_identity: format!("conformance:{logical_name_id}:authority"),
+                        namespace: "basenames".to_owned(),
+                        logical_name_id: Some(logical_name_id.to_owned()),
+                        resource_id: Some(resource_id),
+                        event_kind: "AuthorityTransferred".to_owned(),
+                        source_family: "basenames_base_registry".to_owned(),
+                        manifest_version: 3,
+                        source_manifest_id: None,
+                        chain_id: Some("base-mainnet".to_owned()),
+                        block_number: Some(102),
+                        block_hash: Some("0xbase-authority".to_owned()),
+                        transaction_hash: Some(format!("0xtx:{logical_name_id}:authority")),
+                        log_index: Some(0),
+                        raw_fact_ref: json!({"kind": "raw_log", "event_identity": format!("conformance:{logical_name_id}:authority")}),
+                        derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+                        canonicality_state: CanonicalityState::Canonical,
+                        before_state: json!({
+                            "owner": "0x00000000000000000000000000000000000000a3",
+                        }),
+                        after_state: json!({
+                            "owner": "0x00000000000000000000000000000000000000b3",
+                        }),
+                    });
+                    events.push(NormalizedEvent {
+                        event_identity: format!("conformance:{logical_name_id}:token"),
+                        namespace: "basenames".to_owned(),
+                        logical_name_id: Some(logical_name_id.to_owned()),
+                        resource_id: Some(resource_id),
+                        event_kind: "TokenControlTransferred".to_owned(),
+                        source_family: "basenames_base_registrar".to_owned(),
+                        manifest_version: 3,
+                        source_manifest_id: None,
+                        chain_id: Some("base-mainnet".to_owned()),
+                        block_number: Some(103),
+                        block_hash: Some("0xbase-token".to_owned()),
+                        transaction_hash: Some(format!("0xtx:{logical_name_id}:token")),
+                        log_index: Some(0),
+                        raw_fact_ref: json!({"kind": "raw_log", "event_identity": format!("conformance:{logical_name_id}:token")}),
+                        derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+                        canonicality_state: CanonicalityState::Canonical,
+                        before_state: json!({
+                            "from": "0x00000000000000000000000000000000000000a3",
+                        }),
+                        after_state: json!({
+                            "to": "0x00000000000000000000000000000000000000c3",
+                        }),
+                    });
+                    events.push(NormalizedEvent {
+                        event_identity: format!("conformance:{logical_name_id}:authority-final"),
+                        namespace: "basenames".to_owned(),
+                        logical_name_id: Some(logical_name_id.to_owned()),
+                        resource_id: Some(resource_id),
+                        event_kind: "AuthorityTransferred".to_owned(),
+                        source_family: "basenames_base_registry".to_owned(),
+                        manifest_version: 3,
+                        source_manifest_id: None,
+                        chain_id: Some("base-mainnet".to_owned()),
+                        block_number: Some(104),
+                        block_hash: Some("0xbase-authority-final".to_owned()),
+                        transaction_hash: Some(format!("0xtx:{logical_name_id}:authority-final")),
+                        log_index: Some(0),
+                        raw_fact_ref: json!({"kind": "raw_log", "event_identity": format!("conformance:{logical_name_id}:authority-final")}),
+                        derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+                        canonicality_state: CanonicalityState::Canonical,
+                        before_state: json!({
+                            "owner": "0x00000000000000000000000000000000000000b3",
+                        }),
+                        after_state: json!({
+                            "owner": "0x00000000000000000000000000000000000000c3",
+                        }),
+                    });
+                }
+            }
+
+            events.push(NormalizedEvent {
+                event_identity: format!("conformance:{logical_name_id}:resolver"),
+                namespace: "basenames".to_owned(),
+                logical_name_id: Some(logical_name_id.to_owned()),
+                resource_id: Some(resource_id),
+                event_kind: "ResolverChanged".to_owned(),
+                source_family: "basenames_base_resolver".to_owned(),
+                manifest_version: 4,
+                source_manifest_id: None,
+                chain_id: Some("base-mainnet".to_owned()),
+                block_number: Some(105),
+                block_hash: Some("0xbase-resolver".to_owned()),
+                transaction_hash: Some(format!("0xtx:{logical_name_id}:resolver")),
+                log_index: Some(0),
+                raw_fact_ref: json!({"kind": "raw_log", "event_identity": format!("conformance:{logical_name_id}:resolver")}),
+                derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+                canonicality_state: CanonicalityState::Canonical,
+                before_state: json!({}),
+                after_state: json!({
+                    "resolver": "0x0000000000000000000000000000000000000abc",
+                    "namehash": format!("namehash:{normalized_name}"),
+                }),
+            });
+
+            bigname_storage::upsert_normalized_events(&database.pool, &events).await?;
 
             Ok(())
         }
@@ -1145,6 +1548,28 @@
                 "registry_owner": "0x00000000000000000000000000000000000000bb",
                 "latest_event_kind": "AuthorityTransferred",
             })
+        }
+
+        fn basenames_control_vector_control_summary(
+            scenario: BasenamesControlVectorScenario,
+        ) -> Value {
+            match scenario {
+                BasenamesControlVectorScenario::NftOnly => json!({
+                    "registrant": "0x00000000000000000000000000000000000000c1",
+                    "registry_owner": "0x00000000000000000000000000000000000000b1",
+                    "latest_event_kind": "TokenControlTransferred",
+                }),
+                BasenamesControlVectorScenario::ManagementOnly => json!({
+                    "registrant": "0x00000000000000000000000000000000000000a2",
+                    "registry_owner": "0x00000000000000000000000000000000000000b2",
+                    "latest_event_kind": "AuthorityTransferred",
+                }),
+                BasenamesControlVectorScenario::FullTransfer => json!({
+                    "registrant": "0x00000000000000000000000000000000000000c3",
+                    "registry_owner": "0x00000000000000000000000000000000000000c3",
+                    "latest_event_kind": "AuthorityTransferred",
+                }),
+            }
         }
 
         fn basenames_exact_name_resolver_summary() -> Value {

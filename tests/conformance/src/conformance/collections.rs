@@ -1249,6 +1249,136 @@
         }
 
         #[tokio::test]
+        async fn address_names_contract_returns_basenames_base_authority_relation_facets_across_control_vectors()
+        -> Result<()> {
+            let database = HarnessDatabase::new().await?;
+            let cases = [
+                (
+                    "nft-only.base.eth",
+                    BasenamesControlVectorScenario::NftOnly,
+                    0x86a0_u128,
+                ),
+                (
+                    "management-only.base.eth",
+                    BasenamesControlVectorScenario::ManagementOnly,
+                    0x86b0_u128,
+                ),
+                (
+                    "full-transfer.base.eth",
+                    BasenamesControlVectorScenario::FullTransfer,
+                    0x86c0_u128,
+                ),
+            ];
+
+            for (name, scenario, base_id) in cases {
+                let logical_name_id = format!("basenames:{name}");
+                seed_basenames_control_vector_rebuild_inputs(
+                    &database,
+                    &logical_name_id,
+                    Uuid::from_u128(base_id),
+                    Uuid::from_u128(base_id + 1),
+                    Uuid::from_u128(base_id + 2),
+                    scenario,
+                )
+                .await?;
+            }
+            rebuild_address_names_current(&database, None).await?;
+
+            for (name, scenario, _) in cases {
+                let logical_name_id = format!("basenames:{name}");
+                let holder_response = app_router(database.app_state())
+                    .oneshot(
+                        Request::builder()
+                            .uri(format!(
+                                "/v1/addresses/{}/names?namespace=basenames",
+                                scenario.current_token_subject()
+                            ))
+                            .body(Body::empty())
+                            .expect("request must build"),
+                    )
+                    .await
+                    .with_context(|| format!("Basenames address names request failed for {name}"))?;
+
+                assert_eq!(holder_response.status(), StatusCode::OK);
+                let holder_payload: AddressNamesResponse = read_json(holder_response).await?;
+                assert_eq!(holder_payload.data.len(), 1);
+                assert_eq!(
+                    holder_payload.data[0].get("logical_name_id"),
+                    Some(&json!(logical_name_id))
+                );
+                assert_eq!(
+                    holder_payload.data[0].get("relation_facets"),
+                    Some(&match scenario {
+                        BasenamesControlVectorScenario::FullTransfer => json!([
+                            "registrant",
+                            "token_holder",
+                            "effective_controller"
+                        ]),
+                        _ => json!(["registrant", "token_holder"]),
+                    })
+                );
+                assert_eq!(
+                    holder_payload.coverage.source_classes_considered,
+                    vec!["ensv1_registry_path".to_owned()]
+                );
+
+                if scenario.current_effective_controller() != scenario.current_token_subject() {
+                    let controller_response = app_router(database.app_state())
+                        .oneshot(
+                            Request::builder()
+                                .uri(format!(
+                                    "/v1/addresses/{}/names?namespace=basenames",
+                                    scenario.current_effective_controller()
+                                ))
+                                .body(Body::empty())
+                                .expect("request must build"),
+                        )
+                        .await
+                        .with_context(|| {
+                            format!("Basenames controller address request failed for {name}")
+                        })?;
+
+                    assert_eq!(controller_response.status(), StatusCode::OK);
+                    let controller_payload: AddressNamesResponse =
+                        read_json(controller_response).await?;
+                    assert_eq!(controller_payload.data.len(), 1);
+                    assert_eq!(
+                        controller_payload.data[0].get("logical_name_id"),
+                        Some(&json!(logical_name_id))
+                    );
+                    assert_eq!(
+                        controller_payload.data[0].get("relation_facets"),
+                        Some(&json!(["effective_controller"]))
+                    );
+                }
+
+                if let Some(previous_controller) = scenario.previous_effective_controller() {
+                    let previous_response = app_router(database.app_state())
+                        .oneshot(
+                            Request::builder()
+                                .uri(format!(
+                                    "/v1/addresses/{previous_controller}/names?namespace=basenames"
+                                ))
+                                .body(Body::empty())
+                                .expect("request must build"),
+                        )
+                        .await
+                        .with_context(|| {
+                            format!("Basenames previous controller request failed for {name}")
+                        })?;
+
+                    assert_eq!(previous_response.status(), StatusCode::OK);
+                    let previous_payload: AddressNamesResponse =
+                        read_json(previous_response).await?;
+                    assert!(previous_payload.data.is_empty());
+                }
+            }
+
+            database.cleanup().await?;
+            Ok(())
+        }
+
+        #[tokio::test]
         async fn address_names_contract_include_role_summary_is_additive_and_preserves_base_collection_behavior()
         -> Result<()> {
             let database = HarnessDatabase::new().await?;
@@ -1538,4 +1668,3 @@
             database.cleanup().await?;
             Ok(())
         }
-

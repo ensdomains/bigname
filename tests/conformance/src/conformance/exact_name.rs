@@ -381,6 +381,70 @@
         }
 
         #[tokio::test]
+        async fn basenames_exact_name_contract_reads_rebuilt_control_vectors() -> Result<()> {
+            let database = HarnessDatabase::new().await?;
+            let cases = [
+                (
+                    "nft-only.base.eth",
+                    BasenamesControlVectorScenario::NftOnly,
+                    0x9260_u128,
+                ),
+                (
+                    "management-only.base.eth",
+                    BasenamesControlVectorScenario::ManagementOnly,
+                    0x9270_u128,
+                ),
+                (
+                    "full-transfer.base.eth",
+                    BasenamesControlVectorScenario::FullTransfer,
+                    0x9280_u128,
+                ),
+            ];
+
+            for (name, scenario, base_id) in cases {
+                let logical_name_id = format!("basenames:{name}");
+                seed_basenames_control_vector_rebuild_inputs(
+                    &database,
+                    &logical_name_id,
+                    Uuid::from_u128(base_id),
+                    Uuid::from_u128(base_id + 1),
+                    Uuid::from_u128(base_id + 2),
+                    scenario,
+                )
+                .await?;
+                database.rebuild_name_current(&logical_name_id).await?;
+
+                let response = app_router(database.app_state())
+                    .oneshot(
+                        Request::builder()
+                            .uri(format!("/v1/names/basenames/{name}"))
+                            .body(Body::empty())
+                            .expect("request must build"),
+                    )
+                    .await
+                    .with_context(|| format!("Basenames exact-name request failed for {name}"))?;
+
+                assert_eq!(response.status(), StatusCode::OK);
+
+                let payload: NameResponse = read_json(response).await?;
+                assert_eq!(payload.data["logical_name_id"], json!(logical_name_id));
+                assert_eq!(
+                    payload.declared_state.get("control"),
+                    Some(&basenames_control_vector_control_summary(scenario))
+                );
+                assert_eq!(
+                    payload.declared_state.get("resolver"),
+                    Some(&basenames_exact_name_resolver_summary())
+                );
+                assert_eq!(payload.coverage["status"], json!("full"));
+                assert_eq!(payload.verified_state, None);
+            }
+
+            database.cleanup().await?;
+            Ok(())
+        }
+
+        #[tokio::test]
         async fn basenames_coverage_contract_returns_shared_exact_name_coverage() -> Result<()> {
             let database = HarnessDatabase::new().await?;
             let logical_name_id = "basenames:alice.base.eth";
@@ -538,4 +602,3 @@
             database.cleanup().await?;
             Ok(())
         }
-

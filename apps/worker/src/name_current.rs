@@ -1618,6 +1618,271 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rebuild_projects_basenames_base_authority_control_vectors_into_name_current()
+    -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let nft_only = IdentityBinding::new(
+            "basenames:nft-only.base.eth",
+            "nft-only.base.eth",
+            0x4411,
+            0x4412,
+            0x4413,
+        );
+        let management_only = IdentityBinding::new(
+            "basenames:management-only.base.eth",
+            "management-only.base.eth",
+            0x4421,
+            0x4422,
+            0x4423,
+        );
+        let full_transfer = IdentityBinding::new(
+            "basenames:full-transfer.base.eth",
+            "full-transfer.base.eth",
+            0x4431,
+            0x4432,
+            0x4433,
+        );
+
+        seed_raw_blocks(
+            database.pool(),
+            &[
+                raw_block("base-mainnet", "0xbase-surface", 500, 1_717_182_500),
+                raw_block("base-mainnet", "0xnft-grant", 501, 1_717_182_501),
+                raw_block("base-mainnet", "0xnft-manager", 502, 1_717_182_502),
+                raw_block("base-mainnet", "0xnft-transfer", 503, 1_717_182_503),
+                raw_block("base-mainnet", "0xmgmt-grant", 511, 1_717_182_511),
+                raw_block("base-mainnet", "0xmgmt-manager", 512, 1_717_182_512),
+                raw_block("base-mainnet", "0xfull-grant", 521, 1_717_182_521),
+                raw_block("base-mainnet", "0xfull-manager", 522, 1_717_182_522),
+                raw_block("base-mainnet", "0xfull-transfer", 523, 1_717_182_523),
+                raw_block("base-mainnet", "0xfull-manager-final", 524, 1_717_182_524),
+            ],
+        )
+        .await?;
+        seed_basenames_identity(
+            database.pool(),
+            &nft_only,
+            "0xnft-grant",
+            501,
+            1_717_182_501,
+        )
+        .await?;
+        seed_basenames_identity(
+            database.pool(),
+            &management_only,
+            "0xmgmt-grant",
+            511,
+            1_717_182_511,
+        )
+        .await?;
+        seed_basenames_identity(
+            database.pool(),
+            &full_transfer,
+            "0xfull-grant",
+            521,
+            1_717_182_521,
+        )
+        .await?;
+        seed_events(
+            database.pool(),
+            &[
+                basenames_authority_event(
+                    &nft_only,
+                    "nft-grant",
+                    "RegistrationGranted",
+                    SOURCE_FAMILY_BASENAMES_BASE_REGISTRAR,
+                    "0xnft-grant",
+                    501,
+                    Some(0),
+                    json!({}),
+                    json!({
+                        "authority_kind": "registrar",
+                        "authority_key": "registrar:base-mainnet:nft-only",
+                        "registrant": "0x00000000000000000000000000000000000000a1",
+                    }),
+                ),
+                basenames_authority_event(
+                    &nft_only,
+                    "nft-manager",
+                    "AuthorityTransferred",
+                    SOURCE_FAMILY_BASENAMES_BASE_REGISTRY,
+                    "0xnft-manager",
+                    502,
+                    Some(0),
+                    json!({
+                        "owner": "0x00000000000000000000000000000000000000a1",
+                    }),
+                    json!({
+                        "owner": "0x00000000000000000000000000000000000000b1",
+                    }),
+                ),
+                basenames_authority_event(
+                    &nft_only,
+                    "nft-transfer",
+                    "TokenControlTransferred",
+                    SOURCE_FAMILY_BASENAMES_BASE_REGISTRAR,
+                    "0xnft-transfer",
+                    503,
+                    Some(0),
+                    json!({
+                        "from": "0x00000000000000000000000000000000000000a1",
+                    }),
+                    json!({
+                        "to": "0x00000000000000000000000000000000000000c1",
+                    }),
+                ),
+                basenames_authority_event(
+                    &management_only,
+                    "mgmt-grant",
+                    "RegistrationGranted",
+                    SOURCE_FAMILY_BASENAMES_BASE_REGISTRAR,
+                    "0xmgmt-grant",
+                    511,
+                    Some(0),
+                    json!({}),
+                    json!({
+                        "authority_kind": "registrar",
+                        "authority_key": "registrar:base-mainnet:management-only",
+                        "registrant": "0x00000000000000000000000000000000000000a2",
+                    }),
+                ),
+                basenames_authority_event(
+                    &management_only,
+                    "mgmt-manager",
+                    "AuthorityTransferred",
+                    SOURCE_FAMILY_BASENAMES_BASE_REGISTRY,
+                    "0xmgmt-manager",
+                    512,
+                    Some(0),
+                    json!({
+                        "owner": "0x00000000000000000000000000000000000000a2",
+                    }),
+                    json!({
+                        "owner": "0x00000000000000000000000000000000000000b2",
+                    }),
+                ),
+                basenames_authority_event(
+                    &full_transfer,
+                    "full-grant",
+                    "RegistrationGranted",
+                    SOURCE_FAMILY_BASENAMES_BASE_REGISTRAR,
+                    "0xfull-grant",
+                    521,
+                    Some(0),
+                    json!({}),
+                    json!({
+                        "authority_kind": "registrar",
+                        "authority_key": "registrar:base-mainnet:full-transfer",
+                        "registrant": "0x00000000000000000000000000000000000000a3",
+                    }),
+                ),
+                basenames_authority_event(
+                    &full_transfer,
+                    "full-manager",
+                    "AuthorityTransferred",
+                    SOURCE_FAMILY_BASENAMES_BASE_REGISTRY,
+                    "0xfull-manager",
+                    522,
+                    Some(0),
+                    json!({
+                        "owner": "0x00000000000000000000000000000000000000a3",
+                    }),
+                    json!({
+                        "owner": "0x00000000000000000000000000000000000000b3",
+                    }),
+                ),
+                basenames_authority_event(
+                    &full_transfer,
+                    "full-transfer",
+                    "TokenControlTransferred",
+                    SOURCE_FAMILY_BASENAMES_BASE_REGISTRAR,
+                    "0xfull-transfer",
+                    523,
+                    Some(0),
+                    json!({
+                        "from": "0x00000000000000000000000000000000000000a3",
+                    }),
+                    json!({
+                        "to": "0x00000000000000000000000000000000000000c3",
+                    }),
+                ),
+                basenames_authority_event(
+                    &full_transfer,
+                    "full-manager-final",
+                    "AuthorityTransferred",
+                    SOURCE_FAMILY_BASENAMES_BASE_REGISTRY,
+                    "0xfull-manager-final",
+                    524,
+                    Some(0),
+                    json!({
+                        "owner": "0x00000000000000000000000000000000000000b3",
+                    }),
+                    json!({
+                        "owner": "0x00000000000000000000000000000000000000c3",
+                    }),
+                ),
+            ],
+        )
+        .await?;
+
+        rebuild_name_current(database.pool(), None).await?;
+
+        let nft_only_row = load_name_current(database.pool(), &nft_only.logical_name_id)
+            .await?
+            .context("nft-only basenames row must exist")?;
+        assert_eq!(nft_only_row.namespace, BASENAMES_NAMESPACE);
+        assert_eq!(
+            nft_only_row.declared_summary["control"]["registrant"],
+            Value::String("0x00000000000000000000000000000000000000c1".to_owned())
+        );
+        assert_eq!(
+            nft_only_row.declared_summary["control"]["registry_owner"],
+            Value::String("0x00000000000000000000000000000000000000b1".to_owned())
+        );
+        assert_eq!(
+            nft_only_row.declared_summary["control"]["latest_event_kind"],
+            Value::String("TokenControlTransferred".to_owned())
+        );
+
+        let management_only_row =
+            load_name_current(database.pool(), &management_only.logical_name_id)
+                .await?
+                .context("management-only basenames row must exist")?;
+        assert_eq!(management_only_row.namespace, BASENAMES_NAMESPACE);
+        assert_eq!(
+            management_only_row.declared_summary["control"]["registrant"],
+            Value::String("0x00000000000000000000000000000000000000a2".to_owned())
+        );
+        assert_eq!(
+            management_only_row.declared_summary["control"]["registry_owner"],
+            Value::String("0x00000000000000000000000000000000000000b2".to_owned())
+        );
+        assert_eq!(
+            management_only_row.declared_summary["control"]["latest_event_kind"],
+            Value::String("AuthorityTransferred".to_owned())
+        );
+
+        let full_transfer_row = load_name_current(database.pool(), &full_transfer.logical_name_id)
+            .await?
+            .context("full-transfer basenames row must exist")?;
+        assert_eq!(full_transfer_row.namespace, BASENAMES_NAMESPACE);
+        assert_eq!(
+            full_transfer_row.declared_summary["control"]["registrant"],
+            Value::String("0x00000000000000000000000000000000000000c3".to_owned())
+        );
+        assert_eq!(
+            full_transfer_row.declared_summary["control"]["registry_owner"],
+            Value::String("0x00000000000000000000000000000000000000c3".to_owned())
+        );
+        assert_eq!(
+            full_transfer_row.declared_summary["control"]["latest_event_kind"],
+            Value::String("AuthorityTransferred".to_owned())
+        );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
     async fn rebuild_keeps_same_binding_for_renewal_and_transfer() -> Result<()> {
         let database = TestDatabase::new().await?;
         let binding = IdentityBinding::new("ens:alice.eth", "alice.eth", 0x4100, 0x4200, 0x4300);
