@@ -7549,25 +7549,30 @@ mod shipped_api {
             database.rebuild_name_current(logical_name_id).await?;
             let record_inventory_row =
                 resolution_record_inventory_current_row(logical_name_id, resource_id);
+            let supported_name_row =
+                bigname_storage::load_name_current(&database.pool, logical_name_id)
+                    .await?
+                    .context("resolution negative fixture requires an exact-name current row")?;
+            let records = parse_resolution_record_keys(
+                Some("text:com.twitter"),
+                ResolutionMode::Verified,
+            )
+            .map_err(|error| anyhow::anyhow!(error.message))?;
+            let cache_key = build_resolution_execution_cache_key(
+                &supported_name_row,
+                &records,
+                Some(&record_inventory_row),
+            )?;
+            let request_key = cache_key.request_key.clone();
+
             database
                 .insert_record_inventory_current_row(record_inventory_row.clone())
                 .await?;
 
-            let mut name_row = bigname_storage::load_name_current(&database.pool, logical_name_id)
-                .await?
-                .context("resolution negative fixture requires an exact-name current row")?;
+            let mut name_row = supported_name_row.clone();
             path_case.apply_to_name_row(&mut name_row);
             database.insert_name_current_row(name_row.clone()).await?;
 
-            let supported_records =
-                parse_resolution_record_keys(Some("text:com.twitter"), ResolutionMode::Verified)
-                    .map_err(|error| anyhow::anyhow!(error.message))?;
-            let cache_key = build_resolution_execution_cache_key(
-                &name_row,
-                &supported_records,
-                Some(&record_inventory_row),
-            )?;
-            let request_key = cache_key.request_key.clone();
             let persisted_verified_queries = resolution_execution_verified_queries(
                 path_case.execution_trace_id(),
                 &["avatar", "text:com.twitter"],
