@@ -115,8 +115,8 @@ Rules:
 
 - `ens` is one public product.
 - ENSv1 and ENSv2 are internal authority epochs, not separate public namespaces.
-- `basenames` is a separate public product for Basenames-issued `*.base.eth` names on Base.
-- `base.eth` itself is not treated as an end-user Basename.
+- `basenames` is a separate public product for Basenames-issued `*.base.eth` names on Base (upstream: .refs/basenames/README.md:L8 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L14 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L70 @ basenames@1809bbc).
+- `base.eth` itself is not treated as an end-user Basename; upstream treats `base.eth` as the root domain handled by the Ethereum Mainnet `L1Resolver`, while Basenames are the `*.base.eth` subdomains managed on Base (upstream: .refs/basenames/src/L1/L1Resolver.sol:L13 @ basenames@1809bbc) (upstream: .refs/basenames/src/L1/L1Resolver.sol:L154 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L70 @ basenames@1809bbc).
 - public namespace assignment is explicit and versioned in an internal `NamespaceRegistry`
 - a technically ENS-backed name may still belong to a different public namespace product
 - no public name may exist twice across public namespaces
@@ -126,7 +126,7 @@ Rules:
 
 Implication:
 
-- `alice.base.eth` may be ENS-compatible internally, but publicly it belongs to `basenames`
+- `alice.base.eth` may be ENS-compatible internally, but publicly it belongs to `basenames` (upstream: .refs/basenames/README.md:L14 @ basenames@1809bbc)
 
 ### `NamespaceRegistry`
 
@@ -156,8 +156,8 @@ Resolution rules:
 
 Initial registry policy:
 
-- exact `base.eth` belongs to `ens`
-- suffix `*.base.eth` belongs to `basenames`
+- exact `base.eth` belongs to `ens` because upstream treats `base.eth` as the L1 root domain handled by the Ethereum Mainnet `L1Resolver`, while Basenames are the `*.base.eth` subdomains managed on Base (upstream: .refs/basenames/src/L1/L1Resolver.sol:L13 @ basenames@1809bbc) (upstream: .refs/basenames/src/L1/L1Resolver.sol:L154 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L70 @ basenames@1809bbc)
+- suffix `*.base.eth` belongs to `basenames` (upstream: .refs/basenames/README.md:L70 @ basenames@1809bbc)
 - other supported ENS surfaces belong to `ens`
 
 Conflicts reject canonical admission until the registry is updated. Namespace assignment happens before `logical_name_id` is minted.
@@ -316,7 +316,7 @@ This is the anchor for:
 
 For ENSv2, `resource_id` maps to the stable resource / canonical ID within a registry and survives token regeneration.  
 For ENSv1, `resource_id` is the stable internal identity for the authority object represented by the registry / wrapper / registration state.  
-For Basenames, `resource_id` anchors the Base-side authority object, even when L1 compatibility transport is involved.
+For Basenames, `resource_id` anchors the Base-side authority object, even when L1 compatibility transport is involved, because upstream keeps the authority stack on Base while cross-chain compatibility enters through the separate Ethereum Mainnet `L1Resolver` (upstream: .refs/basenames/README.md:L69 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L70 @ basenames@1809bbc) (upstream: .refs/basenames/src/L1/L1Resolver.sol:L13 @ basenames@1809bbc).
 
 ENSv1 continuity rule:
 
@@ -514,8 +514,8 @@ Rules:
 - for `ens`, authoritative registration and control come from Ethereum L1
 - `authority_epoch` may be `ens_v1` or `ens_v2` per name and time
 - `authority_epoch` and `resolution_epoch` are separate concepts
-- for `basenames`, authoritative registration and control live on Base
-- the Basenames L1 resolver path is compatibility transport, not a competing authority source
+- for `basenames`, authoritative registration and control live on Base (upstream: .refs/basenames/README.md:L70 @ basenames@1809bbc)
+- the Basenames L1 resolver path is compatibility transport, not a competing authority source (upstream: .refs/basenames/README.md:L69 @ basenames@1809bbc) (upstream: .refs/basenames/src/L1/L1Resolver.sol:L13 @ basenames@1809bbc)
 - primary names are canonical only after the verification algorithm succeeds for the requested `coinType`
 - reverse claims alone are insufficient
 
@@ -561,7 +561,7 @@ Current admitted Basenames split:
 - `basenames_l1_compat`
 - `basenames_execution`
 
-`basenames_offchain` remains a reserved catalog family for later explicit gateway admission and is not part of the current admitted split.
+This admitted Basenames split matches the upstream deployed Registry, BaseRegistrar, L2Resolver, ReverseRegistrar, and L1Resolver contracts on Base Mainnet and Ethereum Mainnet; `basenames_offchain` remains reserved for later explicit gateway admission and is not part of the current admitted split (upstream: .refs/basenames/README.md:L22 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L28 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L29 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L33 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L34 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L71 @ basenames@1809bbc).
 
 ### Shared families
 
@@ -606,13 +606,13 @@ Rules:
 - ENS declared reverse-claim intake on Ethereum Mainnet belongs to `ens_v1_reverse_l1`, whose canonical contract role is `reverse_registrar` at `0xa58E81fe9b61B5c3fE2AFD33CF304c454AbFc7Cb` on the Ethereum `addr.reverse` Reverse Registrar, not to `ens_v1_registry_l1` or `ens_v1_resolver_l1`
 - that ENS reverse-family ownership freezes only the current reverse-only declared claim surface; later fallback claim-setting surfaces, if admitted, require their own source-family owner and a later doc-first contract update
 - for ENS primary-name reads in Phase 7, that reverse-family ownership admits only the reverse-claim tuple; it does not authorize combining reverse-only claim precedence with resolver-backed or execution-derived name identity to manufacture richer `claimed_primary_name` payloads
-- Basenames declared authority on the shipped mainnet profile is split across `basenames_base_registry` through contract role `registry` at `0xb94704422c2a1e396835a571837aa5ae53285a95`, `basenames_base_registrar` through contract role `registrar` at `0x03c4738ee98ae44591e1a4a4f3cab6641d95dd9a`, and `basenames_base_resolver` through contract role `resolver` at `0xC6d566A56A1aFf6508b41f6c90ff131615583BCD`
-- Basenames declared primary-claim intake on the shipped mainnet profile belongs to `basenames_base_primary`, whose canonical contract role is `reverse_registrar` at `0x79ea96012eea67a83431f1701b3dff7e37f9e282`
-- that six-family Basenames split freezes the first declared read-plane boundary: exact-name, address-name, and children reads take declared truth from the Base registry / registrar / resolver families, while `basenames_base_primary` stays a separate claim-intake family
-- Basenames L1 compatibility transport on the shipped mainnet profile belongs to `basenames_l1_compat`, whose canonical contract role is `l1_resolver` at `0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31`
-- Basenames verified resolution on the shipped mainnet profile belongs to `basenames_execution`, whose canonical contract role is `l1_resolver` at `0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31`; `basenames_execution` stays shadow-scoped until public verified Basenames reads ship, and the shared L1 Resolver address does not collapse transport ownership into execution ownership
-- `basenames_offchain` remains reserved for later explicit gateway admission; the current admitted Basenames family split is the six families above, not seven
-- that Basenames freeze does not create separate current source-family owners for registrar-controller, oracle, migration, proxy-admin, or offchain-gateway deployment artifacts
+- Basenames declared authority on the shipped mainnet profile is split across `basenames_base_registry` through contract role `registry` at `0xb94704422c2a1e396835a571837aa5ae53285a95`, `basenames_base_registrar` through contract role `registrar` at `0x03c4738ee98ae44591e1a4a4f3cab6641d95dd9a`, and `basenames_base_resolver` through contract role `resolver` at `0xC6d566A56A1aFf6508b41f6c90ff131615583BCD` (upstream: .refs/basenames/README.md:L28 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L29 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L34 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/Registry.sol:L10 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L15 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/L2Resolver.sol:L22 @ basenames@1809bbc)
+- Basenames declared primary-claim intake on the shipped mainnet profile belongs to `basenames_base_primary`, whose canonical contract role is `reverse_registrar` at `0x79ea96012eea67a83431f1701b3dff7e37f9e282` (upstream: .refs/basenames/README.md:L33 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L12 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L150 @ basenames@1809bbc)
+- that six-family Basenames split freezes the first declared read-plane boundary: exact-name, address-name, and children reads take declared truth from the Base registry / registrar / resolver families, while `basenames_base_primary` stays a separate claim-intake family (upstream: .refs/basenames/README.md:L69 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L70 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L12 @ basenames@1809bbc)
+- Basenames L1 compatibility transport on the shipped mainnet profile belongs to `basenames_l1_compat`, whose canonical contract role is `l1_resolver` at `0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31` (upstream: .refs/basenames/README.md:L22 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L69 @ basenames@1809bbc) (upstream: .refs/basenames/src/L1/L1Resolver.sol:L13 @ basenames@1809bbc)
+- Basenames verified resolution on the shipped mainnet profile belongs to `basenames_execution`, whose canonical contract role is `l1_resolver` at `0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31`; `basenames_execution` keeps `verified_resolution=shadow` until the mixed and execution-explain routes both serve the exact-surface transport-assisted direct-path class, and the shared L1 Resolver address does not collapse transport ownership into execution ownership (upstream: .refs/basenames/README.md:L22 @ basenames@1809bbc) (upstream: .refs/basenames/src/L1/L1Resolver.sol:L154 @ basenames@1809bbc) (upstream: .refs/basenames/src/L1/L1Resolver.sol:L173 @ basenames@1809bbc) (upstream: .refs/basenames/src/L1/L1Resolver.sol:L191 @ basenames@1809bbc)
+- `basenames_offchain` remains reserved for later explicit gateway admission; the current admitted Basenames family split is the six families above, not seven (upstream: .refs/basenames/README.md:L71 @ basenames@1809bbc)
+- that freeze does not create separate current source-family owners for registrar-controller, oracle, migration, proxy-admin, or offchain-gateway deployment artifacts
 - draft or optional features may be enabled behind manifest flags without changing the public contract
 
 ---
@@ -911,6 +911,7 @@ Field semantics:
 - `alias` is an object with `final_target` and `hops`
 - `version_boundaries` is an object with `topology_version_boundary` and `record_version_boundary`
 - `transport` is an object with `source_chain_id`, `target_chain_id`, `contract_address`, and `latest_event_kind`
+- when compatibility transport participates, `transport.source_chain_id` names the declared-authority chain and `transport.target_chain_id` names the compatibility-entrypoint chain; for the frozen Basenames promotion-target class that freezes to `base-mainnet -> ethereum-mainnet` through the Basenames L1 Resolver because upstream deploys the Basenames authority stack on Base and the `L1Resolver` on Ethereum Mainnet (upstream: .refs/basenames/README.md:L22 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L28 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L29 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L34 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L69 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L70 @ basenames@1809bbc)
 
 Rules:
 
@@ -998,7 +999,9 @@ Rules:
 - the already frozen ENS alias-only non-direct support class is the exact-surface class where that same declared topology snapshot keeps `resolver_path[0].logical_name_id` equal to the route surface `logical_name_id`, `alias.final_target` non-`null` with `hops` non-empty, `wildcard.source=null` with `matched_labels=[]`, and all `transport` fields are `null`
 - the first additive ENS wildcard-derived support class is the exact-surface class where `wildcard.source` is non-`null` with `matched_labels` non-empty, `resolver_path[0].logical_name_id` equals `wildcard.source.logical_name_id`, `alias.final_target=null` with `hops=[]`, `subregistry_path=[]`, and all `transport` fields are `null`
 - ENS verified paths outside the direct-path, alias-only, and wildcard-derived classes, including other non-alias ancestor-selected paths, linked-subregistry ancestor-selected paths, any transport-assisted path, and any request whose persisted execution used CCIP-Read, remain deferred and return explicit selector-local `unsupported` results rather than silently widening support
-- Basenames verified reads remain bootstrap-scaffolded and selector-local `unsupported` until Base-side authority plus L1 compatibility transport are both wired into the verified plane
+- while `basenames_execution` remains `shadow`, public Basenames verified reads stay explicit `unsupported`; the first Basenames verified-resolution class frozen for promotion to `supported` is the exact-surface transport-assisted direct-path class where `resolver_path[0].logical_name_id` equals the route surface `logical_name_id`, `wildcard.source=null` with `matched_labels=[]`, `alias.final_target=null` with `hops=[]`, `subregistry_path=[]`, `transport.source_chain_id="base-mainnet"`, `transport.target_chain_id="ethereum-mainnet"`, and `transport.contract_address="0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31"`; that keeps declared authority on Base while publishing the separate L1 compatibility hop in the same declared topology snapshot (upstream: .refs/basenames/README.md:L22 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L28 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L29 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L34 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L69 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L70 @ basenames@1809bbc)
+- when `basenames_execution` graduates from `shadow` to `supported`, that frozen Basenames class includes CCIP-participating traces rather than selector-local `unsupported` because the upstream `L1Resolver` initiates `OffchainLookup` for non-`base.eth` requests and completes them through `resolveWithProof` (upstream: .refs/basenames/src/L1/L1Resolver.sol:L154 @ basenames@1809bbc) (upstream: .refs/basenames/src/L1/L1Resolver.sol:L173 @ basenames@1809bbc) (upstream: .refs/basenames/src/L1/L1Resolver.sol:L191 @ basenames@1809bbc)
+- after that promotion, other Basenames verified path classes remain explicit selector-local `unsupported` until a later doc-first contract update broadens support and keeps future gateway admission separate from the frozen Base-authority-plus-L1Resolver slice (upstream: .refs/basenames/README.md:L69 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L70 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L71 @ basenames@1809bbc)
 - verified answers must persist an execution trace
 - wildcard traversal, alias rewriting, and CCIP flows must be explainable end-to-end
 
@@ -1015,13 +1018,13 @@ Rules:
 
 Rules:
 
-- the shipped explain route stays coupled to the same public verified-support boundary and explains persisted supported answers only; it does not fabricate trace-shaped public responses for deferred ENS non-direct paths or Basenames scaffolding
-- for the supported ENS alias-only and wildcard-derived classes, explainability must stay trace-backed and exact-surface-scoped: the persisted explain payload makes the participating alias rewrite or wildcard traversal explicit while transport-assisted, CCIP-participating, other non-alias ancestor-selected, linked-subregistry ancestor-selected, and Basenames paths remain outside the shipped public explain surface
+- the shipped explain route stays coupled to the same public verified-support boundary and explains persisted supported answers only; it does not fabricate trace-shaped public responses for deferred ENS non-direct paths or for Basenames paths outside the frozen transport-assisted direct class (upstream: .refs/basenames/README.md:L69 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L70 @ basenames@1809bbc)
+- for the supported ENS alias-only and wildcard-derived classes, and for the supported Basenames transport-assisted direct class, explainability must stay trace-backed and exact-surface-scoped: the persisted explain payload makes the participating alias rewrite, wildcard traversal, or Basenames CCIP transport explicit while other transport-assisted, CCIP-participating, non-alias ancestor-selected, or linked-subregistry paths remain outside the shipped public explain surface (upstream: .refs/basenames/src/L1/L1Resolver.sol:L154 @ basenames@1809bbc) (upstream: .refs/basenames/src/L1/L1Resolver.sol:L173 @ basenames@1809bbc) (upstream: .refs/basenames/src/L1/L1Resolver.sol:L191 @ basenames@1809bbc)
 
 For Basenames, resolution must expose both:
 
-- Base-native authority / state
-- L1 compatibility transport context
+- Base-native authority / state (upstream: .refs/basenames/README.md:L70 @ basenames@1809bbc)
+- L1 compatibility transport context (upstream: .refs/basenames/README.md:L69 @ basenames@1809bbc) (upstream: .refs/basenames/src/L1/L1Resolver.sol:L13 @ basenames@1809bbc)
 
 ---
 
@@ -1087,20 +1090,20 @@ Rules:
 - verified primary names require the verification algorithm to succeed
 - reverse claims alone are insufficient
 - for ENS on Ethereum Mainnet, the current declared claim precedence is reverse-only through `ens_v1_reverse_l1` and its `reverse_registrar` entrypoint at `0xa58E81fe9b61B5c3fE2AFD33CF304c454AbFc7Cb`
-- for Basenames on the shipped mainnet profile, the admitted declared primary-claim family is `basenames_base_primary` through contract role `reverse_registrar` at `0x79ea96012eea67a83431f1701b3dff7e37f9e282`; it remains claim intake only and does not replace the Base registry / registrar / resolver families as the declared truth for exact-name, address-name, or children reads
+- for Basenames on the shipped mainnet profile, the admitted declared primary-claim family is `basenames_base_primary` through contract role `reverse_registrar` at `0x79ea96012eea67a83431f1701b3dff7e37f9e282`; it remains claim intake only and does not replace the Base registry / registrar / resolver families as the declared truth for exact-name, address-name, or children reads because upstream exposes reverse-name claims through the dedicated ReverseRegistrar rather than the Base authority stack (upstream: .refs/basenames/README.md:L33 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L12 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L150 @ basenames@1809bbc)
 - missing or unsupported ENS reverse claims do not trigger fallback to registry-, resolver-, or other claim-setting surfaces in this phase
 - any fallback beyond that reverse-only ENS claim surface remains deferred and requires a later doc-first contract update; manifest presence alone does not widen claim precedence
 - `claimed_primary_name.name`, when present, comes only from the exact requested `primary_names_current(address, coin_type, namespace)` row's declared normalized claim-identity source for that same tuple, aligned with the currently admitted reverse-only claim precedence
 - it must not be synthesized or backfilled from manifest presence, resolver-backed identity, verified execution identity, tuple presence alone, a different tuple, or any fallback claim source
 - `claimed_primary_name.name` remains distinct from execution-derived `verified_primary_name.name`; this clarification does not change when `verified_primary_name.name` appears, and it does not by itself change route-level primary-name coverage, which stays bootstrap `unsupported` unless a separate doc-first coverage change lands
-- for Basenames as well as ENS, admitted claim intake does not collapse `claimed_primary_name` and `verified_primary_name`: claim-local state stays separate from execution-local state, and Base authority reads plus shadow execution admission do not let one backfill the other
+- for Basenames as well as ENS, admitted claim intake does not collapse `claimed_primary_name` and `verified_primary_name`: claim-local state stays separate from execution-local state, and Base authority reads plus the separate Ethereum Mainnet `L1Resolver` execution owner do not let one backfill the other (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L12 @ basenames@1809bbc) (upstream: .refs/basenames/src/L1/L1Resolver.sol:L13 @ basenames@1809bbc)
 - in Phase 7, that reverse-only ENS claim precedence does not combine with resolver-backed or execution-derived name data to enrich `claimed_primary_name`; `claimed_primary_name.name` stays limited to that exact requested row's declared normalized claim-identity source, `claimed_primary_name.provenance` is limited to exact-tuple declared row provenance, and richer fallback-expanded claimed payloads remain blocked
 - the first additive ENS verified-primary readback slice uses stable execution identity `request_type=verified_primary_name` with request-key identity `{namespace}:{normalized_address}:{coin_type}` for the exact route tuple; claimed text, normalized name identity, verified target address, result status, and section-local provenance are outside that cache identity
 - the matching `primary_names_current(address, coin_type, namespace)` row is the only admitted claim-side lookup / invalidation anchor for that verified request; the projection may carry claim-local lookup and invalidation inputs only, and it does not become a second verified ledger
 - `claimed_primary_name.provenance` is the first public claim-local section provenance on this route: exact-tuple declared-only provenance from the requested `primary_names_current(address, coin_type, namespace)` row, stripped of `verified_primary_name_lookup` / `verified_primary_name_invalidation`, and with no `execution_trace_id`
 - `verified_primary_name.provenance` is part of the shipped public field boundary and is limited to `{execution_trace_id, manifest_versions}`: it is a strict verification-local refinement for the exact tuple, `verified_primary_name.provenance.execution_trace_id` must equal top-level `provenance.execution_trace_id`, `verified_primary_name.provenance.manifest_versions` must narrow that same persisted verification trace, and it must not publish `verified_primary_name_lookup` / `verified_primary_name_invalidation` hook material, restate claimed-row provenance, or publish other `Provenance` fields at this section-local boundary
 - top-level route provenance joins declared claim inputs with any persisted verification trace; `claimed_primary_name.provenance` stays row-scoped and declared-only, and `verified_primary_name.provenance`, when present, stays verification-local within that same top-level `execution_trace_id`
-- Basenames claim-setting operations affect the claim surface, but the read contract still distinguishes claim from verified primary name
+- Basenames claim-setting operations affect the claim surface, but the read contract still distinguishes claim from verified primary name because upstream keeps reverse-name writes on the ReverseRegistrar while verified resolution enters through the separate `L1Resolver` (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L193 @ basenames@1809bbc) (upstream: .refs/basenames/src/L1/L1Resolver.sol:L13 @ basenames@1809bbc)
 
 ---
 
@@ -1128,7 +1131,7 @@ Rules:
 - route-level exact-lookup coverage and subdocument support are separate concerns
 - each declared summary section is always present as an object
 - any declared summary section that is not yet projected must return an explicit unsupported object instead of disappearing silently
-- for `namespace=basenames`, exact-name declared truth stays on the admitted Base authority split `basenames_base_registry`, `basenames_base_registrar`, and `basenames_base_resolver`; `basenames_base_primary` remains primary-claim intake only, and neither `basenames_l1_compat` nor `basenames_execution` widens this declared route
+- for `namespace=basenames`, exact-name declared truth stays on the admitted Base authority split `basenames_base_registry`, `basenames_base_registrar`, and `basenames_base_resolver`; `basenames_base_primary` remains primary-claim intake only, and neither `basenames_l1_compat` nor `basenames_execution` widens this declared route because upstream keeps the registry / registrar / resolver stack on Base while reverse claims and the Ethereum Mainnet `L1Resolver` remain separate surfaces (upstream: .refs/basenames/README.md:L69 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L70 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L12 @ basenames@1809bbc)
 - `authority` may fall back to the current binding identifiers when the binding is known but a richer authority summary is not yet projected
 - exact-name `control` is a narrow current-control summary for the bound `resource_id`; in the initial contract it carries `registrant`, `registry_owner`, and `latest_event_kind`, and it stays narrower than both the internal `ControlVector` and the dedicated resource-permissions truth family
 - exact-name `control` may repeat the current `registrant` already visible in `registration` when the same canonical facts drive both summaries; that duplication is intentional and does not create a second control truth system
@@ -1159,7 +1162,7 @@ Rules:
 - default sort is `display_name_asc`
 - exhaustiveness is only authoritative for source classes with enumerable ownership / assignment surfaces
 - wildcard- and offchain-derived names are never silently treated as exhaustive enumeration results
-- for `namespace=basenames`, address-to-name membership and relation facets derive from the admitted Base authority split rather than reverse-claim or transport state; `basenames_base_primary`, `basenames_l1_compat`, and `basenames_execution` do not add rows or widen relation semantics on this route
+- for `namespace=basenames`, address-to-name membership and relation facets derive from the admitted Base authority split rather than reverse-claim or transport state; `basenames_base_primary`, `basenames_l1_compat`, and `basenames_execution` do not add rows or widen relation semantics on this route because upstream separates Base-side name ownership / resolver state from reverse claims and the Ethereum Mainnet `L1Resolver` transport (upstream: .refs/basenames/README.md:L69 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L70 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L12 @ basenames@1809bbc)
 - role-summary expansion is additive; it must not change item identity, supported filters, grouping semantics, default sort, cursor behavior, or coverage meaning
 
 ### 21.3 Address → names with `include=role_summary`
@@ -1204,7 +1207,7 @@ Rules:
 - `subname_count` in the main name summary means declared direct children only
 - linked, alias-derived, and wildcard-observed child counts are separate metrics
 - a child can appear in multiple public surfaces when backing resources are shared
-- for `namespace=basenames`, declared direct child surfaces come from the admitted Base authority split only; `basenames_base_primary` claim intake, `basenames_l1_compat` transport, and shadow `basenames_execution` do not create child rows or widen supported child buckets
+- for `namespace=basenames`, declared direct child surfaces come from the admitted Base authority split only; `basenames_base_primary` claim intake, `basenames_l1_compat` transport, and shadow `basenames_execution` do not create child rows or widen supported child buckets because upstream places `*.base.eth` subdomain registration on the Base registry / registrar stack while reverse claims and the L1 resolver stay separate (upstream: .refs/basenames/README.md:L8 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L69 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L70 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L12 @ basenames@1809bbc)
 
 ### 21.5 Resource → permissions
 
@@ -1342,8 +1345,8 @@ Verified execution is a required subsystem.
 Default verified resolution paths:
 
 - ENS uses `ens_execution` with contract role `universal_resolver` at `0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe` as the canonical verified-resolution entrypoint on Ethereum Mainnet; the shipped public verified slice covers exact-surface direct-path requests, the already frozen exact-surface alias-only non-direct class, and the first additive exact-surface wildcard-derived class, using the same route-level support check over declared topology
-- Basenames uses `basenames_execution` with contract role `l1_resolver` at `0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31` as the canonical verified-resolution entrypoint on Ethereum Mainnet; `basenames_l1_compat` owns that same L1 Resolver address as compatibility transport, and public verified Basenames reads remain bootstrap-scaffolded and explicit unsupported until that L1 path plus the admitted Base authority families are wired end-to-end
-- that verified-only Basenames `unsupported` boundary does not suppress the separate declared read plane: exact-name, address-name, children, and declared exact-name explain reads stay on Base-side declared truth while verified execution and public execution explain remain deferred
+- Basenames uses `basenames_execution` with contract role `l1_resolver` at `0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31` as the canonical verified-resolution entrypoint on Ethereum Mainnet; `basenames_l1_compat` owns that same L1 Resolver address as compatibility transport, and while `basenames_execution` remains `shadow`, public Basenames verified / explain reads stay explicit `unsupported`. The first Basenames verified / explain class frozen for promotion to `supported` is the exact-surface transport-assisted direct-path class where `resolver_path[0].logical_name_id` equals the route surface, `wildcard.source=null` with `matched_labels=[]`, `alias.final_target=null` with `hops=[]`, `subregistry_path=[]`, `transport.source_chain_id="base-mainnet"`, `transport.target_chain_id="ethereum-mainnet"`, and `transport.contract_address="0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31"` (upstream: .refs/basenames/README.md:L22 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L28 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L29 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L34 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L69 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L70 @ basenames@1809bbc)
+- that frozen Basenames verified-support target does not suppress the separate declared read plane: exact-name, address-name, children, and declared exact-name explain reads stay on Base-side declared truth while only Basenames paths outside the frozen transport-assisted direct class remain deferred after promotion (upstream: .refs/basenames/README.md:L69 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L70 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L12 @ basenames@1809bbc)
 
 The execution engine must support:
 
@@ -1551,7 +1554,7 @@ The system is done for its first production milestone when:
 - every primary-name answer distinguishes claim from verified result
 - ENS names transition across ENSv1 and ENSv2 without duplicating public-surface identity
 - multiple public surfaces can bind to one backing resource without duplicating control history
-- Basenames remain a separate public namespace even though they reuse ENS-style infrastructure
+- Basenames remain a separate public namespace even though they reuse ENS-style infrastructure (upstream: .refs/basenames/README.md:L14 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L70 @ basenames@1809bbc)
 - no answer silently drops unsupported source classes or resolver types
 - projections rebuild deterministically from canonical facts
 - reorg recovery requires no manual projection patching

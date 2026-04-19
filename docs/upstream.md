@@ -39,7 +39,11 @@ Use this exact shape everywhere — docs, ADRs, manifests, code comments, task w
 
 Intentional differences between our docs/manifests and upstream. Every divergence lives here so that citations reading "differently than upstream" are legible instead of looking like bugs. If a divergence is not in this list, it should be treated as drift and closed — either by updating our doc or by adding the entry.
 
-_This list is seeded empty. Add entries as they are discovered or introduced._
+> **Basenames verified/explain public support narrowing** — bigname narrows the upstream Basenames L1Resolver and CCIP entrypoint into one first public support class instead of publishing every upstream-reachable non-`base.eth` path immediately.
+> **Upstream**: `(upstream: .refs/basenames/README.md:L69 @ basenames@1809bbc)` `(upstream: .refs/basenames/README.md:L70 @ basenames@1809bbc)` `(upstream: .refs/basenames/README.md:L71 @ basenames@1809bbc)` `(upstream: .refs/basenames/src/L1/L1Resolver.sol:L154 @ basenames@1809bbc)` `(upstream: .refs/basenames/src/L1/L1Resolver.sol:L173 @ basenames@1809bbc)`
+> **Our rule**: `docs/api-v1.md` § `GET /v1/resolutions/{namespace}/{name}` and § `GET /v1/explain/resolutions/{namespace}/{name}/execution`; mirrored in `docs/execution.md` § Initial Support Boundary and `docs/manifests.md` § Basenames source-family ownership.
+> **Why**: freeze the first Basenames consumer-replacement slice on the declared Base-authority plus L1-transport boundary before widening alias-participating, wildcard-derived, linked-subregistry, transport-free, or offchain-gateway path classes.
+> **Since**: `2026-04-19`
 
 Per-entry format:
 
