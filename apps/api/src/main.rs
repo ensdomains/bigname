@@ -2157,6 +2157,16 @@ async fn explain_resolution_execution_current(
             ))
         })?;
 
+    if resolution_verified_support_boundary(&row, record_inventory_current.as_ref()).is_none() {
+        return Err(ApiError {
+            status: StatusCode::NOT_FOUND,
+            code: "not_found",
+            message: format!(
+                "persisted resolution execution explain was not found for name {name} in namespace {namespace}"
+            ),
+        });
+    }
+
     let cache_key_records = resolution_execution_cache_lookup_records(&row, &records);
     let cache_key = build_resolution_execution_cache_key(
         &row,
@@ -3528,7 +3538,8 @@ fn supported_resolution_verified_readback_records(
         .iter()
         .filter(|record| {
             supports_resolution_verified_lookup_record(record)
-                || (resolution_supports_avatar_readback(row) && is_resolution_avatar_record(record))
+                || (resolution_supports_avatar_readback(row, None)
+                    && is_resolution_avatar_record(record))
         })
         .cloned()
         .collect()
@@ -3540,10 +3551,7 @@ async fn load_resolution_verified_outcome(
     records: &[ResolutionRecordKey],
     record_inventory_row: Option<&RecordInventoryCurrentRow>,
 ) -> Result<Option<ExecutionOutcome>> {
-    if record_inventory_row.is_none() {
-        return Ok(None);
-    }
-    if build_supported_resolution_verified_boundary(row).is_none() {
+    if resolution_verified_support_boundary(row, record_inventory_row).is_none() {
         return Ok(None);
     }
 
@@ -3670,6 +3678,10 @@ fn build_resolution_execution_resolver_discovery_path(
     row: &NameCurrentRow,
     trace: &ExecutionTrace,
 ) -> JsonValue {
+    if let Some(resolver_path) = projected_resolution_resolver_path(&row.declared_summary) {
+        return resolver_path;
+    }
+
     let declared_resolver = provenance_field(&row.declared_summary, "resolver");
     let chain_id = trace
         .contracts_called
@@ -3809,6 +3821,17 @@ fn build_resolution_topology(
     row: &NameCurrentRow,
     record_inventory_row: Option<&RecordInventoryCurrentRow>,
 ) -> JsonValue {
+    if let Some(projected_topology) = projected_resolution_topology(&row.declared_summary) {
+        return projected_topology;
+    }
+
+    build_legacy_resolution_topology(row, record_inventory_row)
+}
+
+fn build_legacy_resolution_topology(
+    row: &NameCurrentRow,
+    record_inventory_row: Option<&RecordInventoryCurrentRow>,
+) -> JsonValue {
     if row.namespace != "ens"
         || row.binding_kind != Some(SurfaceBindingKind::DeclaredRegistryPath)
         || row.resource_id.is_none()
@@ -3888,6 +3911,20 @@ fn build_resolution_topology(
     insert_value_field(&mut topology, "version_boundaries", version_boundaries);
     insert_value_field(&mut topology, "transport", transport);
     topology
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum SupportedResolutionPathClass {
+    Direct,
+    AliasOnly,
+    WildcardDerived,
+}
+
+struct ResolutionVerifiedSupportBoundary {
+    #[allow(dead_code)]
+    path_class: SupportedResolutionPathClass,
+    topology_version_boundary: JsonValue,
+    record_version_boundary: JsonValue,
 }
 
 fn build_resolution_name_ref(row: &NameCurrentRow) -> JsonValue {
@@ -3998,22 +4035,15 @@ fn build_resolution_execution_cache_key(
         );
     }
 
-    let topology_version_boundary = build_supported_resolution_verified_boundary(row)
-        .or_else(|| resolution_record_version_boundary(row, record_inventory_row))
+    let support_boundary = resolution_verified_support_boundary(row, record_inventory_row)
         .with_context(|| {
             format!(
-                "resolution execution explain requires a topology boundary for {}",
+                "resolution execution explain requires a supported topology boundary for {}",
                 row.logical_name_id
             )
         })?;
-    let record_version_boundary = resolution_record_version_boundary(row, record_inventory_row)
-        .or_else(|| build_supported_resolution_verified_boundary(row))
-        .with_context(|| {
-            format!(
-                "resolution execution explain requires a record boundary for {}",
-                row.logical_name_id
-            )
-        })?;
+    let topology_version_boundary = support_boundary.topology_version_boundary;
+    let record_version_boundary = support_boundary.record_version_boundary;
 
     Ok(ExecutionCacheKey {
         request_key: normalized_resolution_request_key(
@@ -4096,7 +4126,7 @@ fn resolution_execution_cache_lookup_records(
     row: &NameCurrentRow,
     records: &[ResolutionRecordKey],
 ) -> Vec<ResolutionRecordKey> {
-    if !resolution_supports_avatar_readback(row) {
+    if !resolution_supports_avatar_readback(row, None) {
         return records.to_vec();
     }
 
@@ -4188,8 +4218,11 @@ fn is_resolution_avatar_record(record: &ResolutionRecordKey) -> bool {
         && record.selector_key.is_none()
 }
 
-fn resolution_supports_avatar_readback(row: &NameCurrentRow) -> bool {
-    build_supported_resolution_verified_boundary(row).is_some()
+fn resolution_supports_avatar_readback(
+    row: &NameCurrentRow,
+    record_inventory_row: Option<&RecordInventoryCurrentRow>,
+) -> bool {
+    resolution_verified_support_boundary(row, record_inventory_row).is_some()
 }
 
 fn build_supported_resolution_verified_boundary(row: &NameCurrentRow) -> Option<JsonValue> {
@@ -4209,6 +4242,152 @@ fn build_supported_resolution_verified_boundary(row: &NameCurrentRow) -> Option<
     }
 
     Some(build_resolution_version_boundary(row, &chain_position))
+}
+
+fn projected_resolution_topology(summary: &JsonValue) -> Option<JsonValue> {
+    provenance_field(summary, "topology")
+        .filter(|value| value.is_object())
+        .cloned()
+}
+
+fn projected_resolution_resolver_path(summary: &JsonValue) -> Option<JsonValue> {
+    projected_resolution_topology(summary).and_then(|topology| {
+        provenance_field(&topology, "resolver_path")
+            .filter(|value| value.is_array())
+            .cloned()
+    })
+}
+
+fn resolution_verified_support_boundary(
+    row: &NameCurrentRow,
+    record_inventory_row: Option<&RecordInventoryCurrentRow>,
+) -> Option<ResolutionVerifiedSupportBoundary> {
+    if row.namespace != "ens" {
+        return None;
+    }
+
+    if let Some(projected_topology) = projected_resolution_topology(&row.declared_summary) {
+        let path_class =
+            classify_supported_resolution_topology(&row.logical_name_id, &projected_topology)?;
+        let version_boundaries = provenance_field(&projected_topology, "version_boundaries")?;
+        let topology_version_boundary =
+            provenance_field(version_boundaries, "topology_version_boundary")?.clone();
+        let record_version_boundary =
+            provenance_field(version_boundaries, "record_version_boundary")?.clone();
+        return Some(ResolutionVerifiedSupportBoundary {
+            path_class,
+            topology_version_boundary,
+            record_version_boundary,
+        });
+    }
+
+    let topology_version_boundary = build_supported_resolution_verified_boundary(row)?;
+    let record_version_boundary = resolution_record_version_boundary(row, record_inventory_row)
+        .or_else(|| Some(topology_version_boundary.clone()))?;
+    let path_class = match row.binding_kind {
+        Some(SurfaceBindingKind::ResolverAliasPath) => SupportedResolutionPathClass::AliasOnly,
+        _ => SupportedResolutionPathClass::Direct,
+    };
+
+    Some(ResolutionVerifiedSupportBoundary {
+        path_class,
+        topology_version_boundary,
+        record_version_boundary,
+    })
+}
+
+fn classify_supported_resolution_topology(
+    logical_name_id: &str,
+    topology: &JsonValue,
+) -> Option<SupportedResolutionPathClass> {
+    if summary_is_unsupported(Some(topology)) || !resolution_topology_transport_is_null(topology) {
+        return None;
+    }
+
+    let resolver_logical_name_id = resolution_topology_resolver_logical_name_id(topology)?;
+    let alias_present = resolution_topology_alias_is_present(topology)?;
+    let wildcard_source_logical_name_id = resolution_topology_wildcard_state(topology)?;
+
+    if wildcard_source_logical_name_id.is_some() {
+        if alias_present || !resolution_topology_subregistry_path_is_empty(topology) {
+            return None;
+        }
+        return (resolver_logical_name_id == wildcard_source_logical_name_id?)
+            .then_some(SupportedResolutionPathClass::WildcardDerived);
+    }
+
+    if resolver_logical_name_id != logical_name_id {
+        return None;
+    }
+
+    if alias_present {
+        Some(SupportedResolutionPathClass::AliasOnly)
+    } else {
+        Some(SupportedResolutionPathClass::Direct)
+    }
+}
+
+fn resolution_topology_resolver_logical_name_id(topology: &JsonValue) -> Option<String> {
+    provenance_field(topology, "resolver_path")
+        .and_then(JsonValue::as_array)
+        .and_then(|resolver_path| resolver_path.first())
+        .and_then(|hop| string_field(provenance_field(hop, "logical_name_id")))
+}
+
+fn resolution_topology_alias_is_present(topology: &JsonValue) -> Option<bool> {
+    let alias = provenance_field(topology, "alias")?;
+    let final_target_present = !matches!(
+        provenance_field(alias, "final_target"),
+        None | Some(JsonValue::Null)
+    );
+    let hops = provenance_field(alias, "hops")?.as_array()?;
+    let hops_present = !hops.is_empty();
+
+    if final_target_present != hops_present {
+        return None;
+    }
+
+    Some(final_target_present)
+}
+
+fn resolution_topology_wildcard_state(topology: &JsonValue) -> Option<Option<String>> {
+    let wildcard = provenance_field(topology, "wildcard")?;
+    let matched_labels = provenance_field(wildcard, "matched_labels")?.as_array()?;
+    let source = provenance_field(wildcard, "source");
+
+    match source {
+        None | Some(JsonValue::Null) => matched_labels.is_empty().then_some(None),
+        Some(_) if matched_labels.is_empty() => None,
+        Some(source) => string_field(provenance_field(source, "logical_name_id")).map(Some),
+    }
+}
+
+fn resolution_topology_subregistry_path_is_empty(topology: &JsonValue) -> bool {
+    provenance_field(topology, "subregistry_path")
+        .and_then(JsonValue::as_array)
+        .is_some_and(Vec::is_empty)
+}
+
+fn resolution_topology_transport_is_null(topology: &JsonValue) -> bool {
+    let Some(transport) = provenance_field(topology, "transport") else {
+        return true;
+    };
+
+    for field_name in [
+        "source_chain_id",
+        "target_chain_id",
+        "contract_address",
+        "latest_event_kind",
+    ] {
+        if !matches!(
+            provenance_field(transport, field_name),
+            None | Some(JsonValue::Null)
+        ) {
+            return false;
+        }
+    }
+
+    true
 }
 
 fn record_version_boundary_has_pointer(record_version_boundary: &JsonValue) -> bool {

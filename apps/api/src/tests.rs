@@ -1477,6 +1477,22 @@ fn resolution_execution_outcome(
     logical_name_id: &str,
     resource_id: Uuid,
 ) -> ExecutionOutcome {
+    resolution_execution_outcome_with_boundaries(
+        execution_trace_id,
+        request_key,
+        verified_queries,
+        record_inventory_boundary(logical_name_id, resource_id),
+        record_inventory_boundary(logical_name_id, resource_id),
+    )
+}
+
+fn resolution_execution_outcome_with_boundaries(
+    execution_trace_id: Uuid,
+    request_key: &str,
+    verified_queries: Value,
+    topology_version_boundary: Value,
+    record_version_boundary: Value,
+) -> ExecutionOutcome {
     ExecutionOutcome {
         cache_key: ExecutionCacheKey {
             request_key: request_key.to_owned(),
@@ -1489,8 +1505,8 @@ fn resolution_execution_outcome(
                     "deployment_epoch": "ens_v1"
                 }
             ]),
-            topology_version_boundary: record_inventory_boundary(logical_name_id, resource_id),
-            record_version_boundary: record_inventory_boundary(logical_name_id, resource_id),
+            topology_version_boundary,
+            record_version_boundary,
         },
         execution_trace_id,
         request_type: VERIFIED_RESOLUTION_REQUEST_TYPE.to_owned(),
@@ -4001,6 +4017,724 @@ async fn get_resolution_mode_parsing_populates_expected_sections() -> Result<()>
                 }
             ]
         }))
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_resolution_execution_explain_supports_projected_wildcard_topology() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0x2200);
+    let wildcard_resource_id = Uuid::from_u128(0x4400);
+    let token_lineage_id = Uuid::from_u128(0x1100);
+    let surface_binding_id = Uuid::from_u128(0x3300);
+    let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000027);
+    let request_key = resolution_execution_request_key(&["addr:60"]);
+    let wildcard_source = json!({
+        "logical_name_id": "ens:eth",
+        "namespace": "ens",
+        "normalized_name": "eth",
+        "canonical_display_name": "Eth",
+        "namehash": "namehash:eth",
+        "resource_id": wildcard_resource_id.to_string(),
+        "binding_kind": "observed_wildcard_path"
+    });
+    let wildcard_boundary = record_inventory_boundary("ens:eth", wildcard_resource_id);
+    let projected_topology = json!({
+        "registry_path": [
+            {
+                "logical_name_id": logical_name_id,
+                "namespace": "ens",
+                "normalized_name": "alice.eth",
+                "canonical_display_name": "Alice.eth",
+                "namehash": "namehash:alice.eth",
+                "resource_id": resource_id.to_string(),
+                "binding_kind": "observed_wildcard_path"
+            }
+        ],
+        "subregistry_path": [],
+        "resolver_path": [
+            {
+                "logical_name_id": "ens:eth",
+                "namespace": "ens",
+                "normalized_name": "eth",
+                "canonical_display_name": "Eth",
+                "resource_id": wildcard_resource_id.to_string(),
+                "chain_id": "ethereum-mainnet",
+                "address": "0x0000000000000000000000000000000000000def",
+                "latest_event_kind": "ResolverChanged"
+            }
+        ],
+        "wildcard": {
+            "source": wildcard_source.clone(),
+            "matched_labels": ["alice"]
+        },
+        "alias": {
+            "final_target": null,
+            "hops": []
+        },
+        "version_boundaries": {
+            "topology_version_boundary": wildcard_boundary.clone(),
+            "record_version_boundary": wildcard_boundary.clone()
+        },
+        "transport": {
+            "source_chain_id": null,
+            "target_chain_id": null,
+            "contract_address": null,
+            "latest_event_kind": null
+        }
+    });
+    let persisted_verified_queries = json!([
+        {
+            "record_key": "addr:60",
+            "status": "success",
+            "value": {
+                "coin_type": "60",
+                "value": "0x00000000000000000000000000000000000000aa"
+            },
+            "provenance": {
+                "execution_trace_id": execution_trace_id.to_string()
+            }
+        }
+    ]);
+
+    database
+        .seed_name_current_binding_migrated(
+            logical_name_id,
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+
+    let mut row = exact_name_row(
+        logical_name_id,
+        surface_binding_id,
+        resource_id,
+        token_lineage_id,
+    );
+    row.binding_kind = Some(bigname_storage::SurfaceBindingKind::ObservedWildcardPath);
+    row.declared_summary = json!({
+        "topology": projected_topology.clone()
+    });
+    database.insert_name_current_row(row).await?;
+
+    let mut trace = resolution_execution_trace(
+        execution_trace_id,
+        &request_key,
+        &["addr:60"],
+        persisted_verified_queries.clone(),
+    );
+    trace.request_metadata = json!({
+        "surface": "alice.eth",
+        "record_keys": ["addr:60"],
+        "entrypoint": "universal_resolver",
+        "contract_address": "0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe",
+        "wildcard": {
+            "source": wildcard_source.clone(),
+            "matched_labels": ["alice"]
+        }
+    });
+    let outcome = resolution_execution_outcome_with_boundaries(
+        execution_trace_id,
+        &request_key,
+        persisted_verified_queries,
+        wildcard_boundary.clone(),
+        wildcard_boundary,
+    );
+    upsert_execution_trace(&database.pool, &trace).await?;
+    upsert_execution_outcome(&database.pool, &outcome).await?;
+
+    let explain_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/explain/resolutions/ens/alice.eth/execution?records=addr:60")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("wildcard resolution execution explain request failed")?;
+    let resolution_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resolutions/ens/alice.eth?mode=verified&records=addr:60")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("wildcard mixed resolution request failed")?;
+
+    assert_eq!(explain_response.status(), StatusCode::OK);
+    assert_eq!(resolution_response.status(), StatusCode::OK);
+
+    let explain_payload: ResolutionResponse = read_json(explain_response).await?;
+    let resolution_payload: ResolutionResponse = read_json(resolution_response).await?;
+
+    assert_eq!(
+        resolution_payload.verified_state,
+        Some(json!({
+            "verified_queries": [
+                {
+                    "record_key": "addr:60",
+                    "status": "success",
+                    "value": {
+                        "coin_type": "60",
+                        "value": "0x00000000000000000000000000000000000000aa"
+                    },
+                    "provenance": {
+                        "execution_trace_id": execution_trace_id.to_string()
+                    }
+                }
+            ]
+        }))
+    );
+    assert_eq!(
+        explain_payload
+            .verified_state
+            .as_ref()
+            .and_then(|state| state.get("execution"))
+            .and_then(|execution| execution.get("resolver_discovery_path")),
+        projected_topology.get("resolver_path")
+    );
+    assert_eq!(
+        explain_payload
+            .verified_state
+            .as_ref()
+            .and_then(|state| state.get("execution"))
+            .and_then(|execution| execution.get("wildcard")),
+        Some(&json!({
+            "source": wildcard_source,
+            "matched_labels": ["alice"]
+        }))
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_resolution_both_mode_preserves_projected_topology_for_deferred_ancestor_selected_path()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0x2200);
+    let ancestor_resource_id = Uuid::from_u128(0x5500);
+    let token_lineage_id = Uuid::from_u128(0x1100);
+    let surface_binding_id = Uuid::from_u128(0x3300);
+    let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000028);
+    let request_key = resolution_execution_request_key(&["text:com.twitter"]);
+    let ancestor_boundary = record_inventory_boundary("ens:eth", ancestor_resource_id);
+    let projected_topology = json!({
+        "registry_path": [
+            {
+                "logical_name_id": logical_name_id,
+                "namespace": "ens",
+                "normalized_name": "alice.eth",
+                "canonical_display_name": "Alice.eth",
+                "namehash": "namehash:alice.eth",
+                "resource_id": resource_id.to_string(),
+                "binding_kind": "declared_registry_path"
+            }
+        ],
+        "subregistry_path": [],
+        "resolver_path": [
+            {
+                "logical_name_id": "ens:eth",
+                "namespace": "ens",
+                "normalized_name": "eth",
+                "canonical_display_name": "Eth",
+                "resource_id": ancestor_resource_id.to_string(),
+                "chain_id": "ethereum-mainnet",
+                "address": "0x0000000000000000000000000000000000000def",
+                "latest_event_kind": "ResolverChanged"
+            }
+        ],
+        "wildcard": {
+            "source": null,
+            "matched_labels": []
+        },
+        "alias": {
+            "final_target": null,
+            "hops": []
+        },
+        "version_boundaries": {
+            "topology_version_boundary": ancestor_boundary.clone(),
+            "record_version_boundary": ancestor_boundary.clone()
+        },
+        "transport": {
+            "source_chain_id": null,
+            "target_chain_id": null,
+            "contract_address": null,
+            "latest_event_kind": null
+        }
+    });
+    let persisted_verified_queries = json!([
+        {
+            "record_key": "text:com.twitter",
+            "status": "success",
+            "value": {
+                "value": "@ancestor"
+            },
+            "provenance": {
+                "execution_trace_id": execution_trace_id.to_string()
+            }
+        }
+    ]);
+
+    database
+        .seed_name_current_binding_migrated(
+            logical_name_id,
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+
+    let mut row = exact_name_row(
+        logical_name_id,
+        surface_binding_id,
+        resource_id,
+        token_lineage_id,
+    );
+    row.declared_summary = json!({
+        "topology": projected_topology.clone()
+    });
+    database.insert_name_current_row(row).await?;
+
+    let trace = resolution_execution_trace(
+        execution_trace_id,
+        &request_key,
+        &["text:com.twitter"],
+        persisted_verified_queries.clone(),
+    );
+    let outcome = resolution_execution_outcome_with_boundaries(
+        execution_trace_id,
+        &request_key,
+        persisted_verified_queries,
+        ancestor_boundary.clone(),
+        ancestor_boundary,
+    );
+    upsert_execution_trace(&database.pool, &trace).await?;
+    upsert_execution_outcome(&database.pool, &outcome).await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resolutions/ens/alice.eth?mode=both&records=text:com.twitter")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("deferred ancestor-selected mixed resolution request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let payload: ResolutionResponse = read_json(response).await?;
+    assert_eq!(
+        payload
+            .declared_state
+            .as_ref()
+            .and_then(|state| state.get("topology")),
+        Some(&projected_topology)
+    );
+    assert_eq!(
+        payload.provenance.get("execution_trace_id"),
+        Some(&Value::Null)
+    );
+    assert_eq!(
+        payload.verified_state,
+        Some(json!({
+            "verified_queries": [
+                {
+                    "record_key": "text:com.twitter",
+                    "status": "unsupported",
+                    "unsupported_reason": "verified resolution entrypoint is not yet supported"
+                }
+            ]
+        }))
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_resolution_both_mode_preserves_projected_transport_for_deferred_transport_path()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0x2200);
+    let token_lineage_id = Uuid::from_u128(0x1100);
+    let surface_binding_id = Uuid::from_u128(0x3300);
+    let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000029);
+    let request_key = resolution_execution_request_key(&["addr:60"]);
+    let route_boundary = record_inventory_boundary(logical_name_id, resource_id);
+    let projected_topology = json!({
+        "registry_path": [
+            {
+                "logical_name_id": logical_name_id,
+                "namespace": "ens",
+                "normalized_name": "alice.eth",
+                "canonical_display_name": "Alice.eth",
+                "namehash": "namehash:alice.eth",
+                "resource_id": resource_id.to_string(),
+                "binding_kind": "declared_registry_path"
+            }
+        ],
+        "subregistry_path": [],
+        "resolver_path": [
+            {
+                "logical_name_id": logical_name_id,
+                "namespace": "ens",
+                "normalized_name": "alice.eth",
+                "canonical_display_name": "Alice.eth",
+                "resource_id": resource_id.to_string(),
+                "chain_id": "ethereum-mainnet",
+                "address": "0x0000000000000000000000000000000000000abc",
+                "latest_event_kind": "ResolverChanged"
+            }
+        ],
+        "wildcard": {
+            "source": null,
+            "matched_labels": []
+        },
+        "alias": {
+            "final_target": null,
+            "hops": []
+        },
+        "version_boundaries": {
+            "topology_version_boundary": route_boundary.clone(),
+            "record_version_boundary": route_boundary.clone()
+        },
+        "transport": {
+            "source_chain_id": "ethereum-mainnet",
+            "target_chain_id": "base-mainnet",
+            "contract_address": "0x000000000000000000000000000000000000beef",
+            "latest_event_kind": "TransportResolved"
+        }
+    });
+    let persisted_verified_queries = json!([
+        {
+            "record_key": "addr:60",
+            "status": "success",
+            "value": {
+                "coin_type": "60",
+                "value": "0x00000000000000000000000000000000000000aa"
+            },
+            "provenance": {
+                "execution_trace_id": execution_trace_id.to_string()
+            }
+        }
+    ]);
+
+    database
+        .seed_name_current_binding_migrated(
+            logical_name_id,
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+
+    let mut row = exact_name_row(
+        logical_name_id,
+        surface_binding_id,
+        resource_id,
+        token_lineage_id,
+    );
+    row.declared_summary = json!({
+        "topology": projected_topology.clone()
+    });
+    database.insert_name_current_row(row).await?;
+
+    let trace = resolution_execution_trace(
+        execution_trace_id,
+        &request_key,
+        &["addr:60"],
+        persisted_verified_queries.clone(),
+    );
+    let outcome = resolution_execution_outcome_with_boundaries(
+        execution_trace_id,
+        &request_key,
+        persisted_verified_queries,
+        route_boundary.clone(),
+        route_boundary,
+    );
+    upsert_execution_trace(&database.pool, &trace).await?;
+    upsert_execution_outcome(&database.pool, &outcome).await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resolutions/ens/alice.eth?mode=both&records=addr:60")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("transport-assisted mixed resolution request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let payload: ResolutionResponse = read_json(response).await?;
+    assert_eq!(
+        payload
+            .declared_state
+            .as_ref()
+            .and_then(|state| state.get("topology")),
+        Some(&projected_topology)
+    );
+    assert_eq!(
+        payload.provenance.get("execution_trace_id"),
+        Some(&Value::Null)
+    );
+    assert_eq!(
+        payload.verified_state,
+        Some(json!({
+            "verified_queries": [
+                {
+                    "record_key": "addr:60",
+                    "status": "unsupported",
+                    "unsupported_reason": "verified resolution entrypoint is not yet supported"
+                }
+            ]
+        }))
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_resolution_execution_explain_returns_not_found_for_deferred_ancestor_selected_path()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0x2200);
+    let ancestor_resource_id = Uuid::from_u128(0x5500);
+    let token_lineage_id = Uuid::from_u128(0x1100);
+    let surface_binding_id = Uuid::from_u128(0x3300);
+    let execution_trace_id = Uuid::from_u128(0x0e7ec7ace0000000000000000000002a);
+    let request_key = resolution_execution_request_key(&["text:com.twitter"]);
+    let ancestor_boundary = record_inventory_boundary("ens:eth", ancestor_resource_id);
+
+    database
+        .seed_name_current_binding_migrated(
+            logical_name_id,
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+
+    let mut row = exact_name_row(
+        logical_name_id,
+        surface_binding_id,
+        resource_id,
+        token_lineage_id,
+    );
+    row.declared_summary = json!({
+        "topology": {
+            "registry_path": [],
+            "subregistry_path": [],
+            "resolver_path": [
+                {
+                    "logical_name_id": "ens:eth",
+                    "namespace": "ens",
+                    "normalized_name": "eth",
+                    "canonical_display_name": "Eth",
+                    "resource_id": ancestor_resource_id.to_string(),
+                    "chain_id": "ethereum-mainnet",
+                    "address": "0x0000000000000000000000000000000000000def",
+                    "latest_event_kind": "ResolverChanged"
+                }
+            ],
+            "wildcard": {
+                "source": null,
+                "matched_labels": []
+            },
+            "alias": {
+                "final_target": null,
+                "hops": []
+            },
+            "version_boundaries": {
+                "topology_version_boundary": ancestor_boundary.clone(),
+                "record_version_boundary": ancestor_boundary.clone()
+            },
+            "transport": {
+                "source_chain_id": null,
+                "target_chain_id": null,
+                "contract_address": null,
+                "latest_event_kind": null
+            }
+        }
+    });
+    database.insert_name_current_row(row).await?;
+
+    let persisted_verified_queries = json!([
+        {
+            "record_key": "text:com.twitter",
+            "status": "success",
+            "value": {
+                "value": "@ancestor"
+            },
+            "provenance": {
+                "execution_trace_id": execution_trace_id.to_string()
+            }
+        }
+    ]);
+    let trace = resolution_execution_trace(
+        execution_trace_id,
+        &request_key,
+        &["text:com.twitter"],
+        persisted_verified_queries.clone(),
+    );
+    let outcome = resolution_execution_outcome_with_boundaries(
+        execution_trace_id,
+        &request_key,
+        persisted_verified_queries,
+        ancestor_boundary.clone(),
+        ancestor_boundary,
+    );
+    upsert_execution_trace(&database.pool, &trace).await?;
+    upsert_execution_outcome(&database.pool, &outcome).await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/explain/resolutions/ens/alice.eth/execution?records=text:com.twitter")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("deferred ancestor-selected resolution execution explain request failed")?;
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let payload: ErrorResponse = read_json(response).await?;
+    assert_eq!(payload.error.code, "not_found");
+    assert_eq!(
+        payload.error.message,
+        "persisted resolution execution explain was not found for name alice.eth in namespace ens"
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_resolution_execution_explain_returns_not_found_for_deferred_transport_path()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0x2200);
+    let token_lineage_id = Uuid::from_u128(0x1100);
+    let surface_binding_id = Uuid::from_u128(0x3300);
+    let execution_trace_id = Uuid::from_u128(0x0e7ec7ace0000000000000000000002b);
+    let request_key = resolution_execution_request_key(&["addr:60"]);
+    let route_boundary = record_inventory_boundary(logical_name_id, resource_id);
+
+    database
+        .seed_name_current_binding_migrated(
+            logical_name_id,
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+
+    let mut row = exact_name_row(
+        logical_name_id,
+        surface_binding_id,
+        resource_id,
+        token_lineage_id,
+    );
+    row.declared_summary = json!({
+        "topology": {
+            "registry_path": [],
+            "subregistry_path": [],
+            "resolver_path": [
+                {
+                    "logical_name_id": logical_name_id,
+                    "namespace": "ens",
+                    "normalized_name": "alice.eth",
+                    "canonical_display_name": "Alice.eth",
+                    "resource_id": resource_id.to_string(),
+                    "chain_id": "ethereum-mainnet",
+                    "address": "0x0000000000000000000000000000000000000abc",
+                    "latest_event_kind": "ResolverChanged"
+                }
+            ],
+            "wildcard": {
+                "source": null,
+                "matched_labels": []
+            },
+            "alias": {
+                "final_target": null,
+                "hops": []
+            },
+            "version_boundaries": {
+                "topology_version_boundary": route_boundary.clone(),
+                "record_version_boundary": route_boundary.clone()
+            },
+            "transport": {
+                "source_chain_id": "ethereum-mainnet",
+                "target_chain_id": "base-mainnet",
+                "contract_address": "0x000000000000000000000000000000000000beef",
+                "latest_event_kind": "TransportResolved"
+            }
+        }
+    });
+    database.insert_name_current_row(row).await?;
+
+    let persisted_verified_queries = json!([
+        {
+            "record_key": "addr:60",
+            "status": "success",
+            "value": {
+                "coin_type": "60",
+                "value": "0x00000000000000000000000000000000000000aa"
+            },
+            "provenance": {
+                "execution_trace_id": execution_trace_id.to_string()
+            }
+        }
+    ]);
+    let trace = resolution_execution_trace(
+        execution_trace_id,
+        &request_key,
+        &["addr:60"],
+        persisted_verified_queries.clone(),
+    );
+    let outcome = resolution_execution_outcome_with_boundaries(
+        execution_trace_id,
+        &request_key,
+        persisted_verified_queries,
+        route_boundary.clone(),
+        route_boundary,
+    );
+    upsert_execution_trace(&database.pool, &trace).await?;
+    upsert_execution_outcome(&database.pool, &outcome).await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/explain/resolutions/ens/alice.eth/execution?records=addr:60")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("deferred transport resolution execution explain request failed")?;
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let payload: ErrorResponse = read_json(response).await?;
+    assert_eq!(payload.error.code, "not_found");
+    assert_eq!(
+        payload.error.message,
+        "persisted resolution execution explain was not found for name alice.eth in namespace ens"
     );
 
     database.cleanup().await?;
