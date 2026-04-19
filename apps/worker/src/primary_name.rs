@@ -14,6 +14,7 @@ use sqlx::{
 };
 
 const ENS_NAMESPACE: &str = "ens";
+const BASENAMES_NAMESPACE: &str = "basenames";
 const EVENT_KIND_REVERSE_CHANGED: &str = "ReverseChanged";
 const CANONICAL_STATE_FILTER: &str = r#"
   IN (
@@ -159,11 +160,12 @@ async fn load_reverse_claim_tuples(pool: &PgPool) -> Result<Vec<ReverseClaimTupl
             ne.after_state->>'coin_type' AS coin_type,
             COALESCE(ne.after_state->'claim_provenance', '{{}}'::jsonb) AS claim_provenance
         FROM normalized_events ne
-        WHERE ne.namespace = $1
-          AND ne.event_kind = $2
+        WHERE ne.event_kind = $1
           AND ne.canonicality_state {CANONICAL_STATE_FILTER}
           AND ne.after_state->>'address' IS NOT NULL
           AND ne.after_state->>'address' <> ''
+          AND COALESCE(ne.after_state->>'namespace', ne.namespace) IS NOT NULL
+          AND COALESCE(ne.after_state->>'namespace', ne.namespace) <> ''
           AND ne.after_state->>'coin_type' IS NOT NULL
           AND ne.after_state->>'coin_type' <> ''
         ORDER BY
@@ -175,7 +177,6 @@ async fn load_reverse_claim_tuples(pool: &PgPool) -> Result<Vec<ReverseClaimTupl
             ne.normalized_event_id DESC
         "#,
     ))
-    .bind(ENS_NAMESPACE)
     .bind(EVENT_KIND_REVERSE_CHANGED)
     .fetch_all(pool)
     .await
@@ -196,13 +197,15 @@ async fn load_reverse_claim_tuple(
             ne.after_state->>'coin_type' AS coin_type,
             COALESCE(ne.after_state->'claim_provenance', '{{}}'::jsonb) AS claim_provenance
         FROM normalized_events ne
-        WHERE ne.namespace = $1
-          AND ne.event_kind = $2
+        WHERE ne.event_kind = $1
           AND ne.canonicality_state {CANONICAL_STATE_FILTER}
+          AND COALESCE(ne.after_state->>'namespace', ne.namespace) = $2
           AND LOWER(ne.after_state->>'address') = $3
           AND ne.after_state->>'coin_type' = $4
           AND ne.after_state->>'address' IS NOT NULL
           AND ne.after_state->>'address' <> ''
+          AND COALESCE(ne.after_state->>'namespace', ne.namespace) IS NOT NULL
+          AND COALESCE(ne.after_state->>'namespace', ne.namespace) <> ''
           AND ne.after_state->>'coin_type' IS NOT NULL
           AND ne.after_state->>'coin_type' <> ''
         ORDER BY
@@ -212,8 +215,8 @@ async fn load_reverse_claim_tuple(
         LIMIT 1
         "#,
     ))
-    .bind(&target.namespace)
     .bind(EVENT_KIND_REVERSE_CHANGED)
+    .bind(&target.namespace)
     .bind(&target.address)
     .bind(&target.coin_type)
     .fetch_optional(pool)
@@ -244,8 +247,7 @@ async fn load_latest_name_claim_observations(
             ne.after_state->>'raw_name' AS raw_name,
             ne.after_state->'primary_claim_source' AS primary_claim_source
         FROM normalized_events ne
-        WHERE ne.namespace = $1
-          AND ne.event_kind = 'RecordChanged'
+        WHERE ne.event_kind = 'RecordChanged'
           AND ne.canonicality_state {CANONICAL_STATE_FILTER}
           AND ne.logical_name_id IS NULL
           AND ne.resource_id IS NULL
@@ -253,6 +255,8 @@ async fn load_latest_name_claim_observations(
           AND ne.after_state ? 'primary_claim_source'
           AND ne.after_state->'primary_claim_source'->>'address' IS NOT NULL
           AND ne.after_state->'primary_claim_source'->>'address' <> ''
+          AND COALESCE(ne.after_state->'primary_claim_source'->>'namespace', ne.namespace) IS NOT NULL
+          AND COALESCE(ne.after_state->'primary_claim_source'->>'namespace', ne.namespace) <> ''
           AND ne.after_state->'primary_claim_source'->>'coin_type' IS NOT NULL
           AND ne.after_state->'primary_claim_source'->>'coin_type' <> ''
         ORDER BY
@@ -264,7 +268,6 @@ async fn load_latest_name_claim_observations(
             ne.normalized_event_id DESC
         "#,
     ))
-    .bind(ENS_NAMESPACE)
     .fetch_all(pool)
     .await
     .context("failed to load reverse-linked name claim observations")?;
@@ -288,15 +291,15 @@ async fn load_latest_name_claim_observation(
             ne.after_state->>'raw_name' AS raw_name,
             ne.after_state->'primary_claim_source' AS primary_claim_source
         FROM normalized_events ne
-        WHERE ne.namespace = $1
-          AND ne.event_kind = 'RecordChanged'
+        WHERE ne.event_kind = 'RecordChanged'
           AND ne.canonicality_state {CANONICAL_STATE_FILTER}
           AND ne.logical_name_id IS NULL
           AND ne.resource_id IS NULL
           AND ne.after_state->>'record_key' = 'name'
+          AND ne.after_state ? 'primary_claim_source'
           AND LOWER(ne.after_state->'primary_claim_source'->>'address') = $2
-          AND COALESCE(ne.after_state->'primary_claim_source'->>'namespace', ne.namespace) = $3
-          AND ne.after_state->'primary_claim_source'->>'coin_type' = $4
+          AND COALESCE(ne.after_state->'primary_claim_source'->>'namespace', ne.namespace) = $1
+          AND ne.after_state->'primary_claim_source'->>'coin_type' = $3
         ORDER BY
             ne.block_number DESC NULLS LAST,
             ne.log_index DESC NULLS LAST,
@@ -304,9 +307,8 @@ async fn load_latest_name_claim_observation(
         LIMIT 1
         "#,
     ))
-    .bind(ENS_NAMESPACE)
-    .bind(&target.address)
     .bind(&target.namespace)
+    .bind(&target.address)
     .bind(&target.coin_type)
     .fetch_optional(pool)
     .await
@@ -701,8 +703,162 @@ mod tests {
         }
     }
 
+    fn basenames_reverse_changed_event(
+        event_identity: &str,
+        address: &str,
+        coin_type: &str,
+        block_number: i64,
+        log_index: i64,
+        canonicality_state: CanonicalityState,
+    ) -> NormalizedEvent {
+        let normalized_address = address.to_ascii_lowercase();
+        let reverse_label = normalized_address.trim_start_matches("0x").to_owned();
+
+        NormalizedEvent {
+            event_identity: event_identity.to_owned(),
+            namespace: BASENAMES_NAMESPACE.to_owned(),
+            logical_name_id: None,
+            resource_id: None,
+            event_kind: EVENT_KIND_REVERSE_CHANGED.to_owned(),
+            source_family: "basenames_base_primary".to_owned(),
+            manifest_version: 1,
+            source_manifest_id: None,
+            chain_id: Some("base-mainnet".to_owned()),
+            block_number: Some(block_number),
+            block_hash: Some(format!("0xbaseblock{block_number:064x}")),
+            transaction_hash: Some(format!("0xbasetx{block_number:064x}")),
+            log_index: Some(log_index),
+            raw_fact_ref: json!({
+                "kind": "raw_log",
+                "chain_id": "base-mainnet",
+                "block_number": block_number,
+                "log_index": log_index,
+            }),
+            derivation_kind: "ens_v1_reverse_claim".to_owned(),
+            canonicality_state,
+            before_state: json!({}),
+            after_state: json!({
+                "source_event": "ReverseClaimed",
+                "address": normalized_address,
+                "coin_type": coin_type,
+                "namespace": BASENAMES_NAMESPACE,
+                "reverse_namespace": BASENAMES_NAMESPACE,
+                "reverse_label": reverse_label,
+                "reverse_name": format!("{reverse_label}.addr.reverse"),
+                "reverse_node": format!("0x{block_number:064x}"),
+                "claim_provenance": {
+                    "source_family": "basenames_base_primary",
+                    "contract_role": "reverse_registrar",
+                    "contract_instance_id": format!("00000000-0000-0000-0000-{block_number:012x}"),
+                    "emitting_address": "0x00000000000000000000000000000000000000ad",
+                },
+            }),
+        }
+    }
+
+    fn basenames_reverse_linked_name_event(
+        event_identity: &str,
+        address: &str,
+        coin_type: &str,
+        raw_name: Option<&str>,
+        block_number: i64,
+        log_index: i64,
+        canonicality_state: CanonicalityState,
+    ) -> NormalizedEvent {
+        let normalized_address = address.to_ascii_lowercase();
+        let reverse_label = normalized_address.trim_start_matches("0x").to_owned();
+        let mut after_state = serde_json::Map::from_iter([
+            ("record_key".to_owned(), json!("name")),
+            ("record_family".to_owned(), json!("name")),
+            ("selector_key".to_owned(), Value::Null),
+            (
+                "primary_claim_source".to_owned(),
+                json!({
+                    "address": normalized_address,
+                    "namespace": BASENAMES_NAMESPACE,
+                    "coin_type": coin_type,
+                    "reverse_name": format!("{reverse_label}.addr.reverse"),
+                    "reverse_node": format!("0x{block_number:064x}"),
+                    "claim_provenance": {
+                        "source_family": "basenames_base_primary",
+                        "contract_role": "reverse_registrar",
+                        "contract_instance_id": format!("00000000-0000-0000-0000-{block_number:012x}"),
+                        "emitting_address": "0x00000000000000000000000000000000000000ad",
+                    },
+                }),
+            ),
+        ]);
+        if let Some(raw_name) = raw_name {
+            after_state.insert("raw_name".to_owned(), json!(raw_name));
+        }
+
+        NormalizedEvent {
+            event_identity: event_identity.to_owned(),
+            namespace: BASENAMES_NAMESPACE.to_owned(),
+            logical_name_id: None,
+            resource_id: None,
+            event_kind: "RecordChanged".to_owned(),
+            source_family: "basenames_base_resolver".to_owned(),
+            manifest_version: 1,
+            source_manifest_id: None,
+            chain_id: Some("base-mainnet".to_owned()),
+            block_number: Some(block_number),
+            block_hash: Some(format!("0xbaseclaimblock{block_number:064x}")),
+            transaction_hash: Some(format!("0xbaseclaimtx{block_number:064x}")),
+            log_index: Some(log_index),
+            raw_fact_ref: json!({
+                "kind": "raw_log",
+                "chain_id": "base-mainnet",
+                "block_number": block_number,
+                "log_index": log_index,
+            }),
+            derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+            canonicality_state,
+            before_state: json!({}),
+            after_state: Value::Object(after_state),
+        }
+    }
+
     fn expected_claim_provenance(
         address: &str,
+        coin_type: &str,
+        reverse_block_number: i64,
+        claim_status: PrimaryNameClaimStatus,
+        primary_claim_block_number: Option<i64>,
+    ) -> Value {
+        expected_claim_provenance_for_namespace(
+            address,
+            ENS_NAMESPACE,
+            "ens_v1_reverse_l1",
+            coin_type,
+            reverse_block_number,
+            claim_status,
+            primary_claim_block_number,
+        )
+    }
+
+    fn basenames_expected_claim_provenance(
+        address: &str,
+        coin_type: &str,
+        reverse_block_number: i64,
+        claim_status: PrimaryNameClaimStatus,
+        primary_claim_block_number: Option<i64>,
+    ) -> Value {
+        expected_claim_provenance_for_namespace(
+            address,
+            BASENAMES_NAMESPACE,
+            "basenames_base_primary",
+            coin_type,
+            reverse_block_number,
+            claim_status,
+            primary_claim_block_number,
+        )
+    }
+
+    fn expected_claim_provenance_for_namespace(
+        address: &str,
+        namespace: &str,
+        source_family: &str,
         coin_type: &str,
         reverse_block_number: i64,
         claim_status: PrimaryNameClaimStatus,
@@ -711,7 +867,7 @@ mod tests {
         let normalized_address = address.to_ascii_lowercase();
         let reverse_label = normalized_address.trim_start_matches("0x").to_owned();
         let mut claim_provenance = Map::from_iter([
-            ("source_family".to_owned(), json!("ens_v1_reverse_l1")),
+            ("source_family".to_owned(), json!(source_family)),
             ("contract_role".to_owned(), json!("reverse_registrar")),
             (
                 "contract_instance_id".to_owned(),
@@ -727,7 +883,7 @@ mod tests {
                 VERIFIED_PRIMARY_NAME_LOOKUP_KEY.to_owned(),
                 json!({
                     "address": normalized_address.clone(),
-                    "namespace": ENS_NAMESPACE,
+                    "namespace": namespace,
                     "coin_type": coin_type,
                 }),
             ),
@@ -739,12 +895,12 @@ mod tests {
                 "primary_claim_source".to_owned(),
                 json!({
                     "address": normalized_address.clone(),
-                    "namespace": ENS_NAMESPACE,
+                    "namespace": namespace,
                     "coin_type": coin_type,
                     "reverse_name": format!("{reverse_label}.addr.reverse"),
                     "reverse_node": format!("0x{primary_claim_block_number:064x}"),
                     "claim_provenance": {
-                        "source_family": "ens_v1_reverse_l1",
+                        "source_family": source_family,
                         "contract_role": "reverse_registrar",
                         "contract_instance_id": format!(
                             "00000000-0000-0000-0000-{primary_claim_block_number:012x}"
@@ -1376,6 +1532,150 @@ mod tests {
             .await?
             .map(|snapshot| snapshot.normalized_claim_name),
             Some(None)
+        );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn full_rebuild_projects_basenames_claim_name_from_base_resolver_observation()
+    -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let address = "0x0000000000000000000000000000000000000abc";
+
+        upsert_normalized_events(
+            database.pool(),
+            &[
+                basenames_reverse_changed_event(
+                    "basenames-reverse-a-60",
+                    address,
+                    "60",
+                    500,
+                    0,
+                    CanonicalityState::Canonical,
+                ),
+                basenames_reverse_linked_name_event(
+                    "basenames-record-a-60-success",
+                    address,
+                    "60",
+                    Some("alice.base.eth"),
+                    501,
+                    0,
+                    CanonicalityState::Canonical,
+                ),
+            ],
+        )
+        .await?;
+
+        let summary = rebuild_primary_names_current(database.pool(), None, None, None).await?;
+        assert_eq!(
+            summary,
+            PrimaryNamesCurrentRebuildSummary {
+                requested_tuple_count: 1,
+                upserted_row_count: 1,
+                deleted_row_count: 0,
+                success_row_count: 1,
+                not_found_row_count: 0,
+                invalid_name_row_count: 0,
+            }
+        );
+        assert_eq!(
+            load_primary_name_current(database.pool(), address, BASENAMES_NAMESPACE, "60").await?,
+            Some(PrimaryNameCurrentRow {
+                address: address.to_owned(),
+                namespace: BASENAMES_NAMESPACE.to_owned(),
+                coin_type: "60".to_owned(),
+                claim_status: PrimaryNameClaimStatus::Success,
+                raw_claim_name: None,
+                claim_provenance: basenames_expected_claim_provenance(
+                    address,
+                    "60",
+                    500,
+                    PrimaryNameClaimStatus::Success,
+                    Some(501),
+                ),
+            })
+        );
+        assert_eq!(
+            load_primary_name_current_snapshot(database.pool(), address, BASENAMES_NAMESPACE, "60")
+                .await?
+                .map(|snapshot| snapshot.normalized_claim_name),
+            Some(Some("alice.base.eth".to_owned()))
+        );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn targeted_rebuild_projects_basenames_claim_name_from_base_resolver_observation()
+    -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let address = "0x0000000000000000000000000000000000000def";
+
+        upsert_normalized_events(
+            database.pool(),
+            &[
+                basenames_reverse_changed_event(
+                    "basenames-reverse-b-60",
+                    address,
+                    "60",
+                    600,
+                    0,
+                    CanonicalityState::Canonical,
+                ),
+                basenames_reverse_linked_name_event(
+                    "basenames-record-b-60-success",
+                    address,
+                    "60",
+                    Some("bob.base.eth"),
+                    601,
+                    0,
+                    CanonicalityState::Canonical,
+                ),
+            ],
+        )
+        .await?;
+
+        let summary = rebuild_primary_names_current(
+            database.pool(),
+            Some(address),
+            Some(BASENAMES_NAMESPACE),
+            Some("60"),
+        )
+        .await?;
+        assert_eq!(
+            summary,
+            PrimaryNamesCurrentRebuildSummary {
+                requested_tuple_count: 1,
+                upserted_row_count: 1,
+                deleted_row_count: 0,
+                success_row_count: 1,
+                not_found_row_count: 0,
+                invalid_name_row_count: 0,
+            }
+        );
+        assert_eq!(
+            load_primary_name_current(database.pool(), address, BASENAMES_NAMESPACE, "60").await?,
+            Some(PrimaryNameCurrentRow {
+                address: address.to_owned(),
+                namespace: BASENAMES_NAMESPACE.to_owned(),
+                coin_type: "60".to_owned(),
+                claim_status: PrimaryNameClaimStatus::Success,
+                raw_claim_name: None,
+                claim_provenance: basenames_expected_claim_provenance(
+                    address,
+                    "60",
+                    600,
+                    PrimaryNameClaimStatus::Success,
+                    Some(601),
+                ),
+            })
+        );
+        assert_eq!(
+            load_primary_name_current_snapshot(database.pool(), address, BASENAMES_NAMESPACE, "60")
+                .await?
+                .map(|snapshot| snapshot.normalized_claim_name),
+            Some(Some("bob.base.eth".to_owned()))
         );
 
         database.cleanup().await

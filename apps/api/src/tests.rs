@@ -1017,6 +1017,122 @@ fn primary_name_reverse_linked_name_event(
     }
 }
 
+fn basenames_primary_name_reverse_changed_event(
+    event_identity: &str,
+    address: &str,
+    coin_type: &str,
+    block_number: i64,
+    log_index: i64,
+    canonicality_state: CanonicalityState,
+) -> NormalizedEvent {
+    let normalized_address = address.to_ascii_lowercase();
+    let reverse_label = normalized_address.trim_start_matches("0x").to_owned();
+
+    NormalizedEvent {
+        event_identity: event_identity.to_owned(),
+        namespace: "basenames".to_owned(),
+        logical_name_id: None,
+        resource_id: None,
+        event_kind: "ReverseChanged".to_owned(),
+        source_family: "basenames_base_primary".to_owned(),
+        manifest_version: 1,
+        source_manifest_id: None,
+        chain_id: Some("base-mainnet".to_owned()),
+        block_number: Some(block_number),
+        block_hash: Some(format!("0xbaseblock{block_number:064x}")),
+        transaction_hash: Some(format!("0xbasetx{block_number:064x}")),
+        log_index: Some(log_index),
+        raw_fact_ref: json!({
+            "kind": "raw_log",
+            "chain_id": "base-mainnet",
+            "block_number": block_number,
+            "log_index": log_index,
+        }),
+        derivation_kind: "ens_v1_reverse_claim".to_owned(),
+        canonicality_state,
+        before_state: json!({}),
+        after_state: json!({
+            "source_event": "ReverseClaimed",
+            "address": normalized_address,
+            "coin_type": coin_type,
+            "namespace": "basenames",
+            "reverse_namespace": "basenames",
+            "reverse_label": reverse_label,
+            "reverse_name": format!("{reverse_label}.addr.reverse"),
+            "reverse_node": format!("0x{block_number:064x}"),
+            "claim_provenance": {
+                "source_family": "basenames_base_primary",
+                "contract_role": "reverse_registrar",
+                "contract_instance_id": format!("00000000-0000-0000-0000-{block_number:012x}"),
+                "emitting_address": "0x00000000000000000000000000000000000000ad",
+            },
+        }),
+    }
+}
+
+fn basenames_primary_name_reverse_linked_name_event(
+    event_identity: &str,
+    address: &str,
+    coin_type: &str,
+    raw_name: Option<&str>,
+    block_number: i64,
+    log_index: i64,
+    canonicality_state: CanonicalityState,
+) -> NormalizedEvent {
+    let normalized_address = address.to_ascii_lowercase();
+    let reverse_label = normalized_address.trim_start_matches("0x").to_owned();
+    let mut after_state = serde_json::Map::from_iter([
+        ("record_key".to_owned(), json!("name")),
+        ("record_family".to_owned(), json!("name")),
+        ("selector_key".to_owned(), Value::Null),
+        (
+            "primary_claim_source".to_owned(),
+            json!({
+                "address": normalized_address,
+                "namespace": "basenames",
+                "coin_type": coin_type,
+                "reverse_name": format!("{reverse_label}.addr.reverse"),
+                "reverse_node": format!("0x{block_number:064x}"),
+                "claim_provenance": {
+                    "source_family": "basenames_base_primary",
+                    "contract_role": "reverse_registrar",
+                    "contract_instance_id": format!("00000000-0000-0000-0000-{block_number:012x}"),
+                    "emitting_address": "0x00000000000000000000000000000000000000ad",
+                },
+            }),
+        ),
+    ]);
+    if let Some(raw_name) = raw_name {
+        after_state.insert("raw_name".to_owned(), json!(raw_name));
+    }
+
+    NormalizedEvent {
+        event_identity: event_identity.to_owned(),
+        namespace: "basenames".to_owned(),
+        logical_name_id: None,
+        resource_id: None,
+        event_kind: "RecordChanged".to_owned(),
+        source_family: "basenames_base_resolver".to_owned(),
+        manifest_version: 1,
+        source_manifest_id: None,
+        chain_id: Some("base-mainnet".to_owned()),
+        block_number: Some(block_number),
+        block_hash: Some(format!("0xbaseclaimblock{block_number:064x}")),
+        transaction_hash: Some(format!("0xbaseclaimtx{block_number:064x}")),
+        log_index: Some(log_index),
+        raw_fact_ref: json!({
+            "kind": "raw_log",
+            "chain_id": "base-mainnet",
+            "block_number": block_number,
+            "log_index": log_index,
+        }),
+        derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+        canonicality_state,
+        before_state: json!({}),
+        after_state: Value::Object(after_state),
+    }
+}
+
 fn raw_block(
     chain_id: &str,
     block_hash: &str,
@@ -10898,6 +11014,101 @@ async fn get_primary_names_reads_declared_claim_status_for_exact_tuple() -> Resu
                     "source_family": "ens_v1_reverse_l1",
                     "contract_role": "reverse_registrar",
                     "contract_instance_id": "00000000-0000-0000-0000-0000000000fa",
+                    "emitting_address": "0x00000000000000000000000000000000000000ad",
+                },
+            }
+        }))
+    );
+    assert_eq!(declared_payload.verified_state, None);
+    assert_eq!(both_payload.declared_state, declared_payload.declared_state);
+    assert_eq!(
+        both_payload.verified_state,
+        Some(json!({
+            "verified_primary_name": {
+                "status": "unsupported",
+                "unsupported_reason": "verified primary-name entrypoint is not yet supported",
+            }
+        }))
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_primary_names_reads_basenames_declared_claim_status_for_exact_tuple() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000bcd";
+    upsert_normalized_events(
+        &database.pool,
+        &[
+            basenames_primary_name_reverse_changed_event(
+                "basenames-reverse-a-60",
+                address,
+                "60",
+                260,
+                0,
+                CanonicalityState::Canonical,
+            ),
+            basenames_primary_name_reverse_linked_name_event(
+                "basenames-record-a-60-success",
+                address,
+                "60",
+                Some("Alice.base.eth"),
+                261,
+                0,
+                CanonicalityState::Canonical,
+            ),
+        ],
+    )
+    .await?;
+    worker_primary_name::rebuild_primary_names_current(
+        &database.pool,
+        Some(address),
+        Some("basenames"),
+        Some("60"),
+    )
+    .await?;
+
+    let declared_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/primary-names/{address}?namespace=basenames&coin_type=60&mode=declared"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("declared basenames primary-name status request failed")?;
+    let both_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/primary-names/{address}?namespace=basenames&coin_type=60&mode=both"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("mixed basenames primary-name status request failed")?;
+
+    assert_eq!(declared_response.status(), StatusCode::OK);
+    assert_eq!(both_response.status(), StatusCode::OK);
+
+    let declared_payload: PrimaryNameResponse = read_json(declared_response).await?;
+    let both_payload: PrimaryNameResponse = read_json(both_response).await?;
+
+    assert_eq!(
+        declared_payload.declared_state,
+        Some(json!({
+            "claimed_primary_name": {
+                "status": "success",
+                "name": "alice.base.eth",
+                "provenance": {
+                    "source_family": "basenames_base_primary",
+                    "contract_role": "reverse_registrar",
+                    "contract_instance_id": "00000000-0000-0000-0000-000000000104",
                     "emitting_address": "0x00000000000000000000000000000000000000ad",
                 },
             }

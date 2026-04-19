@@ -628,6 +628,117 @@ mod shipped_api {
                 Ok(())
             }
 
+            async fn seed_basenames_primary_name_claim_observation(
+                &self,
+                address: &str,
+                coin_type: &str,
+                raw_name: &str,
+            ) -> Result<()> {
+                let normalized_address = address.to_ascii_lowercase();
+                let reverse_label = normalized_address.trim_start_matches("0x").to_owned();
+
+                bigname_storage::upsert_normalized_events(
+                    &self.pool,
+                    &[
+                        NormalizedEvent {
+                            event_identity: format!(
+                                "conformance:Basenames:ReverseChanged:{normalized_address}:{coin_type}"
+                            ),
+                            namespace: "basenames".to_owned(),
+                            logical_name_id: None,
+                            resource_id: None,
+                            event_kind: "ReverseChanged".to_owned(),
+                            source_family: "basenames_base_primary".to_owned(),
+                            manifest_version: 1,
+                            source_manifest_id: None,
+                            chain_id: Some("base-mainnet".to_owned()),
+                            block_number: Some(260),
+                            block_hash: Some("0xbaseprimaryname".to_owned()),
+                            transaction_hash: Some("0xtxbaseprimaryname".to_owned()),
+                            log_index: Some(0),
+                            raw_fact_ref: json!({
+                                "kind": "raw_log",
+                                "chain_id": "base-mainnet",
+                                "block_hash": "0xbaseprimaryname",
+                                "block_number": 260,
+                                "transaction_hash": "0xtxbaseprimaryname",
+                                "log_index": 0,
+                            }),
+                            derivation_kind: "ens_v1_reverse_claim".to_owned(),
+                            canonicality_state: CanonicalityState::Canonical,
+                            before_state: json!({}),
+                            after_state: json!({
+                                "source_event": "ReverseClaimed",
+                                "address": normalized_address,
+                                "coin_type": coin_type,
+                                "namespace": "basenames",
+                                "reverse_namespace": "basenames",
+                                "reverse_label": reverse_label,
+                                "reverse_name": format!("{reverse_label}.addr.reverse"),
+                                "reverse_node": "0x0000000000000000000000000000000000000000000000000000000000000104",
+                                "claim_provenance": {
+                                    "source_family": "basenames_base_primary",
+                                    "contract_role": "reverse_registrar",
+                                    "contract_instance_id": "00000000-0000-0000-0000-000000000104",
+                                    "emitting_address": "0x00000000000000000000000000000000000000ad",
+                                },
+                            }),
+                        },
+                        NormalizedEvent {
+                            event_identity: format!(
+                                "conformance:Basenames:RecordChanged:{normalized_address}:{coin_type}"
+                            ),
+                            namespace: "basenames".to_owned(),
+                            logical_name_id: None,
+                            resource_id: None,
+                            event_kind: "RecordChanged".to_owned(),
+                            source_family: "basenames_base_resolver".to_owned(),
+                            manifest_version: 1,
+                            source_manifest_id: None,
+                            chain_id: Some("base-mainnet".to_owned()),
+                            block_number: Some(261),
+                            block_hash: Some("0xbaseclaim".to_owned()),
+                            transaction_hash: Some("0xtxbaseclaim".to_owned()),
+                            log_index: Some(0),
+                            raw_fact_ref: json!({
+                                "kind": "raw_log",
+                                "chain_id": "base-mainnet",
+                                "block_hash": "0xbaseclaim",
+                                "block_number": 261,
+                                "transaction_hash": "0xtxbaseclaim",
+                                "log_index": 0,
+                            }),
+                            derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+                            canonicality_state: CanonicalityState::Canonical,
+                            before_state: json!({}),
+                            after_state: json!({
+                                "record_key": "name",
+                                "record_family": "name",
+                                "selector_key": Value::Null,
+                                "raw_name": raw_name,
+                                "primary_claim_source": {
+                                    "address": normalized_address,
+                                    "namespace": "basenames",
+                                    "coin_type": coin_type,
+                                    "reverse_name": format!("{reverse_label}.addr.reverse"),
+                                    "reverse_node": "0x0000000000000000000000000000000000000000000000000000000000000105",
+                                    "claim_provenance": {
+                                        "source_family": "basenames_base_primary",
+                                        "contract_role": "reverse_registrar",
+                                        "contract_instance_id": "00000000-0000-0000-0000-000000000105",
+                                        "emitting_address": "0x00000000000000000000000000000000000000ad",
+                                    },
+                                },
+                            }),
+                        },
+                    ],
+                )
+                .await
+                .context("failed to seed Basenames primary-name claim observation for conformance")?;
+
+                Ok(())
+            }
+
             async fn rebuild_primary_names_current(
                 &self,
                 address: &str,
@@ -4628,6 +4739,90 @@ mod shipped_api {
         }
 
         #[tokio::test]
+        async fn primary_names_contract_reads_basenames_declared_claimed_name_for_exact_tuple()
+        -> Result<()> {
+            let database = HarnessDatabase::new().await?;
+            let address = "0x0000000000000000000000000000000000000bcd";
+            let expected_data = json!({
+                "address": address,
+                "namespace": "basenames",
+                "coin_type": "60",
+            });
+
+            database
+                .seed_basenames_primary_name_claim_observation(address, "60", "Alice.base.eth")
+                .await?;
+            database
+                .rebuild_primary_names_current(address, "basenames", "60")
+                .await?;
+
+            let declared_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/v1/primary-names/{address}?namespace=basenames&coin_type=60&mode=declared"
+                        ))
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("declared basenames primary-name claimed-name request failed")?;
+            let both_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/v1/primary-names/{address}?namespace=basenames&coin_type=60&mode=both"
+                        ))
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("mixed basenames primary-name claimed-name request failed")?;
+
+            assert_eq!(declared_response.status(), StatusCode::OK);
+            assert_eq!(both_response.status(), StatusCode::OK);
+
+            let declared_payload: PrimaryNameResponse = read_json(declared_response).await?;
+            let both_payload: PrimaryNameResponse = read_json(both_response).await?;
+
+            assert_eq!(declared_payload.data, expected_data);
+            assert_eq!(both_payload.data, expected_data);
+            assert_eq!(
+                declared_payload.declared_state,
+                Some(json!({
+                    "claimed_primary_name": {
+                        "status": "success",
+                        "name": "alice.base.eth",
+                        "provenance": {
+                            "source_family": "basenames_base_primary",
+                            "contract_role": "reverse_registrar",
+                            "contract_instance_id": "00000000-0000-0000-0000-000000000104",
+                            "emitting_address": "0x00000000000000000000000000000000000000ad",
+                        },
+                    }
+                }))
+            );
+            assert_eq!(declared_payload.verified_state, None);
+            assert_eq!(both_payload.declared_state, declared_payload.declared_state);
+            assert_eq!(
+                both_payload.verified_state,
+                Some(json!({
+                    "verified_primary_name": {
+                        "status": "unsupported",
+                        "unsupported_reason": "verified primary-name entrypoint is not yet supported",
+                    }
+                }))
+            );
+
+            for payload in [&declared_payload, &both_payload] {
+                assert_primary_name_bootstrap_invariants(payload);
+            }
+
+            database.cleanup().await?;
+            Ok(())
+        }
+
+        #[tokio::test]
         async fn primary_names_contract_reads_declared_claimed_name_for_exact_tuple()
         -> Result<()> {
             let database = HarnessDatabase::new().await?;
@@ -5197,6 +5392,18 @@ mod shipped_api {
             let declared_payload: PrimaryNameResponse = read_json(declared_response).await?;
             let verified_payload: PrimaryNameResponse = read_json(verified_response).await?;
             let both_payload: PrimaryNameResponse = read_json(both_response).await?;
+            let verified_section_provenance = json!({
+                "manifest_versions": primary_name_execution_manifest_versions(),
+                "execution_trace_id": execution_trace_id.to_string(),
+            });
+            let mut expected_verified_primary_name = verified_primary_name.clone();
+            expected_verified_primary_name
+                .as_object_mut()
+                .expect("verified primary-name fixture must be an object")
+                .insert(
+                    "provenance".to_owned(),
+                    verified_section_provenance.clone(),
+                );
 
             assert_eq!(declared_payload.data, expected_data);
             assert_eq!(verified_payload.data, expected_data);
@@ -5215,7 +5422,7 @@ mod shipped_api {
             assert_eq!(
                 verified_payload.verified_state,
                 Some(json!({
-                    "verified_primary_name": verified_primary_name.clone(),
+                    "verified_primary_name": expected_verified_primary_name,
                 }))
             );
             assert_eq!(both_payload.declared_state, declared_payload.declared_state);
@@ -9369,6 +9576,18 @@ mod shipped_api {
             let verified_before_payload: PrimaryNameResponse =
                 read_json(verified_before_response).await?;
             let both_before_payload: PrimaryNameResponse = read_json(both_before_response).await?;
+            let mut expected_target_verified_primary_name =
+                fixture.target_verified_primary_name.clone();
+            expected_target_verified_primary_name
+                .as_object_mut()
+                .expect("target verified primary-name fixture must be an object")
+                .insert(
+                    "provenance".to_owned(),
+                    json!({
+                        "manifest_versions": primary_name_execution_manifest_versions(),
+                        "execution_trace_id": fixture.target_execution_trace_id.to_string(),
+                    }),
+                );
 
             assert_eq!(verified_before_payload.data, expected_data);
             assert_eq!(both_before_payload.data, expected_data);
@@ -9376,7 +9595,7 @@ mod shipped_api {
             assert_eq!(
                 verified_before_payload.verified_state,
                 Some(json!({
-                    "verified_primary_name": fixture.target_verified_primary_name.clone(),
+                    "verified_primary_name": expected_target_verified_primary_name,
                 }))
             );
             assert_eq!(
@@ -9515,11 +9734,25 @@ mod shipped_api {
             );
             assert_primary_name_bootstrap_invariants(&verified_after_payload);
             assert_primary_name_bootstrap_invariants(&both_after_payload);
+            let mut expected_sibling_verified_primary_name =
+                fixture.sibling_verified_primary_name.clone();
+            expected_sibling_verified_primary_name
+                .as_object_mut()
+                .expect("sibling verified primary-name fixture must be an object")
+                .insert(
+                    "provenance".to_owned(),
+                    json!({
+                        "manifest_versions": primary_name_execution_manifest_versions(),
+                        "execution_trace_id": invalidation
+                            .sibling_execution_trace_id()
+                            .to_string(),
+                    }),
+                );
 
             assert_eq!(
                 sibling_payload.verified_state,
                 Some(json!({
-                    "verified_primary_name": fixture.sibling_verified_primary_name.clone(),
+                    "verified_primary_name": expected_sibling_verified_primary_name,
                 }))
             );
             assert_primary_name_persisted_readback_invariants(
