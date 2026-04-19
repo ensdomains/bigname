@@ -10,10 +10,9 @@ use std::{
 use anyhow::{Context, Result};
 use bigname_storage::default_database_url;
 use sqlx::{
-    PgPool,
+    PgPool, Row,
     postgres::{PgConnectOptions, PgPoolOptions},
     query_scalar,
-    Row,
 };
 use uuid::Uuid;
 
@@ -316,9 +315,7 @@ async fn load_capability_flags_for_source_family(
     .bind(source_family)
     .fetch_all(pool)
     .await
-    .with_context(|| {
-        format!("failed to load capability flags for {namespace}/{source_family}")
-    })?;
+    .with_context(|| format!("failed to load capability flags for {namespace}/{source_family}"))?;
 
     rows.into_iter()
         .map(|row| {
@@ -557,9 +554,11 @@ async fn shadow_execution_family_persists_without_entering_active_views() -> Res
     let active_manifests = load_active_manifests_for_namespace(database.pool(), "ens").await?;
     assert_eq!(active_manifests.len(), 1);
     assert_eq!(active_manifests[0].source_family, "ens_v1_registry_l1");
-    assert!(!active_manifests[0]
-        .capability_flags
-        .contains_key("verified_resolution"));
+    assert!(
+        !active_manifests[0]
+            .capability_flags
+            .contains_key("verified_resolution")
+    );
 
     let watched_contracts = load_watched_contracts(database.pool()).await?;
     assert!(!watched_contracts.iter().any(|contract| {
@@ -657,7 +656,10 @@ async fn checked_in_reverse_manifest_is_admitted_as_authoritative_watch_target()
     let repository = load_repository(&test_dir.path)?;
     assert_eq!(repository.summary().status, ManifestLoadStatus::Loaded);
     assert_eq!(repository.manifests().len(), 1);
-    assert_eq!(repository.manifests()[0].manifest.source_family, "ens_v1_reverse_l1");
+    assert_eq!(
+        repository.manifests()[0].manifest.source_family,
+        "ens_v1_reverse_l1"
+    );
 
     let summary = sync_repository(database.pool(), &repository).await?;
     assert_eq!(summary.status, ManifestSyncStatus::Synced);
@@ -702,10 +704,7 @@ async fn checked_in_reverse_manifest_is_admitted_as_authoritative_watch_target()
     );
 
     let admission_state = load_discovery_admission_state(database.pool()).await?;
-    assert!(admission_state.has_authoritative_address(
-        "ethereum-mainnet",
-        &reverse_registrar
-    ));
+    assert!(admission_state.has_authoritative_address("ethereum-mainnet", &reverse_registrar));
 
     database.cleanup().await?;
     Ok(())
