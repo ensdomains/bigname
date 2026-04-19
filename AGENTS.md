@@ -16,6 +16,24 @@
 - Manifest and discovery code decides what is authoritative.
 - Raw facts are immutable. Projections are rebuildable. Canonicality is explicit. Execution artifacts are durable. Unsupported behavior must be explicit.
 
+## Upstream anchors
+
+The canonical ENSv1, ENSv2, and Basenames codebases are pinned under `.refs/`. Agents read from the pinned checkouts; they do not guess or paraphrase upstream behavior from memory.
+
+- `.refs/ens_v1/` — canonical ENSv1 Solidity
+- `.refs/ens_v2/` — ENSv2 contracts
+- `.refs/basenames/` — canonical Basenames Solidity
+- `.refs/ens_subgraph/`, `.refs/ensnode/` — reference indexers for cross-check only
+
+Pins live in `.refs/MANIFEST.toml`. Sync with `scripts/sync-refs`; verify with `scripts/sync-refs --check`. Rotation policy and known divergences live in `docs/upstream.md`.
+
+Citation rules:
+
+- Any claim about ENSv1, ENSv2, or Basenames behavior — in docs, manifests, ADRs, code comments, task writeups, or agent output — must cite the upstream source as `(upstream: .refs/<key>/<path>:L<line> @ <key>@<short-commit>)`.
+- "Upstream says X" without a `.refs/` citation is unsupported and should be rejected in review.
+- When upstream disagrees with our docs or manifests, the disagreement is a doc-first task. We may intentionally narrow, widen, or reshape upstream semantics; the divergence must be stated explicitly in the doc that carries our rule and listed in `docs/upstream.md` § Known divergences.
+- Manifest address changes and new source families cite the upstream deployment metadata or Solidity file rather than relying on external URLs.
+
 ## High Conflict
 
 - Keep `crates/domain` narrow.
@@ -27,3 +45,8 @@
 - `$change-gate`: classify doc-first vs implementation-only work.
 - `$orchestrate`: make the current session orchestrate broad execution work, using subagents instead of doing most implementation directly. Covers fan-out and continuation as modes.
 - `$phased-continuation`: run `$orchestrate` in continuation mode, cycling `next_slice_researcher` → execute → research until blocked or redirected.
+
+## Core Agents
+
+- `docs_writer`, `next_slice_researcher`, `task_designer`, `verification_reviewer`: defined in `.codex/agents/`. All four read `AGENTS.md` and treat upstream anchors as part of their reading set.
+- `upstream_auditor`: read-only agent that surfaces drift between `.refs/` pins and upstream `main`. Run opportunistically or on a schedule; it reports, it does not bump pins.

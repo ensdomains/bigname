@@ -37,6 +37,7 @@ For the requested capability, map:
   - concrete app call-site mapping
   - contract tests
   - rollout and rollback criteria
+- Consumer-replacement or parity claims for ENSv1, ENSv2, or Basenames cite the upstream route, contract, or ABI providing the capability under `.refs/<key>/` at the pinned commit. Use the `(upstream: .refs/<key>/<path>:L<line> @ <key>@<short-commit>)` format from `AGENTS.md` § Upstream anchors. "We replace upstream X" without such a citation is unsupported.
 
 ## Output style
 

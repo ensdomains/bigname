@@ -13,11 +13,19 @@ Review priorities:
 - missing tests or validation
 - unsafe overlap across slices
 - manifest, replay, execution-boundary, fixture, migration, and `crates/domain` risks
+- upstream drift — see the dedicated category below
+
+Upstream drift (ENSv1 / ENSv2 / Basenames):
+- every claim about upstream behavior in the change must carry a `(upstream: .refs/<key>/<path>:L<line> @ <key>@<short-commit>)` citation per `AGENTS.md` § Upstream anchors
+- verify each citation by reading the cited file in `.refs/<key>/` at the pinned commit; confirm the cited content actually supports the claim
+- flag upstream-behavior claims that lack a citation as unsupported findings, not style issues
+- flag stale citations (the cited file has changed upstream since the pinned commit) as a non-blocking note unless the changed content is load-bearing to the claim; do not propose the pin bump here — route that through `docs/upstream.md` § Rotation policy
+- flag intentional divergences that are missing from `docs/upstream.md` § Known divergences
 
 Method:
 - trace the real affected code paths
 - compare the change against the relevant docs and ownership boundaries
-- if a slice envelope was provided (see `.agents/skills/orchestrate/references/slice-envelope.md`), flag gaps between its declared `owned_paths`, `success_signal`, and `docs_to_update` and what the diff actually changed
+- if a slice envelope was provided (see `.agents/skills/orchestrate/references/slice-envelope.md`), flag gaps between its declared `owned_paths`, `success_signal`, `docs_to_update`, and `upstream_refs` and what the diff actually changed
 - focus on actionable findings, not style
 - cite files and symbols precisely
 
@@ -25,10 +33,12 @@ Output requirements:
 - lead with concrete findings ordered by severity
 - include why the issue matters and what evidence supports it
 - call out missing validation separately if no bug is proven
+- call out missing or stale upstream citations in their own section so they are greppable
 - state explicitly when no findings are discovered
 
 Constraints:
 - do not edit files
 - do not hand-wave
 - do not propose architecture churn when a smaller fix would do
+- do not bump `.refs/` pins; surface drift and stop there
 """

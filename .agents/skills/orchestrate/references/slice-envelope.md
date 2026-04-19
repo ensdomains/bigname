@@ -17,14 +17,15 @@ Canonical schema for communicating about a slice across research, design, review
 - `change_class` — `semantic`, `shared-interface`, or `implementation-only`. Produced by `$change-gate`.
 - `docs_to_update` — exact docs that must change first or alongside code. Produced by `$change-gate`. May overlap with `docs_to_touch`; treat `docs_to_update` as the stricter set.
 - `write_owner` — owning workstream or directory from `docs/workstreams.md`.
+- `upstream_refs` — list of `.refs/<key>/<path>` entries the slice's work must read before or during implementation. Populated by `next_slice_researcher` when the slice depends on ENSv1, ENSv2, or Basenames behavior; propagated into worker task reading lists by `task_designer`. May be empty for slices that do not touch upstream semantics. See `AGENTS.md` § Upstream anchors and `.refs/MANIFEST.toml`.
 
 ## Roles
 
 - `next_slice_researcher` emits a ranked list of complete envelopes (primary first, then viable follow-ons — typically 1–3 entries). Returns an empty list and names the smallest unblocker when no viable slice exists.
 - `$change-gate` fills `change_class`, `docs_to_update`, `write_owner`. Run it before or alongside research when shared-interface risk is present. With a multi-envelope list, classify each envelope independently unless they genuinely share a single shared-interface change.
-- `task_designer` consumes one envelope or a ranked list of envelopes and produces a unified task set. Every task references its originating envelope's `slice_id`, inherits a subset of that envelope's `owned_paths`, and respects its `change_class`. Cross-slice dependencies are marked explicitly.
-- `verification_reviewer` reads the envelope(s) for context and flags gaps between declared fields and what the diff actually changed.
-- Worker subagents inherit `owned_paths`, `success_signal`, `docs_to_update` as guardrails from their task's originating envelope.
+- `task_designer` consumes one envelope or a ranked list of envelopes and produces a unified task set. Every task references its originating envelope's `slice_id`, inherits a subset of that envelope's `owned_paths`, and respects its `change_class`. Cross-slice dependencies are marked explicitly. `upstream_refs` propagate into dependent task reading lists.
+- `verification_reviewer` reads the envelope(s) for context and flags gaps between declared fields and what the diff actually changed, including missing or stale upstream citations.
+- Worker subagents inherit `owned_paths`, `success_signal`, `docs_to_update`, and `upstream_refs` as guardrails from their task's originating envelope.
 
 ## Slice log
 

@@ -25,6 +25,7 @@ Core rules:
 - Respect ownership boundaries from `docs/workstreams.md`.
 - Be conservative around `crates/domain`, migrations, fixtures, and manifest schema — these may force `coordinated` or `serial` even when the surface headline looks safe.
 - If the next work requires semantic or shared-interface changes, say so plainly and treat doc-first work as the real next slice — returning one doc-first slice is a correct output, not a failure mode.
+- If a slice depends on ENSv1, ENSv2, or Basenames behavior, populate the envelope's `upstream_refs` with the specific `.refs/<key>/<path>` entries the work must read. See `AGENTS.md` § Upstream anchors and `.refs/MANIFEST.toml`. If the relevant ref is not yet synced, add that to `blocking_risks` rather than guessing the upstream shape.
 - Do not write code, docs, manifests, migrations, or fixtures.
 - Do not produce a vague roadmap or multi-page plan.
 - Leave detailed task decomposition to `task_designer` after the slices are picked.

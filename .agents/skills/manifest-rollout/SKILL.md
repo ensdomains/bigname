@@ -49,4 +49,14 @@ For each manifest or discovery change, state explicitly:
 
 Do not add watched contracts that cannot be explained by an active manifest or an admitted discovery edge.
 
-Keep the output operational: show the manifest change, the admission logic, and the downstream consequences.
+## Upstream anchor
+
+Every new contract address, role, or discovery-rule admission cites the upstream deployment metadata or Solidity file under `.refs/`:
+
+- ENSv1 → `.refs/ens_v1/`
+- ENSv2 → `.refs/ens_v2/`
+- Basenames → `.refs/basenames/`
+
+Use the citation format from `AGENTS.md` § Upstream anchors — `(upstream: .refs/<key>/<path>:L<line> @ <key>@<short-commit>)` — either as a comment in the manifest TOML or in the accompanying doc update. Addresses without an upstream citation are unsupported; the existing human-assertion comment style in `manifests/basenames/basenames_base_registry/v1.toml` is the legacy shape and should be replaced on touch.
+
+Keep the output operational: show the manifest change, the admission logic, the upstream citation, and the downstream consequences.

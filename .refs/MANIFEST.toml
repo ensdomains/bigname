@@ -1,0 +1,63 @@
+# Upstream references pinned for bigname agents and reviewers.
+#
+# Agents cite claims about ENSv1, ENSv2, or Basenames behavior as:
+#   (upstream: .refs/<key>/<path>:L<line> @ <key>@<short-commit>)
+# The pinned commits below are what "at that commit" means. The initial
+# pins are each repo's HEAD as of the first sync; bump deliberately per
+# docs/upstream.md § Rotation policy.
+#
+# Sync:  scripts/sync-refs
+# Check: scripts/sync-refs --check
+#
+# Directories under .refs/<key>/ are gitignored; MANIFEST.toml and
+# .refs/README.md are tracked.
+
+schema_version = 1
+
+[refs.ens_v1]
+repo = "https://github.com/ensdomains/ens-contracts"
+commit = "91c966febd7b55494269df830fc6775f040b927b"
+purpose = "Canonical ENSv1 Solidity: registry, registrar, resolver, name wrapper, reverse registrar."
+authoritative_for = [
+  "ENSv1 registry/registrar/resolver/wrapper behavior",
+  "authority-anchor rules in docs/adrs/0002-surface-resource-identity.md",
+  "addresses in manifests/ens/*/v1.toml",
+  "ENSv1 reverse-claim and primary-name semantics in docs/api-v1.md and docs/storage.md",
+]
+
+[refs.ens_v2]
+repo = "https://github.com/ensdomains/contracts-v2"
+commit = "725a18d70305b7bb2b511b91b44da927427b6a81"
+purpose = "ENSv2 contracts: linked surfaces, new resolver model."
+authoritative_for = [
+  "ENSv2 semantics referenced in docs/architecture.md",
+  "ENSv2-specific rules in docs/adrs/0002-surface-resource-identity.md § ENSv2 linked surfaces",
+]
+
+[refs.basenames]
+repo = "https://github.com/base-org/basenames"
+commit = "1809bbc998672880aaa27488eb38321af8552874"
+purpose = "Canonical Basenames Solidity on Base L2 and the L1 compatibility resolver."
+authoritative_for = [
+  "Basenames addresses pinned in manifests/basenames/*/v1.toml",
+  "basenames_base_registry, basenames_base_registrar, basenames_base_resolver ownership in docs/manifests.md",
+  "basenames_base_primary claim-intake semantics",
+  "basenames_l1_compat transport and basenames_execution entrypoint-selection semantics",
+]
+
+[refs.ens_subgraph]
+repo = "https://github.com/ensdomains/ens-subgraph"
+commit = "723f1b6abfd4b30a99db0b429a77ebac61ed8b91"
+purpose = "Reference ENSv1 indexer. Not authoritative by itself; used for event-ordering and parity cross-checks."
+authoritative_for = [
+  "cross-check scope for ENSv1 event ordering and decomposition",
+  "fixture inspiration for tests/conformance when upstream-derived cases are added",
+]
+
+[refs.ensnode]
+repo = "https://github.com/namehash/ensnode"
+commit = "2017ae6239ae4a338fb4122d5204f769030c9bc3"
+purpose = "Alternative ENS indexer. Not authoritative by itself; used for parity cross-checks where a second implementation helps disambiguate."
+authoritative_for = [
+  "cross-check scope for consumer-capability questions",
+]

@@ -1,0 +1,109 @@
+#!/usr/bin/env python3
+"""Sync upstream reference repositories pinned in .refs/MANIFEST.toml.
+
+Usage:
+    scripts/sync-refs            # clone/fetch/checkout to pinned commits
+    scripts/sync-refs --check    # exit nonzero if any ref is missing or off-pin
+
+Refs are declared in .refs/MANIFEST.toml. Each lives under .refs/<key>/; those
+directories are gitignored. MANIFEST.toml and .refs/README.md are tracked.
+"""
+from __future__ import annotations
+
+import argparse
+import subprocess
+import sys
+import tomllib
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+REFS_DIR = REPO_ROOT / ".refs"
+MANIFEST = REFS_DIR / "MANIFEST.toml"
+
+
+def load_manifest() -> dict:
+    with MANIFEST.open("rb") as fh:
+        return tomllib.load(fh)
+
+
+def run(cmd: list[str], cwd: Path | None = None) -> None:
+    result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f"$ {' '.join(cmd)}", file=sys.stderr)
+        if result.stdout:
+            print(result.stdout, file=sys.stderr)
+        if result.stderr:
+            print(result.stderr, file=sys.stderr)
+        sys.exit(result.returncode)
+
+
+def head_commit(path: Path) -> str:
+    return subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=path, text=True
+    ).strip()
+
+
+def sync_ref(key: str, entry: dict) -> None:
+    path = REFS_DIR / key
+    repo = entry["repo"]
+    commit = entry["commit"]
+    print(f"[{key}] {repo} @ {commit[:12]}")
+    if not path.exists():
+        run(["git", "clone", "--filter=blob:none", "--no-checkout", repo, str(path)])
+    else:
+        run(["git", "-C", str(path), "remote", "set-url", "origin", repo])
+    run(["git", "fetch", "--filter=blob:none", "--depth", "1", "origin", commit], cwd=path)
+    run(["git", "checkout", "--detach", commit], cwd=path)
+
+
+def check_ref(key: str, entry: dict) -> str | None:
+    path = REFS_DIR / key
+    commit = entry["commit"]
+    if not path.exists():
+        return f"missing: .refs/{key}"
+    try:
+        head = head_commit(path)
+    except subprocess.CalledProcessError:
+        return f"unreadable: .refs/{key}"
+    if head != commit:
+        return f"off-pin: .refs/{key} at {head[:12]}, expected {commit[:12]}"
+    return None
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0] or None)
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="verify pins without mutating the tree",
+    )
+    args = parser.parse_args()
+
+    if not MANIFEST.exists():
+        print(f"no manifest at {MANIFEST}", file=sys.stderr)
+        return 1
+
+    manifest = load_manifest()
+    refs = manifest.get("refs", {})
+    if not refs:
+        print("no refs declared in MANIFEST.toml", file=sys.stderr)
+        return 1
+
+    if args.check:
+        problems = [msg for key, entry in refs.items() if (msg := check_ref(key, entry))]
+        if problems:
+            print("sync-refs --check failed:", file=sys.stderr)
+            for msg in problems:
+                print(f"  {msg}", file=sys.stderr)
+            return 1
+        print(f"sync-refs --check OK ({len(refs)} refs)")
+        return 0
+
+    for key, entry in refs.items():
+        sync_ref(key, entry)
+    print(f"Synced {len(refs)} refs into {REFS_DIR}.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

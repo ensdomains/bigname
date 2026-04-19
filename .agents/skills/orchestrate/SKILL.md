@@ -34,6 +34,7 @@ Shared subagents live in `.codex/agents/*.toml`. Dispatch as follows:
 - `task_designer` (read-only) — decomposes one or more chosen slices into owned subagent tasks. Consumes a single envelope or a ranked envelope list; produces a unified task set with explicit file ownership and cross-slice dependencies.
 - `docs_writer` — writes or updates docs, task writeups, doc-first semantic changes. Not read-only because its job is to edit under `docs/` and task notes.
 - `verification_reviewer` (read-only) — cross-slice review for correctness, boundary compliance, missing validation. Use when risk is high or multiple workers edited adjacent surfaces.
+- `upstream_auditor` (read-only) — surfaces drift between `.refs/` pins and upstream `main` for ENSv1, ENSv2, Basenames, and the reference indexers. Use when a manifest or ADR change is about to merge, when `docs/upstream.md` is updated, or on a periodic `$schedule`. Reports only; pin bumps stay manual per `docs/upstream.md` § Rotation policy.
 - built-in `worker` — bounded implementation task. Give it owned paths, outcome, and validation.
 
 ## Dispatching subagents

@@ -19,6 +19,7 @@ Use this skill to decide whether a task is a frozen-interface change or an imple
 - Verified execution or explain traces: `docs/execution.md`
 - Consumer replacement or parity claims: `docs/consumer-capabilities.md`
 - Delivery order or workstream ownership: `docs/development-plan.md`, `docs/workstreams.md`
+- Upstream anchors for ENSv1, ENSv2, Basenames: `AGENTS.md` § Upstream anchors, `.refs/MANIFEST.toml`, `docs/upstream.md`
 
 ## Classify the change
 
@@ -37,6 +38,7 @@ These feed the slice envelope. `parallel_risk` is assigned by the researcher, no
 - manifest schema, rollout semantics, or capability-flag meaning
 - storage ownership boundaries or canonicality rules
 - what counts as consumer replacement or parity
+- any claim about ENSv1, ENSv2, or Basenames behavior that is not already cited under `.refs/<key>/` — a new upstream citation is a doc change and must land in the same commit as the code claim that depends on it
 
 ## Hard stops
 

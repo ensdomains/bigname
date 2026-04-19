@@ -48,4 +48,8 @@ Correct designs that drift into any of these:
 - Projection tables may be recreated only when the rebuild path already exists.
 - If a change affects shared ownership or replay semantics, route it back through `$change-gate`.
 
-Keep the review concrete. Name the affected tables, keys, invalidation sources, and rebuild modes.
+## Upstream anchor
+
+Canonicality, reorg, and event-ordering claims about ENSv1 or Basenames behavior cite the upstream emitter in `.refs/<key>/` at the pinned commit. Use the `(upstream: .refs/<key>/<path>:L<line> @ <key>@<short-commit>)` format from `AGENTS.md` § Upstream anchors. Paraphrasing upstream event semantics from memory is treated as drift.
+
+Keep the review concrete. Name the affected tables, keys, invalidation sources, rebuild modes, and upstream citations.
