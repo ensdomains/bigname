@@ -1700,6 +1700,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rebuild_preserves_observed_wildcard_binding_kind() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let binding =
+            IdentityBinding::new("ens:wildcard.eth", "wildcard.eth", 0x3301, 0x3302, 0x3303);
+
+        seed_raw_blocks(
+            database.pool(),
+            &[raw_block("ethereum-mainnet", "0xwild", 241, 1_717_171_741)],
+        )
+        .await?;
+        upsert_token_lineages(
+            database.pool(),
+            &[token_lineage(binding.token_lineage_id, "0xwild", 241)],
+        )
+        .await?;
+        upsert_resources(
+            database.pool(),
+            &[resource(
+                binding.resource_id,
+                binding.token_lineage_id,
+                "0xwild",
+                241,
+            )],
+        )
+        .await?;
+        upsert_name_surfaces(
+            database.pool(),
+            &[name_surface(
+                &binding.logical_name_id,
+                &binding.display_name,
+                "0xwild",
+                241,
+            )],
+        )
+        .await?;
+
+        let mut wildcard_binding = surface_binding(&binding, 1_717_171_741, None, "0xwild", 241);
+        wildcard_binding.binding_kind = SurfaceBindingKind::ObservedWildcardPath;
+        upsert_surface_bindings(database.pool(), &[wildcard_binding]).await?;
+
+        rebuild_name_current(database.pool(), Some(&binding.logical_name_id)).await?;
+
+        let row = load_name_current(database.pool(), &binding.logical_name_id)
+            .await?
+            .context("rebuilt row must exist")?;
+        assert_eq!(
+            row.binding_kind,
+            Some(SurfaceBindingKind::ObservedWildcardPath)
+        );
+        assert_eq!(row.coverage["status"], Value::String("full".to_owned()));
+        assert_eq!(row.coverage["unsupported_reason"], Value::Null);
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
     async fn rebuild_history_heads_match_canonical_name_history_ordering() -> Result<()> {
         let database = TestDatabase::new().await?;
         let binding =

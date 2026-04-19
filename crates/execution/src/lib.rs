@@ -293,6 +293,7 @@ struct RequestedChainPosition {
 enum SupportedResolutionPathClass {
     Direct,
     AliasOnly,
+    WildcardDerived,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -602,6 +603,7 @@ fn validate_verified_primary_trace(
         &trace.steps,
         trace.execution_trace_id,
         "ENS verified-primary",
+        SupportedResolutionPathClass::Direct,
     )?;
     if matches!(
         verified_primary_name.status,
@@ -1577,6 +1579,7 @@ fn ensure_steps_are_supported_exact_surface_path(
         &trace.steps,
         execution_trace_id,
         "ENS direct-path verified resolution",
+        path_class,
     )?;
     if !step_summary.saw_universal_resolver_call {
         bail!(
@@ -1591,12 +1594,26 @@ fn ensure_steps_are_supported_exact_surface_path(
         "ENS direct-path verified resolution",
     )?;
     validate_supported_exact_surface_runtime_details(trace, path_class, execution_trace_id)?;
-    if path_class == SupportedResolutionPathClass::Direct && step_summary.saw_alias_step {
-        bail!(
-            "ENS direct-path verified resolution trace {} must not persist alias steps without binding_kind {}",
-            execution_trace_id,
-            RESOLVER_ALIAS_PATH_BINDING_KIND
-        );
+    match path_class {
+        SupportedResolutionPathClass::Direct => {
+            if step_summary.saw_alias_step {
+                bail!(
+                    "ENS direct-path verified resolution trace {} must not persist alias steps without binding_kind {}",
+                    execution_trace_id,
+                    RESOLVER_ALIAS_PATH_BINDING_KIND
+                );
+            }
+        }
+        SupportedResolutionPathClass::AliasOnly => {}
+        SupportedResolutionPathClass::WildcardDerived => {
+            if step_summary.saw_alias_step {
+                bail!(
+                    "ENS direct-path verified resolution trace {} must not persist alias steps when binding_kind is {}",
+                    execution_trace_id,
+                    OBSERVED_WILDCARD_PATH_BINDING_KIND
+                );
+            }
+        }
     }
 
     Ok(())
@@ -1606,12 +1623,21 @@ fn ensure_steps_do_not_use_deferred_execution_paths(
     steps: &[bigname_storage::ExecutionTraceStep],
     execution_trace_id: Uuid,
     context: &str,
+    path_class: SupportedResolutionPathClass,
 ) -> Result<SupportedResolutionStepSummary> {
     let mut summary = SupportedResolutionStepSummary::default();
     for step in steps {
         let normalized = step.step_kind.to_ascii_lowercase();
         if normalized.contains("wildcard")
-            || normalized.contains("ccip")
+            && path_class != SupportedResolutionPathClass::WildcardDerived
+        {
+            bail!(
+                "{context} trace {} must not persist wildcard traversal step {}",
+                execution_trace_id,
+                step.step_kind
+            );
+        }
+        if normalized.contains("ccip")
             || normalized.contains("transport")
             || normalized.contains("subregistry")
             || normalized.contains("ancestor")
@@ -1643,15 +1669,13 @@ fn classify_supported_resolution_path(
             Ok(SupportedResolutionPathClass::Direct)
         }
         Some(RESOLVER_ALIAS_PATH_BINDING_KIND) => Ok(SupportedResolutionPathClass::AliasOnly),
+        Some(OBSERVED_WILDCARD_PATH_BINDING_KIND) => {
+            Ok(SupportedResolutionPathClass::WildcardDerived)
+        }
         Some(LINKED_SUBREGISTRY_PATH_BINDING_KIND) => bail!(
             "ENS direct-path verified resolution trace {} must not persist non-alias ancestor-selected binding_kind {}",
             execution_trace_id,
             LINKED_SUBREGISTRY_PATH_BINDING_KIND
-        ),
-        Some(OBSERVED_WILDCARD_PATH_BINDING_KIND) => bail!(
-            "ENS direct-path verified resolution trace {} must not persist wildcard-derived binding_kind {}",
-            execution_trace_id,
-            OBSERVED_WILDCARD_PATH_BINDING_KIND
         ),
         Some(MIGRATION_REBIND_BINDING_KIND | OBSERVED_ONLY_BINDING_KIND) => bail!(
             "ENS direct-path verified resolution trace {} must not persist unsupported binding_kind {}",
@@ -1675,7 +1699,12 @@ fn validate_supported_exact_surface_runtime_details(
 ) -> Result<()> {
     let alias_present =
         persisted_alias_detail_is_present(trace, "ENS direct-path verified resolution")?;
-    ensure_wildcard_detail_absent(trace, "ENS direct-path verified resolution")?;
+    ensure_wildcard_detail_matches_path_class(
+        trace,
+        path_class,
+        "ENS direct-path verified resolution",
+        execution_trace_id,
+    )?;
     ensure_transport_detail_absent(trace, "ENS direct-path verified resolution")?;
 
     match path_class {
@@ -1694,6 +1723,15 @@ fn validate_supported_exact_surface_runtime_details(
                     "ENS direct-path verified resolution trace {} must persist alias.final_target and non-empty alias.hops for binding_kind {}",
                     execution_trace_id,
                     RESOLVER_ALIAS_PATH_BINDING_KIND
+                );
+            }
+        }
+        SupportedResolutionPathClass::WildcardDerived => {
+            if alias_present {
+                bail!(
+                    "ENS direct-path verified resolution trace {} must not persist alias detail when binding_kind is {}",
+                    execution_trace_id,
+                    OBSERVED_WILDCARD_PATH_BINDING_KIND
                 );
             }
         }
@@ -1770,8 +1808,20 @@ fn persisted_alias_detail_is_present(trace: &ExecutionTrace, context: &str) -> R
     Ok(true)
 }
 
-fn ensure_wildcard_detail_absent(trace: &ExecutionTrace, context: &str) -> Result<()> {
+fn ensure_wildcard_detail_matches_path_class(
+    trace: &ExecutionTrace,
+    path_class: SupportedResolutionPathClass,
+    context: &str,
+    execution_trace_id: Uuid,
+) -> Result<()> {
     let Some(wildcard) = persisted_trace_detail_object(trace, "wildcard") else {
+        if path_class == SupportedResolutionPathClass::WildcardDerived {
+            bail!(
+                "{context} trace {} must persist wildcard.source non-null with matched_labels non-empty for binding_kind {}",
+                execution_trace_id,
+                OBSERVED_WILDCARD_PATH_BINDING_KIND
+            );
+        }
         return Ok(());
     };
 
@@ -1793,10 +1843,23 @@ fn ensure_wildcard_detail_absent(trace: &ExecutionTrace, context: &str) -> Resul
         wildcard.get("matched_labels"),
         &format!("{wildcard_context}.matched_labels"),
     )?;
-    if source_present || !matched_labels.is_empty() {
-        bail!(
-            "{context} only supports wildcard.source=null with matched_labels=[] for persisted exact-surface requests"
-        );
+    match path_class {
+        SupportedResolutionPathClass::Direct | SupportedResolutionPathClass::AliasOnly => {
+            if source_present || !matched_labels.is_empty() {
+                bail!(
+                    "{context} only supports wildcard.source=null with matched_labels=[] for persisted exact-surface requests"
+                );
+            }
+        }
+        SupportedResolutionPathClass::WildcardDerived => {
+            if !source_present || matched_labels.is_empty() {
+                bail!(
+                    "{context} trace {} must persist wildcard.source non-null with matched_labels non-empty for binding_kind {}",
+                    execution_trace_id,
+                    OBSERVED_WILDCARD_PATH_BINDING_KIND
+                );
+            }
+        }
     }
 
     Ok(())
@@ -3442,6 +3505,76 @@ mod tests {
                 .is_none(),
             "rejected wildcard-derived request must not persist outcome rows"
         );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn persists_exact_surface_wildcard_derived_path_with_observed_wildcard_binding()
+    -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let mut request = success_request();
+        let wildcard_source = alias_target(Uuid::from_u128(0x0e7ec7ace0000000000000000000aab6));
+
+        request.trace.execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000030);
+        request.trace.request_key = "ens:alice.eth:addr:60".to_owned();
+        request.trace.request_metadata = json!({
+            "surface": "alice.eth",
+            "record_key": "addr:60",
+            "binding_kind": OBSERVED_WILDCARD_PATH_BINDING_KIND,
+            "wildcard": {
+                "source": wildcard_source.clone(),
+                "matched_labels": ["profile"]
+            },
+            "normalizer_version": "uts46-v1"
+        });
+        request.trace.steps.push(ExecutionTraceStep {
+            step_index: 2,
+            step_kind: "call_wildcard_resolver".to_owned(),
+            input_digest: Some("sha256:wildcard-input".to_owned()),
+            output_digest: Some("sha256:wildcard-output".to_owned()),
+            latency_ms: Some(19),
+            canonicality_dependency: json!({
+                ETHEREUM_MAINNET_CHAIN_ID: {
+                    "block_hash": "0xabc123",
+                    "block_number": 21_000_000,
+                    "state": "canonical"
+                }
+            }),
+            step_payload: json!({
+                "name": "alice.eth",
+                "wildcard": {
+                    "source": wildcard_source,
+                    "matched_labels": ["profile"]
+                }
+            }),
+        });
+        request.outcome.execution_trace_id = request.trace.execution_trace_id;
+        request.outcome.cache_key.request_key = request.trace.request_key.clone();
+        request.outcome.finished_at = request
+            .trace
+            .finished_at
+            .expect("wildcard-derived test trace must finish");
+
+        let persisted =
+            persist_ens_exact_name_verified_resolution_direct(database.pool(), &request).await?;
+        assert_eq!(
+            persisted,
+            PersistedVerifiedResolutionIdentity {
+                execution_trace_id: request.trace.execution_trace_id,
+                cache_key: request.outcome.cache_key.clone(),
+            }
+        );
+
+        let loaded_trace = load_execution_trace(database.pool(), persisted.execution_trace_id)
+            .await?
+            .expect("execution trace must exist after wildcard-derived persistence");
+        assert_eq!(loaded_trace, request.trace);
+
+        let loaded_outcome = load_execution_outcome(database.pool(), &persisted.cache_key)
+            .await?
+            .expect("execution outcome must exist after wildcard-derived persistence");
+        assert_eq!(loaded_outcome, request.outcome);
 
         database.cleanup().await
     }
