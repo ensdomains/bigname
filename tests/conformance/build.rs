@@ -1,18 +1,49 @@
-use std::{env, fs, path::PathBuf};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+};
 
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("manifest dir"));
     let source_path = manifest_dir.join("../../apps/api/src/main.rs");
-    let source = fs::read_to_string(&source_path)
-        .unwrap_or_else(|error| panic!("failed to read {}: {error}", source_path.display()));
+    let source = inline_local_includes(&source_path);
     let rewritten = rewrite_openapi_components(&strip_crate_recursion_limit(&source))
         .replace("\n#[cfg(test)]\nmod tests;\n", "\n");
     let out_path = PathBuf::from(env::var("OUT_DIR").expect("out dir")).join("api_main.rs");
 
     fs::write(&out_path, rewritten)
         .unwrap_or_else(|error| panic!("failed to write {}: {error}", out_path.display()));
+}
 
+fn inline_local_includes(source_path: &Path) -> String {
     println!("cargo:rerun-if-changed={}", source_path.display());
+
+    let source = fs::read_to_string(source_path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", source_path.display()));
+    let mut rewritten = String::with_capacity(source.len());
+
+    for line in source.split_inclusive('\n') {
+        let trimmed = line.trim();
+        if let Some(include_path) = parse_include_path(trimmed) {
+            let resolved = source_path
+                .parent()
+                .unwrap_or_else(|| panic!("{} has no parent directory", source_path.display()))
+                .join(include_path);
+            rewritten.push_str(&inline_local_includes(&resolved));
+            if !rewritten.ends_with('\n') {
+                rewritten.push('\n');
+            }
+            continue;
+        }
+
+        rewritten.push_str(line);
+    }
+
+    rewritten
+}
+
+fn parse_include_path(line: &str) -> Option<&str> {
+    line.strip_prefix("include!(\"")?.strip_suffix("\");")
 }
 
 fn strip_crate_recursion_limit(source: &str) -> String {

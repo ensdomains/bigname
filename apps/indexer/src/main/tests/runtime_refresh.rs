@@ -1,0 +1,1148 @@
+#[tokio::test]
+async fn build_manifest_runtime_state_loads_checked_in_repository_seed() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let manifests_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../manifests");
+    let manifest_repository = load_manifest_repository(&manifests_root)?;
+
+    let runtime_state = build_manifest_runtime_state(database.pool(), &manifest_repository).await?;
+
+    assert_eq!(
+        runtime_state.manifest_summary.status,
+        ManifestLoadStatus::Loaded
+    );
+    assert_eq!(runtime_state.manifest_summary.namespace_count, 2);
+    assert_eq!(runtime_state.manifest_summary.source_family_count, 10);
+    assert_eq!(runtime_state.manifest_summary.manifest_count, 10);
+    assert_eq!(
+        runtime_state.sync_summary.status,
+        ManifestSyncStatus::Synced
+    );
+    assert_eq!(runtime_state.sync_summary.synced_manifest_count, 10);
+    assert_eq!(runtime_state.sync_summary.active_manifest_count, 8);
+    assert_eq!(runtime_state.sync_summary.root_count, 3);
+    assert_eq!(runtime_state.sync_summary.contract_count, 10);
+    assert_eq!(runtime_state.sync_summary.capability_count, 6);
+    assert_eq!(runtime_state.sync_summary.discovery_rule_count, 2);
+    assert_eq!(runtime_state.discovery_admission.active_manifest_count, 8);
+    assert_eq!(runtime_state.discovery_admission.active_root_count, 3);
+    assert_eq!(runtime_state.discovery_admission.active_contract_count, 8);
+    assert_eq!(runtime_state.discovery_admission.active_rule_count, 2);
+    assert_eq!(
+        runtime_state
+            .manifest_normalized_event_summary
+            .total_synced_count,
+        12
+    );
+    assert_eq!(
+        runtime_state.watched_contract_summary.unique_contract_count,
+        8
+    );
+    assert_eq!(
+        runtime_state.watched_contract_summary.source_entry_count,
+        11
+    );
+    assert_eq!(
+        runtime_state.watched_contract_summary.manifest_root_count,
+        3
+    );
+    assert_eq!(
+        runtime_state
+            .watched_contract_summary
+            .manifest_contract_count,
+        8
+    );
+    assert_eq!(
+        runtime_state.watched_contract_summary.discovery_edge_count,
+        0
+    );
+    assert_eq!(
+        runtime_state.watched_chain_plan,
+        vec![
+            WatchedChainPlan {
+                chain: "base-mainnet".to_owned(),
+                addresses: vec![
+                    "0x03c4738ee98ae44591e1a4a4f3cab6641d95dd9a".to_owned(),
+                    "0x79ea96012eea67a83431f1701b3dff7e37f9e282".to_owned(),
+                    "0xb94704422c2a1e396835a571837aa5ae53285a95".to_owned(),
+                    "0xc6d566a56a1aff6508b41f6c90ff131615583bcd".to_owned(),
+                ],
+                manifest_root_entry_count: 1,
+                manifest_contract_entry_count: 4,
+                discovery_edge_entry_count: 0,
+            },
+            WatchedChainPlan {
+                chain: "ethereum-mainnet".to_owned(),
+                addresses: vec![
+                    "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e".to_owned(),
+                    "0x57f1887a8bf19b14fc0df6fd9b2acc9af147ea85".to_owned(),
+                    "0xa58e81fe9b61b5c3fe2afd33cf304c454abfc7cb".to_owned(),
+                    "0xde9049636f4a1dfe0a64d1bfe3155c0a14c54f31".to_owned(),
+                ],
+                manifest_root_entry_count: 2,
+                manifest_contract_entry_count: 4,
+                discovery_edge_entry_count: 0,
+            }
+        ]
+    );
+
+    let stored_admission = load_discovery_admission_state(database.pool()).await?;
+    assert_eq!(stored_admission.active_manifest_count, 8);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn refresh_watched_chain_plan_detects_storage_changes() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let root_contract_instance_id = Uuid::from_u128(41);
+    let discovered_contract_instance_id = Uuid::from_u128(42);
+
+    sqlx::query(
+        r#"
+            INSERT INTO manifest_versions (manifest_id, chain, rollout_status)
+            VALUES (1, 'ethereum-mainnet', 'active')
+            "#,
+    )
+    .execute(database.pool())
+    .await
+    .context("failed to insert manifest_versions for watched plan refresh test")?;
+    insert_contract_instance(
+        database.pool(),
+        root_contract_instance_id,
+        "ethereum-mainnet",
+        "root",
+    )
+    .await?;
+    insert_active_contract_instance_address(
+        database.pool(),
+        root_contract_instance_id,
+        "ethereum-mainnet",
+        "0x0000000000000000000000000000000000000001",
+        Some(1),
+    )
+    .await?;
+    insert_manifest_root_contract_instance(
+        database.pool(),
+        1,
+        root_contract_instance_id,
+        "0x0000000000000000000000000000000000000001",
+    )
+    .await?;
+
+    let initial_plan = load_watched_chain_plan(database.pool()).await?;
+    assert_eq!(
+        refresh_watched_chain_plan(database.pool(), &initial_plan).await?,
+        None
+    );
+
+    insert_contract_instance(
+        database.pool(),
+        discovered_contract_instance_id,
+        "ethereum-mainnet",
+        "contract",
+    )
+    .await?;
+    insert_active_contract_instance_address(
+        database.pool(),
+        discovered_contract_instance_id,
+        "ethereum-mainnet",
+        "0x00000000000000000000000000000000000000cc",
+        Some(1),
+    )
+    .await?;
+    insert_active_discovery_edge(
+        database.pool(),
+        "ethereum-mainnet",
+        "subregistry",
+        root_contract_instance_id,
+        discovered_contract_instance_id,
+        Some(1),
+    )
+    .await?;
+
+    let refreshed_plan = refresh_watched_chain_plan(database.pool(), &initial_plan)
+        .await?
+        .expect("watch plan change must be detected");
+    assert_eq!(refreshed_plan.len(), 1);
+    assert_eq!(refreshed_plan[0].chain, "ethereum-mainnet");
+    assert_eq!(
+        refreshed_plan[0].addresses,
+        vec![
+            "0x0000000000000000000000000000000000000001".to_owned(),
+            "0x00000000000000000000000000000000000000cc".to_owned(),
+        ]
+    );
+    assert_eq!(refreshed_plan[0].manifest_root_entry_count, 1);
+    assert_eq!(refreshed_plan[0].manifest_contract_entry_count, 0);
+    assert_eq!(refreshed_plan[0].discovery_edge_entry_count, 1);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn refresh_intake_chain_tasks_detects_checkpoint_updates() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let root_contract_instance_id = Uuid::from_u128(51);
+
+    sqlx::query(
+        r#"
+            INSERT INTO manifest_versions (manifest_id, chain, rollout_status)
+            VALUES (1, 'ethereum-mainnet', 'active')
+            "#,
+    )
+    .execute(database.pool())
+    .await
+    .context("failed to insert manifest_versions for checkpoint refresh test")?;
+    insert_contract_instance(
+        database.pool(),
+        root_contract_instance_id,
+        "ethereum-mainnet",
+        "root",
+    )
+    .await?;
+    insert_active_contract_instance_address(
+        database.pool(),
+        root_contract_instance_id,
+        "ethereum-mainnet",
+        "0x0000000000000000000000000000000000000001",
+        Some(1),
+    )
+    .await?;
+    insert_manifest_root_contract_instance(
+        database.pool(),
+        1,
+        root_contract_instance_id,
+        "0x0000000000000000000000000000000000000001",
+    )
+    .await?;
+
+    let watched_plan = load_watched_chain_plan(database.pool()).await?;
+    let initial_tasks = sync_intake_chain_tasks(database.pool(), &watched_plan).await?;
+    assert_eq!(
+        refresh_intake_chain_tasks(database.pool(), &initial_tasks, &watched_plan).await?,
+        None
+    );
+
+    sqlx::query(
+            r#"
+            UPDATE chain_checkpoints
+            SET
+                canonical_block_hash = '0x00000000000000000000000000000000000000000000000000000000000000aa',
+                canonical_block_number = 42,
+                safe_block_hash = '0x0000000000000000000000000000000000000000000000000000000000000099',
+                safe_block_number = 41,
+                finalized_block_hash = '0x0000000000000000000000000000000000000000000000000000000000000088',
+                finalized_block_number = 40
+            WHERE chain_id = 'ethereum-mainnet'
+            "#,
+        )
+        .execute(database.pool())
+        .await
+        .context("failed to update chain_checkpoints for checkpoint refresh test")?;
+
+    let refreshed_tasks =
+        refresh_intake_chain_tasks(database.pool(), &initial_tasks, &watched_plan)
+            .await?
+            .expect("checkpoint change must be detected");
+    assert_eq!(refreshed_tasks.len(), 1);
+    assert_eq!(
+        refreshed_tasks[0].checkpoint.canonical_block_number,
+        Some(42)
+    );
+    assert_eq!(checkpoint_mode(&refreshed_tasks[0].checkpoint), "resume");
+    assert_eq!(
+        intake_runtime_state(&refreshed_tasks),
+        IntakeRuntimeState {
+            chain_count: 1,
+            address_count: 1,
+            entry_count: 1,
+            cold_start_chain_count: 0,
+            resumable_chain_count: 1,
+            safe_checkpoint_chain_count: 1,
+            finalized_checkpoint_chain_count: 1,
+        }
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn build_manifest_runtime_state_reloads_repository_changes_without_restart() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let manifests = TestManifestDir::new()?;
+    let manifest_path = manifests.write_manifest(&manifest_contents(
+        "0x0000000000000000000000000000000000000001",
+        "shadow",
+    ))?;
+
+    let initial_repository = load_manifest_repository(&manifests.path)?;
+    assert_eq!(
+        initial_repository.summary().status,
+        ManifestLoadStatus::Loaded
+    );
+    let initial_state = build_manifest_runtime_state(database.pool(), &initial_repository).await?;
+    assert_eq!(initial_state.watched_chain_plan.len(), 1);
+    assert_eq!(
+        initial_state.watched_chain_plan[0].addresses,
+        vec![
+            "0x0000000000000000000000000000000000000001".to_owned(),
+            "0x00000000000000000000000000000000000000aa".to_owned(),
+        ]
+    );
+    assert_eq!(
+        initial_state
+            .manifest_normalized_event_summary
+            .total_inserted_count,
+        2
+    );
+
+    fs::write(
+        &manifest_path,
+        manifest_contents("0x0000000000000000000000000000000000000002", "supported"),
+    )
+    .with_context(|| format!("failed to rewrite {}", manifest_path.display()))?;
+
+    let refreshed_repository = load_manifest_repository(&manifests.path)?;
+    let refreshed_state =
+        build_manifest_runtime_state(database.pool(), &refreshed_repository).await?;
+    assert_eq!(
+        refreshed_state.watched_chain_plan,
+        vec![WatchedChainPlan {
+            chain: "ethereum-mainnet".to_owned(),
+            addresses: vec![
+                "0x0000000000000000000000000000000000000002".to_owned(),
+                "0x00000000000000000000000000000000000000aa".to_owned(),
+            ],
+            manifest_root_entry_count: 1,
+            manifest_contract_entry_count: 1,
+            discovery_edge_entry_count: 0,
+        }]
+    );
+    assert_eq!(
+        refreshed_state
+            .manifest_normalized_event_summary
+            .total_inserted_count,
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM normalized_events WHERE event_kind = 'CapabilityChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        2
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn refresh_watched_chain_plan_reuses_contract_instance_ids_across_inactive_gaps() -> Result<()>
+{
+    let database = TestDatabase::new().await?;
+    let manifests = TestManifestDir::new()?;
+    let manifest_path = manifests.write_manifest(&manifest_contents(
+        "0x0000000000000000000000000000000000000001",
+        "shadow",
+    ))?;
+
+    let initial_repository = load_manifest_repository(&manifests.path)?;
+    let initial_state = build_manifest_runtime_state(database.pool(), &initial_repository).await?;
+    let initial_contract_instance_id = load_single_contract_instance_for_address(
+        database.pool(),
+        "ethereum-mainnet",
+        "0x00000000000000000000000000000000000000aa",
+    )
+    .await?;
+
+    fs::remove_file(&manifest_path)
+        .with_context(|| format!("failed to remove {}", manifest_path.display()))?;
+
+    let empty_repository = load_manifest_repository(&manifests.path)?;
+    let empty_state = build_manifest_runtime_state(database.pool(), &empty_repository).await?;
+    assert!(empty_state.watched_chain_plan.is_empty());
+    assert_eq!(
+        refresh_watched_chain_plan(database.pool(), &initial_state.watched_chain_plan).await?,
+        Some(Vec::new())
+    );
+
+    fs::write(
+        &manifest_path,
+        manifest_contents("0x0000000000000000000000000000000000000001", "shadow"),
+    )
+    .with_context(|| format!("failed to rewrite {}", manifest_path.display()))?;
+
+    let restored_repository = load_manifest_repository(&manifests.path)?;
+    let restored_state =
+        build_manifest_runtime_state(database.pool(), &restored_repository).await?;
+    let restored_contract_instance_id = load_single_contract_instance_for_address(
+        database.pool(),
+        "ethereum-mainnet",
+        "0x00000000000000000000000000000000000000aa",
+    )
+    .await?;
+
+    assert_eq!(initial_contract_instance_id, restored_contract_instance_id);
+    assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*)::BIGINT FROM contract_instance_addresses WHERE contract_instance_id = $1"
+            )
+            .bind(initial_contract_instance_id)
+            .fetch_one(database.pool())
+            .await?,
+            2
+        );
+    assert_eq!(
+        refresh_watched_chain_plan(database.pool(), &empty_state.watched_chain_plan).await?,
+        Some(restored_state.watched_chain_plan.clone())
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn refresh_watched_chain_plan_tracks_proxy_implementation_churn() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let manifests = TestManifestDir::new()?;
+    let manifest_path = manifests.write_manifest(&manifest_contents_with_contract(
+        "0x0000000000000000000000000000000000000001",
+        "supported",
+        "0x00000000000000000000000000000000000000aa",
+        "erc1967",
+        Some("0x00000000000000000000000000000000000000dd"),
+    ))?;
+
+    let initial_repository = load_manifest_repository(&manifests.path)?;
+    let initial_state = build_manifest_runtime_state(database.pool(), &initial_repository).await?;
+    let proxy_contract_instance_id = load_single_contract_instance_for_address(
+        database.pool(),
+        "ethereum-mainnet",
+        "0x00000000000000000000000000000000000000aa",
+    )
+    .await?;
+    let first_implementation_contract_instance_id = load_single_contract_instance_for_address(
+        database.pool(),
+        "ethereum-mainnet",
+        "0x00000000000000000000000000000000000000dd",
+    )
+    .await?;
+
+    assert_eq!(
+        initial_state.watched_chain_plan,
+        vec![WatchedChainPlan {
+            chain: "ethereum-mainnet".to_owned(),
+            addresses: vec![
+                "0x0000000000000000000000000000000000000001".to_owned(),
+                "0x00000000000000000000000000000000000000aa".to_owned(),
+                "0x00000000000000000000000000000000000000dd".to_owned(),
+            ],
+            manifest_root_entry_count: 1,
+            manifest_contract_entry_count: 1,
+            discovery_edge_entry_count: 1,
+        }]
+    );
+
+    fs::write(
+        &manifest_path,
+        manifest_contents_with_contract(
+            "0x0000000000000000000000000000000000000001",
+            "supported",
+            "0x00000000000000000000000000000000000000aa",
+            "erc1967",
+            Some("0x00000000000000000000000000000000000000ee"),
+        ),
+    )
+    .with_context(|| format!("failed to rewrite {}", manifest_path.display()))?;
+
+    let refreshed_repository = load_manifest_repository(&manifests.path)?;
+    let refreshed_state =
+        build_manifest_runtime_state(database.pool(), &refreshed_repository).await?;
+    let refreshed_plan =
+        refresh_watched_chain_plan(database.pool(), &initial_state.watched_chain_plan)
+            .await?
+            .expect("proxy implementation churn must refresh the watched plan");
+    let second_implementation_contract_instance_id = load_single_contract_instance_for_address(
+        database.pool(),
+        "ethereum-mainnet",
+        "0x00000000000000000000000000000000000000ee",
+    )
+    .await?;
+    let intake_tasks =
+        sync_intake_chain_tasks(database.pool(), &refreshed_state.watched_chain_plan).await?;
+
+    assert_eq!(
+        proxy_contract_instance_id,
+        load_single_contract_instance_for_address(
+            database.pool(),
+            "ethereum-mainnet",
+            "0x00000000000000000000000000000000000000aa",
+        )
+        .await?
+    );
+    assert_ne!(
+        first_implementation_contract_instance_id,
+        second_implementation_contract_instance_id
+    );
+    assert_eq!(refreshed_plan, refreshed_state.watched_chain_plan);
+    assert_eq!(
+        refreshed_state.watched_chain_plan,
+        vec![WatchedChainPlan {
+            chain: "ethereum-mainnet".to_owned(),
+            addresses: vec![
+                "0x0000000000000000000000000000000000000001".to_owned(),
+                "0x00000000000000000000000000000000000000aa".to_owned(),
+                "0x00000000000000000000000000000000000000ee".to_owned(),
+            ],
+            manifest_root_entry_count: 1,
+            manifest_contract_entry_count: 1,
+            discovery_edge_entry_count: 1,
+        }]
+    );
+    assert_eq!(
+        intake_tasks[0].addresses,
+        refreshed_state.watched_chain_plan[0].addresses
+    );
+    assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*)::BIGINT FROM discovery_edges WHERE edge_kind = 'proxy_implementation' AND deactivated_at IS NULL"
+            )
+            .fetch_one(database.pool())
+            .await?,
+            1
+        );
+    assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*)::BIGINT FROM contract_instance_addresses WHERE contract_instance_id = $1 AND deactivated_at IS NULL"
+            )
+            .bind(first_implementation_contract_instance_id)
+            .fetch_one(database.pool())
+            .await?,
+            0
+        );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn watched_plan_excludes_successor_migration_edges_from_address_expansion() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let manifests = TestManifestDir::new()?;
+    let manifest_path = manifests.write_manifest(&manifest_contents_with_contract(
+        "0x0000000000000000000000000000000000000001",
+        "supported",
+        "0x00000000000000000000000000000000000000aa",
+        "erc1967",
+        Some("0x00000000000000000000000000000000000000dd"),
+    ))?;
+
+    let initial_repository = load_manifest_repository(&manifests.path)?;
+    let initial_state = build_manifest_runtime_state(database.pool(), &initial_repository).await?;
+
+    fs::write(
+        &manifest_path,
+        manifest_contents_with_contract(
+            "0x0000000000000000000000000000000000000001",
+            "supported",
+            "0x00000000000000000000000000000000000000bb",
+            "erc1967",
+            Some("0x00000000000000000000000000000000000000dd"),
+        ),
+    )
+    .with_context(|| format!("failed to rewrite {}", manifest_path.display()))?;
+
+    let refreshed_repository = load_manifest_repository(&manifests.path)?;
+    let refreshed_state =
+        build_manifest_runtime_state(database.pool(), &refreshed_repository).await?;
+    let refreshed_plan =
+        refresh_watched_chain_plan(database.pool(), &initial_state.watched_chain_plan)
+            .await?
+            .expect("successor address rotation must refresh the watched plan");
+    let intake_tasks =
+        sync_intake_chain_tasks(database.pool(), &refreshed_state.watched_chain_plan).await?;
+
+    assert_eq!(refreshed_plan, refreshed_state.watched_chain_plan);
+    assert_eq!(
+        refreshed_state.watched_chain_plan,
+        vec![WatchedChainPlan {
+            chain: "ethereum-mainnet".to_owned(),
+            addresses: vec![
+                "0x0000000000000000000000000000000000000001".to_owned(),
+                "0x00000000000000000000000000000000000000bb".to_owned(),
+                "0x00000000000000000000000000000000000000dd".to_owned(),
+            ],
+            manifest_root_entry_count: 1,
+            manifest_contract_entry_count: 1,
+            discovery_edge_entry_count: 1,
+        }]
+    );
+    assert!(
+        !refreshed_state.watched_chain_plan[0]
+            .addresses
+            .contains(&"0x00000000000000000000000000000000000000aa".to_owned())
+    );
+    assert_eq!(
+        intake_tasks[0].addresses,
+        refreshed_state.watched_chain_plan[0].addresses
+    );
+    assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*)::BIGINT FROM discovery_edges WHERE edge_kind = 'migration' AND deactivated_at IS NULL"
+            )
+            .fetch_one(database.pool())
+            .await?,
+            1
+        );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn build_manifest_runtime_state_accepts_empty_root_and_clears_watch_plan() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let manifests = TestManifestDir::new()?;
+    let manifest_path = manifests.write_manifest(&manifest_contents(
+        "0x0000000000000000000000000000000000000001",
+        "shadow",
+    ))?;
+
+    let initial_repository = load_manifest_repository(&manifests.path)?;
+    let initial_state = build_manifest_runtime_state(database.pool(), &initial_repository).await?;
+    assert_eq!(
+        initial_state.manifest_summary.status,
+        ManifestLoadStatus::Loaded
+    );
+    assert_eq!(initial_state.watched_chain_plan.len(), 1);
+
+    fs::remove_file(&manifest_path)
+        .with_context(|| format!("failed to remove {}", manifest_path.display()))?;
+
+    let empty_repository = load_manifest_repository(&manifests.path)?;
+    assert_eq!(empty_repository.summary().status, ManifestLoadStatus::Empty);
+    let empty_state = build_manifest_runtime_state(database.pool(), &empty_repository).await?;
+    assert_eq!(
+        empty_state.manifest_summary.status,
+        ManifestLoadStatus::Empty
+    );
+    assert!(empty_state.watched_chain_plan.is_empty());
+    assert_eq!(empty_state.discovery_admission.active_manifest_count, 0);
+    assert_eq!(empty_state.watched_contract_summary.source_entry_count, 0);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn reconcile_fetched_heads_backfills_code_hashes_for_new_watched_addresses() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let first_root_contract_instance_id = Uuid::from_u128(61);
+    let second_contract_instance_id = Uuid::from_u128(62);
+
+    sqlx::query(
+        r#"
+            INSERT INTO manifest_versions (manifest_id, chain, rollout_status)
+            VALUES (1, 'ethereum-mainnet', 'active')
+            "#,
+    )
+    .execute(database.pool())
+    .await
+    .context("failed to insert manifest_versions for code-hash backfill test")?;
+    insert_contract_instance(
+        database.pool(),
+        first_root_contract_instance_id,
+        "ethereum-mainnet",
+        "root",
+    )
+    .await?;
+    insert_active_contract_instance_address(
+        database.pool(),
+        first_root_contract_instance_id,
+        "ethereum-mainnet",
+        "0x0000000000000000000000000000000000000001",
+        Some(1),
+    )
+    .await?;
+    insert_manifest_root_contract_instance(
+        database.pool(),
+        1,
+        first_root_contract_instance_id,
+        "0x0000000000000000000000000000000000000001",
+    )
+    .await?;
+
+    let watched_plan = load_watched_chain_plan(database.pool()).await?;
+    let mut tasks = sync_intake_chain_tasks(database.pool(), &watched_plan).await?;
+    let canonical_head = provider_block(
+        "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        Some("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+        42,
+    );
+    let (provider, server) = bundle_provider(vec![canonical_head.clone()]).await?;
+
+    let (next_task, initial_outcome) = reconcile_fetched_heads(
+        database.pool(),
+        &tasks[0],
+        &provider,
+        &ProviderHeadSnapshot {
+            canonical: canonical_head.clone(),
+            safe: None,
+            finalized: None,
+        },
+    )
+    .await?
+    .expect("initial code-hash reconciliation must update task state");
+    assert_eq!(
+        initial_outcome.canonical_status,
+        CanonicalReconciliationStatus::Initialized
+    );
+    tasks[0] = next_task;
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM raw_code_hashes")
+            .fetch_one(database.pool())
+            .await?,
+        1
+    );
+
+    insert_contract_instance(
+        database.pool(),
+        second_contract_instance_id,
+        "ethereum-mainnet",
+        "contract",
+    )
+    .await?;
+    insert_active_contract_instance_address(
+        database.pool(),
+        second_contract_instance_id,
+        "ethereum-mainnet",
+        "0x0000000000000000000000000000000000000002",
+        Some(1),
+    )
+    .await?;
+    insert_active_discovery_edge(
+        database.pool(),
+        "ethereum-mainnet",
+        "subregistry",
+        first_root_contract_instance_id,
+        second_contract_instance_id,
+        Some(1),
+    )
+    .await?;
+
+    let watched_plan = load_watched_chain_plan(database.pool()).await?;
+    tasks = sync_intake_chain_tasks(database.pool(), &watched_plan).await?;
+    let unchanged = reconcile_fetched_heads(
+        database.pool(),
+        &tasks[0],
+        &provider,
+        &ProviderHeadSnapshot {
+            canonical: canonical_head,
+            safe: None,
+            finalized: None,
+        },
+    )
+    .await?;
+    assert!(
+        unchanged.is_none(),
+        "unchanged heads should not report a task transition"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM raw_code_hashes")
+            .fetch_one(database.pool())
+            .await?,
+        2
+    );
+    assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT code_byte_length FROM raw_code_hashes WHERE contract_address = '0x0000000000000000000000000000000000000002'"
+            )
+            .fetch_one(database.pool())
+            .await?,
+            0
+        );
+
+    server.abort();
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn storage_discovery_refresh_adds_ensv1_address_without_manifest_reload_and_next_poll_backfills_code_hash()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let manifests = TestManifestDir::new()?;
+    let manifest_path = manifests
+        .write_manifest_for_source_family("ens_v1_registry_l1", &ens_v1_manifest_contents())?;
+
+    let initial_repository = load_manifest_repository(&manifests.path)?;
+    let initial_state = build_manifest_runtime_state(database.pool(), &initial_repository).await?;
+    let initial_manifest_summary = initial_state.manifest_summary.clone();
+    let initial_sync_summary = initial_state.sync_summary.clone();
+    let initial_discovery_admission = initial_state.discovery_admission.clone();
+    let initial_manifest_event_summary = initial_state.manifest_normalized_event_summary.clone();
+    let initial_tasks =
+        sync_intake_chain_tasks(database.pool(), &initial_state.watched_chain_plan).await?;
+
+    assert_eq!(initial_state.watched_chain_plan.len(), 1);
+    assert_eq!(initial_tasks.len(), 1);
+    assert_eq!(initial_tasks[0].addresses.len(), 1);
+
+    let canonical_head = provider_block(
+        "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        Some("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+        42,
+    );
+    let (provider, server) = bundle_provider(vec![canonical_head.clone()]).await?;
+
+    let (_next_task, initial_outcome) = reconcile_fetched_heads(
+        database.pool(),
+        &initial_tasks[0],
+        &provider,
+        &ProviderHeadSnapshot {
+            canonical: canonical_head.clone(),
+            safe: None,
+            finalized: None,
+        },
+    )
+    .await?
+    .expect("initial ENSv1 registry poll must update task state");
+    assert_eq!(
+        initial_outcome.canonical_status,
+        CanonicalReconciliationStatus::Initialized
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM raw_code_hashes")
+            .fetch_one(database.pool())
+            .await?,
+        1
+    );
+
+    insert_raw_new_owner_log(
+        database.pool(),
+        "ethereum-mainnet",
+        &canonical_head,
+        "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E",
+        "0x0000000000000000000000000000000000000002",
+        CanonicalityState::Canonical,
+    )
+    .await?;
+
+    let (refreshed_state, refreshed_tasks) =
+        refresh_runtime_state_from_storage_discovery(database.pool(), &initial_state)
+            .await?
+            .expect("stored ENSv1 discovery must refresh the watched plan without manifest reload");
+
+    assert_eq!(refreshed_state.manifest_summary, initial_manifest_summary);
+    assert_eq!(refreshed_state.sync_summary, initial_sync_summary);
+    assert_eq!(
+        refreshed_state.discovery_admission,
+        initial_discovery_admission
+    );
+    assert_eq!(
+        refreshed_state.manifest_normalized_event_summary,
+        initial_manifest_event_summary
+    );
+    assert_eq!(
+        fs::read_to_string(&manifest_path)
+            .with_context(|| format!("failed to read {}", manifest_path.display()))?,
+        ens_v1_manifest_contents()
+    );
+    assert_eq!(refreshed_state.watched_chain_plan.len(), 1);
+    assert_eq!(refreshed_tasks.len(), 1);
+    assert_eq!(
+        refreshed_state.watched_chain_plan[0].chain,
+        "ethereum-mainnet"
+    );
+    assert_eq!(refreshed_state.watched_chain_plan[0].addresses.len(), 2);
+    assert!(
+        refreshed_state.watched_chain_plan[0]
+            .addresses
+            .contains(&"0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e".to_owned())
+    );
+    assert!(
+        refreshed_state.watched_chain_plan[0]
+            .addresses
+            .contains(&"0x0000000000000000000000000000000000000002".to_owned())
+    );
+    assert_eq!(
+        refreshed_state.watched_chain_plan[0].manifest_root_entry_count,
+        1
+    );
+    assert_eq!(
+        refreshed_state.watched_chain_plan[0].manifest_contract_entry_count,
+        1
+    );
+    assert_eq!(
+        refreshed_state.watched_chain_plan[0].discovery_edge_entry_count,
+        1
+    );
+    assert_eq!(
+        refreshed_tasks[0].addresses,
+        refreshed_state.watched_chain_plan[0].addresses
+    );
+    assert_eq!(
+        refreshed_tasks[0].checkpoint.canonical_block_number,
+        Some(42)
+    );
+    assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*)::BIGINT FROM discovery_edges WHERE discovery_source = 'ens_v1_registry_new_owner:ethereum-mainnet' AND deactivated_at IS NULL"
+            )
+            .fetch_one(database.pool())
+            .await?,
+            1
+        );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM normalized_events WHERE event_kind = 'SubregistryChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        1
+    );
+    assert_eq!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT after_state->>'owner' FROM normalized_events WHERE event_kind = 'SubregistryChanged'"
+            )
+            .fetch_one(database.pool())
+            .await?,
+            "0x0000000000000000000000000000000000000002".to_owned()
+        );
+    assert_eq!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT canonicality_state::TEXT FROM normalized_events WHERE event_kind = 'SubregistryChanged'"
+            )
+            .fetch_one(database.pool())
+            .await?,
+            "canonical".to_owned()
+        );
+
+    let unchanged = reconcile_fetched_heads(
+        database.pool(),
+        &refreshed_tasks[0],
+        &provider,
+        &ProviderHeadSnapshot {
+            canonical: canonical_head,
+            safe: None,
+            finalized: None,
+        },
+    )
+    .await?;
+    assert!(
+        unchanged.is_none(),
+        "unchanged heads should still backfill code hashes for newly watched ENSv1 addresses"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM raw_code_hashes")
+            .fetch_one(database.pool())
+            .await?,
+        2
+    );
+    assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT code_byte_length FROM raw_code_hashes WHERE contract_address = '0x0000000000000000000000000000000000000002'"
+            )
+            .fetch_one(database.pool())
+            .await?,
+            0
+        );
+    server.abort();
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn storage_discovery_refresh_adds_basenames_address_without_manifest_reload_and_next_poll_backfills_code_hash()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let manifests = TestManifestDir::new()?;
+    let manifest_path = manifests.write_manifest_for_namespace_source_family(
+        "basenames",
+        "basenames_base_registry",
+        &basenames_base_registry_manifest_contents(),
+    )?;
+
+    let initial_repository = load_manifest_repository(&manifests.path)?;
+    let initial_state = build_manifest_runtime_state(database.pool(), &initial_repository).await?;
+    let initial_manifest_summary = initial_state.manifest_summary.clone();
+    let initial_sync_summary = initial_state.sync_summary.clone();
+    let initial_discovery_admission = initial_state.discovery_admission.clone();
+    let initial_manifest_event_summary = initial_state.manifest_normalized_event_summary.clone();
+    let initial_tasks =
+        sync_intake_chain_tasks(database.pool(), &initial_state.watched_chain_plan).await?;
+
+    assert_eq!(initial_state.watched_chain_plan.len(), 1);
+    assert_eq!(initial_tasks.len(), 1);
+    assert_eq!(initial_tasks[0].addresses.len(), 1);
+
+    let canonical_head = provider_block(
+        "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab",
+        Some("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbc"),
+        42,
+    );
+    let (provider, server) = bundle_provider(vec![canonical_head.clone()]).await?;
+
+    let (_next_task, initial_outcome) = reconcile_fetched_heads(
+        database.pool(),
+        &initial_tasks[0],
+        &provider,
+        &ProviderHeadSnapshot {
+            canonical: canonical_head.clone(),
+            safe: None,
+            finalized: None,
+        },
+    )
+    .await?
+    .expect("initial Basenames registry poll must update task state");
+    assert_eq!(
+        initial_outcome.canonical_status,
+        CanonicalReconciliationStatus::Initialized
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM raw_code_hashes")
+            .fetch_one(database.pool())
+            .await?,
+        1
+    );
+
+    insert_raw_new_owner_log_for_parent(
+        database.pool(),
+        "base-mainnet",
+        &canonical_head,
+        "0xb94704422c2a1e396835a571837aa5ae53285a95",
+        "0x0000000000000000000000000000000000000002",
+        &base_eth_node(),
+        "alice",
+        CanonicalityState::Canonical,
+    )
+    .await?;
+
+    let (refreshed_state, refreshed_tasks) =
+        refresh_runtime_state_from_storage_discovery(database.pool(), &initial_state)
+            .await?
+            .expect(
+                "stored Basenames discovery must refresh the watched plan without manifest reload",
+            );
+
+    assert_eq!(refreshed_state.manifest_summary, initial_manifest_summary);
+    assert_eq!(refreshed_state.sync_summary, initial_sync_summary);
+    assert_eq!(
+        refreshed_state.discovery_admission,
+        initial_discovery_admission
+    );
+    assert_eq!(
+        refreshed_state.manifest_normalized_event_summary,
+        initial_manifest_event_summary
+    );
+    assert_eq!(
+        fs::read_to_string(&manifest_path)
+            .with_context(|| format!("failed to read {}", manifest_path.display()))?,
+        basenames_base_registry_manifest_contents()
+    );
+    assert_eq!(refreshed_state.watched_chain_plan.len(), 1);
+    assert_eq!(refreshed_tasks.len(), 1);
+    assert_eq!(refreshed_state.watched_chain_plan[0].chain, "base-mainnet");
+    assert_eq!(refreshed_state.watched_chain_plan[0].addresses.len(), 2);
+    assert!(
+        refreshed_state.watched_chain_plan[0]
+            .addresses
+            .contains(&"0xb94704422c2a1e396835a571837aa5ae53285a95".to_owned())
+    );
+    assert!(
+        refreshed_state.watched_chain_plan[0]
+            .addresses
+            .contains(&"0x0000000000000000000000000000000000000002".to_owned())
+    );
+    assert_eq!(
+        refreshed_state.watched_chain_plan[0].manifest_root_entry_count,
+        1
+    );
+    assert_eq!(
+        refreshed_state.watched_chain_plan[0].manifest_contract_entry_count,
+        1
+    );
+    assert_eq!(
+        refreshed_state.watched_chain_plan[0].discovery_edge_entry_count,
+        1
+    );
+    assert_eq!(
+        refreshed_tasks[0].addresses,
+        refreshed_state.watched_chain_plan[0].addresses
+    );
+    assert_eq!(
+        refreshed_tasks[0].checkpoint.canonical_block_number,
+        Some(42)
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM discovery_edges WHERE discovery_source = 'ens_v1_registry_new_owner:base-mainnet' AND deactivated_at IS NULL"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM normalized_events WHERE event_kind = 'SubregistryChanged' AND namespace = 'basenames'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT after_state->>'owner' FROM normalized_events WHERE event_kind = 'SubregistryChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "0x0000000000000000000000000000000000000002".to_owned()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT canonicality_state::TEXT FROM normalized_events WHERE event_kind = 'SubregistryChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "canonical".to_owned()
+    );
+
+    let unchanged = reconcile_fetched_heads(
+        database.pool(),
+        &refreshed_tasks[0],
+        &provider,
+        &ProviderHeadSnapshot {
+            canonical: canonical_head,
+            safe: None,
+            finalized: None,
+        },
+    )
+    .await?;
+    assert!(
+        unchanged.is_none(),
+        "unchanged heads should still backfill code hashes for newly watched Basenames addresses"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM raw_code_hashes")
+            .fetch_one(database.pool())
+            .await?,
+        2
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT code_byte_length FROM raw_code_hashes WHERE contract_address = '0x0000000000000000000000000000000000000002'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        0
+    );
+
+    server.abort();
+    database.cleanup().await?;
+    Ok(())
+}
+
