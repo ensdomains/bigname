@@ -1714,3 +1714,327 @@
             database.cleanup().await?;
             Ok(())
         }
+
+        #[tokio::test]
+        async fn address_names_contract_include_role_summary_reads_ensv2_projection_outputs()
+        -> Result<()> {
+            let database = HarnessDatabase::new().await?;
+            let logical_name_id = "ens:bob.alice.eth";
+            let normalized_name = "bob.alice.eth";
+            let namehash = "namehash:bob.alice.eth";
+            let resource_id = Uuid::from_u128(0x8c10);
+            let token_lineage_id = Uuid::from_u128(0x8c11);
+            let surface_binding_id = Uuid::from_u128(0x8c12);
+            let registrant = "0x0000000000000000000000000000000000000b0b";
+            let controller = "0x0000000000000000000000000000000000000c0c";
+            let resolver_address = "0x0000000000000000000000000000000000000abc";
+
+            seed_ens_v2_address_name_rebuild_inputs(
+                &database,
+                logical_name_id,
+                resource_id,
+                token_lineage_id,
+                surface_binding_id,
+                registrant,
+                controller,
+            )
+            .await?;
+            rebuild_address_names_current(&database, Some(controller)).await?;
+
+            let record_inventory_row =
+                resolution_record_inventory_current_row(logical_name_id, resource_id);
+            let selector_count = record_inventory_row
+                .selectors
+                .as_array()
+                .expect("record_inventory_current selectors must be an array")
+                .len();
+            database
+                .insert_record_inventory_current_row(record_inventory_row)
+                .await?;
+
+            let mut name_row = address_name_name_current_row(
+                logical_name_id,
+                normalized_name,
+                normalized_name,
+                namehash,
+                surface_binding_id,
+                resource_id,
+                Some(token_lineage_id),
+                206,
+                json!({
+                    "registration": {
+                        "status": "active",
+                        "authority_kind": "ens_v2_registry",
+                    },
+                    "control": {
+                        "status": "active",
+                        "expiry": "2030-03-17T17:46:40Z",
+                        "registrant": registrant,
+                        "registry_owner": controller,
+                        "latest_event_kind": "AuthorityTransferred",
+                    },
+                    "resolver": {
+                        "chain_id": "ethereum-sepolia",
+                        "address": resolver_address,
+                        "latest_event_kind": "ResolverChanged",
+                    },
+                    "record_inventory": {
+                        "status": "supported",
+                        "count": selector_count,
+                    },
+                    "history": {
+                        "surface_head": null,
+                        "resource_head": null,
+                    },
+                }),
+            );
+            name_row.binding_kind = Some(bigname_storage::SurfaceBindingKind::LinkedSubregistryPath);
+            name_row.provenance = json!({
+                "normalized_event_ids": [206],
+                "raw_fact_refs": [{
+                    "kind": "raw_log",
+                    "chain_id": "ethereum-sepolia",
+                    "block_number": 206,
+                }],
+                "manifest_versions": [{
+                    "manifest_version": 11,
+                    "source_family": ENSV2_REGISTRY_SOURCE_FAMILY,
+                    "source_manifest_id": null,
+                }],
+                "execution_trace_id": null,
+                "derivation_kind": "name_current_supporting_projection",
+            });
+            name_row.coverage = json!({
+                "status": "unsupported",
+                "exhaustiveness": "not_applicable",
+                "source_classes_considered": [ENSV2_REGISTRY_SOURCE_FAMILY],
+                "unsupported_reason": "name_current is seeded here only to support address role-summary expansion",
+                "enumeration_basis": "address_name_role_summary_support",
+            });
+            name_row.chain_positions = json!({
+                "ethereum": {
+                    "chain_id": "ethereum-sepolia",
+                    "block_number": 206,
+                    "block_hash": "0xensv2-regen",
+                    "timestamp": "2024-05-31T16:10:06Z",
+                }
+            });
+            name_row.canonicality_summary = json!({
+                "status": "finalized",
+                "chains": {
+                    "ethereum-sepolia": "finalized",
+                }
+            });
+            name_row.manifest_version = 11;
+            database.insert_name_current_row(name_row).await?;
+
+            bigname_storage::upsert_name_surfaces(
+                &database.pool,
+                &[
+                    collection_name_surface(
+                        "ens:carol.bob.alice.eth",
+                        "carol.bob.alice.eth",
+                        "namehash:carol.bob.alice.eth",
+                        207,
+                    ),
+                    collection_name_surface(
+                        "ens:dave.bob.alice.eth",
+                        "dave.bob.alice.eth",
+                        "namehash:dave.bob.alice.eth",
+                        208,
+                    ),
+                    collection_name_surface(
+                        "ens:eve.carol.bob.alice.eth",
+                        "eve.carol.bob.alice.eth",
+                        "namehash:eve.carol.bob.alice.eth",
+                        209,
+                    ),
+                ],
+            )
+            .await
+            .context("failed to upsert ENSv2 child surfaces for address role-summary conformance")?;
+            bigname_storage::upsert_children_current_rows(
+                &database.pool,
+                &[
+                    ens_v2_declared_child_row(
+                        logical_name_id,
+                        "ens:carol.bob.alice.eth",
+                        "carol.bob.alice.eth",
+                        "namehash:carol.bob.alice.eth",
+                        801,
+                        207,
+                    ),
+                    ens_v2_declared_child_row(
+                        logical_name_id,
+                        "ens:dave.bob.alice.eth",
+                        "dave.bob.alice.eth",
+                        "namehash:dave.bob.alice.eth",
+                        802,
+                        208,
+                    ),
+                ],
+            )
+            .await
+            .context("failed to upsert ENSv2 children_current rows for address role-summary conformance")?;
+
+            seed_ens_v2_event_fixture_inputs(
+                &database.pool,
+                &[
+                    ens_v2_permission_changed_event(
+                        "conformance:ensv2:bob.alice.eth:resource-permission",
+                        logical_name_id,
+                        resource_id,
+                        controller,
+                        PermissionScope::Resource,
+                        &["set_resolver", "set_records"],
+                        11,
+                        209,
+                        0,
+                    ),
+                    ens_v2_permission_changed_event(
+                        "conformance:ensv2:bob.alice.eth:resolver-permission",
+                        logical_name_id,
+                        resource_id,
+                        controller,
+                        PermissionScope::Resolver {
+                            chain_id: "ethereum-sepolia".to_owned(),
+                            resolver_address: resolver_address.to_owned(),
+                        },
+                        &["set_resolver", "create_subnames"],
+                        12,
+                        210,
+                        0,
+                    ),
+                ],
+            )
+            .await?;
+            rebuild_permissions_current(&database, Some(resource_id)).await?;
+
+            let base_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/v1/addresses/{controller}/names?namespace=ens"))
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("ENSv2 base address names request failed")?;
+            let include_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/v1/addresses/{controller}/names?namespace=ens&include=role_summary"
+                        ))
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("ENSv2 role_summary address names request failed")?;
+
+            assert_eq!(base_response.status(), StatusCode::OK);
+            assert_eq!(include_response.status(), StatusCode::OK);
+
+            let base_payload: AddressNamesResponse = read_json(base_response).await?;
+            let payload: AddressNamesResponse = read_json(include_response).await?;
+
+            assert_eq!(base_payload.data.len(), 1);
+            assert_eq!(payload.data.len(), 1);
+            assert_eq!(
+                base_payload.data[0].get("logical_name_id"),
+                Some(&json!(logical_name_id))
+            );
+            assert_eq!(
+                base_payload.data[0].get("binding_kind"),
+                Some(&json!("linked_subregistry_path"))
+            );
+            assert_eq!(
+                base_payload.data[0].get("relation_facets"),
+                Some(&json!(["effective_controller"]))
+            );
+            assert!(base_payload.data[0].get("role_summary").is_none());
+            assert!(base_payload.data[0].get("subname_count").is_none());
+            assert!(base_payload.data[0].get("record_count").is_none());
+            assert_eq!(payload.coverage, base_payload.coverage);
+            assert_eq!(payload.page, base_payload.page);
+            assert_eq!(payload.declared_state, base_payload.declared_state);
+            assert_eq!(payload.consistency, base_payload.consistency);
+
+            let base_row = base_payload.data[0]
+                .as_object()
+                .expect("base ENSv2 address-name row must be an object");
+            let include_row = payload.data[0]
+                .as_object()
+                .expect("ENSv2 role-summary address-name row must be an object");
+            let base_keys = base_row.keys().cloned().collect::<BTreeSet<_>>();
+            let include_keys = include_row.keys().cloned().collect::<BTreeSet<_>>();
+            assert_eq!(
+                include_keys
+                    .difference(&base_keys)
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                vec![
+                    "expiry".to_owned(),
+                    "record_count".to_owned(),
+                    "role_summary".to_owned(),
+                    "status".to_owned(),
+                    "subname_count".to_owned(),
+                ]
+            );
+            for key in &base_keys {
+                assert_eq!(
+                    include_row.get(key),
+                    base_row.get(key),
+                    "include=role_summary must preserve ENSv2 base field {key}"
+                );
+            }
+
+            assert_eq!(payload.data[0].get("status"), Some(&json!("active")));
+            assert_eq!(
+                payload.data[0].get("expiry"),
+                Some(&json!("2030-03-17T17:46:40Z"))
+            );
+            assert_eq!(payload.data[0].get("subname_count"), Some(&json!(2)));
+            assert_eq!(
+                payload.data[0].get("record_count"),
+                Some(&json!(selector_count))
+            );
+            assert_eq!(
+                payload.data[0].get("role_summary"),
+                Some(&json!({
+                    "subjects": [{
+                        "subject": controller,
+                        "scopes": [
+                            {
+                                "scope": {
+                                    "kind": "resolver",
+                                    "detail": {
+                                        "chain_id": "ethereum-sepolia",
+                                        "resolver_address": resolver_address,
+                                    },
+                                },
+                                "effective_powers": ["set_resolver", "create_subnames"],
+                            },
+                            {
+                                "scope": {
+                                    "kind": "resource",
+                                    "detail": {},
+                                },
+                                "effective_powers": ["set_resolver", "set_records"],
+                            },
+                        ],
+                    }],
+                }))
+            );
+            assert_eq!(payload.provenance["execution_trace_id"], json!(null));
+            assert!(
+                payload.provenance["manifest_versions"]
+                    .as_array()
+                    .expect("address-name provenance manifest_versions must be an array")
+                    .iter()
+                    .any(|manifest| manifest.get("source_family")
+                        == Some(&json!(ENSV2_REGISTRY_SOURCE_FAMILY)))
+            );
+
+            database.cleanup().await?;
+            Ok(())
+        }

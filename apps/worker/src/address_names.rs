@@ -17,11 +17,14 @@ use sqlx::{
 use uuid::Uuid;
 
 const ENS_V1_AUTHORITY_DERIVATION_KIND: &str = "ens_v1_unwrapped_authority";
+const ENS_V2_REGISTRY_DERIVATION_KIND: &str = "ens_v2_registry_resource_surface";
 const ADDRESS_NAMES_CURRENT_DERIVATION_KIND: &str = "address_names_current_rebuild";
 const ADDRESS_NAMES_ENUMERATION_BASIS: &str = "surface_current_relations";
 const ENS_V1_REGISTRAR_SOURCE_FAMILY: &str = "ens_v1_registrar_l1";
 const ENS_V1_REGISTRY_SOURCE_FAMILY: &str = "ens_v1_registry_l1";
 const ENS_V1_RESOLVER_SOURCE_FAMILY: &str = "ens_v1_resolver_l1";
+const ENS_V2_ROOT_SOURCE_FAMILY: &str = "ens_v2_root_l1";
+const ENS_V2_REGISTRY_SOURCE_FAMILY: &str = "ens_v2_registry_l1";
 const BASENAMES_BASE_REGISTRAR_SOURCE_FAMILY: &str = "basenames_base_registrar";
 const BASENAMES_BASE_REGISTRY_SOURCE_FAMILY: &str = "basenames_base_registry";
 const BASENAMES_BASE_RESOLVER_SOURCE_FAMILY: &str = "basenames_base_resolver";
@@ -30,6 +33,7 @@ const RELEVANT_EVENT_KINDS: &[&str] = &[
     "TokenControlTransferred",
     "AuthorityTransferred",
     "AuthorityEpochChanged",
+    "TokenRegenerated",
 ];
 const CANONICAL_STATE_FILTER: &str = r#"
   IN (
@@ -191,7 +195,7 @@ fn build_relation_rows(
     let coverage = json!({
         "status": "full",
         "exhaustiveness": "authoritative",
-        "source_classes_considered": ["ensv1_registry_path"],
+        "source_classes_considered": address_names_source_classes(&binding.namespace, events),
         "unsupported_reason": Value::Null,
         "enumeration_basis": ADDRESS_NAMES_ENUMERATION_BASIS,
     });
@@ -256,7 +260,7 @@ fn project_relations(binding: &CurrentBindingSeed, events: &[RelevantEvent]) -> 
             "AuthorityTransferred" => {
                 registry_owner = json_str(&event.after_state, &["owner"]).map(normalize_address);
             }
-            "AuthorityEpochChanged" => {}
+            "AuthorityEpochChanged" | "TokenRegenerated" => {}
             _ => {}
         }
     }
@@ -510,6 +514,10 @@ async fn load_relevant_events(
         .iter()
         .map(|kind| (*kind).to_owned())
         .collect::<Vec<_>>();
+    let derivation_kinds = authority_derivation_kinds(namespace)
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
     let source_families = authority_source_families(namespace);
 
     let rows = sqlx::query(&format!(
@@ -533,7 +541,7 @@ async fn load_relevant_events(
          AND rb.block_hash = ne.block_hash
         WHERE ne.namespace = $1
           AND ne.logical_name_id = $2
-          AND ne.derivation_kind = $3
+          AND ne.derivation_kind = ANY($3::TEXT[])
           AND ne.event_kind = ANY($4::TEXT[])
           AND ne.source_family = ANY($5::TEXT[])
           AND ne.chain_id = $6
@@ -546,7 +554,7 @@ async fn load_relevant_events(
     ))
     .bind(namespace)
     .bind(logical_name_id)
-    .bind(ENS_V1_AUTHORITY_DERIVATION_KIND)
+    .bind(&derivation_kinds)
     .bind(&event_kinds)
     .bind(&source_families)
     .bind(authority_chain_id)
@@ -676,7 +684,38 @@ fn authority_source_families(namespace: &str) -> Vec<&'static str> {
             ENS_V1_REGISTRAR_SOURCE_FAMILY,
             ENS_V1_REGISTRY_SOURCE_FAMILY,
             ENS_V1_RESOLVER_SOURCE_FAMILY,
+            ENS_V2_ROOT_SOURCE_FAMILY,
+            ENS_V2_REGISTRY_SOURCE_FAMILY,
         ],
+    }
+}
+
+fn authority_derivation_kinds(namespace: &str) -> Vec<&'static str> {
+    match namespace {
+        "basenames" => vec![ENS_V1_AUTHORITY_DERIVATION_KIND],
+        _ => vec![
+            ENS_V1_AUTHORITY_DERIVATION_KIND,
+            ENS_V2_REGISTRY_DERIVATION_KIND,
+        ],
+    }
+}
+
+fn address_names_source_classes(namespace: &str, events: &[RelevantEvent]) -> Vec<&'static str> {
+    if namespace == "basenames" {
+        return vec!["ensv1_registry_path"];
+    }
+
+    let has_ens_v1 = events
+        .iter()
+        .any(|event| event.source_family.starts_with("ens_v1_"));
+    let has_ens_v2 = events
+        .iter()
+        .any(|event| event.source_family.starts_with("ens_v2_"));
+
+    match (has_ens_v1, has_ens_v2) {
+        (false, true) => vec!["ensv2_registry_resource_surface"],
+        (true, true) => vec!["ensv1_registry_path", "ensv2_registry_resource_surface"],
+        _ => vec!["ensv1_registry_path"],
     }
 }
 
@@ -1641,6 +1680,144 @@ mod tests {
         database.cleanup().await
     }
 
+    #[tokio::test]
+    async fn rebuilds_ensv2_address_names_from_registry_resource_surface_events() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let binding = IdentityBinding::with_namespace_and_chain(
+            "ens",
+            "ethereum-sepolia",
+            "ens:bob.alice.eth",
+            "bob.alice.eth",
+            Some(0x9600),
+            0x9700,
+            0x9800,
+        );
+        let holder = "0x0000000000000000000000000000000000000b0b";
+        let controller = "0x0000000000000000000000000000000000000c0c";
+
+        seed_raw_blocks(
+            database.pool(),
+            &[
+                raw_block("ethereum-sepolia", "0xensv2-link", 700, 1_717_182_700),
+                raw_block("ethereum-sepolia", "0xensv2-regen", 701, 1_717_182_701),
+            ],
+        )
+        .await?;
+        seed_identity(
+            database.pool(),
+            &binding,
+            "0xensv2-link",
+            700,
+            1_717_182_700,
+        )
+        .await?;
+        seed_events(
+            database.pool(),
+            &[
+                ensv2_registry_event(
+                    &binding,
+                    "grant",
+                    "RegistrationGranted",
+                    "0xensv2-link",
+                    700,
+                    Some(0),
+                    json!({}),
+                    json!({
+                        "authority_kind": "ens_v2_registry",
+                        "authority_key": "ens-v2-registry:ethereum-sepolia:user-registry:0xeac",
+                        "registrant": holder,
+                        "expiry": 1_900_000_000_i64,
+                        "upstream_resource": "0x0000000000000000000000000000000000000000000000000000000000000eac",
+                    }),
+                ),
+                ensv2_registry_event(
+                    &binding,
+                    "controller",
+                    "AuthorityTransferred",
+                    "0xensv2-link",
+                    700,
+                    Some(1),
+                    json!({
+                        "owner": holder,
+                    }),
+                    json!({
+                        "owner": controller,
+                        "upstream_resource": "0x0000000000000000000000000000000000000000000000000000000000000eac",
+                    }),
+                ),
+                ensv2_registry_event(
+                    &binding,
+                    "regen",
+                    "TokenRegenerated",
+                    "0xensv2-regen",
+                    701,
+                    Some(0),
+                    json!({
+                        "token_id": "0x01",
+                    }),
+                    json!({
+                        "old_token_id": "0x01",
+                        "new_token_id": "0x02",
+                        "resource_id": binding.resource_id.to_string(),
+                    }),
+                ),
+            ],
+        )
+        .await?;
+
+        let summary = rebuild_address_names_current(database.pool(), None).await?;
+        assert_eq!(summary.requested_address_count, 2);
+        assert_eq!(summary.upserted_row_count, 3);
+
+        let holder_rows =
+            load_address_names_current(database.pool(), holder, Some("ens"), None).await?;
+        assert_eq!(holder_rows.len(), 2);
+        assert_eq!(
+            holder_rows
+                .iter()
+                .map(|row| row.relation)
+                .collect::<Vec<_>>(),
+            vec![
+                AddressNameRelation::Registrant,
+                AddressNameRelation::TokenHolder,
+            ]
+        );
+        assert!(
+            holder_rows
+                .iter()
+                .all(|row| row.logical_name_id == binding.logical_name_id)
+        );
+        assert!(
+            holder_rows
+                .iter()
+                .all(|row| row.resource_id == binding.resource_id)
+        );
+        assert!(holder_rows.iter().all(|row| {
+            row.coverage["source_classes_considered"] == json!(["ensv2_registry_resource_surface"])
+        }));
+        assert!(holder_rows.iter().all(|row| {
+            row.provenance["normalized_event_ids"]
+                .as_array()
+                .is_some_and(|values| values.len() == 3)
+        }));
+        assert!(
+            holder_rows
+                .iter()
+                .all(|row| row.chain_positions["ethereum"]["chain_id"] == json!("ethereum-sepolia"))
+        );
+
+        let controller_rows =
+            load_address_names_current(database.pool(), controller, Some("ens"), None).await?;
+        assert_eq!(controller_rows.len(), 1);
+        assert_eq!(
+            controller_rows[0].relation,
+            AddressNameRelation::EffectiveController
+        );
+        assert_eq!(controller_rows[0].logical_name_id, binding.logical_name_id);
+
+        database.cleanup().await
+    }
+
     #[derive(Clone, Debug)]
     struct IdentityBinding {
         namespace: String,
@@ -1896,6 +2073,31 @@ mod tests {
             before_state,
             after_state,
         }
+    }
+
+    fn ensv2_registry_event(
+        binding: &IdentityBinding,
+        identity_suffix: &str,
+        event_kind: &str,
+        block_hash: &str,
+        block_number: i64,
+        log_index: Option<i64>,
+        before_state: Value,
+        after_state: Value,
+    ) -> NormalizedEvent {
+        let mut event = authority_event(
+            binding,
+            identity_suffix,
+            event_kind,
+            ENS_V2_REGISTRY_SOURCE_FAMILY,
+            block_hash,
+            block_number,
+            log_index,
+            before_state,
+            after_state,
+        );
+        event.derivation_kind = ENS_V2_REGISTRY_DERIVATION_KIND.to_owned();
+        event
     }
 
     fn ignored_event(

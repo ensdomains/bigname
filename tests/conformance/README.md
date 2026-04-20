@@ -44,7 +44,13 @@ Execution notes:
 - the address-name collection contract seeds `address_names_current` rows plus the backing
   surfaces, resources, token lineage, and bindings; the harness covers the base
   `GET /v1/addresses/{address}/names` response plus shipped `namespace`, `relation`,
-  `dedupe_by`, and additive `include=role_summary` handling
+  `dedupe_by`, and additive `include=role_summary` handling. Standalone ENSv2 address-name
+  readback coverage rebuilds `address_names_current` from normalized-event inputs and asserts
+  that `include=role_summary` remains projection-backed and additive: the base collection row is
+  unchanged, while `status`, `expiry`, `record_count`, `subname_count`, and `role_summary` read
+  from the existing supporting projections. This does not claim public exact-name support,
+  manifest capability graduation, linked child support, verified execution, or universal
+  resolver support
 - the exact-name contract seeds raw blocks, identity rows, and normalized events, rebuilds
   `name_current` through the worker, and asserts only the frozen `control`, `resolver`, and
   `history` declared-state sections on `GET /v1/names/{namespace}/{name}`, with

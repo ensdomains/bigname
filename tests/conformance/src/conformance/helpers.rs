@@ -1368,6 +1368,55 @@
             }
         }
 
+        fn ens_v2_declared_child_row(
+            parent_logical_name_id: &str,
+            child_logical_name_id: &str,
+            display_name: &str,
+            namehash: &str,
+            normalized_event_id: i64,
+            block_number: i64,
+        ) -> bigname_storage::ChildrenCurrentRow {
+            let mut row = declared_child_row(
+                parent_logical_name_id,
+                child_logical_name_id,
+                display_name,
+                namehash,
+                normalized_event_id,
+                block_number,
+            );
+            row.provenance = json!({
+                "normalized_event_ids": [normalized_event_id],
+                "raw_fact_refs": [{
+                    "kind": "raw_log",
+                    "chain_id": "ethereum-sepolia",
+                    "block_number": block_number,
+                }],
+                "manifest_versions": [{
+                    "manifest_version": 11,
+                    "source_family": ENSV2_REGISTRY_SOURCE_FAMILY,
+                    "source_manifest_id": null,
+                }],
+                "execution_trace_id": null,
+                "derivation_kind": "children_current_rebuild",
+            });
+            row.chain_positions = json!({
+                "ethereum": {
+                    "chain_id": "ethereum-sepolia",
+                    "block_number": block_number,
+                    "block_hash": format!("0xensv2child{block_number:02x}"),
+                    "timestamp": format!("2026-04-17T00:00:{:02}Z", block_number % 60),
+                }
+            });
+            row.canonicality_summary = json!({
+                "status": "finalized",
+                "chains": {
+                    "ethereum-sepolia": "finalized",
+                }
+            });
+            row.manifest_version = 11;
+            row
+        }
+
         fn chain_id_for_namespace(namespace: &str) -> &'static str {
             match namespace {
                 "basenames" => "base-mainnet",
@@ -1640,6 +1689,195 @@
                     }),
                 )
             }
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        async fn seed_ens_v2_address_name_rebuild_inputs(
+            database: &HarnessDatabase,
+            logical_name_id: &str,
+            resource_id: Uuid,
+            token_lineage_id: Uuid,
+            surface_binding_id: Uuid,
+            registrant: &str,
+            controller: &str,
+        ) -> Result<()> {
+            let normalized_name = ens_namespace_normalized_name(logical_name_id);
+
+            bigname_storage::upsert_raw_blocks(
+                &database.pool,
+                &[
+                    raw_block("ethereum-sepolia", "0xensv2-surface", None, 201, 1_717_182_201),
+                    raw_block("ethereum-sepolia", "0xensv2-resource", None, 202, 1_717_182_202),
+                    raw_block("ethereum-sepolia", "0xensv2-binding", None, 203, 1_717_182_203),
+                    raw_block("ethereum-sepolia", "0xensv2-grant", None, 204, 1_717_182_204),
+                    raw_block("ethereum-sepolia", "0xensv2-authority", None, 205, 1_717_182_205),
+                    raw_block("ethereum-sepolia", "0xensv2-regen", None, 206, 1_717_182_206),
+                ],
+            )
+            .await
+            .context("failed to upsert raw blocks for ENSv2 address-name conformance")?;
+            bigname_storage::upsert_name_surfaces(
+                &database.pool,
+                &[NameSurface {
+                    logical_name_id: logical_name_id.to_owned(),
+                    namespace: "ens".to_owned(),
+                    input_name: normalized_name.clone(),
+                    canonical_display_name: normalized_name.clone(),
+                    normalized_name: normalized_name.clone(),
+                    dns_encoded_name: normalized_name.as_bytes().to_vec(),
+                    namehash: format!("namehash:{normalized_name}"),
+                    labelhashes: vec![format!("labelhash:{normalized_name}")],
+                    normalizer_version: "ensip15@2026-04-16".to_owned(),
+                    normalization_warnings: json!([]),
+                    normalization_errors: json!([]),
+                    chain_id: "ethereum-sepolia".to_owned(),
+                    block_hash: "0xensv2-surface".to_owned(),
+                    block_number: 201,
+                    provenance: json!({"seed": "ensv2_address_name_surface"}),
+                    canonicality_state: CanonicalityState::Finalized,
+                }],
+            )
+            .await
+            .context("failed to upsert ENSv2 address-name surface for conformance")?;
+            bigname_storage::upsert_token_lineages(
+                &database.pool,
+                &[TokenLineage {
+                    token_lineage_id,
+                    chain_id: "ethereum-sepolia".to_owned(),
+                    block_hash: "0xensv2-resource".to_owned(),
+                    block_number: 202,
+                    provenance: json!({"seed": "ensv2_address_name_token_lineage"}),
+                    canonicality_state: CanonicalityState::Finalized,
+                }],
+            )
+            .await
+            .context("failed to upsert ENSv2 address-name token lineage for conformance")?;
+            bigname_storage::upsert_resources(
+                &database.pool,
+                &[Resource {
+                    resource_id,
+                    token_lineage_id: Some(token_lineage_id),
+                    chain_id: "ethereum-sepolia".to_owned(),
+                    block_hash: "0xensv2-resource".to_owned(),
+                    block_number: 202,
+                    provenance: json!({
+                        "seed": "ensv2_address_name_resource",
+                        "upstream_resource": "0x0000000000000000000000000000000000000000000000000000000000000eac",
+                    }),
+                    canonicality_state: CanonicalityState::Finalized,
+                }],
+            )
+            .await
+            .context("failed to upsert ENSv2 address-name resource for conformance")?;
+            bigname_storage::upsert_surface_bindings(
+                &database.pool,
+                &[SurfaceBinding {
+                    surface_binding_id,
+                    logical_name_id: logical_name_id.to_owned(),
+                    resource_id,
+                    binding_kind: SurfaceBindingKind::LinkedSubregistryPath,
+                    active_from: timestamp(1_717_182_203),
+                    active_to: None,
+                    chain_id: "ethereum-sepolia".to_owned(),
+                    block_hash: "0xensv2-binding".to_owned(),
+                    block_number: 203,
+                    provenance: json!({
+                        "seed": "ensv2_address_name_binding",
+                        "binding_kind": "linked_subregistry_path",
+                    }),
+                    canonicality_state: CanonicalityState::Finalized,
+                }],
+            )
+            .await
+            .context("failed to upsert ENSv2 address-name surface binding for conformance")?;
+
+            bigname_storage::upsert_normalized_events(
+                &database.pool,
+                &[
+                    NormalizedEvent {
+                        event_identity: format!("conformance:{logical_name_id}:ensv2-grant"),
+                        namespace: "ens".to_owned(),
+                        logical_name_id: Some(logical_name_id.to_owned()),
+                        resource_id: Some(resource_id),
+                        event_kind: "RegistrationGranted".to_owned(),
+                        source_family: ENSV2_REGISTRY_SOURCE_FAMILY.to_owned(),
+                        manifest_version: 11,
+                        source_manifest_id: None,
+                        chain_id: Some("ethereum-sepolia".to_owned()),
+                        block_number: Some(204),
+                        block_hash: Some("0xensv2-grant".to_owned()),
+                        transaction_hash: Some(format!("0xtx:{logical_name_id}:ensv2-grant")),
+                        log_index: Some(0),
+                        raw_fact_ref: json!({"kind": "raw_log", "event_identity": format!("conformance:{logical_name_id}:ensv2-grant")}),
+                        derivation_kind: ENSV2_REGISTRY_DERIVATION_KIND.to_owned(),
+                        canonicality_state: CanonicalityState::Finalized,
+                        before_state: json!({}),
+                        after_state: json!({
+                            "authority_kind": "ens_v2_registry",
+                            "authority_key": format!("ens-v2-registry:ethereum-sepolia:{normalized_name}:0xeac"),
+                            "registrant": registrant,
+                            "expiry": 1_900_000_000_i64,
+                            "upstream_resource": "0x0000000000000000000000000000000000000000000000000000000000000eac",
+                            "status": "registered",
+                        }),
+                    },
+                    NormalizedEvent {
+                        event_identity: format!("conformance:{logical_name_id}:ensv2-authority"),
+                        namespace: "ens".to_owned(),
+                        logical_name_id: Some(logical_name_id.to_owned()),
+                        resource_id: Some(resource_id),
+                        event_kind: "AuthorityTransferred".to_owned(),
+                        source_family: ENSV2_REGISTRY_SOURCE_FAMILY.to_owned(),
+                        manifest_version: 11,
+                        source_manifest_id: None,
+                        chain_id: Some("ethereum-sepolia".to_owned()),
+                        block_number: Some(205),
+                        block_hash: Some("0xensv2-authority".to_owned()),
+                        transaction_hash: Some(format!("0xtx:{logical_name_id}:ensv2-authority")),
+                        log_index: Some(0),
+                        raw_fact_ref: json!({"kind": "raw_log", "event_identity": format!("conformance:{logical_name_id}:ensv2-authority")}),
+                        derivation_kind: ENSV2_REGISTRY_DERIVATION_KIND.to_owned(),
+                        canonicality_state: CanonicalityState::Finalized,
+                        before_state: json!({
+                            "owner": registrant,
+                        }),
+                        after_state: json!({
+                            "owner": controller,
+                            "upstream_resource": "0x0000000000000000000000000000000000000000000000000000000000000eac",
+                        }),
+                    },
+                    NormalizedEvent {
+                        event_identity: format!("conformance:{logical_name_id}:ensv2-regen"),
+                        namespace: "ens".to_owned(),
+                        logical_name_id: Some(logical_name_id.to_owned()),
+                        resource_id: Some(resource_id),
+                        event_kind: "TokenRegenerated".to_owned(),
+                        source_family: ENSV2_REGISTRY_SOURCE_FAMILY.to_owned(),
+                        manifest_version: 11,
+                        source_manifest_id: None,
+                        chain_id: Some("ethereum-sepolia".to_owned()),
+                        block_number: Some(206),
+                        block_hash: Some("0xensv2-regen".to_owned()),
+                        transaction_hash: Some(format!("0xtx:{logical_name_id}:ensv2-regen")),
+                        log_index: Some(0),
+                        raw_fact_ref: json!({"kind": "raw_log", "event_identity": format!("conformance:{logical_name_id}:ensv2-regen")}),
+                        derivation_kind: ENSV2_REGISTRY_DERIVATION_KIND.to_owned(),
+                        canonicality_state: CanonicalityState::Finalized,
+                        before_state: json!({
+                            "token_id": "0x01",
+                        }),
+                        after_state: json!({
+                            "old_token_id": "0x01",
+                            "new_token_id": "0x02",
+                            "resource_id": resource_id.to_string(),
+                        }),
+                    },
+                ],
+            )
+            .await
+            .context("failed to upsert ENSv2 address-name normalized events for conformance")?;
+
+            Ok(())
         }
 
         async fn seed_ens_v2_event_fixture_inputs(pool: &PgPool, events: &[NormalizedEvent]) -> Result<()> {

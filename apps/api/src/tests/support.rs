@@ -1456,6 +1456,232 @@ impl TestDatabase {
         Ok(())
     }
 
+    async fn seed_ensv2_address_names_rebuild_inputs(
+        &self,
+        logical_name_id: &str,
+        resource_id: Uuid,
+        token_lineage_id: Uuid,
+        surface_binding_id: Uuid,
+        registrant: &str,
+        controller: &str,
+    ) -> Result<()> {
+        let normalized_name = logical_name_id
+            .split_once(':')
+            .map(|(_, normalized_name)| normalized_name)
+            .expect("logical_name_id must include namespace");
+
+        bigname_storage::upsert_raw_blocks(
+            &self.pool,
+            &[
+                raw_block(
+                    "ethereum-sepolia",
+                    "0xensv2-surface",
+                    None,
+                    201,
+                    1_717_182_201,
+                ),
+                raw_block(
+                    "ethereum-sepolia",
+                    "0xensv2-resource",
+                    None,
+                    202,
+                    1_717_182_202,
+                ),
+                raw_block(
+                    "ethereum-sepolia",
+                    "0xensv2-binding",
+                    None,
+                    203,
+                    1_717_182_203,
+                ),
+                raw_block(
+                    "ethereum-sepolia",
+                    "0xensv2-grant",
+                    None,
+                    204,
+                    1_717_182_204,
+                ),
+                raw_block(
+                    "ethereum-sepolia",
+                    "0xensv2-authority",
+                    None,
+                    205,
+                    1_717_182_205,
+                ),
+                raw_block(
+                    "ethereum-sepolia",
+                    "0xensv2-regen",
+                    None,
+                    206,
+                    1_717_182_206,
+                ),
+            ],
+        )
+        .await
+        .context("failed to upsert raw blocks for ENSv2 address-name API test")?;
+        bigname_storage::upsert_name_surfaces(
+            &self.pool,
+            &[NameSurface {
+                logical_name_id: logical_name_id.to_owned(),
+                namespace: "ens".to_owned(),
+                input_name: normalized_name.to_owned(),
+                canonical_display_name: normalized_name.to_owned(),
+                normalized_name: normalized_name.to_owned(),
+                dns_encoded_name: normalized_name.as_bytes().to_vec(),
+                namehash: format!("namehash:{normalized_name}"),
+                labelhashes: vec![format!("labelhash:{normalized_name}")],
+                normalizer_version: "ensip15@2026-04-16".to_owned(),
+                normalization_warnings: json!([]),
+                normalization_errors: json!([]),
+                chain_id: "ethereum-sepolia".to_owned(),
+                block_hash: "0xensv2-surface".to_owned(),
+                block_number: 201,
+                provenance: json!({"seed": "ensv2_address_names_surface"}),
+                canonicality_state: CanonicalityState::Finalized,
+            }],
+        )
+        .await
+        .context("failed to upsert ENSv2 address-name surface for API test")?;
+        bigname_storage::upsert_token_lineages(
+            &self.pool,
+            &[TokenLineage {
+                token_lineage_id,
+                chain_id: "ethereum-sepolia".to_owned(),
+                block_hash: "0xensv2-resource".to_owned(),
+                block_number: 202,
+                provenance: json!({"seed": "ensv2_address_names_token_lineage"}),
+                canonicality_state: CanonicalityState::Finalized,
+            }],
+        )
+        .await
+        .context("failed to upsert ENSv2 address-name token lineage for API test")?;
+        bigname_storage::upsert_resources(
+            &self.pool,
+            &[Resource {
+                resource_id,
+                token_lineage_id: Some(token_lineage_id),
+                chain_id: "ethereum-sepolia".to_owned(),
+                block_hash: "0xensv2-resource".to_owned(),
+                block_number: 202,
+                provenance: json!({
+                    "seed": "ensv2_address_names_resource",
+                    "upstream_resource": "0x0000000000000000000000000000000000000000000000000000000000000eac",
+                }),
+                canonicality_state: CanonicalityState::Finalized,
+            }],
+        )
+        .await
+        .context("failed to upsert ENSv2 address-name resource for API test")?;
+        bigname_storage::upsert_surface_bindings(
+            &self.pool,
+            &[SurfaceBinding {
+                surface_binding_id,
+                logical_name_id: logical_name_id.to_owned(),
+                resource_id,
+                binding_kind: SurfaceBindingKind::LinkedSubregistryPath,
+                active_from: timestamp(1_717_182_203),
+                active_to: None,
+                chain_id: "ethereum-sepolia".to_owned(),
+                block_hash: "0xensv2-binding".to_owned(),
+                block_number: 203,
+                provenance: json!({
+                    "seed": "ensv2_address_names_binding",
+                    "binding_kind": "linked_subregistry_path",
+                }),
+                canonicality_state: CanonicalityState::Finalized,
+            }],
+        )
+        .await
+        .context("failed to upsert ENSv2 address-name surface binding for API test")?;
+        bigname_storage::upsert_normalized_events(
+            &self.pool,
+            &[
+                NormalizedEvent {
+                    event_identity: format!("api-test:{logical_name_id}:ensv2-grant"),
+                    namespace: "ens".to_owned(),
+                    logical_name_id: Some(logical_name_id.to_owned()),
+                    resource_id: Some(resource_id),
+                    event_kind: "RegistrationGranted".to_owned(),
+                    source_family: "ens_v2_registry_l1".to_owned(),
+                    manifest_version: 11,
+                    source_manifest_id: None,
+                    chain_id: Some("ethereum-sepolia".to_owned()),
+                    block_number: Some(204),
+                    block_hash: Some("0xensv2-grant".to_owned()),
+                    transaction_hash: Some(format!("0xtx:{logical_name_id}:ensv2-grant")),
+                    log_index: Some(0),
+                    raw_fact_ref: json!({"kind": "raw_log", "event_identity": format!("api-test:{logical_name_id}:ensv2-grant")}),
+                    derivation_kind: "ens_v2_registry_resource_surface".to_owned(),
+                    canonicality_state: CanonicalityState::Finalized,
+                    before_state: json!({}),
+                    after_state: json!({
+                        "authority_kind": "ens_v2_registry",
+                        "authority_key": format!("ens-v2-registry:ethereum-sepolia:{normalized_name}:0xeac"),
+                        "registrant": registrant,
+                        "expiry": 1_900_000_000_i64,
+                        "upstream_resource": "0x0000000000000000000000000000000000000000000000000000000000000eac",
+                        "status": "registered",
+                    }),
+                },
+                NormalizedEvent {
+                    event_identity: format!("api-test:{logical_name_id}:ensv2-authority"),
+                    namespace: "ens".to_owned(),
+                    logical_name_id: Some(logical_name_id.to_owned()),
+                    resource_id: Some(resource_id),
+                    event_kind: "AuthorityTransferred".to_owned(),
+                    source_family: "ens_v2_registry_l1".to_owned(),
+                    manifest_version: 11,
+                    source_manifest_id: None,
+                    chain_id: Some("ethereum-sepolia".to_owned()),
+                    block_number: Some(205),
+                    block_hash: Some("0xensv2-authority".to_owned()),
+                    transaction_hash: Some(format!("0xtx:{logical_name_id}:ensv2-authority")),
+                    log_index: Some(0),
+                    raw_fact_ref: json!({"kind": "raw_log", "event_identity": format!("api-test:{logical_name_id}:ensv2-authority")}),
+                    derivation_kind: "ens_v2_registry_resource_surface".to_owned(),
+                    canonicality_state: CanonicalityState::Finalized,
+                    before_state: json!({
+                        "owner": registrant,
+                    }),
+                    after_state: json!({
+                        "owner": controller,
+                        "upstream_resource": "0x0000000000000000000000000000000000000000000000000000000000000eac",
+                    }),
+                },
+                NormalizedEvent {
+                    event_identity: format!("api-test:{logical_name_id}:ensv2-regen"),
+                    namespace: "ens".to_owned(),
+                    logical_name_id: Some(logical_name_id.to_owned()),
+                    resource_id: Some(resource_id),
+                    event_kind: "TokenRegenerated".to_owned(),
+                    source_family: "ens_v2_registry_l1".to_owned(),
+                    manifest_version: 11,
+                    source_manifest_id: None,
+                    chain_id: Some("ethereum-sepolia".to_owned()),
+                    block_number: Some(206),
+                    block_hash: Some("0xensv2-regen".to_owned()),
+                    transaction_hash: Some(format!("0xtx:{logical_name_id}:ensv2-regen")),
+                    log_index: Some(0),
+                    raw_fact_ref: json!({"kind": "raw_log", "event_identity": format!("api-test:{logical_name_id}:ensv2-regen")}),
+                    derivation_kind: "ens_v2_registry_resource_surface".to_owned(),
+                    canonicality_state: CanonicalityState::Finalized,
+                    before_state: json!({
+                        "token_id": "0x01",
+                    }),
+                    after_state: json!({
+                        "old_token_id": "0x01",
+                        "new_token_id": "0x02",
+                        "resource_id": resource_id.to_string(),
+                    }),
+                },
+            ],
+        )
+        .await
+        .context("failed to upsert ENSv2 address-name normalized events for API test")?;
+
+        Ok(())
+    }
+
     async fn seed_basenames_resolution_rebuild_inputs(
         &self,
         logical_name_id: &str,
