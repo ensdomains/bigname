@@ -444,6 +444,7 @@ fn apply_registry_observation(
                     "registrant": state.owner,
                     "expiry": expiry,
                     "sender": sender,
+                    "registry_contract_instance_id": reference.emitting_contract_instance_id.to_string(),
                     "resource_pending": true,
                 }),
                 format!("label-registered:{}", state.token_id),
@@ -535,6 +536,7 @@ fn apply_registry_observation(
                         "status": "unregistered",
                         "token_id": token_id,
                         "sender": sender,
+                        "registry_contract_instance_id": reference.emitting_contract_instance_id.to_string(),
                     }),
                     format!("label-unregistered:{token_id}"),
                 ));
@@ -581,6 +583,7 @@ fn apply_registry_observation(
                         "token_id": token_id,
                         "expiry": new_expiry,
                         "labelhash": state.labelhash,
+                        "registry_contract_instance_id": reference.emitting_contract_instance_id.to_string(),
                     }),
                     format!("registration-renewed:{token_id}"),
                 ));
@@ -897,6 +900,7 @@ fn build_resource_events(
                 "current_token_id": state.token_id,
                 "upstream_resource": link.upstream_resource,
                 "status": "registered",
+                "registry_contract_instance_id": state.registry_contract_instance_id.to_string(),
             }),
             format!("registration-granted:{}", link.upstream_resource),
         ));
@@ -2285,6 +2289,96 @@ mod tests {
         assert_eq!(
             linked_event.after_state["current_token_id"],
             Value::String(new_token_id.clone())
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn ens_v2_lifecycle_events_include_registry_contract_instance_id() -> Result<()> {
+        let registry = "0x00000000000000000000000000000000000000aa".to_owned();
+        let contract_instance_id = Uuid::from_u128(0x1234);
+        let token = "0x00000000000000000000000000000000000000000000000000000000000000a1".to_owned();
+        let upstream_resource =
+            "0x0000000000000000000000000000000000000000000000000000000000000ea1".to_owned();
+        let mut harness = RegistryHarness::new(&registry, contract_instance_id, "eth");
+
+        harness.apply(RegistryObservation::LabelRegistered {
+            token_id: token.clone(),
+            labelhash: labelhash("alice"),
+            label: "alice".to_owned(),
+            owner: "0x0000000000000000000000000000000000000a11".to_owned(),
+            expiry: 1_900_000_000,
+            sender: "0x0000000000000000000000000000000000000dad".to_owned(),
+            reference: reference(&registry, contract_instance_id, 10, 0),
+        })?;
+
+        let expected_registry_id = Value::String(contract_instance_id.to_string());
+        let pending_grant = harness
+            .graph_events
+            .iter()
+            .find(|event| event.event_kind == EVENT_KIND_REGISTRATION_GRANTED)
+            .context("LabelRegistered should emit RegistrationGranted")?;
+        assert_eq!(
+            pending_grant.after_state["registry_contract_instance_id"],
+            expected_registry_id
+        );
+
+        harness.apply(RegistryObservation::TokenResource {
+            token_id: token.clone(),
+            upstream_resource: upstream_resource.clone(),
+            reference: reference(&registry, contract_instance_id, 10, 1),
+        })?;
+        let resource_id = deterministic_uuid(&format!(
+            "ens-v2-resource:{}:{}:{}",
+            "ethereum-sepolia", contract_instance_id, upstream_resource
+        ));
+        let linked_state = harness
+            .linked_resource_states
+            .get(&resource_id)
+            .context("TokenResource should link a resource")?;
+        let link = linked_state
+            .resource
+            .as_ref()
+            .context("linked state should keep resource")?;
+        let resource_grant = build_resource_events(linked_state, link)
+            .into_iter()
+            .find(|event| event.event_kind == EVENT_KIND_REGISTRATION_GRANTED)
+            .context("resource-linked state should emit RegistrationGranted")?;
+        assert_eq!(
+            resource_grant.after_state["registry_contract_instance_id"],
+            expected_registry_id
+        );
+
+        harness.apply(RegistryObservation::ExpiryUpdated {
+            token_id: token.clone(),
+            new_expiry: 2_000_000_000,
+            sender: "0x0000000000000000000000000000000000000dad".to_owned(),
+            reference: reference(&registry, contract_instance_id, 11, 0),
+        })?;
+        let renewal = harness
+            .graph_events
+            .iter()
+            .find(|event| event.event_kind == EVENT_KIND_REGISTRATION_RENEWED)
+            .context("ExpiryUpdated should emit RegistrationRenewed")?;
+        assert_eq!(
+            renewal.after_state["registry_contract_instance_id"],
+            expected_registry_id
+        );
+
+        harness.apply(RegistryObservation::LabelUnregistered {
+            token_id: token,
+            sender: "0x0000000000000000000000000000000000000dad".to_owned(),
+            reference: reference(&registry, contract_instance_id, 12, 0),
+        })?;
+        let release = harness
+            .graph_events
+            .iter()
+            .find(|event| event.event_kind == EVENT_KIND_REGISTRATION_RELEASED)
+            .context("LabelUnregistered should emit RegistrationReleased")?;
+        assert_eq!(
+            release.after_state["registry_contract_instance_id"],
+            expected_registry_id
         );
 
         Ok(())

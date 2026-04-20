@@ -38,7 +38,9 @@ Execution notes:
 - the child collection contract seeds `children_current` rows and covers both the base
   `GET /v1/names/{namespace}/{name}/children` response and the shipped `include=counts`
   variant; the harness also asserts that unsupported non-`declared` `surface_classes` are
-  rejected
+  rejected. Standalone ENSv2 coverage reads back a declared direct child from the same collection
+  envelope with `surface_class=declared`, `enumeration_basis=declared_direct_children`, ENSv2
+  registry provenance, and no broader linked-child surface-class support
 - the address-name collection contract seeds `address_names_current` rows plus the backing
   surfaces, resources, token lineage, and bindings; the harness covers the base
   `GET /v1/addresses/{address}/names` response plus shipped `namespace`, `relation`,
@@ -64,7 +66,13 @@ Execution notes:
   and reserved offchain-gateway Basenames path classes stay selector-local `unsupported` with
   `provenance.execution_trace_id=null` on the mixed route; beyond those shipped lanes, other
   transport-assisted, other non-alias ancestor-selected, and broader non-wildcard non-direct
-  verified support remain out of scope
+  verified support remain out of scope. Standalone ENSv2 declared record-inventory coverage
+  reads normalized resolver events into `record_inventory` and `record_cache` only: supported
+  selector inventory is limited to retained selector identity and the shared
+  `record_version_boundary`, requested `addr:60` and `text` cache entries remain
+  `unsupported` because values are not retained in normalized events, missing `contenthash`
+  returns `not_found`, unsupported `pubkey` stays `unsupported`, and this does not imply
+  verified resolution or universal resolver execution support
 - the coverage contract reuses the same exact-name rebuild seed and asserts that
   `GET /v1/coverage/{namespace}/{name}` keeps the same single-name `data` and top-level
   `coverage` object as exact-name lookup while exposing the explain-only coverage block in
@@ -117,11 +125,17 @@ Execution notes:
   `manifest_versions`, `execution_trace_id`, and execution `finished_at` as `last_updated`
 - the resource-permissions contract seeds `permissions_current` rows and covers both the base
   `GET /v1/resources/{resource_id}/permissions` collection response and the shipped `subject` and
-  `scope` query filters
+  `scope` query filters. Standalone ENSv2 readback coverage includes resource-scope and
+  resolver-scope permission rows from `ens_v2_resolver_l1`, omits fully revoked rows from the
+  current collection, and leaves `verified_state` absent
 - the resolver-overview contract seeds `resolver_current` rows and asserts the shipped declared
   summary sections, including the supported `{status, count, items}` alias envelope narrowed to
   current `binding_kind=resolver_alias_path` bindings, plus projection provenance, coverage, and
-  lowercase address normalization for `GET /v1/resolvers/{chain_id}/{resolver_address}`
+  lowercase address normalization for `GET /v1/resolvers/{chain_id}/{resolver_address}`.
+  Standalone ENSv2 resolver-overview coverage reads resolver binding, permission, role-holder,
+  and event-summary counts from the declared summary while keeping the permission item shape to
+  `resource_id`, `subject`, `effective_powers`, `grant_source`, and `revocation_source`; it does
+  not expand the public permission ledger or graduate manifest capabilities
 - the address-history contract seeds `address_names_current` anchors plus the backing surfaces,
   resources, token lineage, bindings, and canonical normalized events; the harness covers the
   base `GET /v1/history/addresses/{address}` response with the shipped empty `declared_state`,

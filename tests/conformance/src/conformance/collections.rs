@@ -156,12 +156,7 @@
             bigname_storage::upsert_name_surfaces(
                 &database.pool,
                 &[
-                    collection_name_surface(
-                        parent_logical_name_id,
-                        "parent.eth",
-                        "node:parent.eth",
-                        10,
-                    ),
+                    collection_name_surface(parent_logical_name_id, "parent.eth", "node:parent.eth", 10),
                     collection_name_surface(
                         "ens:bob.parent.eth",
                         "bob.parent.eth",
@@ -348,20 +343,95 @@
         }
 
         #[tokio::test]
-        async fn name_children_contract_include_counts_returns_declared_subname_count() -> Result<()>
-        {
+        async fn name_children_contract_returns_ensv2_declared_direct_child_readback() -> Result<()> {
+            let database = HarnessDatabase::new().await?;
+            let fixture = EnsV2DeclaredChildFixture::new(
+                "ens:parent.eth",
+                "ens:alice.parent.eth",
+                Uuid::from_u128(0x9100),
+                Uuid::from_u128(0x9101),
+                90,
+            );
+            fixture.seed(&database).await?;
+
+            rebuild_children_current(&database, Some("ens:parent.eth")).await?;
+
+            let response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri("/v1/names/ens/parent.eth/children")
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("ENSv2 children request failed")?;
+
+            assert_eq!(response.status(), StatusCode::OK);
+
+            let payload: ChildrenResponse = read_json(response).await?;
+            assert!(
+                payload
+                    .declared_state
+                    .as_object()
+                    .map(|value| value.is_empty())
+                    .unwrap_or(false)
+            );
+            assert_eq!(payload.coverage.status, "full");
+            assert_eq!(payload.coverage.exhaustiveness, "authoritative");
+            assert_eq!(
+                payload.coverage.source_classes_considered,
+                vec!["declared".to_owned()]
+            );
+            assert_eq!(
+                payload.coverage.enumeration_basis,
+                "declared_direct_children"
+            );
+            assert_eq!(payload.coverage.unsupported_reason, None);
+            assert_eq!(payload.page.sort, "display_name_asc");
+            assert_eq!(payload.page.page_size, 1);
+            assert_eq!(payload.consistency, "finalized");
+            assert_eq!(
+                payload.provenance,
+                fixture.expected_children_provenance(&database).await?
+            );
+            assert_eq!(
+                payload.chain_positions,
+                json!({
+                    "ethereum": {
+                        "chain_id": "ethereum-mainnet",
+                        "block_number": 92,
+                        "block_hash": "0xensv2block5c",
+                        "timestamp": "2024-05-31T21:14:52Z"
+                    }
+                })
+            );
+            assert_eq!(payload.data.len(), 1);
+            assert_eq!(
+                payload.data[0].get("logical_name_id"),
+                Some(&json!("ens:alice.parent.eth"))
+            );
+            assert_eq!(
+                payload.data[0].get("surface_class"),
+                Some(&json!("declared"))
+            );
+            assert_eq!(
+                payload.data[0].get("normalized_name"),
+                Some(&json!("alice.parent.eth"))
+            );
+
+            database.cleanup().await?;
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn name_children_contract_include_counts_returns_declared_subname_count() -> Result<()> {
             let database = HarnessDatabase::new().await?;
             let parent_logical_name_id = "ens:parent.eth";
 
             bigname_storage::upsert_name_surfaces(
                 &database.pool,
                 &[
-                    collection_name_surface(
-                        parent_logical_name_id,
-                        "parent.eth",
-                        "node:parent.eth",
-                        20,
-                    ),
+                    collection_name_surface(parent_logical_name_id, "parent.eth", "node:parent.eth", 20),
                     collection_name_surface(
                         "ens:alice.parent.eth",
                         "alice.parent.eth",
@@ -423,20 +493,14 @@
         }
 
         #[tokio::test]
-        async fn name_children_contract_returns_basenames_rows_from_base_authority() -> Result<()>
-        {
+        async fn name_children_contract_returns_basenames_rows_from_base_authority() -> Result<()> {
             let database = HarnessDatabase::new().await?;
             let parent_logical_name_id = "basenames:base.eth";
 
             bigname_storage::upsert_name_surfaces(
                 &database.pool,
                 &[
-                    collection_name_surface(
-                        parent_logical_name_id,
-                        "base.eth",
-                        "node:base.eth",
-                        40,
-                    ),
+                    collection_name_surface(parent_logical_name_id, "base.eth", "node:base.eth", 40),
                     collection_name_surface(
                         "basenames:bob.base.eth",
                         "bob.base.eth",
@@ -631,12 +695,7 @@
                         "0xalpha",
                         11,
                     ),
-                    address_name_resource(
-                        beta_resource_id,
-                        Some(beta_token_lineage_id),
-                        "0xbeta",
-                        12,
-                    ),
+                    address_name_resource(beta_resource_id, Some(beta_token_lineage_id), "0xbeta", 12),
                 ],
             )
             .await
@@ -1115,8 +1174,7 @@
         }
 
         #[tokio::test]
-        async fn address_names_contract_returns_basenames_base_authority_relation_facets()
-        -> Result<()> {
+        async fn address_names_contract_returns_basenames_base_authority_relation_facets() -> Result<()> {
             let database = HarnessDatabase::new().await?;
             let address = "0x0000000000000000000000000000000000000bcd";
             let resource_id = Uuid::from_u128(0x85a0);
@@ -1309,11 +1367,8 @@
                 assert_eq!(
                     holder_payload.data[0].get("relation_facets"),
                     Some(&match scenario {
-                        BasenamesControlVectorScenario::FullTransfer => json!([
-                            "registrant",
-                            "token_holder",
-                            "effective_controller"
-                        ]),
+                        BasenamesControlVectorScenario::FullTransfer =>
+                            json!(["registrant", "token_holder", "effective_controller"]),
                         _ => json!(["registrant", "token_holder"]),
                     })
                 );
@@ -1339,8 +1394,7 @@
                         })?;
 
                     assert_eq!(controller_response.status(), StatusCode::OK);
-                    let controller_payload: AddressNamesResponse =
-                        read_json(controller_response).await?;
+                    let controller_payload: AddressNamesResponse = read_json(controller_response).await?;
                     assert_eq!(controller_payload.data.len(), 1);
                     assert_eq!(
                         controller_payload.data[0].get("logical_name_id"),
@@ -1368,8 +1422,7 @@
                         })?;
 
                     assert_eq!(previous_response.status(), StatusCode::OK);
-                    let previous_payload: AddressNamesResponse =
-                        read_json(previous_response).await?;
+                    let previous_payload: AddressNamesResponse = read_json(previous_response).await?;
                     assert!(previous_payload.data.is_empty());
                 }
             }
@@ -1526,19 +1579,12 @@
                         subject,
                         PermissionScope::Resolver {
                             chain_id: "ethereum-mainnet".to_owned(),
-                            resolver_address: "0x0000000000000000000000000000000000000aaa"
-                                .to_owned(),
+                            resolver_address: "0x0000000000000000000000000000000000000aaa".to_owned(),
                         },
                         8,
                         72,
                     ),
-                    permission_current_row(
-                        resource_id,
-                        other_subject,
-                        PermissionScope::Registry,
-                        9,
-                        73,
-                    ),
+                    permission_current_row(resource_id, other_subject, PermissionScope::Registry, 9, 73),
                 ],
             )
             .await

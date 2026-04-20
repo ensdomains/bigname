@@ -5,9 +5,16 @@ use sqlx::{PgPool, Row, postgres::PgRow};
 
 const DECLARED_SURFACE_CLASS: &str = "declared";
 const SUBREGISTRY_EVENT_KIND: &str = "SubregistryChanged";
+const PARENT_EVENT_KIND: &str = "ParentChanged";
+const REGISTRATION_GRANTED_EVENT_KIND: &str = "RegistrationGranted";
+const REGISTRATION_RENEWED_EVENT_KIND: &str = "RegistrationRenewed";
+const REGISTRATION_RELEASED_EVENT_KIND: &str = "RegistrationReleased";
 const SUBREGISTRY_DERIVATION_KIND: &str = "ens_v1_subregistry_changed";
+const ENSV2_REGISTRY_DERIVATION_KIND: &str = "ens_v2_registry_resource_surface";
 const ENSV1_SUBREGISTRY_SOURCE_FAMILY: &str = "ens_v1_registry_l1";
 const BASENAMES_BASE_SUBREGISTRY_SOURCE_FAMILY: &str = "basenames_base_registry";
+const ENSV2_ROOT_SOURCE_FAMILY: &str = "ens_v2_root_l1";
+const ENSV2_REGISTRY_SOURCE_FAMILY: &str = "ens_v2_registry_l1";
 const DEFAULT_CHILDREN_CURRENT_READ_FILTER: &str = r#"
   AND parent.canonicality_state IN (
       'canonical'::canonicality_state,
@@ -58,6 +65,9 @@ pub struct DeclaredChildEventSource {
     pub transaction_hash: String,
     pub log_index: i64,
     pub raw_fact_ref: Value,
+    pub normalized_event_ids: Vec<i64>,
+    pub raw_fact_refs: Value,
+    pub manifest_versions: Value,
 }
 
 /// Load declared direct child rows for one parent from the default canonical read set.
@@ -147,7 +157,7 @@ pub async fn load_canonical_declared_child_sources(
 ) -> Result<Vec<DeclaredChildEventSource>> {
     let rows = sqlx::query(
         r#"
-        WITH ranked_sources AS (
+        WITH ranked_v1_sources AS (
             SELECT
                 parent.logical_name_id AS parent_logical_name_id,
                 child.logical_name_id AS child_logical_name_id,
@@ -166,6 +176,13 @@ pub async fn load_canonical_declared_child_sources(
                 ne.transaction_hash,
                 ne.log_index,
                 ne.raw_fact_ref,
+                ARRAY[ne.normalized_event_id]::BIGINT[] AS normalized_event_ids,
+                jsonb_build_array(ne.raw_fact_ref) AS raw_fact_refs,
+                jsonb_build_array(jsonb_build_object(
+                    'source_manifest_id', ne.source_manifest_id,
+                    'source_family', ne.source_family,
+                    'manifest_version', ne.manifest_version
+                )) AS manifest_versions,
                 COALESCE((ne.after_state ->> 'tombstone')::BOOLEAN, FALSE) AS tombstone,
                 COALESCE((ne.after_state ->> 'active_edge')::BOOLEAN, FALSE) AS active_edge,
                 ROW_NUMBER() OVER (
@@ -204,6 +221,322 @@ pub async fn load_canonical_declared_child_sources(
                     'safe'::canonicality_state,
                     'finalized'::canonicality_state
               )
+        ),
+        current_v1_sources AS (
+            SELECT
+                parent_logical_name_id,
+                child_logical_name_id,
+                namespace,
+                canonical_display_name,
+                normalized_name,
+                namehash,
+                normalized_event_id,
+                event_identity,
+                source_family,
+                manifest_version,
+                source_manifest_id,
+                chain_id,
+                block_number,
+                block_hash,
+                transaction_hash,
+                log_index,
+                raw_fact_ref,
+                normalized_event_ids,
+                raw_fact_refs,
+                manifest_versions
+            FROM ranked_v1_sources
+            WHERE current_child_rank = 1
+              AND tombstone = FALSE
+              AND active_edge = TRUE
+        ),
+        ensv2_ranked_subregistries AS (
+            SELECT
+                ne.normalized_event_id,
+                ne.event_identity,
+                ne.source_family,
+                ne.manifest_version,
+                ne.source_manifest_id,
+                ne.chain_id,
+                ne.block_number,
+                ne.block_hash,
+                ne.transaction_hash,
+                ne.log_index,
+                ne.raw_fact_ref,
+                ne.logical_name_id AS parent_logical_name_id,
+                ne.after_state ->> 'from_contract_instance_id' AS from_contract_instance_id,
+                ne.after_state ->> 'to_contract_instance_id' AS to_contract_instance_id,
+                ROW_NUMBER() OVER (
+                    PARTITION BY ne.logical_name_id
+                    ORDER BY
+                        ne.block_number DESC,
+                        ne.log_index DESC,
+                        ne.normalized_event_id DESC
+                ) AS current_rank
+            FROM normalized_events ne
+            WHERE ne.event_kind = $6
+              AND ne.derivation_kind = $7
+              AND ne.source_family IN ($8, $9)
+              AND ne.logical_name_id IS NOT NULL
+              AND ne.after_state ->> 'from_contract_instance_id' IS NOT NULL
+              AND ne.canonicality_state IN (
+                    'canonical'::canonicality_state,
+                    'safe'::canonicality_state,
+                    'finalized'::canonicality_state
+              )
+        ),
+        ensv2_current_subregistries AS (
+            SELECT *
+            FROM ensv2_ranked_subregistries
+            WHERE current_rank = 1
+              AND to_contract_instance_id IS NOT NULL
+        ),
+        ensv2_ranked_parent_events AS (
+            SELECT
+                ne.normalized_event_id,
+                ne.event_identity,
+                ne.source_family,
+                ne.manifest_version,
+                ne.source_manifest_id,
+                ne.chain_id,
+                ne.block_number,
+                ne.block_hash,
+                ne.transaction_hash,
+                ne.log_index,
+                ne.raw_fact_ref,
+                ne.after_state ->> 'registry_contract_instance_id' AS registry_contract_instance_id,
+                ne.after_state ->> 'parent_contract_instance_id' AS parent_contract_instance_id,
+                ne.after_state ->> 'registry_name' AS registry_name,
+                ROW_NUMBER() OVER (
+                    PARTITION BY ne.after_state ->> 'registry_contract_instance_id'
+                    ORDER BY
+                        ne.block_number DESC,
+                        ne.log_index DESC,
+                        ne.normalized_event_id DESC
+                ) AS current_rank
+            FROM normalized_events ne
+            WHERE ne.event_kind = $10
+              AND ne.derivation_kind = $7
+              AND ne.source_family IN ($8, $9)
+              AND ne.after_state ->> 'registry_contract_instance_id' IS NOT NULL
+              AND ne.canonicality_state IN (
+                    'canonical'::canonicality_state,
+                    'safe'::canonicality_state,
+                    'finalized'::canonicality_state
+              )
+        ),
+        ensv2_current_parent_events AS (
+            SELECT *
+            FROM ensv2_ranked_parent_events
+            WHERE current_rank = 1
+              AND parent_contract_instance_id IS NOT NULL
+              AND registry_name IS NOT NULL
+        ),
+        ensv2_ranked_child_events AS (
+            SELECT
+                ne.normalized_event_id,
+                ne.event_identity,
+                ne.source_family,
+                ne.manifest_version,
+                ne.source_manifest_id,
+                ne.chain_id,
+                ne.block_number,
+                ne.block_hash,
+                ne.transaction_hash,
+                ne.log_index,
+                ne.raw_fact_ref,
+                ne.logical_name_id AS child_logical_name_id,
+                ne.event_kind,
+                ne.after_state ->> 'registry_contract_instance_id' AS registry_contract_instance_id,
+                ROW_NUMBER() OVER (
+                    PARTITION BY ne.logical_name_id
+                    ORDER BY
+                        ne.block_number DESC,
+                        ne.log_index DESC,
+                        ne.normalized_event_id DESC
+                ) AS current_rank
+            FROM normalized_events ne
+            WHERE ne.event_kind IN ($11, $12, $13)
+              AND ne.derivation_kind = $7
+              AND ne.source_family IN ($8, $9)
+              AND ne.logical_name_id IS NOT NULL
+              AND ne.after_state ->> 'registry_contract_instance_id' IS NOT NULL
+              AND ne.canonicality_state IN (
+                    'canonical'::canonicality_state,
+                    'safe'::canonicality_state,
+                    'finalized'::canonicality_state
+              )
+        ),
+        ensv2_current_child_events AS (
+            SELECT *
+            FROM ensv2_ranked_child_events
+            WHERE current_rank = 1
+              AND event_kind <> $13
+        ),
+        ensv2_sources AS (
+            SELECT
+                parent.logical_name_id AS parent_logical_name_id,
+                child.logical_name_id AS child_logical_name_id,
+                child.namespace,
+                child.canonical_display_name,
+                child.normalized_name,
+                child.namehash,
+                latest.normalized_event_id,
+                latest.event_identity,
+                latest.source_family,
+                composite_manifest.manifest_version,
+                latest.source_manifest_id,
+                latest.chain_id,
+                latest.block_number,
+                latest.block_hash,
+                latest.transaction_hash,
+                latest.log_index,
+                latest.raw_fact_ref,
+                ARRAY[
+                    subregistry.normalized_event_id,
+                    parent_event.normalized_event_id,
+                    child_event.normalized_event_id
+                ]::BIGINT[] AS normalized_event_ids,
+                jsonb_build_array(
+                    subregistry.raw_fact_ref,
+                    parent_event.raw_fact_ref,
+                    child_event.raw_fact_ref
+                ) AS raw_fact_refs,
+                composite_manifest.manifest_versions
+            FROM ensv2_current_subregistries subregistry
+            JOIN name_surfaces parent
+              ON parent.logical_name_id = subregistry.parent_logical_name_id
+            JOIN ensv2_current_parent_events parent_event
+              ON parent_event.registry_contract_instance_id = subregistry.to_contract_instance_id
+             AND parent_event.parent_contract_instance_id = subregistry.from_contract_instance_id
+             AND parent_event.registry_name = parent.normalized_name
+            JOIN ensv2_current_child_events child_event
+              ON child_event.registry_contract_instance_id = subregistry.to_contract_instance_id
+             AND child_event.registry_contract_instance_id = parent_event.registry_contract_instance_id
+            JOIN name_surfaces child
+              ON child.logical_name_id = child_event.child_logical_name_id
+            CROSS JOIN LATERAL (
+                SELECT *
+                FROM (
+                    VALUES
+                        (
+                            subregistry.normalized_event_id,
+                            subregistry.event_identity,
+                            subregistry.source_family,
+                            subregistry.manifest_version,
+                            subregistry.source_manifest_id,
+                            subregistry.chain_id,
+                            subregistry.block_number,
+                            subregistry.block_hash,
+                            subregistry.transaction_hash,
+                            subregistry.log_index,
+                            subregistry.raw_fact_ref
+                        ),
+                        (
+                            parent_event.normalized_event_id,
+                            parent_event.event_identity,
+                            parent_event.source_family,
+                            parent_event.manifest_version,
+                            parent_event.source_manifest_id,
+                            parent_event.chain_id,
+                            parent_event.block_number,
+                            parent_event.block_hash,
+                            parent_event.transaction_hash,
+                            parent_event.log_index,
+                            parent_event.raw_fact_ref
+                        ),
+                        (
+                            child_event.normalized_event_id,
+                            child_event.event_identity,
+                            child_event.source_family,
+                            child_event.manifest_version,
+                            child_event.source_manifest_id,
+                            child_event.chain_id,
+                            child_event.block_number,
+                            child_event.block_hash,
+                            child_event.transaction_hash,
+                            child_event.log_index,
+                            child_event.raw_fact_ref
+                        )
+                ) AS candidates(
+                    normalized_event_id,
+                    event_identity,
+                    source_family,
+                    manifest_version,
+                    source_manifest_id,
+                    chain_id,
+                    block_number,
+                    block_hash,
+                    transaction_hash,
+                    log_index,
+                    raw_fact_ref
+                )
+                ORDER BY
+                    block_number DESC,
+                    log_index DESC,
+                    normalized_event_id DESC
+                LIMIT 1
+            ) latest
+            CROSS JOIN LATERAL (
+                SELECT
+                    MAX(manifest_version) AS manifest_version,
+                    jsonb_agg(
+                        jsonb_build_object(
+                            'source_manifest_id', source_manifest_id,
+                            'source_family', source_family,
+                            'manifest_version', manifest_version
+                        )
+                        ORDER BY source_family ASC, source_manifest_id ASC NULLS FIRST, manifest_version ASC
+                    ) AS manifest_versions
+                FROM (
+                    SELECT DISTINCT source_manifest_id, source_family, manifest_version
+                    FROM (
+                        VALUES
+                            (
+                                subregistry.source_manifest_id,
+                                subregistry.source_family,
+                                subregistry.manifest_version
+                            ),
+                            (
+                                parent_event.source_manifest_id,
+                                parent_event.source_family,
+                                parent_event.manifest_version
+                            ),
+                            (
+                                child_event.source_manifest_id,
+                                child_event.source_family,
+                                child_event.manifest_version
+                            )
+                    ) AS candidates(source_manifest_id, source_family, manifest_version)
+                ) manifest_candidates
+            ) composite_manifest
+            WHERE parent.namespace = child.namespace
+              AND parent.namespace = 'ens'
+              AND child.namespace = 'ens'
+              AND parent.chain_id = child.chain_id
+              AND parent.chain_id = subregistry.chain_id
+              AND parent.chain_id = parent_event.chain_id
+              AND child.chain_id = child_event.chain_id
+              AND parent.canonicality_state IN (
+                    'canonical'::canonicality_state,
+                    'safe'::canonicality_state,
+                    'finalized'::canonicality_state
+              )
+              AND child.canonicality_state IN (
+                    'canonical'::canonicality_state,
+                    'safe'::canonicality_state,
+                    'finalized'::canonicality_state
+              )
+              AND child.normalized_name <> parent.normalized_name
+              AND right(child.normalized_name, length(parent.normalized_name) + 1) = concat('.', parent.normalized_name)
+              AND array_length(string_to_array(child.normalized_name, '.'), 1)
+                    = array_length(string_to_array(parent.normalized_name, '.'), 1) + 1
+        ),
+        current_sources AS (
+            SELECT *
+            FROM current_v1_sources
+            UNION ALL
+            SELECT *
+            FROM ensv2_sources
         )
         SELECT
             parent_logical_name_id,
@@ -222,12 +555,12 @@ pub async fn load_canonical_declared_child_sources(
             block_hash,
             transaction_hash,
             log_index,
-            raw_fact_ref
-        FROM ranked_sources
-        WHERE current_child_rank = 1
-          AND tombstone = FALSE
-          AND active_edge = TRUE
-          AND ($5::TEXT IS NULL OR parent_logical_name_id = $5)
+            raw_fact_ref,
+            normalized_event_ids,
+            raw_fact_refs,
+            manifest_versions
+        FROM current_sources
+        WHERE ($5::TEXT IS NULL OR parent_logical_name_id = $5)
         ORDER BY
             parent_logical_name_id ASC,
             canonical_display_name ASC,
@@ -239,6 +572,14 @@ pub async fn load_canonical_declared_child_sources(
     .bind(ENSV1_SUBREGISTRY_SOURCE_FAMILY)
     .bind(BASENAMES_BASE_SUBREGISTRY_SOURCE_FAMILY)
     .bind(parent_logical_name_id)
+    .bind(SUBREGISTRY_EVENT_KIND)
+    .bind(ENSV2_REGISTRY_DERIVATION_KIND)
+    .bind(ENSV2_ROOT_SOURCE_FAMILY)
+    .bind(ENSV2_REGISTRY_SOURCE_FAMILY)
+    .bind(PARENT_EVENT_KIND)
+    .bind(REGISTRATION_GRANTED_EVENT_KIND)
+    .bind(REGISTRATION_RENEWED_EVENT_KIND)
+    .bind(REGISTRATION_RELEASED_EVENT_KIND)
     .fetch_all(pool)
     .await
     .with_context(|| match parent_logical_name_id {
@@ -607,6 +948,15 @@ fn decode_declared_child_event_source(row: PgRow) -> Result<DeclaredChildEventSo
         raw_fact_ref: row
             .try_get("raw_fact_ref")
             .context("missing raw_fact_ref")?,
+        normalized_event_ids: row
+            .try_get("normalized_event_ids")
+            .context("missing normalized_event_ids")?,
+        raw_fact_refs: row
+            .try_get("raw_fact_refs")
+            .context("missing raw_fact_refs")?,
+        manifest_versions: row
+            .try_get("manifest_versions")
+            .context("missing manifest_versions")?,
     })
 }
 
@@ -840,6 +1190,137 @@ mod tests {
                 "owner": "0x0000000000000000000000000000000000000001",
                 "tombstone": tombstone,
                 "active_edge": active_edge
+            }),
+        }
+    }
+
+    fn ensv2_subregistry_event(
+        event_identity: &str,
+        parent_logical_name_id: &str,
+        from_contract_instance_id: &str,
+        to_contract_instance_id: Option<&str>,
+        block_number: i64,
+        log_index: i64,
+    ) -> NormalizedEvent {
+        NormalizedEvent {
+            event_identity: event_identity.to_owned(),
+            namespace: "ens".to_owned(),
+            logical_name_id: Some(parent_logical_name_id.to_owned()),
+            resource_id: None,
+            event_kind: SUBREGISTRY_EVENT_KIND.to_owned(),
+            source_family: ENSV2_ROOT_SOURCE_FAMILY.to_owned(),
+            manifest_version: 2,
+            source_manifest_id: None,
+            chain_id: Some("ethereum-sepolia".to_owned()),
+            block_number: Some(block_number),
+            block_hash: Some(format!("0xensv2eventblock{block_number:02x}")),
+            transaction_hash: Some(format!("0xensv2tx{block_number:02x}")),
+            log_index: Some(log_index),
+            raw_fact_ref: json!({
+                "kind": "raw_log",
+                "chain_id": "ethereum-sepolia",
+                "block_number": block_number,
+                "log_index": log_index,
+                "emitting_address": "0x00000000000000000000000000000000000000aa"
+            }),
+            derivation_kind: ENSV2_REGISTRY_DERIVATION_KIND.to_owned(),
+            canonicality_state: CanonicalityState::Finalized,
+            before_state: json!({}),
+            after_state: json!({
+                "source_event": "SubregistryUpdated",
+                "token_id": format!("0xtoken{block_number:02x}"),
+                "subregistry": to_contract_instance_id.map(|_| "0x00000000000000000000000000000000000000bb"),
+                "from_contract_instance_id": from_contract_instance_id,
+                "to_contract_instance_id": to_contract_instance_id,
+            }),
+        }
+    }
+
+    fn ensv2_parent_event(
+        event_identity: &str,
+        parent_name: &str,
+        parent_contract_instance_id: &str,
+        registry_contract_instance_id: &str,
+        emitting_address: &str,
+        block_number: i64,
+        log_index: i64,
+    ) -> NormalizedEvent {
+        NormalizedEvent {
+            event_identity: event_identity.to_owned(),
+            namespace: "ens".to_owned(),
+            logical_name_id: None,
+            resource_id: None,
+            event_kind: PARENT_EVENT_KIND.to_owned(),
+            source_family: ENSV2_REGISTRY_SOURCE_FAMILY.to_owned(),
+            manifest_version: 3,
+            source_manifest_id: None,
+            chain_id: Some("ethereum-sepolia".to_owned()),
+            block_number: Some(block_number),
+            block_hash: Some(format!("0xensv2eventblock{block_number:02x}")),
+            transaction_hash: Some(format!("0xensv2tx{block_number:02x}")),
+            log_index: Some(log_index),
+            raw_fact_ref: json!({
+                "kind": "raw_log",
+                "chain_id": "ethereum-sepolia",
+                "block_number": block_number,
+                "log_index": log_index,
+                "emitting_address": emitting_address
+            }),
+            derivation_kind: ENSV2_REGISTRY_DERIVATION_KIND.to_owned(),
+            canonicality_state: CanonicalityState::Finalized,
+            before_state: json!({}),
+            after_state: json!({
+                "source_event": "ParentUpdated",
+                "parent": "0x00000000000000000000000000000000000000aa",
+                "label": parent_name.split('.').next().unwrap_or(parent_name),
+                "registry_name": parent_name,
+                "registry_contract_instance_id": registry_contract_instance_id,
+                "parent_contract_instance_id": parent_contract_instance_id,
+            }),
+        }
+    }
+
+    fn ensv2_registration_event(
+        event_identity: &str,
+        child_logical_name_id: &str,
+        event_kind: &str,
+        registry_contract_instance_id: &str,
+        emitting_address: &str,
+        block_number: i64,
+        log_index: i64,
+    ) -> NormalizedEvent {
+        NormalizedEvent {
+            event_identity: event_identity.to_owned(),
+            namespace: "ens".to_owned(),
+            logical_name_id: Some(child_logical_name_id.to_owned()),
+            resource_id: None,
+            event_kind: event_kind.to_owned(),
+            source_family: ENSV2_REGISTRY_SOURCE_FAMILY.to_owned(),
+            manifest_version: 3,
+            source_manifest_id: None,
+            chain_id: Some("ethereum-sepolia".to_owned()),
+            block_number: Some(block_number),
+            block_hash: Some(format!("0xensv2eventblock{block_number:02x}")),
+            transaction_hash: Some(format!("0xensv2tx{block_number:02x}")),
+            log_index: Some(log_index),
+            raw_fact_ref: json!({
+                "kind": "raw_log",
+                "chain_id": "ethereum-sepolia",
+                "block_number": block_number,
+                "log_index": log_index,
+                "emitting_address": emitting_address
+            }),
+            derivation_kind: ENSV2_REGISTRY_DERIVATION_KIND.to_owned(),
+            canonicality_state: CanonicalityState::Finalized,
+            before_state: json!({}),
+            after_state: json!({
+                "source_event": event_kind,
+                "registry_contract_instance_id": registry_contract_instance_id,
+                "status": if event_kind == REGISTRATION_RELEASED_EVENT_KIND {
+                    "released"
+                } else {
+                    "registered"
+                },
             }),
         }
     }
@@ -1198,6 +1679,152 @@ mod tests {
         assert_eq!(current[0].namespace, "basenames");
         assert_eq!(current[0].chain_id, "base-mainnet");
         assert_eq!(current[0].event_identity, "alice-base-registry");
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn children_current_declared_child_sources_include_ensv2_linked_subregistry_graph_and_reject_registry_mismatch()
+    -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let parent = "ens:alice.eth";
+        let child = "ens:bob.alice.eth";
+        let wrong_registry_child = "ens:eve.alice.eth";
+        let released_child = "ens:carol.alice.eth";
+        let parent_registry = "00000000-0000-0000-0000-0000000000aa";
+        let child_registry = "00000000-0000-0000-0000-0000000000bb";
+        let child_registry_address = "0x00000000000000000000000000000000000000bb";
+
+        upsert_name_surfaces(
+            database.pool(),
+            &[
+                name_surface_on_chain(
+                    parent,
+                    "alice.eth",
+                    "node:alice.eth",
+                    "ethereum-sepolia",
+                    50,
+                    CanonicalityState::Finalized,
+                ),
+                name_surface_on_chain(
+                    child,
+                    "bob.alice.eth",
+                    "node:bob.alice.eth",
+                    "ethereum-sepolia",
+                    51,
+                    CanonicalityState::Finalized,
+                ),
+                name_surface_on_chain(
+                    wrong_registry_child,
+                    "eve.alice.eth",
+                    "node:eve.alice.eth",
+                    "ethereum-sepolia",
+                    52,
+                    CanonicalityState::Finalized,
+                ),
+                name_surface_on_chain(
+                    released_child,
+                    "carol.alice.eth",
+                    "node:carol.alice.eth",
+                    "ethereum-sepolia",
+                    53,
+                    CanonicalityState::Finalized,
+                ),
+            ],
+        )
+        .await?;
+
+        upsert_normalized_events(
+            database.pool(),
+            &[
+                ensv2_subregistry_event(
+                    "ensv2-subregistry-active",
+                    parent,
+                    parent_registry,
+                    Some(child_registry),
+                    300,
+                    0,
+                ),
+                ensv2_parent_event(
+                    "ensv2-parent-active",
+                    "alice.eth",
+                    parent_registry,
+                    child_registry,
+                    child_registry_address,
+                    301,
+                    0,
+                ),
+                ensv2_registration_event(
+                    "ensv2-bob-registered",
+                    child,
+                    REGISTRATION_GRANTED_EVENT_KIND,
+                    child_registry,
+                    child_registry_address,
+                    302,
+                    0,
+                ),
+                ensv2_registration_event(
+                    "ensv2-eve-wrong-registry",
+                    wrong_registry_child,
+                    REGISTRATION_GRANTED_EVENT_KIND,
+                    "00000000-0000-0000-0000-0000000000cc",
+                    child_registry_address,
+                    303,
+                    0,
+                ),
+                ensv2_registration_event(
+                    "ensv2-carol-registered",
+                    released_child,
+                    REGISTRATION_GRANTED_EVENT_KIND,
+                    child_registry,
+                    child_registry_address,
+                    304,
+                    0,
+                ),
+                ensv2_registration_event(
+                    "ensv2-carol-released",
+                    released_child,
+                    REGISTRATION_RELEASED_EVENT_KIND,
+                    child_registry,
+                    child_registry_address,
+                    305,
+                    0,
+                ),
+            ],
+        )
+        .await?;
+
+        let current = load_canonical_declared_child_sources(database.pool(), Some(parent)).await?;
+        assert_eq!(current.len(), 1);
+        assert_eq!(current[0].parent_logical_name_id, parent);
+        assert_eq!(current[0].child_logical_name_id, child);
+        assert!(
+            current
+                .iter()
+                .all(|source| source.child_logical_name_id != wrong_registry_child),
+            "registration with matching raw emitting_address but mismatched registry_contract_instance_id must be rejected"
+        );
+        assert_eq!(current[0].event_identity, "ensv2-bob-registered");
+        assert_eq!(current[0].source_family, ENSV2_REGISTRY_SOURCE_FAMILY);
+        assert_eq!(current[0].manifest_version, 3);
+        assert_eq!(
+            current[0].manifest_versions,
+            json!([
+                {
+                    "source_manifest_id": null,
+                    "source_family": ENSV2_REGISTRY_SOURCE_FAMILY,
+                    "manifest_version": 3
+                },
+                {
+                    "source_manifest_id": null,
+                    "source_family": ENSV2_ROOT_SOURCE_FAMILY,
+                    "manifest_version": 2
+                }
+            ])
+        );
+        assert_eq!(current[0].chain_id, "ethereum-sepolia");
+        assert_eq!(current[0].normalized_event_ids.len(), 3);
+        assert_eq!(current[0].raw_fact_refs.as_array().map(Vec::len), Some(3));
 
         database.cleanup().await
     }

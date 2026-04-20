@@ -147,13 +147,9 @@ async fn load_source_block(
 
 fn build_provenance(source: &bigname_storage::DeclaredChildEventSource) -> Value {
     json!({
-        "normalized_event_ids": [source.normalized_event_id],
-        "raw_fact_refs": [source.raw_fact_ref.clone()],
-        "manifest_versions": [{
-            "source_manifest_id": source.source_manifest_id,
-            "source_family": source.source_family,
-            "manifest_version": source.manifest_version,
-        }],
+        "normalized_event_ids": source.normalized_event_ids.clone(),
+        "raw_fact_refs": source.raw_fact_refs.clone(),
+        "manifest_versions": source.manifest_versions.clone(),
         "execution_trace_id": Value::Null,
         "derivation_kind": CHILDREN_CURRENT_DERIVATION_KIND,
     })
@@ -601,6 +597,118 @@ mod tests {
         database.cleanup().await
     }
 
+    #[tokio::test]
+    async fn rebuilds_ensv2_declared_children_from_linked_subregistry_graph() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let parent = "ens:alice.eth";
+        let child = "ens:bob.alice.eth";
+        let parent_registry = "00000000-0000-0000-0000-0000000000aa";
+        let child_registry = "00000000-0000-0000-0000-0000000000bb";
+        let child_registry_address = "0x00000000000000000000000000000000000000bb";
+
+        seed_raw_blocks(
+            database.pool(),
+            &[
+                raw_block("ethereum-sepolia", "0xblock12c", 300, 1_717_172_300),
+                raw_block("ethereum-sepolia", "0xblock12d", 301, 1_717_172_301),
+                raw_block("ethereum-sepolia", "0xblock12e", 302, 1_717_172_302),
+            ],
+        )
+        .await?;
+        seed_name_surfaces(
+            database.pool(),
+            &[
+                name_surface_on_chain(
+                    parent,
+                    "alice.eth",
+                    "node:alice.eth",
+                    "ethereum-sepolia",
+                    50,
+                ),
+                name_surface_on_chain(
+                    child,
+                    "bob.alice.eth",
+                    "node:bob.alice.eth",
+                    "ethereum-sepolia",
+                    51,
+                ),
+            ],
+        )
+        .await?;
+        seed_subregistry_events(
+            database.pool(),
+            &[
+                ensv2_subregistry_event(
+                    "ensv2-subregistry-active",
+                    parent,
+                    parent_registry,
+                    child_registry,
+                    300,
+                    0,
+                ),
+                ensv2_parent_event(
+                    "ensv2-parent-active",
+                    "alice.eth",
+                    parent_registry,
+                    child_registry,
+                    child_registry_address,
+                    301,
+                    0,
+                ),
+                ensv2_registration_event(
+                    "ensv2-bob-registered",
+                    child,
+                    "RegistrationGranted",
+                    child_registry,
+                    child_registry_address,
+                    302,
+                    0,
+                ),
+            ],
+        )
+        .await?;
+
+        let summary = rebuild_children_current(database.pool(), Some(parent)).await?;
+        assert_eq!(summary.requested_parent_count, 1);
+        assert_eq!(summary.upserted_row_count, 1);
+        assert_eq!(summary.deleted_row_count, 0);
+
+        let rows = load_children_current(database.pool(), parent).await?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].child_logical_name_id, child);
+        assert_eq!(rows[0].surface_class, DECLARED_SURFACE_CLASS);
+        assert_eq!(
+            rows[0].chain_positions["ethereum-sepolia"]["block_number"],
+            json!(302)
+        );
+        assert_eq!(
+            rows[0].provenance["manifest_versions"],
+            json!([
+                {
+                    "source_manifest_id": null,
+                    "source_family": "ens_v2_registry_l1",
+                    "manifest_version": 3
+                },
+                {
+                    "source_manifest_id": null,
+                    "source_family": "ens_v2_root_l1",
+                    "manifest_version": 2
+                }
+            ])
+        );
+        assert_eq!(rows[0].manifest_version, 3);
+        assert_eq!(
+            rows[0]
+                .provenance
+                .get("normalized_event_ids")
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(3)
+        );
+
+        database.cleanup().await
+    }
+
     async fn seed_raw_blocks(pool: &PgPool, blocks: &[RawBlock]) -> Result<()> {
         upsert_raw_blocks(pool, blocks).await?;
         Ok(())
@@ -642,12 +750,32 @@ mod tests {
         namehash: &str,
         block_number: i64,
     ) -> NameSurface {
+        name_surface_on_chain(
+            logical_name_id,
+            display_name,
+            namehash,
+            chain_id_for_namespace(
+                logical_name_id
+                    .split_once(':')
+                    .map(|(namespace, _)| namespace)
+                    .expect("logical_name_id must include namespace"),
+            ),
+            block_number,
+        )
+    }
+
+    fn name_surface_on_chain(
+        logical_name_id: &str,
+        display_name: &str,
+        namehash: &str,
+        chain_id: &str,
+        block_number: i64,
+    ) -> NameSurface {
         let namespace = logical_name_id
             .split_once(':')
             .map(|(namespace, _)| namespace)
             .expect("logical_name_id must include namespace")
             .to_owned();
-        let chain_id = chain_id_for_namespace(&namespace).to_owned();
 
         NameSurface {
             logical_name_id: logical_name_id.to_owned(),
@@ -661,7 +789,7 @@ mod tests {
             normalizer_version: "ensip15@2026-04-16".to_owned(),
             normalization_warnings: json!([]),
             normalization_errors: json!([]),
-            chain_id,
+            chain_id: chain_id.to_owned(),
             block_hash: format!("0xsurface{block_number:02x}"),
             block_number,
             provenance: json!({"source": "worker_children_current_test", "kind": "name_surface"}),
@@ -717,6 +845,133 @@ mod tests {
                 "owner": "0x0000000000000000000000000000000000000001",
                 "tombstone": tombstone,
                 "active_edge": active_edge
+            }),
+        }
+    }
+
+    fn ensv2_subregistry_event(
+        event_identity: &str,
+        parent_logical_name_id: &str,
+        from_contract_instance_id: &str,
+        to_contract_instance_id: &str,
+        block_number: i64,
+        log_index: i64,
+    ) -> NormalizedEvent {
+        NormalizedEvent {
+            event_identity: event_identity.to_owned(),
+            namespace: "ens".to_owned(),
+            logical_name_id: Some(parent_logical_name_id.to_owned()),
+            resource_id: None,
+            event_kind: "SubregistryChanged".to_owned(),
+            source_family: "ens_v2_root_l1".to_owned(),
+            manifest_version: 2,
+            source_manifest_id: None,
+            chain_id: Some("ethereum-sepolia".to_owned()),
+            block_number: Some(block_number),
+            block_hash: Some(format!("0xblock{block_number:02x}")),
+            transaction_hash: Some(format!("0xtx{block_number:02x}")),
+            log_index: Some(log_index),
+            raw_fact_ref: json!({
+                "kind": "raw_log",
+                "chain_id": "ethereum-sepolia",
+                "block_number": block_number,
+                "log_index": log_index,
+                "emitting_address": "0x00000000000000000000000000000000000000aa"
+            }),
+            derivation_kind: "ens_v2_registry_resource_surface".to_owned(),
+            canonicality_state: CanonicalityState::Finalized,
+            before_state: json!({}),
+            after_state: json!({
+                "source_event": "SubregistryUpdated",
+                "token_id": format!("0xtoken{block_number:02x}"),
+                "subregistry": "0x00000000000000000000000000000000000000bb",
+                "from_contract_instance_id": from_contract_instance_id,
+                "to_contract_instance_id": to_contract_instance_id,
+            }),
+        }
+    }
+
+    fn ensv2_parent_event(
+        event_identity: &str,
+        parent_name: &str,
+        parent_contract_instance_id: &str,
+        registry_contract_instance_id: &str,
+        emitting_address: &str,
+        block_number: i64,
+        log_index: i64,
+    ) -> NormalizedEvent {
+        NormalizedEvent {
+            event_identity: event_identity.to_owned(),
+            namespace: "ens".to_owned(),
+            logical_name_id: None,
+            resource_id: None,
+            event_kind: "ParentChanged".to_owned(),
+            source_family: "ens_v2_registry_l1".to_owned(),
+            manifest_version: 3,
+            source_manifest_id: None,
+            chain_id: Some("ethereum-sepolia".to_owned()),
+            block_number: Some(block_number),
+            block_hash: Some(format!("0xblock{block_number:02x}")),
+            transaction_hash: Some(format!("0xtx{block_number:02x}")),
+            log_index: Some(log_index),
+            raw_fact_ref: json!({
+                "kind": "raw_log",
+                "chain_id": "ethereum-sepolia",
+                "block_number": block_number,
+                "log_index": log_index,
+                "emitting_address": emitting_address
+            }),
+            derivation_kind: "ens_v2_registry_resource_surface".to_owned(),
+            canonicality_state: CanonicalityState::Finalized,
+            before_state: json!({}),
+            after_state: json!({
+                "source_event": "ParentUpdated",
+                "parent": "0x00000000000000000000000000000000000000aa",
+                "label": parent_name.split('.').next().unwrap_or(parent_name),
+                "registry_name": parent_name,
+                "registry_contract_instance_id": registry_contract_instance_id,
+                "parent_contract_instance_id": parent_contract_instance_id,
+            }),
+        }
+    }
+
+    fn ensv2_registration_event(
+        event_identity: &str,
+        child_logical_name_id: &str,
+        event_kind: &str,
+        registry_contract_instance_id: &str,
+        emitting_address: &str,
+        block_number: i64,
+        log_index: i64,
+    ) -> NormalizedEvent {
+        NormalizedEvent {
+            event_identity: event_identity.to_owned(),
+            namespace: "ens".to_owned(),
+            logical_name_id: Some(child_logical_name_id.to_owned()),
+            resource_id: None,
+            event_kind: event_kind.to_owned(),
+            source_family: "ens_v2_registry_l1".to_owned(),
+            manifest_version: 3,
+            source_manifest_id: None,
+            chain_id: Some("ethereum-sepolia".to_owned()),
+            block_number: Some(block_number),
+            block_hash: Some(format!("0xblock{block_number:02x}")),
+            transaction_hash: Some(format!("0xtx{block_number:02x}")),
+            log_index: Some(log_index),
+            raw_fact_ref: json!({
+                "kind": "raw_log",
+                "chain_id": "ethereum-sepolia",
+                "block_number": block_number,
+                "log_index": log_index,
+                "emitting_address": emitting_address
+            }),
+            derivation_kind: "ens_v2_registry_resource_surface".to_owned(),
+            canonicality_state: CanonicalityState::Finalized,
+            before_state: json!({}),
+            after_state: json!({
+                "source_event": event_kind,
+                "registry_contract_instance_id": registry_contract_instance_id,
+                "status": "registered",
             }),
         }
     }

@@ -1,6 +1,5 @@
         fn timestamp(seconds: i64) -> OffsetDateTime {
-            OffsetDateTime::from_unix_timestamp(seconds)
-                .expect("conformance timestamp must be valid")
+            OffsetDateTime::from_unix_timestamp(seconds).expect("conformance timestamp must be valid")
         }
 
         #[derive(Clone, Copy)]
@@ -198,81 +197,81 @@
             )
             .await?;
             bigname_storage::upsert_normalized_events(
-                &database.pool,
-                &[
-                    NormalizedEvent {
-                        event_identity: "conformance:basenames:grant".to_owned(),
-                        namespace: "basenames".to_owned(),
-                        logical_name_id: Some(logical_name_id.to_owned()),
-                        resource_id: Some(resource_id),
-                        event_kind: "RegistrationGranted".to_owned(),
-                        source_family: "basenames_base_registrar".to_owned(),
-                        manifest_version: 3,
-                        source_manifest_id: None,
-                        chain_id: Some("base-mainnet".to_owned()),
-                        block_number: Some(101),
-                        block_hash: Some("0xbase-grant".to_owned()),
-                        transaction_hash: Some("0xtxbasegrant".to_owned()),
-                        log_index: Some(0),
-                        raw_fact_ref: json!({"kind": "raw_log", "event_identity": "conformance:basenames:grant"}),
-                        derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
-                        canonicality_state: CanonicalityState::Canonical,
-                        before_state: json!({}),
-                        after_state: json!({
-                            "authority_kind": "registrar",
-                            "authority_key": "registrar:base-mainnet:alice",
-                            "registrant": "0x00000000000000000000000000000000000000aa",
-                            "expiry": 1_900_000_000_i64,
-                        }),
-                    },
-                    NormalizedEvent {
-                        event_identity: "conformance:basenames:authority".to_owned(),
-                        namespace: "basenames".to_owned(),
-                        logical_name_id: Some(logical_name_id.to_owned()),
-                        resource_id: Some(resource_id),
-                        event_kind: "AuthorityTransferred".to_owned(),
-                        source_family: "basenames_base_registry".to_owned(),
-                        manifest_version: 3,
-                        source_manifest_id: None,
-                        chain_id: Some("base-mainnet".to_owned()),
-                        block_number: Some(102),
-                        block_hash: Some("0xbase-authority".to_owned()),
-                        transaction_hash: Some("0xtxbaseauthority".to_owned()),
-                        log_index: Some(0),
-                        raw_fact_ref: json!({"kind": "raw_log", "event_identity": "conformance:basenames:authority"}),
-                        derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
-                        canonicality_state: CanonicalityState::Canonical,
-                        before_state: json!({}),
-                        after_state: json!({
-                            "owner": "0x00000000000000000000000000000000000000bb",
-                        }),
-                    },
-                    NormalizedEvent {
-                        event_identity: "conformance:basenames:resolver".to_owned(),
-                        namespace: "basenames".to_owned(),
-                        logical_name_id: Some(logical_name_id.to_owned()),
-                        resource_id: Some(resource_id),
-                        event_kind: "ResolverChanged".to_owned(),
-                        source_family: "basenames_base_resolver".to_owned(),
-                        manifest_version: 4,
-                        source_manifest_id: None,
-                        chain_id: Some("base-mainnet".to_owned()),
-                        block_number: Some(103),
-                        block_hash: Some("0xbase-resolver".to_owned()),
-                        transaction_hash: Some("0xtxbaseresolver".to_owned()),
-                        log_index: Some(0),
-                        raw_fact_ref: json!({"kind": "raw_log", "event_identity": "conformance:basenames:resolver"}),
-                        derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
-                        canonicality_state: CanonicalityState::Canonical,
-                        before_state: json!({}),
-                        after_state: json!({
-                            "resolver": "0x0000000000000000000000000000000000000abc",
-                            "namehash": "namehash:alice.base.eth",
-                        }),
-                    },
-                ],
-            )
-            .await?;
+                        &database.pool,
+                        &[
+                            NormalizedEvent {
+                                event_identity: "conformance:basenames:grant".to_owned(),
+                                namespace: "basenames".to_owned(),
+                                logical_name_id: Some(logical_name_id.to_owned()),
+                                resource_id: Some(resource_id),
+                                event_kind: "RegistrationGranted".to_owned(),
+                                source_family: "basenames_base_registrar".to_owned(),
+                                manifest_version: 3,
+                                source_manifest_id: None,
+                                chain_id: Some("base-mainnet".to_owned()),
+                                block_number: Some(101),
+                                block_hash: Some("0xbase-grant".to_owned()),
+                                transaction_hash: Some("0xtxbasegrant".to_owned()),
+                                log_index: Some(0),
+                                raw_fact_ref: json!({"kind": "raw_log", "event_identity": "conformance:basenames:grant"}),
+                                derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+                                canonicality_state: CanonicalityState::Canonical,
+                                before_state: json!({}),
+                                after_state: json!({
+                                    "authority_kind": "registrar",
+                                    "authority_key": "registrar:base-mainnet:alice",
+                                    "registrant": "0x00000000000000000000000000000000000000aa",
+                                    "expiry": 1_900_000_000_i64,
+                                }),
+                            },
+                            NormalizedEvent {
+                                event_identity: "conformance:basenames:authority".to_owned(),
+                                namespace: "basenames".to_owned(),
+                                logical_name_id: Some(logical_name_id.to_owned()),
+                                resource_id: Some(resource_id),
+                                event_kind: "AuthorityTransferred".to_owned(),
+                                source_family: "basenames_base_registry".to_owned(),
+                                manifest_version: 3,
+                                source_manifest_id: None,
+                                chain_id: Some("base-mainnet".to_owned()),
+                                block_number: Some(102),
+                                block_hash: Some("0xbase-authority".to_owned()),
+                                transaction_hash: Some("0xtxbaseauthority".to_owned()),
+                                log_index: Some(0),
+                                raw_fact_ref: json!({"kind": "raw_log", "event_identity": "conformance:basenames:authority"}),
+                                derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+                                canonicality_state: CanonicalityState::Canonical,
+                                before_state: json!({}),
+                                after_state: json!({
+                                    "owner": "0x00000000000000000000000000000000000000bb",
+                                }),
+                            },
+                            NormalizedEvent {
+                                event_identity: "conformance:basenames:resolver".to_owned(),
+                                namespace: "basenames".to_owned(),
+                                logical_name_id: Some(logical_name_id.to_owned()),
+                                resource_id: Some(resource_id),
+                                event_kind: "ResolverChanged".to_owned(),
+                                source_family: "basenames_base_resolver".to_owned(),
+                                manifest_version: 4,
+                                source_manifest_id: None,
+                                chain_id: Some("base-mainnet".to_owned()),
+                                block_number: Some(103),
+                                block_hash: Some("0xbase-resolver".to_owned()),
+                                transaction_hash: Some("0xtxbaseresolver".to_owned()),
+                                log_index: Some(0),
+                                raw_fact_ref: json!({"kind": "raw_log", "event_identity": "conformance:basenames:resolver"}),
+                                derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+                                canonicality_state: CanonicalityState::Canonical,
+                                before_state: json!({}),
+                                after_state: json!({
+                                    "resolver": "0x0000000000000000000000000000000000000abc",
+                                    "namehash": "namehash:alice.base.eth",
+                                }),
+                            },
+                        ],
+                    )
+                    .await?;
 
             Ok(())
         }
@@ -291,8 +290,8 @@
                 .to_url_lossy()
                 .to_string();
             let address = address.map(str::to_owned);
-            let worker_manifest_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../../apps/worker/Cargo.toml");
+            let worker_manifest_path =
+                std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../apps/worker/Cargo.toml");
 
             tokio::task::spawn_blocking(move || -> Result<()> {
                 let _guard = WORKER_CARGO_LOCK
@@ -334,6 +333,59 @@
             })
             .await
             .context("worker address_names_current rebuild task panicked")??;
+
+            Ok(())
+        }
+
+        async fn rebuild_children_current(
+            database: &HarnessDatabase,
+            logical_name_id: Option<&str>,
+        ) -> Result<()> {
+            let database_url = database.database_url.clone();
+            let logical_name_id = logical_name_id.map(str::to_owned);
+            let worker_manifest_path =
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../apps/worker/Cargo.toml");
+
+            tokio::task::spawn_blocking(move || -> Result<()> {
+                let _guard = WORKER_CARGO_LOCK
+                    .lock()
+                    .expect("worker cargo lock must not be poisoned");
+                let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
+                let mut command = Command::new(cargo);
+                command
+                    .arg("run")
+                    .arg("--quiet")
+                    .arg("--manifest-path")
+                    .arg(worker_manifest_path)
+                    .arg("--")
+                    .arg("children-current")
+                    .arg("rebuild")
+                    .arg("--database-url")
+                    .arg(&database_url);
+                if let Some(logical_name_id) = logical_name_id.as_deref() {
+                    command.arg("--logical-name-id").arg(logical_name_id);
+                }
+
+                let output = command.output().with_context(|| {
+                    format!(
+                        "failed to invoke worker children_current rebuild for {}",
+                        logical_name_id.as_deref().unwrap_or("all")
+                    )
+                })?;
+
+                if !output.status.success() {
+                    return Err(anyhow::anyhow!(
+                        "worker children_current rebuild failed for {}\nstdout:\n{}\nstderr:\n{}",
+                        logical_name_id.as_deref().unwrap_or("all"),
+                        String::from_utf8_lossy(&output.stdout),
+                        String::from_utf8_lossy(&output.stderr),
+                    ));
+                }
+
+                Ok(())
+            })
+            .await
+            .context("worker children_current rebuild task panicked")??;
 
             Ok(())
         }
@@ -469,179 +521,179 @@
             match scenario {
                 BasenamesControlVectorScenario::NftOnly => {
                     events.push(NormalizedEvent {
-                        event_identity: format!("conformance:{logical_name_id}:authority"),
-                        namespace: "basenames".to_owned(),
-                        logical_name_id: Some(logical_name_id.to_owned()),
-                        resource_id: Some(resource_id),
-                        event_kind: "AuthorityTransferred".to_owned(),
-                        source_family: "basenames_base_registry".to_owned(),
-                        manifest_version: 3,
-                        source_manifest_id: None,
-                        chain_id: Some("base-mainnet".to_owned()),
-                        block_number: Some(102),
-                        block_hash: Some("0xbase-authority".to_owned()),
-                        transaction_hash: Some(format!("0xtx:{logical_name_id}:authority")),
-                        log_index: Some(0),
-                        raw_fact_ref: json!({"kind": "raw_log", "event_identity": format!("conformance:{logical_name_id}:authority")}),
-                        derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
-                        canonicality_state: CanonicalityState::Canonical,
-                        before_state: json!({
-                            "owner": "0x00000000000000000000000000000000000000a1",
-                        }),
-                        after_state: json!({
-                            "owner": "0x00000000000000000000000000000000000000b1",
-                        }),
-                    });
+                                event_identity: format!("conformance:{logical_name_id}:authority"),
+                                namespace: "basenames".to_owned(),
+                                logical_name_id: Some(logical_name_id.to_owned()),
+                                resource_id: Some(resource_id),
+                                event_kind: "AuthorityTransferred".to_owned(),
+                                source_family: "basenames_base_registry".to_owned(),
+                                manifest_version: 3,
+                                source_manifest_id: None,
+                                chain_id: Some("base-mainnet".to_owned()),
+                                block_number: Some(102),
+                                block_hash: Some("0xbase-authority".to_owned()),
+                                transaction_hash: Some(format!("0xtx:{logical_name_id}:authority")),
+                                log_index: Some(0),
+                                raw_fact_ref: json!({"kind": "raw_log", "event_identity": format!("conformance:{logical_name_id}:authority")}),
+                                derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+                                canonicality_state: CanonicalityState::Canonical,
+                                before_state: json!({
+                                    "owner": "0x00000000000000000000000000000000000000a1",
+                                }),
+                                after_state: json!({
+                                    "owner": "0x00000000000000000000000000000000000000b1",
+                                }),
+                            });
                     events.push(NormalizedEvent {
-                        event_identity: format!("conformance:{logical_name_id}:token"),
-                        namespace: "basenames".to_owned(),
-                        logical_name_id: Some(logical_name_id.to_owned()),
-                        resource_id: Some(resource_id),
-                        event_kind: "TokenControlTransferred".to_owned(),
-                        source_family: "basenames_base_registrar".to_owned(),
-                        manifest_version: 3,
-                        source_manifest_id: None,
-                        chain_id: Some("base-mainnet".to_owned()),
-                        block_number: Some(103),
-                        block_hash: Some("0xbase-token".to_owned()),
-                        transaction_hash: Some(format!("0xtx:{logical_name_id}:token")),
-                        log_index: Some(0),
-                        raw_fact_ref: json!({"kind": "raw_log", "event_identity": format!("conformance:{logical_name_id}:token")}),
-                        derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
-                        canonicality_state: CanonicalityState::Canonical,
-                        before_state: json!({
-                            "from": "0x00000000000000000000000000000000000000a1",
-                        }),
-                        after_state: json!({
-                            "to": "0x00000000000000000000000000000000000000c1",
-                        }),
-                    });
+                                event_identity: format!("conformance:{logical_name_id}:token"),
+                                namespace: "basenames".to_owned(),
+                                logical_name_id: Some(logical_name_id.to_owned()),
+                                resource_id: Some(resource_id),
+                                event_kind: "TokenControlTransferred".to_owned(),
+                                source_family: "basenames_base_registrar".to_owned(),
+                                manifest_version: 3,
+                                source_manifest_id: None,
+                                chain_id: Some("base-mainnet".to_owned()),
+                                block_number: Some(103),
+                                block_hash: Some("0xbase-token".to_owned()),
+                                transaction_hash: Some(format!("0xtx:{logical_name_id}:token")),
+                                log_index: Some(0),
+                                raw_fact_ref: json!({"kind": "raw_log", "event_identity": format!("conformance:{logical_name_id}:token")}),
+                                derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+                                canonicality_state: CanonicalityState::Canonical,
+                                before_state: json!({
+                                    "from": "0x00000000000000000000000000000000000000a1",
+                                }),
+                                after_state: json!({
+                                    "to": "0x00000000000000000000000000000000000000c1",
+                                }),
+                            });
                 }
                 BasenamesControlVectorScenario::ManagementOnly => {
                     events.push(NormalizedEvent {
-                        event_identity: format!("conformance:{logical_name_id}:authority"),
-                        namespace: "basenames".to_owned(),
-                        logical_name_id: Some(logical_name_id.to_owned()),
-                        resource_id: Some(resource_id),
-                        event_kind: "AuthorityTransferred".to_owned(),
-                        source_family: "basenames_base_registry".to_owned(),
-                        manifest_version: 3,
-                        source_manifest_id: None,
-                        chain_id: Some("base-mainnet".to_owned()),
-                        block_number: Some(102),
-                        block_hash: Some("0xbase-authority".to_owned()),
-                        transaction_hash: Some(format!("0xtx:{logical_name_id}:authority")),
-                        log_index: Some(0),
-                        raw_fact_ref: json!({"kind": "raw_log", "event_identity": format!("conformance:{logical_name_id}:authority")}),
-                        derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
-                        canonicality_state: CanonicalityState::Canonical,
-                        before_state: json!({
-                            "owner": "0x00000000000000000000000000000000000000a2",
-                        }),
-                        after_state: json!({
-                            "owner": "0x00000000000000000000000000000000000000b2",
-                        }),
-                    });
+                                event_identity: format!("conformance:{logical_name_id}:authority"),
+                                namespace: "basenames".to_owned(),
+                                logical_name_id: Some(logical_name_id.to_owned()),
+                                resource_id: Some(resource_id),
+                                event_kind: "AuthorityTransferred".to_owned(),
+                                source_family: "basenames_base_registry".to_owned(),
+                                manifest_version: 3,
+                                source_manifest_id: None,
+                                chain_id: Some("base-mainnet".to_owned()),
+                                block_number: Some(102),
+                                block_hash: Some("0xbase-authority".to_owned()),
+                                transaction_hash: Some(format!("0xtx:{logical_name_id}:authority")),
+                                log_index: Some(0),
+                                raw_fact_ref: json!({"kind": "raw_log", "event_identity": format!("conformance:{logical_name_id}:authority")}),
+                                derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+                                canonicality_state: CanonicalityState::Canonical,
+                                before_state: json!({
+                                    "owner": "0x00000000000000000000000000000000000000a2",
+                                }),
+                                after_state: json!({
+                                    "owner": "0x00000000000000000000000000000000000000b2",
+                                }),
+                            });
                 }
                 BasenamesControlVectorScenario::FullTransfer => {
                     events.push(NormalizedEvent {
-                        event_identity: format!("conformance:{logical_name_id}:authority"),
-                        namespace: "basenames".to_owned(),
-                        logical_name_id: Some(logical_name_id.to_owned()),
-                        resource_id: Some(resource_id),
-                        event_kind: "AuthorityTransferred".to_owned(),
-                        source_family: "basenames_base_registry".to_owned(),
-                        manifest_version: 3,
-                        source_manifest_id: None,
-                        chain_id: Some("base-mainnet".to_owned()),
-                        block_number: Some(102),
-                        block_hash: Some("0xbase-authority".to_owned()),
-                        transaction_hash: Some(format!("0xtx:{logical_name_id}:authority")),
-                        log_index: Some(0),
-                        raw_fact_ref: json!({"kind": "raw_log", "event_identity": format!("conformance:{logical_name_id}:authority")}),
-                        derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
-                        canonicality_state: CanonicalityState::Canonical,
-                        before_state: json!({
-                            "owner": "0x00000000000000000000000000000000000000a3",
-                        }),
-                        after_state: json!({
-                            "owner": "0x00000000000000000000000000000000000000b3",
-                        }),
-                    });
+                                event_identity: format!("conformance:{logical_name_id}:authority"),
+                                namespace: "basenames".to_owned(),
+                                logical_name_id: Some(logical_name_id.to_owned()),
+                                resource_id: Some(resource_id),
+                                event_kind: "AuthorityTransferred".to_owned(),
+                                source_family: "basenames_base_registry".to_owned(),
+                                manifest_version: 3,
+                                source_manifest_id: None,
+                                chain_id: Some("base-mainnet".to_owned()),
+                                block_number: Some(102),
+                                block_hash: Some("0xbase-authority".to_owned()),
+                                transaction_hash: Some(format!("0xtx:{logical_name_id}:authority")),
+                                log_index: Some(0),
+                                raw_fact_ref: json!({"kind": "raw_log", "event_identity": format!("conformance:{logical_name_id}:authority")}),
+                                derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+                                canonicality_state: CanonicalityState::Canonical,
+                                before_state: json!({
+                                    "owner": "0x00000000000000000000000000000000000000a3",
+                                }),
+                                after_state: json!({
+                                    "owner": "0x00000000000000000000000000000000000000b3",
+                                }),
+                            });
                     events.push(NormalizedEvent {
-                        event_identity: format!("conformance:{logical_name_id}:token"),
-                        namespace: "basenames".to_owned(),
-                        logical_name_id: Some(logical_name_id.to_owned()),
-                        resource_id: Some(resource_id),
-                        event_kind: "TokenControlTransferred".to_owned(),
-                        source_family: "basenames_base_registrar".to_owned(),
-                        manifest_version: 3,
-                        source_manifest_id: None,
-                        chain_id: Some("base-mainnet".to_owned()),
-                        block_number: Some(103),
-                        block_hash: Some("0xbase-token".to_owned()),
-                        transaction_hash: Some(format!("0xtx:{logical_name_id}:token")),
-                        log_index: Some(0),
-                        raw_fact_ref: json!({"kind": "raw_log", "event_identity": format!("conformance:{logical_name_id}:token")}),
-                        derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
-                        canonicality_state: CanonicalityState::Canonical,
-                        before_state: json!({
-                            "from": "0x00000000000000000000000000000000000000a3",
-                        }),
-                        after_state: json!({
-                            "to": "0x00000000000000000000000000000000000000c3",
-                        }),
-                    });
+                                event_identity: format!("conformance:{logical_name_id}:token"),
+                                namespace: "basenames".to_owned(),
+                                logical_name_id: Some(logical_name_id.to_owned()),
+                                resource_id: Some(resource_id),
+                                event_kind: "TokenControlTransferred".to_owned(),
+                                source_family: "basenames_base_registrar".to_owned(),
+                                manifest_version: 3,
+                                source_manifest_id: None,
+                                chain_id: Some("base-mainnet".to_owned()),
+                                block_number: Some(103),
+                                block_hash: Some("0xbase-token".to_owned()),
+                                transaction_hash: Some(format!("0xtx:{logical_name_id}:token")),
+                                log_index: Some(0),
+                                raw_fact_ref: json!({"kind": "raw_log", "event_identity": format!("conformance:{logical_name_id}:token")}),
+                                derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+                                canonicality_state: CanonicalityState::Canonical,
+                                before_state: json!({
+                                    "from": "0x00000000000000000000000000000000000000a3",
+                                }),
+                                after_state: json!({
+                                    "to": "0x00000000000000000000000000000000000000c3",
+                                }),
+                            });
                     events.push(NormalizedEvent {
-                        event_identity: format!("conformance:{logical_name_id}:authority-final"),
-                        namespace: "basenames".to_owned(),
-                        logical_name_id: Some(logical_name_id.to_owned()),
-                        resource_id: Some(resource_id),
-                        event_kind: "AuthorityTransferred".to_owned(),
-                        source_family: "basenames_base_registry".to_owned(),
-                        manifest_version: 3,
-                        source_manifest_id: None,
-                        chain_id: Some("base-mainnet".to_owned()),
-                        block_number: Some(104),
-                        block_hash: Some("0xbase-authority-final".to_owned()),
-                        transaction_hash: Some(format!("0xtx:{logical_name_id}:authority-final")),
-                        log_index: Some(0),
-                        raw_fact_ref: json!({"kind": "raw_log", "event_identity": format!("conformance:{logical_name_id}:authority-final")}),
-                        derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
-                        canonicality_state: CanonicalityState::Canonical,
-                        before_state: json!({
-                            "owner": "0x00000000000000000000000000000000000000b3",
-                        }),
-                        after_state: json!({
-                            "owner": "0x00000000000000000000000000000000000000c3",
-                        }),
-                    });
+                                event_identity: format!("conformance:{logical_name_id}:authority-final"),
+                                namespace: "basenames".to_owned(),
+                                logical_name_id: Some(logical_name_id.to_owned()),
+                                resource_id: Some(resource_id),
+                                event_kind: "AuthorityTransferred".to_owned(),
+                                source_family: "basenames_base_registry".to_owned(),
+                                manifest_version: 3,
+                                source_manifest_id: None,
+                                chain_id: Some("base-mainnet".to_owned()),
+                                block_number: Some(104),
+                                block_hash: Some("0xbase-authority-final".to_owned()),
+                                transaction_hash: Some(format!("0xtx:{logical_name_id}:authority-final")),
+                                log_index: Some(0),
+                                raw_fact_ref: json!({"kind": "raw_log", "event_identity": format!("conformance:{logical_name_id}:authority-final")}),
+                                derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+                                canonicality_state: CanonicalityState::Canonical,
+                                before_state: json!({
+                                    "owner": "0x00000000000000000000000000000000000000b3",
+                                }),
+                                after_state: json!({
+                                    "owner": "0x00000000000000000000000000000000000000c3",
+                                }),
+                            });
                 }
             }
 
             events.push(NormalizedEvent {
-                event_identity: format!("conformance:{logical_name_id}:resolver"),
-                namespace: "basenames".to_owned(),
-                logical_name_id: Some(logical_name_id.to_owned()),
-                resource_id: Some(resource_id),
-                event_kind: "ResolverChanged".to_owned(),
-                source_family: "basenames_base_resolver".to_owned(),
-                manifest_version: 4,
-                source_manifest_id: None,
-                chain_id: Some("base-mainnet".to_owned()),
-                block_number: Some(105),
-                block_hash: Some("0xbase-resolver".to_owned()),
-                transaction_hash: Some(format!("0xtx:{logical_name_id}:resolver")),
-                log_index: Some(0),
-                raw_fact_ref: json!({"kind": "raw_log", "event_identity": format!("conformance:{logical_name_id}:resolver")}),
-                derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
-                canonicality_state: CanonicalityState::Canonical,
-                before_state: json!({}),
-                after_state: json!({
-                    "resolver": "0x0000000000000000000000000000000000000abc",
-                    "namehash": format!("namehash:{normalized_name}"),
-                }),
-            });
+                        event_identity: format!("conformance:{logical_name_id}:resolver"),
+                        namespace: "basenames".to_owned(),
+                        logical_name_id: Some(logical_name_id.to_owned()),
+                        resource_id: Some(resource_id),
+                        event_kind: "ResolverChanged".to_owned(),
+                        source_family: "basenames_base_resolver".to_owned(),
+                        manifest_version: 4,
+                        source_manifest_id: None,
+                        chain_id: Some("base-mainnet".to_owned()),
+                        block_number: Some(105),
+                        block_hash: Some("0xbase-resolver".to_owned()),
+                        transaction_hash: Some(format!("0xtx:{logical_name_id}:resolver")),
+                        log_index: Some(0),
+                        raw_fact_ref: json!({"kind": "raw_log", "event_identity": format!("conformance:{logical_name_id}:resolver")}),
+                        derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+                        canonicality_state: CanonicalityState::Canonical,
+                        before_state: json!({}),
+                        after_state: json!({
+                            "resolver": "0x0000000000000000000000000000000000000abc",
+                            "namehash": format!("namehash:{normalized_name}"),
+                        }),
+                    });
 
             bigname_storage::upsert_normalized_events(&database.pool, &events).await?;
 
@@ -665,83 +717,83 @@
             .await?;
 
             bigname_storage::upsert_normalized_events(
-                &database.pool,
-                &[
-                    NormalizedEvent {
-                        event_identity: "conformance:basenames:record-version".to_owned(),
-                        namespace: "basenames".to_owned(),
-                        logical_name_id: Some(logical_name_id.to_owned()),
-                        resource_id: Some(resource_id),
-                        event_kind: "RecordVersionChanged".to_owned(),
-                        source_family: "basenames_base_resolver".to_owned(),
-                        manifest_version: 4,
-                        source_manifest_id: None,
-                        chain_id: Some("base-mainnet".to_owned()),
-                        block_number: Some(103),
-                        block_hash: Some("0xbase-resolver".to_owned()),
-                        transaction_hash: Some("0xtxbaseresolver".to_owned()),
-                        log_index: Some(1),
-                        raw_fact_ref: json!({"kind": "raw_log", "event_identity": "conformance:basenames:record-version"}),
-                        derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
-                        canonicality_state: CanonicalityState::Canonical,
-                        before_state: json!({
-                            "record_version": 6,
-                        }),
-                        after_state: json!({
-                            "record_version": 7,
-                        }),
-                    },
-                    NormalizedEvent {
-                        event_identity: "conformance:basenames:addr".to_owned(),
-                        namespace: "basenames".to_owned(),
-                        logical_name_id: Some(logical_name_id.to_owned()),
-                        resource_id: Some(resource_id),
-                        event_kind: "RecordChanged".to_owned(),
-                        source_family: "basenames_base_resolver".to_owned(),
-                        manifest_version: 4,
-                        source_manifest_id: None,
-                        chain_id: Some("base-mainnet".to_owned()),
-                        block_number: Some(103),
-                        block_hash: Some("0xbase-resolver".to_owned()),
-                        transaction_hash: Some("0xtxbaseresolver".to_owned()),
-                        log_index: Some(2),
-                        raw_fact_ref: json!({"kind": "raw_log", "event_identity": "conformance:basenames:addr"}),
-                        derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
-                        canonicality_state: CanonicalityState::Canonical,
-                        before_state: json!({}),
-                        after_state: json!({
-                            "record_key": "addr:60",
-                            "record_family": "addr",
-                            "selector_key": "60",
-                        }),
-                    },
-                    NormalizedEvent {
-                        event_identity: "conformance:basenames:text".to_owned(),
-                        namespace: "basenames".to_owned(),
-                        logical_name_id: Some(logical_name_id.to_owned()),
-                        resource_id: Some(resource_id),
-                        event_kind: "RecordChanged".to_owned(),
-                        source_family: "basenames_base_resolver".to_owned(),
-                        manifest_version: 4,
-                        source_manifest_id: None,
-                        chain_id: Some("base-mainnet".to_owned()),
-                        block_number: Some(103),
-                        block_hash: Some("0xbase-resolver".to_owned()),
-                        transaction_hash: Some("0xtxbaseresolver".to_owned()),
-                        log_index: Some(3),
-                        raw_fact_ref: json!({"kind": "raw_log", "event_identity": "conformance:basenames:text"}),
-                        derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
-                        canonicality_state: CanonicalityState::Canonical,
-                        before_state: json!({}),
-                        after_state: json!({
-                            "record_key": "text",
-                            "record_family": "text",
-                            "selector_key": null,
-                        }),
-                    },
-                ],
-            )
-            .await?;
+                        &database.pool,
+                        &[
+                            NormalizedEvent {
+                                event_identity: "conformance:basenames:record-version".to_owned(),
+                                namespace: "basenames".to_owned(),
+                                logical_name_id: Some(logical_name_id.to_owned()),
+                                resource_id: Some(resource_id),
+                                event_kind: "RecordVersionChanged".to_owned(),
+                                source_family: "basenames_base_resolver".to_owned(),
+                                manifest_version: 4,
+                                source_manifest_id: None,
+                                chain_id: Some("base-mainnet".to_owned()),
+                                block_number: Some(103),
+                                block_hash: Some("0xbase-resolver".to_owned()),
+                                transaction_hash: Some("0xtxbaseresolver".to_owned()),
+                                log_index: Some(1),
+                                raw_fact_ref: json!({"kind": "raw_log", "event_identity": "conformance:basenames:record-version"}),
+                                derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+                                canonicality_state: CanonicalityState::Canonical,
+                                before_state: json!({
+                                    "record_version": 6,
+                                }),
+                                after_state: json!({
+                                    "record_version": 7,
+                                }),
+                            },
+                            NormalizedEvent {
+                                event_identity: "conformance:basenames:addr".to_owned(),
+                                namespace: "basenames".to_owned(),
+                                logical_name_id: Some(logical_name_id.to_owned()),
+                                resource_id: Some(resource_id),
+                                event_kind: "RecordChanged".to_owned(),
+                                source_family: "basenames_base_resolver".to_owned(),
+                                manifest_version: 4,
+                                source_manifest_id: None,
+                                chain_id: Some("base-mainnet".to_owned()),
+                                block_number: Some(103),
+                                block_hash: Some("0xbase-resolver".to_owned()),
+                                transaction_hash: Some("0xtxbaseresolver".to_owned()),
+                                log_index: Some(2),
+                                raw_fact_ref: json!({"kind": "raw_log", "event_identity": "conformance:basenames:addr"}),
+                                derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+                                canonicality_state: CanonicalityState::Canonical,
+                                before_state: json!({}),
+                                after_state: json!({
+                                    "record_key": "addr:60",
+                                    "record_family": "addr",
+                                    "selector_key": "60",
+                                }),
+                            },
+                            NormalizedEvent {
+                                event_identity: "conformance:basenames:text".to_owned(),
+                                namespace: "basenames".to_owned(),
+                                logical_name_id: Some(logical_name_id.to_owned()),
+                                resource_id: Some(resource_id),
+                                event_kind: "RecordChanged".to_owned(),
+                                source_family: "basenames_base_resolver".to_owned(),
+                                manifest_version: 4,
+                                source_manifest_id: None,
+                                chain_id: Some("base-mainnet".to_owned()),
+                                block_number: Some(103),
+                                block_hash: Some("0xbase-resolver".to_owned()),
+                                transaction_hash: Some("0xtxbaseresolver".to_owned()),
+                                log_index: Some(3),
+                                raw_fact_ref: json!({"kind": "raw_log", "event_identity": "conformance:basenames:text"}),
+                                derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+                                canonicality_state: CanonicalityState::Canonical,
+                                before_state: json!({}),
+                                after_state: json!({
+                                    "record_key": "text",
+                                    "record_family": "text",
+                                    "selector_key": null,
+                                }),
+                            },
+                        ],
+                    )
+                    .await?;
 
             Ok(())
         }
@@ -756,41 +808,41 @@
                 PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../apps/worker/Cargo.toml");
 
             tokio::task::spawn_blocking(move || -> Result<()> {
-                let _guard = WORKER_CARGO_LOCK
-                    .lock()
-                    .expect("worker cargo lock must not be poisoned");
-                let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
-                let output = Command::new(cargo)
-                    .arg("run")
-                    .arg("--quiet")
-                    .arg("--manifest-path")
-                    .arg(worker_manifest_path)
-                    .arg("--")
-                    .arg("record-inventory-current")
-                    .arg("rebuild")
-                    .arg("--database-url")
-                    .arg(&database_url)
-                    .arg("--resource-id")
-                    .arg(&resource_id)
-                    .output()
-                    .with_context(|| {
-                        format!(
-                            "failed to invoke worker record_inventory_current rebuild for {resource_id}"
-                        )
-                    })?;
+                        let _guard = WORKER_CARGO_LOCK
+                            .lock()
+                            .expect("worker cargo lock must not be poisoned");
+                        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
+                        let output = Command::new(cargo)
+                            .arg("run")
+                            .arg("--quiet")
+                            .arg("--manifest-path")
+                            .arg(worker_manifest_path)
+                            .arg("--")
+                            .arg("record-inventory-current")
+                            .arg("rebuild")
+                            .arg("--database-url")
+                            .arg(&database_url)
+                            .arg("--resource-id")
+                            .arg(&resource_id)
+                            .output()
+                            .with_context(|| {
+                                format!(
+                                    "failed to invoke worker record_inventory_current rebuild for {resource_id}"
+                                )
+                            })?;
 
-                if !output.status.success() {
-                    return Err(anyhow::anyhow!(
-                        "worker record_inventory_current rebuild failed for {resource_id}\nstdout:\n{}\nstderr:\n{}",
-                        String::from_utf8_lossy(&output.stdout),
-                        String::from_utf8_lossy(&output.stderr),
-                    ));
-                }
+                        if !output.status.success() {
+                            return Err(anyhow::anyhow!(
+                                "worker record_inventory_current rebuild failed for {resource_id}\nstdout:\n{}\nstderr:\n{}",
+                                String::from_utf8_lossy(&output.stdout),
+                                String::from_utf8_lossy(&output.stderr),
+                            ));
+                        }
 
-                Ok(())
-            })
-            .await
-            .context("worker record_inventory_current rebuild task panicked")??;
+                        Ok(())
+                    })
+                    .await
+                    .context("worker record_inventory_current rebuild task panicked")??;
 
             Ok(())
         }
@@ -1337,6 +1389,662 @@
             }
         }
 
+        const ENSV2_CHAIN_ID: &str = "ethereum-mainnet";
+        const ENSV2_ROOT_SOURCE_FAMILY: &str = "ens_v2_root_l1";
+        const ENSV2_REGISTRY_SOURCE_FAMILY: &str = "ens_v2_registry_l1";
+        const ENSV2_RESOLVER_SOURCE_FAMILY: &str = "ens_v2_resolver_l1";
+        const ENSV2_REGISTRY_DERIVATION_KIND: &str = "ens_v2_registry_resource_surface";
+        const ENSV2_PERMISSIONS_DERIVATION_KIND: &str = "ens_v2_permissions";
+        const ENSV2_RESOLVER_DERIVATION_KIND: &str = "ens_v2_resolver";
+
+        #[derive(Clone, Debug)]
+        struct EnsV2DeclaredChildFixture {
+            parent_logical_name_id: String,
+            parent_normalized_name: String,
+            parent_namehash: String,
+            parent_resource_id: Uuid,
+            child_logical_name_id: String,
+            child_normalized_name: String,
+            child_namehash: String,
+            child_resource_id: Uuid,
+            parent_contract_instance_id: String,
+            child_registry_contract_instance_id: String,
+            child_registry_address: String,
+            base_block_number: i64,
+        }
+
+        impl EnsV2DeclaredChildFixture {
+            fn new(
+                parent_logical_name_id: &str,
+                child_logical_name_id: &str,
+                parent_resource_id: Uuid,
+                child_resource_id: Uuid,
+                base_block_number: i64,
+            ) -> Self {
+                let parent_normalized_name = ens_namespace_normalized_name(parent_logical_name_id);
+                let child_normalized_name = ens_namespace_normalized_name(child_logical_name_id);
+                assert!(
+                    is_direct_child_name(&parent_normalized_name, &child_normalized_name),
+                    "ENSv2 child fixtures only model declared direct children"
+                );
+
+                Self {
+                    parent_logical_name_id: parent_logical_name_id.to_owned(),
+                    parent_namehash: format!("namehash:{parent_normalized_name}"),
+                    parent_resource_id,
+                    child_logical_name_id: child_logical_name_id.to_owned(),
+                    child_namehash: format!("namehash:{child_normalized_name}"),
+                    child_resource_id,
+                    parent_contract_instance_id: format!("ensv2:registry:{parent_normalized_name}"),
+                    child_registry_contract_instance_id: format!(
+                        "ensv2:subregistry:{parent_normalized_name}"
+                    ),
+                    child_registry_address: "0x0000000000000000000000000000000000000c01".to_owned(),
+                    parent_normalized_name,
+                    child_normalized_name,
+                    base_block_number,
+                }
+            }
+
+            fn name_surfaces(&self) -> [NameSurface; 2] {
+                [
+                    collection_name_surface(
+                        &self.parent_logical_name_id,
+                        &self.parent_normalized_name,
+                        &self.parent_namehash,
+                        self.base_block_number,
+                    ),
+                    collection_name_surface(
+                        &self.child_logical_name_id,
+                        &self.child_normalized_name,
+                        &self.child_namehash,
+                        self.base_block_number + 1,
+                    ),
+                ]
+            }
+
+            fn resources(&self) -> [Resource; 2] {
+                [
+                    ens_v2_resource(
+                        self.parent_resource_id,
+                        self.base_block_number,
+                        "ens_v2_parent_resource",
+                    ),
+                    ens_v2_resource(
+                        self.child_resource_id,
+                        self.base_block_number + 1,
+                        "ens_v2_child_resource",
+                    ),
+                ]
+            }
+
+            fn normalized_events(&self) -> [NormalizedEvent; 3] {
+                [
+                    self.subregistry_changed_event(),
+                    self.parent_changed_event(),
+                    self.child_registration_event(),
+                ]
+            }
+
+            async fn expected_children_provenance(&self, database: &HarnessDatabase) -> Result<Value> {
+                let events = self.normalized_events();
+                let event_identities = events
+                    .iter()
+                    .map(|event| event.event_identity.clone())
+                    .collect::<Vec<_>>();
+                let rows = sqlx::query(
+                    r#"
+                    SELECT event_identity, normalized_event_id
+                    FROM normalized_events
+                    WHERE event_identity = ANY($1::TEXT[])
+                    "#,
+                )
+                .bind(&event_identities)
+                .fetch_all(&database.pool)
+                .await
+                .context("failed to load ENSv2 child fixture normalized event IDs")?;
+                let mut event_ids_by_identity = std::collections::BTreeMap::new();
+                for row in rows {
+                    event_ids_by_identity.insert(
+                        row.try_get::<String, _>("event_identity")
+                            .context("missing ENSv2 fixture event_identity")?,
+                        row.try_get::<i64, _>("normalized_event_id")
+                            .context("missing ENSv2 fixture normalized_event_id")?,
+                    );
+                }
+                let normalized_event_ids = event_identities
+                    .iter()
+                    .map(|event_identity| {
+                        event_ids_by_identity
+                            .get(event_identity)
+                            .with_context(|| {
+                                format!("missing normalized_event_id for seeded event {event_identity}")
+                            })
+                            .map(ToString::to_string)
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let raw_fact_refs = events
+                    .iter()
+                    .map(|event| event.raw_fact_ref.clone())
+                    .collect::<Vec<_>>();
+
+                Ok(json!({
+                    "normalized_event_ids": normalized_event_ids,
+                    "raw_fact_refs": raw_fact_refs,
+                    "manifest_versions": [
+                        {
+                            "manifest_version": 3,
+                            "source_family": ENSV2_REGISTRY_SOURCE_FAMILY,
+                            "source_manifest_id": null
+                        },
+                        {
+                            "manifest_version": 2,
+                            "source_family": ENSV2_ROOT_SOURCE_FAMILY,
+                            "source_manifest_id": null
+                        }
+                    ],
+                    "execution_trace_id": null,
+                    "derivation_kind": "children_current_rebuild"
+                }))
+            }
+
+            async fn seed(&self, database: &HarnessDatabase) -> Result<()> {
+                bigname_storage::upsert_name_surfaces(&database.pool, &self.name_surfaces())
+                    .await
+                    .context("failed to upsert ENSv2 child fixture name surfaces")?;
+                bigname_storage::upsert_resources(&database.pool, &self.resources())
+                    .await
+                    .context("failed to upsert ENSv2 child fixture resources")?;
+                seed_ens_v2_event_fixture_inputs(&database.pool, &self.normalized_events())
+                    .await
+                    .context("failed to seed ENSv2 child fixture events")?;
+
+                Ok(())
+            }
+
+            fn subregistry_changed_event(&self) -> NormalizedEvent {
+                let mut event = ens_v2_registry_event(
+                    &format!(
+                        "conformance:ensv2:{}:subregistry",
+                        self.parent_normalized_name
+                    ),
+                    Some(&self.parent_logical_name_id),
+                    Some(self.parent_resource_id),
+                    "SubregistryChanged",
+                    self.base_block_number,
+                    0,
+                    json!({}),
+                    json!({
+                        "from_contract_instance_id": self.parent_contract_instance_id,
+                        "to_contract_instance_id": self.child_registry_contract_instance_id,
+                    }),
+                    json!({
+                        "kind": "raw_log",
+                        "event_identity": format!(
+                            "conformance:ensv2:{}:subregistry",
+                            self.parent_normalized_name
+                        ),
+                    }),
+                );
+                event.source_family = ENSV2_ROOT_SOURCE_FAMILY.to_owned();
+                event.manifest_version = 2;
+                event
+            }
+
+            fn parent_changed_event(&self) -> NormalizedEvent {
+                ens_v2_registry_event(
+                    &format!("conformance:ensv2:{}:parent", self.parent_normalized_name),
+                    Some(&self.parent_logical_name_id),
+                    Some(self.parent_resource_id),
+                    "ParentChanged",
+                    self.base_block_number + 1,
+                    0,
+                    json!({}),
+                    json!({
+                        "registry_contract_instance_id": self.child_registry_contract_instance_id,
+                        "parent_contract_instance_id": self.parent_contract_instance_id,
+                        "registry_name": self.parent_normalized_name,
+                    }),
+                    json!({
+                        "kind": "raw_log",
+                        "event_identity": format!(
+                            "conformance:ensv2:{}:parent",
+                            self.parent_normalized_name
+                        ),
+                        "emitting_address": self.child_registry_address,
+                    }),
+                )
+            }
+
+            fn child_registration_event(&self) -> NormalizedEvent {
+                ens_v2_registry_event(
+                    &format!("conformance:ensv2:{}:child", self.child_normalized_name),
+                    Some(&self.child_logical_name_id),
+                    Some(self.child_resource_id),
+                    "RegistrationGranted",
+                    self.base_block_number + 2,
+                    0,
+                    json!({}),
+                    json!({
+                        "registry_contract_instance_id": self.child_registry_contract_instance_id,
+                        "normalized_name": self.child_normalized_name,
+                        "active": true,
+                    }),
+                    json!({
+                        "kind": "raw_log",
+                        "event_identity": format!(
+                            "conformance:ensv2:{}:child",
+                            self.child_normalized_name
+                        ),
+                        "emitting_address": self.child_registry_address,
+                    }),
+                )
+            }
+        }
+
+        async fn seed_ens_v2_event_fixture_inputs(pool: &PgPool, events: &[NormalizedEvent]) -> Result<()> {
+            let mut seen_blocks = BTreeSet::new();
+            let mut blocks = Vec::new();
+
+            for event in events {
+                let (Some(chain_id), Some(block_hash), Some(block_number)) = (
+                    event.chain_id.as_deref(),
+                    event.block_hash.as_deref(),
+                    event.block_number,
+                ) else {
+                    continue;
+                };
+
+                if seen_blocks.insert((chain_id.to_owned(), block_hash.to_owned())) {
+                    let mut block = raw_block(
+                        chain_id,
+                        block_hash,
+                        None,
+                        block_number,
+                        1_717_190_000 + block_number,
+                    );
+                    block.canonicality_state = CanonicalityState::Finalized;
+                    blocks.push(block);
+                }
+            }
+
+            bigname_storage::upsert_raw_blocks(pool, &blocks)
+                .await
+                .context("failed to upsert ENSv2 fixture raw blocks")?;
+            bigname_storage::upsert_normalized_events(pool, events)
+                .await
+                .context("failed to upsert ENSv2 fixture normalized events")?;
+
+            Ok(())
+        }
+
+        fn ens_v2_permission_current_row(
+            resource_id: Uuid,
+            subject: &str,
+            scope: PermissionScope,
+            effective_powers: &[&str],
+            manifest_version: i64,
+            block_number: i64,
+        ) -> PermissionsCurrentRow {
+            assert!(
+                !effective_powers.is_empty(),
+                "current permission rows cannot represent fully revoked EAC roles"
+            );
+            let chain_id = permission_scope_chain_id(&scope).to_owned();
+            let chain_position_key = chain_id.clone();
+            let chain_position_chain_id = chain_id.clone();
+            let canonicality_key = chain_id.clone();
+
+            PermissionsCurrentRow {
+                resource_id,
+                subject: subject.to_owned(),
+                scope,
+                effective_powers: json!(effective_powers),
+                grant_source: json!({
+                    "kind": "raw_log",
+                    "source_event": "EACRolesChanged",
+                }),
+                revocation_source: None,
+                inheritance_path: json!([]),
+                transfer_behavior: json!({}),
+                provenance: json!({
+                    "normalized_event_ids": [block_number],
+                    "raw_fact_refs": [{
+                        "kind": "raw_log",
+                        "block_number": block_number,
+                    }],
+                    "manifest_versions": [{
+                        "manifest_version": manifest_version,
+                        "source_family": ENSV2_RESOLVER_SOURCE_FAMILY,
+                        "chain": chain_id.clone(),
+                        "deployment_epoch": "ens_v2",
+                    }],
+                    "derivation_kind": "permissions_current_rebuild",
+                }),
+                coverage: json!({
+                    "status": "full",
+                    "exhaustiveness": "authoritative",
+                    "source_classes_considered": [ENSV2_RESOLVER_SOURCE_FAMILY],
+                    "enumeration_basis": "resource_permissions",
+                    "unsupported_reason": null,
+                }),
+                chain_positions: json!({
+                    chain_position_key: {
+                        "chain_id": chain_position_chain_id,
+                        "block_number": block_number,
+                        "block_hash": ens_v2_block_hash(block_number),
+                        "timestamp": format!("2026-04-17T00:00:{:02}Z", block_number % 60),
+                    }
+                }),
+                canonicality_summary: json!({
+                    "status": "finalized",
+                    "chains": {
+                        canonicality_key: "finalized",
+                    }
+                }),
+                manifest_version,
+                last_recomputed_at: timestamp(1_717_174_000 + block_number),
+            }
+        }
+
+        fn ens_v2_permission_changed_event(
+            event_identity: &str,
+            logical_name_id: &str,
+            resource_id: Uuid,
+            subject: &str,
+            scope: PermissionScope,
+            effective_powers: &[&str],
+            manifest_version: i64,
+            block_number: i64,
+            log_index: i64,
+        ) -> NormalizedEvent {
+            let chain_id = permission_scope_chain_id(&scope).to_owned();
+            let emitting_address = permission_scope_emitting_address(&scope);
+            let source = json!({
+                "kind": "raw_log",
+                "source_event": "EACRolesChanged",
+                "resource_id": resource_id.to_string(),
+                "changed_powers": effective_powers,
+            });
+            let grant_source = if effective_powers.is_empty() {
+                json!({})
+            } else {
+                source.clone()
+            };
+            let revocation_source = if effective_powers.is_empty() {
+                source
+            } else {
+                Value::Null
+            };
+
+            NormalizedEvent {
+                event_identity: event_identity.to_owned(),
+                namespace: "ens".to_owned(),
+                logical_name_id: Some(logical_name_id.to_owned()),
+                resource_id: Some(resource_id),
+                event_kind: "PermissionChanged".to_owned(),
+                source_family: ENSV2_RESOLVER_SOURCE_FAMILY.to_owned(),
+                manifest_version,
+                source_manifest_id: None,
+                chain_id: Some(chain_id.clone()),
+                block_number: Some(block_number),
+                block_hash: Some(ens_v2_block_hash(block_number)),
+                transaction_hash: Some(ens_v2_transaction_hash(block_number)),
+                log_index: Some(log_index),
+                raw_fact_ref: json!({
+                    "kind": "raw_log",
+                    "event_identity": event_identity,
+                    "emitting_address": emitting_address,
+                }),
+                derivation_kind: ENSV2_PERMISSIONS_DERIVATION_KIND.to_owned(),
+                canonicality_state: CanonicalityState::Canonical,
+                before_state: json!({
+                    "subject": subject,
+                    "effective_powers": [],
+                }),
+                after_state: json!({
+                    "subject": subject,
+                    "scope": permission_scope_after_state(&scope),
+                    "effective_powers": effective_powers,
+                    "grant_source": grant_source,
+                    "revocation_source": revocation_source,
+                    "inheritance_path": [],
+                    "transfer_behavior": {},
+                    "source_event": "EACRolesChanged",
+                }),
+            }
+        }
+
+        fn ens_v2_record_version_changed_event(
+            event_identity: &str,
+            logical_name_id: &str,
+            resource_id: Uuid,
+            resolver_address: &str,
+            namehash: &str,
+            record_version: &str,
+            manifest_version: i64,
+            block_number: i64,
+            log_index: i64,
+        ) -> NormalizedEvent {
+            ens_v2_resolver_event(
+                event_identity,
+                logical_name_id,
+                resource_id,
+                resolver_address,
+                "RecordVersionChanged",
+                manifest_version,
+                block_number,
+                log_index,
+                json!({}),
+                json!({
+                    "source_event": "VersionChanged",
+                    "resolver": resolver_address,
+                    "resolver_contract_instance_id": format!("ensv2:resolver:{resolver_address}"),
+                    "node": namehash,
+                    "record_version": record_version,
+                }),
+            )
+        }
+
+        fn ens_v2_record_changed_event(
+            event_identity: &str,
+            logical_name_id: &str,
+            resource_id: Uuid,
+            resolver_address: &str,
+            namehash: &str,
+            record_family: &str,
+            selector_key: Option<&str>,
+            manifest_version: i64,
+            block_number: i64,
+            log_index: i64,
+        ) -> NormalizedEvent {
+            let record_key = record_key_for_selector(record_family, selector_key);
+
+            ens_v2_resolver_event(
+                event_identity,
+                logical_name_id,
+                resource_id,
+                resolver_address,
+                "RecordChanged",
+                manifest_version,
+                block_number,
+                log_index,
+                json!({}),
+                json!({
+                    "source_event": resolver_source_event_for_record_family(record_family),
+                    "resolver": resolver_address,
+                    "resolver_contract_instance_id": format!("ensv2:resolver:{resolver_address}"),
+                    "node": namehash,
+                    "record_key": record_key,
+                    "record_family": record_family,
+                    "selector_key": selector_key,
+                    "value_retained": false,
+                }),
+            )
+        }
+
+        fn ens_v2_registry_event(
+            event_identity: &str,
+            logical_name_id: Option<&str>,
+            resource_id: Option<Uuid>,
+            event_kind: &str,
+            block_number: i64,
+            log_index: i64,
+            before_state: Value,
+            after_state: Value,
+            raw_fact_ref: Value,
+        ) -> NormalizedEvent {
+            NormalizedEvent {
+                event_identity: event_identity.to_owned(),
+                namespace: "ens".to_owned(),
+                logical_name_id: logical_name_id.map(str::to_owned),
+                resource_id,
+                event_kind: event_kind.to_owned(),
+                source_family: ENSV2_REGISTRY_SOURCE_FAMILY.to_owned(),
+                manifest_version: 3,
+                source_manifest_id: None,
+                chain_id: Some(ENSV2_CHAIN_ID.to_owned()),
+                block_number: Some(block_number),
+                block_hash: Some(ens_v2_block_hash(block_number)),
+                transaction_hash: Some(ens_v2_transaction_hash(block_number)),
+                log_index: Some(log_index),
+                raw_fact_ref,
+                derivation_kind: ENSV2_REGISTRY_DERIVATION_KIND.to_owned(),
+                canonicality_state: CanonicalityState::Canonical,
+                before_state,
+                after_state,
+            }
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn ens_v2_resolver_event(
+            event_identity: &str,
+            logical_name_id: &str,
+            resource_id: Uuid,
+            resolver_address: &str,
+            event_kind: &str,
+            manifest_version: i64,
+            block_number: i64,
+            log_index: i64,
+            before_state: Value,
+            after_state: Value,
+        ) -> NormalizedEvent {
+            NormalizedEvent {
+                event_identity: event_identity.to_owned(),
+                namespace: "ens".to_owned(),
+                logical_name_id: Some(logical_name_id.to_owned()),
+                resource_id: Some(resource_id),
+                event_kind: event_kind.to_owned(),
+                source_family: ENSV2_RESOLVER_SOURCE_FAMILY.to_owned(),
+                manifest_version,
+                source_manifest_id: None,
+                chain_id: Some(ENSV2_CHAIN_ID.to_owned()),
+                block_number: Some(block_number),
+                block_hash: Some(ens_v2_block_hash(block_number)),
+                transaction_hash: Some(ens_v2_transaction_hash(block_number)),
+                log_index: Some(log_index),
+                raw_fact_ref: json!({
+                    "kind": "raw_log",
+                    "event_identity": event_identity,
+                    "emitting_address": resolver_address,
+                }),
+                derivation_kind: ENSV2_RESOLVER_DERIVATION_KIND.to_owned(),
+                canonicality_state: CanonicalityState::Canonical,
+                before_state,
+                after_state,
+            }
+        }
+
+        fn ens_v2_resource(resource_id: Uuid, block_number: i64, seed: &str) -> Resource {
+            Resource {
+                resource_id,
+                token_lineage_id: None,
+                chain_id: ENSV2_CHAIN_ID.to_owned(),
+                block_hash: ens_v2_block_hash(block_number),
+                block_number,
+                provenance: json!({"seed": seed}),
+                canonicality_state: CanonicalityState::Finalized,
+            }
+        }
+
+        fn ens_namespace_normalized_name(logical_name_id: &str) -> String {
+            let (namespace, normalized_name) = logical_name_id
+                .split_once(':')
+                .expect("logical_name_id must include namespace");
+            assert_eq!(namespace, "ens", "ENSv2 fixtures are scoped to ens names");
+            normalized_name.to_owned()
+        }
+
+        fn is_direct_child_name(parent: &str, child: &str) -> bool {
+            child.ends_with(&format!(".{parent}"))
+                && child.split('.').count() == parent.split('.').count() + 1
+        }
+
+        fn permission_scope_after_state(scope: &PermissionScope) -> Value {
+            match scope {
+                PermissionScope::Resource => json!({
+                    "kind": "resource",
+                }),
+                PermissionScope::Resolver {
+                    chain_id,
+                    resolver_address,
+                } => json!({
+                    "kind": "resolver",
+                    "chain_id": chain_id,
+                    "resolver_address": resolver_address,
+                }),
+                unexpected => panic!(
+                    "ENSv2 permission fixtures only model resource and resolver scopes, got {unexpected:?}"
+                ),
+            }
+        }
+
+        fn permission_scope_chain_id(scope: &PermissionScope) -> &str {
+            match scope {
+                PermissionScope::Resource => ENSV2_CHAIN_ID,
+                PermissionScope::Resolver { chain_id, .. } => chain_id,
+                unexpected => panic!(
+                    "ENSv2 permission fixtures only model resource and resolver scopes, got {unexpected:?}"
+                ),
+            }
+        }
+
+        fn permission_scope_emitting_address(scope: &PermissionScope) -> &str {
+            match scope {
+                PermissionScope::Resource => "0x0000000000000000000000000000000000000eac",
+                PermissionScope::Resolver {
+                    resolver_address, ..
+                } => resolver_address,
+                unexpected => panic!(
+                    "ENSv2 permission fixtures only model resource and resolver scopes, got {unexpected:?}"
+                ),
+            }
+        }
+
+        fn record_key_for_selector(record_family: &str, selector_key: Option<&str>) -> String {
+            selector_key
+                .map(|selector_key| format!("{record_family}:{selector_key}"))
+                .unwrap_or_else(|| record_family.to_owned())
+        }
+
+        fn resolver_source_event_for_record_family(record_family: &str) -> &'static str {
+            match record_family {
+                "addr" => "AddressChanged",
+                "contenthash" => "ContenthashChanged",
+                "name" => "NameChanged",
+                "text" => "TextChanged",
+                _ => "RecordChanged",
+            }
+        }
+
+        fn ens_v2_block_hash(block_number: i64) -> String {
+            format!("0xensv2block{block_number:02x}")
+        }
+
+        fn ens_v2_transaction_hash(block_number: i64) -> String {
+            format!("0xensv2tx{block_number:02x}")
+        }
+
         fn address_name_token_lineage(
             token_lineage_id: Uuid,
             block_hash: &str,
@@ -1684,9 +2392,7 @@
             })
         }
 
-        fn basenames_control_vector_control_summary(
-            scenario: BasenamesControlVectorScenario,
-        ) -> Value {
+        fn basenames_control_vector_control_summary(scenario: BasenamesControlVectorScenario) -> Value {
             match scenario {
                 BasenamesControlVectorScenario::NftOnly => json!({
                     "registrant": "0x00000000000000000000000000000000000000c1",
@@ -1853,10 +2559,7 @@
         ) -> RecordInventoryCurrentRow {
             RecordInventoryCurrentRow {
                 resource_id,
-                record_version_boundary: resolution_record_inventory_boundary(
-                    logical_name_id,
-                    resource_id,
-                ),
+                record_version_boundary: resolution_record_inventory_boundary(logical_name_id, resource_id),
                 enumeration_basis: resolution_record_inventory_enumeration_basis(),
                 selectors: resolution_record_inventory_selectors(),
                 explicit_gaps: resolution_record_inventory_explicit_gaps(),
@@ -1996,10 +2699,7 @@
             })
         }
 
-        fn resolution_execution_verified_queries(
-            execution_trace_id: Uuid,
-            record_keys: &[&str],
-        ) -> Value {
+        fn resolution_execution_verified_queries(execution_trace_id: Uuid, record_keys: &[&str]) -> Value {
             json!(
                 record_keys
                     .iter()
@@ -2043,18 +2743,14 @@
                                 "execution_trace_id": execution_trace_id.to_string(),
                             }
                         }),
-                        unexpected => panic!(
-                            "unexpected persisted verified resolution selector {unexpected}"
-                        ),
+                        unexpected =>
+                            panic!("unexpected persisted verified resolution selector {unexpected}"),
                     })
                     .collect::<Vec<_>>()
             )
         }
 
-        fn resolution_alias_only_verified_queries(
-            execution_trace_id: Uuid,
-            record_keys: &[&str],
-        ) -> Value {
+        fn resolution_alias_only_verified_queries(execution_trace_id: Uuid, record_keys: &[&str]) -> Value {
             json!(
                 record_keys
                     .iter()
@@ -2300,9 +2996,7 @@
             })
         }
 
-        fn append_basenames_execution_manifest_version(
-            name_row: &mut bigname_storage::NameCurrentRow,
-        ) {
+        fn append_basenames_execution_manifest_version(name_row: &mut bigname_storage::NameCurrentRow) {
             let manifest_versions = name_row.provenance["manifest_versions"]
                 .as_array_mut()
                 .expect("name_current.provenance.manifest_versions must be an array");
@@ -2315,9 +3009,7 @@
             manifest_versions.push(basenames_execution_manifest_version());
         }
 
-        fn insert_basenames_supported_ethereum_position(
-            name_row: &mut bigname_storage::NameCurrentRow,
-        ) {
+        fn insert_basenames_supported_ethereum_position(name_row: &mut bigname_storage::NameCurrentRow) {
             let chain_positions = name_row
                 .chain_positions
                 .as_object_mut()
@@ -2597,10 +3289,8 @@
             wildcard_source_logical_name_id: &str,
             wildcard_source_resource_id: Uuid,
         ) -> Value {
-            let wildcard_source = resolution_wildcard_source(
-                wildcard_source_logical_name_id,
-                wildcard_source_resource_id,
-            );
+            let wildcard_source =
+                resolution_wildcard_source(wildcard_source_logical_name_id, wildcard_source_resource_id);
             let wildcard_boundary = resolution_record_inventory_boundary(
                 wildcard_source_logical_name_id,
                 wildcard_source_resource_id,
@@ -2657,10 +3347,8 @@
             wildcard_source_logical_name_id: &str,
             wildcard_source_resource_id: Uuid,
         ) -> Value {
-            let wildcard_source = resolution_wildcard_source(
-                wildcard_source_logical_name_id,
-                wildcard_source_resource_id,
-            );
+            let wildcard_source =
+                resolution_wildcard_source(wildcard_source_logical_name_id, wildcard_source_resource_id);
             let mut execution =
                 resolution_execution_summary(execution_trace_id, wildcard_source_resource_id);
 
@@ -2710,9 +3398,7 @@
         impl UnsupportedEnsVerifiedResolutionPathCase {
             fn execution_trace_id(self) -> Uuid {
                 match self {
-                    Self::NonAliasAncestorSelected => {
-                        Uuid::from_u128(0x0e7ec7ace00000000000000000000027)
-                    }
+                    Self::NonAliasAncestorSelected => Uuid::from_u128(0x0e7ec7ace00000000000000000000027),
                     Self::TransportAssisted => Uuid::from_u128(0x0e7ec7ace00000000000000000000028),
                 }
             }
@@ -2742,9 +3428,7 @@
                                 Self::NonAliasAncestorSelected => {
                                     "0x0000000000000000000000000000000000000def"
                                 }
-                                Self::TransportAssisted => {
-                                    "0x0000000000000000000000000000000000000abc"
-                                }
+                                Self::TransportAssisted => "0x0000000000000000000000000000000000000abc",
                             }
                             .to_owned(),
                         ),
@@ -2783,14 +3467,11 @@
             }
 
             fn expected_topology(self, logical_name_id: &str, resource_id: Option<Uuid>) -> Value {
-                let resource_id = resource_id
-                    .expect("resolution negative fixture requires an exact-surface resource_id");
+                let resource_id =
+                    resource_id.expect("resolution negative fixture requires an exact-surface resource_id");
                 match self {
                     Self::NonAliasAncestorSelected => {
-                        resolution_non_alias_ancestor_selected_topology(
-                            logical_name_id,
-                            resource_id,
-                        )
+                        resolution_non_alias_ancestor_selected_topology(logical_name_id, resource_id)
                     }
                     Self::TransportAssisted => {
                         resolution_transport_assisted_topology(logical_name_id, resource_id)
@@ -2808,15 +3489,12 @@
             path_case: UnsupportedEnsVerifiedResolutionPathCase,
         ) -> Result<()> {
             let database = HarnessDatabase::new().await?;
-            let fixture =
-                seed_unsupported_ens_verified_resolution_fixture(&database, path_case).await?;
+            let fixture = seed_unsupported_ens_verified_resolution_fixture(&database, path_case).await?;
 
             let response = app_router(database.app_state())
                 .oneshot(
                     Request::builder()
-                        .uri(
-                            "/v1/resolutions/ens/alice.eth?mode=both&records=avatar,text:com.twitter",
-                        )
+                        .uri("/v1/resolutions/ens/alice.eth?mode=both&records=avatar,text:com.twitter")
                         .body(Body::empty())
                         .expect("request must build"),
                 )
@@ -2839,11 +3517,7 @@
                 .get("topology")
                 .context("mixed negative resolution response must include topology")?;
 
-            assert_negative_verified_resolution_topology(
-                path_case,
-                topology,
-                fixture.logical_name_id,
-            );
+            assert_negative_verified_resolution_topology(path_case, topology, fixture.logical_name_id);
             assert_eq!(
                 payload.provenance.get("execution_trace_id"),
                 Some(&Value::Null),
@@ -2877,22 +3551,21 @@
             path_case: UnsupportedEnsVerifiedResolutionPathCase,
         ) -> Result<()> {
             let database = HarnessDatabase::new().await?;
-            let _fixture =
-                seed_unsupported_ens_verified_resolution_fixture(&database, path_case).await?;
+            let _fixture = seed_unsupported_ens_verified_resolution_fixture(&database, path_case).await?;
 
             let response = app_router(database.app_state())
-                .oneshot(
-                    Request::builder()
-                        .uri(
-                            "/v1/explain/resolutions/ens/alice.eth/execution?records=avatar,text:com.twitter",
+                        .oneshot(
+                            Request::builder()
+                                .uri(
+                                    "/v1/explain/resolutions/ens/alice.eth/execution?records=avatar,text:com.twitter",
+                                )
+                                .body(Body::empty())
+                                .expect("request must build"),
                         )
-                        .body(Body::empty())
-                        .expect("request must build"),
-                )
-                .await
-                .with_context(|| {
-                    format!("{} resolution execution explain request failed", path_case.label())
-                })?;
+                        .await
+                        .with_context(|| {
+                            format!("{} resolution execution explain request failed", path_case.label())
+                        })?;
 
             assert_eq!(
                 response.status(),
@@ -2937,13 +3610,11 @@
             database.rebuild_name_current(logical_name_id).await?;
             let record_inventory_row =
                 resolution_record_inventory_current_row(logical_name_id, resource_id);
-            let supported_name_row =
-                bigname_storage::load_name_current(&database.pool, logical_name_id)
-                    .await?
-                    .context("resolution negative fixture requires an exact-name current row")?;
-            let records =
-                parse_resolution_record_keys(Some("text:com.twitter"), ResolutionMode::Verified)
-                    .map_err(|error| anyhow::anyhow!(error.message))?;
+            let supported_name_row = bigname_storage::load_name_current(&database.pool, logical_name_id)
+                .await?
+                .context("resolution negative fixture requires an exact-name current row")?;
+            let records = parse_resolution_record_keys(Some("text:com.twitter"), ResolutionMode::Verified)
+                .map_err(|error| anyhow::anyhow!(error.message))?;
             let cache_key = build_resolution_execution_cache_key(
                 &supported_name_row,
                 &records,
@@ -3053,10 +3724,7 @@
             })
         }
 
-        fn resolution_transport_assisted_topology(
-            logical_name_id: &str,
-            resource_id: Uuid,
-        ) -> Value {
+        fn resolution_transport_assisted_topology(logical_name_id: &str, resource_id: Uuid) -> Value {
             let mut topology = resolution_supported_declared_state(
                 logical_name_id,
                 resource_id,
@@ -3193,11 +3861,7 @@
             primary_name_execution_manifest_versions_for_namespace("ens")
         }
 
-        fn primary_name_execution_request_key(
-            namespace: &str,
-            address: &str,
-            coin_type: &str,
-        ) -> String {
+        fn primary_name_execution_request_key(namespace: &str, address: &str, coin_type: &str) -> String {
             format!("{namespace}:{}:{coin_type}", address.to_ascii_lowercase())
         }
 
@@ -3406,11 +4070,7 @@
             ExecutionTrace {
                 execution_trace_id,
                 request_type: bigname_storage::VERIFIED_PRIMARY_NAME_REQUEST_TYPE.to_owned(),
-                request_key: primary_name_execution_request_key(
-                    namespace,
-                    &normalized_address,
-                    coin_type,
-                ),
+                request_key: primary_name_execution_request_key(namespace, &normalized_address, coin_type),
                 namespace: namespace.to_owned(),
                 chain_context: json!({
                     "requested_positions": primary_name_execution_requested_chain_positions(),
@@ -3453,9 +4113,7 @@
                         coin_type,
                     ),
                     requested_chain_positions: primary_name_execution_requested_chain_positions(),
-                    manifest_versions: primary_name_execution_manifest_versions_for_namespace(
-                        namespace,
-                    ),
+                    manifest_versions: primary_name_execution_manifest_versions_for_namespace(namespace),
                     topology_version_boundary,
                     record_version_boundary,
                 },
@@ -3550,41 +4208,36 @@
             invalidation: PersistedResolutionInvalidation,
         ) -> Result<()> {
             let database = HarnessDatabase::new().await?;
-            let fixture = seed_persisted_resolution_execution_fixture(
-                &database,
-                invalidation.execution_trace_id(),
-            )
-            .await?;
+            let fixture =
+                seed_persisted_resolution_execution_fixture(&database, invalidation.execution_trace_id())
+                    .await?;
 
             let mixed_before_response = app_router(database.app_state())
                 .oneshot(
                     Request::builder()
-                        .uri(
-                            "/v1/resolutions/ens/alice.eth?mode=both&records=text:com.twitter,addr:60",
-                        )
+                        .uri("/v1/resolutions/ens/alice.eth?mode=both&records=text:com.twitter,addr:60")
                         .body(Body::empty())
                         .expect("request must build"),
                 )
                 .await
                 .context("mixed resolution request failed before invalidation")?;
             let explain_before_response = app_router(database.app_state())
-                .oneshot(
-                    Request::builder()
-                        .uri(
-                            "/v1/explain/resolutions/ens/alice.eth/execution?records=text:com.twitter,addr:60",
+                        .oneshot(
+                            Request::builder()
+                                .uri(
+                                    "/v1/explain/resolutions/ens/alice.eth/execution?records=text:com.twitter,addr:60",
+                                )
+                                .body(Body::empty())
+                                .expect("request must build"),
                         )
-                        .body(Body::empty())
-                        .expect("request must build"),
-                )
-                .await
-                .context("resolution execution explain request failed before invalidation")?;
+                        .await
+                        .context("resolution execution explain request failed before invalidation")?;
 
             assert_eq!(mixed_before_response.status(), StatusCode::OK);
             assert_eq!(explain_before_response.status(), StatusCode::OK);
 
             let mixed_before_payload: ResolutionResponse = read_json(mixed_before_response).await?;
-            let explain_before_payload: ResolutionResponse =
-                read_json(explain_before_response).await?;
+            let explain_before_payload: ResolutionResponse = read_json(explain_before_response).await?;
             let expected_declared_state = resolution_supported_declared_state(
                 fixture.logical_name_id,
                 fixture.resource_id,
@@ -3620,8 +4273,7 @@
                 }))
             );
 
-            invalidate_persisted_resolution_execution(&database, &fixture.cache_key, invalidation)
-                .await?;
+            invalidate_persisted_resolution_execution(&database, &fixture.cache_key, invalidation).await?;
 
             assert_eq!(
                 load_execution_outcome(&database.pool, &fixture.cache_key).await?,
@@ -3637,25 +4289,23 @@
             let mixed_after_response = app_router(database.app_state())
                 .oneshot(
                     Request::builder()
-                        .uri(
-                            "/v1/resolutions/ens/alice.eth?mode=both&records=text:com.twitter,addr:60",
-                        )
+                        .uri("/v1/resolutions/ens/alice.eth?mode=both&records=text:com.twitter,addr:60")
                         .body(Body::empty())
                         .expect("request must build"),
                 )
                 .await
                 .context("mixed resolution request failed after invalidation")?;
             let explain_after_response = app_router(database.app_state())
-                .oneshot(
-                    Request::builder()
-                        .uri(
-                            "/v1/explain/resolutions/ens/alice.eth/execution?records=text:com.twitter,addr:60",
+                        .oneshot(
+                            Request::builder()
+                                .uri(
+                                    "/v1/explain/resolutions/ens/alice.eth/execution?records=text:com.twitter,addr:60",
+                                )
+                                .body(Body::empty())
+                                .expect("request must build"),
                         )
-                        .body(Body::empty())
-                        .expect("request must build"),
-                )
-                .await
-                .context("resolution execution explain request failed after invalidation")?;
+                        .await
+                        .context("resolution execution explain request failed after invalidation")?;
 
             assert_eq!(mixed_after_response.status(), StatusCode::OK);
             assert_eq!(explain_after_response.status(), StatusCode::NOT_FOUND);
@@ -3733,21 +4383,14 @@
                 .context("resolution execution invalidation requires an exact-name current row")?;
             let record_inventory_row =
                 resolution_record_inventory_current_row(logical_name_id, resource_id);
-            let records = parse_resolution_record_keys(
-                Some("text:com.twitter,addr:60"),
-                ResolutionMode::Verified,
-            )
-            .map_err(|error| anyhow::anyhow!(error.message))?;
-            let cache_key = build_resolution_execution_cache_key(
-                &name_row,
-                &records,
-                Some(&record_inventory_row),
-            )?;
+            let records =
+                parse_resolution_record_keys(Some("text:com.twitter,addr:60"), ResolutionMode::Verified)
+                    .map_err(|error| anyhow::anyhow!(error.message))?;
+            let cache_key =
+                build_resolution_execution_cache_key(&name_row, &records, Some(&record_inventory_row))?;
             let request_key = cache_key.request_key.clone();
-            let persisted_verified_queries = resolution_execution_verified_queries(
-                execution_trace_id,
-                &["addr:60", "text:com.twitter"],
-            );
+            let persisted_verified_queries =
+                resolution_execution_verified_queries(execution_trace_id, &["addr:60", "text:com.twitter"]);
 
             upsert_execution_trace(
                 &database.pool,
@@ -3788,9 +4431,7 @@
                         .manifest_versions
                         .as_array()
                         .and_then(|entries| entries.first())
-                        .context(
-                            "persisted verified resolution cache key must expose manifest_versions",
-                        )?;
+                        .context("persisted verified resolution cache key must expose manifest_versions")?;
                     let manifest_version = manifest_entry
                         .get("manifest_version")
                         .and_then(Value::as_i64)
@@ -3899,8 +4540,7 @@
             invalidation: PersistedPrimaryNameInvalidation,
         ) -> Result<()> {
             let database = HarnessDatabase::new().await?;
-            let fixture =
-                seed_persisted_primary_name_execution_fixture(&database, invalidation).await?;
+            let fixture = seed_persisted_primary_name_execution_fixture(&database, invalidation).await?;
             let expected_data = json!({
                 "address": fixture.address,
                 "namespace": "ens",
@@ -3945,11 +4585,9 @@
             assert_eq!(verified_before_response.status(), StatusCode::OK);
             assert_eq!(both_before_response.status(), StatusCode::OK);
 
-            let verified_before_payload: PrimaryNameResponse =
-                read_json(verified_before_response).await?;
+            let verified_before_payload: PrimaryNameResponse = read_json(verified_before_response).await?;
             let both_before_payload: PrimaryNameResponse = read_json(both_before_response).await?;
-            let mut expected_target_verified_primary_name =
-                fixture.target_verified_primary_name.clone();
+            let mut expected_target_verified_primary_name = fixture.target_verified_primary_name.clone();
             expected_target_verified_primary_name
                 .as_object_mut()
                 .expect("target verified primary-name fixture must be an object")
@@ -3994,12 +4632,8 @@
                 fixture.target_finished_at,
             );
 
-            invalidate_persisted_primary_name_execution(
-                &database,
-                &fixture.target_cache_key,
-                invalidation,
-            )
-            .await?;
+            invalidate_persisted_primary_name_execution(&database, &fixture.target_cache_key, invalidation)
+                .await?;
 
             assert_eq!(
                 load_execution_outcome(&database.pool, &fixture.target_cache_key).await?,
@@ -4074,8 +4708,7 @@
             assert_eq!(both_after_response.status(), StatusCode::OK);
             assert_eq!(sibling_response.status(), StatusCode::OK);
 
-            let verified_after_payload: PrimaryNameResponse =
-                read_json(verified_after_response).await?;
+            let verified_after_payload: PrimaryNameResponse = read_json(verified_after_response).await?;
             let both_after_payload: PrimaryNameResponse = read_json(both_after_response).await?;
             let sibling_payload: PrimaryNameResponse = read_json(sibling_response).await?;
 
@@ -4106,8 +4739,7 @@
             );
             assert_primary_name_bootstrap_invariants(&verified_after_payload);
             assert_primary_name_bootstrap_invariants(&both_after_payload);
-            let mut expected_sibling_verified_primary_name =
-                fixture.sibling_verified_primary_name.clone();
+            let mut expected_sibling_verified_primary_name = fixture.sibling_verified_primary_name.clone();
             expected_sibling_verified_primary_name
                 .as_object_mut()
                 .expect("sibling verified primary-name fixture must be an object")
@@ -4239,11 +4871,11 @@
                             "persisted verified primary-name cache key must expose manifest_versions",
                         )?;
                     let manifest_version = manifest_entry
-                        .get("manifest_version")
-                        .and_then(Value::as_i64)
-                        .context(
-                            "persisted verified primary-name manifest invalidation requires manifest_version",
-                        )?;
+                                .get("manifest_version")
+                                .and_then(Value::as_i64)
+                                .context(
+                                    "persisted verified primary-name manifest invalidation requires manifest_version",
+                                )?;
                     let source_manifest_id = manifest_entry
                         .get("source_manifest_id")
                         .and_then(Value::as_i64);
@@ -4261,8 +4893,7 @@
                     invalidate_execution_outcomes_for_manifest_version_and_request_key(
                         &database.pool,
                         &ExecutionManifestInvalidation {
-                            request_type: bigname_storage::VERIFIED_PRIMARY_NAME_REQUEST_TYPE
-                                .to_owned(),
+                            request_type: bigname_storage::VERIFIED_PRIMARY_NAME_REQUEST_TYPE.to_owned(),
                             namespace: "ens".to_owned(),
                             source_manifest_id,
                             source_family,
@@ -4276,8 +4907,7 @@
                     invalidate_execution_outcomes_for_topology_boundary_and_request_key(
                         &database.pool,
                         &ExecutionBoundaryInvalidation {
-                            request_type: bigname_storage::VERIFIED_PRIMARY_NAME_REQUEST_TYPE
-                                .to_owned(),
+                            request_type: bigname_storage::VERIFIED_PRIMARY_NAME_REQUEST_TYPE.to_owned(),
                             namespace: "ens".to_owned(),
                             boundary: cache_key.topology_version_boundary.clone(),
                         },
@@ -4289,8 +4919,7 @@
                     invalidate_execution_outcomes_for_record_boundary_and_request_key(
                         &database.pool,
                         &ExecutionBoundaryInvalidation {
-                            request_type: bigname_storage::VERIFIED_PRIMARY_NAME_REQUEST_TYPE
-                                .to_owned(),
+                            request_type: bigname_storage::VERIFIED_PRIMARY_NAME_REQUEST_TYPE.to_owned(),
                             namespace: "ens".to_owned(),
                             boundary: cache_key.record_version_boundary.clone(),
                         },

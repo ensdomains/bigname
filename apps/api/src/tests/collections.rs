@@ -32,6 +32,46 @@ async fn get_resolver_overview_returns_declared_state_with_shared_projection_env
         })
     );
     assert_eq!(
+        payload
+            .declared_state
+            .as_object()
+            .expect("resolver declared_state must be an object")
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            "aliases",
+            "bindings",
+            "event_summary",
+            "permissions",
+            "role_holders",
+        ])
+    );
+    assert_eq!(
+        payload.declared_state["permissions"]
+            .as_object()
+            .expect("resolver permissions summary must be an object")
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from(["count", "items", "status"])
+    );
+    assert_eq!(
+        payload.declared_state["permissions"]["items"][0]
+            .as_object()
+            .expect("resolver permission summary item must be an object")
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            "effective_powers",
+            "grant_source",
+            "resource_id",
+            "revocation_source",
+            "subject",
+        ])
+    );
+    assert_eq!(
         payload.declared_state,
         json!({
             "bindings": {
@@ -183,8 +223,7 @@ async fn get_resolver_overview_returns_not_found_when_projection_is_missing() ->
 }
 
 #[tokio::test]
-async fn get_resolver_overview_reads_basenames_resolver_and_permissions_from_normalized_events()
--> Result<()> {
+async fn get_resolver_overview_summarizes_basenames_permissions_current_projection() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let logical_name_id = "basenames:alice.base.eth";
     let resource_id = Uuid::from_u128(0x8a10);
@@ -205,8 +244,20 @@ async fn get_resolver_overview_reads_basenames_resolver_and_permissions_from_nor
     bigname_storage::upsert_raw_blocks(
         &database.pool,
         &[
-            raw_block("base-mainnet", "0xbase-permission-1", None, 106, 1_717_181_706),
-            raw_block("base-mainnet", "0xbase-permission-2", None, 107, 1_717_181_707),
+            raw_block(
+                "base-mainnet",
+                "0xbase-permission-1",
+                None,
+                106,
+                1_717_181_706,
+            ),
+            raw_block(
+                "base-mainnet",
+                "0xbase-permission-2",
+                None,
+                107,
+                1_717_181_707,
+            ),
         ],
     )
     .await?;
@@ -290,6 +341,55 @@ async fn get_resolver_overview_reads_basenames_resolver_and_permissions_from_nor
         .rebuild_resolver_current(Some("base-mainnet"), Some(resolver_address))
         .await?;
 
+    let raw_only_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resolvers/base-mainnet/0x0000000000000000000000000000000000000ABC")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("Basenames raw-only resolver overview request failed")?;
+    assert_eq!(raw_only_response.status(), StatusCode::OK);
+    let raw_only_payload: ResolverResponse = read_json(raw_only_response).await?;
+    assert_eq!(
+        raw_only_payload.declared_state["bindings"]["count"],
+        json!(1)
+    );
+    assert_eq!(
+        raw_only_payload.declared_state["permissions"],
+        json!({
+            "status": "supported",
+            "count": 0,
+            "items": [],
+        })
+    );
+    assert_eq!(
+        raw_only_payload.declared_state["role_holders"],
+        json!({
+            "status": "supported",
+            "count": 0,
+            "items": [],
+        })
+    );
+    assert_eq!(
+        raw_only_payload.declared_state["event_summary"],
+        json!({
+            "status": "supported",
+            "count": 1,
+            "by_kind": {
+                "ResolverChanged": 1,
+            },
+        })
+    );
+
+    database
+        .rebuild_permissions_current(Some(resource_id))
+        .await?;
+    database
+        .rebuild_resolver_current(Some("base-mainnet"), Some(resolver_address))
+        .await?;
+
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
@@ -311,11 +411,14 @@ async fn get_resolver_overview_reads_basenames_resolver_and_permissions_from_nor
         })
     );
     assert_eq!(payload.declared_state["bindings"]["count"], json!(1));
-    assert_eq!(payload.declared_state["aliases"], json!({
-        "status": "supported",
-        "count": 0,
-        "items": [],
-    }));
+    assert_eq!(
+        payload.declared_state["aliases"],
+        json!({
+            "status": "supported",
+            "count": 0,
+            "items": [],
+        })
+    );
     assert_eq!(
         payload.declared_state["bindings"]["items"][0]["logical_name_id"],
         json!(logical_name_id)
@@ -557,6 +660,134 @@ async fn get_name_children_returns_declared_rows_sorted_with_declared_only_cover
 }
 
 #[tokio::test]
+async fn get_name_children_returns_ensv2_declared_children_without_widening_route_shape()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let parent_logical_name_id = "ens:subregistry.eth";
+
+    bigname_storage::upsert_name_surfaces(
+        &database.pool,
+        &[
+            collection_name_surface(
+                parent_logical_name_id,
+                "subregistry.eth",
+                "node:subregistry.eth",
+                50,
+            ),
+            collection_name_surface(
+                "ens:bob.subregistry.eth",
+                "bob.subregistry.eth",
+                "node:bob.subregistry.eth",
+                51,
+            ),
+            collection_name_surface(
+                "ens:alice.subregistry.eth",
+                "alice.subregistry.eth",
+                "node:alice.subregistry.eth",
+                52,
+            ),
+        ],
+    )
+    .await?;
+    bigname_storage::upsert_children_current_rows(
+        &database.pool,
+        &[
+            ensv2_declared_child_row(
+                parent_logical_name_id,
+                "ens:bob.subregistry.eth",
+                "bob.subregistry.eth",
+                "node:bob.subregistry.eth",
+                501,
+                51,
+            ),
+            ensv2_declared_child_row(
+                parent_logical_name_id,
+                "ens:alice.subregistry.eth",
+                "alice.subregistry.eth",
+                "node:alice.subregistry.eth",
+                502,
+                52,
+            ),
+        ],
+    )
+    .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/names/ens/subregistry.eth/children?surface_classes=declared&include=counts")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("ENSv2 children request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let payload: ChildrenResponse = read_json(response).await?;
+    assert_eq!(payload.declared_state, json!({"subname_count": 2}));
+    assert_eq!(payload.verified_state, None);
+    assert_eq!(
+        payload.coverage,
+        CoverageResponse {
+            status: "full".to_owned(),
+            exhaustiveness: "authoritative".to_owned(),
+            source_classes_considered: vec!["declared".to_owned()],
+            enumeration_basis: "declared_direct_children".to_owned(),
+            unsupported_reason: None,
+        }
+    );
+    assert_eq!(
+        payload.provenance,
+        json!({
+            "normalized_event_ids": ["502", "501"],
+            "raw_fact_refs": [
+                {"kind": "raw_log", "chain_id": "ethereum-mainnet", "block_number": 52},
+                {"kind": "raw_log", "chain_id": "ethereum-mainnet", "block_number": 51}
+            ],
+            "manifest_versions": [{
+                "manifest_version": 7,
+                "source_family": "ens_v2_registry_l1",
+                "source_manifest_id": null
+            }],
+            "execution_trace_id": null,
+            "derivation_kind": "children_current_rebuild"
+        })
+    );
+    assert_eq!(
+        payload.data,
+        vec![
+            json!({
+                "logical_name_id": "ens:alice.subregistry.eth",
+                "namespace": "ens",
+                "normalized_name": "alice.subregistry.eth",
+                "canonical_display_name": "alice.subregistry.eth",
+                "namehash": "node:alice.subregistry.eth",
+                "surface_class": "declared",
+            }),
+            json!({
+                "logical_name_id": "ens:bob.subregistry.eth",
+                "namespace": "ens",
+                "normalized_name": "bob.subregistry.eth",
+                "canonical_display_name": "bob.subregistry.eth",
+                "namehash": "node:bob.subregistry.eth",
+                "surface_class": "declared",
+            }),
+        ]
+    );
+    assert_eq!(payload.page.sort, "display_name_asc");
+    assert_eq!(payload.page.page_size, 2);
+    assert_eq!(payload.consistency, "finalized");
+    assert_eq!(
+        payload.last_updated,
+        format_timestamp(timestamp(1_717_172_052))
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn get_name_children_include_counts_returns_declared_subname_count() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let parent_logical_name_id = "ens:parent.eth";
@@ -772,25 +1003,31 @@ async fn get_name_children_rejects_non_declared_surface_classes() -> Result<()> 
     )
     .await?;
 
-    let response = app_router(database.app_state())
-        .oneshot(
-            Request::builder()
-                .uri("/v1/names/ens/parent.eth/children?surface_classes=declared,linked")
-                .body(Body::empty())
-                .expect("request must build"),
-        )
-        .await
-        .context("children unsupported surface_classes request failed")?;
+    for surface_classes in ["linked", "alias", "wildcard", "declared,linked"] {
+        let response = app_router(database.app_state())
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/v1/names/ens/parent.eth/children?surface_classes={surface_classes}"
+                    ))
+                    .body(Body::empty())
+                    .expect("request must build"),
+            )
+            .await
+            .with_context(|| {
+                format!("children unsupported surface_classes={surface_classes} request failed")
+            })?;
 
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
-    let payload: ErrorResponse = read_json(response).await?;
-    assert_eq!(payload.error.code, "unsupported");
-    assert_eq!(
-        payload.error.message,
-        "surface_classes other than declared are not yet supported"
-    );
-    assert!(payload.error.details.is_empty());
+        let payload: ErrorResponse = read_json(response).await?;
+        assert_eq!(payload.error.code, "unsupported");
+        assert_eq!(
+            payload.error.message,
+            "surface_classes other than declared are not yet supported"
+        );
+        assert!(payload.error.details.is_empty());
+    }
 
     database.cleanup().await?;
     Ok(())
@@ -1630,11 +1867,8 @@ async fn get_address_names_returns_basenames_base_authority_relation_facets_acro
         assert_eq!(
             holder_payload.data[0].get("relation_facets"),
             Some(&match scenario {
-                BasenamesControlVectorScenario::FullTransfer => json!([
-                    "registrant",
-                    "token_holder",
-                    "effective_controller"
-                ]),
+                BasenamesControlVectorScenario::FullTransfer =>
+                    json!(["registrant", "token_holder", "effective_controller"]),
                 _ => json!(["registrant", "token_holder"]),
             })
         );
@@ -2031,8 +2265,20 @@ async fn get_address_names_include_role_summary_reads_basenames_permissions_from
     bigname_storage::upsert_raw_blocks(
         &database.pool,
         &[
-            raw_block("base-mainnet", "0xbase-permission-3", None, 106, 1_717_181_706),
-            raw_block("base-mainnet", "0xbase-permission-4", None, 107, 1_717_181_707),
+            raw_block(
+                "base-mainnet",
+                "0xbase-permission-3",
+                None,
+                106,
+                1_717_181_706,
+            ),
+            raw_block(
+                "base-mainnet",
+                "0xbase-permission-4",
+                None,
+                107,
+                1_717_181_707,
+            ),
         ],
     )
     .await?;
@@ -2305,4 +2551,39 @@ async fn get_coverage_returns_internal_error_envelope_on_storage_failure() -> Re
 
     database.cleanup().await?;
     Ok(())
+}
+
+fn ensv2_declared_child_row(
+    parent_logical_name_id: &str,
+    child_logical_name_id: &str,
+    display_name: &str,
+    namehash: &str,
+    normalized_event_id: i64,
+    block_number: i64,
+) -> bigname_storage::ChildrenCurrentRow {
+    let mut row = declared_child_row(
+        parent_logical_name_id,
+        child_logical_name_id,
+        display_name,
+        namehash,
+        normalized_event_id,
+        block_number,
+    );
+    row.provenance = json!({
+        "normalized_event_ids": [normalized_event_id],
+        "raw_fact_refs": [{
+            "kind": "raw_log",
+            "chain_id": "ethereum-mainnet",
+            "block_number": block_number,
+        }],
+        "manifest_versions": [{
+            "manifest_version": 7,
+            "source_family": "ens_v2_registry_l1",
+            "source_manifest_id": null,
+        }],
+        "execution_trace_id": null,
+        "derivation_kind": "children_current_rebuild",
+    });
+    row.manifest_version = 7;
+    row
 }
