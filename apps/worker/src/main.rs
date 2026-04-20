@@ -5,6 +5,7 @@ mod name_current;
 mod permissions;
 mod primary_name;
 mod record_inventory;
+mod replay;
 mod resolver;
 
 use anyhow::{Context, Result};
@@ -34,6 +35,7 @@ enum Command {
     NameCurrent(NameCurrentArgs),
     PermissionsCurrent(PermissionsCurrentArgs),
     PrimaryNamesCurrent(PrimaryNamesCurrentArgs),
+    Replay(ReplayArgs),
     RecordInventoryCurrent(RecordInventoryCurrentArgs),
     ResolverCurrent(ResolverCurrentArgs),
 }
@@ -93,6 +95,12 @@ struct PrimaryNamesCurrentArgs {
 }
 
 #[derive(Args, Debug)]
+struct ReplayArgs {
+    #[command(subcommand)]
+    command: ReplayCommand,
+}
+
+#[derive(Args, Debug)]
 struct RecordInventoryCurrentArgs {
     #[command(subcommand)]
     command: RecordInventoryCurrentCommand,
@@ -137,6 +145,11 @@ enum PermissionsCurrentCommand {
 #[derive(Subcommand, Debug)]
 enum PrimaryNamesCurrentCommand {
     Rebuild(PrimaryNamesCurrentRebuildArgs),
+}
+
+#[derive(Subcommand, Debug)]
+enum ReplayCommand {
+    AllCurrentProjections(AllCurrentProjectionsArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -278,6 +291,12 @@ struct PrimaryNamesCurrentRebuildArgs {
 }
 
 #[derive(Args, Debug)]
+struct AllCurrentProjectionsArgs {
+    #[command(flatten)]
+    database: DatabaseConfig,
+}
+
+#[derive(Args, Debug)]
 struct RecordInventoryCurrentRebuildArgs {
     #[command(flatten)]
     database: DatabaseConfig,
@@ -308,6 +327,7 @@ async fn main() -> Result<()> {
         Command::NameCurrent(args) => name_current(args).await,
         Command::PermissionsCurrent(args) => permissions_current(args).await,
         Command::PrimaryNamesCurrent(args) => primary_names_current(args).await,
+        Command::Replay(args) => replay_command(args).await,
         Command::RecordInventoryCurrent(args) => record_inventory_current(args).await,
         Command::ResolverCurrent(args) => resolver_current(args).await,
     }
@@ -396,6 +416,12 @@ async fn record_inventory_current(args: RecordInventoryCurrentArgs) -> Result<()
 async fn primary_names_current(args: PrimaryNamesCurrentArgs) -> Result<()> {
     match args.command {
         PrimaryNamesCurrentCommand::Rebuild(args) => rebuild_primary_names_current(args).await,
+    }
+}
+
+async fn replay_command(args: ReplayArgs) -> Result<()> {
+    match args.command {
+        ReplayCommand::AllCurrentProjections(args) => replay_all_current_projections(args).await,
     }
 }
 
@@ -701,6 +727,23 @@ async fn rebuild_primary_names_current(args: PrimaryNamesCurrentRebuildArgs) -> 
     Ok(())
 }
 
+async fn replay_all_current_projections(args: AllCurrentProjectionsArgs) -> Result<()> {
+    let pool = bigname_storage::connect(&args.database).await?;
+    let summary = replay::rebuild_all_current_projections(&pool).await?;
+
+    info!(
+        service = "worker",
+        replay = "all_current_projections",
+        projection_order = ?summary.projection_order(),
+        projection_count = summary.steps.len(),
+        total_upserted_row_count = summary.total_upserted_row_count(),
+        total_deleted_row_count = summary.total_deleted_row_count(),
+        "all current projections replay completed"
+    );
+
+    Ok(())
+}
+
 async fn rebuild_record_inventory_current(args: RecordInventoryCurrentRebuildArgs) -> Result<()> {
     let pool = bigname_storage::connect(&args.database).await?;
     let summary =
@@ -765,4 +808,21 @@ fn init_tracing(service: &'static str) {
         phase = bigname_domain::bootstrap_phase(),
         "logging configured"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn replay_all_current_projections_cli_is_available() {
+        let cli = Cli::parse_from(["bigname-worker", "replay", "all-current-projections"]);
+
+        match cli.command {
+            Command::Replay(args) => match args.command {
+                ReplayCommand::AllCurrentProjections(_) => {}
+            },
+            other => panic!("expected replay command, got {other:?}"),
+        }
+    }
 }
