@@ -12,26 +12,26 @@ async fn build_manifest_runtime_state_loads_checked_in_repository_seed() -> Resu
     );
     assert_eq!(runtime_state.manifest_summary.namespace_count, 2);
     assert_eq!(runtime_state.manifest_summary.source_family_count, 10);
-    assert_eq!(runtime_state.manifest_summary.manifest_count, 10);
+    assert_eq!(runtime_state.manifest_summary.manifest_count, 11);
     assert_eq!(
         runtime_state.sync_summary.status,
         ManifestSyncStatus::Synced
     );
-    assert_eq!(runtime_state.sync_summary.synced_manifest_count, 10);
-    assert_eq!(runtime_state.sync_summary.active_manifest_count, 8);
+    assert_eq!(runtime_state.sync_summary.synced_manifest_count, 11);
+    assert_eq!(runtime_state.sync_summary.active_manifest_count, 9);
     assert_eq!(runtime_state.sync_summary.root_count, 3);
-    assert_eq!(runtime_state.sync_summary.contract_count, 10);
-    assert_eq!(runtime_state.sync_summary.capability_count, 6);
+    assert_eq!(runtime_state.sync_summary.contract_count, 11);
+    assert_eq!(runtime_state.sync_summary.capability_count, 7);
     assert_eq!(runtime_state.sync_summary.discovery_rule_count, 2);
-    assert_eq!(runtime_state.discovery_admission.active_manifest_count, 8);
+    assert_eq!(runtime_state.discovery_admission.active_manifest_count, 9);
     assert_eq!(runtime_state.discovery_admission.active_root_count, 3);
-    assert_eq!(runtime_state.discovery_admission.active_contract_count, 8);
+    assert_eq!(runtime_state.discovery_admission.active_contract_count, 9);
     assert_eq!(runtime_state.discovery_admission.active_rule_count, 2);
     assert_eq!(
         runtime_state
             .manifest_normalized_event_summary
             .total_synced_count,
-        12
+        14
     );
     assert_eq!(
         runtime_state.watched_contract_summary.unique_contract_count,
@@ -39,7 +39,7 @@ async fn build_manifest_runtime_state_loads_checked_in_repository_seed() -> Resu
     );
     assert_eq!(
         runtime_state.watched_contract_summary.source_entry_count,
-        11
+        12
     );
     assert_eq!(
         runtime_state.watched_contract_summary.manifest_root_count,
@@ -49,7 +49,7 @@ async fn build_manifest_runtime_state_loads_checked_in_repository_seed() -> Resu
         runtime_state
             .watched_contract_summary
             .manifest_contract_count,
-        8
+        9
     );
     assert_eq!(
         runtime_state.watched_contract_summary.discovery_edge_count,
@@ -79,14 +79,14 @@ async fn build_manifest_runtime_state_loads_checked_in_repository_seed() -> Resu
                     "0xde9049636f4a1dfe0a64d1bfe3155c0a14c54f31".to_owned(),
                 ],
                 manifest_root_entry_count: 2,
-                manifest_contract_entry_count: 4,
+                manifest_contract_entry_count: 5,
                 discovery_edge_entry_count: 0,
             }
         ]
     );
 
     let stored_admission = load_discovery_admission_state(database.pool()).await?;
-    assert_eq!(stored_admission.active_manifest_count, 8);
+    assert_eq!(stored_admission.active_manifest_count, 9);
 
     database.cleanup().await?;
     Ok(())
@@ -1145,4 +1145,3 @@ async fn storage_discovery_refresh_adds_basenames_address_without_manifest_reloa
     database.cleanup().await?;
     Ok(())
 }
-
