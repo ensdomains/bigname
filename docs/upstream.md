@@ -7,7 +7,7 @@ bigname anchors every ENSv1, ENSv2, and Basenames claim to a specific upstream c
 | Key | Repo | Commit | Purpose |
 |-----|------|--------|---------|
 | `ens_v1` | `ensdomains/ens-contracts` | `91c966fe` | Canonical ENSv1 Solidity |
-| `ens_v2` | `ensdomains/contracts-v2` | `725a18d7` | ENSv2 contracts |
+| `ens_v2` | `ensdomains/contracts-v2` | `554c309b` | ENSv2 contracts |
 | `basenames` | `base-org/basenames` | `1809bbc9` | Canonical Basenames Solidity |
 | `ens_subgraph` | `ensdomains/ens-subgraph` | `723f1b6a` | Reference ENSv1 indexer |
 | `ensnode` | `namehash/ensnode` | `2017ae62` | Alternative ENS indexer |
@@ -44,6 +44,12 @@ Intentional differences between our docs/manifests and upstream. Every divergenc
 > **Our rule**: `docs/api-v1.md` § `GET /v1/resolutions/{namespace}/{name}` and § `GET /v1/explain/resolutions/{namespace}/{name}/execution`; mirrored in `docs/execution.md` § Initial Support Boundary and `docs/manifests.md` § Basenames source-family ownership.
 > **Why**: freeze the first Basenames consumer-replacement slice on the declared Base-authority plus L1-transport boundary before widening alias-participating, wildcard-derived, linked-subregistry, transport-free, or offchain-gateway path classes.
 > **Since**: `2026-04-19`
+
+> **ENSv2 sepolia-dev Phase 5 admission narrowing** — bigname admits only the first four ENSv2 source families for Phase 5 instead of treating every upstream `sepolia-dev` deployment artifact as an active source family.
+> **Upstream**: `(upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/RootRegistry.json:L2 @ ens_v2@554c309)` `(upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistry.json:L2 @ ens_v2@554c309)` `(upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistrar.json:L2 @ ens_v2@554c309)` `(upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/PermissionedResolverImpl.json:L2 @ ens_v2@554c309)` `(upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/UniversalResolverV2.json:L2 @ ens_v2@554c309)` `(upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ReverseRegistry.json:L2 @ ens_v2@554c309)` `(upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/DNSAliasResolver.json:L2 @ ens_v2@554c309)` `(upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/WrapperRegistryImpl.json:L2 @ ens_v2@554c309)` `(upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/LockedMigrationController.json:L2 @ ens_v2@554c309)` `(upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/HCAFactory.json:L2 @ ens_v2@554c309)` `(upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/StandardRentPriceOracle.json:L2 @ ens_v2@554c309)` `(upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/BatchRegistrar.json:L2 @ ens_v2@554c309)` `(upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/MockUSDC.json:L2 @ ens_v2@554c309)` `(upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/MockDAI.json:L2 @ ens_v2@554c309)`
+> **Our rule**: `docs/manifests.md` § ENSv2 Phase 5 source-family ownership; mirrored in `docs/architecture.md` § Source Families and `docs/chain-intake.md` § ENSv2 Phase 5 Adapter Intake Boundary.
+> **Why**: freeze the first ENSv2 development-profile slice on root, registry, registrar, and resolver resource/event semantics before admitting reverse, DNS, wrapper, migration, universal-resolver/execution, factory, oracle, batch, or mock-payment surfaces.
+> **Since**: `2026-04-20`
 
 Per-entry format:
 

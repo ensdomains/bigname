@@ -12,6 +12,7 @@ This document freezes the chain-intake contract for the shipped mainnet deployme
 - block hash is identity; block number is position
 - live ingestion and backfill must converge on the same raw-fact, normalized-event, and projection pipeline
 - a deployment selects one chain profile at a time; mainnet and Sepolia facts do not share the same canonical corpus, checkpoints, or projection state
+- the ENSv2 `sepolia-dev` profile selects `manifests-sepolia-dev/` as a whole alternate profile; it must not be loaded beside `manifests/` in the same intake runtime, watch plan, discovery graph, or projection set
 
 ## 2. Scope Boundary
 
@@ -33,7 +34,19 @@ Out of scope for the initial intake contract:
 
 These may exist later as separate capabilities, but they must not leak into the core correctness model for declared-state indexing.
 
-## 3. Upstream Requirements
+## 3. ENSv2 Phase 5 Adapter Intake Boundary
+
+The Phase 5 ENSv2 `sepolia-dev` intake starts from the four admitted source families `ens_v2_root_l1`, `ens_v2_registry_l1`, `ens_v2_registrar_l1`, and `ens_v2_resolver_l1` under `manifests-sepolia-dev/ens/...`. Initial direct watched roots come from the pinned upstream `sepolia-dev` deployment metadata for `RootRegistry`, `ETHRegistry`, and `ETHRegistrar`; `PermissionedResolverImpl` is implementation metadata for discovered or admitted resolver instances, and resolver instances enter the watch plan only through manifest admission or discovery edges (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/RootRegistry.json:L2 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistry.json:L2 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistrar.json:L2 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/PermissionedResolverImpl.json:L2 @ ens_v2@554c309).
+
+ENSv2 adapters normalize log-derived facts after raw block admission:
+
+- upstream `TokenResource(tokenId, resource)` becomes `TokenResourceLinked`; upstream `TokenRegenerated(oldTokenId, newTokenId)` becomes `TokenRegenerated` and must not be treated as a new resource by intake or projection workers (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L34 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L69 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L451 @ ens_v2@554c309).
+- upstream `SubregistryUpdated`, `ResolverUpdated`, and `ParentUpdated` become graph and topology events after their endpoint addresses resolve to current `contract_instance_id` values for the selected profile (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L49 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L59 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L75 @ ens_v2@554c309).
+- upstream `AliasChanged` becomes `AliasChanged` on admitted resolver instances, and upstream `EACRolesChanged` becomes resource-, root-, or resolver-scoped Permission events after the adapter resolves the upstream EAC resource to bigname identity (upstream: .refs/ens_v2/contracts/src/resolver/interfaces/IPermissionedResolver.sol:L14 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/access-control/interfaces/IEnhancedAccessControl.sol:L19 @ ens_v2@554c309).
+
+Any ENSv2 enrichment call used to repair or disambiguate a log-derived fact, such as `getResource(anyId)`, `getTokenId(anyId)`, `getState(anyId)`, `getAlias(fromName)`, or EAC role reads, must be anchored to the same block identity as the raw log. The upstream interfaces expose these reads, but the intake correctness model remains hash-first and log-derived state must not be rewritten through ambiguous number-only calls (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L57 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L67 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L72 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/resolver/interfaces/IPermissionedResolver.sol:L56 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/access-control/interfaces/IEnhancedAccessControl.sol:L100 @ ens_v2@554c309).
+
+## 4. Upstream Requirements
 
 For each chain source in the selected deployment profile, the intake plane must have access to:
 
@@ -51,7 +64,7 @@ Rules:
 - historical state-heavy enrichment and state rewrites require archive-capable upstreams or a separately retained local corpus
 - upstream history retention must be treated as bounded; intake must retain its own raw corpus for deterministic replay and rewrites
 
-## 4. Head Model And Recent Window
+## 5. Head Model And Recent Window
 
 Per chain, intake tracks these persisted checkpoints:
 
@@ -84,7 +97,7 @@ This window exists to:
 
 Number-to-hash mappings inside this window are derived views only. The primary key is always block hash.
 
-## 5. Block Identity And Storage Rules
+## 6. Block Identity And Storage Rules
 
 Lineage and raw facts must preserve enough information to rebuild canonicality without re-scraping chain history.
 
@@ -96,7 +109,7 @@ Rules:
 - caches are keyed by block hash first; block number may be used only as a secondary lookup or pagination aid
 - if a downstream key needs "current block number," it must resolve that number to a block hash before reading block-scoped data
 
-## 6. Notification And Fetch Contract
+## 7. Notification And Fetch Contract
 
 Subscriptions, filters, and polling are allowed only as low-latency triggers.
 
@@ -122,7 +135,7 @@ For exact block-scoped data:
 - receipts should be fetched block-scoped first; transaction-by-transaction receipt fan-out is a fallback, not the preferred primitive
 - live ingestion must not rely on subscription payloads alone as the persisted source of truth
 
-## 7. Backfill Contract
+## 8. Backfill Contract
 
 Backfill may use either:
 
@@ -136,7 +149,7 @@ Rules:
 - backfill jobs must be resumable, idempotent, and bounded by explicit checkpoints
 - backfill completion is not proof of finality; canonical, safe, and finalized promotion still follow the lineage model
 
-## 8. Batch And Retry Rules
+## 9. Batch And Retry Rules
 
 Batching is allowed only for independent work.
 
@@ -154,7 +167,7 @@ Rules:
 - partial batch failure must not corrupt intake ordering
 - batch size must stay bounded and measurable
 
-## 9. State Enrichment Rules
+## 10. State Enrichment Rules
 
 If intake or execution enriches facts with state reads such as calls, storage, or balances:
 
@@ -164,7 +177,7 @@ If intake or execution enriches facts with state reads such as calls, storage, o
 
 Historical state-heavy enrichment is an archive requirement, not a best-effort full-node feature.
 
-## 10. Reconciliation Algorithm
+## 11. Reconciliation Algorithm
 
 Reorg handling is an explicit unwind and replay algorithm.
 
@@ -182,7 +195,7 @@ For each candidate canonical block:
 
 Reconciliation must never depend on ad hoc deletes or "latest row wins" semantics.
 
-## 11. Atomicity Boundary
+## 12. Atomicity Boundary
 
 The raw admission transaction boundary is one block.
 
@@ -198,7 +211,7 @@ The canonical head pointer is written last inside that admission unit.
 
 Projection workers remain downstream and asynchronous, but they must consume deterministic block-scoped invalidation and replay inputs so that reorg repair is reproducible.
 
-## 12. Traces, Pending, And Other Optional Capabilities
+## 13. Traces, Pending, And Other Optional Capabilities
 
 Pending and mempool indexing are a separate product surface.
 
@@ -210,7 +223,7 @@ Rules:
 - if traces are enabled later, they persist as their own raw facts with the same block-hash anchoring and reorg semantics
 - intake planning must not assume all providers expose the same trace APIs
 
-## 13. Observability And Test Requirements
+## 14. Observability And Test Requirements
 
 Minimum chain-intake metrics:
 
@@ -232,7 +245,7 @@ Required failure drills:
 - crash and resume from a persisted checkpoint
 - safe or finalized promotion lagging canonical intake
 
-## 14. Acceptance Rules
+## 15. Acceptance Rules
 
 The intake contract is acceptable for the first implementation milestone only if:
 

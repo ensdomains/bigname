@@ -27,7 +27,7 @@ authoritative_for = [
 
 [refs.ens_v2]
 repo = "https://github.com/ensdomains/contracts-v2"
-commit = "725a18d70305b7bb2b511b91b44da927427b6a81"
+commit = "554c309b0df391fb72b0de6c398a9f9258f7451f"
 purpose = "ENSv2 contracts: linked surfaces, new resolver model."
 authoritative_for = [
   "ENSv2 semantics referenced in docs/architecture.md",

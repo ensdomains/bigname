@@ -314,7 +314,7 @@ This is the anchor for:
 - resolver-scoped resource permissions
 - resource-level role history
 
-For ENSv2, `resource_id` maps to the stable resource / canonical ID within a registry and survives token regeneration.  
+For ENSv2, `resource_id` maps to the upstream permissioned-registry EAC resource, not the current ERC1155 token ID. The registry exposes both `getResource(anyId)` and `getTokenId(anyId)`, emits `TokenResource(tokenId, resource)` when a registered label is linked to its EAC resource, and emits `TokenRegenerated(oldTokenId, newTokenId)` when role changes burn and mint a replacement token while leaving the resource unchanged (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L67 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L72 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L34 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L69 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L451 @ ens_v2@554c309).
 For ENSv1, `resource_id` is the stable internal identity for the authority object represented by the registry / wrapper / registration state.  
 For Basenames, `resource_id` anchors the Base-side authority object, even when L1 compatibility transport is involved, because upstream keeps the authority stack on Base while cross-chain compatibility enters through the separate Ethereum Mainnet `L1Resolver` (upstream: .refs/basenames/README.md:L69 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L70 @ basenames@1809bbc) (upstream: .refs/basenames/src/L1/L1Resolver.sol:L13 @ basenames@1809bbc).
 
@@ -341,6 +341,11 @@ ENSv1 continuity rule:
 - keep that `token_lineage_id` across transfer, renewal, expiry, and grace-period changes while the same tokenized anchor stays authoritative
 - rotate the active `token_lineage_id` when authority moves to a different tokenized anchor, including registrar-to-wrapper transitions and a later re-registration after the old registration has fully ended
 - if authority returns to the exact prior tokenized anchor, reuse that anchor's prior `token_lineage_id`; unwrap back to the same still-live registrar lease reactivates the prior registrar lineage
+
+ENSv2 continuity rule:
+
+- keep the same `resource_id` and `token_lineage_id` across `TokenRegenerated` events; update the current token ID attribute and append the normalized `TokenRegenerated` event instead of rebinding the surface or minting a successor resource (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L69 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L429 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L451 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L461 @ ens_v2@554c309)
+- mint or reactivate resource identity by upstream EAC resource, because the registry constructs resources from `eacVersionId` and token IDs from `tokenVersionId`; unregister / re-register increments both counters, while token regeneration increments only the token version (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L28 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L203 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L237 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L536 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L545 @ ens_v2@554c309)
 
 ### 7.4 `contract_instance_id`
 
@@ -542,6 +547,15 @@ Design consequence:
 - `ens_v2_resolver_l1`
 - `ens_execution`
 
+Current admitted ENSv2 `sepolia-dev` split:
+
+- `ens_v2_root_l1` owns the `RootRegistry` manifest root for the alternate `sepolia-dev` profile (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/RootRegistry.json:L2 @ ens_v2@554c309).
+- `ens_v2_registry_l1` owns the `ETHRegistry` root and discovered `UserRegistry` registry instances reached through ENSv2 registry graph expansion (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistry.json:L2 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/UserRegistry.sol:L15 @ ens_v2@554c309).
+- `ens_v2_registrar_l1` owns the `ETHRegistrar` source for `.eth` commit, registration, and renewal facts; registered-name resource identity remains anchored to the permissioned registry resource linked by the registry (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistrar.json:L2 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registrar/ETHRegistrar.sol:L30 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registrar/ETHRegistrar.sol:L173 @ ens_v2@554c309).
+- `ens_v2_resolver_l1` owns `PermissionedResolver` record, alias, version, and resolver-scoped permission facts for admitted resolver instances; the initial `sepolia-dev` implementation artifact is `PermissionedResolverImpl` (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/PermissionedResolverImpl.json:L2 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L38 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L70 @ ens_v2@554c309).
+
+The `sepolia-dev` profile uses `manifests-sepolia-dev/<namespace>/<source_family>/v1.toml` with the same manifest schema. It is an alternate selected profile, not an extension of the shipped mainnet profile; mainnet and Sepolia / `sepolia-dev` facts must not share a canonical corpus, watch plan, discovery graph, or projection set.
+
 ### Basenames source families
 
 - `basenames_base_registry`
@@ -596,12 +610,14 @@ Rules:
 
 - root manifests bootstrap the canonical contract graph through root `contract_instance_id` nodes
 - a discovered contract becomes authoritative only if it is reachable from a canonical root or explicitly admitted by a manifest
+- alternate-profile manifests such as `manifests-sepolia-dev/ens/ens_v2_registry_l1/v1.toml` use the same schema and are selected as a whole profile; they are not loaded beside `manifests/` in the same runtime
 - manifest-declared roots and contracts admit `contract_instance_id` nodes; declared addresses are lookup attributes for those nodes, not the source-graph identity
 - re-declaring the same root or contract address on the same chain, including after an inactive gap, carries forward the existing `contract_instance_id` and records a new non-overlapping active range
 - changing the declared root or contract address mints a new contract instance and closes the old active range; any continuity to the predecessor is represented with a `migration` edge
 - declared proxy implementations resolve to separate implementation `contract_instance_id` nodes; a proxy implementation change updates the proxy / implementation edge, not the proxy identity
 - manifest versions are carried forward into normalized events and projections
 - capability ownership attaches to the declaring `source_family`; it is never implied by a different family's presence alone
+- ENSv2 Phase 5 `sepolia-dev` capability ownership is frozen to `ens_v2_root_l1`, `ens_v2_registry_l1`, `ens_v2_registrar_l1`, and `ens_v2_resolver_l1`; upstream deployment artifacts outside those families, including universal resolver, reverse, DNS, wrapper, migration, factory, oracle, and mock-payment deployments, remain outside current admission until a later doc-first source-family update (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/UniversalResolverV2.json:L2 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ReverseRegistry.json:L2 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/DNSAliasResolver.json:L2 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/WrapperRegistryImpl.json:L2 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/LockedMigrationController.json:L2 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/HCAFactory.json:L2 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/StandardRentPriceOracle.json:L2 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/MockUSDC.json:L2 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/MockDAI.json:L2 @ ens_v2@554c309)
 - ENS verified resolution on Ethereum Mainnet belongs to `ens_execution`, whose canonical contract role is `universal_resolver` at `0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe` on the ENS Universal Resolver, not to `ens_v1_registry_l1`; that ownership freeze does not by itself widen public verified support beyond the separately frozen exact-surface ENS direct-path class, the already frozen exact-surface alias-only non-direct class, and the first additive exact-surface wildcard-derived class
 - ENS declared reverse-claim intake on Ethereum Mainnet belongs to `ens_v1_reverse_l1`, whose canonical contract role is `reverse_registrar` at `0xa58E81fe9b61B5c3fE2AFD33CF304c454AbFc7Cb` on the Ethereum `addr.reverse` Reverse Registrar, not to `ens_v1_registry_l1` or `ens_v1_resolver_l1`
 - that ENS reverse-family ownership freezes only the current reverse-only declared claim surface; later fallback claim-setting surfaces, if admitted, require their own source-family owner and a later doc-first contract update
@@ -647,6 +663,12 @@ Endpoint rules:
 - manifest-declared and discovered edges share the same endpoint model: each endpoint is a `contract_instance_id`
 - discovery first resolves `(chain, address, point in time)` to the active `contract_instance_id`; if the address was admitted previously on that chain and is admitted again after an inactive gap, discovery reuses the historical `contract_instance_id` and records a new active range; only an address that has never been admitted on that chain mints a new `contract_instance_id`
 - addresses, implementation addresses, code hashes, and roles remain attributes or provenance on the endpoint instances; they are never the primary key of the graph
+
+ENSv2 graph expansion rules:
+
+- upstream `SubregistryUpdated(tokenId, subregistry, sender)` maps to normalized `SubregistryChanged`; non-null `subregistry` endpoints are resolved to `contract_instance_id` before the discovery edge is stored (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L49 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L131 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L222 @ ens_v2@554c309).
+- upstream `ParentUpdated(parent, label, sender)` maps to normalized `ParentChanged` and updates the parent edge for the registry instance that emitted it (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L75 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L151 @ ens_v2@554c309).
+- upstream `ResolverUpdated(tokenId, resolver, sender)` updates the resolver edge for the current registry resource; admitted resolver endpoints then belong to `ens_v2_resolver_l1` (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L59 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L141 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L225 @ ens_v2@554c309).
 
 Watch-plan expansion rules:
 
@@ -851,6 +873,14 @@ Source-specific values include:
 - `DelegateRetainedAfterTransfer`
 - `PermissionScopeChanged`
 
+ENSv2 adapter mappings:
+
+- `TokenResourceLinked` is emitted from upstream `TokenResource(tokenId, resource)` and is the only adapter event that links the current token ID to the upstream EAC resource (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L34 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L216 @ ens_v2@554c309).
+- `TokenRegenerated` is emitted from upstream `TokenRegenerated(oldTokenId, newTokenId)` and must preserve the existing `resource_id`, `token_lineage_id`, and active surface binding unless a separate registry event changes those anchors (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L69 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L451 @ ens_v2@554c309).
+- `SubregistryChanged` and `ParentChanged` are the normalized graph events for upstream `SubregistryUpdated` and `ParentUpdated` respectively (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L49 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L75 @ ens_v2@554c309).
+- `AliasChanged` is the normalized topology event for upstream `PermissionedResolver.AliasChanged`, and the alias path stores source and destination DNS-encoded names from the unindexed event data (upstream: .refs/ens_v2/contracts/src/resolver/interfaces/IPermissionedResolver.sol:L14 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L230 @ ens_v2@554c309).
+- `PermissionChanged` and `RootPermissionChanged` are derived from upstream `EACRolesChanged(resource, account, oldRoleBitmap, newRoleBitmap)`; root-resource permissions stay distinguishable because EAC root roles are checked separately and also satisfy resource-level checks through root fallback (upstream: .refs/ens_v2/contracts/src/access-control/interfaces/IEnhancedAccessControl.sol:L19 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L176 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L181 @ ens_v2@554c309).
+
 ### Reverse and primary
 
 - `ReverseChanged`
@@ -917,6 +947,8 @@ Rules:
 
 - `wildcard.source=null` with `matched_labels=[]` means wildcard traversal did not participate
 - `alias.final_target=null` with `hops=[]` means alias rewriting did not participate
+- for ENSv2, `alias` is declared topology only when admitted `PermissionedResolver` state provides an `AliasChanged` mapping; `PermissionedResolver` resolves aliases by longest suffix match and rewrites the resolver calldata node before dispatching the profile call (upstream: .refs/ens_v2/contracts/src/resolver/interfaces/IPermissionedResolver.sol:L14 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L56 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L412 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L650 @ ens_v2@554c309)
+- for ENSv2, `wildcard` is observed topology, not manifest admission: it is populated only when resolution or explain input identifies an ancestor/source resolver and matched labels; resolver deployment or alias presence alone must not synthesize wildcard coverage (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L38 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L412 @ ens_v2@554c309)
 - all `transport` fields are `null` when no compatibility transport participates
 - each version-boundary object carries `logical_name_id`, `resource_id`, `normalized_event_id`, `event_kind`, and `chain_position`
 - `version_boundaries.record_version_boundary` must match the section-local `record_version_boundary` exposed by both `record_inventory` and `record_cache` for the same declared answer
@@ -1055,6 +1087,10 @@ Public reads must expose `effective_powers` directly so callers do not reconstru
 
 The first public declared-state permissions route is resource-centric: `GET /v1/resources/{resource_id}/permissions`.
 Name-, address-, and resolver-centric permission views summarize or filter the same resource-anchored truth model; they do not introduce separate grant systems.
+
+For ENSv2 registry resources, upstream `PermissionedRegistry` translates every labelhash, token ID, or resource input through `getResource(anyId)` before delegating EAC role reads and writes, so public permissions must be keyed by the bigname `resource_id` linked to that upstream resource rather than by token ID (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L57 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L261 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L351 @ ens_v2@554c309).
+
+For ENSv2 resolver-scoped permissions, `PermissionedResolver` uses name-, text-key-, and coin-type-specific EAC resources for resolver setters; these permissions remain rows in the same resource-anchored permission model with resolver scope metadata, and resolver overview may summarize them without creating a separate grant system (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L70 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L159 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L239 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L257 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L282 @ ens_v2@554c309).
 
 Required indexes include:
 
