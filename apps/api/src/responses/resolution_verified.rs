@@ -1047,12 +1047,24 @@ fn resolution_topology_transport_matches_basenames_supported_class(topology: &Js
     let Some(transport) = provenance_field(topology, "transport") else {
         return false;
     };
+    let Some(transport_fields) = transport.as_object() else {
+        return false;
+    };
 
-    string_field(provenance_field(transport, "source_chain_id"))
+    if transport_fields.iter().any(|(field_name, value)| {
+        !matches!(
+            field_name.as_str(),
+            "source_chain_id" | "target_chain_id" | "contract_address" | "latest_event_kind"
+        ) && !value.is_null()
+    }) {
+        return false;
+    }
+
+    string_field(transport_fields.get("source_chain_id"))
         .is_some_and(|value| value == BASENAMES_COMPAT_SOURCE_CHAIN_ID)
-        && string_field(provenance_field(transport, "target_chain_id"))
+        && string_field(transport_fields.get("target_chain_id"))
             .is_some_and(|value| value == BASENAMES_COMPAT_TARGET_CHAIN_ID)
-        && string_field(provenance_field(transport, "contract_address"))
+        && string_field(transport_fields.get("contract_address"))
             .is_some_and(|value| value.eq_ignore_ascii_case(BASENAMES_COMPAT_CONTRACT_ADDRESS))
 }
 

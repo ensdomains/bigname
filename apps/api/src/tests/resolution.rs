@@ -555,6 +555,489 @@ fn insert_basenames_supported_ethereum_position(name_row: &mut bigname_storage::
     );
 }
 
+fn resolution_unsupported_verified_state(records: &[&str]) -> Value {
+    json!({
+        "verified_queries": records
+            .iter()
+            .map(|record_key| {
+                json!({
+                    "record_key": record_key,
+                    "status": "unsupported",
+                    "unsupported_reason": "verified resolution entrypoint is not yet supported",
+                })
+            })
+            .collect::<Vec<_>>(),
+    })
+}
+
+#[derive(Clone, Copy, Debug)]
+enum BasenamesDeferredVerifiedPathCase {
+    AliasParticipating,
+    WildcardDerived,
+    LinkedSubregistry,
+    TransportFree,
+    ReservedOffchainGateway,
+}
+
+impl BasenamesDeferredVerifiedPathCase {
+    fn all() -> [Self; 5] {
+        [
+            Self::AliasParticipating,
+            Self::WildcardDerived,
+            Self::LinkedSubregistry,
+            Self::TransportFree,
+            Self::ReservedOffchainGateway,
+        ]
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::AliasParticipating => "alias_participating",
+            Self::WildcardDerived => "wildcard_derived",
+            Self::LinkedSubregistry => "linked_subregistry",
+            Self::TransportFree => "transport_free",
+            Self::ReservedOffchainGateway => "reserved_offchain_gateway",
+        }
+    }
+}
+
+fn basenames_name_ref(
+    logical_name_id: &str,
+    normalized_name: &str,
+    canonical_display_name: &str,
+    resource_id: Uuid,
+    binding_kind: &str,
+) -> Value {
+    json!({
+        "logical_name_id": logical_name_id,
+        "namespace": "basenames",
+        "normalized_name": normalized_name,
+        "canonical_display_name": canonical_display_name,
+        "namehash": format!("namehash:{normalized_name}"),
+        "resource_id": resource_id.to_string(),
+        "binding_kind": binding_kind,
+    })
+}
+
+fn basenames_resolver_hop(
+    logical_name_id: &str,
+    normalized_name: &str,
+    canonical_display_name: &str,
+    resource_id: Uuid,
+) -> Value {
+    json!({
+        "logical_name_id": logical_name_id,
+        "namespace": "basenames",
+        "normalized_name": normalized_name,
+        "canonical_display_name": canonical_display_name,
+        "resource_id": resource_id.to_string(),
+        "chain_id": "base-mainnet",
+        "address": "0x0000000000000000000000000000000000000abc",
+        "latest_event_kind": "ResolverChanged",
+    })
+}
+
+fn basenames_supported_topology(
+    logical_name_id: &str,
+    resource_id: Uuid,
+    record_version_boundary: &Value,
+) -> Value {
+    json!({
+        "registry_path": [basenames_name_ref(
+            logical_name_id,
+            "alice.base.eth",
+            "Alice.base.eth",
+            resource_id,
+            "declared_registry_path",
+        )],
+        "subregistry_path": [],
+        "resolver_path": [basenames_resolver_hop(
+            logical_name_id,
+            "alice.base.eth",
+            "Alice.base.eth",
+            resource_id,
+        )],
+        "wildcard": {
+            "source": null,
+            "matched_labels": [],
+        },
+        "alias": {
+            "final_target": null,
+            "hops": [],
+        },
+        "version_boundaries": {
+            "topology_version_boundary": record_version_boundary.clone(),
+            "record_version_boundary": record_version_boundary.clone(),
+        },
+        "transport": {
+            "source_chain_id": "base-mainnet",
+            "target_chain_id": "ethereum-mainnet",
+            "contract_address": "0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31",
+            "latest_event_kind": null,
+        },
+    })
+}
+
+fn basenames_deferred_verified_path_topology(
+    case: BasenamesDeferredVerifiedPathCase,
+    logical_name_id: &str,
+    resource_id: Uuid,
+    record_version_boundary: &Value,
+) -> Value {
+    let mut topology =
+        basenames_supported_topology(logical_name_id, resource_id, record_version_boundary);
+
+    match case {
+        BasenamesDeferredVerifiedPathCase::AliasParticipating => {
+            let alias_target = basenames_name_ref(
+                "basenames:resolver.base.eth",
+                "resolver.base.eth",
+                "Resolver.base.eth",
+                Uuid::from_u128(0x6201),
+                "resolver_alias_path",
+            );
+            topology["alias"] = json!({
+                "final_target": alias_target.clone(),
+                "hops": [alias_target],
+            });
+        }
+        BasenamesDeferredVerifiedPathCase::WildcardDerived => {
+            let wildcard_source = basenames_name_ref(
+                "basenames:wild.base.eth",
+                "wild.base.eth",
+                "Wild.base.eth",
+                Uuid::from_u128(0x6202),
+                "observed_wildcard_path",
+            );
+            topology["resolver_path"] = json!([basenames_resolver_hop(
+                "basenames:wild.base.eth",
+                "wild.base.eth",
+                "Wild.base.eth",
+                Uuid::from_u128(0x6202),
+            )]);
+            topology["wildcard"] = json!({
+                "source": wildcard_source,
+                "matched_labels": ["alice"],
+            });
+        }
+        BasenamesDeferredVerifiedPathCase::LinkedSubregistry => {
+            topology["subregistry_path"] = json!([basenames_name_ref(
+                "basenames:child.base.eth",
+                "child.base.eth",
+                "Child.base.eth",
+                Uuid::from_u128(0x6203),
+                "linked_subregistry_path",
+            )]);
+        }
+        BasenamesDeferredVerifiedPathCase::TransportFree => {
+            topology["transport"] = json!({
+                "source_chain_id": null,
+                "target_chain_id": null,
+                "contract_address": null,
+                "latest_event_kind": null,
+            });
+        }
+        BasenamesDeferredVerifiedPathCase::ReservedOffchainGateway => {
+            topology["transport"]["gateway"] = json!("https://basenames.example.test");
+        }
+    }
+
+    topology
+}
+
+async fn assert_basenames_deferred_verified_path_case_stays_selector_local(
+    case: BasenamesDeferredVerifiedPathCase,
+) -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let logical_name_id = "basenames:alice.base.eth";
+    let resource_id = Uuid::from_u128(0x6210);
+    let token_lineage_id = Uuid::from_u128(0x6211);
+    let surface_binding_id = Uuid::from_u128(0x6212);
+    let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000039);
+    let request_key = basenames_resolution_request_key(&["text:com.twitter", "addr:60"]);
+    let persisted_verified_queries = json!([
+        {
+            "record_key": "text:com.twitter",
+            "status": "not_found",
+            "failure_reason": "no_text_record",
+            "provenance": {
+                "execution_trace_id": execution_trace_id.to_string()
+            }
+        },
+        {
+            "record_key": "addr:60",
+            "status": "success",
+            "value": {
+                "coin_type": "60",
+                "value": "0x00000000000000000000000000000000000000aa"
+            },
+            "provenance": {
+                "execution_trace_id": execution_trace_id.to_string()
+            }
+        }
+    ]);
+
+    database
+        .seed_basenames_resolution_rebuild_inputs(
+            logical_name_id,
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    database.rebuild_name_current(logical_name_id).await?;
+    database.rebuild_record_inventory_current(resource_id).await?;
+
+    let declared_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resolutions/basenames/alice.base.eth?mode=declared&records=text:com.twitter,addr:60")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "basenames declared resolution request failed before {} assertions",
+                case.label()
+            )
+        })?;
+    assert_eq!(declared_response.status(), StatusCode::OK, "case {}", case.label());
+
+    let declared_payload: ResolutionResponse = read_json(declared_response).await?;
+    let record_inventory_boundary = declared_payload
+        .declared_state
+        .as_ref()
+        .and_then(|state| state.get("record_inventory"))
+        .and_then(|value| value.get("record_version_boundary"))
+        .cloned()
+        .context("basenames declared resolution must expose record_inventory boundary")?;
+    let worker_row = bigname_storage::load_record_inventory_current(
+        &database.pool,
+        resource_id,
+        &record_inventory_boundary,
+    )
+    .await?
+    .context("worker-produced basenames record_inventory_current row must exist")?;
+    let mut name_row = bigname_storage::load_name_current(&database.pool, logical_name_id)
+        .await?
+        .context("basenames deferred verified path test requires name_current row")?;
+    append_basenames_execution_manifest_version(&mut name_row);
+    insert_basenames_supported_ethereum_position(&mut name_row);
+    let topology = basenames_deferred_verified_path_topology(
+        case,
+        logical_name_id,
+        resource_id,
+        &worker_row.record_version_boundary,
+    );
+    name_row.declared_summary["topology"] = topology.clone();
+    database.insert_name_current_row(name_row.clone()).await?;
+
+    let requested_chain_positions =
+        requested_chain_positions_from_name_current(&name_row.chain_positions);
+    let mut trace = resolution_execution_trace(
+        execution_trace_id,
+        &request_key,
+        &["text:com.twitter", "addr:60"],
+        persisted_verified_queries.clone(),
+    );
+    trace.namespace = "basenames".to_owned();
+    trace.request_key = request_key.clone();
+    trace.chain_context = json!({
+        "requested_positions": requested_chain_positions.clone(),
+    });
+    trace.manifest_context = json!({
+        "manifest_versions": [{
+            "source_family": "basenames_execution",
+            "manifest_version": 2
+        }]
+    });
+    trace.contracts_called = json!([
+        {
+            "chain_id": "ethereum-mainnet",
+            "contract_address": "0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31",
+            "selector": "0x9061b923"
+        }
+    ]);
+    trace.gateway_digests = json!(["sha256:ccip-request", "sha256:ccip-response"]);
+    trace.request_metadata = json!({
+        "surface": "alice.base.eth",
+        "record_keys": ["text:com.twitter", "addr:60"],
+        "entrypoint": "l1_resolver",
+        "contract_address": "0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31",
+        "transport": {
+            "source_chain_id": "base-mainnet",
+            "target_chain_id": "ethereum-mainnet",
+            "contract_address": "0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31",
+            "latest_event_kind": null
+        }
+    });
+    trace.steps = vec![
+        ExecutionTraceStep {
+            step_index: 0,
+            step_kind: "load_declared_topology".to_owned(),
+            input_digest: Some("sha256:topology-input".to_owned()),
+            output_digest: Some("sha256:topology-output".to_owned()),
+            latency_ms: Some(4),
+            canonicality_dependency: json!({
+                "base-mainnet": {
+                    "block_hash": "0xbase-binding",
+                    "block_number": 100,
+                    "state": "finalized"
+                }
+            }),
+            step_payload: json!({
+                "entrypoint": "l1_resolver",
+                "resolver": "0x0000000000000000000000000000000000000abc"
+            }),
+        },
+        ExecutionTraceStep {
+            step_index: 1,
+            step_kind: "call_l1_resolver".to_owned(),
+            input_digest: Some("sha256:l1-input".to_owned()),
+            output_digest: Some("sha256:l1-output".to_owned()),
+            latency_ms: Some(17),
+            canonicality_dependency: json!({
+                "ethereum-mainnet": {
+                    "block_hash": "0xbase-binding",
+                    "block_number": 100,
+                    "state": "finalized"
+                }
+            }),
+            step_payload: json!({
+                "name": "alice.base.eth",
+                "record_count": 2
+            }),
+        },
+        ExecutionTraceStep {
+            step_index: 2,
+            step_kind: "ccip_offchain_lookup".to_owned(),
+            input_digest: Some("sha256:ccip-input".to_owned()),
+            output_digest: Some("sha256:ccip-output".to_owned()),
+            latency_ms: Some(29),
+            canonicality_dependency: json!({
+                "ethereum-mainnet": {
+                    "block_hash": "0xbase-binding",
+                    "block_number": 100,
+                    "state": "finalized"
+                }
+            }),
+            step_payload: json!({
+                "gateway_digest": "sha256:ccip-request"
+            }),
+        },
+        ExecutionTraceStep {
+            step_index: 3,
+            step_kind: "resolve_with_proof".to_owned(),
+            input_digest: Some("sha256:proof-input".to_owned()),
+            output_digest: Some("sha256:proof-output".to_owned()),
+            latency_ms: Some(11),
+            canonicality_dependency: json!({
+                "ethereum-mainnet": {
+                    "block_hash": "0xbase-binding",
+                    "block_number": 100,
+                    "state": "finalized"
+                }
+            }),
+            step_payload: json!({
+                "proof_kind": "signature"
+            }),
+        },
+    ];
+
+    let mut outcome = resolution_execution_outcome_with_boundaries(
+        execution_trace_id,
+        &request_key,
+        persisted_verified_queries,
+        worker_row.record_version_boundary.clone(),
+        worker_row.record_version_boundary.clone(),
+    );
+    outcome.namespace = "basenames".to_owned();
+    outcome.cache_key.requested_chain_positions = requested_chain_positions;
+    outcome.cache_key.manifest_versions = name_row
+        .provenance
+        .get("manifest_versions")
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+    upsert_execution_trace(&database.pool, &trace).await?;
+    upsert_execution_outcome(&database.pool, &outcome).await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resolutions/basenames/alice.base.eth?mode=both&records=text:com.twitter,addr:60")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "deferred basenames mixed resolution request failed for {}",
+                case.label()
+            )
+        })?;
+    let explain_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/explain/resolutions/basenames/alice.base.eth/execution?records=text:com.twitter,addr:60")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "deferred basenames execution explain request failed for {}",
+                case.label()
+            )
+        })?;
+
+    assert_eq!(response.status(), StatusCode::OK, "case {}", case.label());
+    assert_eq!(
+        explain_response.status(),
+        StatusCode::NOT_FOUND,
+        "case {}",
+        case.label()
+    );
+
+    let payload: ResolutionResponse = read_json(response).await?;
+    assert_eq!(
+        payload
+            .declared_state
+            .as_ref()
+            .and_then(|state| state.get("topology")),
+        Some(&topology),
+        "case {}",
+        case.label()
+    );
+    assert_eq!(
+        payload.verified_state,
+        Some(resolution_unsupported_verified_state(&[
+            "text:com.twitter",
+            "addr:60",
+        ])),
+        "case {}",
+        case.label()
+    );
+    assert_eq!(
+        payload.provenance.get("execution_trace_id"),
+        Some(&Value::Null),
+        "case {}",
+        case.label()
+    );
+
+    let explain_payload: ErrorResponse = read_json(explain_response).await?;
+    assert_eq!(explain_payload.error.code, "not_found", "case {}", case.label());
+    assert_eq!(
+        explain_payload.error.message,
+        "persisted resolution execution explain was not found for name alice.base.eth in namespace basenames",
+        "case {}",
+        case.label()
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn get_resolution_both_mode_reads_persisted_basenames_transport_direct_answers()
 -> Result<()> {
@@ -1680,6 +2163,15 @@ async fn get_resolution_keeps_out_of_class_basenames_transport_explicit()
     );
 
     database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_resolution_keeps_basenames_deferred_path_classes_selector_local() -> Result<()> {
+    for case in BasenamesDeferredVerifiedPathCase::all() {
+        assert_basenames_deferred_verified_path_case_stays_selector_local(case).await?;
+    }
+
     Ok(())
 }
 

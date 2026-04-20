@@ -58,9 +58,13 @@ Execution notes:
   `contenthash` answer, shipped persisted verified `avatar` readback only for ENS exact-surface
   direct-path and `resolver_alias_path` alias-only cases on the mixed route, and persisted ENS
   wildcard-derived `addr:60` readback on `mode=both` with projected wildcard topology while
-  declared `record_inventory` / `record_cache` remain unsupported for that lane; beyond that
-  shipped wildcard-derived lane, transport-assisted, other non-alias ancestor-selected,
-  Basenames-, and broader non-wildcard non-direct verified support remain out of scope
+  declared `record_inventory` / `record_cache` remain unsupported for that lane, plus the
+  Basenames deferred-path lock: shipped direct transport-assisted Basenames readback remains
+  supported, while alias-participating, wildcard-derived, linked-subregistry, transport-free,
+  and reserved offchain-gateway Basenames path classes stay selector-local `unsupported` with
+  `provenance.execution_trace_id=null` on the mixed route; beyond those shipped lanes, other
+  transport-assisted, other non-alias ancestor-selected, and broader non-wildcard non-direct
+  verified support remain out of scope
 - the coverage contract reuses the same exact-name rebuild seed and asserts that
   `GET /v1/coverage/{namespace}/{name}` keeps the same single-name `data` and top-level
   `coverage` object as exact-name lookup while exposing the explain-only coverage block in
@@ -147,14 +151,17 @@ Execution notes:
   `verified_queries`, presence of the persisted execution summary, explain-route readback of the
   same persisted ENS exact-surface direct-path `contenthash` answer for the requested selector
   set, shipped persisted verified `avatar` explain-route readback only for ENS exact-surface
-  direct-path and `resolver_alias_path` alias-only cases, and persisted ENS wildcard-derived
-  `addr:60` explain-route readback with the same envelope plus a persisted execution summary;
-  beyond that shipped wildcard-derived lane, transport-assisted, other non-alias ancestor-
-  selected, Basenames-, and broader non-wildcard non-direct lanes remain out of scope. It also
-  asserts `404 not_found` when the current exact surface has no persisted answer for the requested
-  selector set, and that deferred transport-assisted and other non-alias ancestor-selected
-  requests stay outside the shipped public explain surface even when persisted outcomes exist, and
-  reuses the shipped execution-outcome invalidation APIs to assert that exact manifest,
+  direct-path and `resolver_alias_path` alias-only cases, persisted ENS wildcard-derived
+  `addr:60` explain-route readback with the same envelope plus a persisted execution summary, and
+  shipped direct transport-assisted Basenames explain-route readback; beyond those shipped lanes,
+  other transport-assisted, other non-alias ancestor-selected, and broader non-wildcard
+  non-direct lanes remain out of scope. It also asserts `404 not_found` when the current exact
+  surface has no persisted answer for the requested selector set, that deferred transport-assisted
+  and other non-alias ancestor-selected requests stay outside the shipped public explain surface
+  even when persisted outcomes exist, and that the Basenames alias-participating,
+  wildcard-derived, linked-subregistry, transport-free, and reserved offchain-gateway deferred
+  path classes stay `404 not_found` on the execution explain route, then reuses the shipped
+  execution-outcome invalidation APIs to assert that exact manifest,
   topology-boundary, and record-boundary
   invalidation evicts the persisted ENS verified-resolution answer from the mixed
   `GET /v1/resolutions/{namespace}/{name}?mode=both` route and the execution explain route
