@@ -35,6 +35,7 @@ History reads use normalized events plus thin cursor support rather than a separ
 
 - keyed by `logical_name_id`
 - authoritative for supported source classes
+- for `namespace=ens` on the selected ENSv2 `sepolia-dev` profile, `name_current` may consume admitted registry and registrar facts for shadow projection work, but it must not publish a supported exact-name profile answer while the manifest capability remains `exact_name_profile=shadow`; public route-level coverage for that class remains `status=unsupported`, `exhaustiveness=not_applicable`, and `unsupported_reason="ensv2 sepolia-dev exact-name profile is shadow-only"` until a later doc-first capability promotion (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistry.json:L2 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistrar.json:L2 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L34 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L69 @ ens_v2@554c309)
 - for `namespace=basenames`, `name_current` remains a Base-authority read family: exact-name declared truth comes from `basenames_base_registry`, `basenames_base_registrar`, and `basenames_base_resolver`; `basenames_base_primary` is claim-intake-only, and `basenames_l1_compat` plus `basenames_execution` do not become alternate exact-name truth because upstream keeps the registry / registrar / resolver stack on Base while reverse claims stay on the separate ReverseRegistrar surface (upstream: .refs/basenames/README.md:L70 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L12 @ basenames@1809bbc)
 - returns the current binding plus fixed declared summary sections for registration, authority, control, resolver, record inventory, and history
 - unsupported declared summary sections stay explicit in the read model; they are not omitted silently
@@ -50,6 +51,7 @@ History reads use normalized events plus thin cursor support rather than a separ
 
 - keyed by `logical_name_id`
 - serves the shared `Coverage` object for both `GET /v1/names/{namespace}/{name}` inline coverage and `GET /v1/coverage/{namespace}/{name}`
+- for the ENSv2 `sepolia-dev` exact-name profile while `exact_name_profile=shadow`, `coverage_current` stores the shared unsupported summary for that exact-name profile class rather than a hidden supported or observed-only state (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistry.json:L2 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistrar.json:L2 @ ens_v2@554c309)
 - the dedicated coverage route adds declared explain detail for that same single-name answer; it does not introduce separate coverage enums or defaults
 - `CoverageChanged` updates this shared single-name coverage state; capability changes may invalidate or recompute it, but do not create a second coverage truth system
 
