@@ -82,12 +82,7 @@
             bigname_storage::upsert_name_surfaces(
                 &database.pool,
                 &[
-                    collection_name_surface(
-                        "ens:current.eth",
-                        "current.eth",
-                        "node:current.eth",
-                        540,
-                    ),
+                    collection_name_surface("ens:current.eth", "current.eth", "node:current.eth", 540),
                     collection_name_surface(
                         "ens:historical.eth",
                         "historical.eth",
@@ -292,6 +287,282 @@
                 "chain_position_desc",
                 50,
                 1,
+            );
+
+            database.cleanup().await?;
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn basenames_history_routes_read_back_canonical_rows() -> Result<()> {
+            let database = HarnessDatabase::new().await?;
+            let address = "0x0000000000000000000000000000000000000b0b";
+            let current_logical_name_id = "basenames:alice.base.eth";
+            let historical_logical_name_id = "basenames:legacy.base.eth";
+            let current_resource_id = Uuid::from_u128(0xa245);
+            let current_surface_binding_id = Uuid::from_u128(0xb245);
+            let historical_resource_id = Uuid::from_u128(0xa246);
+
+            bigname_storage::upsert_raw_blocks(
+                &database.pool,
+                &[
+                    raw_block("base-mainnet", "0xb641", None, 641, 1_700_000_641),
+                    raw_block("base-mainnet", "0xb642", Some("0xb641"), 642, 1_700_000_642),
+                    raw_block("base-mainnet", "0xb643", Some("0xb642"), 643, 1_700_000_643),
+                    raw_block("base-mainnet", "0xb644", Some("0xb643"), 644, 1_700_000_644),
+                    raw_block("base-mainnet", "0xb645", Some("0xb644"), 645, 1_700_000_645),
+                ],
+            )
+            .await
+            .context("failed to upsert basenames history raw blocks for conformance")?;
+            bigname_storage::upsert_resources(
+                &database.pool,
+                &[
+                    Resource {
+                        chain_id: "base-mainnet".to_owned(),
+                        block_hash: "0xb641".to_owned(),
+                        block_number: 641,
+                        ..address_name_resource(current_resource_id, None, "0xb641", 641)
+                    },
+                    Resource {
+                        chain_id: "base-mainnet".to_owned(),
+                        block_hash: "0xb642".to_owned(),
+                        block_number: 642,
+                        ..address_name_resource(historical_resource_id, None, "0xb642", 642)
+                    },
+                ],
+            )
+            .await
+            .context("failed to upsert basenames history resources for conformance")?;
+            bigname_storage::upsert_name_surfaces(
+                &database.pool,
+                &[
+                    collection_name_surface(
+                        current_logical_name_id,
+                        "alice.base.eth",
+                        "node:alice.base.eth",
+                        641,
+                    ),
+                    collection_name_surface(
+                        historical_logical_name_id,
+                        "legacy.base.eth",
+                        "node:legacy.base.eth",
+                        642,
+                    ),
+                ],
+            )
+            .await
+            .context("failed to upsert basenames history surfaces for conformance")?;
+            bigname_storage::upsert_surface_bindings(
+                &database.pool,
+                &[SurfaceBinding {
+                    chain_id: "base-mainnet".to_owned(),
+                    block_hash: "0xb641".to_owned(),
+                    block_number: 641,
+                    ..address_name_surface_binding(
+                        current_surface_binding_id,
+                        current_logical_name_id,
+                        current_resource_id,
+                        "0xb641",
+                        641,
+                        1_717_173_641,
+                    )
+                }],
+            )
+            .await
+            .context("failed to upsert basenames history surface binding for conformance")?;
+            bigname_storage::upsert_address_names_current_rows(
+                &database.pool,
+                &[address_name_current_row(
+                    address,
+                    current_logical_name_id,
+                    bigname_storage::AddressNameRelation::Registrant,
+                    "alice.base.eth",
+                    "alice.base.eth",
+                    "node:alice.base.eth",
+                    current_surface_binding_id,
+                    current_resource_id,
+                    None,
+                    641,
+                )],
+            )
+            .await
+            .context("failed to upsert basenames history address-name row for conformance")?;
+            bigname_storage::upsert_normalized_events(
+                &database.pool,
+                &[
+                    NormalizedEvent {
+                        namespace: "basenames".to_owned(),
+                        source_family: "basenames_base_registry".to_owned(),
+                        ..history_event(
+                            "current-surface",
+                            Some(current_logical_name_id),
+                            None,
+                            Some("base-mainnet"),
+                            Some(644),
+                            Some("0xb644"),
+                            Some("0xtx644"),
+                            Some(0),
+                            CanonicalityState::Canonical,
+                        )
+                    },
+                    NormalizedEvent {
+                        namespace: "basenames".to_owned(),
+                        source_family: "basenames_base_registry".to_owned(),
+                        ..history_event(
+                            "current-resource",
+                            None,
+                            Some(current_resource_id),
+                            Some("base-mainnet"),
+                            Some(645),
+                            Some("0xb645"),
+                            Some("0xtx645"),
+                            Some(0),
+                            CanonicalityState::Canonical,
+                        )
+                    },
+                    NormalizedEvent {
+                        namespace: "basenames".to_owned(),
+                        source_family: "basenames_base_registry".to_owned(),
+                        ..history_event(
+                            "historical-surface",
+                            Some(historical_logical_name_id),
+                            None,
+                            Some("base-mainnet"),
+                            Some(643),
+                            Some("0xb643"),
+                            Some("0xtx643"),
+                            Some(0),
+                            CanonicalityState::Canonical,
+                        )
+                    },
+                    NormalizedEvent {
+                        namespace: "basenames".to_owned(),
+                        source_family: "basenames_base_registry".to_owned(),
+                        ..history_event(
+                            "historical-resource",
+                            None,
+                            Some(historical_resource_id),
+                            Some("base-mainnet"),
+                            Some(642),
+                            Some("0xb642"),
+                            Some("0xtx642"),
+                            Some(0),
+                            CanonicalityState::Canonical,
+                        )
+                    },
+                    NormalizedEvent {
+                        namespace: "basenames".to_owned(),
+                        source_family: "basenames_base_registry".to_owned(),
+                        chain_id: Some("base-mainnet".to_owned()),
+                        ..authority_history_event(
+                            "historical-match",
+                            "basenames",
+                            historical_logical_name_id,
+                            historical_resource_id,
+                            "RegistrationGranted",
+                            641,
+                            "0xb641",
+                            json!({
+                                "registrant": "0x0000000000000000000000000000000000000B0B",
+                            }),
+                        )
+                    },
+                ],
+            )
+            .await
+            .context("failed to upsert basenames history normalized events for conformance")?;
+
+            let name_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri("/v1/history/names/basenames/alice.base.eth")
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("basenames name history request failed")?;
+            assert_eq!(name_response.status(), StatusCode::OK);
+            let name_payload: HistoryResponse = read_json(name_response).await?;
+            assert_eq!(
+                history_event_identities(&name_payload),
+                vec!["current-resource", "current-surface"]
+            );
+            assert_eq!(name_payload.declared_state, json!({}));
+            assert_eq!(
+                name_payload.coverage.enumeration_basis,
+                "canonical normalized-event history for the requested both scope"
+            );
+            assert_eq!(
+                name_payload
+                    .provenance
+                    .get("derivation_kind")
+                    .and_then(Value::as_str),
+                Some("normalized_event_history")
+            );
+            assert_eq!(
+                name_payload.chain_positions["base"]["chain_id"],
+                json!("base-mainnet")
+            );
+
+            let resource_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/v1/history/resources/{current_resource_id}"))
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("basenames resource history request failed")?;
+            assert_eq!(resource_response.status(), StatusCode::OK);
+            let resource_payload: HistoryResponse = read_json(resource_response).await?;
+            assert_eq!(
+                history_event_identities(&resource_payload),
+                vec!["current-resource", "current-surface"]
+            );
+            assert_eq!(
+                resource_payload.chain_positions["base"]["chain_id"],
+                json!("base-mainnet")
+            );
+
+            let address_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/v1/history/addresses/{address}?namespace=basenames&relation=registrant"
+                        ))
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("basenames address history request failed")?;
+            assert_eq!(address_response.status(), StatusCode::OK);
+            let address_payload: HistoryResponse = read_json(address_response).await?;
+            assert_eq!(
+                history_event_identities(&address_payload),
+                vec![
+                    "current-resource",
+                    "current-surface",
+                    "historical-surface",
+                    "historical-resource",
+                    "historical-match",
+                ]
+            );
+            assert_eq!(address_payload.declared_state, json!({}));
+            assert_eq!(
+                address_payload.coverage.enumeration_basis,
+                "canonical normalized-event history for the requested both scope"
+            );
+            assert_eq!(
+                address_payload
+                    .provenance
+                    .get("derivation_kind")
+                    .and_then(Value::as_str),
+                Some("normalized_event_history")
+            );
+            assert_eq!(
+                address_payload.chain_positions["base"]["chain_id"],
+                json!("base-mainnet")
             );
 
             database.cleanup().await?;
@@ -909,8 +1180,7 @@
         }
 
         #[tokio::test]
-        async fn name_history_contract_returns_declared_rows_with_empty_declared_state()
-        -> Result<()> {
+        async fn name_history_contract_returns_declared_rows_with_empty_declared_state() -> Result<()> {
             let database = HarnessDatabase::new().await?;
             let logical_name_id = "ens:alice.eth";
             let resource_id = Uuid::from_u128(0xa001);
@@ -1130,8 +1400,7 @@
         }
 
         #[tokio::test]
-        async fn resource_history_contract_returns_declared_rows_with_empty_declared_state()
-        -> Result<()> {
+        async fn resource_history_contract_returns_declared_rows_with_empty_declared_state() -> Result<()> {
             let database = HarnessDatabase::new().await?;
             let logical_name_id = "ens:alice.eth";
             let resource_id = Uuid::from_u128(0xa300);
@@ -1313,4 +1582,3 @@
                 .context("failed to read conformance response body")?;
             serde_json::from_slice(&bytes).context("failed to decode conformance response JSON")
         }
-

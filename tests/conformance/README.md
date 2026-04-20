@@ -128,6 +128,14 @@ Execution notes:
   normalized-event provenance, and default `both` scope behavior, plus the shipped
   `namespace=ens&relation=registrant` filter combination and
   `relation=effective_controller` with `scope=surface`, `scope=resource`, and `scope=both`
+- the Basenames history readback contract seeds canonical Basenames rows and asserts they read
+  back through the existing shared history envelopes for
+  `GET /v1/history/names/{namespace}/{name}`,
+  `GET /v1/history/resources/{resource_id}`, and
+  `GET /v1/history/addresses/{address}`; address-history matching includes historical
+  Basenames matches even when the matched resource has `token_lineage_id = NULL`, while the route
+  contract and row shape remain unchanged with no Basenames-only history ledger or
+  execution-trace history
 - collection-route conformance asserts no-param behavior plus replay-stable `cursor` /
   `page_size` paging for the six shipped collection routes:
   `GET /v1/addresses/{address}/names`,
