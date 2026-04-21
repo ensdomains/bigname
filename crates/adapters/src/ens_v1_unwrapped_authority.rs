@@ -86,6 +86,8 @@ struct ActiveEmitter {
     source_family: String,
     manifest_version: i64,
     normalizer_version: String,
+    active_from_block_number: Option<i64>,
+    active_to_block_number: Option<i64>,
     source_rank: i32,
 }
 

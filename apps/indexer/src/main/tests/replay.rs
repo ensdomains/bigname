@@ -669,6 +669,42 @@ async fn replay_normalized_events_rejects_mixed_canonicality_raw_logs() -> Resul
     database.cleanup().await
 }
 
+#[tokio::test]
+async fn replay_normalized_events_respects_ensv1_dynamic_resolver_watch_target_range()
+-> Result<()> {
+    assert_dynamic_resolver_replay_respects_watch_target_range(DynamicResolverReplayConfig {
+        namespace: "ens",
+        chain: "ethereum-mainnet",
+        deployment_epoch: "ens_v1",
+        reverse_source_family: "ens_v1_reverse_l1",
+        registry_source_family: "ens_v1_registry_l1",
+        resolver_source_family: "ens_v1_resolver_l1",
+        in_range_raw_name: "alice.eth",
+        closed_raw_name: "closed.eth",
+        manifest_id_base: 300,
+        uuid_base: 0x3000,
+    })
+    .await
+}
+
+#[tokio::test]
+async fn replay_normalized_events_respects_basenames_dynamic_resolver_watch_target_range()
+-> Result<()> {
+    assert_dynamic_resolver_replay_respects_watch_target_range(DynamicResolverReplayConfig {
+        namespace: "basenames",
+        chain: "base-mainnet",
+        deployment_epoch: "basenames_v1",
+        reverse_source_family: "basenames_base_primary",
+        registry_source_family: "basenames_base_registry",
+        resolver_source_family: "basenames_base_resolver",
+        in_range_raw_name: "alice.base.eth",
+        closed_raw_name: "closed.base.eth",
+        manifest_id_base: 400,
+        uuid_base: 0x4000,
+    })
+    .await
+}
+
 async fn insert_active_replay_watched_contract(
     pool: &PgPool,
     manifest_id: i64,
@@ -686,6 +722,298 @@ async fn insert_active_replay_watched_contract(
         "name_wrapper",
     )
     .await
+}
+
+struct DynamicResolverReplayConfig {
+    namespace: &'static str,
+    chain: &'static str,
+    deployment_epoch: &'static str,
+    reverse_source_family: &'static str,
+    registry_source_family: &'static str,
+    resolver_source_family: &'static str,
+    in_range_raw_name: &'static str,
+    closed_raw_name: &'static str,
+    manifest_id_base: i64,
+    uuid_base: u128,
+}
+
+async fn assert_dynamic_resolver_replay_respects_watch_target_range(
+    config: DynamicResolverReplayConfig,
+) -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let reverse_manifest_id = config.manifest_id_base + 1;
+    let registry_manifest_id = config.manifest_id_base + 2;
+    let resolver_manifest_id = config.manifest_id_base + 3;
+    let reverse_contract_instance_id = Uuid::from_u128(config.uuid_base + 1);
+    let registry_contract_instance_id = Uuid::from_u128(config.uuid_base + 2);
+    let resolver_contract_instance_id = Uuid::from_u128(config.uuid_base + 3);
+    let reverse_address = "0x00000000000000000000000000000000000000ad";
+    let registry_address = "0x00000000000000000000000000000000000000bb";
+    let resolver_address = "0x00000000000000000000000000000000000000cc";
+    let unadmitted_resolver_address = "0x00000000000000000000000000000000000000dd";
+    let claimed_address = "0x0000000000000000000000000000000000001234";
+    let reverse_node = reverse_node_for_address(claimed_address);
+    let block_50 = provider_block(
+        "0x5050505050505050505050505050505050505050505050505050505050505050",
+        Some("0x4040404040404040404040404040404040404040404040404040404040404040"),
+        50,
+    );
+    let block_51 = provider_block(
+        "0x5151515151515151515151515151515151515151515151515151515151515151",
+        Some(&block_50.block_hash),
+        51,
+    );
+    let orphaned_block_51 = provider_block(
+        "0x51515151515151515151515151515151515151515151515151515151515151ff",
+        Some(&block_50.block_hash),
+        51,
+    );
+    let block_52 = provider_block(
+        "0x5252525252525252525252525252525252525252525252525252525252525252",
+        Some(&block_51.block_hash),
+        52,
+    );
+
+    insert_active_replay_manifest_contract(
+        database.pool(),
+        reverse_manifest_id,
+        config.namespace,
+        config.reverse_source_family,
+        config.chain,
+        config.deployment_epoch,
+        reverse_contract_instance_id,
+        reverse_address,
+        "reverse_registrar",
+    )
+    .await?;
+    insert_active_replay_manifest_contract(
+        database.pool(),
+        registry_manifest_id,
+        config.namespace,
+        config.registry_source_family,
+        config.chain,
+        config.deployment_epoch,
+        registry_contract_instance_id,
+        registry_address,
+        "registry",
+    )
+    .await?;
+    insert_active_replay_manifest(
+        database.pool(),
+        resolver_manifest_id,
+        config.namespace,
+        config.resolver_source_family,
+        config.chain,
+        config.deployment_epoch,
+    )
+    .await?;
+    insert_contract_instance(
+        database.pool(),
+        resolver_contract_instance_id,
+        config.chain,
+        "contract",
+    )
+    .await?;
+    insert_active_contract_instance_address(
+        database.pool(),
+        resolver_contract_instance_id,
+        config.chain,
+        resolver_address,
+        None,
+    )
+    .await?;
+    insert_active_discovery_edge_with_range(
+        database.pool(),
+        config.chain,
+        "resolver",
+        registry_contract_instance_id,
+        resolver_contract_instance_id,
+        Some(registry_manifest_id),
+        Some(50),
+        Some(51),
+    )
+    .await?;
+
+    for (block, canonicality_state) in [
+        (&block_50, CanonicalityState::Canonical),
+        (&block_51, CanonicalityState::Canonical),
+        (&orphaned_block_51, CanonicalityState::Orphaned),
+        (&block_52, CanonicalityState::Canonical),
+    ] {
+        insert_chain_lineage_for_block(database.pool(), config.chain, block, canonicality_state)
+            .await?;
+    }
+    insert_raw_reverse_claimed_log(
+        database.pool(),
+        config.chain,
+        &block_50,
+        reverse_address,
+        claimed_address,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    insert_raw_new_resolver_log_for_node(
+        database.pool(),
+        config.chain,
+        &block_50,
+        registry_address,
+        resolver_address,
+        &reverse_node,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    insert_raw_resolver_name_changed_log_for_node(
+        database.pool(),
+        config.chain,
+        &block_50,
+        resolver_address,
+        &reverse_node,
+        config.in_range_raw_name,
+        2,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    insert_raw_resolver_name_changed_log_for_node(
+        database.pool(),
+        config.chain,
+        &block_50,
+        unadmitted_resolver_address,
+        &reverse_node,
+        "unadmitted.example",
+        3,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    insert_raw_resolver_version_changed_log_for_node(
+        database.pool(),
+        config.chain,
+        &block_51,
+        resolver_address,
+        &reverse_node,
+        7,
+        0,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    insert_raw_resolver_name_changed_log_for_node(
+        database.pool(),
+        config.chain,
+        &block_52,
+        resolver_address,
+        &reverse_node,
+        config.closed_raw_name,
+        0,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    insert_raw_resolver_version_changed_log_for_node(
+        database.pool(),
+        config.chain,
+        &orphaned_block_51,
+        resolver_address,
+        &reverse_node,
+        99,
+        0,
+        CanonicalityState::Orphaned,
+    )
+    .await?;
+
+    let outcome = replay_raw_fact_normalized_events(
+        database.pool(),
+        RawFactNormalizedEventReplayRequest {
+            deployment_profile: "mainnet".to_owned(),
+            chain: config.chain.to_owned(),
+            selection: RawFactNormalizedEventReplaySelection::BlockRange {
+                from_block: 50,
+                to_block: 52,
+            },
+        },
+    )
+    .await?;
+
+    assert_eq!(outcome.selected_block_count, 3);
+    assert_eq!(outcome.canonical_raw_log_count, 6);
+    assert_eq!(
+        sqlx::query_scalar::<_, Vec<String>>(
+            r#"
+            SELECT COALESCE(
+                ARRAY_AGG(after_state->>'raw_name' ORDER BY block_number, log_index),
+                ARRAY[]::TEXT[]
+            )
+            FROM normalized_events
+            WHERE source_family = $1
+              AND event_kind = 'RecordChanged'
+            "#
+        )
+        .bind(config.resolver_source_family)
+        .fetch_one(database.pool())
+        .await?,
+        vec![config.in_range_raw_name.to_owned()]
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, Vec<i64>>(
+            r#"
+            SELECT COALESCE(
+                ARRAY_AGG((after_state->>'record_version')::BIGINT ORDER BY block_number, log_index),
+                ARRAY[]::BIGINT[]
+            )
+            FROM normalized_events
+            WHERE source_family = $1
+              AND event_kind = 'RecordVersionChanged'
+            "#
+        )
+        .bind(config.resolver_source_family)
+        .fetch_one(database.pool())
+        .await?,
+        vec![7]
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM normalized_events WHERE source_family = $1 AND event_kind IN ('RecordChanged', 'RecordVersionChanged')"
+        )
+        .bind(config.resolver_source_family)
+        .fetch_one(database.pool())
+        .await?,
+        2
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM normalized_events WHERE raw_fact_ref->>'emitting_address' = $1"
+        )
+        .bind(unadmitted_resolver_address)
+        .fetch_one(database.pool())
+        .await?,
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM normalized_events WHERE raw_fact_ref->>'block_hash' = $1"
+        )
+        .bind(&block_52.block_hash)
+        .fetch_one(database.pool())
+        .await?,
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM normalized_events WHERE raw_fact_ref->>'block_hash' = $1"
+        )
+        .bind(&orphaned_block_51.block_hash)
+        .fetch_one(database.pool())
+        .await?,
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM normalized_events WHERE event_kind = 'ResolverChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        1
+    );
+    assert_no_duplicate_normalized_event_identities(database.pool()).await?;
+
+    database.cleanup().await
 }
 
 async fn insert_stale_name_wrapped_preimage_event(
@@ -840,6 +1168,96 @@ async fn insert_active_replay_watched_contract_with_source_family(
         None,
     )
     .await
+}
+
+async fn insert_active_replay_manifest_contract(
+    pool: &PgPool,
+    manifest_id: i64,
+    namespace: &str,
+    source_family: &str,
+    chain: &str,
+    deployment_epoch: &str,
+    contract_instance_id: Uuid,
+    address: &str,
+    role: &str,
+) -> Result<()> {
+    insert_active_replay_manifest(
+        pool,
+        manifest_id,
+        namespace,
+        source_family,
+        chain,
+        deployment_epoch,
+    )
+    .await?;
+    insert_contract_instance(pool, contract_instance_id, chain, "contract").await?;
+    insert_active_contract_instance_address(
+        pool,
+        contract_instance_id,
+        chain,
+        address,
+        Some(manifest_id),
+    )
+    .await?;
+    insert_manifest_contract_instance(
+        pool,
+        manifest_id,
+        role,
+        contract_instance_id,
+        address,
+        "none",
+        None,
+        None,
+    )
+    .await
+}
+
+async fn insert_active_replay_manifest(
+    pool: &PgPool,
+    manifest_id: i64,
+    namespace: &str,
+    source_family: &str,
+    chain: &str,
+    deployment_epoch: &str,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO manifest_versions (
+            manifest_id,
+            manifest_version,
+            namespace,
+            source_family,
+            chain,
+            deployment_epoch,
+            rollout_status,
+            normalizer_version,
+            file_path,
+            manifest_payload
+        )
+        VALUES (
+            $1,
+            1,
+            $2,
+            $3,
+            $4,
+            $5,
+            'active',
+            'uts46-v1',
+            ('manifests/' || $2 || '/' || $3 || '/v1.toml'),
+            '{}'::jsonb
+        )
+        "#,
+    )
+    .bind(manifest_id)
+    .bind(namespace)
+    .bind(source_family)
+    .bind(chain)
+    .bind(deployment_epoch)
+    .execute(pool)
+    .await
+    .context("failed to insert manifest_versions for dynamic resolver replay test")?;
+
+    Ok(())
 }
 
 async fn count_wrapper_replay_events(pool: &PgPool) -> Result<i64> {

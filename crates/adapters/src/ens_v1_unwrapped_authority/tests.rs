@@ -232,6 +232,51 @@ async fn insert_contract_instance_address(
     Ok(())
 }
 
+async fn insert_active_discovery_edge_with_range(
+    pool: &PgPool,
+    chain_id: &str,
+    edge_kind: &str,
+    from_contract_instance_id: Uuid,
+    to_contract_instance_id: Uuid,
+    source_manifest_id: i64,
+    active_from_block_number: Option<i64>,
+    active_to_block_number: Option<i64>,
+) -> Result<()> {
+    let discovery_source = format!(
+        "test:{edge_kind}:{from_contract_instance_id}:{to_contract_instance_id}:{active_from_block_number:?}:{active_to_block_number:?}"
+    );
+    sqlx::query(
+        r#"
+            INSERT INTO discovery_edges (
+                chain_id,
+                edge_kind,
+                from_contract_instance_id,
+                to_contract_instance_id,
+                discovery_source,
+                source_manifest_id,
+                admission,
+                active_from_block_number,
+                active_to_block_number,
+                provenance
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, 'test', $7, $8, $9::jsonb)
+            "#,
+    )
+    .bind(chain_id)
+    .bind(edge_kind)
+    .bind(from_contract_instance_id)
+    .bind(to_contract_instance_id)
+    .bind(discovery_source)
+    .bind(source_manifest_id)
+    .bind(active_from_block_number)
+    .bind(active_to_block_number)
+    .bind("{}")
+    .execute(pool)
+    .await
+    .context("failed to insert discovery edge")?;
+    Ok(())
+}
+
 async fn insert_active_contract_fixture(
     pool: &PgPool,
     source_family: &str,
@@ -1719,6 +1764,289 @@ async fn sync_ens_v1_unwrapped_authority_emits_reverse_claim_source_observations
             .await?,
             3
         );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn sync_ens_v1_unwrapped_authority_new_resolver_discovery_edge_respects_effective_range()
+-> Result<()> {
+    let _permit = crate::acquire_test_db_permit().await;
+    let database = TestDatabase::new().await?;
+
+    let reverse_manifest_id = insert_manifest_version(
+        database.pool(),
+        1,
+        "ens",
+        "ens_v1_reverse_l1",
+        "ethereum-mainnet",
+        "ens_v1",
+        "active",
+        "uts46-v1",
+        "manifests/ens/ens_v1_reverse_l1/v1.toml",
+    )
+    .await?;
+    let registry_manifest_id = insert_manifest_version(
+        database.pool(),
+        1,
+        "ens",
+        SOURCE_FAMILY_ENS_V1_REGISTRY_L1,
+        "ethereum-mainnet",
+        "ens_v1",
+        "active",
+        "uts46-v1",
+        "manifests/ens/ens_v1_registry_l1/v1.toml",
+    )
+    .await?;
+    let resolver_manifest_id = insert_manifest_version(
+        database.pool(),
+        1,
+        "ens",
+        SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
+        "ethereum-mainnet",
+        "ens_v1",
+        "active",
+        "uts46-v1",
+        "manifests/ens/ens_v1_resolver_l1/v1.toml",
+    )
+    .await?;
+    let registry_contract_instance_id = Uuid::new_v4();
+    let resolver_contract_instance_id = Uuid::new_v4();
+    let registry_address = "0x00000000000000000000000000000000000000bb";
+    let resolver_address = "0x00000000000000000000000000000000000000cc";
+    let unadmitted_resolver_address = "0x00000000000000000000000000000000000000dd";
+
+    insert_contract_instance(
+        database.pool(),
+        registry_contract_instance_id,
+        "ethereum-mainnet",
+        "contract",
+    )
+    .await?;
+    insert_manifest_contract_instance(
+        database.pool(),
+        registry_manifest_id,
+        "contract",
+        "registry",
+        registry_contract_instance_id,
+        registry_address,
+        Some("registry"),
+        Some("none"),
+    )
+    .await?;
+    insert_contract_instance_address(
+        database.pool(),
+        registry_contract_instance_id,
+        "ethereum-mainnet",
+        registry_address,
+        registry_manifest_id,
+    )
+    .await?;
+    insert_contract_instance(
+        database.pool(),
+        resolver_contract_instance_id,
+        "ethereum-mainnet",
+        "contract",
+    )
+    .await?;
+    insert_contract_instance_address(
+        database.pool(),
+        resolver_contract_instance_id,
+        "ethereum-mainnet",
+        resolver_address,
+        resolver_manifest_id,
+    )
+    .await?;
+    insert_active_discovery_edge_with_range(
+        database.pool(),
+        "ethereum-mainnet",
+        "resolver",
+        registry_contract_instance_id,
+        resolver_contract_instance_id,
+        registry_manifest_id,
+        Some(42),
+        Some(42),
+    )
+    .await?;
+
+    insert_active_discovery_edge_with_range(
+        database.pool(),
+        "ethereum-mainnet",
+        "resolver",
+        registry_contract_instance_id,
+        resolver_contract_instance_id,
+        registry_manifest_id,
+        Some(44),
+        Some(44),
+    )
+    .await?;
+
+    let block_hash = "0xedededededededededededededededededededededededededededededededed";
+    let closed_block_hash = "0xefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef";
+    let reopened_block_hash = "0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4";
+    let transaction_hash = "0xtxededededededededededededededededededededededededededededededed";
+    let claimed_address = "0x0000000000000000000000000000000000001234";
+    let reverse_node = reverse_node_for_address(claimed_address);
+    let reverse_name = format!(
+        "{}.addr.reverse",
+        reverse_label_for_address(claimed_address)
+    );
+
+    upsert_raw_blocks(
+        database.pool(),
+        &[
+            raw_block(
+                block_hash,
+                Some("0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"),
+                42,
+                1_700_000_042,
+            ),
+            raw_block(closed_block_hash, Some(block_hash), 43, 1_700_000_043),
+            raw_block(
+                reopened_block_hash,
+                Some(closed_block_hash),
+                44,
+                1_700_000_044,
+            ),
+        ],
+    )
+    .await?;
+    upsert_normalized_events(
+        database.pool(),
+        &[reverse_claim_event(
+            reverse_manifest_id,
+            block_hash,
+            transaction_hash,
+            0,
+            claimed_address,
+            &reverse_node,
+            &reverse_name,
+        )],
+    )
+    .await?;
+    upsert_raw_logs(
+        database.pool(),
+        &[
+            RawLog {
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: block_hash.to_owned(),
+                block_number: 42,
+                transaction_hash: transaction_hash.to_owned(),
+                transaction_index: 0,
+                log_index: 0,
+                emitting_address: registry_address.to_owned(),
+                topics: vec![new_resolver_topic0(), reverse_node.clone()],
+                data: encode_registry_new_resolver_log_data(resolver_address),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            RawLog {
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: block_hash.to_owned(),
+                block_number: 42,
+                transaction_hash: transaction_hash.to_owned(),
+                transaction_index: 0,
+                log_index: 1,
+                emitting_address: resolver_address.to_owned(),
+                topics: vec![name_changed_topic0(), reverse_node.clone()],
+                data: encode_dynamic_string_log_data("alice.eth"),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            RawLog {
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: block_hash.to_owned(),
+                block_number: 42,
+                transaction_hash: transaction_hash.to_owned(),
+                transaction_index: 0,
+                log_index: 2,
+                emitting_address: resolver_address.to_owned(),
+                topics: vec![version_changed_topic0(), reverse_node.clone()],
+                data: encode_resolver_version_changed_log_data(7),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            RawLog {
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: block_hash.to_owned(),
+                block_number: 42,
+                transaction_hash: transaction_hash.to_owned(),
+                transaction_index: 0,
+                log_index: 3,
+                emitting_address: unadmitted_resolver_address.to_owned(),
+                topics: vec![name_changed_topic0(), reverse_node.clone()],
+                data: encode_dynamic_string_log_data("unadmitted.eth"),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            RawLog {
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: closed_block_hash.to_owned(),
+                block_number: 43,
+                transaction_hash:
+                    "0xtxefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef".to_owned(),
+                transaction_index: 0,
+                log_index: 0,
+                emitting_address: resolver_address.to_owned(),
+                topics: vec![name_changed_topic0(), reverse_node.clone()],
+                data: encode_dynamic_string_log_data("closed.eth"),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            RawLog {
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: reopened_block_hash.to_owned(),
+                block_number: 44,
+                transaction_hash: "0xtxf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4"
+                    .to_owned(),
+                transaction_index: 0,
+                log_index: 0,
+                emitting_address: resolver_address.to_owned(),
+                topics: vec![name_changed_topic0(), reverse_node.clone()],
+                data: encode_dynamic_string_log_data("reopened.eth"),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+        ],
+    )
+    .await?;
+
+    let summary = sync_ens_v1_unwrapped_authority(database.pool(), "ethereum-mainnet").await?;
+    assert_eq!(summary.scanned_log_count, 4);
+    assert_eq!(summary.matched_log_count, 4);
+    assert_eq!(summary.total_normalized_event_count, 4);
+    assert_eq!(
+        summary.by_kind.get(EVENT_KIND_RESOLVER_CHANGED),
+        Some(&1_usize)
+    );
+    assert_eq!(
+        summary.by_kind.get(EVENT_KIND_RECORD_CHANGED),
+        Some(&2_usize)
+    );
+    assert_eq!(
+        summary.by_kind.get(EVENT_KIND_RECORD_VERSION_CHANGED),
+        Some(&1_usize)
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, Vec<String>>(
+            "SELECT ARRAY_AGG(after_state->>'raw_name' ORDER BY block_number, log_index) FROM normalized_events WHERE event_kind = 'RecordChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        vec!["alice.eth".to_owned(), "reopened.eth".to_owned()]
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM normalized_events WHERE raw_fact_ref->>'emitting_address' = $1"
+        )
+        .bind(unadmitted_resolver_address)
+        .fetch_one(database.pool())
+        .await?,
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM normalized_events WHERE raw_fact_ref->>'block_hash' = $1"
+        )
+        .bind(closed_block_hash)
+        .fetch_one(database.pool())
+        .await?,
+        0
+    );
 
     database.cleanup().await
 }

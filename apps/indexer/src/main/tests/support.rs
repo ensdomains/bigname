@@ -1078,6 +1078,91 @@ async fn insert_raw_name_wrapped_log(
     Ok(())
 }
 
+async fn insert_raw_resolver_name_changed_log_for_node(
+    pool: &PgPool,
+    chain: &str,
+    block: &ProviderBlock,
+    emitting_address: &str,
+    node: &str,
+    raw_name: &str,
+    log_index: i64,
+    canonicality_state: CanonicalityState,
+) -> Result<()> {
+    insert_raw_resolver_log(
+        pool,
+        chain,
+        block,
+        emitting_address,
+        vec![resolver_name_changed_topic0(), node.to_owned()],
+        decode_hex_string(&encode_dynamic_string_log_data(raw_name)),
+        log_index,
+        canonicality_state,
+    )
+    .await
+}
+
+async fn insert_raw_resolver_version_changed_log_for_node(
+    pool: &PgPool,
+    chain: &str,
+    block: &ProviderBlock,
+    emitting_address: &str,
+    node: &str,
+    version: u64,
+    log_index: i64,
+    canonicality_state: CanonicalityState,
+) -> Result<()> {
+    insert_raw_resolver_log(
+        pool,
+        chain,
+        block,
+        emitting_address,
+        vec![resolver_version_changed_topic0(), node.to_owned()],
+        decode_hex_string(&encode_resolver_version_changed_log_data(version)),
+        log_index,
+        canonicality_state,
+    )
+    .await
+}
+
+async fn insert_raw_resolver_log(
+    pool: &PgPool,
+    chain: &str,
+    block: &ProviderBlock,
+    emitting_address: &str,
+    topics: Vec<String>,
+    data: Vec<u8>,
+    log_index: i64,
+    canonicality_state: CanonicalityState,
+) -> Result<()> {
+    upsert_raw_blocks(
+        pool,
+        &[provider_block_to_raw_block(
+            chain,
+            block,
+            canonicality_state,
+        )],
+    )
+    .await?;
+    upsert_raw_logs(
+        pool,
+        &[RawLog {
+            chain_id: chain.to_owned(),
+            block_hash: block.block_hash.clone(),
+            block_number: block.block_number,
+            transaction_hash: transaction_hash_for_block(block),
+            transaction_index: 0,
+            log_index,
+            emitting_address: emitting_address.to_ascii_lowercase(),
+            topics,
+            data,
+            canonicality_state,
+        }],
+    )
+    .await?;
+
+    Ok(())
+}
+
 async fn insert_contract_instance(
     pool: &PgPool,
     contract_instance_id: Uuid,
@@ -1276,6 +1361,29 @@ async fn insert_active_discovery_edge(
     to_contract_instance_id: Uuid,
     source_manifest_id: Option<i64>,
 ) -> Result<()> {
+    insert_active_discovery_edge_with_range(
+        pool,
+        chain,
+        edge_kind,
+        from_contract_instance_id,
+        to_contract_instance_id,
+        source_manifest_id,
+        None,
+        None,
+    )
+    .await
+}
+
+async fn insert_active_discovery_edge_with_range(
+    pool: &PgPool,
+    chain: &str,
+    edge_kind: &str,
+    from_contract_instance_id: Uuid,
+    to_contract_instance_id: Uuid,
+    source_manifest_id: Option<i64>,
+    active_from_block_number: Option<i64>,
+    active_to_block_number: Option<i64>,
+) -> Result<()> {
     sqlx::query(
             r#"
             INSERT INTO discovery_edges (
@@ -1285,9 +1393,11 @@ async fn insert_active_discovery_edge(
                 to_contract_instance_id,
                 discovery_source,
                 source_manifest_id,
-                admission
+                admission,
+                active_from_block_number,
+                active_to_block_number
             )
-            VALUES ($1, $2, $3, $4, 'test', $5, 'test')
+            VALUES ($1, $2, $3, $4, 'test', $5, 'test', $6, $7)
             "#,
         )
         .bind(chain)
@@ -1295,6 +1405,8 @@ async fn insert_active_discovery_edge(
         .bind(from_contract_instance_id)
         .bind(to_contract_instance_id)
         .bind(source_manifest_id)
+        .bind(active_from_block_number)
+        .bind(active_to_block_number)
         .execute(pool)
         .await
         .with_context(|| {

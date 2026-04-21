@@ -538,12 +538,27 @@ async fn load_authority_raw_logs(
     restrict_to_block_hashes: bool,
     block_hashes: &[String],
 ) -> Result<Vec<AuthorityRawLogRow>> {
-    let emitters_by_address = active_emitters
+    let mut emitters_by_address = HashMap::<String, ActiveEmitter>::new();
+    for emitter in active_emitters {
+        match emitters_by_address.get(&emitter.address) {
+            Some(current) if !candidate_precedes(emitter, current) => {}
+            _ => {
+                emitters_by_address.insert(emitter.address.clone(), emitter.clone());
+            }
+        }
+    }
+    let watched_addresses = active_emitters
         .iter()
-        .cloned()
-        .map(|emitter| (emitter.address.clone(), emitter))
-        .collect::<HashMap<_, _>>();
-    let watched_addresses = emitters_by_address.keys().cloned().collect::<Vec<_>>();
+        .map(|emitter| emitter.address.clone())
+        .collect::<Vec<_>>();
+    let watched_effective_from_blocks = active_emitters
+        .iter()
+        .map(|emitter| emitter.active_from_block_number.unwrap_or(0))
+        .collect::<Vec<_>>();
+    let watched_effective_to_blocks = active_emitters
+        .iter()
+        .map(|emitter| emitter.active_to_block_number.unwrap_or(i64::MAX))
+        .collect::<Vec<_>>();
 
     let rows = sqlx::query(
         r#"
@@ -566,6 +581,17 @@ async fn load_authority_raw_logs(
         WHERE rl.chain_id = $1
           AND lower(rl.emitting_address) = ANY($2::TEXT[])
           AND ($3::BOOLEAN = FALSE OR rl.block_hash = ANY($4::TEXT[]))
+          AND EXISTS (
+              SELECT 1
+              FROM unnest($5::TEXT[], $6::BIGINT[], $7::BIGINT[]) AS watched(
+                  address,
+                  effective_from_block,
+                  effective_to_block
+              )
+              WHERE watched.address = lower(rl.emitting_address)
+                AND rl.block_number BETWEEN watched.effective_from_block
+                    AND watched.effective_to_block
+          )
           AND rl.canonicality_state IN (
               'canonical'::canonicality_state,
               'safe'::canonicality_state,
@@ -578,6 +604,9 @@ async fn load_authority_raw_logs(
     .bind(&watched_addresses)
     .bind(restrict_to_block_hashes)
     .bind(block_hashes)
+    .bind(&watched_addresses)
+    .bind(&watched_effective_from_blocks)
+    .bind(&watched_effective_to_blocks)
     .fetch_all(pool)
     .await
     .with_context(|| {
@@ -653,7 +682,7 @@ async fn load_active_emitters(pool: &PgPool, chain: &str) -> Result<Vec<ActiveEm
         .collect::<Vec<_>>();
 
     let active_manifests = load_active_manifest_metadata(pool, &manifest_ids).await?;
-    let mut emitters_by_address = HashMap::<String, ActiveEmitter>::new();
+    let mut emitters = Vec::new();
     for watched_contract in watched_contracts {
         let Some(source_manifest_id) = watched_contract.source_manifest_id else {
             continue;
@@ -679,18 +708,14 @@ async fn load_active_emitters(pool: &PgPool, chain: &str) -> Result<Vec<ActiveEm
             source_family: manifest.source_family.clone(),
             manifest_version: manifest.manifest_version,
             normalizer_version: manifest.normalizer_version.clone(),
+            active_from_block_number: watched_contract.active_from_block_number,
+            active_to_block_number: watched_contract.active_to_block_number,
             source_rank: source_rank(watched_contract.source),
         };
 
-        match emitters_by_address.get(&candidate.address) {
-            Some(current) if !candidate_precedes(&candidate, current) => {}
-            _ => {
-                emitters_by_address.insert(candidate.address.clone(), candidate);
-            }
-        }
+        emitters.push(candidate);
     }
 
-    let mut emitters = emitters_by_address.into_values().collect::<Vec<_>>();
     emitters.sort_by(|left, right| {
         left.address
             .cmp(&right.address)
