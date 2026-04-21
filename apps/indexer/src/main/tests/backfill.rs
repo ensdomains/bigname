@@ -1,5 +1,7 @@
 use std::{collections::BTreeMap, sync::Mutex};
 
+use bigname_storage::{BackfillLifecycleStatus, load_backfill_job, load_backfill_ranges};
+
 include!("support.rs");
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -12,6 +14,7 @@ struct RecordedRpcRequest {
 async fn hash_pinned_backfill_persists_range_and_is_idempotent_without_advancing_checkpoints()
 -> Result<()> {
     let database = TestDatabase::new().await?;
+    create_backfill_job_tables(database.pool()).await?;
     let root_contract_instance_id = Uuid::from_u128(901);
 
     sqlx::query(
@@ -95,14 +98,24 @@ async fn hash_pinned_backfill_persists_range_and_is_idempotent_without_advancing
     .await?;
 
     let range = BackfillBlockRange::new(42, 43)?;
-    let outcome =
-        run_hash_pinned_backfill_range(database.pool(), &watched_chain, &provider, range).await?;
+    let config = backfill_job_config(range, "indexer-backfill-hash-pinned", "lease-first")?;
+    let outcome = run_resumable_hash_pinned_backfill_job(
+        database.pool(),
+        &watched_chain,
+        &provider,
+        config.clone(),
+    )
+    .await?;
     assert_eq!(
         outcome,
-        backfill::BackfillOutcome {
+        backfill::BackfillJobRunOutcome {
+            backfill_job_id: outcome.backfill_job_id,
             chain: "ethereum-mainnet".to_owned(),
             from_block: 42,
             to_block: 43,
+            idempotency_key: "indexer-backfill-hash-pinned".to_owned(),
+            reserved_range_count: 1,
+            completed_range_count: 1,
             resolved_block_count: 2,
             raw_block_count: 2,
             raw_transaction_count: 2,
@@ -112,9 +125,63 @@ async fn hash_pinned_backfill_persists_range_and_is_idempotent_without_advancing
         }
     );
 
-    let rerun =
-        run_hash_pinned_backfill_range(database.pool(), &watched_chain, &provider, range).await?;
-    assert_eq!(rerun, outcome);
+    let job = load_backfill_job(database.pool(), outcome.backfill_job_id)
+        .await?
+        .expect("backfill job must exist");
+    assert_eq!(job.status, BackfillLifecycleStatus::Completed);
+    assert_eq!(job.deployment_profile, "mainnet");
+    assert_eq!(job.chain_id, "ethereum-mainnet");
+    assert_eq!(job.range_start_block_number, 42);
+    assert_eq!(job.range_end_block_number, 43);
+    assert_eq!(job.idempotency_key, "indexer-backfill-hash-pinned");
+    assert_eq!(job.scan_mode, "hash_pinned_block");
+
+    let ranges = load_backfill_ranges(database.pool(), outcome.backfill_job_id).await?;
+    assert_eq!(ranges.len(), 1);
+    assert_eq!(ranges[0].status, BackfillLifecycleStatus::Completed);
+    assert_eq!(ranges[0].range_start_block_number, 42);
+    assert_eq!(ranges[0].range_end_block_number, 43);
+    assert_eq!(ranges[0].checkpoint_block_number, 43);
+    assert_eq!(ranges[0].attempt_count, 1);
+
+    let rerun = run_resumable_hash_pinned_backfill_job(
+        database.pool(),
+        &watched_chain,
+        &provider,
+        backfill_job_config(range, "indexer-backfill-hash-pinned", "lease-repeat")?,
+    )
+    .await?;
+    assert_eq!(rerun.backfill_job_id, outcome.backfill_job_id);
+    assert_eq!(rerun.reserved_range_count, 0);
+    assert_eq!(rerun.completed_range_count, 0);
+    assert_eq!(rerun.resolved_block_count, 0);
+
+    let widened_error = run_resumable_hash_pinned_backfill_job(
+        database.pool(),
+        &watched_chain,
+        &provider,
+        backfill_job_config(
+            BackfillBlockRange::new(42, 44)?,
+            "indexer-backfill-hash-pinned",
+            "lease-widened",
+        )?,
+    )
+    .await
+    .expect_err("same idempotency key must not widen work");
+    assert!(
+        widened_error
+            .to_string()
+            .contains("does not match requested immutable job identity"),
+        "unexpected error: {widened_error:#}"
+    );
+
+    let ranges_after_conflict =
+        load_backfill_ranges(database.pool(), outcome.backfill_job_id).await?;
+    assert_eq!(ranges_after_conflict.len(), 1);
+    assert_eq!(ranges_after_conflict[0].range_start_block_number, 42);
+    assert_eq!(ranges_after_conflict[0].range_end_block_number, 43);
+    assert_eq!(ranges_after_conflict[0].checkpoint_block_number, 43);
+    assert_eq!(ranges_after_conflict[0].attempt_count, 1);
 
     assert_eq!(table_count(database.pool(), "raw_blocks").await?, 2);
     assert_eq!(table_count(database.pool(), "raw_transactions").await?, 2);
@@ -176,31 +243,31 @@ async fn hash_pinned_backfill_persists_range_and_is_idempotent_without_advancing
         .lock()
         .expect("request log must not be poisoned")
         .clone();
-    assert_eq!(requests.len(), 20);
+    assert_eq!(requests.len(), 10);
     assert_eq!(requests[0].method, "eth_getBlockByNumber");
     assert_eq!(
         requests[0].params.first().and_then(Value::as_str),
         Some("0x2a")
     );
-    assert_eq!(requests[1].method, "eth_getBlockByNumber");
+    assert_eq!(requests[1].method, "eth_getBlockByHash");
     assert_eq!(
         requests[1].params.first().and_then(Value::as_str),
-        Some("0x2b")
-    );
-    assert_eq!(requests[2].method, "eth_getBlockByHash");
-    assert_eq!(
-        requests[2].params.first().and_then(Value::as_str),
         Some(block_42.block_hash.as_str())
     );
-    assert_eq!(requests[5].method, "eth_getCode");
+    assert_eq!(requests[4].method, "eth_getCode");
     assert_eq!(
-        requests[5]
+        requests[4]
             .params
             .get(1)
             .and_then(Value::as_object)
             .and_then(|selection| selection.get("blockHash"))
             .and_then(Value::as_str),
         Some(block_42.block_hash.as_str())
+    );
+    assert_eq!(requests[5].method, "eth_getBlockByNumber");
+    assert_eq!(
+        requests[5].params.first().and_then(Value::as_str),
+        Some("0x2b")
     );
     assert_eq!(requests[6].method, "eth_getBlockByHash");
     assert_eq!(
@@ -225,6 +292,7 @@ async fn hash_pinned_backfill_persists_range_and_is_idempotent_without_advancing
 #[tokio::test]
 async fn hash_pinned_backfill_fails_missing_hash_payload_without_number_fallback() -> Result<()> {
     let database = TestDatabase::new().await?;
+    create_backfill_job_tables(database.pool()).await?;
     let block_hash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     let requests = Arc::new(Mutex::new(Vec::<RecordedRpcRequest>::new()));
     let request_log = Arc::clone(&requests);
@@ -272,11 +340,15 @@ async fn hash_pinned_backfill_fails_missing_hash_payload_without_number_fallback
         discovery_edge_entry_count: 0,
     };
 
-    let error = run_hash_pinned_backfill_range(
+    let error = run_resumable_hash_pinned_backfill_job(
         database.pool(),
         &watched_chain,
         &provider,
-        BackfillBlockRange::new(42, 42)?,
+        backfill_job_config(
+            BackfillBlockRange::new(42, 42)?,
+            "indexer-backfill-missing-hash",
+            "lease-fail",
+        )?,
     )
     .await
     .expect_err("missing hash-scoped block payload must fail");
@@ -286,6 +358,55 @@ async fn hash_pinned_backfill_fails_missing_hash_payload_without_number_fallback
         ),
         "unexpected error: {error:#}"
     );
+
+    let backfill_job_id = sqlx::query_scalar::<_, i64>(
+        "SELECT backfill_job_id FROM backfill_jobs WHERE idempotency_key = $1",
+    )
+    .bind("indexer-backfill-missing-hash")
+    .fetch_one(database.pool())
+    .await?;
+    let job = load_backfill_job(database.pool(), backfill_job_id)
+        .await?
+        .expect("failed backfill job must exist");
+    assert_eq!(job.status, BackfillLifecycleStatus::Failed);
+    assert_eq!(
+        job.failure_reason.as_deref(),
+        Some("hash-pinned backfill failed")
+    );
+    assert_eq!(
+        job.failure_metadata.get("phase").and_then(Value::as_str),
+        Some("hash_pinned_intake")
+    );
+
+    let ranges = load_backfill_ranges(database.pool(), backfill_job_id).await?;
+    assert_eq!(ranges.len(), 1);
+    assert_eq!(ranges[0].status, BackfillLifecycleStatus::Failed);
+    assert_eq!(
+        ranges[0].failure_reason.as_deref(),
+        Some("hash-pinned backfill failed")
+    );
+    assert_eq!(ranges[0].range_start_block_number, 42);
+    assert_eq!(ranges[0].range_end_block_number, 42);
+    assert_eq!(ranges[0].checkpoint_block_number, 42);
+    assert_eq!(ranges[0].attempt_count, 1);
+    assert_eq!(
+        ranges[0]
+            .failure_metadata
+            .get("block_number")
+            .and_then(Value::as_i64),
+        Some(42)
+    );
+    assert!(
+        ranges[0]
+            .failure_metadata
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .contains("provider did not return block"),
+        "unexpected failure metadata: {}",
+        ranges[0].failure_metadata
+    );
+
     let requests = requests
         .lock()
         .expect("request log must not be poisoned")
@@ -415,6 +536,159 @@ async fn number_resolving_provider(
     .await?;
 
     Ok((provider::JsonRpcProvider::new(&url)?, server))
+}
+
+fn backfill_job_config(
+    range: BackfillBlockRange,
+    idempotency_key: &str,
+    lease_token: &str,
+) -> Result<BackfillJobRunConfig> {
+    Ok(BackfillJobRunConfig {
+        deployment_profile: "mainnet".to_owned(),
+        idempotency_key: idempotency_key.to_owned(),
+        range,
+        lease_owner: "indexer-backfill-test".to_owned(),
+        lease_token: lease_token.to_owned(),
+        lease_expires_at: backfill_lease_deadline()?,
+    })
+}
+
+fn backfill_lease_deadline() -> Result<OffsetDateTime> {
+    OffsetDateTime::from_unix_timestamp(OffsetDateTime::now_utc().unix_timestamp() + 300)
+        .context("backfill lease deadline must be valid")
+}
+
+async fn create_backfill_job_tables(pool: &PgPool) -> Result<()> {
+    sqlx::query(
+        r#"
+        CREATE TYPE backfill_lifecycle_status AS ENUM (
+            'pending',
+            'reserved',
+            'running',
+            'completed',
+            'failed'
+        )
+        "#,
+    )
+    .execute(pool)
+    .await
+    .context("failed to create backfill_lifecycle_status type for indexer tests")?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE backfill_jobs (
+            backfill_job_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+            deployment_profile TEXT NOT NULL,
+            chain_id TEXT NOT NULL,
+            source_identity JSONB NOT NULL,
+            scan_mode TEXT NOT NULL,
+            range_start_block_number BIGINT NOT NULL CHECK (range_start_block_number >= 0),
+            range_end_block_number BIGINT NOT NULL CHECK (range_end_block_number >= range_start_block_number),
+            idempotency_key TEXT NOT NULL,
+            status backfill_lifecycle_status NOT NULL DEFAULT 'pending',
+            failure_reason TEXT,
+            failure_metadata JSONB NOT NULL DEFAULT '{}'::JSONB,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            completed_at TIMESTAMPTZ,
+            UNIQUE (idempotency_key),
+            CHECK (jsonb_typeof(source_identity) IN ('object', 'array')),
+            CHECK (jsonb_typeof(failure_metadata) = 'object'),
+            CHECK ((status = 'failed'::backfill_lifecycle_status) = (failure_reason IS NOT NULL) OR status <> 'failed'::backfill_lifecycle_status),
+            CHECK ((status = 'completed'::backfill_lifecycle_status) = (completed_at IS NOT NULL) OR status <> 'completed'::backfill_lifecycle_status)
+        )
+        "#,
+    )
+    .execute(pool)
+    .await
+    .context("failed to create backfill_jobs table for indexer tests")?;
+
+    sqlx::query(
+        r#"
+        CREATE INDEX backfill_jobs_lookup_idx
+            ON backfill_jobs (deployment_profile, chain_id, scan_mode, status)
+        "#,
+    )
+    .execute(pool)
+    .await
+    .context("failed to create backfill_jobs_lookup_idx for indexer tests")?;
+
+    sqlx::query(
+        r#"
+        CREATE INDEX backfill_jobs_range_idx
+            ON backfill_jobs (chain_id, range_start_block_number, range_end_block_number)
+        "#,
+    )
+    .execute(pool)
+    .await
+    .context("failed to create backfill_jobs_range_idx for indexer tests")?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE backfill_ranges (
+            backfill_range_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+            backfill_job_id BIGINT NOT NULL REFERENCES backfill_jobs (backfill_job_id) ON DELETE CASCADE,
+            range_start_block_number BIGINT NOT NULL CHECK (range_start_block_number >= 0),
+            range_end_block_number BIGINT NOT NULL CHECK (range_end_block_number >= range_start_block_number),
+            checkpoint_block_number BIGINT NOT NULL CHECK (checkpoint_block_number >= range_start_block_number AND checkpoint_block_number <= range_end_block_number),
+            status backfill_lifecycle_status NOT NULL DEFAULT 'pending',
+            lease_token TEXT,
+            lease_owner TEXT,
+            lease_expires_at TIMESTAMPTZ,
+            attempt_count BIGINT NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+            failure_reason TEXT,
+            failure_metadata JSONB NOT NULL DEFAULT '{}'::JSONB,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            completed_at TIMESTAMPTZ,
+            UNIQUE (backfill_job_id, range_start_block_number, range_end_block_number),
+            CHECK (jsonb_typeof(failure_metadata) = 'object'),
+            CHECK ((lease_token IS NULL) = (lease_owner IS NULL)),
+            CHECK ((lease_token IS NULL) = (lease_expires_at IS NULL)),
+            CHECK ((status IN ('reserved'::backfill_lifecycle_status, 'running'::backfill_lifecycle_status)) = (lease_token IS NOT NULL)),
+            CHECK ((status = 'failed'::backfill_lifecycle_status) = (failure_reason IS NOT NULL) OR status <> 'failed'::backfill_lifecycle_status),
+            CHECK ((status = 'completed'::backfill_lifecycle_status) = (completed_at IS NOT NULL) OR status <> 'completed'::backfill_lifecycle_status)
+        )
+        "#,
+    )
+    .execute(pool)
+    .await
+    .context("failed to create backfill_ranges table for indexer tests")?;
+
+    sqlx::query(
+        r#"
+        CREATE INDEX backfill_ranges_reservation_idx
+            ON backfill_ranges (backfill_job_id, status, range_start_block_number, range_end_block_number)
+        "#,
+    )
+    .execute(pool)
+    .await
+    .context("failed to create backfill_ranges_reservation_idx for indexer tests")?;
+
+    sqlx::query(
+        r#"
+        CREATE INDEX backfill_ranges_lease_expiry_idx
+            ON backfill_ranges (lease_expires_at)
+            WHERE lease_expires_at IS NOT NULL
+        "#,
+    )
+    .execute(pool)
+    .await
+    .context("failed to create backfill_ranges_lease_expiry_idx for indexer tests")?;
+
+    sqlx::query(
+        r#"
+        CREATE UNIQUE INDEX backfill_ranges_active_lease_token_idx
+            ON backfill_ranges (lease_token)
+            WHERE lease_token IS NOT NULL
+              AND status IN ('reserved'::backfill_lifecycle_status, 'running'::backfill_lifecycle_status)
+        "#,
+    )
+    .execute(pool)
+    .await
+    .context("failed to create backfill_ranges_active_lease_token_idx for indexer tests")?;
+
+    Ok(())
 }
 
 fn parse_rpc_block_number(value: &str) -> i64 {

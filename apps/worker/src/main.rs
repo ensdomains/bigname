@@ -847,6 +847,28 @@ mod tests {
                     assert_eq!(args.chain_id, "eth-mainnet");
                     assert_eq!(args.block_hash, "0xabc");
                 }
+                other => panic!("expected canonicality inspect command, got {other:?}"),
+            },
+            other => panic!("expected inspect command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inspect_backfill_job_cli_is_available() {
+        let cli = Cli::parse_from([
+            "bigname-worker",
+            "inspect",
+            "backfill-job",
+            "--backfill-job-id",
+            "42",
+        ]);
+
+        match cli.command {
+            Command::Inspect(args) => match args.command {
+                inspect::InspectCommand::BackfillJob(args) => {
+                    assert_eq!(args.backfill_job_id, 42);
+                }
+                other => panic!("expected backfill job inspect command, got {other:?}"),
             },
             other => panic!("expected inspect command, got {other:?}"),
         }

@@ -120,8 +120,8 @@ At minimum, manifests/discovery persistence must carry:
 
 At minimum, backfill persistence must carry:
 
-- `backfill_jobs`: one row per bounded backfill job with selected profile, chain, source identity or watch target set, scan mode, declared range start and end, lifecycle status, and idempotency key
-- `backfill_ranges`: child rows or equivalent range records with declared range bounds, next checkpoint, lease token, lease expiry, attempt counters, status, and failure metadata
+- `backfill_jobs`: one row per bounded backfill job with selected profile, chain, source identity or watch target set, scan mode, declared range start and end, idempotency key, lifecycle status, failure metadata, and timestamp metadata
+- `backfill_ranges`: child rows or equivalent range records with declared range bounds, next checkpoint, lease owner, lease token, lease expiry, attempt counters, lifecycle status, failure metadata, and timestamp metadata
 - monotonic helper-owned checkpoint fields that allow a worker to resume after crash without widening the original range or reclassifying already admitted facts
 
 Backfill job and range checkpoint rows are operational state. They do not replace `chain_lineage`, do not define canonicality, and do not promote `canonical_head`, `safe_head`, or `finalized_head`.
@@ -186,6 +186,8 @@ Backfill range checkpoints are separate from canonicality checkpoints. Advancing
 
 Read-only canonicality inspection uses storage audit helpers over `chain_lineage`, raw fact tables, and `normalized_events`. The worker inspection contract is block-hash only: `bigname-worker inspect canonicality --chain-id <id> --block-hash <hash>` resolves a single `(chain_id, block_hash)`. For that requested block hash, helpers may report whether a stored lineage row exists and, for stored rows, block lineage, parent hash, block number, canonicality state, raw fact counts, and normalized-event counts. Range-oriented storage helpers, where present, only list observed/stored lineage rows already known to storage. They do not infer absent heights, gaps, or aggregate orphan/canonical/safe/finalized status for a span. They must not mutate lineage, raw facts, normalized events, projections, execution cache rows, or backfill checkpoints.
 
+Read-only backfill job inspection uses storage audit helpers over `backfill_jobs` and `backfill_ranges`. The worker inspection contract is job-id only: `bigname-worker inspect backfill-job --backfill-job-id <id>` resolves one persisted job and its child ranges. It renders stable JSON with the job lifecycle, declared range, source identity or watch target set, idempotency key, timestamp metadata, failure metadata, and a `ranges` array sorted by range bounds and range id. Each range object includes lifecycle status, declared bounds, range checkpoint, lease owner/token/expiry, attempt count, timestamp metadata, and failure metadata. Nullable lease, completion, and failure fields must render as `null` or an empty metadata object rather than disappearing. The command is read-only: it must not reserve ranges, refresh leases, advance checkpoints, complete or fail jobs, mutate chain lineage, mutate raw facts, update projections, update execution cache rows, or promote `canonical_head`, `safe_head`, or `finalized_head`.
+
 ## 7. Projection Storage Rules
 
 Every current-state projection row carries:
@@ -238,3 +240,4 @@ To keep parallel work safe:
 - synchronous indexer/reorg repair owns only `execution_cache_outcomes` deletes or invalidations tied to orphaned block dependencies
 - API code must not query raw-fact tables directly except for explicit audit endpoints
 - canonicality and raw-fact inspection tooling is worker-owned, read-only operational tooling over storage audit helpers; it does not create a public `v1` route and does not bypass the API boundary for user-facing reads
+- backfill job inspection tooling is worker-owned, read-only operational tooling over `backfill_*`; it does not create a public `v1` route, mutate operational state, or bypass API read boundaries for user-facing data

@@ -1,10 +1,15 @@
 use anyhow::{Context, Result, bail};
 use bigname_manifests::WatchedChainPlan;
 use bigname_storage::{
-    CanonicalityState, RawCodeHash, RawLog, RawReceipt, RawTransaction, upsert_raw_blocks,
-    upsert_raw_code_hashes, upsert_raw_logs, upsert_raw_receipts, upsert_raw_transactions,
+    BackfillJobCreate, BackfillLifecycleStatus, BackfillRange, BackfillRangeSpec,
+    CanonicalityState, RawCodeHash, RawLog, RawReceipt, RawTransaction, advance_backfill_range,
+    complete_backfill_range, create_backfill_job, fail_backfill_range, load_backfill_job,
+    reserve_backfill_range, upsert_raw_blocks, upsert_raw_code_hashes, upsert_raw_logs,
+    upsert_raw_receipts, upsert_raw_transactions,
 };
-use tracing::info;
+use serde_json::{Value, json};
+use sqlx::types::time::OffsetDateTime;
+use tracing::{error, info};
 
 use crate::{
     provider::{JsonRpcProvider, ProviderBlockSelection},
@@ -15,6 +20,9 @@ use crate::{
         sync_adapter_state_from_persisted_raw_payloads,
     },
 };
+
+const HASH_PINNED_BACKFILL_SCAN_MODE: &str = "hash_pinned_block";
+const MAX_FAILURE_ERROR_CHARS: usize = 2048;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct BackfillBlockRange {
@@ -51,6 +59,16 @@ impl BackfillBlockRange {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct BackfillJobRunConfig {
+    pub(crate) deployment_profile: String,
+    pub(crate) idempotency_key: String,
+    pub(crate) range: BackfillBlockRange,
+    pub(crate) lease_owner: String,
+    pub(crate) lease_token: String,
+    pub(crate) lease_expires_at: OffsetDateTime,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct BackfillOutcome {
     pub(crate) chain: String,
     pub(crate) from_block: i64,
@@ -64,9 +82,154 @@ pub(crate) struct BackfillOutcome {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct BackfillJobRunOutcome {
+    pub(crate) backfill_job_id: i64,
+    pub(crate) chain: String,
+    pub(crate) from_block: i64,
+    pub(crate) to_block: i64,
+    pub(crate) idempotency_key: String,
+    pub(crate) reserved_range_count: usize,
+    pub(crate) completed_range_count: usize,
+    pub(crate) resolved_block_count: usize,
+    pub(crate) raw_block_count: usize,
+    pub(crate) raw_transaction_count: usize,
+    pub(crate) raw_receipt_count: usize,
+    pub(crate) raw_log_count: usize,
+    pub(crate) raw_code_hash_count: usize,
+}
+
+impl BackfillJobRunOutcome {
+    fn new(
+        backfill_job_id: i64,
+        watched_chain: &WatchedChainPlan,
+        config: &BackfillJobRunConfig,
+    ) -> Self {
+        Self {
+            backfill_job_id,
+            chain: watched_chain.chain.clone(),
+            from_block: config.range.from_block,
+            to_block: config.range.to_block,
+            idempotency_key: config.idempotency_key.clone(),
+            reserved_range_count: 0,
+            completed_range_count: 0,
+            resolved_block_count: 0,
+            raw_block_count: 0,
+            raw_transaction_count: 0,
+            raw_receipt_count: 0,
+            raw_log_count: 0,
+            raw_code_hash_count: 0,
+        }
+    }
+
+    fn add_range_outcome(&mut self, outcome: &BackfillOutcome) {
+        self.resolved_block_count += outcome.resolved_block_count;
+        self.raw_block_count += outcome.raw_block_count;
+        self.raw_transaction_count += outcome.raw_transaction_count;
+        self.raw_receipt_count += outcome.raw_receipt_count;
+        self.raw_log_count += outcome.raw_log_count;
+        self.raw_code_hash_count += outcome.raw_code_hash_count;
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct ResolvedBackfillBlock {
     block_number: i64,
     block_hash: String,
+}
+
+pub(crate) async fn run_resumable_hash_pinned_backfill_job(
+    pool: &sqlx::PgPool,
+    watched_chain: &WatchedChainPlan,
+    provider: &JsonRpcProvider,
+    config: BackfillJobRunConfig,
+) -> Result<BackfillJobRunOutcome> {
+    let request = BackfillJobCreate {
+        deployment_profile: config.deployment_profile.clone(),
+        chain_id: watched_chain.chain.clone(),
+        source_identity: backfill_source_identity(watched_chain),
+        scan_mode: HASH_PINNED_BACKFILL_SCAN_MODE.to_owned(),
+        range_start_block_number: config.range.from_block,
+        range_end_block_number: config.range.to_block,
+        idempotency_key: config.idempotency_key.clone(),
+        ranges: vec![BackfillRangeSpec {
+            range_start_block_number: config.range.from_block,
+            range_end_block_number: config.range.to_block,
+        }],
+    };
+    let record = create_backfill_job(pool, &request).await?;
+    let mut outcome =
+        BackfillJobRunOutcome::new(record.job.backfill_job_id, watched_chain, &config);
+
+    info!(
+        service = "indexer",
+        command = "backfill",
+        backfill_job_id = record.job.backfill_job_id,
+        backfill_job_status = record.job.status.as_str(),
+        chain = %watched_chain.chain,
+        deployment_profile = %config.deployment_profile,
+        from_block = config.range.from_block,
+        to_block = config.range.to_block,
+        idempotency_key = %config.idempotency_key,
+        range_count = record.ranges.len(),
+        "resumable backfill job loaded"
+    );
+
+    loop {
+        let Some(reserved_range) = reserve_backfill_range(
+            pool,
+            record.job.backfill_job_id,
+            &config.lease_owner,
+            &config.lease_token,
+            config.lease_expires_at,
+        )
+        .await?
+        else {
+            break;
+        };
+
+        outcome.reserved_range_count += 1;
+        run_reserved_hash_pinned_backfill_range(
+            pool,
+            watched_chain,
+            provider,
+            &config,
+            &reserved_range,
+            &mut outcome,
+        )
+        .await?;
+        outcome.completed_range_count += 1;
+    }
+
+    let job = load_backfill_job(pool, record.job.backfill_job_id)
+        .await?
+        .with_context(|| format!("missing backfill job {}", record.job.backfill_job_id))?;
+    if job.status == BackfillLifecycleStatus::Completed {
+        info!(
+            service = "indexer",
+            command = "backfill",
+            backfill_job_id = outcome.backfill_job_id,
+            chain = %outcome.chain,
+            from_block = outcome.from_block,
+            to_block = outcome.to_block,
+            idempotency_key = %outcome.idempotency_key,
+            reserved_range_count = outcome.reserved_range_count,
+            completed_range_count = outcome.completed_range_count,
+            resolved_block_count = outcome.resolved_block_count,
+            raw_block_count = outcome.raw_block_count,
+            raw_transaction_count = outcome.raw_transaction_count,
+            raw_receipt_count = outcome.raw_receipt_count,
+            raw_log_count = outcome.raw_log_count,
+            raw_code_hash_count = outcome.raw_code_hash_count,
+            "resumable hash-pinned backfill job completed"
+        );
+        return Ok(outcome);
+    }
+
+    bail!(
+        "backfill job {} has no reservable ranges but is {}; another active lease may still own work",
+        record.job.backfill_job_id,
+        job.status.as_str()
+    );
 }
 
 pub(crate) async fn run_hash_pinned_backfill_range(
@@ -208,6 +371,152 @@ pub(crate) async fn run_hash_pinned_backfill_range(
     );
 
     Ok(outcome)
+}
+
+async fn run_reserved_hash_pinned_backfill_range(
+    pool: &sqlx::PgPool,
+    watched_chain: &WatchedChainPlan,
+    provider: &JsonRpcProvider,
+    config: &BackfillJobRunConfig,
+    reserved_range: &BackfillRange,
+    aggregate: &mut BackfillJobRunOutcome,
+) -> Result<()> {
+    let mut active_range = reserved_range.clone();
+    let mut block_number = active_range.checkpoint_block_number;
+    while block_number <= active_range.range_end_block_number {
+        let block_range = BackfillBlockRange::new(block_number, block_number)?;
+        let block_outcome = match run_hash_pinned_backfill_range(
+            pool,
+            watched_chain,
+            provider,
+            block_range,
+        )
+        .await
+        {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                return Err(record_reserved_range_failure(
+                    pool,
+                    &active_range,
+                    config,
+                    "hash-pinned backfill failed",
+                    Some(block_number),
+                    "hash_pinned_intake",
+                    error,
+                )
+                .await);
+            }
+        };
+        aggregate.add_range_outcome(&block_outcome);
+
+        active_range = match advance_backfill_range(
+            pool,
+            active_range.backfill_range_id,
+            &config.lease_token,
+            block_number,
+        )
+        .await
+        {
+            Ok(range) => range,
+            Err(error) => {
+                return Err(record_reserved_range_failure(
+                    pool,
+                    &active_range,
+                    config,
+                    "backfill checkpoint advance failed",
+                    Some(block_number),
+                    "checkpoint_advance",
+                    error,
+                )
+                .await);
+            }
+        };
+
+        block_number = block_number
+            .checked_add(1)
+            .context("backfill block number overflowed while advancing range")?;
+    }
+
+    if let Err(error) =
+        complete_backfill_range(pool, active_range.backfill_range_id, &config.lease_token).await
+    {
+        return Err(record_reserved_range_failure(
+            pool,
+            &active_range,
+            config,
+            "backfill range completion failed",
+            None,
+            "range_completion",
+            error,
+        )
+        .await);
+    }
+
+    Ok(())
+}
+
+fn backfill_source_identity(watched_chain: &WatchedChainPlan) -> Value {
+    let mut watch_targets = watched_chain.addresses.clone();
+    watch_targets.sort();
+    json!({
+        "kind": "active_watched_chain_targets",
+        "watch_targets": watch_targets,
+    })
+}
+
+async fn record_reserved_range_failure(
+    pool: &sqlx::PgPool,
+    reserved_range: &BackfillRange,
+    config: &BackfillJobRunConfig,
+    failure_reason: &str,
+    block_number: Option<i64>,
+    phase: &str,
+    error: anyhow::Error,
+) -> anyhow::Error {
+    let failure_metadata = json!({
+        "phase": phase,
+        "block_number": block_number,
+        "range_start_block_number": reserved_range.range_start_block_number,
+        "range_end_block_number": reserved_range.range_end_block_number,
+        "checkpoint_block_number": reserved_range.checkpoint_block_number,
+        "idempotency_key": &config.idempotency_key,
+        "error": truncate_failure_error(&format!("{error:#}")),
+    });
+
+    match fail_backfill_range(
+        pool,
+        reserved_range.backfill_range_id,
+        &config.lease_token,
+        failure_reason,
+        failure_metadata,
+    )
+    .await
+    {
+        Ok(_) => error.context("recorded persisted backfill failure state"),
+        Err(fail_error) => {
+            error!(
+                service = "indexer",
+                command = "backfill",
+                backfill_range_id = reserved_range.backfill_range_id,
+                failure_record_error = %fail_error,
+                "failed to record persisted backfill failure state"
+            );
+            error.context(format!(
+                "failed to record persisted backfill failure state: {fail_error:#}"
+            ))
+        }
+    }
+}
+
+fn truncate_failure_error(error: &str) -> String {
+    let mut truncated = error
+        .chars()
+        .take(MAX_FAILURE_ERROR_CHARS)
+        .collect::<String>();
+    if error.chars().count() > MAX_FAILURE_ERROR_CHARS {
+        truncated.push_str("...[truncated]");
+    }
+    truncated
 }
 
 async fn resolve_backfill_range(

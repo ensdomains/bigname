@@ -14,9 +14,10 @@ mod runtime;
 mod tests;
 
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::Result;
-use backfill::{BackfillBlockRange, run_hash_pinned_backfill_range};
+use anyhow::{Context, Result, bail};
+use backfill::{BackfillBlockRange, BackfillJobRunConfig, run_resumable_hash_pinned_backfill_job};
 use bigname_manifests::{
     ManifestLoadStatus, ManifestLoadSummary, ManifestSyncStatus, ManifestSyncSummary,
     WatchedChainPlan, load_watched_chain_plan, load_watched_contract_summary,
@@ -37,6 +38,7 @@ use reconciliation::*;
 use runtime::*;
 #[allow(unused_imports)]
 use sha3::{Digest, Keccak256};
+use sqlx::types::time::OffsetDateTime;
 use tracing::info;
 
 const MAX_PARENT_FETCH_DEPTH: usize = 32;
@@ -102,6 +104,16 @@ struct BackfillArgs {
     from_block: i64,
     #[arg(long)]
     to_block: i64,
+    #[arg(long)]
+    idempotency_key: String,
+    #[arg(long)]
+    deployment_profile: Option<String>,
+    #[arg(long)]
+    lease_owner: Option<String>,
+    #[arg(long)]
+    lease_token: Option<String>,
+    #[arg(long, default_value_t = 300_u64)]
+    lease_duration_secs: u64,
 }
 
 #[tokio::main]
@@ -245,6 +257,66 @@ async fn run_backfill(args: BackfillArgs) -> Result<()> {
         )
     })?;
 
-    run_hash_pinned_backfill_range(&pool, watched_chain, provider, range).await?;
+    let deployment_profile = args
+        .deployment_profile
+        .unwrap_or_else(|| deployment_profile_from_manifest_root(&args.manifests_root));
+    let lease_owner = args
+        .lease_owner
+        .unwrap_or_else(default_backfill_lease_owner);
+    let lease_token = match args.lease_token {
+        Some(lease_token) => lease_token,
+        None => generated_backfill_lease_token()?,
+    };
+    let lease_expires_at = backfill_lease_expires_at(args.lease_duration_secs)?;
+    let config = BackfillJobRunConfig {
+        deployment_profile,
+        idempotency_key: args.idempotency_key,
+        range,
+        lease_owner,
+        lease_token,
+        lease_expires_at,
+    };
+
+    run_resumable_hash_pinned_backfill_job(&pool, watched_chain, provider, config).await?;
     Ok(())
+}
+
+fn deployment_profile_from_manifest_root(manifests_root: &std::path::Path) -> String {
+    let root_name = manifests_root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("manifests");
+    if root_name == "manifests" {
+        "mainnet".to_owned()
+    } else if let Some(profile) = root_name.strip_prefix("manifests-") {
+        profile.to_owned()
+    } else {
+        root_name.to_owned()
+    }
+}
+
+fn default_backfill_lease_owner() -> String {
+    format!("bigname-indexer:{}", std::process::id())
+}
+
+fn generated_backfill_lease_token() -> Result<String> {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock is before unix epoch")?
+        .as_nanos();
+    Ok(format!("bigname-indexer:{}:{nanos}", std::process::id()))
+}
+
+fn backfill_lease_expires_at(lease_duration_secs: u64) -> Result<OffsetDateTime> {
+    if lease_duration_secs == 0 {
+        bail!("backfill lease duration must be greater than zero");
+    }
+    let duration = i64::try_from(lease_duration_secs)
+        .context("backfill lease duration does not fit in i64 seconds")?;
+    let deadline = OffsetDateTime::now_utc()
+        .unix_timestamp()
+        .checked_add(duration)
+        .context("backfill lease expiry timestamp overflowed")?;
+    OffsetDateTime::from_unix_timestamp(deadline)
+        .context("backfill lease expiry timestamp is out of range")
 }

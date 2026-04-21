@@ -152,15 +152,17 @@ Backfill jobs use a bounded lifecycle:
 - `completed`: every range checkpoint for the job reached its declared end
 - `failed`: the job or range stopped with recorded failure metadata and can be retried by creating or reserving explicit remaining work
 
+The resumable backfill runner command is indexer/backfill-owned operational tooling exposed through `bigname-indexer backfill` over this persisted job model. Each invocation supplies or reuses an idempotency key for one immutable job shape: selected deployment profile, chain, source identity or watch target set, scan mode, finite range start, and finite range end. If the idempotency key already names that exact job shape, the command reuses the existing job and ranges. If the same key is presented with a different job shape, the command must fail with an explicit conflict instead of widening the range, changing source identity, resetting checkpoints, or reclassifying already admitted facts.
+
 Storage helpers own lifecycle mutation. They must be idempotent:
 
-- `create_backfill_job` inserts a new bounded job or returns the existing matching job without widening its range or changing source identity
-- `reserve_backfill_range` atomically claims pending work with a lease token and returns the same reservation for duplicate calls by the lease holder; expired leases can be reclaimed without duplicating range work
-- `advance_backfill_range` moves the persisted range checkpoint forward monotonically, never below the prior checkpoint and never beyond the declared range end
+- `create_backfill_job` inserts a new bounded job or returns the existing job for the same idempotency key and immutable job shape without widening or narrowing its range, changing source identity, or replacing child range bounds
+- `reserve_backfill_range` atomically claims pending or reclaimable work with a lease owner, lease token, and lease expiry; duplicate calls by the same active lease holder return the same reservation, and expired leases can be reclaimed without duplicating range work
+- `advance_backfill_range` requires the current lease and moves the persisted range checkpoint forward monotonically, never below the prior checkpoint and never beyond the declared range end
 - `complete_backfill_range` and `complete_backfill_job` are no-ops when already complete and must require all child range checkpoints to reach their declared ends
-- `fail_backfill_range` and `fail_backfill_job` record bounded failure state without rewinding completed checkpoints or mutating raw facts
+- `fail_backfill_range` and `fail_backfill_job` record bounded failure state and failure metadata without rewinding completed checkpoints, clearing completed ranges, or mutating raw facts
 
-Range checkpoints are owned by the backfill job substrate. They record operational progress for fetch/resume only and must not be reused as chain checkpoints, projection replay checkpoints, or API consistency checkpoints.
+Range checkpoints are owned by the backfill job substrate. They record operational progress for fetch/resume only and must not be reused as chain checkpoints, projection replay checkpoints, or API consistency checkpoints. The runner must not call chain checkpoint advancement as a side effect of creating, reserving, advancing, completing, or failing a backfill job.
 
 Rules:
 
@@ -168,7 +170,7 @@ Rules:
 - receipt-rich indexing should prefer block-scoped receipt ingestion when available
 - backfill jobs must be resumable, idempotent, and bounded by explicit checkpoints
 - backfill completion is not proof of finality; canonical, safe, and finalized promotion still follow the lineage model
-- backfill job and range checkpoint updates must not promote `canonical_head`, `safe_head`, or `finalized_head`
+- backfill job and range checkpoint updates must not mutate or promote `canonical_head`, `safe_head`, or `finalized_head`
 
 ## 9. Batch And Retry Rules
 
