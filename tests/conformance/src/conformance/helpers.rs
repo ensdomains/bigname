@@ -1008,6 +1008,75 @@
             Ok(())
         }
 
+        async fn set_normalized_events_canonicality(
+            database: &HarnessDatabase,
+            event_identities: &[&str],
+            state: CanonicalityState,
+        ) -> Result<()> {
+            let event_identities = event_identities
+                .iter()
+                .map(|identity| (*identity).to_owned())
+                .collect::<Vec<_>>();
+            let updated = sqlx::query(
+                r#"
+                UPDATE normalized_events
+                SET canonicality_state = $1::canonicality_state
+                WHERE event_identity = ANY($2::TEXT[])
+                "#,
+            )
+            .bind(state.as_str())
+            .bind(&event_identities)
+            .execute(&database.pool)
+            .await
+            .context("failed to update normalized_events canonicality for conformance")?
+            .rows_affected();
+
+            anyhow::ensure!(
+                updated == event_identities.len() as u64,
+                "expected to update {} normalized_events rows to {}, updated {updated}",
+                event_identities.len(),
+                state.as_str()
+            );
+
+            Ok(())
+        }
+
+        async fn set_raw_blocks_canonicality(
+            database: &HarnessDatabase,
+            chain_id: &str,
+            block_hashes: &[&str],
+            state: CanonicalityState,
+        ) -> Result<()> {
+            let block_hashes = block_hashes
+                .iter()
+                .map(|block_hash| (*block_hash).to_owned())
+                .collect::<Vec<_>>();
+            let updated = sqlx::query(
+                r#"
+                UPDATE raw_blocks
+                SET canonicality_state = $1::canonicality_state
+                WHERE chain_id = $2
+                  AND block_hash = ANY($3::TEXT[])
+                "#,
+            )
+            .bind(state.as_str())
+            .bind(chain_id)
+            .bind(&block_hashes)
+            .execute(&database.pool)
+            .await
+            .context("failed to update raw_blocks canonicality for conformance")?
+            .rows_affected();
+
+            anyhow::ensure!(
+                updated == block_hashes.len() as u64,
+                "expected to update {} raw_blocks rows to {}, updated {updated}",
+                block_hashes.len(),
+                state.as_str()
+            );
+
+            Ok(())
+        }
+
         #[allow(clippy::too_many_arguments)]
         fn history_event(
             event_identity: &str,

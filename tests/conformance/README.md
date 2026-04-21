@@ -211,7 +211,12 @@ Execution notes:
   fixtures, snapshots exact-name, child and address-name collection, name/resource/address
   history, resolution, resource-permissions, resolver-overview, and primary-name route payloads,
   runs `bigname-worker replay all-current-projections` against that same database, and asserts the
-  route payloads remain byte-for-byte JSON stable. This locks replay idempotence over the shipped
-  route contracts only; it does not widen exact-name support, coverage semantics, verified
-  execution support, ENSv2 exact-name support, Basenames path classes, or consumer-replacement
-  claims
+  route payloads remain byte-for-byte JSON stable. Reorg/current-answer replay coverage also
+  seeds stale losing-branch current projections, marks the losing-branch `normalized_events` and
+  `raw_blocks` source rows `orphaned`, inserts canonical winning-branch source rows, proves stale
+  current answers exist before replay, runs `bigname-worker replay all-current-projections`, and
+  asserts shipped route payloads rebuild to canonical winning-branch truth while losing-branch
+  address, resolver, and history data disappear. This locks replay idempotence and canonical-only
+  rebuild behavior over the shipped route contracts only; it does not widen route support,
+  coverage semantics, verified execution support, manifest capabilities, ENSv2 exact-name support,
+  Basenames path classes, or consumer replacement
