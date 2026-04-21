@@ -76,3 +76,11 @@ jobs:
       - name: verify migrations
         if: steps.workspace.outputs.present == 'true'
         run: cargo run -p bigname-worker -- migrate
+
+      - name: release smoke gate (no network)
+        if: steps.workspace.outputs.present == 'true'
+        run: ./scripts/release-smoke --no-network
+
+      - name: rollback smoke gate (no network)
+        if: steps.workspace.outputs.present == 'true'
+        run: ./scripts/rollback-smoke --no-network

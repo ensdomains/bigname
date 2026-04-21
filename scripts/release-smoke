@@ -1,0 +1,158 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+usage() {
+  cat <<'USAGE'
+Usage: scripts/release-smoke [--no-network]
+
+Runs the local release smoke gate:
+  - no-network sanity, when requested
+  - checked-in OpenAPI artifact drift
+  - checked-in database migrations
+  - local API /healthz readiness
+
+Environment:
+  BIGNAME_DATABASE_URL or DATABASE_URL      PostgreSQL connection URL.
+  BIGNAME_SMOKE_API_BIND_ADDR              API bind addr, default 127.0.0.1:3000.
+  BIGNAME_SMOKE_API_HEALTH_URL             Health URL, default derived from bind addr.
+USAGE
+}
+
+log() {
+  printf '[release-smoke] %s\n' "$*"
+}
+
+fail() {
+  printf '[release-smoke] ERROR: %s\n' "$*" >&2
+  exit 1
+}
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || fail "missing required command: $1"
+}
+
+no_network=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --no-network)
+      no_network=1
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      usage >&2
+      fail "unknown argument: $1"
+      ;;
+  esac
+  shift
+done
+
+if [ -f .env ]; then
+  set -a
+  . ./.env
+  set +a
+fi
+
+export BIGNAME_DATABASE_URL="${BIGNAME_DATABASE_URL:-${DATABASE_URL:-postgres://bigname:bigname@127.0.0.1:5432/bigname}}"
+BIGNAME_SMOKE_API_BIND_ADDR="${BIGNAME_SMOKE_API_BIND_ADDR:-127.0.0.1:3000}"
+BIGNAME_SMOKE_API_HEALTH_URL="${BIGNAME_SMOKE_API_HEALTH_URL:-http://${BIGNAME_SMOKE_API_BIND_ADDR}/healthz}"
+
+cargo_args=(--locked)
+if [ "$no_network" -eq 1 ]; then
+  export CARGO_NET_OFFLINE=true
+  cargo_args+=(--offline)
+fi
+
+assert_no_network_mode() {
+  [ "$no_network" -eq 1 ] || return 0
+
+  case "$BIGNAME_SMOKE_API_BIND_ADDR" in
+    127.*:*|localhost:*|"[::1]:"*) ;;
+    *)
+      fail "--no-network requires BIGNAME_SMOKE_API_BIND_ADDR to be loopback, got ${BIGNAME_SMOKE_API_BIND_ADDR}"
+      ;;
+  esac
+
+  case "$BIGNAME_SMOKE_API_HEALTH_URL" in
+    http://127.*|http://localhost:*|http://"[::1]":*) ;;
+    *)
+      fail "--no-network requires BIGNAME_SMOKE_API_HEALTH_URL to be loopback, got ${BIGNAME_SMOKE_API_HEALTH_URL}"
+      ;;
+  esac
+
+  log "no-network mode enabled: cargo is offline and readiness uses loopback only"
+}
+
+api_pid=""
+openapi_tmp="$(mktemp -t bigname-release-openapi.XXXXXX)"
+health_body_tmp="$(mktemp -t bigname-release-health.XXXXXX)"
+api_log_tmp="$(mktemp -t bigname-release-api.XXXXXX.log)"
+
+cleanup() {
+  if [ -n "$api_pid" ] && kill -0 "$api_pid" 2>/dev/null; then
+    kill "$api_pid" 2>/dev/null || true
+    wait "$api_pid" 2>/dev/null || true
+  fi
+  rm -f "$openapi_tmp" "$health_body_tmp" "$api_log_tmp"
+}
+trap cleanup EXIT INT TERM
+
+run_openapi_drift_check() {
+  log "checking OpenAPI artifact drift"
+  cargo run "${cargo_args[@]}" -p bigname-api -- print-openapi > "$openapi_tmp"
+  diff -u docs/api-v1.openapi.json "$openapi_tmp"
+}
+
+run_migrations() {
+  log "applying checked-in migrations"
+  cargo run "${cargo_args[@]}" -p bigname-worker -- migrate
+}
+
+run_readiness_check() {
+  require_command curl
+
+  log "starting API for readiness probe on ${BIGNAME_SMOKE_API_BIND_ADDR}"
+  cargo run "${cargo_args[@]}" -p bigname-api -- serve \
+    --bind-addr "$BIGNAME_SMOKE_API_BIND_ADDR" \
+    > "$api_log_tmp" 2>&1 &
+  api_pid=$!
+
+  for _attempt in $(seq 1 30); do
+    if ! kill -0 "$api_pid" 2>/dev/null; then
+      sed -n '1,160p' "$api_log_tmp" >&2 || true
+      fail "API exited before readiness probe completed"
+    fi
+
+    http_status="$(
+      curl --silent --show-error --max-time 2 \
+        --output "$health_body_tmp" \
+        --write-out '%{http_code}' \
+        "$BIGNAME_SMOKE_API_HEALTH_URL" 2>/dev/null || true
+    )"
+
+    if [ "$http_status" = "200" ] && grep -q '"status":"ready"' "$health_body_tmp"; then
+      log "readiness probe passed"
+      return 0
+    fi
+
+    sleep 1
+  done
+
+  sed -n '1,160p' "$api_log_tmp" >&2 || true
+  sed -n '1,80p' "$health_body_tmp" >&2 || true
+  fail "API readiness probe failed at ${BIGNAME_SMOKE_API_HEALTH_URL}"
+}
+
+require_command cargo
+require_command diff
+require_command seq
+assert_no_network_mode
+run_openapi_drift_check
+run_migrations
+run_readiness_check
+log "release smoke gate passed"
