@@ -42,15 +42,22 @@ Focused source-family backfill conformance lock, from the repository root:
 cargo test --manifest-path tests/conformance/Cargo.toml backfill_source_family
 ```
 
+Focused reorg chaos drill conformance job, from the repository root:
+
+```sh
+cargo test --manifest-path tests/conformance/Cargo.toml reorg_chaos_drill_conformance_job
+```
+
 Execution notes:
 
 - uses `BIGNAME_DATABASE_URL` when set, then `DATABASE_URL` when set
 - otherwise falls back to the bootstrap default `postgres://bigname:bigname@127.0.0.1:5432/bigname`
 - each test creates, migrates, and drops its own temporary database
-- replay and backfill conformance jobs expect that configured Postgres server to be local and
-  reachable with privileges to create and drop per-test databases; when no local Postgres is
-  available, the standalone backfill job may be treated as a no-run fallback instead of a route
-  contract failure, and should be rerun in an environment with Postgres before relying on it
+- replay, backfill, and chaos-drill conformance jobs expect that configured Postgres server to be
+  local and reachable with privileges to create and drop per-test databases; when no local
+  Postgres is available, standalone backfill jobs and the focused chaos drill may be treated as
+  no-run fallback instead of route contract failures, and should be rerun in an environment with
+  Postgres before relying on them
 - the child collection contract seeds `children_current` rows and covers both the base
   `GET /v1/names/{namespace}/{name}/children` response and the shipped `include=counts`
   variant; the harness also asserts that unsupported non-`declared` `surface_classes` are
@@ -262,3 +269,18 @@ Execution notes:
   consumer-capability responses; it does not prove those synthetic jobs admitted the route data or
   graduate unsupported coverage, ENSv2 exact-name support, wrapper/migration history, manifest
   capabilities, public API routes, or consumer-replacement semantics
+- `reorg_chaos_drill_conformance_job` is the standalone reorg chaos drill conformance entry
+  point. It is focused with
+  `cargo test --manifest-path tests/conformance/Cargo.toml reorg_chaos_drill_conformance_job`.
+  The drill seeds the existing replay-style stale current corpus, applies shipped reorg orphaning
+  helpers to losing-branch raw blocks and normalized events, runs the shipped indexer raw-fact
+  normalized-event replay against a deterministic canonical raw-log probe, runs
+  `bigname-worker replay all-current-projections`, and reuses existing consumer-response
+  convergence and losing-branch absence assertions. It uses the same local Postgres and per-test
+  temporary database expectations as the rest of the harness; when no local Postgres is available,
+  the focused chaos drill may be treated as a no-run fallback instead of a route contract failure,
+  and should be rerun in an environment with Postgres before relying on it. This validates
+  reorg/replay hardening over shipped route contracts only; it does not widen route support or
+  route coverage semantics, graduate unsupported coverage, change verified execution support,
+  manifest capabilities, ENSv2 exact-name support, Basenames path classes, public API routes, or
+  consumer-replacement semantics

@@ -2,6 +2,17 @@
             OffsetDateTime::from_unix_timestamp(seconds).expect("conformance timestamp must be valid")
         }
 
+        const RAW_REPLAY_PROBE_SOURCE_FAMILY: &str = "ens_v1_reverse_l1";
+        const RAW_REPLAY_PROBE_CONTRACT_ROLE: &str = "reverse_registrar";
+        const RAW_REPLAY_PROBE_CLAIMED_ADDRESS: &str =
+            "0x1234567890abcdef1234567890abcdef12345678";
+        const RAW_REPLAY_PROBE_REVERSE_CLAIMED_TOPIC0: &str =
+            "0x6ada868dd3058cf77a48a74489fd7963688e5464b2b0fa957ace976243270e92";
+        const RAW_REPLAY_PROBE_CLAIMED_ADDRESS_TOPIC: &str =
+            "0x0000000000000000000000001234567890abcdef1234567890abcdef12345678";
+        const RAW_REPLAY_PROBE_REVERSE_NODE_TOPIC: &str =
+            "0xab5f3e28c9cfb162e62c91f566751059da9be419f5cbd10d0645d765c061d0e3";
+
         #[derive(Clone, Copy)]
         enum BasenamesControlVectorScenario {
             NftOnly,
@@ -1004,6 +1015,219 @@
             })
             .await
             .context("worker all-current-projections replay task panicked")??;
+
+            Ok(())
+        }
+
+        async fn replay_raw_fact_normalized_events_for_blocks(
+            database: &HarnessDatabase,
+            deployment_profile: &str,
+            chain: &str,
+            block_hashes: &[&str],
+        ) -> Result<()> {
+            let database_url = database.database_url.clone();
+            let deployment_profile = deployment_profile.to_owned();
+            let chain = chain.to_owned();
+            let block_hashes = block_hashes
+                .iter()
+                .map(|block_hash| (*block_hash).to_owned())
+                .collect::<Vec<_>>();
+            let indexer_manifest_path =
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../apps/indexer/Cargo.toml");
+
+            tokio::task::spawn_blocking(move || -> Result<()> {
+                let _guard = WORKER_CARGO_LOCK
+                    .lock()
+                    .expect("worker cargo lock must not be poisoned");
+                let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
+                let mut command = Command::new(cargo);
+                command
+                    .arg("run")
+                    .arg("--quiet")
+                    .arg("--manifest-path")
+                    .arg(indexer_manifest_path)
+                    .arg("--")
+                    .arg("replay")
+                    .arg("normalized-events")
+                    .arg("--database-url")
+                    .arg(&database_url)
+                    .arg("--deployment-profile")
+                    .arg(&deployment_profile)
+                    .arg("--chain")
+                    .arg(&chain);
+                for block_hash in &block_hashes {
+                    command.arg("--block-hash").arg(block_hash);
+                }
+
+                let output = command.output().with_context(|| {
+                    format!(
+                        "failed to invoke bigname-indexer raw-fact normalized-event replay for {chain}"
+                    )
+                })?;
+
+                if !output.status.success() {
+                    return Err(anyhow::anyhow!(
+                        "bigname-indexer raw-fact normalized-event replay failed for {chain}\nstdout:\n{}\nstderr:\n{}",
+                        String::from_utf8_lossy(&output.stdout),
+                        String::from_utf8_lossy(&output.stderr),
+                    ));
+                }
+
+                Ok(())
+            })
+            .await
+            .context("indexer raw-fact normalized-event replay task panicked")??;
+
+            Ok(())
+        }
+
+        async fn seed_raw_fact_replay_probe(
+            database: &HarnessDatabase,
+            chain: &str,
+            block_hash: &str,
+            watched_address: &str,
+        ) -> Result<()> {
+            let manifest_id = database
+                .insert_manifest(
+                    "ens",
+                    RAW_REPLAY_PROBE_SOURCE_FAMILY,
+                    chain,
+                    "ens_v1",
+                    1,
+                    "active",
+                    "uts46-v1",
+                )
+                .await?;
+            let contract_instance_id = Uuid::from_u128(0xc0a05);
+            seed_active_replay_contract(
+                database,
+                manifest_id,
+                contract_instance_id,
+                chain,
+                RAW_REPLAY_PROBE_CONTRACT_ROLE,
+                watched_address,
+            )
+            .await?;
+
+            bigname_storage::upsert_chain_lineage_blocks(
+                &database.pool,
+                &[bigname_storage::ChainLineageBlock {
+                    chain_id: chain.to_owned(),
+                    block_hash: block_hash.to_owned(),
+                    parent_hash: Some(
+                        "0xfeed000000000000000000000000000000000000000000000000000000000000"
+                            .to_owned(),
+                    ),
+                    block_number: 303,
+                    block_timestamp: timestamp(1_717_193_303),
+                    logs_bloom: None,
+                    transactions_root: None,
+                    receipts_root: None,
+                    state_root: None,
+                    canonicality_state: CanonicalityState::Canonical,
+                }],
+            )
+            .await
+            .context("failed to seed chaos raw-fact replay chain lineage")?;
+            bigname_storage::upsert_raw_blocks(
+                &database.pool,
+                &[raw_block(
+                    chain,
+                    block_hash,
+                    Some(
+                        "0xfeed000000000000000000000000000000000000000000000000000000000000",
+                    ),
+                    303,
+                    1_717_193_303,
+                )],
+            )
+            .await
+            .context("failed to seed chaos raw-fact replay raw block")?;
+            bigname_storage::upsert_raw_logs(
+                &database.pool,
+                &[bigname_storage::RawLog {
+                    chain_id: chain.to_owned(),
+                    block_hash: block_hash.to_owned(),
+                    block_number: 303,
+                    transaction_hash:
+                        "0xfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeed"
+                            .to_owned(),
+                    transaction_index: 0,
+                    log_index: 0,
+                    emitting_address: watched_address.to_ascii_lowercase(),
+                    topics: vec![
+                        RAW_REPLAY_PROBE_REVERSE_CLAIMED_TOPIC0.to_owned(),
+                        RAW_REPLAY_PROBE_CLAIMED_ADDRESS_TOPIC.to_owned(),
+                        RAW_REPLAY_PROBE_REVERSE_NODE_TOPIC.to_owned(),
+                    ],
+                    data: Vec::new(),
+                    canonicality_state: CanonicalityState::Canonical,
+                }],
+            )
+            .await
+            .context("failed to seed chaos raw-fact replay raw log")?;
+
+            Ok(())
+        }
+
+        async fn seed_active_replay_contract(
+            database: &HarnessDatabase,
+            manifest_id: i64,
+            contract_instance_id: Uuid,
+            chain: &str,
+            role: &str,
+            address: &str,
+        ) -> Result<()> {
+            sqlx::query(
+                r#"
+                INSERT INTO contract_instances (contract_instance_id, chain_id, contract_kind)
+                VALUES ($1, $2, 'contract')
+                "#,
+            )
+            .bind(contract_instance_id)
+            .bind(chain)
+            .execute(&database.pool)
+            .await
+            .context("failed to seed chaos replay contract instance")?;
+            sqlx::query(
+                r#"
+                INSERT INTO manifest_contract_instances (
+                    manifest_id,
+                    declaration_kind,
+                    declaration_name,
+                    contract_instance_id,
+                    declared_address,
+                    role,
+                    proxy_kind
+                )
+                VALUES ($1, 'contract', $2, $3, $4, $2, 'none')
+                "#,
+            )
+            .bind(manifest_id)
+            .bind(role)
+            .bind(contract_instance_id)
+            .bind(address)
+            .execute(&database.pool)
+            .await
+            .context("failed to seed chaos replay manifest contract instance")?;
+            sqlx::query(
+                r#"
+                INSERT INTO contract_instance_addresses (
+                    contract_instance_id,
+                    chain_id,
+                    address,
+                    source_manifest_id
+                )
+                VALUES ($1, $2, $3, $4)
+                "#,
+            )
+            .bind(contract_instance_id)
+            .bind(chain)
+            .bind(address)
+            .bind(manifest_id)
+            .execute(&database.pool)
+            .await
+            .context("failed to seed chaos replay active contract address")?;
 
             Ok(())
         }

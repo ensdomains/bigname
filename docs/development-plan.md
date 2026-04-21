@@ -485,6 +485,7 @@ Replace the current indexer dependencies in first-party apps with the native `v1
 ### Current contract-freeze status
 
 - `phase10-execution-trace-inspection-cli`: worker-owned `bigname-worker inspect execution-trace --execution-trace-id <id> --json` is frozen as read-only operational JSON over persisted `execution_traces` and `execution_steps`; it does not create a public `v1` route, expose raw execution or gateway payload APIs, execute fresh resolution or primary-name verification, synthesize topology, mutate cache/projection/manifest/discovery state, or widen the public execution-explain route boundary.
+- `phase10-reorg-chaos-drill-conformance-job`: conformance status is frozen around the focused command `cargo test --manifest-path tests/conformance/Cargo.toml reorg_chaos_drill_conformance_job`; the job uses the local per-test Postgres harness, seeds the existing replay-style stale current corpus, applies shipped reorg orphaning helpers, runs shipped raw-fact normalized-event replay over a deterministic canonical raw-log probe, runs all-current projection replay, and reuses existing consumer-response convergence and losing-branch absence assertions. When local Postgres is unavailable, the focused job is a no-run fallback rather than evidence of a route contract failure. This is a Phase 10 hardening drill over shipped route contracts only; it does not widen route coverage or semantics, graduate unsupported coverage, promote ENSv2 exact-name support, change manifest capabilities, add public API routes, or claim consumer replacement.
 
 ---
 

@@ -24,6 +24,8 @@ mod shipped_api {
         include!("conformance/backfill.rs");
 
         include!("conformance/backfill_sources.rs");
+
+        include!("conformance/chaos.rs");
     }
 }
 
@@ -43,4 +45,10 @@ async fn backfilled_data_consumer_conformance_job() -> anyhow::Result<()> {
 #[tokio::test]
 async fn backfill_source_family_existing_response_lock() -> anyhow::Result<()> {
     shipped_api::conformance::run_backfill_source_family_existing_response_lock().await
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn reorg_chaos_drill_conformance_job() -> anyhow::Result<()> {
+    shipped_api::conformance::run_reorg_chaos_drill_conformance_job().await
 }
