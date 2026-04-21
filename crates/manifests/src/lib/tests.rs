@@ -353,6 +353,300 @@ async fn load_capability_flags_for_source_family(
         .collect()
 }
 
+fn watched_contract_for_test(
+    chain: &str,
+    source_family: &str,
+    address: &str,
+    contract_instance_id: Uuid,
+    source: WatchedContractSource,
+    active_from_block_number: Option<i64>,
+    active_to_block_number: Option<i64>,
+) -> WatchedContract {
+    WatchedContract {
+        chain: chain.to_owned(),
+        source_family: source_family.to_owned(),
+        address: normalize_address(address),
+        contract_instance_id,
+        source,
+        source_manifest_id: Some(1),
+        active_from_block_number,
+        active_to_block_number,
+    }
+}
+
+#[test]
+fn source_family_selector_filters_targets_and_builds_chain_plan() -> Result<()> {
+    let registry_a = Uuid::from_u128(1);
+    let registry_b = Uuid::from_u128(2);
+    let registrar = Uuid::from_u128(3);
+    let other_chain_registry = Uuid::from_u128(4);
+    let watched_contracts = vec![
+        watched_contract_for_test(
+            "ethereum-mainnet",
+            "ens_v2_registrar_l1",
+            "0x0000000000000000000000000000000000000002",
+            registrar,
+            WatchedContractSource::ManifestContract,
+            None,
+            None,
+        ),
+        watched_contract_for_test(
+            "ethereum-mainnet",
+            "ens_v2_registry_l1",
+            "0x0000000000000000000000000000000000000001",
+            registry_a,
+            WatchedContractSource::ManifestRoot,
+            None,
+            None,
+        ),
+        watched_contract_for_test(
+            "ethereum-mainnet",
+            "ens_v2_registry_l1",
+            "0x0000000000000000000000000000000000000003",
+            registry_b,
+            WatchedContractSource::DiscoveryEdge,
+            Some(90),
+            Some(150),
+        ),
+        watched_contract_for_test(
+            "base-mainnet",
+            "ens_v2_registry_l1",
+            "0x0000000000000000000000000000000000000004",
+            other_chain_registry,
+            WatchedContractSource::ManifestContract,
+            None,
+            None,
+        ),
+    ];
+
+    let plan = resolve_watched_source_selector(
+        &watched_contracts,
+        "ethereum-mainnet",
+        WatchedSourceSelector::SourceFamily("ens_v2_registry_l1".to_owned()),
+        100,
+        120,
+    )?;
+
+    assert_eq!(plan.selector_kind, WatchedSourceSelectorKind::SourceFamily);
+    assert_eq!(plan.source_family.as_deref(), Some("ens_v2_registry_l1"));
+    assert_eq!(
+        plan.watched_chain_plan,
+        WatchedChainPlan {
+            chain: "ethereum-mainnet".to_owned(),
+            addresses: vec![
+                "0x0000000000000000000000000000000000000001".to_owned(),
+                "0x0000000000000000000000000000000000000003".to_owned(),
+            ],
+            manifest_root_entry_count: 1,
+            manifest_contract_entry_count: 0,
+            discovery_edge_entry_count: 1,
+        }
+    );
+    assert_eq!(
+        plan.selected_targets,
+        vec![
+            WatchedBackfillTarget {
+                source_family: "ens_v2_registry_l1".to_owned(),
+                contract_instance_id: registry_a,
+                address: "0x0000000000000000000000000000000000000001".to_owned(),
+                effective_from_block: 100,
+                effective_to_block: 120,
+            },
+            WatchedBackfillTarget {
+                source_family: "ens_v2_registry_l1".to_owned(),
+                contract_instance_id: registry_b,
+                address: "0x0000000000000000000000000000000000000003".to_owned(),
+                effective_from_block: 100,
+                effective_to_block: 120,
+            },
+        ]
+    );
+
+    Ok(())
+}
+
+#[test]
+fn explicit_watched_target_set_is_normalized_sorted_and_validated() -> Result<()> {
+    let registry = Uuid::from_u128(30);
+    let registrar = Uuid::from_u128(10);
+    let resolver = Uuid::from_u128(20);
+    let watched_contracts = vec![
+        watched_contract_for_test(
+            "ethereum-mainnet",
+            "ens_v2_registry_l1",
+            "0x0000000000000000000000000000000000000030",
+            registry,
+            WatchedContractSource::ManifestContract,
+            Some(25),
+            Some(125),
+        ),
+        watched_contract_for_test(
+            "ethereum-mainnet",
+            "ens_v2_registrar_l1",
+            "0x0000000000000000000000000000000000000010",
+            registrar,
+            WatchedContractSource::ManifestContract,
+            None,
+            None,
+        ),
+        watched_contract_for_test(
+            "ethereum-mainnet",
+            "ens_v2_resolver_l1",
+            "0x0000000000000000000000000000000000000020",
+            resolver,
+            WatchedContractSource::DiscoveryEdge,
+            Some(110),
+            Some(190),
+        ),
+    ];
+
+    let plan = resolve_watched_source_selector(
+        &watched_contracts,
+        "ethereum-mainnet",
+        WatchedSourceSelector::WatchedTargetSet(vec![
+            registry.into(),
+            registrar.into(),
+            registry.into(),
+        ]),
+        100,
+        150,
+    )?;
+
+    assert_eq!(
+        plan.requested_watched_targets,
+        vec![
+            WatchedTargetIdentity {
+                contract_instance_id: registrar,
+            },
+            WatchedTargetIdentity {
+                contract_instance_id: registry,
+            },
+        ]
+    );
+    assert_eq!(
+        plan.selected_targets,
+        vec![
+            WatchedBackfillTarget {
+                source_family: "ens_v2_registrar_l1".to_owned(),
+                contract_instance_id: registrar,
+                address: "0x0000000000000000000000000000000000000010".to_owned(),
+                effective_from_block: 100,
+                effective_to_block: 150,
+            },
+            WatchedBackfillTarget {
+                source_family: "ens_v2_registry_l1".to_owned(),
+                contract_instance_id: registry,
+                address: "0x0000000000000000000000000000000000000030".to_owned(),
+                effective_from_block: 100,
+                effective_to_block: 125,
+            },
+        ]
+    );
+    assert_eq!(
+        plan.source_identity_payload()["selector_kind"],
+        "watched_target_set"
+    );
+
+    let error = resolve_watched_source_selector(
+        &watched_contracts,
+        "ethereum-mainnet",
+        WatchedSourceSelector::WatchedTargetSet(vec![Uuid::from_u128(99).into()]),
+        100,
+        150,
+    )
+    .expect_err("unknown explicit watched target must fail");
+    assert!(
+        error
+            .to_string()
+            .contains("is not active for chain ethereum-mainnet"),
+        "unexpected explicit target validation error: {error:#}"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn watched_selector_validation_prevents_cross_chain_leakage() {
+    let registry = Uuid::from_u128(40);
+    let watched_contracts = vec![watched_contract_for_test(
+        "ethereum-sepolia",
+        "ens_v2_registry_l1",
+        "0x0000000000000000000000000000000000000040",
+        registry,
+        WatchedContractSource::ManifestContract,
+        None,
+        None,
+    )];
+
+    let family_error = resolve_watched_source_selector(
+        &watched_contracts,
+        "ethereum-mainnet",
+        WatchedSourceSelector::SourceFamily("ens_v2_registry_l1".to_owned()),
+        1,
+        10,
+    )
+    .expect_err("source-family selector must not leak targets from another chain");
+    assert!(
+        family_error
+            .to_string()
+            .contains("found no active watched targets for chain ethereum-mainnet"),
+        "unexpected source-family validation error: {family_error:#}"
+    );
+
+    let target_error = resolve_watched_source_selector(
+        &watched_contracts,
+        "ethereum-mainnet",
+        WatchedSourceSelector::WatchedTargetSet(vec![registry.into()]),
+        1,
+        10,
+    )
+    .expect_err("explicit selector must not leak targets from another chain");
+    assert!(
+        target_error
+            .to_string()
+            .contains("is not active for chain ethereum-mainnet"),
+        "unexpected explicit target validation error: {target_error:#}"
+    );
+}
+
+#[test]
+fn watched_selector_rejects_conflicting_target_metadata() {
+    let registry = Uuid::from_u128(50);
+    let watched_contracts = vec![
+        watched_contract_for_test(
+            "ethereum-mainnet",
+            "ens_v2_registry_l1",
+            "0x0000000000000000000000000000000000000050",
+            registry,
+            WatchedContractSource::ManifestRoot,
+            None,
+            None,
+        ),
+        watched_contract_for_test(
+            "ethereum-mainnet",
+            "ens_v2_registry_l1",
+            "0x0000000000000000000000000000000000000051",
+            registry,
+            WatchedContractSource::ManifestContract,
+            None,
+            None,
+        ),
+    ];
+
+    let error = resolve_watched_source_selector(
+        &watched_contracts,
+        "ethereum-mainnet",
+        WatchedSourceSelector::WholeActiveWatchedChain,
+        1,
+        10,
+    )
+    .expect_err("conflicting metadata for one target identity must fail");
+    assert!(
+        error.to_string().contains("source identity conflict"),
+        "unexpected conflict error: {error:#}"
+    );
+}
+
 #[test]
 fn reports_missing_root() -> Result<()> {
     let sequence = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
@@ -1482,10 +1776,12 @@ async fn rebuilds_watched_plan_from_active_contract_instance_address_ranges() ->
     assert!(watched_contracts.iter().any(|contract| {
         contract.address == "0x00000000000000000000000000000000000000dd"
             && contract.source == WatchedContractSource::DiscoveryEdge
+            && contract.source_family == "ens_v2_registry_l1"
     }));
     assert!(watched_contracts.iter().any(|contract| {
         contract.address == "0x00000000000000000000000000000000000000cc"
             && contract.source == WatchedContractSource::DiscoveryEdge
+            && contract.source_family == "ens_v2_registry_l1"
     }));
 
     let watched_summary = load_watched_contract_summary(database.pool()).await?;
@@ -1509,6 +1805,26 @@ async fn rebuilds_watched_plan_from_active_contract_instance_address_ranges() ->
             manifest_contract_entry_count: 1,
             discovery_edge_entry_count: 2,
         }]
+    );
+
+    let selected_source_family_plan = load_watched_source_selector_plan(
+        database.pool(),
+        "ethereum-mainnet",
+        WatchedSourceSelector::SourceFamily("ens_v2_registry_l1".to_owned()),
+        100,
+        200,
+    )
+    .await?;
+    assert_eq!(
+        selected_source_family_plan.watched_chain_plan,
+        watched_chain_plan[0]
+    );
+    assert_eq!(selected_source_family_plan.selected_targets.len(), 4);
+    assert!(
+        selected_source_family_plan
+            .selected_targets
+            .iter()
+            .all(|target| target.source_family == "ens_v2_registry_l1")
     );
 
     database.cleanup().await?;

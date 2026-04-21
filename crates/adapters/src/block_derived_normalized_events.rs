@@ -98,6 +98,14 @@ struct ActiveManifestMetadata {
     manifest_version: i64,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RawLogSourceScopeTarget {
+    source_family: String,
+    address: String,
+    effective_from_block: i64,
+    effective_to_block: i64,
+}
+
 #[derive(Clone, Debug)]
 struct PreimageObservation {
     dns_encoded_name: String,
@@ -111,6 +119,7 @@ pub async fn sync_block_derived_normalized_events(
     pool: &PgPool,
     chain: &str,
     block_hashes: &[String],
+    source_scope: Option<&[(String, String, i64, i64)]>,
 ) -> Result<BlockDerivedNormalizedEventSyncSummary> {
     if block_hashes.is_empty() {
         return Ok(BlockDerivedNormalizedEventSyncSummary {
@@ -123,7 +132,7 @@ pub async fn sync_block_derived_normalized_events(
     }
 
     let scanned_log_count = load_scanned_log_count(pool, chain, block_hashes).await?;
-    let raw_logs = load_watched_raw_logs(pool, chain, block_hashes).await?;
+    let raw_logs = load_watched_raw_logs(pool, chain, block_hashes, source_scope).await?;
     if raw_logs.is_empty() {
         return Ok(BlockDerivedNormalizedEventSyncSummary {
             scanned_log_count,
@@ -634,8 +643,21 @@ async fn load_watched_raw_logs(
     pool: &PgPool,
     chain: &str,
     block_hashes: &[String],
+    source_scope: Option<&[(String, String, i64, i64)]>,
 ) -> Result<Vec<WatchedRawLogRow>> {
-    let active_emitters = load_active_emitters(pool, chain).await?;
+    let source_scope = source_scope.map(normalized_source_scope_targets);
+    if source_scope.as_ref().is_some_and(Vec::is_empty) {
+        return Ok(Vec::new());
+    }
+    let scoped_emitter_identities = source_scope.as_ref().map(|source_scope| {
+        source_scope
+            .iter()
+            .map(|target| (target.source_family.clone(), target.address.clone()))
+            .collect::<HashSet<_>>()
+    });
+
+    let active_emitters =
+        load_active_emitters(pool, chain, scoped_emitter_identities.as_ref()).await?;
     if active_emitters.is_empty() {
         return Ok(Vec::new());
     }
@@ -646,41 +668,106 @@ async fn load_watched_raw_logs(
         .collect::<HashMap<_, _>>();
     let watched_addresses = emitters_by_address.keys().cloned().collect::<Vec<_>>();
 
-    let rows = sqlx::query(
-        r#"
-        SELECT
-            rl.chain_id AS chain_id,
-            rl.block_hash AS block_hash,
-            rl.block_number AS block_number,
-            rl.transaction_hash AS transaction_hash,
-            rl.transaction_index AS transaction_index,
-            rl.log_index AS log_index,
-            rl.emitting_address AS emitting_address,
-            rl.topics AS topics,
-            rl.data AS data,
-            rl.canonicality_state::TEXT AS canonicality_state
-        FROM raw_logs rl
-        WHERE rl.chain_id = $1
-          AND rl.block_hash = ANY($2::TEXT[])
-          AND lower(rl.emitting_address) = ANY($3::TEXT[])
-          AND rl.canonicality_state <> 'orphaned'::canonicality_state
-        ORDER BY
-            rl.block_number,
-            rl.transaction_index,
-            rl.log_index
-        "#,
-    )
-    .bind(chain)
-    .bind(block_hashes)
-    .bind(&watched_addresses)
-    .fetch_all(pool)
-    .await
-    .with_context(|| {
-        format!(
-            "failed to load watched raw logs for chain {chain} across {} blocks",
-            block_hashes.len()
+    let rows = if let Some(source_scope) = &source_scope {
+        let scoped_addresses = source_scope
+            .iter()
+            .map(|target| target.address.clone())
+            .collect::<Vec<_>>();
+        let scoped_from_blocks = source_scope
+            .iter()
+            .map(|target| target.effective_from_block)
+            .collect::<Vec<_>>();
+        let scoped_to_blocks = source_scope
+            .iter()
+            .map(|target| target.effective_to_block)
+            .collect::<Vec<_>>();
+
+        sqlx::query(
+            r#"
+            SELECT
+                rl.chain_id AS chain_id,
+                rl.block_hash AS block_hash,
+                rl.block_number AS block_number,
+                rl.transaction_hash AS transaction_hash,
+                rl.transaction_index AS transaction_index,
+                rl.log_index AS log_index,
+                rl.emitting_address AS emitting_address,
+                rl.topics AS topics,
+                rl.data AS data,
+                rl.canonicality_state::TEXT AS canonicality_state
+            FROM raw_logs rl
+            WHERE rl.chain_id = $1
+              AND rl.block_hash = ANY($2::TEXT[])
+              AND lower(rl.emitting_address) = ANY($3::TEXT[])
+              AND EXISTS (
+                  SELECT 1
+                  FROM unnest($4::TEXT[], $5::BIGINT[], $6::BIGINT[]) AS scoped(
+                      address,
+                      effective_from_block,
+                      effective_to_block
+                  )
+                  WHERE scoped.address = lower(rl.emitting_address)
+                    AND rl.block_number BETWEEN scoped.effective_from_block
+                        AND scoped.effective_to_block
+              )
+              AND rl.canonicality_state <> 'orphaned'::canonicality_state
+            ORDER BY
+                rl.block_number,
+                rl.transaction_index,
+                rl.log_index
+            "#,
         )
-    })?;
+        .bind(chain)
+        .bind(block_hashes)
+        .bind(&watched_addresses)
+        .bind(&scoped_addresses)
+        .bind(&scoped_from_blocks)
+        .bind(&scoped_to_blocks)
+        .fetch_all(pool)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to load scoped watched raw logs for chain {chain} across {} blocks",
+                block_hashes.len()
+            )
+        })?
+    } else {
+        sqlx::query(
+            r#"
+            SELECT
+                rl.chain_id AS chain_id,
+                rl.block_hash AS block_hash,
+                rl.block_number AS block_number,
+                rl.transaction_hash AS transaction_hash,
+                rl.transaction_index AS transaction_index,
+                rl.log_index AS log_index,
+                rl.emitting_address AS emitting_address,
+                rl.topics AS topics,
+                rl.data AS data,
+                rl.canonicality_state::TEXT AS canonicality_state
+            FROM raw_logs rl
+            WHERE rl.chain_id = $1
+              AND rl.block_hash = ANY($2::TEXT[])
+              AND lower(rl.emitting_address) = ANY($3::TEXT[])
+              AND rl.canonicality_state <> 'orphaned'::canonicality_state
+            ORDER BY
+                rl.block_number,
+                rl.transaction_index,
+                rl.log_index
+            "#,
+        )
+        .bind(chain)
+        .bind(block_hashes)
+        .bind(&watched_addresses)
+        .fetch_all(pool)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to load watched raw logs for chain {chain} across {} blocks",
+                block_hashes.len()
+            )
+        })?
+    };
 
     rows.into_iter()
         .map(|row| {
@@ -726,13 +813,40 @@ async fn load_watched_raw_logs(
         .collect()
 }
 
-async fn load_active_emitters(pool: &PgPool, chain: &str) -> Result<Vec<ActiveEmitter>> {
+fn normalized_source_scope_targets(
+    source_scope: &[(String, String, i64, i64)],
+) -> Vec<RawLogSourceScopeTarget> {
+    source_scope
+        .iter()
+        .map(
+            |(source_family, address, effective_from_block, effective_to_block)| {
+                RawLogSourceScopeTarget {
+                    source_family: source_family.clone(),
+                    address: address.to_ascii_lowercase(),
+                    effective_from_block: *effective_from_block,
+                    effective_to_block: *effective_to_block,
+                }
+            },
+        )
+        .collect()
+}
+
+async fn load_active_emitters(
+    pool: &PgPool,
+    chain: &str,
+    scoped_emitter_identities: Option<&HashSet<(String, String)>>,
+) -> Result<Vec<ActiveEmitter>> {
     let watched_contracts = load_watched_contracts(pool)
         .await
         .context("failed to load watched contracts for adapter emitter attribution")?;
     let watched_contracts = watched_contracts
         .into_iter()
         .filter(|contract| contract.chain == chain)
+        .filter(|contract| {
+            scoped_emitter_identities.is_none_or(|scope| {
+                scope.contains(&(contract.source_family.clone(), contract.address.clone()))
+            })
+        })
         .collect::<Vec<_>>();
     if watched_contracts.is_empty() {
         return Ok(Vec::new());
@@ -2025,6 +2139,7 @@ mod tests {
                 "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
                 "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
             ],
+            None,
         )
         .await?;
         assert_eq!(first.scanned_log_count, 2);
@@ -2057,6 +2172,7 @@ mod tests {
             database.pool(),
             "ethereum-mainnet",
             &["0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned()],
+            None,
         )
         .await?;
         assert_eq!(second.scanned_log_count, 1);
@@ -2156,6 +2272,7 @@ mod tests {
             database.pool(),
             "ethereum-mainnet",
             &["0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned()],
+            None,
         )
         .await?;
         assert_eq!(first.scanned_log_count, 1);
@@ -2300,6 +2417,7 @@ mod tests {
                 "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd".to_owned(),
                 "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_owned(),
             ],
+            None,
         )
         .await?;
         assert_eq!(summary.scanned_log_count, 2);
@@ -2378,6 +2496,7 @@ mod tests {
             database.pool(),
             "ethereum-mainnet",
             &["0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned()],
+            None,
         )
         .await?;
         assert_eq!(summary.scanned_log_count, 1);
@@ -2471,6 +2590,7 @@ mod tests {
                 "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
                 "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
             ],
+            None,
         )
         .await?;
         assert_eq!(summary.scanned_log_count, 2);
@@ -2570,6 +2690,7 @@ mod tests {
             database.pool(),
             "ethereum-mainnet",
             &["0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned()],
+            None,
         )
         .await?;
         assert_eq!(first.scanned_log_count, 1);
@@ -2581,6 +2702,7 @@ mod tests {
             database.pool(),
             "ethereum-mainnet",
             &["0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned()],
+            None,
         )
         .await?;
         assert_eq!(second.scanned_log_count, 1);
@@ -2674,6 +2796,7 @@ mod tests {
                 "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
                 "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
             ],
+            None,
         )
         .await?;
         assert_eq!(summary.scanned_log_count, 1);
@@ -2807,6 +2930,7 @@ mod tests {
                 "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
                 "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
             ],
+            None,
         )
         .await?;
         assert_eq!(summary.scanned_log_count, 2);

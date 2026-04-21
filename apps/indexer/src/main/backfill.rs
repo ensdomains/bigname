@@ -1,5 +1,7 @@
+use std::collections::BTreeSet;
+
 use anyhow::{Context, Result, bail};
-use bigname_manifests::WatchedChainPlan;
+use bigname_manifests::{WatchedSourceSelectorKind, WatchedSourceSelectorPlan};
 use bigname_storage::{
     BackfillJobCreate, BackfillLifecycleStatus, BackfillRange, BackfillRangeSpec,
     CanonicalityState, RawCodeHash, RawLog, RawReceipt, RawTransaction, advance_backfill_range,
@@ -7,7 +9,7 @@ use bigname_storage::{
     reserve_backfill_range, upsert_raw_blocks, upsert_raw_code_hashes, upsert_raw_logs,
     upsert_raw_receipts, upsert_raw_transactions,
 };
-use serde_json::{Value, json};
+use serde_json::json;
 use sqlx::types::time::OffsetDateTime;
 use tracing::{error, info};
 
@@ -18,6 +20,7 @@ use crate::{
         provider_code_observation_to_raw_code_hash, provider_log_to_raw_log,
         provider_receipt_to_raw_receipt, provider_transaction_to_raw_transaction,
         sync_adapter_state_from_persisted_raw_payloads,
+        sync_adapter_state_from_scoped_persisted_raw_payloads,
     },
 };
 
@@ -101,12 +104,12 @@ pub(crate) struct BackfillJobRunOutcome {
 impl BackfillJobRunOutcome {
     fn new(
         backfill_job_id: i64,
-        watched_chain: &WatchedChainPlan,
+        source_plan: &WatchedSourceSelectorPlan,
         config: &BackfillJobRunConfig,
     ) -> Self {
         Self {
             backfill_job_id,
-            chain: watched_chain.chain.clone(),
+            chain: source_plan.watched_chain_plan.chain.clone(),
             from_block: config.range.from_block,
             to_block: config.range.to_block,
             idempotency_key: config.idempotency_key.clone(),
@@ -139,14 +142,15 @@ struct ResolvedBackfillBlock {
 
 pub(crate) async fn run_resumable_hash_pinned_backfill_job(
     pool: &sqlx::PgPool,
-    watched_chain: &WatchedChainPlan,
+    source_plan: &WatchedSourceSelectorPlan,
     provider: &JsonRpcProvider,
     config: BackfillJobRunConfig,
 ) -> Result<BackfillJobRunOutcome> {
+    let watched_chain = &source_plan.watched_chain_plan;
     let request = BackfillJobCreate {
         deployment_profile: config.deployment_profile.clone(),
         chain_id: watched_chain.chain.clone(),
-        source_identity: backfill_source_identity(watched_chain),
+        source_identity: source_plan.source_identity_payload(),
         scan_mode: HASH_PINNED_BACKFILL_SCAN_MODE.to_owned(),
         range_start_block_number: config.range.from_block,
         range_end_block_number: config.range.to_block,
@@ -157,8 +161,7 @@ pub(crate) async fn run_resumable_hash_pinned_backfill_job(
         }],
     };
     let record = create_backfill_job(pool, &request).await?;
-    let mut outcome =
-        BackfillJobRunOutcome::new(record.job.backfill_job_id, watched_chain, &config);
+    let mut outcome = BackfillJobRunOutcome::new(record.job.backfill_job_id, source_plan, &config);
 
     info!(
         service = "indexer",
@@ -166,6 +169,8 @@ pub(crate) async fn run_resumable_hash_pinned_backfill_job(
         backfill_job_id = record.job.backfill_job_id,
         backfill_job_status = record.job.status.as_str(),
         chain = %watched_chain.chain,
+        selector_kind = source_plan.selector_kind.as_str(),
+        selected_target_count = source_plan.selected_targets.len(),
         deployment_profile = %config.deployment_profile,
         from_block = config.range.from_block,
         to_block = config.range.to_block,
@@ -190,7 +195,7 @@ pub(crate) async fn run_resumable_hash_pinned_backfill_job(
         outcome.reserved_range_count += 1;
         run_reserved_hash_pinned_backfill_range(
             pool,
-            watched_chain,
+            source_plan,
             provider,
             &config,
             &reserved_range,
@@ -234,10 +239,12 @@ pub(crate) async fn run_resumable_hash_pinned_backfill_job(
 
 pub(crate) async fn run_hash_pinned_backfill_range(
     pool: &sqlx::PgPool,
-    watched_chain: &WatchedChainPlan,
+    source_plan: &WatchedSourceSelectorPlan,
     provider: &JsonRpcProvider,
     range: BackfillBlockRange,
 ) -> Result<BackfillOutcome> {
+    let watched_chain = &source_plan.watched_chain_plan;
+    let source_scope = selected_target_sync_scope(source_plan);
     let resolved_blocks = resolve_backfill_range(provider, range).await?;
     let block_hashes = resolved_blocks
         .iter()
@@ -250,6 +257,8 @@ pub(crate) async fn run_hash_pinned_backfill_range(
     let mut code_hashes = Vec::<RawCodeHash>::new();
 
     for resolved_block in &resolved_blocks {
+        let selected_addresses =
+            selected_target_addresses_at_block(source_plan, resolved_block.block_number);
         let bundle = provider
             .fetch_block_bundle_by_hash(&resolved_block.block_hash)
             .await
@@ -302,14 +311,16 @@ pub(crate) async fn run_hash_pinned_backfill_range(
             bundle
                 .logs
                 .iter()
+                .filter(|log| selected_addresses.contains(&log.address.to_ascii_lowercase()))
                 .map(|log| provider_log_to_raw_log(&watched_chain.chain, &raw_block, log))
                 .collect::<Result<Vec<_>>>()?,
         );
 
-        if !watched_chain.addresses.is_empty() {
+        if !selected_addresses.is_empty() {
+            let selected_addresses = selected_addresses.into_iter().collect::<Vec<_>>();
             let observations = provider
                 .fetch_code_observations_at_block(
-                    &watched_chain.addresses,
+                    &selected_addresses,
                     ProviderBlockSelection::Hash(raw_block.block_hash.clone()),
                 )
                 .await
@@ -341,8 +352,18 @@ pub(crate) async fn run_hash_pinned_backfill_range(
     upsert_raw_receipts(pool, &receipts).await?;
     upsert_raw_logs(pool, &logs).await?;
     upsert_raw_code_hashes(pool, &code_hashes).await?;
-    sync_adapter_state_from_persisted_raw_payloads(pool, &watched_chain.chain, &block_hashes)
+    if source_plan.selector_kind == WatchedSourceSelectorKind::WholeActiveWatchedChain {
+        sync_adapter_state_from_persisted_raw_payloads(pool, &watched_chain.chain, &block_hashes)
+            .await?;
+    } else {
+        sync_adapter_state_from_scoped_persisted_raw_payloads(
+            pool,
+            &watched_chain.chain,
+            &block_hashes,
+            &source_scope,
+        )
         .await?;
+    }
 
     let outcome = BackfillOutcome {
         chain: watched_chain.chain.clone(),
@@ -375,7 +396,7 @@ pub(crate) async fn run_hash_pinned_backfill_range(
 
 async fn run_reserved_hash_pinned_backfill_range(
     pool: &sqlx::PgPool,
-    watched_chain: &WatchedChainPlan,
+    source_plan: &WatchedSourceSelectorPlan,
     provider: &JsonRpcProvider,
     config: &BackfillJobRunConfig,
     reserved_range: &BackfillRange,
@@ -385,28 +406,22 @@ async fn run_reserved_hash_pinned_backfill_range(
     let mut block_number = active_range.checkpoint_block_number;
     while block_number <= active_range.range_end_block_number {
         let block_range = BackfillBlockRange::new(block_number, block_number)?;
-        let block_outcome = match run_hash_pinned_backfill_range(
-            pool,
-            watched_chain,
-            provider,
-            block_range,
-        )
-        .await
-        {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                return Err(record_reserved_range_failure(
-                    pool,
-                    &active_range,
-                    config,
-                    "hash-pinned backfill failed",
-                    Some(block_number),
-                    "hash_pinned_intake",
-                    error,
-                )
-                .await);
-            }
-        };
+        let block_outcome =
+            match run_hash_pinned_backfill_range(pool, source_plan, provider, block_range).await {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    return Err(record_reserved_range_failure(
+                        pool,
+                        &active_range,
+                        config,
+                        "hash-pinned backfill failed",
+                        Some(block_number),
+                        "hash_pinned_intake",
+                        error,
+                    )
+                    .await);
+                }
+            };
         aggregate.add_range_outcome(&block_outcome);
 
         active_range = match advance_backfill_range(
@@ -455,13 +470,35 @@ async fn run_reserved_hash_pinned_backfill_range(
     Ok(())
 }
 
-fn backfill_source_identity(watched_chain: &WatchedChainPlan) -> Value {
-    let mut watch_targets = watched_chain.addresses.clone();
-    watch_targets.sort();
-    json!({
-        "kind": "active_watched_chain_targets",
-        "watch_targets": watch_targets,
-    })
+fn selected_target_addresses_at_block(
+    source_plan: &WatchedSourceSelectorPlan,
+    block_number: i64,
+) -> BTreeSet<String> {
+    source_plan
+        .selected_targets
+        .iter()
+        .filter(|target| {
+            target.effective_from_block <= block_number && block_number <= target.effective_to_block
+        })
+        .map(|target| target.address.to_ascii_lowercase())
+        .collect()
+}
+
+fn selected_target_sync_scope(
+    source_plan: &WatchedSourceSelectorPlan,
+) -> Vec<(String, String, i64, i64)> {
+    source_plan
+        .selected_targets
+        .iter()
+        .map(|target| {
+            (
+                target.source_family.clone(),
+                target.address.to_ascii_lowercase(),
+                target.effective_from_block,
+                target.effective_to_block,
+            )
+        })
+        .collect()
 }
 
 async fn record_reserved_range_failure(

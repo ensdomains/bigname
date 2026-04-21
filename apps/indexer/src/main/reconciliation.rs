@@ -670,7 +670,8 @@ pub(crate) async fn sync_adapter_state_from_persisted_raw_payloads(
     block_hashes: &[String],
 ) -> Result<()> {
     let normalized_event_summary =
-        bigname_adapters::sync_block_derived_normalized_events(pool, chain, block_hashes).await?;
+        bigname_adapters::sync_block_derived_normalized_events(pool, chain, block_hashes, None)
+            .await?;
     log_block_derived_normalized_event_summary(chain, &normalized_event_summary);
     let reverse_claim_summary = bigname_adapters::sync_ens_v1_reverse_claim(pool, chain).await?;
     log_ens_v1_reverse_claim_sync_summary(chain, &reverse_claim_summary);
@@ -686,6 +687,24 @@ pub(crate) async fn sync_adapter_state_from_persisted_raw_payloads(
     log_ens_v2_resolver_sync_summary(chain, &ens_v2_resolver_summary);
     let ens_v2_permissions_summary = bigname_adapters::sync_ens_v2_permissions(pool, chain).await?;
     log_ens_v2_permissions_sync_summary(chain, &ens_v2_permissions_summary);
+
+    Ok(())
+}
+
+pub(crate) async fn sync_adapter_state_from_scoped_persisted_raw_payloads(
+    pool: &sqlx::PgPool,
+    chain: &str,
+    block_hashes: &[String],
+    source_scope: &[(String, String, i64, i64)],
+) -> Result<()> {
+    let normalized_event_summary = bigname_adapters::sync_block_derived_normalized_events(
+        pool,
+        chain,
+        block_hashes,
+        Some(source_scope),
+    )
+    .await?;
+    log_block_derived_normalized_event_summary(chain, &normalized_event_summary);
 
     Ok(())
 }

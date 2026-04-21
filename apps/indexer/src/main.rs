@@ -20,7 +20,8 @@ use anyhow::{Context, Result, bail};
 use backfill::{BackfillBlockRange, BackfillJobRunConfig, run_resumable_hash_pinned_backfill_job};
 use bigname_manifests::{
     ManifestLoadStatus, ManifestLoadSummary, ManifestSyncStatus, ManifestSyncSummary,
-    WatchedChainPlan, load_watched_chain_plan, load_watched_contract_summary,
+    WatchedChainPlan, WatchedSourceSelector, WatchedTargetIdentity, load_watched_chain_plan,
+    load_watched_contract_summary, load_watched_source_selector_plan,
 };
 #[allow(unused_imports)]
 use bigname_storage::{
@@ -108,6 +109,14 @@ struct BackfillArgs {
     idempotency_key: String,
     #[arg(long)]
     deployment_profile: Option<String>,
+    #[arg(long, conflicts_with = "watch_targets")]
+    source_family: Option<String>,
+    #[arg(
+        long = "watch-target",
+        value_name = "CONTRACT_INSTANCE_ID",
+        conflicts_with = "source_family"
+    )]
+    watch_targets: Vec<sqlx::types::Uuid>,
     #[arg(long)]
     lease_owner: Option<String>,
     #[arg(long)]
@@ -227,28 +236,28 @@ async fn run_backfill(args: BackfillArgs) -> Result<()> {
     let manifest_runtime_state = build_manifest_runtime_state(&pool, &manifest_repository).await?;
     log_manifest_runtime_state(&manifest_runtime_state);
     log_watched_chain_plan("backfill", &manifest_runtime_state.watched_chain_plan);
-
+    let selector = backfill_source_selector(&args)?;
+    let source_plan = load_watched_source_selector_plan(
+        &pool,
+        &args.chain,
+        selector,
+        range.from_block,
+        range.to_block,
+    )
+    .await?;
     let provider_registry = ProviderRegistry::from_chain_rpc_urls(&args.chain_rpc_urls)?;
     info!(
         service = "indexer",
         command = "backfill",
         chain = %args.chain,
+        selector_kind = source_plan.selector_kind.as_str(),
+        selected_target_count = source_plan.selected_targets.len(),
         from_block = range.from_block,
         to_block = range.to_block,
         rpc_configured_chain_count = provider_registry.configured_chain_count(),
         "provider registry loaded for hash-pinned backfill"
     );
 
-    let watched_chain = manifest_runtime_state
-        .watched_chain_plan
-        .iter()
-        .find(|chain| chain.chain == args.chain)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "chain {} is not in the active watched chain plan; refusing backfill of non-watched chain",
-                args.chain
-            )
-        })?;
     let provider = provider_registry.provider_for(&args.chain).ok_or_else(|| {
         anyhow::anyhow!(
             "no RPC provider configured for watched chain {}; pass --chain-rpc-url {}=<url>",
@@ -277,8 +286,34 @@ async fn run_backfill(args: BackfillArgs) -> Result<()> {
         lease_expires_at,
     };
 
-    run_resumable_hash_pinned_backfill_job(&pool, watched_chain, provider, config).await?;
+    run_resumable_hash_pinned_backfill_job(&pool, &source_plan, provider, config).await?;
     Ok(())
+}
+
+fn backfill_source_selector(args: &BackfillArgs) -> Result<WatchedSourceSelector> {
+    if let Some(source_family) = &args.source_family {
+        let source_family = source_family.trim();
+        if source_family.is_empty() {
+            bail!("--source-family must not be empty");
+        }
+        return Ok(WatchedSourceSelector::SourceFamily(
+            source_family.to_owned(),
+        ));
+    }
+
+    if !args.watch_targets.is_empty() {
+        return Ok(WatchedSourceSelector::WatchedTargetSet(
+            args.watch_targets
+                .iter()
+                .copied()
+                .map(|contract_instance_id| WatchedTargetIdentity {
+                    contract_instance_id,
+                })
+                .collect(),
+        ));
+    }
+
+    Ok(WatchedSourceSelector::WholeActiveWatchedChain)
 }
 
 fn deployment_profile_from_manifest_root(manifests_root: &std::path::Path) -> String {

@@ -1,5 +1,9 @@
 use std::{collections::BTreeMap, sync::Mutex};
 
+use bigname_manifests::{
+    WatchedSourceSelector, WatchedSourceSelectorKind, WatchedSourceSelectorPlan,
+    WatchedTargetIdentity, load_watched_source_selector_plan,
+};
 use bigname_storage::{BackfillLifecycleStatus, load_backfill_job, load_backfill_ranges};
 
 include!("support.rs");
@@ -74,12 +78,14 @@ async fn hash_pinned_backfill_persists_range_and_is_idempotent_without_advancing
     .await
     .context("failed to insert checkpoint guard row for backfill test")?;
 
-    let watched_plan = load_watched_chain_plan(database.pool()).await?;
-    let watched_chain = watched_plan
-        .iter()
-        .find(|chain| chain.chain == "ethereum-mainnet")
-        .cloned()
-        .expect("backfill test chain must be watched");
+    let source_plan = load_watched_source_selector_plan(
+        database.pool(),
+        "ethereum-mainnet",
+        WatchedSourceSelector::WholeActiveWatchedChain,
+        42,
+        43,
+    )
+    .await?;
     let block_42 = provider_block(
         "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         Some("0x9999999999999999999999999999999999999999999999999999999999999999"),
@@ -101,7 +107,7 @@ async fn hash_pinned_backfill_persists_range_and_is_idempotent_without_advancing
     let config = backfill_job_config(range, "indexer-backfill-hash-pinned", "lease-first")?;
     let outcome = run_resumable_hash_pinned_backfill_job(
         database.pool(),
-        &watched_chain,
+        &source_plan,
         &provider,
         config.clone(),
     )
@@ -135,6 +141,26 @@ async fn hash_pinned_backfill_persists_range_and_is_idempotent_without_advancing
     assert_eq!(job.range_end_block_number, 43);
     assert_eq!(job.idempotency_key, "indexer-backfill-hash-pinned");
     assert_eq!(job.scan_mode, "hash_pinned_block");
+    assert_eq!(
+        job.source_identity
+            .get("selector_kind")
+            .and_then(Value::as_str),
+        Some("whole_active_watched_chain")
+    );
+    assert_eq!(
+        job.source_identity
+            .get("source_identity_hash")
+            .and_then(Value::as_str)
+            .map(|value| value.starts_with("fnv1a64:")),
+        Some(true)
+    );
+    assert_eq!(
+        job.source_identity
+            .get("selected_targets")
+            .and_then(Value::as_array)
+            .map(Vec::len),
+        Some(1)
+    );
 
     let ranges = load_backfill_ranges(database.pool(), outcome.backfill_job_id).await?;
     assert_eq!(ranges.len(), 1);
@@ -146,7 +172,7 @@ async fn hash_pinned_backfill_persists_range_and_is_idempotent_without_advancing
 
     let rerun = run_resumable_hash_pinned_backfill_job(
         database.pool(),
-        &watched_chain,
+        &source_plan,
         &provider,
         backfill_job_config(range, "indexer-backfill-hash-pinned", "lease-repeat")?,
     )
@@ -158,7 +184,7 @@ async fn hash_pinned_backfill_persists_range_and_is_idempotent_without_advancing
 
     let widened_error = run_resumable_hash_pinned_backfill_job(
         database.pool(),
-        &watched_chain,
+        &source_plan,
         &provider,
         backfill_job_config(
             BackfillBlockRange::new(42, 44)?,
@@ -290,6 +316,586 @@ async fn hash_pinned_backfill_persists_range_and_is_idempotent_without_advancing
 }
 
 #[tokio::test]
+async fn source_family_backfill_persists_selector_identity_and_only_selected_target_facts()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_backfill_job_tables(database.pool()).await?;
+    let registry_contract_instance_id = Uuid::from_u128(1_001);
+    let registrar_contract_instance_id = Uuid::from_u128(1_002);
+    let registry_address = "0x0000000000000000000000000000000000000001";
+    let registrar_address = "0x0000000000000000000000000000000000000002";
+
+    insert_watched_manifest_contract(
+        database.pool(),
+        11,
+        "ethereum-mainnet",
+        "ens_v2_registry_l1",
+        registry_contract_instance_id,
+        registry_address,
+    )
+    .await?;
+    insert_watched_manifest_contract(
+        database.pool(),
+        12,
+        "ethereum-mainnet",
+        "ens_v2_registrar_l1",
+        registrar_contract_instance_id,
+        registrar_address,
+    )
+    .await?;
+
+    let range = BackfillBlockRange::new(42, 42)?;
+    let source_plan = load_watched_source_selector_plan(
+        database.pool(),
+        "ethereum-mainnet",
+        WatchedSourceSelector::SourceFamily("ens_v2_registry_l1".to_owned()),
+        range.from_block,
+        range.to_block,
+    )
+    .await?;
+    assert_eq!(
+        source_plan.watched_chain_plan.addresses,
+        vec![registry_address.to_owned()]
+    );
+
+    let block_42 = provider_block(
+        "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        Some("0x9999999999999999999999999999999999999999999999999999999999999999"),
+        42,
+    );
+    let requests = Arc::new(Mutex::new(Vec::<RecordedRpcRequest>::new()));
+    let (provider, server) = number_resolving_provider_with_fixtures(
+        vec![ProviderBlockFixture {
+            block: block_42.clone(),
+            logs: vec![
+                rpc_log_payload_at_address(&block_42, registry_address, 0),
+                rpc_log_payload_at_address(&block_42, registrar_address, 1),
+            ],
+        }],
+        Arc::clone(&requests),
+    )
+    .await?;
+
+    let outcome = run_resumable_hash_pinned_backfill_job(
+        database.pool(),
+        &source_plan,
+        &provider,
+        backfill_job_config(range, "source-family-idempotent", "lease-source-family")?,
+    )
+    .await?;
+    assert_eq!(outcome.raw_log_count, 1);
+    assert_eq!(outcome.raw_code_hash_count, 1);
+
+    let job = load_backfill_job(database.pool(), outcome.backfill_job_id)
+        .await?
+        .expect("source-family backfill job must exist");
+    assert_eq!(
+        job.source_identity
+            .get("selector_kind")
+            .and_then(Value::as_str),
+        Some("source_family")
+    );
+    assert_eq!(
+        job.source_identity
+            .get("source_family")
+            .and_then(Value::as_str),
+        Some("ens_v2_registry_l1")
+    );
+    assert_eq!(
+        job.source_identity
+            .get("selected_targets")
+            .and_then(Value::as_array)
+            .and_then(|targets| targets.first())
+            .and_then(|target| target.get("address"))
+            .and_then(Value::as_str),
+        Some(registry_address)
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM raw_logs WHERE emitting_address = $1")
+            .bind(registrar_address)
+            .fetch_one(database.pool())
+            .await?,
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT emitting_address FROM raw_logs")
+            .fetch_one(database.pool())
+            .await?,
+        registry_address.to_owned()
+    );
+
+    let code_requests = requests
+        .lock()
+        .expect("request log must not be poisoned")
+        .iter()
+        .filter(|request| request.method == "eth_getCode")
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(code_requests.len(), 1);
+    assert_eq!(
+        code_requests[0].params.first().and_then(Value::as_str),
+        Some(registry_address)
+    );
+    assert_eq!(
+        code_requests[0]
+            .params
+            .get(1)
+            .and_then(Value::as_object)
+            .and_then(|selection| selection.get("blockHash"))
+            .and_then(Value::as_str),
+        Some(block_42.block_hash.as_str())
+    );
+
+    let rerun = run_resumable_hash_pinned_backfill_job(
+        database.pool(),
+        &source_plan,
+        &provider,
+        backfill_job_config(
+            range,
+            "source-family-idempotent",
+            "lease-source-family-rerun",
+        )?,
+    )
+    .await?;
+    assert_eq!(rerun.backfill_job_id, outcome.backfill_job_id);
+    assert_eq!(rerun.reserved_range_count, 0);
+
+    let registrar_plan = load_watched_source_selector_plan(
+        database.pool(),
+        "ethereum-mainnet",
+        WatchedSourceSelector::SourceFamily("ens_v2_registrar_l1".to_owned()),
+        range.from_block,
+        range.to_block,
+    )
+    .await?;
+    let conflict = run_resumable_hash_pinned_backfill_job(
+        database.pool(),
+        &registrar_plan,
+        &provider,
+        backfill_job_config(
+            range,
+            "source-family-idempotent",
+            "lease-source-family-conflict",
+        )?,
+    )
+    .await
+    .expect_err("same idempotency key with different source selector must conflict");
+    assert!(
+        conflict
+            .to_string()
+            .contains("does not match requested immutable job identity"),
+        "unexpected selector conflict: {conflict:#}"
+    );
+
+    server.abort();
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn source_scoped_backfill_enforces_selected_target_effective_ranges_during_intake()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_backfill_job_tables(database.pool()).await?;
+    let contract_instance_id = Uuid::from_u128(1_101);
+    let watched_address = "0x0000000000000000000000000000000000000011";
+
+    insert_watched_manifest_contract(
+        database.pool(),
+        101,
+        "ethereum-mainnet",
+        "ens_v2_registry_l1",
+        contract_instance_id,
+        watched_address,
+    )
+    .await?;
+    set_contract_instance_address_range(database.pool(), contract_instance_id, Some(43), Some(43))
+        .await?;
+
+    let range = BackfillBlockRange::new(42, 43)?;
+    let source_plan = load_watched_source_selector_plan(
+        database.pool(),
+        "ethereum-mainnet",
+        WatchedSourceSelector::SourceFamily("ens_v2_registry_l1".to_owned()),
+        range.from_block,
+        range.to_block,
+    )
+    .await?;
+    assert_eq!(source_plan.selected_targets.len(), 1);
+    assert_eq!(source_plan.selected_targets[0].effective_from_block, 43);
+    assert_eq!(source_plan.selected_targets[0].effective_to_block, 43);
+
+    let block_42 = provider_block(
+        "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        Some("0x9999999999999999999999999999999999999999999999999999999999999999"),
+        42,
+    );
+    let block_43 = provider_block(
+        "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        Some("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        43,
+    );
+    let requests = Arc::new(Mutex::new(Vec::<RecordedRpcRequest>::new()));
+    let (provider, server) = number_resolving_provider_with_fixtures(
+        vec![
+            ProviderBlockFixture {
+                block: block_42.clone(),
+                logs: vec![rpc_log_payload_at_address(&block_42, watched_address, 0)],
+            },
+            ProviderBlockFixture {
+                block: block_43.clone(),
+                logs: vec![rpc_log_payload_at_address(&block_43, watched_address, 0)],
+            },
+        ],
+        Arc::clone(&requests),
+    )
+    .await?;
+
+    let outcome = run_resumable_hash_pinned_backfill_job(
+        database.pool(),
+        &source_plan,
+        &provider,
+        backfill_job_config(range, "source-effective-ranges", "lease-effective")?,
+    )
+    .await?;
+    assert_eq!(outcome.raw_log_count, 1);
+    assert_eq!(outcome.raw_code_hash_count, 1);
+    assert_eq!(
+        sqlx::query_scalar::<_, Vec<i64>>(
+            "SELECT ARRAY_AGG(block_number ORDER BY block_number) FROM raw_logs"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        vec![43]
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, Vec<i64>>(
+            "SELECT ARRAY_AGG(block_number ORDER BY block_number) FROM raw_code_hashes"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        vec![43]
+    );
+
+    let code_requests = requests
+        .lock()
+        .expect("request log must not be poisoned")
+        .iter()
+        .filter(|request| request.method == "eth_getCode")
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(code_requests.len(), 1);
+    assert_eq!(
+        code_requests[0].params.first().and_then(Value::as_str),
+        Some(watched_address)
+    );
+    assert_eq!(
+        code_requests[0]
+            .params
+            .get(1)
+            .and_then(Value::as_object)
+            .and_then(|selection| selection.get("blockHash"))
+            .and_then(Value::as_str),
+        Some(block_43.block_hash.as_str())
+    );
+
+    server.abort();
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn source_scoped_backfill_does_not_normalize_preexisting_unselected_raw_logs() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_backfill_job_tables(database.pool()).await?;
+    let selected_contract_instance_id = Uuid::from_u128(1_201);
+    let unselected_contract_instance_id = Uuid::from_u128(1_202);
+    let selected_address = "0x0000000000000000000000000000000000000021";
+    let unselected_address = "0x0000000000000000000000000000000000000022";
+
+    insert_watched_manifest_contract(
+        database.pool(),
+        121,
+        "ethereum-mainnet",
+        "ens_v2_registry_l1",
+        selected_contract_instance_id,
+        selected_address,
+    )
+    .await?;
+    insert_watched_manifest_contract(
+        database.pool(),
+        122,
+        "ethereum-mainnet",
+        "ens_v2_registrar_l1",
+        unselected_contract_instance_id,
+        unselected_address,
+    )
+    .await?;
+
+    let block_42 = provider_block(
+        "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        Some("0x9999999999999999999999999999999999999999999999999999999999999999"),
+        42,
+    );
+    insert_raw_name_wrapped_log_at_address(
+        database.pool(),
+        "ethereum-mainnet",
+        &block_42,
+        unselected_address,
+        7,
+    )
+    .await?;
+
+    let range = BackfillBlockRange::new(42, 42)?;
+    let source_plan = load_watched_source_selector_plan(
+        database.pool(),
+        "ethereum-mainnet",
+        WatchedSourceSelector::SourceFamily("ens_v2_registry_l1".to_owned()),
+        range.from_block,
+        range.to_block,
+    )
+    .await?;
+    let requests = Arc::new(Mutex::new(Vec::<RecordedRpcRequest>::new()));
+    let (provider, server) = number_resolving_provider_with_fixtures(
+        vec![ProviderBlockFixture {
+            block: block_42.clone(),
+            logs: vec![rpc_log_payload_at_address(&block_42, selected_address, 0)],
+        }],
+        Arc::clone(&requests),
+    )
+    .await?;
+
+    let outcome = run_resumable_hash_pinned_backfill_job(
+        database.pool(),
+        &source_plan,
+        &provider,
+        backfill_job_config(range, "source-scoped-sync", "lease-scoped-sync")?,
+    )
+    .await?;
+    assert_eq!(outcome.raw_log_count, 1);
+    assert_eq!(table_count(database.pool(), "raw_logs").await?, 2);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM normalized_events WHERE raw_fact_ref->>'emitting_address' = $1"
+        )
+        .bind(selected_address)
+        .fetch_one(database.pool())
+        .await?,
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM normalized_events WHERE raw_fact_ref->>'emitting_address' = $1"
+        )
+        .bind(unselected_address)
+        .fetch_one(database.pool())
+        .await?,
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM normalized_events")
+            .fetch_one(database.pool())
+            .await?,
+        1
+    );
+
+    server.abort();
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn explicit_watched_targets_are_sorted_idempotent_and_validated() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_backfill_job_tables(database.pool()).await?;
+    let registry_contract_instance_id = Uuid::from_u128(2_001);
+    let registrar_contract_instance_id = Uuid::from_u128(2_002);
+    let registry_address = "0x0000000000000000000000000000000000000001";
+    let registrar_address = "0x0000000000000000000000000000000000000002";
+
+    insert_watched_manifest_contract(
+        database.pool(),
+        21,
+        "ethereum-mainnet",
+        "ens_v2_registry_l1",
+        registry_contract_instance_id,
+        registry_address,
+    )
+    .await?;
+    insert_watched_manifest_contract(
+        database.pool(),
+        22,
+        "ethereum-mainnet",
+        "ens_v2_registrar_l1",
+        registrar_contract_instance_id,
+        registrar_address,
+    )
+    .await?;
+
+    let range = BackfillBlockRange::new(42, 42)?;
+    let source_plan = load_watched_source_selector_plan(
+        database.pool(),
+        "ethereum-mainnet",
+        WatchedSourceSelector::WatchedTargetSet(vec![
+            WatchedTargetIdentity {
+                contract_instance_id: registrar_contract_instance_id,
+            },
+            WatchedTargetIdentity {
+                contract_instance_id: registry_contract_instance_id,
+            },
+            WatchedTargetIdentity {
+                contract_instance_id: registrar_contract_instance_id,
+            },
+        ]),
+        range.from_block,
+        range.to_block,
+    )
+    .await?;
+    assert_eq!(
+        source_plan.requested_watched_targets,
+        vec![
+            WatchedTargetIdentity {
+                contract_instance_id: registry_contract_instance_id,
+            },
+            WatchedTargetIdentity {
+                contract_instance_id: registrar_contract_instance_id,
+            },
+        ]
+    );
+
+    let block_42 = provider_block(
+        "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        Some("0x9999999999999999999999999999999999999999999999999999999999999999"),
+        42,
+    );
+    let requests = Arc::new(Mutex::new(Vec::<RecordedRpcRequest>::new()));
+    let (provider, server) =
+        number_resolving_provider(vec![block_42.clone()], Arc::clone(&requests)).await?;
+
+    let outcome = run_resumable_hash_pinned_backfill_job(
+        database.pool(),
+        &source_plan,
+        &provider,
+        backfill_job_config(range, "explicit-target-idempotent", "lease-explicit")?,
+    )
+    .await?;
+    let job = load_backfill_job(database.pool(), outcome.backfill_job_id)
+        .await?
+        .expect("explicit watched-target backfill job must exist");
+    assert_eq!(
+        job.source_identity
+            .get("selector_kind")
+            .and_then(Value::as_str),
+        Some("watched_target_set")
+    );
+    assert_eq!(
+        job.source_identity
+            .get("requested_watched_targets")
+            .and_then(Value::as_array)
+            .map(Vec::len),
+        Some(2)
+    );
+    assert_eq!(
+        job.source_identity
+            .get("selected_targets")
+            .and_then(Value::as_array)
+            .and_then(|targets| targets.first())
+            .and_then(|target| target.get("source_family"))
+            .and_then(Value::as_str),
+        Some("ens_v2_registrar_l1")
+    );
+    assert_eq!(outcome.raw_code_hash_count, 2);
+
+    let reordered_plan = load_watched_source_selector_plan(
+        database.pool(),
+        "ethereum-mainnet",
+        WatchedSourceSelector::WatchedTargetSet(vec![
+            WatchedTargetIdentity {
+                contract_instance_id: registry_contract_instance_id,
+            },
+            WatchedTargetIdentity {
+                contract_instance_id: registrar_contract_instance_id,
+            },
+        ]),
+        range.from_block,
+        range.to_block,
+    )
+    .await?;
+    let rerun = run_resumable_hash_pinned_backfill_job(
+        database.pool(),
+        &reordered_plan,
+        &provider,
+        backfill_job_config(range, "explicit-target-idempotent", "lease-explicit-rerun")?,
+    )
+    .await?;
+    assert_eq!(rerun.backfill_job_id, outcome.backfill_job_id);
+    assert_eq!(rerun.reserved_range_count, 0);
+
+    let narrowed_plan = load_watched_source_selector_plan(
+        database.pool(),
+        "ethereum-mainnet",
+        WatchedSourceSelector::WatchedTargetSet(vec![WatchedTargetIdentity {
+            contract_instance_id: registry_contract_instance_id,
+        }]),
+        range.from_block,
+        range.to_block,
+    )
+    .await?;
+    let conflict = run_resumable_hash_pinned_backfill_job(
+        database.pool(),
+        &narrowed_plan,
+        &provider,
+        backfill_job_config(
+            range,
+            "explicit-target-idempotent",
+            "lease-explicit-conflict",
+        )?,
+    )
+    .await
+    .expect_err("same idempotency key with changed explicit target set must conflict");
+    assert!(
+        conflict
+            .to_string()
+            .contains("does not match requested immutable job identity"),
+        "unexpected explicit target conflict: {conflict:#}"
+    );
+
+    let invalid_family = load_watched_source_selector_plan(
+        database.pool(),
+        "ethereum-mainnet",
+        WatchedSourceSelector::SourceFamily("missing_family".to_owned()),
+        range.from_block,
+        range.to_block,
+    )
+    .await
+    .expect_err("unknown source family must fail before job creation");
+    assert!(
+        invalid_family
+            .to_string()
+            .contains("source_family missing_family found no active watched targets"),
+        "unexpected invalid source-family error: {invalid_family:#}"
+    );
+
+    let invalid_target = load_watched_source_selector_plan(
+        database.pool(),
+        "ethereum-mainnet",
+        WatchedSourceSelector::WatchedTargetSet(vec![WatchedTargetIdentity {
+            contract_instance_id: Uuid::from_u128(9_999),
+        }]),
+        range.from_block,
+        range.to_block,
+    )
+    .await
+    .expect_err("unknown watched target must fail before job creation");
+    assert!(
+        invalid_target
+            .to_string()
+            .contains("is not active for chain ethereum-mainnet"),
+        "unexpected invalid watched-target error: {invalid_target:#}"
+    );
+
+    server.abort();
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn hash_pinned_backfill_fails_missing_hash_payload_without_number_fallback() -> Result<()> {
     let database = TestDatabase::new().await?;
     create_backfill_job_tables(database.pool()).await?;
@@ -332,17 +938,24 @@ async fn hash_pinned_backfill_fails_missing_hash_payload_without_number_fallback
     }))
     .await?;
     let provider = provider::JsonRpcProvider::new(&url)?;
-    let watched_chain = WatchedChainPlan {
+    let source_plan = WatchedSourceSelectorPlan {
         chain: "ethereum-mainnet".to_owned(),
-        addresses: Vec::new(),
-        manifest_root_entry_count: 1,
-        manifest_contract_entry_count: 0,
-        discovery_edge_entry_count: 0,
+        selector_kind: WatchedSourceSelectorKind::WholeActiveWatchedChain,
+        source_family: None,
+        requested_watched_targets: Vec::new(),
+        selected_targets: Vec::new(),
+        watched_chain_plan: WatchedChainPlan {
+            chain: "ethereum-mainnet".to_owned(),
+            addresses: Vec::new(),
+            manifest_root_entry_count: 1,
+            manifest_contract_entry_count: 0,
+            discovery_edge_entry_count: 0,
+        },
     };
 
     let error = run_resumable_hash_pinned_backfill_job(
         database.pool(),
-        &watched_chain,
+        &source_plan,
         &provider,
         backfill_job_config(
             BackfillBlockRange::new(42, 42)?,
@@ -427,16 +1040,33 @@ async fn number_resolving_provider(
     blocks: Vec<ProviderBlock>,
     requests: Arc<Mutex<Vec<RecordedRpcRequest>>>,
 ) -> Result<(provider::JsonRpcProvider, JoinHandle<()>)> {
-    let blocks_by_hash = Arc::new(
+    number_resolving_provider_with_fixtures(
         blocks
             .into_iter()
-            .map(|block| (block.block_hash.clone(), block))
+            .map(|block| ProviderBlockFixture {
+                logs: vec![rpc_log_payload(&block)],
+                block,
+            })
+            .collect(),
+        requests,
+    )
+    .await
+}
+
+async fn number_resolving_provider_with_fixtures(
+    fixtures: Vec<ProviderBlockFixture>,
+    requests: Arc<Mutex<Vec<RecordedRpcRequest>>>,
+) -> Result<(provider::JsonRpcProvider, JoinHandle<()>)> {
+    let fixtures_by_hash = Arc::new(
+        fixtures
+            .into_iter()
+            .map(|fixture| (fixture.block.block_hash.clone(), fixture))
             .collect::<BTreeMap<_, _>>(),
     );
     let hashes_by_number = Arc::new(
-        blocks_by_hash
+        fixtures_by_hash
             .values()
-            .map(|block| (block.block_number, block.block_hash.clone()))
+            .map(|fixture| (fixture.block.block_number, fixture.block.block_hash.clone()))
             .collect::<BTreeMap<_, _>>(),
     );
 
@@ -469,10 +1099,10 @@ async fn number_resolving_provider(
                 let block_hash = hashes_by_number
                     .get(&block_number)
                     .unwrap_or_else(|| panic!("unexpected block number request: {body}"));
-                let block = blocks_by_hash
+                let fixture = fixtures_by_hash
                     .get(block_hash)
                     .expect("number index must point at a fixture block");
-                rpc_block_bundle_payload(block)
+                rpc_block_bundle_payload(&fixture.block)
             }
             "eth_getBlockByHash" => {
                 assert_eq!(params.get(1), Some(&Value::Bool(true)));
@@ -481,10 +1111,10 @@ async fn number_resolving_provider(
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_ascii_lowercase();
-                let block = blocks_by_hash
+                let fixture = fixtures_by_hash
                     .get(&block_hash)
                     .unwrap_or_else(|| panic!("unexpected block hash request: {body}"));
-                rpc_block_bundle_payload(block)
+                rpc_block_bundle_payload(&fixture.block)
             }
             "eth_getLogs" => {
                 let block_hash = params
@@ -494,10 +1124,10 @@ async fn number_resolving_provider(
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_ascii_lowercase();
-                let block = blocks_by_hash
+                let fixture = fixtures_by_hash
                     .get(&block_hash)
                     .unwrap_or_else(|| panic!("unexpected log request: {body}"));
-                Value::Array(vec![rpc_log_payload(block)])
+                Value::Array(fixture.logs.clone())
             }
             "eth_getBlockReceipts" => {
                 let block_hash = params
@@ -505,10 +1135,10 @@ async fn number_resolving_provider(
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_ascii_lowercase();
-                let block = blocks_by_hash
+                let fixture = fixtures_by_hash
                     .get(&block_hash)
                     .unwrap_or_else(|| panic!("unexpected receipt request: {body}"));
-                Value::Array(vec![rpc_receipt_payload(block)])
+                Value::Array(vec![rpc_receipt_payload(&fixture.block)])
             }
             "eth_getCode" => {
                 let block_hash = params
@@ -519,7 +1149,7 @@ async fn number_resolving_provider(
                     .unwrap_or_default()
                     .to_ascii_lowercase();
                 assert!(
-                    blocks_by_hash.contains_key(&block_hash),
+                    fixtures_by_hash.contains_key(&block_hash),
                     "unexpected code block selection: {body}"
                 );
                 Value::String("0x6001600155".to_owned())
@@ -536,6 +1166,134 @@ async fn number_resolving_provider(
     .await?;
 
     Ok((provider::JsonRpcProvider::new(&url)?, server))
+}
+
+fn rpc_log_payload_at_address(block: &ProviderBlock, address: &str, log_index: i64) -> Value {
+    let mut payload = rpc_log_payload(block);
+    let fields = payload
+        .as_object_mut()
+        .expect("test log payload must be a JSON object");
+    fields.insert("address".to_owned(), Value::String(address.to_owned()));
+    fields.insert(
+        "logIndex".to_owned(),
+        Value::String(format!("0x{log_index:x}")),
+    );
+    payload
+}
+
+async fn insert_raw_name_wrapped_log_at_address(
+    pool: &PgPool,
+    chain: &str,
+    block: &ProviderBlock,
+    emitting_address: &str,
+    log_index: i64,
+) -> Result<()> {
+    let dns_name = dns_encoded_test_name();
+    upsert_raw_logs(
+        pool,
+        &[RawLog {
+            chain_id: chain.to_owned(),
+            block_hash: block.block_hash.clone(),
+            block_number: block.block_number,
+            transaction_hash: transaction_hash_for_block(block),
+            transaction_index: 0,
+            log_index,
+            emitting_address: emitting_address.to_ascii_lowercase(),
+            topics: vec![name_wrapped_topic0(), namehash_for_dns_name(&dns_name)],
+            data: decode_hex_string(&encode_name_wrapped_log_data(&dns_name)),
+            canonicality_state: CanonicalityState::Observed,
+        }],
+    )
+    .await?;
+
+    Ok(())
+}
+
+async fn insert_manifest_version_with_source_family(
+    pool: &PgPool,
+    manifest_id: i64,
+    chain: &str,
+    source_family: &str,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+            INSERT INTO manifest_versions (
+                manifest_id,
+                namespace,
+                source_family,
+                chain,
+                rollout_status
+            )
+            VALUES ($1, 'ens', $2, $3, 'active')
+            "#,
+    )
+    .bind(manifest_id)
+    .bind(source_family)
+    .bind(chain)
+    .execute(pool)
+    .await
+    .with_context(|| {
+        format!("failed to insert active manifest {manifest_id} for {chain}:{source_family}")
+    })?;
+
+    Ok(())
+}
+
+async fn insert_watched_manifest_contract(
+    pool: &PgPool,
+    manifest_id: i64,
+    chain: &str,
+    source_family: &str,
+    contract_instance_id: Uuid,
+    address: &str,
+) -> Result<()> {
+    insert_manifest_version_with_source_family(pool, manifest_id, chain, source_family).await?;
+    insert_contract_instance(pool, contract_instance_id, chain, "contract").await?;
+    insert_active_contract_instance_address(
+        pool,
+        contract_instance_id,
+        chain,
+        address,
+        Some(manifest_id),
+    )
+    .await?;
+    insert_manifest_contract_instance(
+        pool,
+        manifest_id,
+        "WatchedContract",
+        contract_instance_id,
+        address,
+        "none",
+        None,
+        None,
+    )
+    .await
+}
+
+async fn set_contract_instance_address_range(
+    pool: &PgPool,
+    contract_instance_id: Uuid,
+    active_from_block_number: Option<i64>,
+    active_to_block_number: Option<i64>,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+            UPDATE contract_instance_addresses
+            SET active_from_block_number = $2,
+                active_to_block_number = $3
+            WHERE contract_instance_id = $1
+            "#,
+    )
+    .bind(contract_instance_id)
+    .bind(active_from_block_number)
+    .bind(active_to_block_number)
+    .execute(pool)
+    .await
+    .with_context(|| {
+        format!("failed to set active range for contract_instance_id {contract_instance_id}")
+    })?;
+
+    Ok(())
 }
 
 fn backfill_job_config(

@@ -142,7 +142,7 @@ Backfill may use either:
 - logs-centric range scans
 - block-centric receipt or block scans
 
-Backfill is scheduled as persisted, bounded jobs. A job is scoped to one selected deployment profile, chain, source family or watch target set, scan mode, and explicit block range. The job range must be finite at creation time; open-ended tail following remains live intake, not a backfill job.
+Backfill is scheduled as persisted, bounded jobs. A job is scoped to one selected deployment profile, chain, source selector, scan mode, and explicit block range. The source selector mode is `whole_active_watched_chain` by default when no selector is supplied, `source_family`, or an explicit `watched_target_set`. The job range must be finite at creation time; open-ended tail following remains live intake, not a backfill job.
 
 Backfill jobs use a bounded lifecycle:
 
@@ -152,7 +152,17 @@ Backfill jobs use a bounded lifecycle:
 - `completed`: every range checkpoint for the job reached its declared end
 - `failed`: the job or range stopped with recorded failure metadata and can be retried by creating or reserving explicit remaining work
 
-The resumable backfill runner command is indexer/backfill-owned operational tooling exposed through `bigname-indexer backfill` over this persisted job model. Each invocation supplies or reuses an idempotency key for one immutable job shape: selected deployment profile, chain, source identity or watch target set, scan mode, finite range start, and finite range end. If the idempotency key already names that exact job shape, the command reuses the existing job and ranges. If the same key is presented with a different job shape, the command must fail with an explicit conflict instead of widening the range, changing source identity, resetting checkpoints, or reclassifying already admitted facts.
+The resumable backfill runner command is indexer/backfill-owned operational tooling exposed through `bigname-indexer backfill` over this persisted job model. Each invocation supplies or reuses an idempotency key for one immutable job shape: selected deployment profile, chain, source selector, scan mode, finite range start, and finite range end. If the idempotency key already names that exact job shape, the command reuses the existing job and ranges. If the same key is presented with a different job shape, the command must fail with an explicit conflict instead of widening the range, changing source identity, resetting checkpoints, or reclassifying already admitted facts.
+
+The source-scoped backfill runner selector has three mutually exclusive modes:
+
+- `whole_active_watched_chain`: the default when no source selector is supplied. The selected targets are every active watched target for the selected deployment profile and chain whose active watch range intersects the finite job range at job creation time.
+- `source_family`: selected by `--source-family <family>`. The selected targets are only the active watched targets in that source family for the selected deployment profile and chain whose active watch range intersects the finite job range. Unknown families or families with no matching active targets fail before job creation rather than falling back to whole-chain backfill.
+- `watched_target_set`: selected by an explicit watched-target set. The request identifies watched targets by `contract_instance_id`; raw addresses alone are not accepted as durable target identity. The selected targets are exactly the supplied watched target identities after validation against the selected deployment profile, chain, and finite job range. The runner must not expand an explicit set to sibling targets, other targets in the same source family, or the whole active watch plan.
+
+The persisted source identity for any selector is the resolved target set, not the CLI spelling that produced it. It is stable and sorted by `source_family`, `contract_instance_id`, normalized address, effective target range start, and effective target range end. Duplicate target identities must collapse only when the full canonical target tuple matches; if the same selector resolves conflicting metadata for the same target identity, job creation fails with an explicit source identity conflict. For idempotency-key reuse, the runner compares the persisted selector mode and resolved source identity. If the active watch plan has changed such that the same CLI selector now resolves to a different target set, the same idempotency key conflicts instead of mutating the existing job.
+
+Backfill intake for a source-scoped job is selected-target-only and hash-pinned. The runner may use block-number ranges to enumerate candidate blocks, but every persisted block-scoped fact or enrichment must be anchored to the resolved block hash before admission through the shared intake path. The job may persist minimal lineage/header anchors needed for that hash pinning, but target-scoped log admission, call snapshots, normalized events, and downstream projection invalidation must be limited to the selected targets. A source-scoped job must not opportunistically admit unselected watched targets merely because they appear in the same block, receipt batch, source family, or chain range.
 
 Storage helpers own lifecycle mutation. They must be idempotent:
 
@@ -162,7 +172,7 @@ Storage helpers own lifecycle mutation. They must be idempotent:
 - `complete_backfill_range` and `complete_backfill_job` are no-ops when already complete and must require all child range checkpoints to reach their declared ends
 - `fail_backfill_range` and `fail_backfill_job` record bounded failure state and failure metadata without rewinding completed checkpoints, clearing completed ranges, or mutating raw facts
 
-Range checkpoints are owned by the backfill job substrate. They record operational progress for fetch/resume only and must not be reused as chain checkpoints, projection replay checkpoints, or API consistency checkpoints. The runner must not call chain checkpoint advancement as a side effect of creating, reserving, advancing, completing, or failing a backfill job.
+Range checkpoints are owned by the backfill job substrate. They record operational progress for fetch/resume only and must not be reused as chain checkpoints, projection replay checkpoints, or API consistency checkpoints. The runner must not call chain checkpoint advancement as a side effect of creating, reserving, advancing, completing, failing, or reusing a backfill job, regardless of whether the selector is whole-chain, source-family scoped, or an explicit watched-target set.
 
 Rules:
 
