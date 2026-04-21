@@ -142,12 +142,33 @@ Backfill may use either:
 - logs-centric range scans
 - block-centric receipt or block scans
 
+Backfill is scheduled as persisted, bounded jobs. A job is scoped to one selected deployment profile, chain, source family or watch target set, scan mode, and explicit block range. The job range must be finite at creation time; open-ended tail following remains live intake, not a backfill job.
+
+Backfill jobs use a bounded lifecycle:
+
+- `pending`: the job or range exists but no worker currently owns it
+- `reserved`: a worker has a lease for the next bounded range checkpoint
+- `running`: the reserved worker is advancing the range checkpoint through the shared intake path
+- `completed`: every range checkpoint for the job reached its declared end
+- `failed`: the job or range stopped with recorded failure metadata and can be retried by creating or reserving explicit remaining work
+
+Storage helpers own lifecycle mutation. They must be idempotent:
+
+- `create_backfill_job` inserts a new bounded job or returns the existing matching job without widening its range or changing source identity
+- `reserve_backfill_range` atomically claims pending work with a lease token and returns the same reservation for duplicate calls by the lease holder; expired leases can be reclaimed without duplicating range work
+- `advance_backfill_range` moves the persisted range checkpoint forward monotonically, never below the prior checkpoint and never beyond the declared range end
+- `complete_backfill_range` and `complete_backfill_job` are no-ops when already complete and must require all child range checkpoints to reach their declared ends
+- `fail_backfill_range` and `fail_backfill_job` record bounded failure state without rewinding completed checkpoints or mutating raw facts
+
+Range checkpoints are owned by the backfill job substrate. They record operational progress for fetch/resume only and must not be reused as chain checkpoints, projection replay checkpoints, or API consistency checkpoints.
+
 Rules:
 
 - backfill and live ingestion share the same downstream normalization and projection path after raw fetch
 - receipt-rich indexing should prefer block-scoped receipt ingestion when available
 - backfill jobs must be resumable, idempotent, and bounded by explicit checkpoints
 - backfill completion is not proof of finality; canonical, safe, and finalized promotion still follow the lineage model
+- backfill job and range checkpoint updates must not promote `canonical_head`, `safe_head`, or `finalized_head`
 
 ## 9. Batch And Retry Rules
 
@@ -247,6 +268,7 @@ Required failure drills:
 - missing parent gap that requires parent backfill
 - partial batch failures
 - crash and resume from a persisted checkpoint
+- crash and resume from a persisted backfill job range checkpoint
 - safe or finalized promotion lagging canonical intake
 
 ## 15. Acceptance Rules

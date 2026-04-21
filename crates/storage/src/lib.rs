@@ -1,6 +1,8 @@
 //! Shared PostgreSQL bootstrap utilities.
 
 mod address_names;
+mod audit;
+mod backfill_jobs;
 mod checkpoints;
 mod children;
 mod execution;
@@ -28,6 +30,16 @@ pub use address_names::{
     clear_address_names_current, collapse_address_name_current_rows, delete_address_names_current,
     load_address_names_current, load_address_names_current_including_noncanonical,
     upsert_address_names_current_rows,
+};
+pub use audit::{
+    CanonicalityInspection, CanonicalityInspectionStatus, RawFactAuditCounts,
+    inspect_block_canonicality, inspect_canonicality_range,
+};
+pub use backfill_jobs::{
+    BackfillJob, BackfillJobCreate, BackfillJobRecord, BackfillLifecycleStatus, BackfillRange,
+    BackfillRangeSpec, advance_backfill_range, complete_backfill_job, complete_backfill_range,
+    create_backfill_job, fail_backfill_job, fail_backfill_range, load_backfill_job,
+    load_backfill_ranges, reserve_backfill_range,
 };
 pub use checkpoints::{
     ChainCheckpoint, ChainCheckpointUpdate, CheckpointBlockRef, advance_chain_checkpoints,

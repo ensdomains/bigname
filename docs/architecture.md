@@ -711,6 +711,8 @@ Shared stages:
 7. projection updates
 8. execution-cache invalidation
 
+Historical backfill enters through persisted, bounded jobs and range checkpoints, then uses the same raw fact, adapter, normalized-event, and projection stages as live intake. Backfill checkpoint state is operational worker state; it does not promote canonical, safe, or finalized chain checkpoints.
+
 Exact lineage, fetch, notification, and reconciliation rules for this plane live in `docs/chain-intake.md`.
 
 Protocol-specific logic belongs in:
@@ -1451,6 +1453,10 @@ Backfills use the same path as live ingestion:
 - normalized events
 - projections
 
+Backfill scheduling is persisted as bounded jobs with resumable range checkpoints. The shared substrate provides idempotent create, reserve, advance, complete, and fail transitions so workers can crash and resume without widening source ranges, duplicating range ownership, or rewriting admitted facts.
+
+Backfill range checkpoint ownership is separate from chain checkpoint ownership. Completing a backfill job means the declared range work reached its stored end; it does not make any block canonical, safe, or finalized and does not change API consistency semantics.
+
 Required backfills include:
 
 - ENSv1 historical state
@@ -1487,6 +1493,7 @@ Required tooling:
 
 - replay from checkpoint
 - backfill source range
+- inspect backfill job and range checkpoints
 - rerun projections from normalized events
 - inspect explain trace
 - inspect raw facts
@@ -1494,8 +1501,11 @@ Required tooling:
 - diff declared vs verified answers
 - invalidate execution cache
 - inspect canonicality disputes
+- inspect canonicality and raw facts for one `(chain_id, block_hash)` by lineage, parent/number, raw fact counts, normalized-event counts, and stored canonicality state
 - inspect surface bindings
 - inspect resolver topology
+
+Canonicality and raw-fact inspection is worker-owned operational tooling over read-only storage audit helpers. The worker inspection surface is the single-block command `bigname-worker inspect canonicality --chain-id <id> --block-hash <hash>` and resolves only one `(chain_id, block_hash)` at a time. It may report whether that block hash has a stored lineage row and, for stored rows, the lineage, canonicality state, parent hash, block number, raw fact counts, and normalized-event counts for that block. Range-oriented storage helpers, where present, are observed/stored lineage listings for known rows only; they do not infer missing heights, gaps, or range-level canonicality status. The tooling must not expose a public `v1` route, mutate storage, or let user-facing API code bypass the projection and execution-read boundaries.
 
 Audit expectations:
 

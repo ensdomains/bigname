@@ -419,6 +419,8 @@ Harden the system around historical correctness.
 - deterministic replay tooling
 - historical backfill tooling
 - `phase9-reorg-execution-cache-invalidation`: reorg repair invalidates `execution_cache_outcomes` for verified resolution and verified primary-name outcomes that depend on orphaned block identities; execution traces and execution steps remain durable audit artifacts; rows without explicit block-hash-bearing dependencies fail closed unless they are explicitly out of scope; this is a reorg/replay foundation and does not promote ENSv2 exact-name support or any manifest capability
+- `phase9-backfill-job-checkpoint-substrate`: persisted backfill jobs are bounded by explicit profile, chain, source identity or watch target set, scan mode, and finite block range; storage helpers provide idempotent create, reserve, advance, complete, and fail transitions over resumable range checkpoints; those checkpoints are operational backfill progress only and never promote canonical, safe, or finalized chain checkpoints
+- `phase9-canonicality-inspection-tooling`: read-only worker-owned canonicality inspection tooling uses storage audit helpers for the single-block command `bigname-worker inspect canonicality --chain-id <id> --block-hash <hash>`; it reports whether one requested `(chain_id, block_hash)` has a stored lineage row and, for stored rows, lineage, canonicality state, parent/number, raw fact counts, and normalized-event counts; it does not inspect spans or infer absent heights/gaps, does not expose a public `v1` API, does not let API code bypass projection/execution read boundaries, and does not promote ENSv2 exact-name support or any manifest capability
 - dispute and inspection tooling
 - backfill jobs for:
   - ENSv1
@@ -433,6 +435,8 @@ Harden the system around historical correctness.
 - historical backfill reuses the same adapter and projection path as live ingestion
 - replay determinism holds from raw facts and from normalized events
 - execution cache invalidation makes orphaned-block-dependent `execution_cache_outcomes` ineligible for reuse without deleting execution traces or execution steps
+- backfill job and range helpers are resumable, idempotent, bounded, and separate from canonical, safe, and finalized chain checkpoint promotion
+- canonicality inspection reports stored lineage, parent/number, canonicality state, raw fact counts, and normalized-event counts for one requested `(chain_id, block_hash)` through worker-owned read-only tooling without adding a public API surface or range/gap inspection
 
 ---
 

@@ -1,6 +1,7 @@
 mod address_names;
 mod children;
 mod execution;
+mod inspect;
 mod name_current;
 mod permissions;
 mod primary_name;
@@ -32,6 +33,7 @@ enum Command {
     AddressNamesCurrent(AddressNamesCurrentArgs),
     ChildrenCurrent(ChildrenCurrentArgs),
     Execution(ExecutionArgs),
+    Inspect(inspect::InspectArgs),
     NameCurrent(NameCurrentArgs),
     PermissionsCurrent(PermissionsCurrentArgs),
     PrimaryNamesCurrent(PrimaryNamesCurrentArgs),
@@ -324,6 +326,7 @@ async fn main() -> Result<()> {
         Command::AddressNamesCurrent(args) => address_names_current(args).await,
         Command::ChildrenCurrent(args) => children_current(args).await,
         Command::Execution(args) => execution_command(args).await,
+        Command::Inspect(args) => inspect::inspect_command(args).await,
         Command::NameCurrent(args) => name_current(args).await,
         Command::PermissionsCurrent(args) => permissions_current(args).await,
         Command::PrimaryNamesCurrent(args) => primary_names_current(args).await,
@@ -823,6 +826,29 @@ mod tests {
                 ReplayCommand::AllCurrentProjections(_) => {}
             },
             other => panic!("expected replay command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inspect_canonicality_cli_is_available() {
+        let cli = Cli::parse_from([
+            "bigname-worker",
+            "inspect",
+            "canonicality",
+            "--chain-id",
+            "eth-mainnet",
+            "--block-hash",
+            "0xabc",
+        ]);
+
+        match cli.command {
+            Command::Inspect(args) => match args.command {
+                inspect::InspectCommand::Canonicality(args) => {
+                    assert_eq!(args.chain_id, "eth-mainnet");
+                    assert_eq!(args.block_hash, "0xabc");
+                }
+            },
+            other => panic!("expected inspect command, got {other:?}"),
         }
     }
 }

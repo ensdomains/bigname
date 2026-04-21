@@ -95,6 +95,7 @@ Use `bigint generated always as identity` for:
 | --- | --- | --- |
 | `chain_*` | intake | lineage and canonical block graph |
 | `raw_*` | intake | immutable blockchain and execution inputs |
+| `backfill_*` | worker/backfill substrate | persisted backfill jobs, bounded range leases, and resumable range checkpoints; not chain head checkpoints |
 | `manifest_*` | manifests/discovery | source manifests, declared contract admission, capability versions |
 | `discovery_*` | manifests/discovery | canonical reachable contract graph and watch-plan expansion keyed by `contract_instance_id` |
 | `name_surfaces`, `surface_bindings`, `resources`, `token_lineages` | adapters | stable identity anchors |
@@ -116,6 +117,14 @@ At minimum, manifests/discovery persistence must carry:
 - `contract_instance_addresses`: time-ranged address attributes keyed by `contract_instance_id` for lookup from raw facts and watch targets to source-graph identity; one `contract_instance_id` may carry multiple non-overlapping active ranges when the same address is re-admitted after an inactive gap
 - `discovery_edges`: edges keyed by `edge_id` with `from_contract_instance_id`, `to_contract_instance_id`, `edge_kind`, active range, provenance, and canonicality
 - any materialized watch-plan table keyed by `contract_instance_id` plus chain and range, including root start nodes keyed by the root `contract_instance_id`; raw address is a derived watch target, not the durable identity
+
+At minimum, backfill persistence must carry:
+
+- `backfill_jobs`: one row per bounded backfill job with selected profile, chain, source identity or watch target set, scan mode, declared range start and end, lifecycle status, and idempotency key
+- `backfill_ranges`: child rows or equivalent range records with declared range bounds, next checkpoint, lease token, lease expiry, attempt counters, status, and failure metadata
+- monotonic helper-owned checkpoint fields that allow a worker to resume after crash without widening the original range or reclassifying already admitted facts
+
+Backfill job and range checkpoint rows are operational state. They do not replace `chain_lineage`, do not define canonicality, and do not promote `canonical_head`, `safe_head`, or `finalized_head`.
 
 ## 5. Partitioning Baseline
 
@@ -173,6 +182,10 @@ Execution cache rows follow the same hash-first canonicality rule. When reorg re
 
 Reusable `execution_cache_outcomes` rows must carry dependencies tied to explicit block-hash-bearing chain positions or boundaries. Rows for verified resolution or verified primary-name readback that lack those dependencies fail closed; rows for request types explicitly documented as outside this reorg invalidation surface remain out of scope rather than being treated as reorg-safe by omission.
 
+Backfill range checkpoints are separate from canonicality checkpoints. Advancing or completing a backfill job records only that bounded fetch/resume work reached a position in its declared range; it must not change any `canonicality_state` value and must not advance `canonical_head`, `safe_head`, or `finalized_head`.
+
+Read-only canonicality inspection uses storage audit helpers over `chain_lineage`, raw fact tables, and `normalized_events`. The worker inspection contract is block-hash only: `bigname-worker inspect canonicality --chain-id <id> --block-hash <hash>` resolves a single `(chain_id, block_hash)`. For that requested block hash, helpers may report whether a stored lineage row exists and, for stored rows, block lineage, parent hash, block number, canonicality state, raw fact counts, and normalized-event counts. Range-oriented storage helpers, where present, only list observed/stored lineage rows already known to storage. They do not infer absent heights, gaps, or aggregate orphan/canonical/safe/finalized status for a span. They must not mutate lineage, raw facts, normalized events, projections, execution cache rows, or backfill checkpoints.
+
 ## 7. Projection Storage Rules
 
 Every current-state projection row carries:
@@ -208,6 +221,7 @@ The execution storage boundary separates durable audit artifacts from cache reus
 
 - schema changes land through checked-in migrations only
 - append-only tables prefer additive changes over destructive rewrites
+- backfill job and range checkpoint storage lands as additive `backfill_*` tables or additive columns; it must not overload `chain_lineage`, projection job state, or public API tables
 - projection tables may be recreated when the rebuild path already exists
 - migrations that change a shared interface require the companion doc update first
 
@@ -216,8 +230,11 @@ The execution storage boundary separates durable audit artifacts from cache reus
 To keep parallel work safe:
 
 - storage owns migrations and query primitives
+- storage owns backfill job/range helper primitives for idempotent create, reserve, advance, complete, and fail transitions
+- worker/backfill code owns operational writes to `backfill_*` through those helpers
 - adapters own inserts into identity and normalized-event tables
 - projection workers own materialized read models
 - execution workers own trace and step writes plus normal cache outcome writes
 - synchronous indexer/reorg repair owns only `execution_cache_outcomes` deletes or invalidations tied to orphaned block dependencies
 - API code must not query raw-fact tables directly except for explicit audit endpoints
+- canonicality and raw-fact inspection tooling is worker-owned, read-only operational tooling over storage audit helpers; it does not create a public `v1` route and does not bypass the API boundary for user-facing reads
