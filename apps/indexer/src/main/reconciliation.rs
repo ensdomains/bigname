@@ -659,8 +659,18 @@ pub(crate) async fn persist_reconciled_raw_payloads(
     upsert_raw_transactions(pool, &transactions).await?;
     upsert_raw_receipts(pool, &receipts).await?;
     upsert_raw_logs(pool, &logs).await?;
+    sync_adapter_state_from_persisted_raw_payloads(pool, chain, &block_hashes).await?;
+
+    Ok(())
+}
+
+pub(crate) async fn sync_adapter_state_from_persisted_raw_payloads(
+    pool: &sqlx::PgPool,
+    chain: &str,
+    block_hashes: &[String],
+) -> Result<()> {
     let normalized_event_summary =
-        bigname_adapters::sync_block_derived_normalized_events(pool, chain, &block_hashes).await?;
+        bigname_adapters::sync_block_derived_normalized_events(pool, chain, block_hashes).await?;
     log_block_derived_normalized_event_summary(chain, &normalized_event_summary);
     let reverse_claim_summary = bigname_adapters::sync_ens_v1_reverse_claim(pool, chain).await?;
     log_ens_v1_reverse_claim_sync_summary(chain, &reverse_claim_summary);

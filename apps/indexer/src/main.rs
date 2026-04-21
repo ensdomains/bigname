@@ -1,3 +1,9 @@
+#[path = "main/backfill.rs"]
+mod backfill;
+#[cfg(test)]
+#[allow(dead_code, unused_imports)]
+#[path = "main/tests/backfill.rs"]
+mod backfill_tests;
 mod provider;
 #[path = "main/reconciliation.rs"]
 mod reconciliation;
@@ -10,6 +16,7 @@ mod tests;
 use std::path::PathBuf;
 
 use anyhow::Result;
+use backfill::{BackfillBlockRange, run_hash_pinned_backfill_range};
 use bigname_manifests::{
     ManifestLoadStatus, ManifestLoadSummary, ManifestSyncStatus, ManifestSyncSummary,
     WatchedChainPlan, load_watched_chain_plan, load_watched_contract_summary,
@@ -46,6 +53,7 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 enum Command {
     Run(RunArgs),
+    Backfill(BackfillArgs),
 }
 
 #[derive(Args, Debug)]
@@ -72,12 +80,37 @@ struct RunArgs {
     chain_rpc_urls: Vec<String>,
 }
 
+#[derive(Args, Debug)]
+struct BackfillArgs {
+    #[command(flatten)]
+    database: DatabaseConfig,
+    #[arg(
+        long,
+        env = "BIGNAME_INDEXER_MANIFESTS_ROOT",
+        default_value = "manifests"
+    )]
+    manifests_root: PathBuf,
+    #[arg(
+        long = "chain-rpc-url",
+        env = "BIGNAME_INDEXER_CHAIN_RPC_URLS",
+        value_delimiter = ','
+    )]
+    chain_rpc_urls: Vec<String>,
+    #[arg(long)]
+    chain: String,
+    #[arg(long)]
+    from_block: i64,
+    #[arg(long)]
+    to_block: i64,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     init_tracing("bigname-indexer");
 
     match Cli::parse().command {
         Command::Run(args) => run(args).await,
+        Command::Backfill(args) => run_backfill(args).await,
     }
 }
 
@@ -169,4 +202,49 @@ async fn run(args: RunArgs) -> Result<()> {
         args.poll_interval_secs,
     )
     .await
+}
+
+async fn run_backfill(args: BackfillArgs) -> Result<()> {
+    let range = BackfillBlockRange::new(args.from_block, args.to_block)?;
+    let manifest_repository = load_manifest_repository(&args.manifests_root)?;
+    let manifest_summary = manifest_repository.summary().clone();
+    log_manifest_summary(&manifest_summary);
+    ensure_manifest_root_ready(&manifest_summary)?;
+
+    let pool = bigname_storage::connect(&args.database).await?;
+    let manifest_runtime_state = build_manifest_runtime_state(&pool, &manifest_repository).await?;
+    log_manifest_runtime_state(&manifest_runtime_state);
+    log_watched_chain_plan("backfill", &manifest_runtime_state.watched_chain_plan);
+
+    let provider_registry = ProviderRegistry::from_chain_rpc_urls(&args.chain_rpc_urls)?;
+    info!(
+        service = "indexer",
+        command = "backfill",
+        chain = %args.chain,
+        from_block = range.from_block,
+        to_block = range.to_block,
+        rpc_configured_chain_count = provider_registry.configured_chain_count(),
+        "provider registry loaded for hash-pinned backfill"
+    );
+
+    let watched_chain = manifest_runtime_state
+        .watched_chain_plan
+        .iter()
+        .find(|chain| chain.chain == args.chain)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "chain {} is not in the active watched chain plan; refusing backfill of non-watched chain",
+                args.chain
+            )
+        })?;
+    let provider = provider_registry.provider_for(&args.chain).ok_or_else(|| {
+        anyhow::anyhow!(
+            "no RPC provider configured for watched chain {}; pass --chain-rpc-url {}=<url>",
+            args.chain,
+            args.chain
+        )
+    })?;
+
+    run_hash_pinned_backfill_range(&pool, watched_chain, provider, range).await?;
+    Ok(())
 }

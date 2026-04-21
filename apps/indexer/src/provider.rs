@@ -116,23 +116,32 @@ impl ProviderBlockTag {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProviderBlockSelection {
     Number(i64),
+    Hash(String),
     Tag(ProviderBlockTag),
 }
 
 impl ProviderBlockSelection {
-    fn json_rpc_parameter(self) -> Result<String> {
+    fn json_rpc_parameter(self) -> Result<Value> {
         match self {
             Self::Number(number) => {
                 if number < 0 {
                     bail!("provider block selection number cannot be negative: {number}");
                 }
 
-                Ok(format!("0x{number:x}"))
+                Ok(Value::String(format!("0x{number:x}")))
             }
-            Self::Tag(tag) => Ok(tag.as_json_rpc_tag().to_owned()),
+            Self::Hash(block_hash) => {
+                let block_hash = normalize_hash(&block_hash);
+                if block_hash.is_empty() {
+                    bail!("provider block selection hash cannot be empty");
+                }
+
+                Ok(json!({ "blockHash": block_hash }))
+            }
+            Self::Tag(tag) => Ok(Value::String(tag.as_json_rpc_tag().to_owned())),
         }
     }
 }
@@ -205,6 +214,28 @@ impl JsonRpcProvider {
             safe,
             finalized,
         })
+    }
+
+    pub async fn fetch_block_hash_by_number(&self, block_number: i64) -> Result<String> {
+        let block_parameter = ProviderBlockSelection::Number(block_number).json_rpc_parameter()?;
+        let block = self
+            .fetch_block(
+                "eth_getBlockByNumber",
+                vec![block_parameter, Value::Bool(false)],
+            )
+            .await?
+            .with_context(|| format!("provider did not return block number {block_number}"))?;
+
+        if block.block_number != block_number {
+            bail!(
+                "provider returned block {} for requested number {} with mismatched block number {}",
+                block.block_hash,
+                block_number,
+                block.block_number
+            );
+        }
+
+        Ok(block.block_hash)
     }
 
     pub async fn fetch_block_by_hash(&self, block_hash: &str) -> Result<ProviderBlock> {
@@ -540,15 +571,12 @@ impl JsonRpcProvider {
     async fn fetch_code_for_address_at_block(
         &self,
         address: &str,
-        block_parameter: &str,
+        block_parameter: &Value,
     ) -> Result<Vec<u8>> {
         let code = self
             .fetch_json_rpc_result(
                 "eth_getCode",
-                vec![
-                    Value::String(address.to_owned()),
-                    Value::String(block_parameter.to_owned()),
-                ],
+                vec![Value::String(address.to_owned()), block_parameter.clone()],
             )
             .await?
             .with_context(|| {
@@ -1016,11 +1044,20 @@ mod tests {
     fn provider_block_selection_formats_json_rpc_parameters() -> Result<()> {
         assert_eq!(
             ProviderBlockSelection::Number(42).json_rpc_parameter()?,
-            "0x2a"
+            json!("0x2a")
         );
         assert_eq!(
             ProviderBlockSelection::Tag(ProviderBlockTag::Safe).json_rpc_parameter()?,
-            "safe"
+            json!("safe")
+        );
+        assert_eq!(
+            ProviderBlockSelection::Hash(
+                "0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_owned()
+            )
+            .json_rpc_parameter()?,
+            json!({
+                "blockHash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            })
         );
 
         let error = ProviderBlockSelection::Number(-1)
@@ -1032,6 +1069,59 @@ mod tests {
                 .contains("provider block selection number cannot be negative: -1")
         );
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn json_rpc_provider_resolves_block_numbers_to_hashes() -> Result<()> {
+        let requested_hash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let request_log = Arc::clone(&requests);
+
+        let (url, server) = spawn_json_rpc_server(Arc::new(move |body| {
+            let method = body
+                .get("method")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let params = body
+                .get("params")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            request_log
+                .lock()
+                .expect("request log must not be poisoned")
+                .push((method.to_owned(), params.clone()));
+
+            let result = match method {
+                "eth_getBlockByNumber" => {
+                    assert_eq!(params.first().and_then(Value::as_str), Some("0x2a"));
+                    assert_eq!(params.get(1), Some(&Value::Bool(false)));
+                    rpc_block_payload(requested_hash, ZERO_HASH, 42, None)
+                }
+                _ => panic!("unexpected RPC request: {body}"),
+            };
+
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": result
+            })
+        }))
+        .await?;
+        let provider = JsonRpcProvider::new(&url)?;
+
+        let block_hash = provider.fetch_block_hash_by_number(42).await?;
+        assert_eq!(block_hash, requested_hash);
+
+        let requests = requests
+            .lock()
+            .expect("request log must not be poisoned")
+            .clone();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].0, "eth_getBlockByNumber");
+
+        server.abort();
         Ok(())
     }
 
