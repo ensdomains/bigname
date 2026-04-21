@@ -959,6 +959,22 @@ mod tests {
     }
 
     #[test]
+    fn inspect_manifest_drift_cli_is_available() {
+        let cli = Cli::parse_from(["bigname-worker", "inspect", "manifest-drift", "--json"]);
+        assert!(cli.writes_machine_json());
+
+        match cli.command {
+            Command::Inspect(args) => match args.command {
+                inspect::InspectCommand::ManifestDrift(args) => {
+                    assert!(args.json);
+                }
+                other => panic!("expected manifest drift inspect command, got {other:?}"),
+            },
+            other => panic!("expected inspect command, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn inspect_stored_lineage_range_cli_is_available() {
         let cli = Cli::parse_from([
             "bigname-worker",

@@ -1,7 +1,12 @@
 use anyhow::{Context, Result, bail};
-use sqlx::{PgPool, Row};
+use serde_json::Value;
+use sqlx::{PgPool, Row, types::time::OffsetDateTime};
 
 use crate::{CanonicalityState, ChainLineageBlock, load_chain_lineage_block};
+
+const DERIVATION_KIND_MANIFEST_ALERT: &str = "manifest_alert";
+const EVENT_KIND_MANIFEST_CODE_HASH_DRIFT_ALERT: &str = "ManifestCodeHashDriftAlert";
+const EVENT_KIND_MANIFEST_PROXY_IMPLEMENTATION_ALERT: &str = "ManifestProxyImplementationAlert";
 
 /// Audit-facing canonicality status for one requested block identity.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -63,6 +68,70 @@ pub struct CanonicalityInspection {
 
 /// Stored lineage row for bounded read-only range inspection.
 pub type StoredLineageRangeBlock = ChainLineageBlock;
+
+/// Read-only stored manifest drift/proxy alert inspection.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ManifestDriftAlertInspection {
+    pub code_hash_drift_alerts: Vec<ManifestDriftAlertObservation>,
+    pub proxy_implementation_alerts: Vec<ManifestDriftAlertObservation>,
+}
+
+impl ManifestDriftAlertInspection {
+    pub fn total_alert_count(&self) -> usize {
+        self.code_hash_drift_alerts.len() + self.proxy_implementation_alerts.len()
+    }
+}
+
+/// Alert family represented by a stored manifest alert normalized event.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ManifestDriftAlertKind {
+    CodeHashDrift,
+    ProxyImplementation,
+}
+
+impl ManifestDriftAlertKind {
+    pub const fn event_kind(self) -> &'static str {
+        match self {
+            Self::CodeHashDrift => EVENT_KIND_MANIFEST_CODE_HASH_DRIFT_ALERT,
+            Self::ProxyImplementation => EVENT_KIND_MANIFEST_PROXY_IMPLEMENTATION_ALERT,
+        }
+    }
+
+    pub const fn alert_type(self) -> &'static str {
+        match self {
+            Self::CodeHashDrift => "manifest_code_hash_drift",
+            Self::ProxyImplementation => "manifest_proxy_implementation_edge",
+        }
+    }
+
+    fn parse(event_kind: &str) -> Result<Self> {
+        match event_kind {
+            EVENT_KIND_MANIFEST_CODE_HASH_DRIFT_ALERT => Ok(Self::CodeHashDrift),
+            EVENT_KIND_MANIFEST_PROXY_IMPLEMENTATION_ALERT => Ok(Self::ProxyImplementation),
+            _ => bail!("unsupported manifest drift alert event kind {event_kind}"),
+        }
+    }
+}
+
+/// One stored manifest drift/proxy alert observation. This is decoded from
+/// normalized events only and intentionally preserves the stored payloads.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ManifestDriftAlertObservation {
+    pub normalized_event_id: i64,
+    pub event_identity: String,
+    pub alert_kind: ManifestDriftAlertKind,
+    pub namespace: String,
+    pub source_family: String,
+    pub manifest_version: i64,
+    pub source_manifest_id: Option<i64>,
+    pub chain_id: Option<String>,
+    pub block_number: Option<i64>,
+    pub block_hash: Option<String>,
+    pub raw_fact_ref: Value,
+    pub canonicality_state: CanonicalityState,
+    pub alert_state: Value,
+    pub observed_at: OffsetDateTime,
+}
 
 /// Inspect one block by hash-first identity without mutating storage.
 pub async fn inspect_block_canonicality(
@@ -173,6 +242,64 @@ pub async fn list_stored_lineage_range(
     rows.into_iter().map(decode_stored_lineage_block).collect()
 }
 
+/// List stored manifest drift and proxy implementation alert observations.
+/// The helper reads the existing manifest-alert normalized events; it does not
+/// compare chain state, create alerts, update alert lifecycle, or mutate
+/// manifest/discovery state.
+pub async fn list_manifest_drift_alert_observations(
+    pool: &PgPool,
+) -> Result<ManifestDriftAlertInspection> {
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            normalized_event_id,
+            event_identity,
+            event_kind,
+            namespace,
+            source_family,
+            manifest_version,
+            source_manifest_id,
+            chain_id,
+            block_number,
+            block_hash,
+            raw_fact_ref,
+            canonicality_state::TEXT AS canonicality_state,
+            after_state AS alert_state,
+            observed_at
+        FROM normalized_events
+        WHERE derivation_kind = $1
+          AND event_kind IN ($2, $3)
+        ORDER BY
+            event_kind,
+            COALESCE(chain_id, after_state ->> 'chain', ''),
+            source_family,
+            manifest_version,
+            event_identity
+        "#,
+    )
+    .bind(DERIVATION_KIND_MANIFEST_ALERT)
+    .bind(EVENT_KIND_MANIFEST_CODE_HASH_DRIFT_ALERT)
+    .bind(EVENT_KIND_MANIFEST_PROXY_IMPLEMENTATION_ALERT)
+    .fetch_all(pool)
+    .await
+    .context("failed to list stored manifest drift alert observations")?;
+
+    let mut inspection = ManifestDriftAlertInspection::default();
+    for row in rows {
+        let observation = decode_manifest_drift_alert_observation(row)?;
+        match observation.alert_kind {
+            ManifestDriftAlertKind::CodeHashDrift => {
+                inspection.code_hash_drift_alerts.push(observation);
+            }
+            ManifestDriftAlertKind::ProxyImplementation => {
+                inspection.proxy_implementation_alerts.push(observation);
+            }
+        }
+    }
+
+    Ok(inspection)
+}
+
 fn build_inspection(
     chain_id: &str,
     block_hash: &str,
@@ -281,6 +408,49 @@ fn decode_stored_lineage_block(row: sqlx::postgres::PgRow) -> Result<StoredLinea
             &row.try_get::<String, _>("canonicality_state")
                 .context("missing canonicality_state")?,
         )?,
+    })
+}
+
+fn decode_manifest_drift_alert_observation(
+    row: sqlx::postgres::PgRow,
+) -> Result<ManifestDriftAlertObservation> {
+    let event_kind = row
+        .try_get::<String, _>("event_kind")
+        .context("missing event_kind")?;
+    let alert_kind = ManifestDriftAlertKind::parse(&event_kind)?;
+
+    Ok(ManifestDriftAlertObservation {
+        normalized_event_id: row
+            .try_get("normalized_event_id")
+            .context("missing normalized_event_id")?,
+        event_identity: row
+            .try_get("event_identity")
+            .context("missing event_identity")?,
+        alert_kind,
+        namespace: row.try_get("namespace").context("missing namespace")?,
+        source_family: row
+            .try_get("source_family")
+            .context("missing source_family")?,
+        manifest_version: row
+            .try_get("manifest_version")
+            .context("missing manifest_version")?,
+        source_manifest_id: row
+            .try_get("source_manifest_id")
+            .context("missing source_manifest_id")?,
+        chain_id: row.try_get("chain_id").context("missing chain_id")?,
+        block_number: row
+            .try_get("block_number")
+            .context("missing block_number")?,
+        block_hash: row.try_get("block_hash").context("missing block_hash")?,
+        raw_fact_ref: row
+            .try_get("raw_fact_ref")
+            .context("missing raw_fact_ref")?,
+        canonicality_state: CanonicalityState::parse(
+            &row.try_get::<String, _>("canonicality_state")
+                .context("missing canonicality_state")?,
+        )?,
+        alert_state: row.try_get("alert_state").context("missing alert_state")?,
+        observed_at: row.try_get("observed_at").context("missing observed_at")?,
     })
 }
 

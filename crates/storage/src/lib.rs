@@ -32,9 +32,10 @@ pub use address_names::{
     upsert_address_names_current_rows,
 };
 pub use audit::{
-    CanonicalityInspection, CanonicalityInspectionStatus, RawFactAuditCounts,
+    CanonicalityInspection, CanonicalityInspectionStatus, ManifestDriftAlertInspection,
+    ManifestDriftAlertKind, ManifestDriftAlertObservation, RawFactAuditCounts,
     StoredLineageRangeBlock, inspect_block_canonicality, inspect_canonicality_range,
-    list_stored_lineage_range,
+    list_manifest_drift_alert_observations, list_stored_lineage_range,
 };
 pub use backfill_jobs::{
     BackfillJob, BackfillJobCreate, BackfillJobRecord, BackfillLifecycleStatus, BackfillRange,

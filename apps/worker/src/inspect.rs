@@ -2,7 +2,8 @@ use anyhow::{Context, Result};
 use bigname_storage::{
     BackfillJob, BackfillJobRecord, BackfillLifecycleStatus, BackfillRange, CanonicalityInspection,
     CanonicalityInspectionStatus, CanonicalityState, DatabaseConfig, ExecutionTraceInspection,
-    ExecutionTraceStep, RawFactAuditCounts, StoredLineageRangeBlock,
+    ExecutionTraceStep, ManifestDriftAlertInspection, ManifestDriftAlertObservation,
+    RawFactAuditCounts, StoredLineageRangeBlock,
 };
 use clap::{Args, Subcommand};
 use serde_json::{Value, json};
@@ -23,6 +24,8 @@ pub(crate) enum InspectCommand {
     Canonicality(InspectCanonicalityArgs),
     #[command(about = "Inspect one persisted execution trace and its ordered steps")]
     ExecutionTrace(InspectExecutionTraceArgs),
+    #[command(about = "Inspect stored manifest drift and proxy implementation alert observations")]
+    ManifestDrift(InspectManifestDriftArgs),
     #[command(about = "List stored lineage rows for a bounded chain block range")]
     StoredLineageRange(InspectStoredLineageRangeArgs),
 }
@@ -56,6 +59,14 @@ pub(crate) struct InspectExecutionTraceArgs {
 }
 
 #[derive(Args, Debug)]
+pub(crate) struct InspectManifestDriftArgs {
+    #[command(flatten)]
+    pub(crate) database: DatabaseConfig,
+    #[arg(long)]
+    pub(crate) json: bool,
+}
+
+#[derive(Args, Debug)]
 pub(crate) struct InspectStoredLineageRangeArgs {
     #[command(flatten)]
     pub(crate) database: DatabaseConfig,
@@ -72,6 +83,7 @@ pub(crate) async fn inspect_command(args: InspectArgs) -> Result<()> {
         InspectCommand::BackfillJob(args) => inspect_backfill_job(args).await,
         InspectCommand::Canonicality(args) => inspect_canonicality(args).await,
         InspectCommand::ExecutionTrace(args) => inspect_execution_trace(args).await,
+        InspectCommand::ManifestDrift(args) => inspect_manifest_drift(args).await,
         InspectCommand::StoredLineageRange(args) => inspect_stored_lineage_range(args).await,
     }
 }
@@ -103,6 +115,15 @@ async fn inspect_execution_trace(args: InspectExecutionTraceArgs) -> Result<()> 
             .with_context(|| format!("missing execution trace {}", args.execution_trace_id))?;
 
     println!("{}", render_execution_trace_inspection(&inspection));
+    Ok(())
+}
+
+async fn inspect_manifest_drift(args: InspectManifestDriftArgs) -> Result<()> {
+    let _emit_json = args.json;
+    let pool = bigname_storage::connect(&args.database).await?;
+    let inspection = bigname_storage::list_manifest_drift_alert_observations(&pool).await?;
+
+    println!("{}", render_manifest_drift_inspection(&inspection));
     Ok(())
 }
 
@@ -309,6 +330,154 @@ fn render_canonicality_inspection(inspection: &CanonicalityInspection) -> Value 
     })
 }
 
+fn render_manifest_drift_inspection(inspection: &ManifestDriftAlertInspection) -> Value {
+    json!({
+        "command": "inspect manifest-drift",
+        "read_only": true,
+        "counts": {
+            "manifest_code_hash_drift": inspection.code_hash_drift_alerts.len(),
+            "manifest_proxy_implementation": inspection.proxy_implementation_alerts.len(),
+            "total": inspection.total_alert_count(),
+        },
+        "manifest_code_hash_drift_alerts": inspection
+            .code_hash_drift_alerts
+            .iter()
+            .map(render_manifest_code_hash_drift_alert)
+            .collect::<Vec<_>>(),
+        "proxy_implementation_alerts": inspection
+            .proxy_implementation_alerts
+            .iter()
+            .map(render_manifest_proxy_implementation_alert)
+            .collect::<Vec<_>>(),
+    })
+}
+
+fn render_manifest_code_hash_drift_alert(alert: &ManifestDriftAlertObservation) -> Value {
+    json!({
+        "normalized_event_id": alert.normalized_event_id,
+        "event_identity": alert.event_identity.as_str(),
+        "event_kind": alert.alert_kind.event_kind(),
+        "alert_type": alert.alert_kind.alert_type(),
+        "namespace": alert.namespace.as_str(),
+        "source_family": alert.source_family.as_str(),
+        "manifest_version": alert.manifest_version,
+        "source_manifest_id": alert_source_manifest_id(alert),
+        "chain": alert_chain(alert),
+        "chain_id": alert.chain_id.as_deref(),
+        "canonicality_state": canonicality_state_label(alert.canonicality_state),
+        "lifecycle": render_manifest_alert_lifecycle(alert),
+        "declaration": {
+            "kind": alert_state_string(alert, "declaration_kind"),
+            "name": alert_state_string(alert, "declaration_name"),
+        },
+        "contract": {
+            "contract_instance_id": alert_state_string(alert, "contract_instance_id"),
+            "address": alert_state_string(alert, "address"),
+        },
+        "code_hash": {
+            "expected": alert_state_string(alert, "expected_code_hash"),
+            "observed": alert_state_string(alert, "observed_code_hash"),
+            "observed_byte_length": alert_state_i64(alert, "observed_code_byte_length"),
+        },
+        "observed_block": {
+            "number": alert.block_number.or_else(|| alert_state_i64(alert, "observed_block_number")),
+            "hash": alert.block_hash.as_deref().or_else(|| alert_state_string(alert, "observed_block_hash")),
+            "canonicality_state": alert_state_string(alert, "observed_canonicality_state"),
+        },
+        "watched_target": {
+            "source": alert_state_string(alert, "watched_source"),
+            "raw_fact_ref": alert.raw_fact_ref.clone(),
+        },
+        "timestamps": {
+            "observed_at": format_timestamp(alert.observed_at),
+        },
+        "remediation": alert_remediation(alert),
+    })
+}
+
+fn render_manifest_proxy_implementation_alert(alert: &ManifestDriftAlertObservation) -> Value {
+    json!({
+        "normalized_event_id": alert.normalized_event_id,
+        "event_identity": alert.event_identity.as_str(),
+        "event_kind": alert.alert_kind.event_kind(),
+        "alert_type": alert.alert_kind.alert_type(),
+        "namespace": alert.namespace.as_str(),
+        "source_family": alert.source_family.as_str(),
+        "manifest_version": alert.manifest_version,
+        "source_manifest_id": alert_source_manifest_id(alert),
+        "chain": alert_chain(alert),
+        "chain_id": alert.chain_id.as_deref(),
+        "canonicality_state": canonicality_state_label(alert.canonicality_state),
+        "lifecycle": render_manifest_alert_lifecycle(alert),
+        "declaration": {
+            "name": alert_state_string(alert, "declaration_name"),
+            "role": alert_state_string(alert, "role"),
+            "proxy_kind": alert_state_string(alert, "proxy_kind"),
+        },
+        "proxy": {
+            "contract_instance_id": alert_state_string(alert, "proxy_contract_instance_id"),
+            "address": alert_state_string(alert, "proxy_address"),
+        },
+        "implementation": {
+            "contract_instance_id": alert_state_string(alert, "implementation_contract_instance_id"),
+            "address": alert_state_string(alert, "implementation_address"),
+        },
+        "implementation_edge": {
+            "admission": alert_state_string(alert, "admission"),
+            "active_from_block_number": alert_state_i64(alert, "active_from_block_number"),
+            "active_to_block_number": alert_state_i64(alert, "active_to_block_number"),
+            "provenance": alert.alert_state.get("provenance").cloned().unwrap_or(Value::Null),
+        },
+        "timestamps": {
+            "observed_at": format_timestamp(alert.observed_at),
+        },
+        "remediation": alert_remediation(alert),
+    })
+}
+
+fn render_manifest_alert_lifecycle(alert: &ManifestDriftAlertObservation) -> Value {
+    let status = alert_state_string(alert, "alert_status").unwrap_or("unknown");
+    json!({
+        "status": status,
+        "active": status == "active",
+        "remediated": status == "remediated",
+    })
+}
+
+fn alert_source_manifest_id(alert: &ManifestDriftAlertObservation) -> Option<i64> {
+    alert
+        .source_manifest_id
+        .or_else(|| alert_state_i64(alert, "source_manifest_id"))
+        .or_else(|| {
+            alert
+                .raw_fact_ref
+                .get("manifest_id")
+                .and_then(Value::as_i64)
+        })
+}
+
+fn alert_chain(alert: &ManifestDriftAlertObservation) -> Option<&str> {
+    alert_state_string(alert, "chain").or(alert.chain_id.as_deref())
+}
+
+fn alert_state_string<'a>(
+    alert: &'a ManifestDriftAlertObservation,
+    field: &str,
+) -> Option<&'a str> {
+    alert.alert_state.get(field).and_then(Value::as_str)
+}
+
+fn alert_state_i64(alert: &ManifestDriftAlertObservation, field: &str) -> Option<i64> {
+    alert.alert_state.get(field).and_then(Value::as_i64)
+}
+
+fn alert_remediation(alert: &ManifestDriftAlertObservation) -> Value {
+    ["remediation", "remediation_metadata"]
+        .iter()
+        .find_map(|field| alert.alert_state.get(*field).cloned())
+        .unwrap_or(Value::Null)
+}
+
 fn render_stored_lineage_range_inspection(blocks: &[StoredLineageRangeBlock]) -> Value {
     json!({
         "blocks": blocks
@@ -435,7 +604,7 @@ mod tests {
     use bigname_storage::{
         BackfillJobCreate, BackfillRangeSpec, ChainLineageBlock, ExecutionCacheKey,
         ExecutionOutcome, ExecutionTrace, ExecutionTraceInspection, ExecutionTraceStep,
-        upsert_chain_lineage_blocks,
+        ManifestDriftAlertKind, NormalizedEvent, upsert_chain_lineage_blocks,
     };
     use serde_json::json;
     use sqlx::{
@@ -752,6 +921,182 @@ mod tests {
         }
     }
 
+    fn manifest_code_hash_alert_observation() -> ManifestDriftAlertObservation {
+        ManifestDriftAlertObservation {
+            normalized_event_id: 101,
+            event_identity: "manifest_alert:code_hash".to_owned(),
+            alert_kind: ManifestDriftAlertKind::CodeHashDrift,
+            namespace: "ens".to_owned(),
+            source_family: "ens_v1_registry_l1".to_owned(),
+            manifest_version: 7,
+            source_manifest_id: Some(42),
+            chain_id: Some("eth-mainnet".to_owned()),
+            block_number: Some(123),
+            block_hash: Some("0xalertblock".to_owned()),
+            raw_fact_ref: json!({
+                "manifest_id": 42,
+                "contract_instance_id": "0e7ec7ac-e000-0000-0000-000000000111",
+                "address": "0xregistry",
+                "observed_block_number": 123,
+                "observed_block_hash": "0xalertblock"
+            }),
+            canonicality_state: CanonicalityState::Canonical,
+            alert_state: json!({
+                "alert_type": "manifest_code_hash_drift",
+                "alert_status": "active",
+                "chain": "eth-mainnet",
+                "source_family": "ens_v1_registry_l1",
+                "declaration_kind": "contract",
+                "declaration_name": "registry",
+                "contract_instance_id": "0e7ec7ac-e000-0000-0000-000000000111",
+                "address": "0xregistry",
+                "expected_code_hash": "0xexpected",
+                "observed_code_hash": "0xobserved",
+                "observed_code_byte_length": 512,
+                "observed_block_number": 123,
+                "observed_block_hash": "0xalertblock",
+                "observed_canonicality_state": "canonical",
+                "watched_source": "manifest_contract",
+                "source_manifest_id": 42
+            }),
+            observed_at: timestamp(1_700_000_200),
+        }
+    }
+
+    fn manifest_proxy_alert_observation() -> ManifestDriftAlertObservation {
+        ManifestDriftAlertObservation {
+            normalized_event_id: 102,
+            event_identity: "manifest_alert:proxy".to_owned(),
+            alert_kind: ManifestDriftAlertKind::ProxyImplementation,
+            namespace: "ens".to_owned(),
+            source_family: "ens_v1_wrapper_l1".to_owned(),
+            manifest_version: 9,
+            source_manifest_id: None,
+            chain_id: Some("eth-mainnet".to_owned()),
+            block_number: None,
+            block_hash: None,
+            raw_fact_ref: json!({
+                "manifest_id": 43,
+                "discovery_edge_id": 99,
+                "proxy_contract_instance_id": "0e7ec7ac-e000-0000-0000-000000000222",
+                "implementation_contract_instance_id": "0e7ec7ac-e000-0000-0000-000000000333"
+            }),
+            canonicality_state: CanonicalityState::Finalized,
+            alert_state: json!({
+                "alert_type": "manifest_proxy_implementation_edge",
+                "alert_status": "active",
+                "chain": "eth-mainnet",
+                "source_family": "ens_v1_wrapper_l1",
+                "proxy_contract_instance_id": "0e7ec7ac-e000-0000-0000-000000000222",
+                "proxy_address": "0xproxy",
+                "implementation_contract_instance_id": "0e7ec7ac-e000-0000-0000-000000000333",
+                "implementation_address": "0ximpl",
+                "declaration_name": "name_wrapper",
+                "role": "name_wrapper",
+                "proxy_kind": "eip1967",
+                "admission": "observed",
+                "active_from_block_number": 120,
+                "active_to_block_number": null,
+                "provenance": {
+                    "slot": "eip1967.proxy.implementation"
+                }
+            }),
+            observed_at: timestamp(1_700_000_240),
+        }
+    }
+
+    fn manifest_code_hash_alert_event(event_identity: &str) -> NormalizedEvent {
+        NormalizedEvent {
+            event_identity: event_identity.to_owned(),
+            namespace: "ens".to_owned(),
+            logical_name_id: None,
+            resource_id: None,
+            event_kind: "ManifestCodeHashDriftAlert".to_owned(),
+            source_family: "ens_v1_registry_l1".to_owned(),
+            manifest_version: 7,
+            source_manifest_id: None,
+            chain_id: Some("eth-mainnet".to_owned()),
+            block_number: Some(123),
+            block_hash: Some("0xalertblock".to_owned()),
+            transaction_hash: None,
+            log_index: None,
+            raw_fact_ref: json!({
+                "manifest_id": 42,
+                "contract_instance_id": "0e7ec7ac-e000-0000-0000-000000000111",
+                "address": "0xregistry",
+                "observed_block_number": 123,
+                "observed_block_hash": "0xalertblock"
+            }),
+            derivation_kind: "manifest_alert".to_owned(),
+            canonicality_state: CanonicalityState::Canonical,
+            before_state: json!({}),
+            after_state: json!({
+                "alert_type": "manifest_code_hash_drift",
+                "alert_status": "active",
+                "chain": "eth-mainnet",
+                "source_family": "ens_v1_registry_l1",
+                "declaration_kind": "contract",
+                "declaration_name": "registry",
+                "contract_instance_id": "0e7ec7ac-e000-0000-0000-000000000111",
+                "address": "0xregistry",
+                "expected_code_hash": "0xexpected",
+                "observed_code_hash": "0xobserved",
+                "observed_code_byte_length": 512,
+                "observed_block_number": 123,
+                "observed_block_hash": "0xalertblock",
+                "observed_canonicality_state": "canonical",
+                "watched_source": "manifest_contract",
+                "source_manifest_id": 42
+            }),
+        }
+    }
+
+    fn manifest_proxy_alert_event(event_identity: &str) -> NormalizedEvent {
+        NormalizedEvent {
+            event_identity: event_identity.to_owned(),
+            namespace: "ens".to_owned(),
+            logical_name_id: None,
+            resource_id: None,
+            event_kind: "ManifestProxyImplementationAlert".to_owned(),
+            source_family: "ens_v1_wrapper_l1".to_owned(),
+            manifest_version: 9,
+            source_manifest_id: None,
+            chain_id: Some("eth-mainnet".to_owned()),
+            block_number: None,
+            block_hash: None,
+            transaction_hash: None,
+            log_index: None,
+            raw_fact_ref: json!({
+                "manifest_id": 43,
+                "discovery_edge_id": 99,
+                "proxy_contract_instance_id": "0e7ec7ac-e000-0000-0000-000000000222",
+                "implementation_contract_instance_id": "0e7ec7ac-e000-0000-0000-000000000333"
+            }),
+            derivation_kind: "manifest_alert".to_owned(),
+            canonicality_state: CanonicalityState::Finalized,
+            before_state: json!({}),
+            after_state: json!({
+                "alert_type": "manifest_proxy_implementation_edge",
+                "alert_status": "active",
+                "chain": "eth-mainnet",
+                "source_family": "ens_v1_wrapper_l1",
+                "proxy_contract_instance_id": "0e7ec7ac-e000-0000-0000-000000000222",
+                "proxy_address": "0xproxy",
+                "implementation_contract_instance_id": "0e7ec7ac-e000-0000-0000-000000000333",
+                "implementation_address": "0ximpl",
+                "declaration_name": "name_wrapper",
+                "role": "name_wrapper",
+                "proxy_kind": "eip1967",
+                "admission": "observed",
+                "active_from_block_number": 120,
+                "active_to_block_number": null,
+                "provenance": {
+                    "slot": "eip1967.proxy.implementation"
+                }
+            }),
+        }
+    }
+
     #[test]
     fn renders_backfill_job_inspection_json() {
         let inspection = BackfillJobRecord {
@@ -1035,6 +1380,107 @@ mod tests {
         );
     }
 
+    #[test]
+    fn renders_manifest_drift_inspection_json() {
+        let rendered = render_manifest_drift_inspection(&ManifestDriftAlertInspection {
+            code_hash_drift_alerts: vec![manifest_code_hash_alert_observation()],
+            proxy_implementation_alerts: vec![manifest_proxy_alert_observation()],
+        });
+
+        assert_eq!(rendered["command"], "inspect manifest-drift");
+        assert_eq!(rendered["read_only"], true);
+        assert_eq!(rendered["counts"]["manifest_code_hash_drift"], 1);
+        assert_eq!(rendered["counts"]["manifest_proxy_implementation"], 1);
+        assert_eq!(rendered["counts"]["total"], 2);
+
+        let code_alert = &rendered["manifest_code_hash_drift_alerts"][0];
+        assert_eq!(code_alert["normalized_event_id"], 101);
+        assert_eq!(code_alert["event_identity"], "manifest_alert:code_hash");
+        assert_eq!(code_alert["event_kind"], "ManifestCodeHashDriftAlert");
+        assert_eq!(code_alert["alert_type"], "manifest_code_hash_drift");
+        assert_eq!(code_alert["namespace"], "ens");
+        assert_eq!(code_alert["source_family"], "ens_v1_registry_l1");
+        assert_eq!(code_alert["manifest_version"], 7);
+        assert_eq!(code_alert["source_manifest_id"], 42);
+        assert_eq!(code_alert["chain"], "eth-mainnet");
+        assert_eq!(code_alert["chain_id"], "eth-mainnet");
+        assert_eq!(code_alert["canonicality_state"], "canonical");
+        assert_eq!(code_alert["lifecycle"]["status"], "active");
+        assert_eq!(code_alert["lifecycle"]["active"], true);
+        assert_eq!(code_alert["declaration"]["kind"], "contract");
+        assert_eq!(code_alert["declaration"]["name"], "registry");
+        assert_eq!(
+            code_alert["contract"]["contract_instance_id"],
+            "0e7ec7ac-e000-0000-0000-000000000111"
+        );
+        assert_eq!(code_alert["contract"]["address"], "0xregistry");
+        assert_eq!(code_alert["code_hash"]["expected"], "0xexpected");
+        assert_eq!(code_alert["code_hash"]["observed"], "0xobserved");
+        assert_eq!(code_alert["code_hash"]["observed_byte_length"], 512);
+        assert_eq!(code_alert["observed_block"]["number"], 123);
+        assert_eq!(code_alert["observed_block"]["hash"], "0xalertblock");
+        assert_eq!(
+            code_alert["observed_block"]["canonicality_state"],
+            "canonical"
+        );
+        assert_eq!(code_alert["watched_target"]["source"], "manifest_contract");
+        assert_eq!(
+            code_alert["watched_target"]["raw_fact_ref"]["manifest_id"],
+            42
+        );
+        assert_eq!(
+            code_alert["timestamps"]["observed_at"],
+            "2023-11-14T22:16:40Z"
+        );
+        assert!(code_alert["remediation"].is_null());
+
+        let proxy_alert = &rendered["proxy_implementation_alerts"][0];
+        assert_eq!(proxy_alert["normalized_event_id"], 102);
+        assert_eq!(proxy_alert["event_identity"], "manifest_alert:proxy");
+        assert_eq!(
+            proxy_alert["event_kind"],
+            "ManifestProxyImplementationAlert"
+        );
+        assert_eq!(
+            proxy_alert["alert_type"],
+            "manifest_proxy_implementation_edge"
+        );
+        assert_eq!(proxy_alert["namespace"], "ens");
+        assert_eq!(proxy_alert["source_family"], "ens_v1_wrapper_l1");
+        assert_eq!(proxy_alert["manifest_version"], 9);
+        assert_eq!(proxy_alert["source_manifest_id"], 43);
+        assert_eq!(proxy_alert["chain"], "eth-mainnet");
+        assert_eq!(proxy_alert["canonicality_state"], "finalized");
+        assert_eq!(proxy_alert["declaration"]["name"], "name_wrapper");
+        assert_eq!(proxy_alert["declaration"]["role"], "name_wrapper");
+        assert_eq!(proxy_alert["declaration"]["proxy_kind"], "eip1967");
+        assert_eq!(
+            proxy_alert["proxy"]["contract_instance_id"],
+            "0e7ec7ac-e000-0000-0000-000000000222"
+        );
+        assert_eq!(proxy_alert["proxy"]["address"], "0xproxy");
+        assert_eq!(
+            proxy_alert["implementation"]["contract_instance_id"],
+            "0e7ec7ac-e000-0000-0000-000000000333"
+        );
+        assert_eq!(proxy_alert["implementation"]["address"], "0ximpl");
+        assert_eq!(proxy_alert["implementation_edge"]["admission"], "observed");
+        assert_eq!(
+            proxy_alert["implementation_edge"]["active_from_block_number"],
+            120
+        );
+        assert!(proxy_alert["implementation_edge"]["active_to_block_number"].is_null());
+        assert_eq!(
+            proxy_alert["implementation_edge"]["provenance"]["slot"],
+            "eip1967.proxy.implementation"
+        );
+        assert_eq!(
+            proxy_alert["timestamps"]["observed_at"],
+            "2023-11-14T22:17:20Z"
+        );
+        assert!(proxy_alert["remediation"].is_null());
+    }
+
     #[tokio::test]
     async fn inspect_stored_lineage_range_orders_and_bounds_stored_rows() -> Result<()> {
         let database = TestDatabase::new().await?;
@@ -1205,6 +1651,34 @@ mod tests {
 
         assert_eq!(after_trace, before_trace);
         assert_eq!(after_outcome, before_outcome);
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn inspect_manifest_drift_does_not_mutate_alert_observations() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        bigname_storage::upsert_normalized_events(
+            database.pool(),
+            &[
+                manifest_code_hash_alert_event("manifest_alert:inspect:code"),
+                manifest_proxy_alert_event("manifest_alert:inspect:proxy"),
+            ],
+        )
+        .await?;
+
+        let before =
+            bigname_storage::list_manifest_drift_alert_observations(database.pool()).await?;
+
+        inspect_manifest_drift(InspectManifestDriftArgs {
+            database: database.database_config(),
+            json: true,
+        })
+        .await?;
+
+        let after =
+            bigname_storage::list_manifest_drift_alert_observations(database.pool()).await?;
+        assert_eq!(after, before);
 
         database.cleanup().await
     }

@@ -8,7 +8,7 @@ use anyhow::Result;
 use serde_json::json;
 use sqlx::types::time::OffsetDateTime;
 use sqlx::{
-    PgPool,
+    PgPool, Row,
     postgres::{PgConnectOptions, PgPoolOptions},
 };
 
@@ -244,6 +244,121 @@ fn normalized_event(block_hash: &str, block_number: i64, index: i64) -> Normaliz
     }
 }
 
+fn manifest_code_hash_drift_alert(event_identity: &str, address: &str) -> NormalizedEvent {
+    NormalizedEvent {
+        event_identity: event_identity.to_owned(),
+        namespace: "ens".to_owned(),
+        logical_name_id: None,
+        resource_id: None,
+        event_kind: "ManifestCodeHashDriftAlert".to_owned(),
+        source_family: "ens_v1_registry_l1".to_owned(),
+        manifest_version: 7,
+        source_manifest_id: None,
+        chain_id: Some("eth-mainnet".to_owned()),
+        block_number: Some(123),
+        block_hash: Some("0xalertblock".to_owned()),
+        transaction_hash: None,
+        log_index: None,
+        raw_fact_ref: json!({
+            "manifest_id": 42,
+            "contract_instance_id": "0e7ec7ac-e000-0000-0000-000000000111",
+            "address": address,
+            "observed_block_number": 123,
+            "observed_block_hash": "0xalertblock"
+        }),
+        derivation_kind: "manifest_alert".to_owned(),
+        canonicality_state: CanonicalityState::Canonical,
+        before_state: json!({}),
+        after_state: json!({
+            "alert_type": "manifest_code_hash_drift",
+            "alert_status": "active",
+            "chain": "eth-mainnet",
+            "source_family": "ens_v1_registry_l1",
+            "declaration_kind": "contract",
+            "declaration_name": "registry",
+            "contract_instance_id": "0e7ec7ac-e000-0000-0000-000000000111",
+            "address": address,
+            "expected_code_hash": "0xexpected",
+            "observed_code_hash": "0xobserved",
+            "observed_code_byte_length": 512,
+            "observed_block_number": 123,
+            "observed_block_hash": "0xalertblock",
+            "observed_canonicality_state": "canonical",
+            "watched_source": "manifest_contract",
+            "source_manifest_id": 42
+        }),
+    }
+}
+
+fn manifest_proxy_implementation_alert(event_identity: &str) -> NormalizedEvent {
+    NormalizedEvent {
+        event_identity: event_identity.to_owned(),
+        namespace: "ens".to_owned(),
+        logical_name_id: None,
+        resource_id: None,
+        event_kind: "ManifestProxyImplementationAlert".to_owned(),
+        source_family: "ens_v1_wrapper_l1".to_owned(),
+        manifest_version: 9,
+        source_manifest_id: None,
+        chain_id: Some("eth-mainnet".to_owned()),
+        block_number: None,
+        block_hash: None,
+        transaction_hash: None,
+        log_index: None,
+        raw_fact_ref: json!({
+            "manifest_id": 43,
+            "discovery_edge_id": 99,
+            "proxy_contract_instance_id": "0e7ec7ac-e000-0000-0000-000000000222",
+            "implementation_contract_instance_id": "0e7ec7ac-e000-0000-0000-000000000333"
+        }),
+        derivation_kind: "manifest_alert".to_owned(),
+        canonicality_state: CanonicalityState::Finalized,
+        before_state: json!({}),
+        after_state: json!({
+            "alert_type": "manifest_proxy_implementation_edge",
+            "alert_status": "active",
+            "chain": "eth-mainnet",
+            "source_family": "ens_v1_wrapper_l1",
+            "proxy_contract_instance_id": "0e7ec7ac-e000-0000-0000-000000000222",
+            "proxy_address": "0xproxy",
+            "implementation_contract_instance_id": "0e7ec7ac-e000-0000-0000-000000000333",
+            "implementation_address": "0ximpl",
+            "declaration_name": "name_wrapper",
+            "role": "name_wrapper",
+            "proxy_kind": "eip1967",
+            "admission": "observed",
+            "active_from_block_number": 120,
+            "active_to_block_number": null,
+            "provenance": {
+                "slot": "eip1967.proxy.implementation"
+            }
+        }),
+    }
+}
+
+fn ignored_manifest_alert_event() -> NormalizedEvent {
+    NormalizedEvent {
+        event_identity: "manifest_alert:ignored".to_owned(),
+        namespace: "ens".to_owned(),
+        logical_name_id: None,
+        resource_id: None,
+        event_kind: "SourceManifestUpdated".to_owned(),
+        source_family: "ens_v1_registry_l1".to_owned(),
+        manifest_version: 7,
+        source_manifest_id: None,
+        chain_id: Some("eth-mainnet".to_owned()),
+        block_number: None,
+        block_hash: None,
+        transaction_hash: None,
+        log_index: None,
+        raw_fact_ref: json!({}),
+        derivation_kind: "manifest_alert".to_owned(),
+        canonicality_state: CanonicalityState::Finalized,
+        before_state: json!({}),
+        after_state: json!({}),
+    }
+}
+
 #[tokio::test]
 async fn audit_reports_lineage_status_and_block_scoped_counts() -> Result<()> {
     let database = TestDatabase::new().await?;
@@ -383,6 +498,103 @@ async fn stored_lineage_range_lists_only_stored_rows_in_stable_order() -> Result
 }
 
 #[tokio::test]
+async fn manifest_drift_audit_lists_stored_alert_observations() -> Result<()> {
+    let database = TestDatabase::new().await?;
+
+    upsert_normalized_events(
+        database.pool(),
+        &[
+            manifest_proxy_implementation_alert("manifest_alert:proxy"),
+            manifest_code_hash_drift_alert("manifest_alert:code:z", "0xregistry-z"),
+            ignored_manifest_alert_event(),
+            manifest_code_hash_drift_alert("manifest_alert:code:a", "0xregistry-a"),
+        ],
+    )
+    .await?;
+
+    let inspection = list_manifest_drift_alert_observations(database.pool()).await?;
+
+    assert_eq!(inspection.total_alert_count(), 3);
+    assert_eq!(
+        inspection
+            .code_hash_drift_alerts
+            .iter()
+            .map(|alert| alert.event_identity.as_str())
+            .collect::<Vec<_>>(),
+        vec!["manifest_alert:code:a", "manifest_alert:code:z"]
+    );
+    for alert in &inspection.code_hash_drift_alerts {
+        assert_eq!(alert.alert_kind, ManifestDriftAlertKind::CodeHashDrift);
+        assert_eq!(alert.alert_kind.event_kind(), "ManifestCodeHashDriftAlert");
+        assert_eq!(alert.alert_kind.alert_type(), "manifest_code_hash_drift");
+        assert_eq!(alert.source_family, "ens_v1_registry_l1");
+        assert_eq!(alert.manifest_version, 7);
+        assert_eq!(alert.chain_id.as_deref(), Some("eth-mainnet"));
+        assert_eq!(alert.block_number, Some(123));
+        assert_eq!(alert.block_hash.as_deref(), Some("0xalertblock"));
+        assert_eq!(alert.canonicality_state, CanonicalityState::Canonical);
+        assert_eq!(
+            alert.alert_state["expected_code_hash"].as_str(),
+            Some("0xexpected")
+        );
+        assert_eq!(
+            alert.alert_state["observed_code_hash"].as_str(),
+            Some("0xobserved")
+        );
+    }
+    assert_eq!(
+        inspection.code_hash_drift_alerts[0].alert_state["address"].as_str(),
+        Some("0xregistry-a")
+    );
+    assert_eq!(
+        inspection.code_hash_drift_alerts[1].alert_state["address"].as_str(),
+        Some("0xregistry-z")
+    );
+    assert_eq!(inspection.proxy_implementation_alerts.len(), 1);
+    let proxy_alert = &inspection.proxy_implementation_alerts[0];
+    assert_eq!(
+        proxy_alert.alert_kind,
+        ManifestDriftAlertKind::ProxyImplementation
+    );
+    assert_eq!(proxy_alert.event_identity, "manifest_alert:proxy");
+    assert_eq!(proxy_alert.source_family, "ens_v1_wrapper_l1");
+    assert_eq!(proxy_alert.manifest_version, 9);
+    assert_eq!(proxy_alert.canonicality_state, CanonicalityState::Finalized);
+    assert_eq!(proxy_alert.alert_state["proxy_address"], "0xproxy");
+    assert_eq!(proxy_alert.alert_state["implementation_address"], "0ximpl");
+    assert_eq!(proxy_alert.raw_fact_ref["discovery_edge_id"], 99);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn manifest_drift_audit_does_not_mutate_alert_observations() -> Result<()> {
+    let database = TestDatabase::new().await?;
+
+    upsert_normalized_events(
+        database.pool(),
+        &[
+            manifest_code_hash_drift_alert("manifest_alert:readonly:code", "0xregistry"),
+            manifest_proxy_implementation_alert("manifest_alert:readonly:proxy"),
+        ],
+    )
+    .await?;
+
+    let before = list_manifest_drift_alert_observations(database.pool()).await?;
+    let before_total = load_normalized_event_total(database.pool()).await?;
+
+    let inspection = list_manifest_drift_alert_observations(database.pool()).await?;
+
+    let after = list_manifest_drift_alert_observations(database.pool()).await?;
+    let after_total = load_normalized_event_total(database.pool()).await?;
+    assert_eq!(inspection, before);
+    assert_eq!(after, before);
+    assert_eq!(after_total, before_total);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn raw_log_replay_inputs_include_only_canonical_persisted_facts() -> Result<()> {
     let database = TestDatabase::new().await?;
 
@@ -466,4 +678,19 @@ async fn raw_log_replay_inputs_include_only_canonical_persisted_facts() -> Resul
     );
 
     database.cleanup().await
+}
+
+async fn load_normalized_event_total(pool: &PgPool) -> Result<i64> {
+    let row = sqlx::query(
+        r#"
+        SELECT COUNT(*)::BIGINT AS event_count
+        FROM normalized_events
+        "#,
+    )
+    .fetch_one(pool)
+    .await
+    .context("failed to load normalized-event total")?;
+
+    row.try_get("event_count")
+        .context("missing normalized-event total")
 }
