@@ -1508,7 +1508,11 @@ fn dns_encoded_test_name() -> Vec<u8> {
 }
 
 fn name_wrapped_topic0() -> String {
-    keccak256_hex(b"NameWrapped(bytes,bytes32,address,uint32,uint64)")
+    canonical_name_wrapped_topic0()
+}
+
+fn canonical_name_wrapped_topic0() -> String {
+    keccak256_hex(b"NameWrapped(bytes32,bytes,address,uint32,uint64)")
 }
 
 fn registrar_name_registered_topic0() -> String {

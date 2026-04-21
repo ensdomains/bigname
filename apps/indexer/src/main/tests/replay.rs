@@ -246,36 +246,39 @@ async fn replay_normalized_events_is_idempotent_without_checkpoint_mutation() ->
 
     assert_eq!(first.selected_block_count, 1);
     assert_eq!(first.canonical_raw_log_count, 1);
-    assert_eq!(first.scanned_raw_log_count, 1);
-    assert_eq!(first.matched_raw_log_count, 1);
-    assert_eq!(first.normalized_event_synced_count, 1);
-    assert_eq!(first.normalized_event_inserted_count, 1);
+    assert_eq!(first.scanned_raw_log_count, 2);
+    assert_eq!(first.matched_raw_log_count, 2);
+    assert_eq!(first.normalized_event_synced_count, 6);
+    assert_eq!(first.normalized_event_inserted_count, 6);
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM normalized_events")
             .fetch_one(database.pool())
             .await?,
-        1
+        6
     );
     assert_eq!(
         sqlx::query_scalar::<_, String>(
-            "SELECT after_state->>'decoded_name' FROM normalized_events"
+            "SELECT after_state->>'decoded_name' FROM normalized_events WHERE event_kind = 'PreimageObserved'"
         )
         .fetch_one(database.pool())
         .await?,
         "wrapped.eth".to_owned()
     );
+    assert_eq!(count_wrapper_replay_events(database.pool()).await?, 5);
 
     let second = replay_raw_fact_normalized_events(database.pool(), request).await?;
 
     assert_eq!(second.selected_block_count, 1);
     assert_eq!(second.canonical_raw_log_count, 1);
-    assert_eq!(second.normalized_event_synced_count, 1);
+    assert_eq!(second.scanned_raw_log_count, 2);
+    assert_eq!(second.matched_raw_log_count, 2);
+    assert_eq!(second.normalized_event_synced_count, 6);
     assert_eq!(second.normalized_event_inserted_count, 0);
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM normalized_events")
             .fetch_one(database.pool())
             .await?,
-        1
+        6
     );
     assert_eq!(
         sqlx::query_scalar::<_, String>(
@@ -298,6 +301,125 @@ async fn replay_normalized_events_is_idempotent_without_checkpoint_mutation() ->
             .await?,
         1
     );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn replay_normalized_events_replays_canonical_name_wrapper_raw_logs_idempotently()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let chain = "ethereum-mainnet";
+    let wrapper_contract_instance_id = Uuid::from_u128(0x906);
+    let wrapper_address = "0xD4416b13d2b3a9aBae7AcD5D6C2BbDBE25686401";
+    let block = provider_block(
+        "0x9696969696969696969696969696969696969696969696969696969696969696",
+        Some("0x8686868686868686868686868686868686868686868686868686868686868686"),
+        96,
+    );
+
+    insert_active_replay_watched_contract(
+        database.pool(),
+        6,
+        chain,
+        wrapper_contract_instance_id,
+        wrapper_address,
+    )
+    .await?;
+    insert_chain_lineage_for_block(database.pool(), chain, &block, CanonicalityState::Canonical)
+        .await?;
+    insert_raw_name_wrapped_log(
+        database.pool(),
+        chain,
+        &block,
+        wrapper_address,
+        0,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+
+    let request = RawFactNormalizedEventReplayRequest {
+        deployment_profile: "mainnet".to_owned(),
+        chain: chain.to_owned(),
+        selection: RawFactNormalizedEventReplaySelection::BlockRange {
+            from_block: block.block_number,
+            to_block: block.block_number,
+        },
+    };
+
+    let first = replay_raw_fact_normalized_events(database.pool(), request.clone()).await?;
+
+    assert_eq!(first.selected_block_count, 1);
+    assert_eq!(first.canonical_raw_log_count, 1);
+    assert_eq!(first.scanned_raw_log_count, 2);
+    assert_eq!(first.matched_raw_log_count, 2);
+    assert_eq!(first.normalized_event_inserted_count, 6);
+
+    let wrapper_event_count = count_wrapper_replay_events(database.pool()).await?;
+    assert_eq!(wrapper_event_count, 5);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)::BIGINT
+            FROM normalized_events
+            WHERE derivation_kind = 'ens_v1_unwrapped_authority'
+              AND source_family = 'ens_v1_wrapper_l1'
+              AND logical_name_id = 'ens:wrapped.eth'
+              AND raw_fact_ref->>'block_hash' = $1
+            "#
+        )
+        .bind(&block.block_hash)
+        .fetch_one(database.pool())
+        .await?,
+        wrapper_event_count
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, Vec<String>>(
+            r#"
+            SELECT ARRAY_AGG(event_kind ORDER BY event_kind)
+            FROM normalized_events
+            WHERE derivation_kind = 'ens_v1_unwrapped_authority'
+              AND source_family = 'ens_v1_wrapper_l1'
+            "#
+        )
+        .fetch_one(database.pool())
+        .await?,
+        vec![
+            "AuthorityEpochChanged".to_owned(),
+            "ExpiryChanged".to_owned(),
+            "PermissionScopeChanged".to_owned(),
+            "SurfaceBound".to_owned(),
+            "TokenControlTransferred".to_owned(),
+        ]
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)::BIGINT
+            FROM normalized_events
+            WHERE derivation_kind = 'raw_log_preimage_observation'
+              AND event_kind = 'PreimageObserved'
+              AND after_state->>'source_event' = 'NameWrapped'
+            "#
+        )
+        .fetch_one(database.pool())
+        .await?,
+        1
+    );
+    assert_no_duplicate_normalized_event_identities(database.pool()).await?;
+
+    let second = replay_raw_fact_normalized_events(database.pool(), request).await?;
+
+    assert_eq!(second.selected_block_count, 1);
+    assert_eq!(second.canonical_raw_log_count, 1);
+    assert_eq!(second.scanned_raw_log_count, 2);
+    assert_eq!(second.matched_raw_log_count, 2);
+    assert_eq!(second.normalized_event_inserted_count, 0);
+    assert_eq!(
+        count_wrapper_replay_events(database.pool()).await?,
+        wrapper_event_count
+    );
+    assert_no_duplicate_normalized_event_identities(database.pool()).await?;
 
     database.cleanup().await
 }
@@ -395,14 +517,24 @@ async fn replay_normalized_events_uses_only_persisted_canonical_raw_log_inputs()
 
     assert_eq!(outcome.selected_block_count, 1);
     assert_eq!(outcome.canonical_raw_log_count, 1);
-    assert_eq!(outcome.normalized_event_inserted_count, 1);
+    assert_eq!(outcome.normalized_event_inserted_count, 6);
     assert_eq!(
-        sqlx::query_scalar::<_, Vec<String>>(
-            "SELECT ARRAY_AGG(block_hash ORDER BY block_hash) FROM normalized_events"
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM normalized_events WHERE block_hash = $1"
         )
+        .bind(&canonical_block.block_hash)
         .fetch_one(database.pool())
         .await?,
-        vec![canonical_block.block_hash]
+        6
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM normalized_events WHERE block_hash <> $1"
+        )
+        .bind(&canonical_block.block_hash)
+        .fetch_one(database.pool())
+        .await?,
+        0
     );
 
     database.cleanup().await
@@ -708,4 +840,39 @@ async fn insert_active_replay_watched_contract_with_source_family(
         None,
     )
     .await
+}
+
+async fn count_wrapper_replay_events(pool: &PgPool) -> Result<i64> {
+    sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)::BIGINT
+        FROM normalized_events
+        WHERE derivation_kind = 'ens_v1_unwrapped_authority'
+          AND source_family = 'ens_v1_wrapper_l1'
+        "#,
+    )
+    .fetch_one(pool)
+    .await
+    .context("failed to count wrapper replay normalized events")
+}
+
+async fn assert_no_duplicate_normalized_event_identities(pool: &PgPool) -> Result<()> {
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)::BIGINT
+            FROM (
+                SELECT event_identity
+                FROM normalized_events
+                GROUP BY event_identity
+                HAVING COUNT(*) > 1
+            ) duplicates
+            "#,
+        )
+        .fetch_one(pool)
+        .await
+        .context("failed to count duplicate normalized event identities")?,
+        0
+    );
+    Ok(())
 }
