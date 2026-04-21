@@ -109,6 +109,8 @@ async fn sync_ens_v1_unwrapped_authority_with_scope(
                 labelhash: labelhash.clone(),
                 first_name_ref: None,
                 current_registration: None,
+                current_wrapper_key: None,
+                wrapper_authorities: BTreeMap::new(),
                 current_registry_owner: None,
                 current_resolver: None,
                 current_record_version: None,
@@ -226,6 +228,48 @@ async fn sync_ens_v1_unwrapped_authority_with_scope(
             );
         }
 
+        for authority in &finalized.wrapper_authorities {
+            let token_lineage_id =
+                deterministic_uuid(&format!("token-lineage:{}", authority.authority_key));
+            token_lineages.push(
+                build_token_lineage(
+                    pool,
+                    token_lineage_id,
+                    &authority.start_ref.chain_id,
+                    &authority.start_ref,
+                    json!({
+                        "adapter": DERIVATION_KIND_ENS_V1_UNWRAPPED_AUTHORITY,
+                        "authority_kind": "wrapper",
+                        "authority_key": authority.authority_key,
+                        "logical_name_id": name.logical_name_id,
+                        "namehash": authority.node,
+                    }),
+                )
+                .await?,
+            );
+            resources.push(
+                build_resource(
+                    pool,
+                    deterministic_uuid(&format!("resource:{}", authority.authority_key)),
+                    Some(token_lineage_id),
+                    &authority.start_ref.chain_id,
+                    &authority.start_ref.as_boundary_ref(),
+                    json!({
+                        "adapter": DERIVATION_KIND_ENS_V1_UNWRAPPED_AUTHORITY,
+                        "authority_kind": "wrapper",
+                        "authority_key": authority.authority_key,
+                        "logical_name_id": name.logical_name_id,
+                        "namehash": authority.node,
+                        "owner": authority.owner,
+                        "fuses": authority.fuses,
+                        "expiry": authority.expiry.unix_timestamp(),
+                        "unwrapped_at": authority.end_ref.as_ref().map(|value| value.block_timestamp.unix_timestamp()),
+                    }),
+                )
+                .await?,
+            );
+        }
+
         for segment in finalized.bindings {
             bindings.push(
                 build_surface_binding(pool, &name.logical_name_id, &segment, &head_ref.chain_id)
@@ -263,12 +307,15 @@ struct FinalizedHistory {
     bindings: Vec<BindingSegment>,
     events: Vec<NormalizedEvent>,
     registrar_leases: Vec<RegistrationLease>,
+    wrapper_authorities: Vec<WrapperAuthority>,
     registry_resource_anchor: Option<BoundaryRef>,
     current_registry_owner: Option<String>,
 }
 
 fn finalize_history(mut history: NameHistory, head_ref: &BoundaryRef) -> Result<FinalizedHistory> {
-    if let Some(lease) = history.current_registration.take() {
+    if history.current_wrapper_key.is_none()
+        && let Some(lease) = history.current_registration.take()
+    {
         if let Some(release_ref) = lease.release_ref.clone() {
             if release_ref.block_timestamp <= head_ref.block_timestamp {
                 emit_registration_released_event(&mut history, &lease, &release_ref)?;
@@ -331,7 +378,25 @@ fn finalize_history(mut history: NameHistory, head_ref: &BoundaryRef) -> Result<
     }
 
     if history.open_binding.is_none()
+        && let Some(wrapper_key) = history.current_wrapper_key.as_ref()
+        && let Some(wrapper) = history.wrapper_authorities.get(wrapper_key)
+    {
+        let wrapper_anchor = build_wrapper_anchor(wrapper);
+        history.open_binding = Some(OpenBinding {
+            surface_binding_id: deterministic_uuid(&format!(
+                "binding:{}:{}",
+                wrapper_anchor.authority_key,
+                wrapper.start_ref.block_timestamp.unix_timestamp()
+            )),
+            authority: wrapper_anchor,
+            active_from: wrapper.start_ref.block_timestamp,
+            anchor_ref: wrapper.start_ref.as_boundary_ref(),
+        });
+    }
+
+    if history.open_binding.is_none()
         && history.current_registration.is_none()
+        && history.current_wrapper_key.is_none()
         && history
             .current_registry_owner
             .as_deref()
@@ -366,6 +431,10 @@ fn finalize_history(mut history: NameHistory, head_ref: &BoundaryRef) -> Result<
     }
 
     let registrar_leases = history.current_registration.into_iter().collect::<Vec<_>>();
+    let wrapper_authorities = history
+        .wrapper_authorities
+        .into_values()
+        .collect::<Vec<_>>();
 
     Ok(FinalizedHistory {
         labelhash: history.labelhash,
@@ -373,6 +442,7 @@ fn finalize_history(mut history: NameHistory, head_ref: &BoundaryRef) -> Result<
         bindings: history.bindings,
         events: history.events,
         registrar_leases,
+        wrapper_authorities,
         registry_resource_anchor: history.registry_resource_anchor,
         current_registry_owner: history.current_registry_owner,
     })
@@ -390,6 +460,21 @@ fn build_registrar_anchor(lease: &RegistrationLease) -> AuthorityAnchor {
         binding_source_family: lease.start_ref.source_family.clone(),
         binding_manifest_version: lease.start_ref.manifest_version,
         binding_manifest_id: lease.start_ref.source_manifest_id,
+    }
+}
+
+fn build_wrapper_anchor(authority: &WrapperAuthority) -> AuthorityAnchor {
+    AuthorityAnchor {
+        kind: AuthorityKind::Wrapper,
+        authority_key: authority.authority_key.clone(),
+        resource_id: deterministic_uuid(&format!("resource:{}", authority.authority_key)),
+        token_lineage_id: Some(deterministic_uuid(&format!(
+            "token-lineage:{}",
+            authority.authority_key
+        ))),
+        binding_source_family: authority.start_ref.source_family.clone(),
+        binding_manifest_version: authority.start_ref.manifest_version,
+        binding_manifest_id: authority.start_ref.source_manifest_id,
     }
 }
 
@@ -1010,6 +1095,258 @@ async fn apply_observation(
                 EVENT_KIND_TOKEN_CONTROL_TRANSFERRED,
             );
         }
+        AuthorityObservation::WrapperNameWrapped(event) => {
+            history
+                .first_name_ref
+                .get_or_insert(event.reference.clone());
+            history.name = Some(event.name.clone());
+            let before_anchor = active_anchor_for_history(history, &event.reference.chain_id);
+            let before_owner = history
+                .current_wrapper_key
+                .as_ref()
+                .and_then(|key| history.wrapper_authorities.get(key))
+                .map(|wrapper| wrapper.owner.clone());
+            let before_fuses = history
+                .current_wrapper_key
+                .as_ref()
+                .and_then(|key| history.wrapper_authorities.get(key))
+                .map(|wrapper| wrapper.fuses);
+            let before_expiry = history
+                .current_wrapper_key
+                .as_ref()
+                .and_then(|key| history.wrapper_authorities.get(key))
+                .map(|wrapper| wrapper.expiry);
+            let authority_key = format!(
+                "wrapper:{}:{}:{}:{}:{}",
+                event.reference.chain_id,
+                event.reference.source_manifest_id,
+                event.name.namehash,
+                event.reference.block_hash,
+                event.reference.log_index.unwrap_or_default()
+            );
+            let wrapper = WrapperAuthority {
+                authority_key: authority_key.clone(),
+                node: event.name.namehash.clone(),
+                owner: event.owner.clone(),
+                fuses: event.fuses,
+                expiry: event.expiry,
+                start_ref: event.reference.clone(),
+                end_ref: None,
+            };
+            history
+                .wrapper_authorities
+                .insert(authority_key.clone(), wrapper.clone());
+            history.current_wrapper_key = Some(authority_key);
+            let after_anchor = Some(build_wrapper_anchor(&wrapper));
+
+            history.events.push(build_normalized_event(
+                &event.reference,
+                Some(event.name.logical_name_id.clone()),
+                after_anchor.as_ref().map(|value| value.resource_id),
+                EVENT_KIND_TOKEN_CONTROL_TRANSFERRED,
+                json!({
+                    "from": before_owner,
+                    "authority_kind": before_anchor.as_ref().map(|value| value.kind.as_str()),
+                }),
+                json!({
+                    "to": event.owner,
+                    "authority_kind": "wrapper",
+                    "authority_key": wrapper.authority_key,
+                    "namehash": event.name.namehash,
+                }),
+                format!(
+                    "wrapper-token:{}:{}:{}",
+                    event.reference.block_hash,
+                    event
+                        .reference
+                        .transaction_hash
+                        .as_deref()
+                        .unwrap_or_default(),
+                    event.reference.log_index.unwrap_or_default()
+                ),
+            ));
+            history.events.push(build_normalized_event(
+                &event.reference,
+                Some(event.name.logical_name_id.clone()),
+                after_anchor.as_ref().map(|value| value.resource_id),
+                EVENT_KIND_EXPIRY_CHANGED,
+                json!({
+                    "expiry": before_expiry.map(|value| value.unix_timestamp()),
+                }),
+                json!({
+                    "expiry": event.expiry.unix_timestamp(),
+                    "namehash": event.name.namehash,
+                    "authority_kind": "wrapper",
+                    "authority_key": wrapper.authority_key,
+                }),
+                format!(
+                    "wrapper-expiry:{}:{}:{}",
+                    event.reference.block_hash,
+                    event
+                        .reference
+                        .transaction_hash
+                        .as_deref()
+                        .unwrap_or_default(),
+                    event.reference.log_index.unwrap_or_default()
+                ),
+            ));
+            emit_wrapper_fuse_event(
+                &mut history.events,
+                &event.reference,
+                &event.name.logical_name_id,
+                after_anchor.as_ref().context("wrapper anchor must exist")?,
+                &event.name.namehash,
+                before_fuses,
+                event.fuses,
+                "wrapper-fuses",
+                EVENT_KIND_PERMISSION_SCOPE_CHANGED,
+            );
+            transition_authority(
+                history,
+                before_anchor,
+                after_anchor,
+                &event.reference.as_boundary_ref(),
+                event.reference.block_timestamp,
+            )?;
+        }
+        AuthorityObservation::WrapperNameUnwrapped(event) => {
+            if history.name.is_none() {
+                return Ok(());
+            };
+            let before_anchor = active_anchor_for_history(history, &event.reference.chain_id);
+            if let Some(wrapper_key) = history.current_wrapper_key.take()
+                && let Some(wrapper) = history.wrapper_authorities.get_mut(&wrapper_key)
+            {
+                wrapper.end_ref = Some(event.reference.clone());
+            }
+            let after_anchor = active_anchor_for_history(history, &event.reference.chain_id);
+            transition_authority(
+                history,
+                before_anchor,
+                after_anchor,
+                &event.reference.as_boundary_ref(),
+                event.reference.block_timestamp,
+            )?;
+        }
+        AuthorityObservation::WrapperFusesSet(event) => {
+            let Some(name) = history.name.clone() else {
+                return Ok(());
+            };
+            let Some(wrapper_key) = history.current_wrapper_key.clone() else {
+                return Ok(());
+            };
+            let Some(wrapper) = history.wrapper_authorities.get_mut(&wrapper_key) else {
+                return Ok(());
+            };
+            let before_fuses = wrapper.fuses;
+            wrapper.fuses = event.fuses;
+            let anchor = build_wrapper_anchor(wrapper);
+            emit_wrapper_fuse_event(
+                &mut history.events,
+                &event.reference,
+                &name.logical_name_id,
+                &anchor,
+                &event.namehash,
+                Some(before_fuses),
+                event.fuses,
+                "wrapper-fuses",
+                EVENT_KIND_PERMISSION_SCOPE_CHANGED,
+            );
+        }
+        AuthorityObservation::WrapperExpiryExtended(event) => {
+            let Some(name) = history.name.clone() else {
+                return Ok(());
+            };
+            let Some(wrapper_key) = history.current_wrapper_key.clone() else {
+                return Ok(());
+            };
+            let Some(wrapper) = history.wrapper_authorities.get_mut(&wrapper_key) else {
+                return Ok(());
+            };
+            let before_expiry = wrapper.expiry;
+            wrapper.expiry = event.expiry;
+            let anchor = build_wrapper_anchor(wrapper);
+            history.events.push(build_normalized_event(
+                &event.reference,
+                Some(name.logical_name_id.clone()),
+                Some(anchor.resource_id),
+                EVENT_KIND_EXPIRY_CHANGED,
+                json!({
+                    "expiry": before_expiry.unix_timestamp(),
+                }),
+                json!({
+                    "expiry": event.expiry.unix_timestamp(),
+                    "namehash": event.namehash,
+                    "authority_kind": "wrapper",
+                    "authority_key": wrapper.authority_key,
+                }),
+                format!(
+                    "wrapper-expiry:{}:{}:{}",
+                    event.reference.block_hash,
+                    event
+                        .reference
+                        .transaction_hash
+                        .as_deref()
+                        .unwrap_or_default(),
+                    event.reference.log_index.unwrap_or_default()
+                ),
+            ));
+        }
+        AuthorityObservation::WrapperTokenTransferred(event) => {
+            if event.value != 1 {
+                return Ok(());
+            }
+            if event.from_address == ZERO_ADDRESS || event.to_address == ZERO_ADDRESS {
+                return Ok(());
+            }
+            let Some(name) = history.name.clone() else {
+                return Ok(());
+            };
+            let Some(wrapper_key) = history.current_wrapper_key.clone() else {
+                return Ok(());
+            };
+            let Some(wrapper) = history.wrapper_authorities.get_mut(&wrapper_key) else {
+                return Ok(());
+            };
+            let before_owner = wrapper.owner.clone();
+            wrapper.owner = event.to_address.clone();
+            let anchor = build_wrapper_anchor(wrapper);
+            history.events.push(build_normalized_event(
+                &event.reference,
+                Some(name.logical_name_id.clone()),
+                Some(anchor.resource_id),
+                EVENT_KIND_TOKEN_CONTROL_TRANSFERRED,
+                json!({
+                    "from": before_owner,
+                }),
+                json!({
+                    "to": event.to_address,
+                    "namehash": event.namehash,
+                    "authority_kind": "wrapper",
+                    "authority_key": wrapper.authority_key,
+                }),
+                format!(
+                    "wrapper-token:{}:{}:{}",
+                    event.reference.block_hash,
+                    event
+                        .reference
+                        .transaction_hash
+                        .as_deref()
+                        .unwrap_or_default(),
+                    event.reference.log_index.unwrap_or_default()
+                ),
+            ));
+            emit_observation_permission_subject_change(
+                &mut history.events,
+                &event.reference,
+                &name.logical_name_id,
+                &anchor,
+                Some(before_owner.as_str()),
+                Some(event.to_address.as_str()),
+                history.current_resolver.as_deref(),
+                EVENT_KIND_TOKEN_CONTROL_TRANSFERRED,
+            );
+        }
         AuthorityObservation::ResolverChanged(event) => {
             let before_resolver = history.current_resolver.clone();
             let before_normalized_resolver = nonzero_address(before_resolver.as_deref());
@@ -1044,6 +1381,11 @@ async fn apply_observation(
                 ),
             ));
             let authority_subject = match authority.as_ref().map(|value| value.kind) {
+                Some(AuthorityKind::Wrapper) => history
+                    .current_wrapper_key
+                    .as_ref()
+                    .and_then(|key| history.wrapper_authorities.get(key))
+                    .map(|wrapper| wrapper.owner.as_str()),
                 Some(AuthorityKind::Registrar) => history
                     .current_registration
                     .as_ref()
@@ -1341,7 +1683,12 @@ fn apply_reverse_claim_source_observation(
         AuthorityObservation::RegistrationGranted(_)
         | AuthorityObservation::RegistrationRenewed(_)
         | AuthorityObservation::TokenTransferred(_)
-        | AuthorityObservation::RegistryOwnerChanged(_) => {}
+        | AuthorityObservation::RegistryOwnerChanged(_)
+        | AuthorityObservation::WrapperNameWrapped(_)
+        | AuthorityObservation::WrapperNameUnwrapped(_)
+        | AuthorityObservation::WrapperFusesSet(_)
+        | AuthorityObservation::WrapperExpiryExtended(_)
+        | AuthorityObservation::WrapperTokenTransferred(_) => {}
     }
 
     Ok(())
@@ -1576,6 +1923,11 @@ fn authority_eq(left: Option<&AuthorityAnchor>, right: Option<&AuthorityAnchor>)
 }
 
 fn active_anchor_for_history(history: &NameHistory, chain: &str) -> Option<AuthorityAnchor> {
+    if let Some(wrapper_key) = history.current_wrapper_key.as_ref()
+        && let Some(wrapper) = history.wrapper_authorities.get(wrapper_key)
+    {
+        return Some(build_wrapper_anchor(wrapper));
+    }
     if let Some(registration) = history.current_registration.as_ref() {
         return Some(build_registrar_anchor(registration));
     }
@@ -1850,6 +2202,45 @@ fn emit_observation_permission_subject_change(
     }
 }
 
+fn emit_wrapper_fuse_event(
+    events: &mut Vec<NormalizedEvent>,
+    reference: &ObservationRef,
+    logical_name_id: &str,
+    anchor: &AuthorityAnchor,
+    namehash: &str,
+    before_fuses: Option<i64>,
+    after_fuses: i64,
+    identity_prefix: &str,
+    event_kind: &str,
+) {
+    if before_fuses == Some(after_fuses) {
+        return;
+    }
+
+    events.push(build_normalized_event(
+        reference,
+        Some(logical_name_id.to_owned()),
+        Some(anchor.resource_id),
+        event_kind,
+        json!({
+            "fuses": before_fuses,
+        }),
+        json!({
+            "fuses": after_fuses,
+            "namehash": namehash,
+            "authority_kind": anchor.kind.as_str(),
+            "authority_key": anchor.authority_key,
+        }),
+        format!(
+            "{}:{}:{}:{}",
+            identity_prefix,
+            reference.block_hash,
+            reference.transaction_hash.as_deref().unwrap_or_default(),
+            reference.log_index.unwrap_or_default()
+        ),
+    ));
+}
+
 fn emit_registration_released_event(
     history: &mut NameHistory,
     lease: &RegistrationLease,
@@ -2006,9 +2397,19 @@ fn observation_labelhash(observation: &AuthorityObservation) -> String {
         AuthorityObservation::RegistrationRenewed(value) => value.labelhash.clone(),
         AuthorityObservation::TokenTransferred(value) => value.labelhash.clone(),
         AuthorityObservation::RegistryOwnerChanged(value) => value.labelhash.clone(),
+        AuthorityObservation::WrapperNameWrapped(value) => value
+            .name
+            .labelhashes
+            .first()
+            .cloned()
+            .expect("wrapper name observation must include a first labelhash"),
         AuthorityObservation::ResolverChanged(_)
         | AuthorityObservation::RecordChanged(_)
-        | AuthorityObservation::RecordVersionChanged(_) => {
+        | AuthorityObservation::RecordVersionChanged(_)
+        | AuthorityObservation::WrapperNameUnwrapped(_)
+        | AuthorityObservation::WrapperFusesSet(_)
+        | AuthorityObservation::WrapperExpiryExtended(_)
+        | AuthorityObservation::WrapperTokenTransferred(_) => {
             unreachable!("resolver observations must be resolved by namehash before use")
         }
     }
@@ -2019,6 +2420,10 @@ fn observation_namehash(observation: &AuthorityObservation) -> Option<&str> {
         AuthorityObservation::ResolverChanged(value) => Some(&value.namehash),
         AuthorityObservation::RecordChanged(value) => Some(&value.namehash),
         AuthorityObservation::RecordVersionChanged(value) => Some(&value.namehash),
+        AuthorityObservation::WrapperNameUnwrapped(value) => Some(&value.namehash),
+        AuthorityObservation::WrapperFusesSet(value) => Some(&value.namehash),
+        AuthorityObservation::WrapperExpiryExtended(value) => Some(&value.namehash),
+        AuthorityObservation::WrapperTokenTransferred(value) => Some(&value.namehash),
         _ => None,
     }
 }

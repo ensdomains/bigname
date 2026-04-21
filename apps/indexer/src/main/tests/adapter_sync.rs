@@ -160,6 +160,245 @@ async fn sync_adapter_owned_raw_log_state_backfills_reverse_claims_from_stored_r
 }
 
 #[tokio::test]
+async fn sync_adapter_owned_raw_log_state_backfills_wrapper_authority_from_stored_raw_logs()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let wrapper_contract_instance_id = Uuid::from_u128(0x352);
+    let registry_contract_instance_id = Uuid::from_u128(0x353);
+    let wrapper_address = "0x00000000000000000000000000000000000000dd";
+    let registry_address = "0x00000000000000000000000000000000000000bb";
+    let orphan_block = provider_block(
+        "0xcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+        Some("0xefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef"),
+        63,
+    );
+    let stored_block = provider_block(
+        "0xdededededededededededededededededededededededededededededededede",
+        Some(&orphan_block.block_hash),
+        64,
+    );
+    let dns_name = dns_encoded_eth_name("wrapped");
+    let wrapped_namehash = namehash_for_dns_name(&dns_name);
+    let transaction_hash = transaction_hash_for_block(&stored_block);
+
+    sqlx::query(
+        r#"
+            INSERT INTO manifest_versions (
+                manifest_id,
+                manifest_version,
+                namespace,
+                source_family,
+                chain,
+                deployment_epoch,
+                rollout_status,
+                normalizer_version,
+                file_path,
+                manifest_payload
+            )
+            VALUES
+                (
+                    1,
+                    1,
+                    'ens',
+                    'ens_v1_wrapper_l1',
+                    'ethereum-mainnet',
+                    'ens_v1',
+                    'active',
+                    'uts46-v1',
+                    'manifests/ens/ens_v1_wrapper_l1/v1.toml',
+                    '{}'::jsonb
+                ),
+                (
+                    2,
+                    1,
+                    'ens',
+                    'ens_v1_registry_l1',
+                    'ethereum-mainnet',
+                    'ens_v1',
+                    'active',
+                    'uts46-v1',
+                    'manifests/ens/ens_v1_registry_l1/v1.toml',
+                    '{}'::jsonb
+                )
+            "#,
+    )
+    .execute(database.pool())
+    .await
+    .context("failed to insert manifest_versions for wrapper runtime bootstrap test")?;
+    insert_contract_instance(
+        database.pool(),
+        wrapper_contract_instance_id,
+        "ethereum-mainnet",
+        "contract",
+    )
+    .await?;
+    insert_contract_instance(
+        database.pool(),
+        registry_contract_instance_id,
+        "ethereum-mainnet",
+        "contract",
+    )
+    .await?;
+    insert_active_contract_instance_address(
+        database.pool(),
+        wrapper_contract_instance_id,
+        "ethereum-mainnet",
+        wrapper_address,
+        Some(1),
+    )
+    .await?;
+    insert_active_contract_instance_address(
+        database.pool(),
+        registry_contract_instance_id,
+        "ethereum-mainnet",
+        registry_address,
+        Some(2),
+    )
+    .await?;
+    insert_manifest_contract_instance(
+        database.pool(),
+        1,
+        "name_wrapper",
+        wrapper_contract_instance_id,
+        wrapper_address,
+        "none",
+        None,
+        None,
+    )
+    .await?;
+    insert_manifest_contract_instance(
+        database.pool(),
+        2,
+        "registry",
+        registry_contract_instance_id,
+        registry_address,
+        "none",
+        None,
+        None,
+    )
+    .await?;
+    upsert_raw_blocks(
+        database.pool(),
+        &[
+            provider_block_to_raw_block(
+                "ethereum-mainnet",
+                &orphan_block,
+                CanonicalityState::Orphaned,
+            ),
+            provider_block_to_raw_block(
+                "ethereum-mainnet",
+                &stored_block,
+                CanonicalityState::Canonical,
+            ),
+        ],
+    )
+    .await?;
+    upsert_raw_logs(
+        database.pool(),
+        &[
+            RawLog {
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: orphan_block.block_hash.clone(),
+                block_number: orphan_block.block_number,
+                transaction_hash: transaction_hash_for_block(&orphan_block),
+                transaction_index: 0,
+                log_index: 0,
+                emitting_address: wrapper_address.to_owned(),
+                topics: vec![
+                    keccak256_hex(b"NameWrapped(bytes32,bytes,address,uint32,uint64)"),
+                    wrapped_namehash.clone(),
+                ],
+                data: decode_hex_string(&encode_name_wrapped_log_data(&dns_name)),
+                canonicality_state: CanonicalityState::Orphaned,
+            },
+            RawLog {
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: stored_block.block_hash.clone(),
+                block_number: stored_block.block_number,
+                transaction_hash: transaction_hash.clone(),
+                transaction_index: 0,
+                log_index: 0,
+                emitting_address: wrapper_address.to_owned(),
+                topics: vec![
+                    keccak256_hex(b"NameWrapped(bytes32,bytes,address,uint32,uint64)"),
+                    wrapped_namehash.clone(),
+                ],
+                data: decode_hex_string(&encode_name_wrapped_log_data(&dns_name)),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            RawLog {
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: stored_block.block_hash.clone(),
+                block_number: stored_block.block_number,
+                transaction_hash,
+                transaction_index: 0,
+                log_index: 1,
+                emitting_address: registry_address.to_owned(),
+                topics: vec![registry_new_resolver_topic0(), wrapped_namehash],
+                data: decode_hex_string(&encode_registry_new_resolver_log_data(
+                    "0x00000000000000000000000000000000000000cc",
+                )),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+        ],
+    )
+    .await?;
+
+    let watched_plan = load_watched_chain_plan(database.pool()).await?;
+    sync_adapter_owned_raw_log_state(database.pool(), &watched_plan).await?;
+    sync_adapter_owned_raw_log_state(database.pool(), &watched_plan).await?;
+
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM resources WHERE provenance->>'authority_kind' = 'wrapper'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT logical_name_id FROM name_surfaces LIMIT 1")
+            .fetch_one(database.pool())
+            .await?,
+        "ens:wrapped.eth".to_owned()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM normalized_events WHERE event_kind = 'ResolverChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT after_state->>'resolver' FROM normalized_events WHERE event_kind = 'ResolverChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "0x00000000000000000000000000000000000000cc".to_owned()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM normalized_events WHERE raw_fact_ref->>'block_hash' = $1"
+        )
+        .bind(orphan_block.block_hash)
+        .fetch_one(database.pool())
+        .await?,
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM normalized_events")
+            .fetch_one(database.pool())
+            .await?,
+        7
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn sync_adapter_owned_raw_log_state_backfills_basenames_reverse_claims_and_authority_from_stored_raw_logs()
 -> Result<()> {
     let database = TestDatabase::new().await?;
@@ -502,4 +741,3 @@ async fn sync_adapter_owned_raw_log_state_backfills_basenames_reverse_claims_and
     database.cleanup().await?;
     Ok(())
 }
-

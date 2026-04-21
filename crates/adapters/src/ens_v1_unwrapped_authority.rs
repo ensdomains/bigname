@@ -19,6 +19,7 @@ use sqlx::{
 const SOURCE_FAMILY_ENS_V1_REGISTRAR_L1: &str = "ens_v1_registrar_l1";
 const SOURCE_FAMILY_ENS_V1_REGISTRY_L1: &str = "ens_v1_registry_l1";
 const SOURCE_FAMILY_ENS_V1_RESOLVER_L1: &str = "ens_v1_resolver_l1";
+const SOURCE_FAMILY_ENS_V1_WRAPPER_L1: &str = "ens_v1_wrapper_l1";
 const SOURCE_FAMILY_BASENAMES_BASE_REGISTRAR: &str = "basenames_base_registrar";
 const SOURCE_FAMILY_BASENAMES_BASE_REGISTRY: &str = "basenames_base_registry";
 const SOURCE_FAMILY_BASENAMES_BASE_RESOLVER: &str = "basenames_base_resolver";
@@ -28,6 +29,7 @@ const EVENT_KIND_AUTHORITY_EPOCH_CHANGED: &str = "AuthorityEpochChanged";
 const EVENT_KIND_AUTHORITY_TRANSFERRED: &str = "AuthorityTransferred";
 const EVENT_KIND_EXPIRY_CHANGED: &str = "ExpiryChanged";
 const EVENT_KIND_PERMISSION_CHANGED: &str = "PermissionChanged";
+const EVENT_KIND_PERMISSION_SCOPE_CHANGED: &str = "PermissionScopeChanged";
 const EVENT_KIND_RECORD_CHANGED: &str = "RecordChanged";
 const EVENT_KIND_RECORD_VERSION_CHANGED: &str = "RecordVersionChanged";
 const EVENT_KIND_REGISTRATION_GRANTED: &str = "RegistrationGranted";
@@ -48,6 +50,11 @@ const TEXT_CHANGED_SIGNATURE: &str = "TextChanged(bytes32,string,string)";
 const TRANSFER_SIGNATURE: &str = "Transfer(address,address,uint256)";
 const NEW_OWNER_SIGNATURE: &str = "NewOwner(bytes32,bytes32,address)";
 const VERSION_CHANGED_SIGNATURE: &str = "VersionChanged(bytes32,uint64)";
+const NAME_WRAPPED_SIGNATURE: &str = "NameWrapped(bytes32,bytes,address,uint32,uint64)";
+const NAME_UNWRAPPED_SIGNATURE: &str = "NameUnwrapped(bytes32,address)";
+const FUSES_SET_SIGNATURE: &str = "FusesSet(bytes32,uint32)";
+const EXPIRY_EXTENDED_SIGNATURE: &str = "ExpiryExtended(bytes32,uint64)";
+const TRANSFER_SINGLE_SIGNATURE: &str = "TransferSingle(address,address,address,uint256,uint256)";
 
 const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 const ENS_NORMALIZER_VERSION: &str = "ensip15@2026-04-16";
@@ -201,6 +208,45 @@ struct RecordVersionObservation {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+struct WrapperNameWrappedObservation {
+    name: NameMetadata,
+    owner: String,
+    fuses: i64,
+    expiry: OffsetDateTime,
+    reference: ObservationRef,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct WrapperNameUnwrappedObservation {
+    namehash: String,
+    owner: String,
+    reference: ObservationRef,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct WrapperFusesObservation {
+    namehash: String,
+    fuses: i64,
+    reference: ObservationRef,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct WrapperExpiryObservation {
+    namehash: String,
+    expiry: OffsetDateTime,
+    reference: ObservationRef,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct WrapperTokenTransferObservation {
+    namehash: String,
+    from_address: String,
+    to_address: String,
+    value: i64,
+    reference: ObservationRef,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum AuthorityObservation {
     RegistrationGranted(NameRegistrationObservation),
     RegistrationRenewed(NameRenewalObservation),
@@ -209,6 +255,11 @@ enum AuthorityObservation {
     ResolverChanged(ResolverObservation),
     RecordChanged(RecordChangeObservation),
     RecordVersionChanged(RecordVersionObservation),
+    WrapperNameWrapped(WrapperNameWrappedObservation),
+    WrapperNameUnwrapped(WrapperNameUnwrappedObservation),
+    WrapperFusesSet(WrapperFusesObservation),
+    WrapperExpiryExtended(WrapperExpiryObservation),
+    WrapperTokenTransferred(WrapperTokenTransferObservation),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -283,6 +334,17 @@ struct RegistrationLease {
     start_ref: ObservationRef,
 }
 
+#[derive(Clone, Debug)]
+struct WrapperAuthority {
+    authority_key: String,
+    node: String,
+    owner: String,
+    fuses: i64,
+    expiry: OffsetDateTime,
+    start_ref: ObservationRef,
+    end_ref: Option<ObservationRef>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct BoundaryRef {
     chain_id: String,
@@ -297,6 +359,7 @@ struct BoundaryRef {
 enum AuthorityKind {
     RegistryOnly,
     Registrar,
+    Wrapper,
 }
 
 impl AuthorityKind {
@@ -304,6 +367,7 @@ impl AuthorityKind {
         match self {
             Self::RegistryOnly => "registry_only",
             Self::Registrar => "registrar",
+            Self::Wrapper => "wrapper",
         }
     }
 }
@@ -357,6 +421,8 @@ struct NameHistory {
     labelhash: String,
     first_name_ref: Option<ObservationRef>,
     current_registration: Option<RegistrationLease>,
+    current_wrapper_key: Option<String>,
+    wrapper_authorities: BTreeMap<String, WrapperAuthority>,
     current_registry_owner: Option<String>,
     current_resolver: Option<String>,
     current_record_version: Option<i64>,
@@ -400,6 +466,13 @@ impl AuthorityProfile {
         match self {
             Self::Ens => SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
             Self::Basenames => SOURCE_FAMILY_BASENAMES_BASE_RESOLVER,
+        }
+    }
+
+    const fn wrapper_source_family(self) -> Option<&'static str> {
+        match self {
+            Self::Ens => Some(SOURCE_FAMILY_ENS_V1_WRAPPER_L1),
+            Self::Basenames => None,
         }
     }
 

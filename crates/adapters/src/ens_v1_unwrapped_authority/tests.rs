@@ -404,6 +404,66 @@ fn encode_resolver_version_changed_log_data(version: u64) -> Vec<u8> {
     abi_word_u64(version).to_vec()
 }
 
+fn dns_encoded_name(labels: &[&str]) -> Vec<u8> {
+    let mut output = Vec::new();
+    for label in labels {
+        output.push(u8::try_from(label.len()).expect("test label length must fit in u8"));
+        output.extend_from_slice(label.as_bytes());
+    }
+    output.push(0);
+    output
+}
+
+fn encode_name_wrapped_log_data(
+    dns_name: &[u8],
+    owner: &str,
+    fuses: u64,
+    expiry_unix: u64,
+) -> Vec<u8> {
+    let mut output = Vec::new();
+    output.extend_from_slice(&abi_word_u64(128));
+    output.extend_from_slice(&abi_word_address(owner));
+    output.extend_from_slice(&abi_word_u64(fuses));
+    output.extend_from_slice(&abi_word_u64(expiry_unix));
+    output.extend_from_slice(&abi_word_u64(
+        u64::try_from(dns_name.len()).expect("test DNS name length must fit in u64"),
+    ));
+    output.extend_from_slice(dns_name);
+    let padded_length = ((dns_name.len() + 31) / 32) * 32;
+    output.resize(160 + padded_length, 0);
+    output
+}
+
+fn encode_name_unwrapped_log_data(owner: &str) -> Vec<u8> {
+    abi_word_address(owner).to_vec()
+}
+
+fn encode_fuses_set_log_data(fuses: u64) -> Vec<u8> {
+    abi_word_u64(fuses).to_vec()
+}
+
+fn encode_expiry_extended_log_data(expiry_unix: u64) -> Vec<u8> {
+    abi_word_u64(expiry_unix).to_vec()
+}
+
+fn hex_32_word(value: &str) -> [u8; 32] {
+    let normalized = value.trim_start_matches("0x");
+    assert_eq!(normalized.len(), 64, "word must be 32 bytes");
+    let mut word = [0u8; 32];
+    for (index, chunk) in normalized.as_bytes().chunks(2).enumerate() {
+        let value = std::str::from_utf8(chunk).expect("hex word chunk must be utf-8");
+        word[index] = u8::from_str_radix(value, 16).expect("word must be hex");
+    }
+    word
+}
+
+fn encode_transfer_single_log_data(token_id: &str, value: u64) -> Vec<u8> {
+    let mut output = Vec::new();
+    output.extend_from_slice(&hex_32_word(token_id));
+    output.extend_from_slice(&abi_word_u64(value));
+    output
+}
+
 fn reverse_claim_event(
     source_manifest_id: i64,
     block_hash: &str,
@@ -559,6 +619,29 @@ fn resolver_raw_log(
     }
 }
 
+fn wrapper_raw_log(topics: Vec<String>, data: Vec<u8>, log_index: i64) -> AuthorityRawLogRow {
+    AuthorityRawLogRow {
+        chain_id: "ethereum-mainnet".to_owned(),
+        block_hash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+        block_number: 42,
+        block_timestamp: OffsetDateTime::from_unix_timestamp(1_700_000_042)
+            .expect("test timestamp must be valid"),
+        transaction_hash: "0xtxaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            .to_owned(),
+        transaction_index: 0,
+        log_index,
+        emitting_address: "0x00000000000000000000000000000000000000dd".to_owned(),
+        topics,
+        data,
+        canonicality_state: CanonicalityState::Canonical,
+        source_manifest_id: 4,
+        namespace: "ens".to_owned(),
+        source_family: SOURCE_FAMILY_ENS_V1_WRAPPER_L1.to_owned(),
+        manifest_version: 1,
+        normalizer_version: ENS_NORMALIZER_VERSION.to_owned(),
+    }
+}
+
 #[test]
 fn build_authority_observation_decodes_resolver_record_logs() -> Result<()> {
     let alice = observe_registrar_eth_name_with_version("alice", ENS_NORMALIZER_VERSION)?;
@@ -670,6 +753,105 @@ fn build_authority_observation_decodes_resolver_record_logs() -> Result<()> {
             resolver: resolver_address.to_owned(),
             record_version: 7,
             reference: resolver_raw_log(resolver_address, Vec::new(), Vec::new(), 4).reference(),
+        })
+    );
+
+    Ok(())
+}
+
+#[test]
+fn build_authority_observation_decodes_wrapper_logs() -> Result<()> {
+    let alice = observe_registrar_eth_name_with_version("alice", ENS_NORMALIZER_VERSION)?;
+    let dns_name = dns_encoded_name(&["alice", "eth"]);
+    let owner = "0x0000000000000000000000000000000000000001";
+
+    let wrapped_observation = build_authority_observation(&wrapper_raw_log(
+        vec![name_wrapped_topic0(), alice.namehash.clone()],
+        encode_name_wrapped_log_data(&dns_name, owner, 8, 1_800_000_000),
+        0,
+    ))?
+    .context("NameWrapped observation should decode")?;
+    assert_eq!(
+        wrapped_observation,
+        AuthorityObservation::WrapperNameWrapped(WrapperNameWrappedObservation {
+            name: alice.clone(),
+            owner: owner.to_owned(),
+            fuses: 8,
+            expiry: OffsetDateTime::from_unix_timestamp(1_800_000_000)?,
+            reference: wrapper_raw_log(Vec::new(), Vec::new(), 0).reference(),
+        })
+    );
+
+    let unwrapped_observation = build_authority_observation(&wrapper_raw_log(
+        vec![name_unwrapped_topic0(), alice.namehash.clone()],
+        encode_name_unwrapped_log_data("0x0000000000000000000000000000000000000002"),
+        1,
+    ))?
+    .context("NameUnwrapped observation should decode")?;
+    assert_eq!(
+        unwrapped_observation,
+        AuthorityObservation::WrapperNameUnwrapped(WrapperNameUnwrappedObservation {
+            namehash: alice.namehash.clone(),
+            owner: "0x0000000000000000000000000000000000000002".to_owned(),
+            reference: wrapper_raw_log(Vec::new(), Vec::new(), 1).reference(),
+        })
+    );
+
+    let fuses_observation = build_authority_observation(&wrapper_raw_log(
+        vec![fuses_set_topic0(), alice.namehash.clone()],
+        encode_fuses_set_log_data(10),
+        2,
+    ))?
+    .context("FusesSet observation should decode")?;
+    assert_eq!(
+        fuses_observation,
+        AuthorityObservation::WrapperFusesSet(WrapperFusesObservation {
+            namehash: alice.namehash.clone(),
+            fuses: 10,
+            reference: wrapper_raw_log(Vec::new(), Vec::new(), 2).reference(),
+        })
+    );
+
+    let expiry_observation = build_authority_observation(&wrapper_raw_log(
+        vec![expiry_extended_topic0(), alice.namehash.clone()],
+        encode_expiry_extended_log_data(1_800_000_100),
+        3,
+    ))?
+    .context("ExpiryExtended observation should decode")?;
+    assert_eq!(
+        expiry_observation,
+        AuthorityObservation::WrapperExpiryExtended(WrapperExpiryObservation {
+            namehash: alice.namehash.clone(),
+            expiry: OffsetDateTime::from_unix_timestamp(1_800_000_100)?,
+            reference: wrapper_raw_log(Vec::new(), Vec::new(), 3).reference(),
+        })
+    );
+
+    let transfer_observation = build_authority_observation(&wrapper_raw_log(
+        vec![
+            transfer_single_topic0(),
+            hex_string(&abi_word_address(
+                "0x00000000000000000000000000000000000000ff",
+            )),
+            hex_string(&abi_word_address(
+                "0x0000000000000000000000000000000000000001",
+            )),
+            hex_string(&abi_word_address(
+                "0x0000000000000000000000000000000000000002",
+            )),
+        ],
+        encode_transfer_single_log_data(&alice.namehash, 1),
+        4,
+    ))?
+    .context("TransferSingle observation should decode")?;
+    assert_eq!(
+        transfer_observation,
+        AuthorityObservation::WrapperTokenTransferred(WrapperTokenTransferObservation {
+            namehash: alice.namehash,
+            from_address: "0x0000000000000000000000000000000000000001".to_owned(),
+            to_address: "0x0000000000000000000000000000000000000002".to_owned(),
+            value: 1,
+            reference: wrapper_raw_log(Vec::new(), Vec::new(), 4).reference(),
         })
     );
 
@@ -1101,6 +1283,257 @@ async fn sync_ens_v1_unwrapped_authority_emits_resolver_changed_idempotently() -
             .fetch_one(database.pool())
             .await?,
         7
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn sync_ens_v1_unwrapped_authority_translates_wrapper_events_idempotently_and_skips_orphans()
+-> Result<()> {
+    let _permit = crate::acquire_test_db_permit().await;
+    let database = TestDatabase::new().await?;
+
+    insert_active_contract_fixture(
+        database.pool(),
+        SOURCE_FAMILY_ENS_V1_WRAPPER_L1,
+        "name_wrapper",
+        "0x00000000000000000000000000000000000000dd",
+        Some("name_wrapper"),
+        "manifests/ens/ens_v1_wrapper_l1/v1.toml",
+    )
+    .await?;
+    insert_active_contract_fixture(
+        database.pool(),
+        SOURCE_FAMILY_ENS_V1_REGISTRY_L1,
+        "registry",
+        "0x00000000000000000000000000000000000000bb",
+        Some("registry"),
+        "manifests/ens/ens_v1_registry_l1/v1.toml",
+    )
+    .await?;
+
+    let orphan_block_hash = "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+    let block_hash = "0xabababababababababababababababababababababababababababababababab";
+    let unwrap_block_hash = "0xacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacac";
+    let transaction_hash = "0xtxababababababababababababababababababababababababababababababab";
+    let mut orphan_block = raw_block(
+        orphan_block_hash,
+        Some("0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"),
+        41,
+        1_700_000_041,
+    );
+    orphan_block.canonicality_state = CanonicalityState::Orphaned;
+    upsert_raw_blocks(
+        database.pool(),
+        &[
+            orphan_block,
+            raw_block(
+                block_hash,
+                Some("0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"),
+                42,
+                1_700_000_042,
+            ),
+            raw_block(unwrap_block_hash, Some(block_hash), 43, 1_700_000_043),
+        ],
+    )
+    .await?;
+
+    let alice = observe_registrar_eth_name_with_version("alice", ENS_NORMALIZER_VERSION)?;
+    let dns_name = dns_encoded_name(&["alice", "eth"]);
+    upsert_raw_logs(
+        database.pool(),
+        &[
+            RawLog {
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: orphan_block_hash.to_owned(),
+                block_number: 41,
+                transaction_hash:
+                    "0xtxffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+                        .to_owned(),
+                transaction_index: 0,
+                log_index: 0,
+                emitting_address: "0x00000000000000000000000000000000000000dd".to_owned(),
+                topics: vec![name_wrapped_topic0(), alice.namehash.clone()],
+                data: encode_name_wrapped_log_data(
+                    &dns_name,
+                    "0x00000000000000000000000000000000000000ee",
+                    0,
+                    1_800_000_000,
+                ),
+                canonicality_state: CanonicalityState::Orphaned,
+            },
+            RawLog {
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: block_hash.to_owned(),
+                block_number: 42,
+                transaction_hash: transaction_hash.to_owned(),
+                transaction_index: 0,
+                log_index: 0,
+                emitting_address: "0x00000000000000000000000000000000000000dd".to_owned(),
+                topics: vec![name_wrapped_topic0(), alice.namehash.clone()],
+                data: encode_name_wrapped_log_data(
+                    &dns_name,
+                    "0x0000000000000000000000000000000000000001",
+                    0,
+                    1_800_000_000,
+                ),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            RawLog {
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: block_hash.to_owned(),
+                block_number: 42,
+                transaction_hash: transaction_hash.to_owned(),
+                transaction_index: 0,
+                log_index: 1,
+                emitting_address: "0x00000000000000000000000000000000000000dd".to_owned(),
+                topics: vec![fuses_set_topic0(), alice.namehash.clone()],
+                data: encode_fuses_set_log_data(8),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            RawLog {
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: block_hash.to_owned(),
+                block_number: 42,
+                transaction_hash: transaction_hash.to_owned(),
+                transaction_index: 0,
+                log_index: 2,
+                emitting_address: "0x00000000000000000000000000000000000000dd".to_owned(),
+                topics: vec![expiry_extended_topic0(), alice.namehash.clone()],
+                data: encode_expiry_extended_log_data(1_800_000_100),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            RawLog {
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: block_hash.to_owned(),
+                block_number: 42,
+                transaction_hash: transaction_hash.to_owned(),
+                transaction_index: 0,
+                log_index: 3,
+                emitting_address: "0x00000000000000000000000000000000000000dd".to_owned(),
+                topics: vec![
+                    transfer_single_topic0(),
+                    hex_string(&abi_word_address(
+                        "0x00000000000000000000000000000000000000ff",
+                    )),
+                    hex_string(&abi_word_address(
+                        "0x0000000000000000000000000000000000000001",
+                    )),
+                    hex_string(&abi_word_address(
+                        "0x0000000000000000000000000000000000000002",
+                    )),
+                ],
+                data: encode_transfer_single_log_data(&alice.namehash, 1),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            RawLog {
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: block_hash.to_owned(),
+                block_number: 42,
+                transaction_hash: transaction_hash.to_owned(),
+                transaction_index: 0,
+                log_index: 4,
+                emitting_address: "0x00000000000000000000000000000000000000bb".to_owned(),
+                topics: vec![new_resolver_topic0(), alice.namehash.clone()],
+                data: encode_registry_new_resolver_log_data(
+                    "0x00000000000000000000000000000000000000cc",
+                ),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            RawLog {
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: unwrap_block_hash.to_owned(),
+                block_number: 43,
+                transaction_hash: transaction_hash.to_owned(),
+                transaction_index: 0,
+                log_index: 5,
+                emitting_address: "0x00000000000000000000000000000000000000dd".to_owned(),
+                topics: vec![name_unwrapped_topic0(), alice.namehash.clone()],
+                data: encode_name_unwrapped_log_data("0x0000000000000000000000000000000000000003"),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+        ],
+    )
+    .await?;
+
+    let first = sync_ens_v1_unwrapped_authority(database.pool(), "ethereum-mainnet").await?;
+    assert_eq!(first.scanned_log_count, 6);
+    assert_eq!(first.matched_log_count, 6);
+    assert_eq!(first.total_name_surface_count, 1);
+    assert_eq!(first.total_resource_count, 1);
+    assert_eq!(first.total_surface_binding_count, 1);
+    assert_eq!(first.total_normalized_event_count, 14);
+    assert_eq!(first.by_kind.get(EVENT_KIND_EXPIRY_CHANGED), Some(&2_usize));
+    assert_eq!(
+        first.by_kind.get(EVENT_KIND_PERMISSION_SCOPE_CHANGED),
+        Some(&2_usize)
+    );
+    assert_eq!(
+        first.by_kind.get(EVENT_KIND_TOKEN_CONTROL_TRANSFERRED),
+        Some(&2_usize)
+    );
+    assert_eq!(
+        first.by_kind.get(EVENT_KIND_RESOLVER_CHANGED),
+        Some(&1_usize)
+    );
+
+    let second = sync_ens_v1_unwrapped_authority(database.pool(), "ethereum-mainnet").await?;
+    assert_eq!(second.scanned_log_count, 6);
+    assert_eq!(second.matched_log_count, 6);
+    assert_eq!(second.total_normalized_event_count, 14);
+
+    let wrapper_resource_id = sqlx::query_scalar::<_, Uuid>(
+        "SELECT resource_id FROM resources WHERE provenance->>'authority_kind' = 'wrapper'",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT logical_name_id FROM normalized_events WHERE event_kind = 'ResolverChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "ens:alice.eth".to_owned()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT resource_id FROM normalized_events WHERE event_kind = 'ResolverChanged'",
+        )
+        .fetch_one(database.pool())
+        .await?,
+        wrapper_resource_id
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, Vec<String>>(
+            "SELECT ARRAY_AGG(after_state->>'fuses' ORDER BY log_index) FROM normalized_events WHERE event_kind = 'PermissionScopeChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        vec!["0".to_owned(), "8".to_owned()]
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT after_state->>'to' FROM normalized_events WHERE event_kind = 'TokenControlTransferred' ORDER BY log_index DESC LIMIT 1"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "0x0000000000000000000000000000000000000002".to_owned()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM normalized_events WHERE raw_fact_ref->>'block_hash' = $1"
+        )
+        .bind(orphan_block_hash)
+        .fetch_one(database.pool())
+        .await?,
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM normalized_events")
+            .fetch_one(database.pool())
+            .await?,
+        14
     );
 
     database.cleanup().await

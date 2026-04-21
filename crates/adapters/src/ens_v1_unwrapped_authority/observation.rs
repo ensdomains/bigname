@@ -298,6 +298,153 @@ fn build_authority_observation(
         )));
     }
 
+    if matches!(profile, Some(profile) if profile.wrapper_source_family() == Some(raw_log.source_family.as_str()))
+        && topic0.eq_ignore_ascii_case(&name_wrapped_topic0())
+    {
+        let dns_name = decode_first_dynamic_bytes(&raw_log.data)?;
+        let name = observe_dns_encoded_name_with_reference(
+            &dns_name,
+            &raw_log.reference(),
+            &raw_log.normalizer_version,
+        )?;
+        let indexed_node = normalize_hex_32(
+            raw_log
+                .topics
+                .get(1)
+                .context("NameWrapped log is missing indexed node")?,
+        )?;
+        if !indexed_node.eq_ignore_ascii_case(&name.namehash) {
+            bail!("NameWrapped indexed node does not match decoded DNS name");
+        }
+        let owner = decode_owner_address(
+            raw_log
+                .data
+                .get(32..64)
+                .context("NameWrapped data is missing owner word")?,
+        )?;
+        let fuses = abi_word_to_i64(
+            raw_log
+                .data
+                .get(64..96)
+                .context("NameWrapped data is missing fuses word")?,
+        )?;
+        let expiry = abi_word_to_i64(
+            raw_log
+                .data
+                .get(96..128)
+                .context("NameWrapped data is missing expiry word")?,
+        )?;
+        return Ok(Some(AuthorityObservation::WrapperNameWrapped(
+            WrapperNameWrappedObservation {
+                name,
+                owner,
+                fuses,
+                expiry: OffsetDateTime::from_unix_timestamp(expiry)
+                    .context("NameWrapped expiry is not a valid unix timestamp")?,
+                reference: raw_log.reference(),
+            },
+        )));
+    }
+
+    if matches!(profile, Some(profile) if profile.wrapper_source_family() == Some(raw_log.source_family.as_str()))
+        && topic0.eq_ignore_ascii_case(&name_unwrapped_topic0())
+    {
+        return Ok(Some(AuthorityObservation::WrapperNameUnwrapped(
+            WrapperNameUnwrappedObservation {
+                namehash: normalize_hex_32(
+                    raw_log
+                        .topics
+                        .get(1)
+                        .context("NameUnwrapped log is missing indexed node")?,
+                )?,
+                owner: decode_owner_address(&raw_log.data)?,
+                reference: raw_log.reference(),
+            },
+        )));
+    }
+
+    if matches!(profile, Some(profile) if profile.wrapper_source_family() == Some(raw_log.source_family.as_str()))
+        && topic0.eq_ignore_ascii_case(&fuses_set_topic0())
+    {
+        return Ok(Some(AuthorityObservation::WrapperFusesSet(
+            WrapperFusesObservation {
+                namehash: normalize_hex_32(
+                    raw_log
+                        .topics
+                        .get(1)
+                        .context("FusesSet log is missing indexed node")?,
+                )?,
+                fuses: abi_word_to_i64(
+                    raw_log
+                        .data
+                        .get(..32)
+                        .context("FusesSet data is missing fuses word")?,
+                )?,
+                reference: raw_log.reference(),
+            },
+        )));
+    }
+
+    if matches!(profile, Some(profile) if profile.wrapper_source_family() == Some(raw_log.source_family.as_str()))
+        && topic0.eq_ignore_ascii_case(&expiry_extended_topic0())
+    {
+        let expiry = abi_word_to_i64(
+            raw_log
+                .data
+                .get(..32)
+                .context("ExpiryExtended data is missing expiry word")?,
+        )?;
+        return Ok(Some(AuthorityObservation::WrapperExpiryExtended(
+            WrapperExpiryObservation {
+                namehash: normalize_hex_32(
+                    raw_log
+                        .topics
+                        .get(1)
+                        .context("ExpiryExtended log is missing indexed node")?,
+                )?,
+                expiry: OffsetDateTime::from_unix_timestamp(expiry)
+                    .context("ExpiryExtended expiry is not a valid unix timestamp")?,
+                reference: raw_log.reference(),
+            },
+        )));
+    }
+
+    if matches!(profile, Some(profile) if profile.wrapper_source_family() == Some(raw_log.source_family.as_str()))
+        && topic0.eq_ignore_ascii_case(&transfer_single_topic0())
+    {
+        let namehash = normalize_hex_32(&hex_string(
+            raw_log
+                .data
+                .get(..32)
+                .context("TransferSingle data is missing token id word")?,
+        ))?;
+        let value = abi_word_to_i64(
+            raw_log
+                .data
+                .get(32..64)
+                .context("TransferSingle data is missing value word")?,
+        )?;
+        return Ok(Some(AuthorityObservation::WrapperTokenTransferred(
+            WrapperTokenTransferObservation {
+                namehash,
+                from_address: normalize_topic_address(
+                    raw_log
+                        .topics
+                        .get(2)
+                        .context("TransferSingle topic2 is missing from address")?,
+                )?,
+                to_address: normalize_topic_address(
+                    raw_log
+                        .topics
+                        .get(3)
+                        .context("TransferSingle topic3 is missing to address")?,
+                )?,
+                value,
+                reference: raw_log.reference(),
+            },
+        )));
+    }
+
     Ok(None)
 }
 
@@ -517,6 +664,7 @@ async fn load_active_emitters(pool: &PgPool, chain: &str) -> Result<Vec<ActiveEm
         if manifest.source_family != SOURCE_FAMILY_ENS_V1_REGISTRAR_L1
             && manifest.source_family != SOURCE_FAMILY_ENS_V1_REGISTRY_L1
             && manifest.source_family != SOURCE_FAMILY_ENS_V1_RESOLVER_L1
+            && manifest.source_family != SOURCE_FAMILY_ENS_V1_WRAPPER_L1
             && manifest.source_family != SOURCE_FAMILY_BASENAMES_BASE_REGISTRAR
             && manifest.source_family != SOURCE_FAMILY_BASENAMES_BASE_REGISTRY
             && manifest.source_family != SOURCE_FAMILY_BASENAMES_BASE_RESOLVER
@@ -607,7 +755,8 @@ fn authority_profile_for_source_family(source_family: &str) -> Option<AuthorityP
     match source_family {
         SOURCE_FAMILY_ENS_V1_REGISTRAR_L1
         | SOURCE_FAMILY_ENS_V1_REGISTRY_L1
-        | SOURCE_FAMILY_ENS_V1_RESOLVER_L1 => Some(AuthorityProfile::Ens),
+        | SOURCE_FAMILY_ENS_V1_RESOLVER_L1
+        | SOURCE_FAMILY_ENS_V1_WRAPPER_L1 => Some(AuthorityProfile::Ens),
         SOURCE_FAMILY_BASENAMES_BASE_REGISTRAR
         | SOURCE_FAMILY_BASENAMES_BASE_REGISTRY
         | SOURCE_FAMILY_BASENAMES_BASE_RESOLVER => Some(AuthorityProfile::Basenames),
@@ -686,6 +835,80 @@ fn observe_registrar_name_with_version(
         labelhashes,
         normalizer_version: normalizer_version.to_owned(),
     })
+}
+
+fn observe_dns_encoded_name_with_reference(
+    bytes: &[u8],
+    reference: &ObservationRef,
+    normalizer_version: &str,
+) -> Result<NameMetadata> {
+    let labels = decode_dns_encoded_labels(bytes)?;
+    if labels.is_empty() {
+        bail!("wrapper name must not be the DNS root");
+    }
+    let input_labels = labels
+        .iter()
+        .map(|label| String::from_utf8(label.clone()))
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .context("wrapper DNS name labels must be valid UTF-8")?;
+    let normalized_labels = input_labels
+        .iter()
+        .map(|label| label.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    let normalized_label_bytes = normalized_labels
+        .iter()
+        .map(|label| label.as_bytes().to_vec())
+        .collect::<Vec<_>>();
+    let mut dns_name = Vec::new();
+    for label in &normalized_label_bytes {
+        dns_name.push(u8::try_from(label.len()).context("wrapper label exceeds DNS length")?);
+        dns_name.extend_from_slice(label);
+    }
+    dns_name.push(0);
+    let normalized_name = normalized_labels.join(".");
+    let input_name = input_labels.join(".");
+    Ok(NameMetadata {
+        namespace: reference.namespace.clone(),
+        logical_name_id: format!("{}:{normalized_name}", reference.namespace),
+        input_name,
+        canonical_display_name: normalized_name.clone(),
+        normalized_name,
+        dns_encoded_name: dns_name,
+        namehash: namehash_hex(&normalized_label_bytes),
+        labelhashes: normalized_label_bytes
+            .iter()
+            .map(|label| keccak256_hex(label))
+            .collect(),
+        normalizer_version: normalizer_version.to_owned(),
+    })
+}
+
+fn decode_dns_encoded_labels(bytes: &[u8]) -> Result<Vec<Vec<u8>>> {
+    if bytes.is_empty() {
+        bail!("dns-encoded name payload must not be empty");
+    }
+
+    let mut labels = Vec::<Vec<u8>>::new();
+    let mut cursor = 0usize;
+    loop {
+        if cursor >= bytes.len() {
+            bail!("dns-encoded name payload is missing the root terminator");
+        }
+        let label_length = usize::from(bytes[cursor]);
+        cursor += 1;
+        if label_length == 0 {
+            if cursor != bytes.len() {
+                bail!("dns-encoded name payload has trailing bytes after the root terminator");
+            }
+            break;
+        }
+        if cursor + label_length > bytes.len() {
+            bail!("dns-encoded name label exceeds the available payload");
+        }
+        labels.push(bytes[cursor..cursor + label_length].to_vec());
+        cursor += label_length;
+    }
+    Ok(labels)
 }
 
 #[cfg(test)]
@@ -877,6 +1100,26 @@ fn text_changed_topic0() -> String {
 
 fn version_changed_topic0() -> String {
     keccak256_hex(VERSION_CHANGED_SIGNATURE.as_bytes())
+}
+
+fn name_wrapped_topic0() -> String {
+    keccak256_hex(NAME_WRAPPED_SIGNATURE.as_bytes())
+}
+
+fn name_unwrapped_topic0() -> String {
+    keccak256_hex(NAME_UNWRAPPED_SIGNATURE.as_bytes())
+}
+
+fn fuses_set_topic0() -> String {
+    keccak256_hex(FUSES_SET_SIGNATURE.as_bytes())
+}
+
+fn expiry_extended_topic0() -> String {
+    keccak256_hex(EXPIRY_EXTENDED_SIGNATURE.as_bytes())
+}
+
+fn transfer_single_topic0() -> String {
+    keccak256_hex(TRANSFER_SINGLE_SIGNATURE.as_bytes())
 }
 
 fn hex_string(bytes: &[u8]) -> String {
