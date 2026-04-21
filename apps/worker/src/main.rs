@@ -296,6 +296,8 @@ struct PrimaryNamesCurrentRebuildArgs {
 struct AllCurrentProjectionsArgs {
     #[command(flatten)]
     database: DatabaseConfig,
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Args, Debug)]
@@ -318,9 +320,10 @@ struct ResolverCurrentRebuildArgs {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    init_tracing("bigname-worker");
+    let cli = Cli::parse();
+    init_tracing("bigname-worker", cli.writes_machine_json());
 
-    match Cli::parse().command {
+    match cli.command {
         Command::Run(args) => run(args).await,
         Command::Migrate(args) => migrate(args).await,
         Command::AddressNamesCurrent(args) => address_names_current(args).await,
@@ -734,6 +737,14 @@ async fn replay_all_current_projections(args: AllCurrentProjectionsArgs) -> Resu
     let pool = bigname_storage::connect(&args.database).await?;
     let summary = replay::rebuild_all_current_projections(&pool).await?;
 
+    if args.json {
+        let payload = summary
+            .json_summary_string()
+            .context("failed to serialize all-current-projections replay JSON summary")?;
+        println!("{payload}");
+        return Ok(());
+    }
+
     info!(
         service = "worker",
         replay = "all_current_projections",
@@ -789,21 +800,43 @@ async fn rebuild_resolver_current(args: ResolverCurrentRebuildArgs) -> Result<()
     Ok(())
 }
 
-fn init_tracing(service: &'static str) {
+impl Cli {
+    fn writes_machine_json(&self) -> bool {
+        matches!(
+            &self.command,
+            Command::Replay(ReplayArgs {
+                command: ReplayCommand::AllCurrentProjections(AllCurrentProjectionsArgs {
+                    json: true,
+                    ..
+                })
+            })
+        )
+    }
+}
+
+fn init_tracing(service: &'static str, emit_logs_to_stderr: bool) {
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
     if std::env::var_os("BIGNAME_LOG_JSON").is_some() {
-        tracing_subscriber::fmt()
+        let subscriber = tracing_subscriber::fmt()
             .with_env_filter(env_filter)
             .json()
-            .with_target(false)
-            .init();
+            .with_target(false);
+        if emit_logs_to_stderr {
+            subscriber.with_writer(std::io::stderr).init();
+        } else {
+            subscriber.init();
+        }
     } else {
-        tracing_subscriber::fmt()
+        let subscriber = tracing_subscriber::fmt()
             .with_env_filter(env_filter)
             .compact()
-            .with_target(false)
-            .init();
+            .with_target(false);
+        if emit_logs_to_stderr {
+            subscriber.with_writer(std::io::stderr).init();
+        } else {
+            subscriber.init();
+        }
     }
 
     info!(
@@ -820,10 +853,33 @@ mod tests {
     #[test]
     fn replay_all_current_projections_cli_is_available() {
         let cli = Cli::parse_from(["bigname-worker", "replay", "all-current-projections"]);
+        assert!(!cli.writes_machine_json());
 
         match cli.command {
             Command::Replay(args) => match args.command {
-                ReplayCommand::AllCurrentProjections(_) => {}
+                ReplayCommand::AllCurrentProjections(args) => {
+                    assert!(!args.json);
+                }
+            },
+            other => panic!("expected replay command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn replay_all_current_projections_json_flag_is_available() {
+        let cli = Cli::parse_from([
+            "bigname-worker",
+            "replay",
+            "all-current-projections",
+            "--json",
+        ]);
+        assert!(cli.writes_machine_json());
+
+        match cli.command {
+            Command::Replay(args) => match args.command {
+                ReplayCommand::AllCurrentProjections(args) => {
+                    assert!(args.json);
+                }
             },
             other => panic!("expected replay command, got {other:?}"),
         }

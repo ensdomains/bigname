@@ -179,6 +179,42 @@ Required worker modes:
 - reorg repair
 - one-shot rebuild
 
+### Replay operational summary
+
+`bigname-worker replay all-current-projections` is worker-owned operational tooling for projection rebuilds. Its `--json` summary is worker-owned operational output only. It does not expose a public `v1` API, publish a machine-readable API contract, graduate manifest capabilities, change route-level coverage, or claim consumer replacement.
+
+When invoked without `--json`, the command keeps its existing non-JSON behavior. Human-readable progress, logging, and terminal formatting remain operational output with no stable machine-readable contract.
+
+When invoked as `bigname-worker replay all-current-projections --json`, stdout is one JSON object with this stable shape:
+
+```json
+{
+  "command": "all-current-projections",
+  "projections": [
+    {
+      "projection": "address_names_current",
+      "requested": 0,
+      "upserted": 0,
+      "deleted": 0
+    }
+  ],
+  "totals": {
+    "requested": 0,
+    "upserted": 0,
+    "deleted": 0
+  }
+}
+```
+
+Rules:
+
+- `command` is always `all-current-projections`
+- `projections` contains one object per current projection family in stable projection identifier order: `address_names_current`, `children_current`, `coverage_current`, `name_current`, `permissions_current`, `primary_names_current`, `record_inventory_current`, `resolver_current`, `surface_bindings_current`
+- each projection object has exactly `projection`, `requested`, `upserted`, and `deleted`
+- `requested`, `upserted`, and `deleted` are non-negative integer counts for that projection replay attempt
+- `totals` has exactly `requested`, `upserted`, and `deleted`, and each value is the sum of the corresponding per-projection counts
+- the JSON summary describes the completed worker command attempt only; it is not stored as projection truth and is not a replay checkpoint
+
 ## 6. Index Baseline
 
 Start with indexes that match the public contract:

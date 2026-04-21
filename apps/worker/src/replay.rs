@@ -15,6 +15,18 @@ pub const ALL_CURRENT_PROJECTION_ORDER: &[&str] = &[
     "primary_names_current",
 ];
 
+pub const ALL_CURRENT_PROJECTION_JSON_ORDER: &[&str] = &[
+    "address_names_current",
+    "children_current",
+    "coverage_current",
+    "name_current",
+    "permissions_current",
+    "primary_names_current",
+    "record_inventory_current",
+    "resolver_current",
+    "surface_bindings_current",
+];
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct AllCurrentProjectionsReplaySummary {
     pub steps: Vec<CurrentProjectionReplayStepSummary>,
@@ -32,6 +44,61 @@ impl AllCurrentProjectionsReplaySummary {
     pub fn total_deleted_row_count(&self) -> u64 {
         self.steps.iter().map(|step| step.deleted_row_count).sum()
     }
+
+    pub fn json_summary_value(&self) -> serde_json::Value {
+        let projections = ALL_CURRENT_PROJECTION_JSON_ORDER
+            .iter()
+            .map(|projection| {
+                let counts = self.projection_json_counts(projection);
+                serde_json::json!({
+                    "projection": projection,
+                    "requested": counts.requested,
+                    "upserted": counts.upserted,
+                    "deleted": counts.deleted,
+                })
+            })
+            .collect::<Vec<_>>();
+        let totals = self.json_totals();
+
+        serde_json::json!({
+            "command": "all-current-projections",
+            "projections": projections,
+            "totals": {
+                "requested": totals.requested,
+                "upserted": totals.upserted,
+                "deleted": totals.deleted,
+            },
+        })
+    }
+
+    pub fn json_summary_string(&self) -> serde_json::Result<String> {
+        serde_json::to_string(&self.json_summary_value())
+    }
+
+    fn json_totals(&self) -> ProjectionJsonCounts {
+        ALL_CURRENT_PROJECTION_JSON_ORDER.iter().fold(
+            ProjectionJsonCounts::default(),
+            |mut totals, projection| {
+                let counts = self.projection_json_counts(projection);
+                totals.requested += counts.requested;
+                totals.upserted += counts.upserted;
+                totals.deleted += counts.deleted;
+                totals
+            },
+        )
+    }
+
+    fn projection_json_counts(&self, projection: &str) -> ProjectionJsonCounts {
+        self.steps
+            .iter()
+            .find(|step| step.projection == projection)
+            .map(|step| ProjectionJsonCounts {
+                requested: step.requested_key_count as u64,
+                upserted: step.upserted_row_count as u64,
+                deleted: step.deleted_row_count,
+            })
+            .unwrap_or_default()
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -40,6 +107,13 @@ pub struct CurrentProjectionReplayStepSummary {
     pub requested_key_count: usize,
     pub upserted_row_count: usize,
     pub deleted_row_count: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct ProjectionJsonCounts {
+    requested: u64,
+    upserted: u64,
+    deleted: u64,
 }
 
 pub async fn rebuild_all_current_projections(
@@ -227,6 +301,111 @@ mod tests {
         }
     }
 
+    #[test]
+    fn all_current_projection_json_summary_has_frozen_shape_order_counts_and_totals() -> Result<()>
+    {
+        let summary = AllCurrentProjectionsReplaySummary {
+            steps: vec![
+                CurrentProjectionReplayStepSummary {
+                    projection: "name_current",
+                    requested_key_count: 2,
+                    upserted_row_count: 2,
+                    deleted_row_count: 0,
+                },
+                CurrentProjectionReplayStepSummary {
+                    projection: "children_current",
+                    requested_key_count: 1,
+                    upserted_row_count: 1,
+                    deleted_row_count: 0,
+                },
+                CurrentProjectionReplayStepSummary {
+                    projection: "permissions_current",
+                    requested_key_count: 1,
+                    upserted_row_count: 1,
+                    deleted_row_count: 0,
+                },
+                CurrentProjectionReplayStepSummary {
+                    projection: "record_inventory_current",
+                    requested_key_count: 1,
+                    upserted_row_count: 1,
+                    deleted_row_count: 0,
+                },
+                CurrentProjectionReplayStepSummary {
+                    projection: "resolver_current",
+                    requested_key_count: 1,
+                    upserted_row_count: 1,
+                    deleted_row_count: 0,
+                },
+                CurrentProjectionReplayStepSummary {
+                    projection: "address_names_current",
+                    requested_key_count: 2,
+                    upserted_row_count: 3,
+                    deleted_row_count: 0,
+                },
+                CurrentProjectionReplayStepSummary {
+                    projection: "primary_names_current",
+                    requested_key_count: 1,
+                    upserted_row_count: 1,
+                    deleted_row_count: 0,
+                },
+            ],
+        };
+
+        let encoded = summary.json_summary_string()?;
+        let value: Value = serde_json::from_str(&encoded)?;
+        assert_json_object_fields(&value, ["command", "projections", "totals"]);
+        assert_eq!(value["command"], "all-current-projections");
+
+        let projections = value["projections"]
+            .as_array()
+            .context("projections must be an array")?;
+        let projection_order = projections
+            .iter()
+            .map(|projection| {
+                projection["projection"]
+                    .as_str()
+                    .context("projection name must be a string")
+            })
+            .collect::<Result<Vec<_>>>()?;
+        assert_eq!(projection_order, ALL_CURRENT_PROJECTION_JSON_ORDER.to_vec());
+
+        let expected_counts = BTreeMap::from([
+            ("address_names_current", (2, 3, 0)),
+            ("children_current", (1, 1, 0)),
+            ("coverage_current", (0, 0, 0)),
+            ("name_current", (2, 2, 0)),
+            ("permissions_current", (1, 1, 0)),
+            ("primary_names_current", (1, 1, 0)),
+            ("record_inventory_current", (1, 1, 0)),
+            ("resolver_current", (1, 1, 0)),
+            ("surface_bindings_current", (0, 0, 0)),
+        ]);
+
+        for projection in projections {
+            assert_json_object_fields(
+                projection,
+                ["projection", "requested", "upserted", "deleted"],
+            );
+            let projection_name = projection["projection"]
+                .as_str()
+                .context("projection name must be a string")?;
+            let (requested, upserted, deleted) = expected_counts
+                .get(projection_name)
+                .copied()
+                .with_context(|| format!("unexpected projection {projection_name}"))?;
+            assert_eq!(projection["requested"].as_u64(), Some(requested));
+            assert_eq!(projection["upserted"].as_u64(), Some(upserted));
+            assert_eq!(projection["deleted"].as_u64(), Some(deleted));
+        }
+
+        assert_json_object_fields(&value["totals"], ["requested", "upserted", "deleted"]);
+        assert_eq!(value["totals"]["requested"].as_u64(), Some(9));
+        assert_eq!(value["totals"]["upserted"].as_u64(), Some(10));
+        assert_eq!(value["totals"]["deleted"].as_u64(), Some(0));
+
+        Ok(())
+    }
+
     #[tokio::test]
     async fn all_current_projection_replay_clears_stale_rows_and_is_idempotent() -> Result<()> {
         let database = TestDatabase::new().await?;
@@ -281,6 +460,14 @@ mod tests {
         assert_eq!(second_snapshot, third_snapshot);
 
         database.cleanup().await
+    }
+
+    fn assert_json_object_fields<const N: usize>(value: &Value, expected: [&str; N]) {
+        let object = value.as_object().expect("value must be a JSON object");
+        assert_eq!(object.len(), N);
+        for key in expected {
+            assert!(object.contains_key(key), "missing JSON field {key}");
+        }
     }
 
     #[derive(Clone, Debug, Eq, PartialEq)]
