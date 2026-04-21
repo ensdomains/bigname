@@ -545,11 +545,13 @@ fn openapi_document_matches_checked_in_artifact() {
         "{}/../../docs/api-v1.openapi.json",
         env!("CARGO_MANIFEST_DIR")
     );
-    let checked_in: Value = serde_json::from_str(
-        &fs::read_to_string(&artifact_path).expect("checked-in OpenAPI artifact must exist"),
-    )
-    .expect("checked-in OpenAPI artifact must be valid JSON");
-    let rendered: Value = serde_json::from_str(&render_openapi_document())
-        .expect("rendered OpenAPI document must be valid JSON");
+    let checked_in =
+        fs::read_to_string(&artifact_path).expect("checked-in OpenAPI artifact must exist");
+    let rendered = render_openapi_document();
+
     assert_eq!(checked_in, rendered);
+
+    let checked_in: Value =
+        serde_json::from_str(&checked_in).expect("checked-in OpenAPI artifact must be valid JSON");
+    assert!(!openapi_paths(&checked_in).contains_key("/healthz"));
 }

@@ -67,6 +67,12 @@ jobs:
         if: steps.workspace.outputs.present == 'true'
         run: cargo test --workspace --all-features
 
+      - name: verify OpenAPI artifact drift
+        if: steps.workspace.outputs.present == 'true'
+        run: |
+          cargo run -p bigname-api -- print-openapi > /tmp/api-v1.openapi.json
+          diff -u docs/api-v1.openapi.json /tmp/api-v1.openapi.json
+
       - name: verify migrations
         if: steps.workspace.outputs.present == 'true'
         run: cargo run -p bigname-worker -- migrate
