@@ -353,6 +353,122 @@ async fn load_capability_flags_for_source_family(
         .collect()
 }
 
+async fn active_manifest_id_for_source_family(
+    pool: &PgPool,
+    namespace: &str,
+    source_family: &str,
+) -> Result<i64> {
+    query_scalar::<_, i64>(
+        r#"
+        SELECT manifest_id
+        FROM manifest_versions
+        WHERE namespace = $1
+          AND source_family = $2
+          AND rollout_status = 'active'
+        ORDER BY manifest_version DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(namespace)
+    .bind(source_family)
+    .fetch_one(pool)
+    .await
+    .with_context(|| format!("failed to load active manifest_id for {namespace}/{source_family}"))
+}
+
+async fn insert_raw_code_hash_observation(
+    pool: &PgPool,
+    chain: &str,
+    block_hash: &str,
+    block_number: i64,
+    contract_address: &str,
+    code_hash: &str,
+    code_byte_length: i64,
+    canonicality_state: &str,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO raw_code_hashes (
+            chain_id,
+            block_hash,
+            block_number,
+            contract_address,
+            code_hash,
+            code_byte_length,
+            canonicality_state
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7::canonicality_state)
+        "#,
+    )
+    .bind(chain)
+    .bind(block_hash)
+    .bind(block_number)
+    .bind(normalize_address(contract_address))
+    .bind(code_hash)
+    .bind(code_byte_length)
+    .bind(canonicality_state)
+    .execute(pool)
+    .await
+    .with_context(|| format!("failed to insert raw code hash for {chain}/{contract_address}"))?;
+
+    Ok(())
+}
+
+async fn insert_manifest_normalized_event(
+    pool: &PgPool,
+    event_identity: &str,
+    event_kind: &str,
+    source_family: &str,
+    manifest_version: i64,
+    source_manifest_id: Option<i64>,
+    canonicality_state: &str,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO normalized_events (
+            event_identity,
+            namespace,
+            event_kind,
+            source_family,
+            manifest_version,
+            source_manifest_id,
+            raw_fact_ref,
+            derivation_kind,
+            canonicality_state,
+            before_state,
+            after_state
+        )
+        VALUES (
+            $1,
+            'ens',
+            $2,
+            $3,
+            $4,
+            $5,
+            $6::jsonb,
+            'manifest_sync',
+            $7::canonicality_state,
+            $8::jsonb,
+            $9::jsonb
+        )
+        "#,
+    )
+    .bind(event_identity)
+    .bind(event_kind)
+    .bind(source_family)
+    .bind(manifest_version)
+    .bind(source_manifest_id)
+    .bind(serde_json::json!({ "event_identity": event_identity }).to_string())
+    .bind(canonicality_state)
+    .bind(serde_json::json!({ "before": event_identity }).to_string())
+    .bind(serde_json::json!({ "after": event_identity }).to_string())
+    .execute(pool)
+    .await
+    .with_context(|| format!("failed to insert normalized event {event_identity}"))?;
+
+    Ok(())
+}
+
 fn watched_contract_for_test(
     chain: &str,
     source_family: &str,
@@ -1741,6 +1857,340 @@ async fn keeps_proxy_instance_stable_across_implementation_churn() -> Result<()>
             .await?,
             0
         );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn manifest_drift_views_materialize_active_alert_inputs() -> Result<()> {
+    let test_dir = TestDir::new()?;
+    let database = TestDatabase::new().await?;
+
+    let root_address = "0x0000000000000000000000000000000000000001";
+    let proxy_address = "0x00000000000000000000000000000000000000AA";
+    let first_implementation = "0x00000000000000000000000000000000000000DD";
+    let second_implementation = "0x00000000000000000000000000000000000000EE";
+    let inactive_execution = "0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe";
+
+    test_dir.write_manifest(
+        "ens",
+        "ens_v2_registry_l1",
+        "v1",
+        &manifest_contents(
+            "active",
+            root_address,
+            proxy_address,
+            Some(first_implementation),
+        ),
+    )?;
+    test_dir.write_manifest(
+        "ens",
+        "ens_execution",
+        "v1",
+        &execution_manifest_contents("shadow"),
+    )?;
+    sync_repository(database.pool(), &load_repository(&test_dir.path)?).await?;
+
+    let proxy_contract_instance_id = load_single_contract_instance_for_address(
+        database.pool(),
+        "ethereum-mainnet",
+        proxy_address,
+    )
+    .await?;
+    let first_implementation_id = load_single_contract_instance_for_address(
+        database.pool(),
+        "ethereum-mainnet",
+        first_implementation,
+    )
+    .await?;
+
+    test_dir.write_manifest(
+        "ens",
+        "ens_v2_registry_l1",
+        "v1",
+        &manifest_contents(
+            "active",
+            root_address,
+            proxy_address,
+            Some(second_implementation),
+        ),
+    )?;
+    sync_repository(database.pool(), &load_repository(&test_dir.path)?).await?;
+
+    let proxy_after_churn = load_single_contract_instance_for_address(
+        database.pool(),
+        "ethereum-mainnet",
+        proxy_address,
+    )
+    .await?;
+    let second_implementation_id = load_single_contract_instance_for_address(
+        database.pool(),
+        "ethereum-mainnet",
+        second_implementation,
+    )
+    .await?;
+    assert_eq!(proxy_contract_instance_id, proxy_after_churn);
+    assert_ne!(first_implementation_id, second_implementation_id);
+
+    insert_raw_code_hash_observation(
+        database.pool(),
+        "ethereum-mainnet",
+        "0x1000000000000000000000000000000000000000000000000000000000000000",
+        100,
+        root_address,
+        "0xroot",
+        32,
+        "canonical",
+    )
+    .await?;
+    insert_raw_code_hash_observation(
+        database.pool(),
+        "ethereum-mainnet",
+        "0x1010000000000000000000000000000000000000000000000000000000000000",
+        101,
+        proxy_address,
+        "0xproxy-old",
+        64,
+        "canonical",
+    )
+    .await?;
+    insert_raw_code_hash_observation(
+        database.pool(),
+        "ethereum-mainnet",
+        "0x1020000000000000000000000000000000000000000000000000000000000000",
+        102,
+        proxy_address,
+        "0xproxy-current",
+        65,
+        "finalized",
+    )
+    .await?;
+    insert_raw_code_hash_observation(
+        database.pool(),
+        "ethereum-mainnet",
+        "0x1030000000000000000000000000000000000000000000000000000000000000",
+        103,
+        second_implementation,
+        "0ximpl-current",
+        96,
+        "safe",
+    )
+    .await?;
+    insert_raw_code_hash_observation(
+        database.pool(),
+        "ethereum-mainnet",
+        "0x1040000000000000000000000000000000000000000000000000000000000000",
+        104,
+        first_implementation,
+        "0ximpl-stale",
+        96,
+        "finalized",
+    )
+    .await?;
+    insert_raw_code_hash_observation(
+        database.pool(),
+        "ethereum-mainnet",
+        "0x1050000000000000000000000000000000000000000000000000000000000000",
+        105,
+        inactive_execution,
+        "0xinactive",
+        128,
+        "finalized",
+    )
+    .await?;
+    insert_raw_code_hash_observation(
+        database.pool(),
+        "ethereum-mainnet",
+        "0x1060000000000000000000000000000000000000000000000000000000000000",
+        106,
+        root_address,
+        "0xorphan-root",
+        33,
+        "orphaned",
+    )
+    .await?;
+
+    let manifest_id =
+        active_manifest_id_for_source_family(database.pool(), "ens", "ens_v2_registry_l1").await?;
+    insert_manifest_normalized_event(
+        database.pool(),
+        "manifest:registry:source",
+        "SourceManifestUpdated",
+        "ens_v2_registry_l1",
+        1,
+        Some(manifest_id),
+        "finalized",
+    )
+    .await?;
+    insert_manifest_normalized_event(
+        database.pool(),
+        "manifest:registry:proxy",
+        "ProxyImplementationChanged",
+        "ens_v2_registry_l1",
+        1,
+        Some(manifest_id),
+        "canonical",
+    )
+    .await?;
+    insert_manifest_normalized_event(
+        database.pool(),
+        "manifest:registry:capability",
+        "CapabilityChanged",
+        "ens_v2_registry_l1",
+        1,
+        Some(manifest_id),
+        "safe",
+    )
+    .await?;
+    insert_manifest_normalized_event(
+        database.pool(),
+        "manifest:registry:orphan",
+        "SourceManifestUpdated",
+        "ens_v2_registry_l1",
+        1,
+        Some(manifest_id),
+        "orphaned",
+    )
+    .await?;
+    insert_manifest_normalized_event(
+        database.pool(),
+        "manifest:registry:not-alert-material",
+        "NameRecordChanged",
+        "ens_v2_registry_l1",
+        1,
+        Some(manifest_id),
+        "finalized",
+    )
+    .await?;
+
+    let drift_inputs = load_manifest_drift_inputs(database.pool()).await?;
+    assert_eq!(drift_inputs.active_manifests.len(), 1);
+    assert_eq!(
+        drift_inputs.active_manifests[0].source_family,
+        "ens_v2_registry_l1"
+    );
+    assert_eq!(
+        drift_inputs.active_manifests[0].manifest_payload["rollout_status"],
+        "active"
+    );
+    assert_eq!(
+        drift_inputs.active_manifests[0].manifest_payload["source_family"],
+        "ens_v2_registry_l1"
+    );
+
+    assert_eq!(drift_inputs.declared_contracts.len(), 2);
+    assert!(drift_inputs.declared_contracts.iter().any(|entry| {
+        entry.declaration_kind == DECLARATION_KIND_ROOT
+            && entry.declaration_name == "RootRegistry"
+            && entry.declared_address == normalize_address(root_address)
+            && entry.implementation_contract_instance_id.is_none()
+    }));
+    let declared_proxy = drift_inputs
+        .declared_contracts
+        .iter()
+        .find(|entry| entry.declaration_kind == DECLARATION_KIND_CONTRACT)
+        .expect("active manifest contract declaration must be present");
+    assert_eq!(declared_proxy.declaration_name, "registry");
+    assert_eq!(
+        declared_proxy.contract_instance_id,
+        proxy_contract_instance_id
+    );
+    assert_eq!(
+        declared_proxy.declared_address,
+        normalize_address(proxy_address)
+    );
+    assert_eq!(declared_proxy.proxy_kind.as_deref(), Some("erc1967"));
+    assert_eq!(
+        declared_proxy.implementation_contract_instance_id,
+        Some(second_implementation_id)
+    );
+    assert_eq!(
+        declared_proxy.declared_implementation_address.as_deref(),
+        Some(normalize_address(second_implementation).as_str())
+    );
+
+    assert_eq!(drift_inputs.proxy_implementation_edges.len(), 1);
+    let proxy_edge = &drift_inputs.proxy_implementation_edges[0];
+    assert_eq!(
+        proxy_edge.proxy_contract_instance_id,
+        proxy_contract_instance_id
+    );
+    assert_eq!(
+        proxy_edge.implementation_contract_instance_id,
+        second_implementation_id
+    );
+    assert_eq!(
+        proxy_edge.proxy_address.as_deref(),
+        Some(normalize_address(proxy_address).as_str())
+    );
+    assert_eq!(
+        proxy_edge.implementation_address.as_deref(),
+        Some(normalize_address(second_implementation).as_str())
+    );
+    assert_eq!(proxy_edge.proxy_kind.as_deref(), Some("erc1967"));
+    assert_eq!(
+        proxy_edge.admission,
+        MANIFEST_PROXY_IMPLEMENTATION_ADMISSION
+    );
+
+    let code_hashes_by_address = drift_inputs
+        .code_hash_observations
+        .iter()
+        .map(|observation| (observation.address.as_str(), observation))
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(code_hashes_by_address.len(), 3);
+    assert_eq!(
+        code_hashes_by_address[normalize_address(root_address).as_str()].code_hash,
+        "0xroot"
+    );
+    assert_eq!(
+        code_hashes_by_address[normalize_address(proxy_address).as_str()].code_hash,
+        "0xproxy-current"
+    );
+    assert_eq!(
+        code_hashes_by_address[normalize_address(second_implementation).as_str()].code_hash,
+        "0ximpl-current"
+    );
+    assert!(!code_hashes_by_address.contains_key(normalize_address(first_implementation).as_str()));
+    assert!(!code_hashes_by_address.contains_key(normalize_address(inactive_execution).as_str()));
+
+    assert_eq!(
+        drift_inputs
+            .normalized_manifest_events
+            .iter()
+            .map(|event| event.event_kind.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "CapabilityChanged",
+            "ProxyImplementationChanged",
+            "SourceManifestUpdated",
+        ]
+    );
+    assert!(
+        drift_inputs
+            .normalized_manifest_events
+            .iter()
+            .all(|event| event.canonicality_state != "orphaned")
+    );
+
+    assert_eq!(
+        query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM manifest_versions WHERE namespace = 'ens'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        2
+    );
+    assert_eq!(
+        query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM discovery_edges WHERE discovery_source = $1 AND deactivated_at IS NULL"
+        )
+        .bind(MANIFEST_PROXY_IMPLEMENTATION_DISCOVERY_SOURCE)
+        .fetch_one(database.pool())
+        .await?,
+        1
+    );
 
     database.cleanup().await?;
     Ok(())

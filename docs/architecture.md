@@ -1529,6 +1529,8 @@ Audit expectations:
 - alerting on unexpected code-hash or implementation changes
 - consumer capability conformance checks
 
+Manifest drift and proxy-upgrade alerting is an operational observation loop over admitted manifests, code-hash observations, proxy / implementation edges, and derived watch targets. Alerts must preserve the proxy `contract_instance_id` when only implementation observations change, and implementation churn remains an edge observation until an explicit manifest or discovery update changes source truth. Alerting does not silently admit contracts, change capability flags, rewrite discovery edges, mutate watch plans, write projections, expose public API responses, or claim consumer replacement.
+
 ---
 
 ## 26. Consumer Capability Contract

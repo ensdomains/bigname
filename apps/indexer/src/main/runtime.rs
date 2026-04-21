@@ -327,6 +327,20 @@ pub(crate) fn manifest_normalized_event_kind_count(
         .unwrap_or(0)
 }
 
+pub(crate) async fn refresh_manifest_normalized_events_from_storage(
+    pool: &sqlx::PgPool,
+    manifest_runtime_state: &ManifestRuntimeState,
+) -> Result<Option<ManifestRuntimeState>> {
+    let next_summary = bigname_adapters::sync_manifest_normalized_events(pool).await?;
+    if next_summary.total_inserted_count == 0 {
+        return Ok(None);
+    }
+
+    let mut next_manifest_runtime_state = manifest_runtime_state.clone();
+    next_manifest_runtime_state.manifest_normalized_event_summary = next_summary;
+    Ok(Some(next_manifest_runtime_state))
+}
+
 pub(crate) fn log_watched_contract_summary(summary: &WatchedContractSummary) {
     info!(
         service = "indexer",
@@ -1134,6 +1148,55 @@ pub(crate) async fn run_poll_loop(
                 }
 
                 poll_provider_heads(pool, &mut intake_chain_tasks, provider_registry).await?;
+
+                match refresh_manifest_normalized_events_from_storage(
+                    pool,
+                    &manifest_runtime_state,
+                )
+                .await
+                {
+                    Ok(Some(next_manifest_runtime_state)) => {
+                        info!(
+                            service = "indexer",
+                            refresh_reason = "timer",
+                            plan_source = "stored_manifest_observations",
+                            normalized_event_inserted_total_count = next_manifest_runtime_state
+                                .manifest_normalized_event_summary
+                                .total_inserted_count,
+                            normalized_event_sync_total_count = next_manifest_runtime_state
+                                .manifest_normalized_event_summary
+                                .total_synced_count,
+                            normalized_event_kind_count = next_manifest_runtime_state
+                                .manifest_normalized_event_summary
+                                .by_kind
+                                .len(),
+                            "manifest observation alert events changed after provider polling"
+                        );
+                        log_manifest_normalized_event_summary(
+                            &next_manifest_runtime_state.manifest_normalized_event_summary,
+                        );
+                        manifest_runtime_state = next_manifest_runtime_state;
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        let current_watch_state =
+                            watched_chain_plan_state(&manifest_runtime_state.watched_chain_plan);
+                        let current_intake_state = intake_runtime_state(&intake_chain_tasks);
+                        warn!(
+                            service = "indexer",
+                            refresh_reason = "timer",
+                            plan_source = "stored_manifest_observations",
+                            error = ?error,
+                            watched_chain_count = current_watch_state.chain_count,
+                            watched_address_count = current_watch_state.address_count,
+                            watched_entry_count_total = current_watch_state.entry_count,
+                            intake_chain_count = current_intake_state.chain_count,
+                            intake_address_count = current_intake_state.address_count,
+                            intake_entry_count_total = current_intake_state.entry_count,
+                            "failed to refresh manifest observation alert events after provider polling; keeping last successful state"
+                        );
+                    }
+                }
 
                 match refresh_runtime_state_from_storage_discovery(pool, &manifest_runtime_state)
                     .await

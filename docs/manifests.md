@@ -235,6 +235,8 @@ They also:
 - invalidate relevant execution cache entries
 - trigger projection recomputation where capability boundaries change
 
+Manifest drift and proxy-upgrade alerting is observation-only in Phase 10. The manifest/discovery owner may compare stored manifests, code-hash observations, proxy / implementation edges, and watched-target materialization to produce operational drift or alert records, but those records do not mutate manifest truth, silently admit contracts, change capability flags, rewrite discovery edges, update watch-plan inputs, write projections, or expose a public API. Alert state is derived from the already admitted source graph; remediation stays an explicit manifest or discovery change that produces the normal `SourceManifestUpdated`, `ProxyImplementationChanged`, or `CapabilityChanged` event.
+
 ## 8. Watch-Plan Expansion
 
 Watch-plan expansion starts from active manifest roots by `contract_instance_id` and traverses active discovery edges by `contract_instance_id`.

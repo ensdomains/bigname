@@ -406,7 +406,7 @@ async fn refresh_watched_chain_plan_reuses_contract_instance_ids_across_inactive
 }
 
 #[tokio::test]
-async fn refresh_watched_chain_plan_tracks_proxy_implementation_churn() -> Result<()> {
+async fn runtime_refresh_tracks_proxy_implementation_alert_churn() -> Result<()> {
     let database = TestDatabase::new().await?;
     let manifests = TestManifestDir::new()?;
     let manifest_path = manifests.write_manifest(&manifest_contents_with_contract(
@@ -445,6 +445,13 @@ async fn refresh_watched_chain_plan_tracks_proxy_implementation_churn() -> Resul
             manifest_contract_entry_count: 1,
             discovery_edge_entry_count: 1,
         }]
+    );
+    assert_eq!(
+        manifest_normalized_event_kind_count(
+            &initial_state.manifest_normalized_event_summary,
+            "ManifestProxyImplementationAlert",
+        ),
+        1
     );
 
     fs::write(
@@ -488,6 +495,22 @@ async fn refresh_watched_chain_plan_tracks_proxy_implementation_churn() -> Resul
         first_implementation_contract_instance_id,
         second_implementation_contract_instance_id
     );
+    assert_eq!(
+        manifest_normalized_event_kind_count(
+            &refreshed_state.manifest_normalized_event_summary,
+            "ManifestProxyImplementationAlert",
+        ),
+        1
+    );
+    assert_eq!(
+        refreshed_state
+            .manifest_normalized_event_summary
+            .by_kind
+            .get("ManifestProxyImplementationAlert")
+            .expect("proxy implementation alert summary must be present")
+            .inserted_count,
+        1
+    );
     assert_eq!(refreshed_plan, refreshed_state.watched_chain_plan);
     assert_eq!(
         refreshed_state.watched_chain_plan,
@@ -524,6 +547,107 @@ async fn refresh_watched_chain_plan_tracks_proxy_implementation_churn() -> Resul
             .await?,
             0
         );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT after_state->>'implementation_address' FROM normalized_events WHERE event_kind = 'ManifestProxyImplementationAlert' ORDER BY normalized_event_id DESC LIMIT 1"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "0x00000000000000000000000000000000000000ee".to_owned()
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn runtime_refresh_emits_code_hash_drift_alert_without_watch_plan_change() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let manifests = TestManifestDir::new()?;
+    let root_address = "0x0000000000000000000000000000000000000001";
+    manifests.write_manifest(&manifest_contents_with_root_code_hash(
+        root_address,
+        "0xexpected",
+    ))?;
+
+    let manifest_repository = load_manifest_repository(&manifests.path)?;
+    let initial_state = build_manifest_runtime_state(database.pool(), &manifest_repository).await?;
+    assert_eq!(initial_state.watched_chain_plan.len(), 1);
+    assert_eq!(
+        manifest_normalized_event_kind_count(
+            &initial_state.manifest_normalized_event_summary,
+            "ManifestCodeHashDriftAlert",
+        ),
+        0
+    );
+
+    upsert_raw_code_hashes(
+        database.pool(),
+        &[RawCodeHash {
+            chain_id: "ethereum-mainnet".to_owned(),
+            block_hash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_owned(),
+            block_number: 42,
+            contract_address: root_address.to_owned(),
+            code_hash: "0xobserved".to_owned(),
+            code_byte_length: 32,
+            canonicality_state: CanonicalityState::Canonical,
+        }],
+    )
+    .await?;
+
+    assert_eq!(
+        refresh_watched_chain_plan(database.pool(), &initial_state.watched_chain_plan).await?,
+        None
+    );
+    let refreshed_state =
+        refresh_manifest_normalized_events_from_storage(database.pool(), &initial_state)
+            .await?
+            .expect("code-hash drift alert must refresh manifest normalized-event summary");
+    assert_eq!(
+        refreshed_state.watched_chain_plan,
+        initial_state.watched_chain_plan
+    );
+    assert_eq!(
+        manifest_normalized_event_kind_count(
+            &refreshed_state.manifest_normalized_event_summary,
+            "ManifestCodeHashDriftAlert",
+        ),
+        1
+    );
+    assert_eq!(
+        refreshed_state
+            .manifest_normalized_event_summary
+            .by_kind
+            .get("ManifestCodeHashDriftAlert")
+            .expect("code-hash drift alert summary must be present")
+            .inserted_count,
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT after_state->>'expected_code_hash' FROM normalized_events WHERE event_kind = 'ManifestCodeHashDriftAlert'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "0xexpected".to_owned()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT after_state->>'observed_code_hash' FROM normalized_events WHERE event_kind = 'ManifestCodeHashDriftAlert'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "0xobserved".to_owned()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT canonicality_state::TEXT FROM normalized_events WHERE event_kind = 'ManifestCodeHashDriftAlert'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "canonical".to_owned()
+    );
 
     database.cleanup().await?;
     Ok(())
@@ -1144,4 +1268,36 @@ async fn storage_discovery_refresh_adds_basenames_address_without_manifest_reloa
     server.abort();
     database.cleanup().await?;
     Ok(())
+}
+
+fn manifest_contents_with_root_code_hash(root_address: &str, code_hash: &str) -> String {
+    format!(
+        r#"
+manifest_version = 1
+namespace = "ens"
+source_family = "ens_v2_registry_l1"
+chain = "ethereum-mainnet"
+deployment_epoch = "ens_v2"
+rollout_status = "active"
+normalizer_version = "uts46-v1"
+
+[capability_flags]
+exact_lookup = "shadow"
+
+[[roots]]
+name = "RootRegistry"
+address = "{root_address}"
+code_hash = "{code_hash}"
+
+[[contracts]]
+role = "registry"
+address = "0x00000000000000000000000000000000000000aa"
+proxy_kind = "none"
+
+[[discovery_rules]]
+edge_kind = "subregistry"
+from_role = "registry"
+admission = "reachable_from_root"
+"#
+    )
 }

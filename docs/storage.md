@@ -124,6 +124,8 @@ At minimum, manifests/discovery persistence must carry:
 - `discovery_edges`: edges keyed by `edge_id` with `from_contract_instance_id`, `to_contract_instance_id`, `edge_kind`, active range, provenance, and canonicality
 - any materialized watch-plan table keyed by `contract_instance_id` plus chain and range, including root start nodes keyed by the root `contract_instance_id`; raw address is a derived watch target, not the durable identity
 
+Manifest drift and proxy alert persistence, when present, is observational worker state over those manifest/discovery rows and raw code-hash observations. Alert rows may reference manifest versions, contract instances, proxy / implementation edge ids, expected and observed code hashes, and watch-target derivation metadata, but they must not be the canonical manifest, discovery edge, capability flag, watch-plan input, or projection state. A proxy implementation observation preserves the proxy `contract_instance_id`; implementation churn is represented by an observed or admitted proxy / implementation edge, not by minting a replacement proxy identity.
+
 At minimum, backfill persistence must carry:
 
 - `backfill_jobs`: one row per bounded backfill job with selected profile, chain, selector kind, resolved source identity, scan mode, declared range start and end, idempotency key, lifecycle status, failure metadata, and timestamp metadata
@@ -269,3 +271,4 @@ To keep parallel work safe:
 - canonicality, raw-fact, and stored lineage range inspection tooling is worker-owned, read-only operational tooling over storage audit helpers; it does not create a public `v1` route, infer missing lineage, or bypass the API boundary for user-facing reads
 - backfill job inspection tooling is worker-owned, read-only operational tooling over `backfill_*`; it does not create a public `v1` route, mutate operational state, or bypass API read boundaries for user-facing data
 - execution trace inspection tooling is worker-owned, read-only operational tooling over `execution_*`; it does not create a public `v1` route, execute fresh verification, mutate cache eligibility, or bypass the public explain-route boundary
+- manifest drift and proxy alerting tooling is manifest/discovery-owned observation over `manifest_*`, `discovery_*`, code-hash facts, and derived watch targets; it must not mutate manifest truth, discovery edges, capability flags, watch-plan inputs, projections, or public API state
