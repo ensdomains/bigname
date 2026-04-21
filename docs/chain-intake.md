@@ -34,7 +34,16 @@ Out of scope for the initial intake contract:
 
 These may exist later as separate capabilities, but they must not leak into the core correctness model for declared-state indexing.
 
-## 3. ENSv2 Phase 5 Adapter Intake Boundary
+## 3. ENSv1 And Basenames Resolver Discovery Boundary
+
+ENSv1 and Basenames declared record indexing must not stop at the statically admitted resolver deployments. For the shipped mainnet profile, registry-level resolver changes are discovery inputs:
+
+- ENSv1 registry `NewResolver(node, resolver)` logs from admitted `ens_v1_registry_l1` emitters must produce resolver discovery observations for `ens_v1_resolver_l1`; nonzero resolver addresses create or refresh node-to-resolver bindings and resolver contract instances, while zero-address resolver changes close only the affected node-to-resolver binding (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L12 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L89 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L174 @ ens_v1@91c966f).
+- Basenames registry `NewResolver(node, resolver)` logs from admitted `basenames_base_registry` emitters must produce resolver discovery observations for `basenames_base_resolver`; nonzero Base-side resolver addresses create or refresh node-to-resolver bindings and resolver contract instances, while zero-address resolver changes close only the affected node-to-resolver binding (upstream: .refs/basenames/src/L2/Registry.sol:L19 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/Registry.sol:L132 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/Registry.sol:L223 @ basenames@1809bbc).
+
+The resolver address observed in declared topology is therefore not sufficient by itself. Contract-instance admission, node-to-resolver binding state, and supported resolver-profile admission are separate. Resolver-local record, record-version, permission, alias, or resolver-overview facts may be consumed only after the resolver address resolves to an admitted `contract_instance_id` through direct manifest admission or a resolver discovery edge and the instance is admitted as a supported resolver profile for the relevant fact family. Until those gates are active, declared record reads must surface explicit unsupported or gap state rather than pretending the current resolver has been indexed.
+
+## 4. ENSv2 Phase 5 Adapter Intake Boundary
 
 The Phase 5 ENSv2 `sepolia-dev` intake starts from the four admitted source families `ens_v2_root_l1`, `ens_v2_registry_l1`, `ens_v2_registrar_l1`, and `ens_v2_resolver_l1` under `manifests-sepolia-dev/ens/...`. Initial direct watched roots come from the pinned upstream `sepolia-dev` deployment metadata for `RootRegistry`, `ETHRegistry`, and `ETHRegistrar`; `PermissionedResolverImpl` is implementation metadata for discovered or admitted resolver instances, and resolver instances enter the watch plan only through manifest admission or discovery edges (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/RootRegistry.json:L2 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistry.json:L2 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistrar.json:L2 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/PermissionedResolverImpl.json:L2 @ ens_v2@554c309).
 
@@ -46,7 +55,7 @@ ENSv2 adapters normalize log-derived facts after raw block admission:
 
 Any ENSv2 enrichment call used to repair or disambiguate a log-derived fact, such as `getResource(anyId)`, `getTokenId(anyId)`, `getState(anyId)`, `getAlias(fromName)`, or EAC role reads, must be anchored to the same block identity as the raw log. The upstream interfaces expose these reads, but the intake correctness model remains hash-first and log-derived state must not be rewritten through ambiguous number-only calls (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L57 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L67 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L72 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/resolver/interfaces/IPermissionedResolver.sol:L56 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/access-control/interfaces/IEnhancedAccessControl.sol:L100 @ ens_v2@554c309).
 
-## 4. Upstream Requirements
+## 5. Upstream Requirements
 
 For each chain source in the selected deployment profile, the intake plane must have access to:
 
@@ -64,7 +73,7 @@ Rules:
 - historical state-heavy enrichment and state rewrites require archive-capable upstreams or a separately retained local corpus
 - upstream history retention must be treated as bounded; intake must retain its own raw corpus for deterministic replay and rewrites
 
-## 5. Head Model And Recent Window
+## 6. Head Model And Recent Window
 
 Per chain, intake tracks these persisted checkpoints:
 
@@ -97,7 +106,7 @@ This window exists to:
 
 Number-to-hash mappings inside this window are derived views only. The primary key is always block hash.
 
-## 6. Block Identity And Storage Rules
+## 7. Block Identity And Storage Rules
 
 Lineage and raw facts must preserve enough information to rebuild canonicality without re-scraping chain history.
 
@@ -109,7 +118,7 @@ Rules:
 - caches are keyed by block hash first; block number may be used only as a secondary lookup or pagination aid
 - if a downstream key needs "current block number," it must resolve that number to a block hash before reading block-scoped data
 
-## 7. Notification And Fetch Contract
+## 8. Notification And Fetch Contract
 
 Subscriptions, filters, and polling are allowed only as low-latency triggers.
 
@@ -135,7 +144,7 @@ For exact block-scoped data:
 - receipts should be fetched block-scoped first; transaction-by-transaction receipt fan-out is a fallback, not the preferred primitive
 - live ingestion must not rely on subscription payloads alone as the persisted source of truth
 
-## 8. Backfill Contract
+## 9. Backfill Contract
 
 Backfill may use either:
 
@@ -182,7 +191,7 @@ Rules:
 - backfill completion is not proof of finality; canonical, safe, and finalized promotion still follow the lineage model
 - backfill job and range checkpoint updates must not mutate or promote `canonical_head`, `safe_head`, or `finalized_head`
 
-## 9. Batch And Retry Rules
+## 10. Batch And Retry Rules
 
 Batching is allowed only for independent work.
 
@@ -200,7 +209,7 @@ Rules:
 - partial batch failure must not corrupt intake ordering
 - batch size must stay bounded and measurable
 
-## 10. State Enrichment Rules
+## 11. State Enrichment Rules
 
 If intake or execution enriches facts with state reads such as calls, storage, or balances:
 
@@ -210,7 +219,7 @@ If intake or execution enriches facts with state reads such as calls, storage, o
 
 Historical state-heavy enrichment is an archive requirement, not a best-effort full-node feature.
 
-## 11. Reconciliation Algorithm
+## 12. Reconciliation Algorithm
 
 Reorg handling is an explicit unwind and replay algorithm.
 
@@ -232,7 +241,7 @@ Execution-cache invalidation emitted by reorg repair is hash-scoped. It invalida
 
 Cache dependencies must be tied to explicit block-hash-bearing chain positions or boundaries before a verified outcome can be treated as reorg-safe. Number-only, tag-only, or dependency-free verified resolution and verified primary-name rows fail closed and cannot be served from cache after a reorg check; rows for request types explicitly documented outside this Phase 9 invalidation surface remain out of scope. This reorg/replay foundation does not promote ENSv2 exact-name support or any manifest capability.
 
-## 12. Raw-Fact Normalized-Event Replay Runner
+## 13. Raw-Fact Normalized-Event Replay Runner
 
 Raw-fact normalized-event replay is bounded operational tooling over already persisted canonical raw facts. A replay request selects a finite deployment profile, chain, and block range or explicit block-hash set. For selected blocks, canonical raw facts are rows whose block identity is `canonical`, `safe`, or `finalized`; `observed` and `orphaned` facts are excluded unless a later audit-only contract explicitly admits them.
 
@@ -240,7 +249,7 @@ The raw-fact normalized-event replay runner performs an upsert-only adapter resy
 
 Replay does not delete stale `normalized_events`, purge rows derived from selected blocks, or replace existing payloads for an already persisted normalized-event identity. Existing normalized-event identities can only be refreshed through the storage upsert canonicality path; stale conflicting payloads remain a hard storage mismatch rather than being rewritten by replay. Raw facts and lineage remain immutable, projection rebuild remains downstream worker-owned, and API responses continue to read projections and execution output rather than the replay runner.
 
-## 13. Atomicity Boundary
+## 14. Atomicity Boundary
 
 The raw admission transaction boundary is one block.
 
@@ -256,7 +265,7 @@ The canonical head pointer is written last inside that admission unit.
 
 Projection workers remain downstream and asynchronous, but they must consume deterministic block-scoped invalidation and replay inputs so that reorg repair is reproducible.
 
-## 14. Traces, Pending, And Other Optional Capabilities
+## 15. Traces, Pending, And Other Optional Capabilities
 
 Pending and mempool indexing are a separate product surface.
 
@@ -268,7 +277,7 @@ Rules:
 - if traces are enabled later, they persist as their own raw facts with the same block-hash anchoring and reorg semantics
 - intake planning must not assume all providers expose the same trace APIs
 
-## 15. Observability And Test Requirements
+## 16. Observability And Test Requirements
 
 Minimum chain-intake metrics:
 
@@ -293,7 +302,7 @@ Required failure drills:
 - raw-fact normalized-event replay restart over the same bounded canonical selection as an upsert-only adapter resync without RPC fetch or checkpoint promotion
 - safe or finalized promotion lagging canonical intake
 
-## 16. Acceptance Rules
+## 17. Acceptance Rules
 
 The intake contract is acceptable for the first implementation milestone only if:
 

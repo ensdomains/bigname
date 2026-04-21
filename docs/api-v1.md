@@ -146,6 +146,8 @@ Use this object for `declared_state.control` on `GET /v1/names/{namespace}/{name
 
 Use this object for `declared_state.resolver` on `GET /v1/names/{namespace}/{name}`. It identifies the current resolver target for the bound resource only; it does not inline `Resolution.topology`, wildcard or alias traversal detail, or resolver-overview subdocuments. When this summary is supported, `chain_id` and `address` are both `null` if the current resource has no declared resolver at the requested snapshot, and `latest_event_kind` may be `null` when the summary has no retained resolver-change pointer.
 
+For ENSv1 and Basenames, this exact-name resolver summary is topology only. It does not prove that resolver-local record, cache, or resolver-overview facts have been indexed; those facts require the resolver address to be direct manifest-admitted or discovery-admitted into the relevant resolver source family and admitted as a supported resolver profile for the relevant record family (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L12 @ ens_v1@91c966f) (upstream: .refs/basenames/src/L2/Registry.sol:L132 @ basenames@1809bbc).
+
 ### `HistoryPointer`
 
 - `normalized_event_id`
@@ -265,6 +267,7 @@ Rules:
 - `selectors` and `explicit_gaps` are sorted by `record_key` ascending
 - `unsupported_families` is sorted by `record_family` ascending
 - this object may be authoritative for exact lookup while `enumeration_basis.globally_enumerable` remains `false`
+- for ENSv1 and Basenames, resolver-local selector and cache facts may be populated only from the current resolver after direct manifest admission or resolver discovery admission plus supported resolver-profile admission for the relevant record family; an unadmitted or unsupported-profile current resolver must surface explicit gaps such as `gap_reason="not_observed_on_current_resolver"` and unsupported families such as `unsupported_reason="resolver_family_pending"` rather than silently appearing complete (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L12 @ ens_v1@91c966f) (upstream: .refs/basenames/src/L2/Registry.sol:L132 @ basenames@1809bbc)
 
 ### `ResolutionRecordCacheEntry`
 
@@ -917,6 +920,7 @@ Rules:
 - callers must round-trip the surfaced `record_key` strings in `records`; `record_family` and `selector_key` are explanatory fields, not alternate request identity
 - `record_inventory` defines the known record-selector space, explicit gaps, and the current version boundary for the requested surface; it does not imply global record enumeration
 - `record_cache` is the declared last-known-value view over that same selector space and version boundary; it never implies that verified execution was run
+- for ENSv1 and Basenames, a current resolver target in `topology.resolver_path` is not enough to claim complete `record_inventory`, `record_cache`, or resolver-overview support; resolver-local declared facts require direct manifest admission or resolver discovery admission into the relevant resolver source family plus supported resolver-profile admission for the relevant record family (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L12 @ ens_v1@91c966f) (upstream: .refs/basenames/src/L2/Registry.sol:L132 @ basenames@1809bbc)
 - `topology.version_boundaries.record_version_boundary` must equal `record_inventory.record_version_boundary` and `record_cache.record_version_boundary` when those sections are supported together
 - selector-level declared cache results live in `record_cache.entries`
 - `record_cache.entries[*]` and `verified_queries[*]` always echo the applicable `record_key`, even when the selector status is not `success`
