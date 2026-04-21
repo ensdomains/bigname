@@ -1904,15 +1904,127 @@ async fn reorg_invalidation_fails_closed_for_verified_outcome_without_block_hash
     .await
     .context("failed to insert malformed execution cache outcome")?;
 
-    let error = invalidate_execution_outcomes_for_orphaned_blocks(database.pool())
-        .await
-        .expect_err("reorg invalidation must fail closed on malformed verified dependencies");
-    let rendered = format!("{error:#}");
-    assert!(
-        rendered.contains(
-            "requested_chain_positions[0] must include non-empty string field block_hash"
-        ),
-        "unexpected error: {error:#}"
+    let mut primary_trace = execution_trace_variant(
+        Uuid::from_u128(0x0e7ec7ace00000000000000000000028),
+        &verified_primary_request_key("0xMalformed", "60"),
+        1_717_172_601,
+    );
+    primary_trace.request_type = "verified_primary_name".to_owned();
+    upsert_execution_trace(database.pool(), &primary_trace).await?;
+
+    let primary_topology_boundary = json!({
+        "logical_name_id": "ens:malformed-primary.eth",
+        "resource_id": Uuid::from_u128(0x0e7ec7ace0000000000000000000acdd).to_string(),
+        "normalized_event_id": 1_930,
+        "event_kind": "ResolverChanged",
+        "chain_position": {
+            "chain_id": "ethereum-mainnet",
+            "block_number": 21_700_012,
+            "timestamp": "2024-06-08T00:00:29Z",
+        }
+    });
+    let primary_record_boundary = json!({
+        "logical_name_id": "ens:malformed-primary.eth",
+        "resource_id": Uuid::from_u128(0x0e7ec7ace0000000000000000000acde).to_string(),
+        "normalized_event_id": 1_940,
+        "event_kind": "RecordsChanged",
+        "chain_position": {
+            "chain_id": "ethereum-mainnet",
+            "block_number": 21_700_013,
+            "timestamp": "2024-06-08T00:00:30Z",
+        }
+    });
+    sqlx::query(
+        r#"
+        INSERT INTO execution_cache_outcomes (
+            execution_cache_key,
+            request_key,
+            requested_chain_positions,
+            manifest_versions,
+            topology_version_boundary,
+            record_version_boundary,
+            execution_trace_id,
+            request_type,
+            namespace,
+            outcome_payload,
+            finished_at
+        )
+        VALUES (
+            $1,
+            $2,
+            $3::jsonb,
+            $4::jsonb,
+            $5::jsonb,
+            $6::jsonb,
+            $7,
+            $8,
+            $9,
+            $10::jsonb,
+            $11
+        )
+        "#,
+    )
+    .bind("malformed-primary-cache-key")
+    .bind(&primary_trace.request_key)
+    .bind(
+        json!([{
+            "chain_id": "ethereum-mainnet",
+            "block_number": 21_700_012
+        }])
+        .to_string(),
+    )
+    .bind(
+        json!([{
+            "source_family": "ens_execution",
+            "manifest_version": 10
+        }])
+        .to_string(),
+    )
+    .bind(primary_topology_boundary.to_string())
+    .bind(primary_record_boundary.to_string())
+    .bind(primary_trace.execution_trace_id)
+    .bind("verified_primary_name")
+    .bind("ens")
+    .bind(json!({"status": "success"}).to_string())
+    .bind(
+        primary_trace
+            .finished_at
+            .expect("malformed primary dependency trace must finish"),
+    )
+    .execute(database.pool())
+    .await
+    .context("failed to insert malformed verified primary-name cache outcome")?;
+
+    let summary = invalidate_execution_outcomes_for_orphaned_blocks(database.pool()).await?;
+    assert_eq!(summary.deleted_outcome_count, 2);
+
+    let malformed_outcome_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM execution_cache_outcomes WHERE execution_cache_key IN ($1, $2)",
+    )
+    .bind("malformed-cache-key")
+    .bind("malformed-primary-cache-key")
+    .fetch_one(database.pool())
+    .await
+    .context("failed to count malformed execution cache outcomes after reorg invalidation")?;
+    assert_eq!(malformed_outcome_count, 0);
+
+    assert_eq!(
+        load_execution_trace(database.pool(), trace.execution_trace_id)
+            .await?
+            .expect("malformed resolution trace must remain durable")
+            .steps
+            .len(),
+        2,
+        "resolution trace steps stay durable after fail-closed cache invalidation"
+    );
+    assert_eq!(
+        load_execution_trace(database.pool(), primary_trace.execution_trace_id)
+            .await?
+            .expect("malformed verified primary-name trace must remain durable")
+            .steps
+            .len(),
+        2,
+        "verified primary-name trace steps stay durable after fail-closed cache invalidation"
     );
 
     database.cleanup().await

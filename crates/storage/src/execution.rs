@@ -88,6 +88,15 @@ pub struct ExecutionOutcomeInvalidationSummary {
     pub deleted_outcome_count: u64,
 }
 
+#[derive(Clone, Debug)]
+struct ExecutionOutcomeReorgInvalidationCandidate {
+    execution_cache_key: String,
+    request_key: String,
+    requested_chain_positions: Value,
+    topology_version_boundary: Value,
+    record_version_boundary: Value,
+}
+
 /// Load one stored execution trace and its ordered steps.
 pub async fn load_execution_trace(
     pool: &PgPool,
@@ -386,17 +395,18 @@ pub async fn invalidate_execution_outcomes_for_orphaned_blocks(
 
     let mut cache_keys = Vec::new();
     for outcome in outcomes {
-        let dependencies = execution_outcome_block_dependencies(&outcome).with_context(|| {
-            format!(
-                "execution outcome for request_type {} namespace {} request_key {} cannot be associated with explicit block-hash-bearing dependencies",
-                outcome.request_type, outcome.namespace, outcome.cache_key.request_key
-            )
-        })?;
+        let dependencies = match execution_outcome_block_dependencies(&outcome) {
+            Ok(dependencies) => dependencies,
+            Err(_) => {
+                cache_keys.push(outcome.execution_cache_key);
+                continue;
+            }
+        };
         if dependencies
             .iter()
             .any(|dependency| orphaned_blocks.contains(dependency))
         {
-            cache_keys.push(execution_cache_key_storage_key(&outcome.cache_key)?);
+            cache_keys.push(outcome.execution_cache_key);
         }
     }
 
@@ -795,7 +805,7 @@ where
 
 async fn load_execution_outcomes_for_reorg_invalidation_scope_internal<'e, E>(
     executor: E,
-) -> Result<Vec<ExecutionOutcome>>
+) -> Result<Vec<ExecutionOutcomeReorgInvalidationCandidate>>
 where
     E: Executor<'e, Database = Postgres>,
 {
@@ -805,15 +815,8 @@ where
             execution_cache_key,
             request_key,
             requested_chain_positions,
-            manifest_versions,
             topology_version_boundary,
-            record_version_boundary,
-            execution_trace_id,
-            request_type,
-            namespace,
-            outcome_payload,
-            failure_payload,
-            finished_at
+            record_version_boundary
         FROM execution_cache_outcomes
         WHERE request_type IN ('verified_resolution', 'verified_primary_name')
         ORDER BY execution_cache_key
@@ -823,7 +826,9 @@ where
     .await
     .context("failed to load execution outcomes for reorg invalidation scope")?;
 
-    rows.into_iter().map(decode_execution_outcome_row).collect()
+    rows.into_iter()
+        .map(decode_execution_outcome_reorg_invalidation_candidate_row)
+        .collect()
 }
 
 async fn load_orphaned_block_dependencies_internal<'e, E>(
@@ -1382,20 +1387,19 @@ fn version_boundary_storage_key(
 }
 
 fn execution_outcome_block_dependencies(
-    outcome: &ExecutionOutcome,
+    outcome: &ExecutionOutcomeReorgInvalidationCandidate,
 ) -> Result<BTreeSet<(String, String)>> {
     let mut dependencies = BTreeSet::new();
-    for position in decode_requested_chain_positions(
-        &outcome.cache_key.requested_chain_positions,
-        &outcome.cache_key.request_key,
-    )? {
+    for position in
+        decode_requested_chain_positions(&outcome.requested_chain_positions, &outcome.request_key)?
+    {
         dependencies.insert((position.chain_id, position.block_hash));
     }
 
     let topology_boundary = decode_version_boundary(
-        &outcome.cache_key.topology_version_boundary,
+        &outcome.topology_version_boundary,
         "topology_version_boundary",
-        &outcome.cache_key.request_key,
+        &outcome.request_key,
     )?;
     dependencies.insert((
         topology_boundary.chain_position.chain_id,
@@ -1403,9 +1407,9 @@ fn execution_outcome_block_dependencies(
     ));
 
     let record_boundary = decode_version_boundary(
-        &outcome.cache_key.record_version_boundary,
+        &outcome.record_version_boundary,
         "record_version_boundary",
-        &outcome.cache_key.request_key,
+        &outcome.request_key,
     )?;
     dependencies.insert((
         record_boundary.chain_position.chain_id,
@@ -1415,7 +1419,7 @@ fn execution_outcome_block_dependencies(
     if dependencies.is_empty() {
         bail!(
             "execution outcome for request_key {} has no block-hash-bearing dependencies",
-            outcome.cache_key.request_key
+            outcome.request_key
         );
     }
 
@@ -1592,6 +1596,28 @@ fn decode_execution_outcome_row(row: PgRow) -> Result<ExecutionOutcome> {
         finished_at: row
             .try_get("finished_at")
             .context("execution outcome row missing finished_at")?,
+    })
+}
+
+fn decode_execution_outcome_reorg_invalidation_candidate_row(
+    row: PgRow,
+) -> Result<ExecutionOutcomeReorgInvalidationCandidate> {
+    Ok(ExecutionOutcomeReorgInvalidationCandidate {
+        execution_cache_key: row
+            .try_get("execution_cache_key")
+            .context("execution outcome row missing execution_cache_key")?,
+        request_key: row
+            .try_get("request_key")
+            .context("execution outcome row missing request_key")?,
+        requested_chain_positions: row
+            .try_get("requested_chain_positions")
+            .context("execution outcome row missing requested_chain_positions")?,
+        topology_version_boundary: row
+            .try_get("topology_version_boundary")
+            .context("execution outcome row missing topology_version_boundary")?,
+        record_version_boundary: row
+            .try_get("record_version_boundary")
+            .context("execution outcome row missing record_version_boundary")?,
     })
 }
 
