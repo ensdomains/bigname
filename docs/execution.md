@@ -133,9 +133,11 @@ Each step records:
 - latency
 - canonicality dependency
 
+Execution traces and execution steps are durable audit artifacts. Reorg-driven cache invalidation must not delete `execution_traces`, `execution_steps`, object-store attachments, or the trace-local step list; it only changes whether a persisted verified outcome can be reused as a cache hit.
+
 ## 5. Cache Key And Invalidation
 
-Verified answers are cached by:
+Persisted verified outcomes are cached in `execution_cache_outcomes` by:
 
 - request key
 - requested chain positions
@@ -155,6 +157,14 @@ Invalidate on:
 For resolution, `request key` includes the normalized explicit selector set so the cache boundary matches `verified_queries`.
 
 For verified primary-name, `request key` is the normalized tuple string `{namespace}:{normalized_address}:{coin_type}`. The matching `primary_names_current(address, coin_type, namespace)` row is the only admitted claim-side lookup / invalidation anchor for that key; projection updates for that row may invalidate request-matching verified answers, but the projection does not persist verified result payloads or trace IDs.
+
+Phase 9 reorg invalidation rules:
+
+- reorg repair invalidates any `execution_cache_outcomes` row for verified resolution or verified primary-name readback whose dependency set contains an orphaned block identity
+- cache dependencies must be tied to explicit block-hash-bearing chain positions or boundaries; block numbers, `latest` / `head` tags, manifest versions, topology versions, and record versions are not sufficient unless they resolve to one or more block hashes or to source rows that carry block hashes
+- verified resolution and verified primary-name rows without explicit block-hash-bearing dependencies fail closed and are ineligible for cache reuse after a reorg check; request types that are documented as not depending on chain state remain explicitly out of scope rather than implicitly safe
+- invalidation affects cache eligibility only; execution traces, execution steps, and trace attachments remain durable audit artifacts
+- this is a reorg/replay foundation only: it does not promote ENSv2 exact-name support, widen any verified support class, or graduate any manifest capability
 
 ## 6. Explain Requirements
 

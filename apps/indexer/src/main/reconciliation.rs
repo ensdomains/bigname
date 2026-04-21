@@ -4,7 +4,8 @@ use anyhow::{Context, Result, bail};
 use bigname_storage::{
     CanonicalityState, ChainCheckpoint, ChainCheckpointUpdate, ChainLineageBlock,
     CheckpointBlockRef, RawBlock, RawCodeHash, RawLog, RawReceipt, RawTransaction,
-    advance_chain_checkpoints, load_chain_lineage_block, load_raw_block, load_raw_blocks_by_hashes,
+    advance_chain_checkpoints, invalidate_execution_outcomes_for_orphaned_blocks,
+    load_chain_lineage_block, load_raw_block, load_raw_blocks_by_hashes,
     load_raw_code_hash_counts_by_block_hashes, mark_block_derived_normalized_events_range_orphaned,
     mark_chain_lineage_range_orphaned, mark_identity_rows_range_orphaned,
     mark_raw_block_facts_range_orphaned, upsert_chain_lineage_blocks, upsert_raw_blocks,
@@ -169,54 +170,68 @@ pub(crate) async fn reconcile_fetched_heads(
     .await?;
     let head_change_set = head_change_set(task, heads, &canonical);
 
-    if canonical.status == CanonicalReconciliationStatus::ReorgReconciled
-        && let Some(current_canonical_hash) = task.checkpoint.canonical_block_hash.as_deref()
-        && load_raw_block(pool, &task.chain, current_canonical_hash)
-            .await?
-            .is_some()
-    {
-        mark_raw_block_facts_range_orphaned(
-            pool,
-            &task.chain,
-            current_canonical_hash,
-            canonical.raw_orphan_stop_before_hash.as_deref(),
-        )
-        .await?;
-        let orphaned_normalized_event_count = mark_block_derived_normalized_events_range_orphaned(
-            pool,
-            &task.chain,
-            current_canonical_hash,
-            canonical.raw_orphan_stop_before_hash.as_deref(),
-        )
-        .await?;
-        if orphaned_normalized_event_count > 0 {
-            info!(
-                service = "indexer",
-                chain = %task.chain,
-                orphaned_normalized_event_count,
-                "block-derived normalized events orphaned for the losing branch"
-            );
-        }
-        let orphaned_identity_counts = mark_identity_rows_range_orphaned(
-            pool,
-            &task.chain,
-            current_canonical_hash,
-            canonical.raw_orphan_stop_before_hash.as_deref(),
-        )
-        .await?;
-        if orphaned_identity_counts.token_lineage_count > 0
-            || orphaned_identity_counts.resource_count > 0
-            || orphaned_identity_counts.name_surface_count > 0
-            || orphaned_identity_counts.surface_binding_count > 0
+    if canonical.status == CanonicalReconciliationStatus::ReorgReconciled {
+        if let Some(current_canonical_hash) = task.checkpoint.canonical_block_hash.as_deref()
+            && load_raw_block(pool, &task.chain, current_canonical_hash)
+                .await?
+                .is_some()
         {
+            mark_raw_block_facts_range_orphaned(
+                pool,
+                &task.chain,
+                current_canonical_hash,
+                canonical.raw_orphan_stop_before_hash.as_deref(),
+            )
+            .await?;
+            let orphaned_normalized_event_count =
+                mark_block_derived_normalized_events_range_orphaned(
+                    pool,
+                    &task.chain,
+                    current_canonical_hash,
+                    canonical.raw_orphan_stop_before_hash.as_deref(),
+                )
+                .await?;
+            if orphaned_normalized_event_count > 0 {
+                info!(
+                    service = "indexer",
+                    chain = %task.chain,
+                    orphaned_normalized_event_count,
+                    "block-derived normalized events orphaned for the losing branch"
+                );
+            }
+            let orphaned_identity_counts = mark_identity_rows_range_orphaned(
+                pool,
+                &task.chain,
+                current_canonical_hash,
+                canonical.raw_orphan_stop_before_hash.as_deref(),
+            )
+            .await?;
+            if orphaned_identity_counts.token_lineage_count > 0
+                || orphaned_identity_counts.resource_count > 0
+                || orphaned_identity_counts.name_surface_count > 0
+                || orphaned_identity_counts.surface_binding_count > 0
+            {
+                info!(
+                    service = "indexer",
+                    chain = %task.chain,
+                    orphaned_token_lineage_count = orphaned_identity_counts.token_lineage_count,
+                    orphaned_resource_count = orphaned_identity_counts.resource_count,
+                    orphaned_name_surface_count = orphaned_identity_counts.name_surface_count,
+                    orphaned_surface_binding_count = orphaned_identity_counts.surface_binding_count,
+                    "identity rows orphaned for the losing branch"
+                );
+            }
+        }
+
+        let execution_invalidation_summary =
+            invalidate_execution_outcomes_for_orphaned_blocks(pool).await?;
+        if execution_invalidation_summary.deleted_outcome_count > 0 {
             info!(
                 service = "indexer",
                 chain = %task.chain,
-                orphaned_token_lineage_count = orphaned_identity_counts.token_lineage_count,
-                orphaned_resource_count = orphaned_identity_counts.resource_count,
-                orphaned_name_surface_count = orphaned_identity_counts.name_surface_count,
-                orphaned_surface_binding_count = orphaned_identity_counts.surface_binding_count,
-                "identity rows orphaned for the losing branch"
+                invalidated_execution_outcome_count =
+                    execution_invalidation_summary.deleted_outcome_count,
+                "execution cache outcomes invalidated for orphaned block dependencies"
             );
         }
     }

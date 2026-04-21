@@ -188,12 +188,16 @@ For each candidate canonical block:
 3. if the parent is missing, backfill parents until continuity or an existing checkpoint is reached
 4. if the parent conflicts with the current canonical head, walk backward through the recent window to a common ancestor
 5. mark the losing branch as `orphaned`
-6. emit deterministic invalidation for normalized events and execution cache entries derived from orphaned blocks
+6. emit deterministic invalidation for normalized events and `execution_cache_outcomes` rows derived from orphaned block identities
 7. admit the winning branch in canonical order
 8. move the canonical head pointer last
 9. promote blocks under the safe and finalized checkpoints asynchronously and monotonically
 
 Reconciliation must never depend on ad hoc deletes or "latest row wins" semantics.
+
+Execution-cache invalidation emitted by reorg repair is hash-scoped. It invalidates `execution_cache_outcomes` rows for verified resolution and verified primary-name outcomes when their dependency set contains an orphaned `(chain_id, block_hash)` or a boundary resolved through one. It must not delete execution traces, execution steps, raw facts, or normalized events; those remain durable replay and audit inputs.
+
+Cache dependencies must be tied to explicit block-hash-bearing chain positions or boundaries before a verified outcome can be treated as reorg-safe. Number-only, tag-only, or dependency-free verified resolution and verified primary-name rows fail closed and cannot be served from cache after a reorg check; rows for request types explicitly documented outside this Phase 9 invalidation surface remain out of scope. This reorg/replay foundation does not promote ENSv2 exact-name support or any manifest capability.
 
 ## 12. Atomicity Boundary
 

@@ -9,7 +9,7 @@ This document freezes the internal persistence strategy enough for storage, inta
 - raw facts are immutable
 - projections are disposable and rebuildable
 - canonicality is explicit, never inferred from "latest row wins"
-- verified execution artifacts are durable facts, not ephemeral cache only
+- execution traces and execution steps are durable audit artifacts; cache outcomes are reusable only while their dependencies remain canonical
 - one write owner exists per storage family
 
 ## 2. Storage Layers
@@ -21,7 +21,7 @@ The system of record is split into six layers:
 3. `manifests_and_discovery`: source manifests, discovered edges, rollout flags
 4. `identity_and_events`: `NameSurface`, `SurfaceBinding`, resources, token lineage, normalized events
 5. `projections`: current-state and collection read models
-6. `execution`: traces, cache entries, persisted verified outcomes
+6. `execution`: durable traces and steps, `execution_cache_outcomes`, invalidation records
 
 Only layers 1 through 5 are required to rebuild current declared state. Layer 6 is required to replay verified answers and explain them.
 
@@ -100,9 +100,11 @@ Use `bigint generated always as identity` for:
 | `name_surfaces`, `surface_bindings`, `resources`, `token_lineages` | adapters | stable identity anchors |
 | `normalized_events` | adapters | append-only normalized protocol events |
 | `projection_*` | projection workers | disposable read models |
-| `execution_*` | execution workers | traces, cached answers, invalidations |
+| `execution_*` | execution workers; synchronous indexer/reorg repair for orphan-block cache outcome deletes only | durable traces and steps, normal `execution_cache_outcomes` writes, invalidation records |
 
 The API process is read-only against storage.
+
+Within the `execution_*` family, the only non-execution-worker write owner is synchronous indexer/reorg repair during chain reconciliation. That path may delete or invalidate reusable `execution_cache_outcomes` rows whose dependency set includes an orphaned block identity; it does not write execution traces, execution steps, normal execution outcomes, projections, API state, or manifest state.
 
 For ENSv1 identity rows and normalized authority / permission events, adapters are responsible for minting and reusing `resource_id`, `token_lineage_id`, and `surface_binding_id` according to the continuity rules above and for attaching normalized events to the authoritative `resource_id` in effect at that chain position. Projection workers consume those identity rows and normalized events; they do not infer alternate continuity or synthesize cross-resource permission carry on their own.
 
@@ -167,6 +169,10 @@ Rules:
 - history and audit tools may opt into `observed` and `orphaned` rows explicitly
 - safe and finalized promotion is monotonic per chain
 
+Execution cache rows follow the same hash-first canonicality rule. When reorg repair marks a block identity `orphaned`, synchronous indexer/reorg repair invalidates or deletes any reusable `execution_cache_outcomes` row for verified resolution or verified primary-name readback whose dependency set includes that `(chain_id, block_hash)` or a boundary resolved through it. The invalidation makes the cached outcome ineligible for reuse; it must not delete raw facts, execution traces, execution steps, trace attachments, or any execution-owned audit artifact.
+
+Reusable `execution_cache_outcomes` rows must carry dependencies tied to explicit block-hash-bearing chain positions or boundaries. Rows for verified resolution or verified primary-name readback that lack those dependencies fail closed; rows for request types explicitly documented as outside this reorg invalidation surface remain out of scope rather than being treated as reorg-safe by omission.
+
 ## 7. Projection Storage Rules
 
 Every current-state projection row carries:
@@ -196,6 +202,8 @@ Persist large payloads in object storage addressed by SHA-256 digest:
 
 Postgres stores the digest, size, content type, and object key.
 
+The execution storage boundary separates durable audit artifacts from cache reuse. `execution_traces` and `execution_steps` preserve what was executed and why; normal `execution_cache_outcomes` writes record whether a verified outcome can be reused under its request key, manifest versions, and block-hash-bearing dependency boundaries. Phase 9 reorg invalidation updates cache eligibility only through the synchronous indexer/reorg repair exception and does not promote ENSv2 exact-name support, widen verified execution support, or graduate any manifest capability.
+
 ## 9. Migration Rules
 
 - schema changes land through checked-in migrations only
@@ -210,5 +218,6 @@ To keep parallel work safe:
 - storage owns migrations and query primitives
 - adapters own inserts into identity and normalized-event tables
 - projection workers own materialized read models
-- execution workers own trace and cache tables
+- execution workers own trace and step writes plus normal cache outcome writes
+- synchronous indexer/reorg repair owns only `execution_cache_outcomes` deletes or invalidations tied to orphaned block dependencies
 - API code must not query raw-fact tables directly except for explicit audit endpoints

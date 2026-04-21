@@ -421,6 +421,101 @@ async fn reconcile_fetched_heads_marks_losing_branch_orphaned_on_reorg() -> Resu
     .execute(database.pool())
     .await
     .context("failed to insert record change events for reorg reconciliation test")?;
+
+    let losing_resolution_trace = execution_trace_fixture(
+        Uuid::from_u128(0x9001),
+        "verified_resolution",
+        "ens:reorg.eth:addr:60",
+        &losing_block,
+    );
+    let losing_resolution_outcome = execution_outcome_fixture(
+        &losing_resolution_trace,
+        &losing_block,
+        &ancestor_block,
+        &ancestor_block,
+        Uuid::from_u128(0x9101),
+    );
+    insert_execution_fixture(
+        database.pool(),
+        &losing_resolution_trace,
+        &losing_resolution_outcome,
+    )
+    .await?;
+
+    let losing_primary_trace = execution_trace_fixture(
+        Uuid::from_u128(0x9002),
+        "verified_primary_name",
+        "ens:0x0000000000000000000000000000000000000001:60",
+        &losing_block,
+    );
+    let losing_primary_outcome = execution_outcome_fixture(
+        &losing_primary_trace,
+        &ancestor_block,
+        &ancestor_block,
+        &losing_block,
+        Uuid::from_u128(0x9103),
+    );
+    insert_execution_fixture(
+        database.pool(),
+        &losing_primary_trace,
+        &losing_primary_outcome,
+    )
+    .await?;
+
+    let unrelated_resolution_trace = execution_trace_fixture(
+        Uuid::from_u128(0x9003),
+        "verified_resolution",
+        "ens:keep.eth:addr:60",
+        &ancestor_block,
+    );
+    let unrelated_resolution_outcome = execution_outcome_fixture(
+        &unrelated_resolution_trace,
+        &ancestor_block,
+        &ancestor_block,
+        &ancestor_block,
+        Uuid::from_u128(0x9105),
+    );
+    insert_execution_fixture(
+        database.pool(),
+        &unrelated_resolution_trace,
+        &unrelated_resolution_outcome,
+    )
+    .await?;
+
+    let out_of_scope_trace = execution_trace_fixture(
+        Uuid::from_u128(0x9004),
+        "declared_resolution",
+        "ens:declared.eth:addr:60",
+        &losing_block,
+    );
+    let out_of_scope_outcome = execution_outcome_fixture(
+        &out_of_scope_trace,
+        &losing_block,
+        &losing_block,
+        &losing_block,
+        Uuid::from_u128(0x9107),
+    );
+    insert_execution_fixture(database.pool(), &out_of_scope_trace, &out_of_scope_outcome).await?;
+
+    let execution_trace_count_before: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM execution_traces")
+            .fetch_one(database.pool())
+            .await
+            .context("failed to count execution traces before reorg")?;
+    let execution_step_count_before: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM execution_steps")
+            .fetch_one(database.pool())
+            .await
+            .context("failed to count execution steps before reorg")?;
+    let execution_outcome_count_before: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM execution_cache_outcomes")
+            .fetch_one(database.pool())
+            .await
+            .context("failed to count execution cache outcomes before reorg")?;
+    assert_eq!(execution_trace_count_before, 4);
+    assert_eq!(execution_step_count_before, 4);
+    assert_eq!(execution_outcome_count_before, 4);
+
     tasks[0].checkpoint = advance_chain_checkpoints(
         database.pool(),
         &ChainCheckpointUpdate {
@@ -655,8 +750,205 @@ async fn reconcile_fetched_heads_marks_losing_branch_orphaned_on_reorg() -> Resu
             .await?,
             "canonical".to_owned()
         );
+    assert_eq!(
+        load_execution_outcome(database.pool(), &losing_resolution_outcome.cache_key).await?,
+        None
+    );
+    assert_eq!(
+        load_execution_outcome(database.pool(), &losing_primary_outcome.cache_key).await?,
+        None
+    );
+    assert!(
+        load_execution_outcome(database.pool(), &unrelated_resolution_outcome.cache_key)
+            .await?
+            .is_some(),
+        "unrelated verified resolution outcome must remain reusable"
+    );
+    assert!(
+        load_execution_outcome(database.pool(), &out_of_scope_outcome.cache_key)
+            .await?
+            .is_some(),
+        "out-of-scope execution outcome must remain reusable"
+    );
+    for trace_id in [
+        losing_resolution_trace.execution_trace_id,
+        losing_primary_trace.execution_trace_id,
+        unrelated_resolution_trace.execution_trace_id,
+        out_of_scope_trace.execution_trace_id,
+    ] {
+        assert!(
+            load_execution_trace(database.pool(), trace_id)
+                .await?
+                .is_some(),
+            "execution trace {trace_id} must remain durable after reorg invalidation"
+        );
+    }
+    let execution_trace_count_after: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM execution_traces")
+            .fetch_one(database.pool())
+            .await
+            .context("failed to count execution traces after reorg")?;
+    let execution_step_count_after: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM execution_steps")
+            .fetch_one(database.pool())
+            .await
+            .context("failed to count execution steps after reorg")?;
+    let execution_outcome_count_after: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM execution_cache_outcomes")
+            .fetch_one(database.pool())
+            .await
+            .context("failed to count execution cache outcomes after reorg")?;
+    assert_eq!(execution_trace_count_after, execution_trace_count_before);
+    assert_eq!(execution_step_count_after, execution_step_count_before);
+    assert_eq!(
+        execution_outcome_count_after,
+        execution_outcome_count_before - 2
+    );
 
     server.abort();
     database.cleanup().await?;
     Ok(())
+}
+
+async fn insert_execution_fixture(
+    pool: &PgPool,
+    trace: &ExecutionTrace,
+    outcome: &ExecutionOutcome,
+) -> Result<()> {
+    upsert_execution_trace(pool, trace).await?;
+    upsert_execution_outcome(pool, outcome).await?;
+    Ok(())
+}
+
+fn execution_trace_fixture(
+    execution_trace_id: Uuid,
+    request_type: &str,
+    request_key: &str,
+    block: &ProviderBlock,
+) -> ExecutionTrace {
+    ExecutionTrace {
+        execution_trace_id,
+        request_type: request_type.to_owned(),
+        request_key: request_key.to_owned(),
+        namespace: "ens".to_owned(),
+        chain_context: json!({
+            "requested_positions": [requested_chain_position(block)]
+        }),
+        manifest_context: json!({
+            "manifest_versions": [{
+                "source_family": "ens_execution",
+                "manifest_version": 1
+            }]
+        }),
+        contracts_called: json!([{
+            "chain_id": "ethereum-mainnet",
+            "contract_address": "0x0000000000000000000000000000000000000001",
+            "selector": "0x3b3b57de"
+        }]),
+        gateway_digests: json!([]),
+        final_payload: Some(json!({
+            "status": "success",
+            "request_key": request_key
+        })),
+        failure_payload: None,
+        request_metadata: json!({
+            "test": "reorg_execution_cache_invalidation"
+        }),
+        finished_at: Some(test_execution_timestamp(block)),
+        steps: vec![ExecutionTraceStep {
+            step_index: 0,
+            step_kind: "execute_verified_read".to_owned(),
+            input_digest: Some(format!("sha256:input-{}", execution_trace_id.simple())),
+            output_digest: Some(format!("sha256:output-{}", execution_trace_id.simple())),
+            latency_ms: Some(1),
+            canonicality_dependency: json!({
+                "ethereum-mainnet": {
+                    "block_number": block.block_number,
+                    "block_hash": block.block_hash
+                }
+            }),
+            step_payload: json!({
+                "request_type": request_type,
+                "request_key": request_key
+            }),
+        }],
+    }
+}
+
+fn execution_outcome_fixture(
+    trace: &ExecutionTrace,
+    requested_block: &ProviderBlock,
+    topology_block: &ProviderBlock,
+    record_block: &ProviderBlock,
+    boundary_seed: Uuid,
+) -> ExecutionOutcome {
+    ExecutionOutcome {
+        cache_key: ExecutionCacheKey {
+            request_key: trace.request_key.clone(),
+            requested_chain_positions: json!([requested_chain_position(requested_block)]),
+            manifest_versions: json!([{
+                "source_family": "ens_execution",
+                "manifest_version": 1
+            }]),
+            topology_version_boundary: version_boundary_fixture(
+                "ens:reorg.eth",
+                boundary_seed,
+                Some(9_101),
+                Some("ResolverChanged"),
+                topology_block,
+            ),
+            record_version_boundary: version_boundary_fixture(
+                "ens:reorg.eth",
+                Uuid::from_u128(boundary_seed.as_u128() + 1),
+                Some(9_102),
+                Some("RecordChanged"),
+                record_block,
+            ),
+        },
+        execution_trace_id: trace.execution_trace_id,
+        request_type: trace.request_type.clone(),
+        namespace: trace.namespace.clone(),
+        outcome_payload: Some(json!({
+            "status": "success",
+            "request_key": trace.request_key
+        })),
+        failure_payload: None,
+        finished_at: trace
+            .finished_at
+            .expect("execution trace fixture must be finished"),
+    }
+}
+
+fn requested_chain_position(block: &ProviderBlock) -> serde_json::Value {
+    json!({
+        "chain_id": "ethereum-mainnet",
+        "block_number": block.block_number,
+        "block_hash": block.block_hash
+    })
+}
+
+fn version_boundary_fixture(
+    logical_name_id: &str,
+    resource_id: Uuid,
+    normalized_event_id: Option<i64>,
+    event_kind: Option<&str>,
+    block: &ProviderBlock,
+) -> serde_json::Value {
+    json!({
+        "logical_name_id": logical_name_id,
+        "resource_id": resource_id.to_string(),
+        "normalized_event_id": normalized_event_id,
+        "event_kind": event_kind,
+        "chain_position": {
+            "chain_id": "ethereum-mainnet",
+            "block_number": block.block_number,
+            "block_hash": block.block_hash,
+            "timestamp": "2024-06-07T00:00:00Z"
+        }
+    })
+}
+
+fn test_execution_timestamp(block: &ProviderBlock) -> OffsetDateTime {
+    OffsetDateTime::from_unix_timestamp(block.block_timestamp_unix_secs)
+        .expect("test block timestamp must be valid")
 }

@@ -44,6 +44,7 @@ pub use execution::{
     ExecutionOutcome, ExecutionOutcomeInvalidationSummary, ExecutionTrace, ExecutionTraceStep,
     invalidate_execution_outcomes_for_manifest_version,
     invalidate_execution_outcomes_for_manifest_version_and_request_key,
+    invalidate_execution_outcomes_for_orphaned_blocks,
     invalidate_execution_outcomes_for_record_boundary,
     invalidate_execution_outcomes_for_record_boundary_and_request_key,
     invalidate_execution_outcomes_for_topology_boundary,

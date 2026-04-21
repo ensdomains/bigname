@@ -418,7 +418,7 @@ Harden the system around historical correctness.
 - canonical invalidation
 - deterministic replay tooling
 - historical backfill tooling
-- execution-cache invalidation on reorg
+- `phase9-reorg-execution-cache-invalidation`: reorg repair invalidates `execution_cache_outcomes` for verified resolution and verified primary-name outcomes that depend on orphaned block identities; execution traces and execution steps remain durable audit artifacts; rows without explicit block-hash-bearing dependencies fail closed unless they are explicitly out of scope; this is a reorg/replay foundation and does not promote ENSv2 exact-name support or any manifest capability
 - dispute and inspection tooling
 - backfill jobs for:
   - ENSv1
@@ -432,6 +432,7 @@ Harden the system around historical correctness.
 - a simulated reorg rebuilds correct current answers
 - historical backfill reuses the same adapter and projection path as live ingestion
 - replay determinism holds from raw facts and from normalized events
+- execution cache invalidation makes orphaned-block-dependent `execution_cache_outcomes` ineligible for reuse without deleting execution traces or execution steps
 
 ---
 

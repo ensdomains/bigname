@@ -12,7 +12,9 @@ use sqlx::{
 };
 
 use super::*;
-use crate::default_database_url;
+use crate::{
+    CanonicalityState, ChainLineageBlock, default_database_url, upsert_chain_lineage_blocks,
+};
 
 static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -53,7 +55,7 @@ impl TestDatabase {
             .with_context(|| format!("failed to create test database {database_name}"))?;
 
         let pool = PgPoolOptions::new()
-            .max_connections(5)
+            .max_connections(2)
             .connect_with(base_options.database(&database_name))
             .await
             .context("failed to connect execution-trace test pool")?;
@@ -90,6 +92,26 @@ impl TestDatabase {
 
 fn timestamp(seconds: i64) -> OffsetDateTime {
     OffsetDateTime::from_unix_timestamp(seconds).expect("test timestamp must be valid")
+}
+
+fn lineage_block(
+    chain_id: &str,
+    block_hash: &str,
+    block_number: i64,
+    canonicality_state: CanonicalityState,
+) -> ChainLineageBlock {
+    ChainLineageBlock {
+        chain_id: chain_id.to_owned(),
+        block_hash: block_hash.to_owned(),
+        parent_hash: None,
+        block_number,
+        block_timestamp: timestamp(1_717_180_000 + block_number.rem_euclid(1_000)),
+        logs_bloom: None,
+        transactions_root: Some(format!("0xtx-{block_hash}")),
+        receipts_root: Some(format!("0xrc-{block_hash}")),
+        state_root: Some(format!("0xst-{block_hash}")),
+        canonicality_state,
+    }
 }
 
 fn execution_trace() -> ExecutionTrace {
@@ -1458,6 +1480,373 @@ async fn invalidates_verified_primary_execution_outcomes_for_exact_record_and_re
     assert_eq!(
         load_execution_outcome(database.pool(), &resolution_outcome.cache_key).await?,
         Some(resolution_outcome)
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn invalidates_verified_execution_outcomes_for_orphaned_block_dependencies() -> Result<()> {
+    let database = TestDatabase::new().await?;
+
+    upsert_chain_lineage_blocks(
+        database.pool(),
+        &[
+            lineage_block(
+                "ethereum-mainnet",
+                "0xrequested-orphan",
+                21_600_001,
+                CanonicalityState::Orphaned,
+            ),
+            lineage_block(
+                "ethereum-mainnet",
+                "0xtopology-orphan",
+                21_600_002,
+                CanonicalityState::Orphaned,
+            ),
+            lineage_block(
+                "ethereum-mainnet",
+                "0xrecord-orphan",
+                21_600_003,
+                CanonicalityState::Orphaned,
+            ),
+            lineage_block(
+                "ethereum-mainnet",
+                "0xcanonical-keep",
+                21_600_004,
+                CanonicalityState::Canonical,
+            ),
+        ],
+    )
+    .await?;
+
+    let requested_trace = execution_trace_variant(
+        Uuid::from_u128(0x0e7ec7ace00000000000000000000022),
+        "ens:requested.eth:addr:60",
+        1_717_172_500,
+    );
+    let mut requested_outcome = execution_outcome_variant(
+        &requested_trace,
+        json!([{
+            "source_family": "ens_execution",
+            "manifest_version": 9
+        }]),
+        version_boundary(
+            "ens:requested.eth",
+            Uuid::from_u128(0x0e7ec7ace0000000000000000000acd1),
+            Some(1_810),
+            Some("ResolverChanged"),
+            21_600_010,
+            "0xrequested-topology-keep",
+            "2024-06-07T00:00:27Z",
+        ),
+        version_boundary(
+            "ens:requested.eth",
+            Uuid::from_u128(0x0e7ec7ace0000000000000000000acd2),
+            Some(1_820),
+            Some("RecordsChanged"),
+            21_600_011,
+            "0xrequested-record-keep",
+            "2024-06-07T00:00:28Z",
+        ),
+    );
+    requested_outcome.cache_key.requested_chain_positions = json!([{
+        "chain_id": "ethereum-mainnet",
+        "block_number": 21_600_001,
+        "block_hash": "0xrequested-orphan"
+    }]);
+    insert_trace_and_outcome(&database, &requested_trace, &requested_outcome).await?;
+
+    let topology_trace = execution_trace_variant(
+        Uuid::from_u128(0x0e7ec7ace00000000000000000000023),
+        "ens:topology.eth:text",
+        1_717_172_501,
+    );
+    let topology_outcome = execution_outcome_variant(
+        &topology_trace,
+        json!([{
+            "source_family": "ens_execution",
+            "manifest_version": 9
+        }]),
+        version_boundary(
+            "ens:topology.eth",
+            Uuid::from_u128(0x0e7ec7ace0000000000000000000acd3),
+            Some(1_830),
+            Some("ResolverChanged"),
+            21_600_002,
+            "0xtopology-orphan",
+            "2024-06-07T00:00:29Z",
+        ),
+        version_boundary(
+            "ens:topology.eth",
+            Uuid::from_u128(0x0e7ec7ace0000000000000000000acd4),
+            Some(1_840),
+            Some("RecordsChanged"),
+            21_600_021,
+            "0xtopology-record-keep",
+            "2024-06-07T00:00:30Z",
+        ),
+    );
+    insert_trace_and_outcome(&database, &topology_trace, &topology_outcome).await?;
+
+    let record_request_key = verified_primary_request_key("0xAbCd1122", "60");
+    let mut record_trace = execution_trace_variant(
+        Uuid::from_u128(0x0e7ec7ace00000000000000000000024),
+        &record_request_key,
+        1_717_172_502,
+    );
+    record_trace.request_type = "verified_primary_name".to_owned();
+    let record_outcome = execution_outcome_variant(
+        &record_trace,
+        json!([{
+            "source_family": "ens_execution",
+            "manifest_version": 9
+        }]),
+        version_boundary(
+            "ens:record.eth",
+            Uuid::from_u128(0x0e7ec7ace0000000000000000000acd5),
+            Some(1_850),
+            Some("ResolverChanged"),
+            21_600_031,
+            "0xrecord-topology-keep",
+            "2024-06-07T00:00:31Z",
+        ),
+        version_boundary(
+            "ens:record.eth",
+            Uuid::from_u128(0x0e7ec7ace0000000000000000000acd6),
+            Some(1_860),
+            Some("RecordsChanged"),
+            21_600_003,
+            "0xrecord-orphan",
+            "2024-06-07T00:00:32Z",
+        ),
+    );
+    insert_trace_and_outcome(&database, &record_trace, &record_outcome).await?;
+
+    let keep_trace = execution_trace_variant(
+        Uuid::from_u128(0x0e7ec7ace00000000000000000000025),
+        "ens:keep.eth:addr:60",
+        1_717_172_503,
+    );
+    let keep_outcome = execution_outcome_variant(
+        &keep_trace,
+        json!([{
+            "source_family": "ens_execution",
+            "manifest_version": 9
+        }]),
+        version_boundary(
+            "ens:keep.eth",
+            Uuid::from_u128(0x0e7ec7ace0000000000000000000acd7),
+            Some(1_870),
+            Some("ResolverChanged"),
+            21_600_004,
+            "0xcanonical-keep",
+            "2024-06-07T00:00:33Z",
+        ),
+        version_boundary(
+            "ens:keep.eth",
+            Uuid::from_u128(0x0e7ec7ace0000000000000000000acd8),
+            Some(1_880),
+            Some("RecordsChanged"),
+            21_600_041,
+            "0xkeep-record",
+            "2024-06-07T00:00:34Z",
+        ),
+    );
+    insert_trace_and_outcome(&database, &keep_trace, &keep_outcome).await?;
+
+    let mut out_of_scope_trace = execution_trace_variant(
+        Uuid::from_u128(0x0e7ec7ace00000000000000000000026),
+        "ens:declared.eth:addr:60",
+        1_717_172_504,
+    );
+    out_of_scope_trace.request_type = "declared_resolution".to_owned();
+    let mut out_of_scope_outcome = execution_outcome_variant(
+        &out_of_scope_trace,
+        json!([{
+            "source_family": "ens_execution",
+            "manifest_version": 9
+        }]),
+        version_boundary(
+            "ens:declared.eth",
+            Uuid::from_u128(0x0e7ec7ace0000000000000000000acd9),
+            Some(1_890),
+            Some("ResolverChanged"),
+            21_600_051,
+            "0xdeclared-topology",
+            "2024-06-07T00:00:35Z",
+        ),
+        version_boundary(
+            "ens:declared.eth",
+            Uuid::from_u128(0x0e7ec7ace0000000000000000000acda),
+            Some(1_900),
+            Some("RecordsChanged"),
+            21_600_052,
+            "0xdeclared-record",
+            "2024-06-07T00:00:36Z",
+        ),
+    );
+    out_of_scope_outcome.cache_key.requested_chain_positions = json!([{
+        "chain_id": "ethereum-mainnet",
+        "block_number": 21_600_001,
+        "block_hash": "0xrequested-orphan"
+    }]);
+    insert_trace_and_outcome(&database, &out_of_scope_trace, &out_of_scope_outcome).await?;
+
+    let summary = invalidate_execution_outcomes_for_orphaned_blocks(database.pool()).await?;
+    assert_eq!(summary.deleted_outcome_count, 3);
+
+    assert_eq!(
+        load_execution_outcome(database.pool(), &requested_outcome.cache_key).await?,
+        None
+    );
+    assert_eq!(
+        load_execution_outcome(database.pool(), &topology_outcome.cache_key).await?,
+        None
+    );
+    assert_eq!(
+        load_execution_outcome(database.pool(), &record_outcome.cache_key).await?,
+        None
+    );
+    assert_eq!(
+        load_execution_outcome(database.pool(), &keep_outcome.cache_key).await?,
+        Some(keep_outcome)
+    );
+    assert_eq!(
+        load_execution_outcome(database.pool(), &out_of_scope_outcome.cache_key).await?,
+        Some(out_of_scope_outcome)
+    );
+    assert!(
+        load_execution_trace(database.pool(), requested_trace.execution_trace_id)
+            .await?
+            .is_some(),
+        "execution traces stay durable after reorg cache invalidation"
+    );
+
+    let trace_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM execution_traces")
+        .fetch_one(database.pool())
+        .await
+        .context("failed to count traces after reorg cache invalidation")?;
+    assert_eq!(trace_count, 5);
+    let step_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM execution_steps")
+        .fetch_one(database.pool())
+        .await
+        .context("failed to count steps after reorg cache invalidation")?;
+    assert_eq!(step_count, 10);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn reorg_invalidation_fails_closed_for_verified_outcome_without_block_hash_dependency()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    upsert_chain_lineage_blocks(
+        database.pool(),
+        &[lineage_block(
+            "ethereum-mainnet",
+            "0xmalformed-orphan",
+            21_700_001,
+            CanonicalityState::Orphaned,
+        )],
+    )
+    .await?;
+
+    let trace = execution_trace_variant(
+        Uuid::from_u128(0x0e7ec7ace00000000000000000000027),
+        "ens:malformed.eth:addr:60",
+        1_717_172_600,
+    );
+    upsert_execution_trace(database.pool(), &trace).await?;
+
+    let topology_boundary = version_boundary(
+        "ens:malformed.eth",
+        Uuid::from_u128(0x0e7ec7ace0000000000000000000acdb),
+        Some(1_910),
+        Some("ResolverChanged"),
+        21_700_010,
+        "0xmalformed-topology",
+        "2024-06-08T00:00:27Z",
+    );
+    let record_boundary = version_boundary(
+        "ens:malformed.eth",
+        Uuid::from_u128(0x0e7ec7ace0000000000000000000acdc),
+        Some(1_920),
+        Some("RecordsChanged"),
+        21_700_011,
+        "0xmalformed-record",
+        "2024-06-08T00:00:28Z",
+    );
+    sqlx::query(
+        r#"
+        INSERT INTO execution_cache_outcomes (
+            execution_cache_key,
+            request_key,
+            requested_chain_positions,
+            manifest_versions,
+            topology_version_boundary,
+            record_version_boundary,
+            execution_trace_id,
+            request_type,
+            namespace,
+            outcome_payload,
+            finished_at
+        )
+        VALUES (
+            $1,
+            $2,
+            $3::jsonb,
+            $4::jsonb,
+            $5::jsonb,
+            $6::jsonb,
+            $7,
+            $8,
+            $9,
+            $10::jsonb,
+            $11
+        )
+        "#,
+    )
+    .bind("malformed-cache-key")
+    .bind(&trace.request_key)
+    .bind(
+        json!([{
+            "chain_id": "ethereum-mainnet",
+            "block_number": 21_700_001
+        }])
+        .to_string(),
+    )
+    .bind(
+        json!([{
+            "source_family": "ens_execution",
+            "manifest_version": 10
+        }])
+        .to_string(),
+    )
+    .bind(topology_boundary.to_string())
+    .bind(record_boundary.to_string())
+    .bind(trace.execution_trace_id)
+    .bind("verified_resolution")
+    .bind("ens")
+    .bind(json!({"status": "success"}).to_string())
+    .bind(
+        trace
+            .finished_at
+            .expect("malformed dependency trace must finish"),
+    )
+    .execute(database.pool())
+    .await
+    .context("failed to insert malformed execution cache outcome")?;
+
+    let error = invalidate_execution_outcomes_for_orphaned_blocks(database.pool())
+        .await
+        .expect_err("reorg invalidation must fail closed on malformed verified dependencies");
+    let rendered = format!("{error:#}");
+    assert!(
+        rendered.contains(
+            "requested_chain_positions[0] must include non-empty string field block_hash"
+        ),
+        "unexpected error: {error:#}"
     );
 
     database.cleanup().await

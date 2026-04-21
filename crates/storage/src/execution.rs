@@ -351,6 +351,49 @@ pub async fn invalidate_execution_outcomes_for_record_boundary_and_request_key(
     .await
 }
 
+/// Delete verified resolution and verified primary-name cache outcomes whose
+/// cache dependencies reference a block identity marked `orphaned`.
+pub async fn invalidate_execution_outcomes_for_orphaned_blocks(
+    pool: &PgPool,
+) -> Result<ExecutionOutcomeInvalidationSummary> {
+    let mut transaction = pool
+        .begin()
+        .await
+        .context("failed to open transaction for execution reorg invalidation")?;
+
+    let orphaned_blocks = load_orphaned_block_dependencies_internal(&mut *transaction).await?;
+    let outcomes =
+        load_execution_outcomes_for_reorg_invalidation_scope_internal(&mut *transaction).await?;
+
+    let mut cache_keys = Vec::new();
+    for outcome in outcomes {
+        let dependencies = execution_outcome_block_dependencies(&outcome).with_context(|| {
+            format!(
+                "execution outcome for request_type {} namespace {} request_key {} cannot be associated with explicit block-hash-bearing dependencies",
+                outcome.request_type, outcome.namespace, outcome.cache_key.request_key
+            )
+        })?;
+        if dependencies
+            .iter()
+            .any(|dependency| orphaned_blocks.contains(dependency))
+        {
+            cache_keys.push(execution_cache_key_storage_key(&outcome.cache_key)?);
+        }
+    }
+
+    let deleted_outcome_count =
+        delete_execution_outcomes_by_keys(&mut transaction, &cache_keys).await?;
+
+    transaction
+        .commit()
+        .await
+        .context("failed to commit execution reorg invalidation")?;
+
+    Ok(ExecutionOutcomeInvalidationSummary {
+        deleted_outcome_count,
+    })
+}
+
 async fn insert_execution_trace_row(
     executor: &mut sqlx::Transaction<'_, Postgres>,
     trace: &ExecutionTrace,
@@ -729,6 +772,69 @@ where
     })?;
 
     rows.into_iter().map(decode_execution_outcome_row).collect()
+}
+
+async fn load_execution_outcomes_for_reorg_invalidation_scope_internal<'e, E>(
+    executor: E,
+) -> Result<Vec<ExecutionOutcome>>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            execution_cache_key,
+            request_key,
+            requested_chain_positions,
+            manifest_versions,
+            topology_version_boundary,
+            record_version_boundary,
+            execution_trace_id,
+            request_type,
+            namespace,
+            outcome_payload,
+            failure_payload,
+            finished_at
+        FROM execution_cache_outcomes
+        WHERE request_type IN ('verified_resolution', 'verified_primary_name')
+        ORDER BY execution_cache_key
+        "#,
+    )
+    .fetch_all(executor)
+    .await
+    .context("failed to load execution outcomes for reorg invalidation scope")?;
+
+    rows.into_iter().map(decode_execution_outcome_row).collect()
+}
+
+async fn load_orphaned_block_dependencies_internal<'e, E>(
+    executor: E,
+) -> Result<BTreeSet<(String, String)>>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    let rows = sqlx::query(
+        r#"
+        SELECT chain_id, block_hash
+        FROM chain_lineage
+        WHERE canonicality_state = 'orphaned'::canonicality_state
+        ORDER BY chain_id, block_hash
+        "#,
+    )
+    .fetch_all(executor)
+    .await
+    .context("failed to load orphaned block identities for execution reorg invalidation")?;
+
+    rows.into_iter()
+        .map(|row| {
+            Ok((
+                row.try_get("chain_id")
+                    .context("orphaned lineage row missing chain_id")?,
+                row.try_get("block_hash")
+                    .context("orphaned lineage row missing block_hash")?,
+            ))
+        })
+        .collect()
 }
 
 async fn delete_execution_outcomes_by_keys(
@@ -1254,6 +1360,47 @@ fn version_boundary_storage_key(
     let mut key = String::new();
     append_version_boundary_key_parts(&mut key, &boundary);
     Ok(key)
+}
+
+fn execution_outcome_block_dependencies(
+    outcome: &ExecutionOutcome,
+) -> Result<BTreeSet<(String, String)>> {
+    let mut dependencies = BTreeSet::new();
+    for position in decode_requested_chain_positions(
+        &outcome.cache_key.requested_chain_positions,
+        &outcome.cache_key.request_key,
+    )? {
+        dependencies.insert((position.chain_id, position.block_hash));
+    }
+
+    let topology_boundary = decode_version_boundary(
+        &outcome.cache_key.topology_version_boundary,
+        "topology_version_boundary",
+        &outcome.cache_key.request_key,
+    )?;
+    dependencies.insert((
+        topology_boundary.chain_position.chain_id,
+        topology_boundary.chain_position.block_hash,
+    ));
+
+    let record_boundary = decode_version_boundary(
+        &outcome.cache_key.record_version_boundary,
+        "record_version_boundary",
+        &outcome.cache_key.request_key,
+    )?;
+    dependencies.insert((
+        record_boundary.chain_position.chain_id,
+        record_boundary.chain_position.block_hash,
+    ));
+
+    if dependencies.is_empty() {
+        bail!(
+            "execution outcome for request_key {} has no block-hash-bearing dependencies",
+            outcome.cache_key.request_key
+        );
+    }
+
+    Ok(dependencies)
 }
 
 fn decode_version_boundary(

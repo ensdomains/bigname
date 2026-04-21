@@ -11,8 +11,10 @@ use std::{
 use anyhow::Context;
 use bigname_manifests::load_discovery_admission_state;
 use bigname_storage::{
-    NameSurface, Resource, SurfaceBinding, SurfaceBindingKind, TokenLineage, default_database_url,
-    upsert_name_surfaces, upsert_resources, upsert_surface_bindings, upsert_token_lineages,
+    ExecutionCacheKey, ExecutionOutcome, ExecutionTrace, ExecutionTraceStep, NameSurface, Resource,
+    SurfaceBinding, SurfaceBindingKind, TokenLineage, default_database_url, load_execution_outcome,
+    load_execution_trace, upsert_execution_outcome, upsert_execution_trace, upsert_name_surfaces,
+    upsert_resources, upsert_surface_bindings, upsert_token_lineages,
 };
 use serde_json::{Value, json};
 use sqlx::{
@@ -648,6 +650,102 @@ impl TestDatabase {
         .execute(&pool)
         .await
         .context("failed to create normalized_events table for indexer tests")?;
+        sqlx::query(
+            r#"
+                CREATE TABLE execution_traces (
+                    execution_trace_id UUID PRIMARY KEY,
+                    request_type TEXT NOT NULL,
+                    request_key TEXT NOT NULL,
+                    namespace TEXT NOT NULL,
+                    chain_context JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    manifest_context JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    contracts_called JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    gateway_digests JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    final_payload JSONB,
+                    failure_payload JSONB,
+                    request_metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    finished_at TIMESTAMPTZ NOT NULL,
+                    inserted_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    CHECK (jsonb_typeof(chain_context) = 'object' AND chain_context <> '{}'::jsonb),
+                    CHECK (
+                        jsonb_typeof(manifest_context) = 'object'
+                        AND manifest_context <> '{}'::jsonb
+                    ),
+                    CHECK (jsonb_typeof(contracts_called) = 'array'),
+                    CHECK (jsonb_typeof(gateway_digests) = 'array'),
+                    CHECK (jsonb_typeof(request_metadata) = 'object'),
+                    CHECK (final_payload IS NOT NULL OR failure_payload IS NOT NULL)
+                )
+                "#,
+        )
+        .execute(&pool)
+        .await
+        .context("failed to create execution_traces table for indexer tests")?;
+        sqlx::query(
+            r#"
+                CREATE TABLE execution_steps (
+                    execution_trace_id UUID NOT NULL REFERENCES execution_traces (execution_trace_id) ON DELETE CASCADE,
+                    step_index BIGINT NOT NULL CHECK (step_index >= 0),
+                    step_kind TEXT NOT NULL,
+                    input_digest TEXT,
+                    output_digest TEXT,
+                    latency_ms BIGINT CHECK (latency_ms IS NULL OR latency_ms >= 0),
+                    canonicality_dependency JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    step_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    inserted_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    PRIMARY KEY (execution_trace_id, step_index),
+                    CHECK (
+                        jsonb_typeof(canonicality_dependency) = 'object'
+                        AND canonicality_dependency <> '{}'::jsonb
+                    ),
+                    CHECK (jsonb_typeof(step_payload) = 'object')
+                )
+                "#,
+        )
+        .execute(&pool)
+        .await
+        .context("failed to create execution_steps table for indexer tests")?;
+        sqlx::query(
+            r#"
+                CREATE TABLE execution_cache_outcomes (
+                    execution_cache_key TEXT PRIMARY KEY,
+                    request_key TEXT NOT NULL,
+                    requested_chain_positions JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    manifest_versions JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    topology_version_boundary JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    record_version_boundary JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    execution_trace_id UUID NOT NULL REFERENCES execution_traces (execution_trace_id) ON DELETE CASCADE,
+                    request_type TEXT NOT NULL,
+                    namespace TEXT NOT NULL,
+                    outcome_payload JSONB,
+                    failure_payload JSONB,
+                    finished_at TIMESTAMPTZ NOT NULL,
+                    inserted_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    CHECK (request_key <> ''),
+                    CHECK (
+                        jsonb_typeof(requested_chain_positions) = 'array'
+                        AND requested_chain_positions <> '[]'::jsonb
+                    ),
+                    CHECK (
+                        jsonb_typeof(manifest_versions) = 'array'
+                        AND manifest_versions <> '[]'::jsonb
+                    ),
+                    CHECK (
+                        jsonb_typeof(topology_version_boundary) = 'object'
+                        AND topology_version_boundary <> '{}'::jsonb
+                    ),
+                    CHECK (
+                        jsonb_typeof(record_version_boundary) = 'object'
+                        AND record_version_boundary <> '{}'::jsonb
+                    ),
+                    CHECK (outcome_payload IS NOT NULL OR failure_payload IS NOT NULL)
+                )
+                "#,
+        )
+        .execute(&pool)
+        .await
+        .context("failed to create execution_cache_outcomes table for indexer tests")?;
 
         Ok(Self {
             admin_pool,
@@ -1585,11 +1683,7 @@ fn encode_registrar_name_registered_log_data(label: &str, expiry_unix: i64) -> S
     hex_string(&data)
 }
 
-fn encode_ens_v2_label_registered_log_data(
-    label: &str,
-    owner: &str,
-    expiry_unix: i64,
-) -> String {
+fn encode_ens_v2_label_registered_log_data(label: &str, owner: &str, expiry_unix: i64) -> String {
     let label_bytes = label.as_bytes();
     let mut data = Vec::new();
 
