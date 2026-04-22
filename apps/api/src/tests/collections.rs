@@ -438,6 +438,331 @@ async fn resolver_overview_dynamic_resolver_pending_profile_returns_explicit_uns
     Ok(())
 }
 
+fn basenames_dynamic_resolver_supported_current_row(
+    chain_id: &str,
+    resolver_address: &str,
+    logical_name_id: &str,
+    normalized_name: &str,
+    resource_id: Uuid,
+    surface_binding_id: Uuid,
+) -> ResolverCurrentRow {
+    ResolverCurrentRow {
+        chain_id: chain_id.to_owned(),
+        resolver_address: resolver_address.to_owned(),
+        declared_summary: json!({
+            "bindings": {
+                "status": "supported",
+                "count": 1,
+                "items": [{
+                    "logical_name_id": logical_name_id,
+                    "canonical_display_name": normalized_name,
+                    "normalized_name": normalized_name,
+                    "namehash": format!("namehash:{normalized_name}"),
+                    "resource_id": resource_id.to_string(),
+                    "surface_binding_id": surface_binding_id.to_string(),
+                    "binding_kind": "declared_registry_path",
+                }],
+            },
+            "aliases": {
+                "status": "supported",
+                "count": 0,
+                "items": [],
+            },
+            "permissions": {
+                "status": "supported",
+                "count": 0,
+                "items": [],
+            },
+            "role_holders": {
+                "status": "supported",
+                "count": 0,
+                "items": [],
+            },
+            "event_summary": {
+                "status": "supported",
+                "count": 1,
+                "by_kind": {
+                    "ResolverChanged": 1,
+                },
+            },
+        }),
+        provenance: json!({
+            "normalized_event_ids": [1200],
+            "raw_fact_refs": [{
+                "kind": "raw_log",
+                "chain_id": chain_id,
+                "block_number": 21_000_060,
+            }],
+            "manifest_versions": [{
+                "manifest_version": 6,
+                "source_family": "basenames_base_resolver",
+                "chain": chain_id,
+                "deployment_epoch": "basenames_v1",
+            }],
+            "execution_trace_id": null,
+            "derivation_kind": "resolver_current_rebuild",
+        }),
+        coverage: json!({
+            "status": "full",
+            "exhaustiveness": "authoritative",
+            "source_classes_considered": [
+                "basenames_base_registry",
+                "basenames_base_resolver",
+            ],
+            "unsupported_reason": null,
+            "enumeration_basis": "resolver_target",
+        }),
+        chain_positions: json!({
+            "base": {
+                "chain_id": chain_id,
+                "block_number": 21_000_060,
+                "block_hash": "0xbasenamesdynamicresolver",
+                "timestamp": "2026-04-17T00:01:00Z",
+            }
+        }),
+        canonicality_summary: json!({
+            "status": "finalized",
+            "chains": {
+                chain_id: "finalized",
+            }
+        }),
+        manifest_version: 6,
+        last_recomputed_at: timestamp(1_748_800_260),
+    }
+}
+
+fn basenames_dynamic_resolver_pending_current_row(
+    chain_id: &str,
+    resolver_address: &str,
+) -> ResolverCurrentRow {
+    ResolverCurrentRow {
+        chain_id: chain_id.to_owned(),
+        resolver_address: resolver_address.to_owned(),
+        declared_summary: json!({
+            "bindings": {
+                "status": "unsupported",
+                "unsupported_reason": "resolver_family_pending",
+            },
+            "aliases": {
+                "status": "unsupported",
+                "unsupported_reason": "resolver_family_pending",
+            },
+            "permissions": {
+                "status": "unsupported",
+                "unsupported_reason": "resolver_family_pending",
+            },
+            "role_holders": {
+                "status": "unsupported",
+                "unsupported_reason": "resolver_family_pending",
+            },
+            "event_summary": {
+                "status": "unsupported",
+                "unsupported_reason": "resolver_family_pending",
+            },
+        }),
+        provenance: json!({
+            "normalized_event_ids": [1202],
+            "raw_fact_refs": [{
+                "kind": "raw_log",
+                "chain_id": chain_id,
+                "block_number": 21_000_061,
+            }],
+            "manifest_versions": [{
+                "manifest_version": 6,
+                "source_family": "basenames_base_registry",
+                "chain": chain_id,
+                "deployment_epoch": "basenames_v1",
+            }],
+            "execution_trace_id": null,
+            "derivation_kind": "resolver_current_rebuild",
+        }),
+        coverage: json!({
+            "status": "partial",
+            "exhaustiveness": "best_effort",
+            "source_classes_considered": ["basenames_base_registry"],
+            "unsupported_reason": "resolver_family_pending",
+            "enumeration_basis": "resolver_target",
+        }),
+        chain_positions: json!({
+            "base": {
+                "chain_id": chain_id,
+                "block_number": 21_000_061,
+                "block_hash": "0xbasenamesdynamicresolverpending",
+                "timestamp": "2026-04-17T00:01:01Z",
+            }
+        }),
+        canonicality_summary: json!({
+            "status": "finalized",
+            "chains": {
+                chain_id: "finalized",
+            }
+        }),
+        manifest_version: 6,
+        last_recomputed_at: timestamp(1_748_800_261),
+    }
+}
+
+#[tokio::test]
+async fn resolver_overview_dynamic_resolver_l2resolver_profile_reads_supported_basenames_sections()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let chain_id = "base-mainnet";
+    let dynamic_resolver_address = "0x0000000000000000000000000000000000000b60";
+    let logical_name_id = "basenames:supported.base.eth";
+    let normalized_name = "supported.base.eth";
+    let resource_id = Uuid::from_u128(0x9e60);
+    let surface_binding_id = Uuid::from_u128(0x9e61);
+
+    bigname_storage::upsert_resolver_current_rows(
+        &database.pool,
+        &[basenames_dynamic_resolver_supported_current_row(
+            chain_id,
+            dynamic_resolver_address,
+            logical_name_id,
+            normalized_name,
+            resource_id,
+            surface_binding_id,
+        )],
+    )
+    .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/resolvers/{chain_id}/{dynamic_resolver_address}"))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("supported Basenames dynamic resolver overview request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let payload: ResolverResponse = read_json(response).await?;
+    assert_eq!(
+        payload.data,
+        json!({
+            "chain_id": chain_id,
+            "resolver_address": dynamic_resolver_address,
+        })
+    );
+    assert_eq!(
+        payload.declared_state["bindings"]["items"][0],
+        json!({
+            "logical_name_id": logical_name_id,
+            "canonical_display_name": normalized_name,
+            "normalized_name": normalized_name,
+            "namehash": "namehash:supported.base.eth",
+            "resource_id": resource_id.to_string(),
+            "surface_binding_id": surface_binding_id.to_string(),
+            "binding_kind": "declared_registry_path",
+        })
+    );
+    for section_name in [
+        "bindings",
+        "aliases",
+        "permissions",
+        "role_holders",
+        "event_summary",
+    ] {
+        assert_eq!(
+            payload.declared_state[section_name]["status"],
+            json!("supported")
+        );
+        assert!(payload.declared_state[section_name]
+            .get("unsupported_reason")
+            .is_none());
+    }
+    assert_eq!(payload.declared_state["bindings"]["count"], json!(1));
+    assert_eq!(payload.declared_state["aliases"]["count"], json!(0));
+    assert_eq!(payload.declared_state["permissions"]["count"], json!(0));
+    assert_eq!(payload.declared_state["role_holders"]["count"], json!(0));
+    assert_eq!(
+        payload.declared_state["event_summary"]["by_kind"],
+        json!({
+            "ResolverChanged": 1,
+        })
+    );
+    assert_eq!(
+        payload.coverage["unsupported_reason"],
+        Value::Null
+    );
+    assert_eq!(payload.verified_state, None);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn resolver_overview_dynamic_resolver_pending_and_unsupported_basenames_profiles_stay_explicit()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let chain_id = "base-mainnet";
+    let cases = [
+        ("pending", "0x0000000000000000000000000000000000000b61"),
+        (
+            "unsupported",
+            "0x0000000000000000000000000000000000000b62",
+        ),
+    ];
+
+    let rows = cases
+        .iter()
+        .map(|(_, resolver_address)| {
+            basenames_dynamic_resolver_pending_current_row(chain_id, resolver_address)
+        })
+        .collect::<Vec<_>>();
+    bigname_storage::upsert_resolver_current_rows(&database.pool, &rows).await?;
+
+    for (case_name, dynamic_resolver_address) in cases {
+        let response = app_router(database.app_state())
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/resolvers/{chain_id}/{dynamic_resolver_address}"))
+                    .body(Body::empty())
+                    .expect("request must build"),
+            )
+            .await
+            .with_context(|| {
+                format!("Basenames {case_name} dynamic resolver overview request failed")
+            })?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let payload: ResolverResponse = read_json(response).await?;
+        assert_eq!(
+            payload.data,
+            json!({
+                "chain_id": chain_id,
+                "resolver_address": dynamic_resolver_address,
+            })
+        );
+        for section_name in [
+            "bindings",
+            "aliases",
+            "permissions",
+            "role_holders",
+            "event_summary",
+        ] {
+            assert_eq!(
+                payload.declared_state.get(section_name),
+                Some(&json!({
+                    "status": "unsupported",
+                    "unsupported_reason": "resolver_family_pending",
+                }))
+            );
+        }
+        assert_eq!(
+            payload.coverage["unsupported_reason"],
+            json!("resolver_family_pending")
+        );
+        assert_eq!(payload.verified_state, None);
+    }
+
+    database.cleanup().await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn get_resolver_overview_summarizes_basenames_permissions_current_projection() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;

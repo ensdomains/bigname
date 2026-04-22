@@ -1218,8 +1218,9 @@ mod tests {
 
     use anyhow::Result;
     use bigname_storage::{
-        NameSurface, NormalizedEvent, RawBlock, Resource, SurfaceBinding, default_database_url,
-        load_resolver_current, upsert_name_surfaces, upsert_normalized_events, upsert_raw_blocks,
+        NameSurface, NormalizedEvent, RawBlock, RawCodeHash, Resource, SurfaceBinding,
+        default_database_url, load_resolver_current, upsert_name_surfaces,
+        upsert_normalized_events, upsert_raw_blocks, upsert_raw_code_hashes,
         upsert_resolver_current_rows, upsert_resources, upsert_surface_bindings,
     };
 
@@ -1867,6 +1868,192 @@ mod tests {
         database.cleanup().await
     }
 
+    #[tokio::test]
+    async fn resolver_current_basenames_dynamic_resolver_gates_supported_pending_and_unsupported_targets()
+    -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let supported_resource_id = Uuid::from_u128(0x8600);
+        let pending_resource_id = Uuid::from_u128(0x8601);
+        let unsupported_resource_id = Uuid::from_u128(0x8602);
+        let supported_surface_binding_id = Uuid::from_u128(0x8610);
+        let pending_surface_binding_id = Uuid::from_u128(0x8611);
+        let unsupported_surface_binding_id = Uuid::from_u128(0x8612);
+        let seed_resolver_contract_instance_id = Uuid::from_u128(0x8620);
+        let supported_resolver_contract_instance_id = Uuid::from_u128(0x8621);
+        let pending_resolver_contract_instance_id = Uuid::from_u128(0x8622);
+        let unsupported_resolver_contract_instance_id = Uuid::from_u128(0x8623);
+        let seed_resolver_address = "0x0000000000000000000000000000000000008620";
+        let supported_resolver_address = "0x0000000000000000000000000000000000008621";
+        let pending_resolver_address = "0x0000000000000000000000000000000000008622";
+        let unsupported_resolver_address = "0x0000000000000000000000000000000000008623";
+
+        insert_basenames_dynamic_resolver_profile_fixture(
+            database.pool(),
+            seed_resolver_contract_instance_id,
+            seed_resolver_address,
+            &[
+                (
+                    supported_resolver_contract_instance_id,
+                    supported_resolver_address,
+                ),
+                (
+                    pending_resolver_contract_instance_id,
+                    pending_resolver_address,
+                ),
+                (
+                    unsupported_resolver_contract_instance_id,
+                    unsupported_resolver_address,
+                ),
+            ],
+            &[
+                (supported_resolver_address, Some(BASENAMES_L2_CODE_HASH)),
+                (pending_resolver_address, None),
+                (unsupported_resolver_address, Some(UNSUPPORTED_CODE_HASH)),
+            ],
+        )
+        .await?;
+        seed_basenames_identity(
+            database.pool(),
+            "basenames:supported.base.eth",
+            supported_resource_id,
+            supported_surface_binding_id,
+            "supported.base.eth",
+            SurfaceBindingKind::DeclaredRegistryPath,
+        )
+        .await?;
+        seed_basenames_identity(
+            database.pool(),
+            "basenames:pending.base.eth",
+            pending_resource_id,
+            pending_surface_binding_id,
+            "pending.base.eth",
+            SurfaceBindingKind::DeclaredRegistryPath,
+        )
+        .await?;
+        seed_basenames_identity(
+            database.pool(),
+            "basenames:unsupported.base.eth",
+            unsupported_resource_id,
+            unsupported_surface_binding_id,
+            "unsupported.base.eth",
+            SurfaceBindingKind::DeclaredRegistryPath,
+        )
+        .await?;
+        seed_raw_blocks(
+            database.pool(),
+            &[raw_block(
+                "base-mainnet",
+                "0xbase-res0500",
+                500,
+                1_776_200_500,
+            )],
+        )
+        .await?;
+        seed_resolver_events(
+            database.pool(),
+            &[
+                basenames_resolver_event(
+                    "base-supported-resolver",
+                    "basenames:supported.base.eth",
+                    supported_resource_id,
+                    supported_resolver_address,
+                    500,
+                    0,
+                ),
+                basenames_resolver_event(
+                    "base-pending-resolver",
+                    "basenames:pending.base.eth",
+                    pending_resource_id,
+                    pending_resolver_address,
+                    500,
+                    1,
+                ),
+                basenames_resolver_event(
+                    "base-unsupported-resolver",
+                    "basenames:unsupported.base.eth",
+                    unsupported_resource_id,
+                    unsupported_resolver_address,
+                    500,
+                    2,
+                ),
+            ],
+        )
+        .await?;
+
+        for resolver_address in [
+            supported_resolver_address,
+            pending_resolver_address,
+            unsupported_resolver_address,
+        ] {
+            let summary = rebuild_resolver_current(
+                database.pool(),
+                Some("base-mainnet"),
+                Some(resolver_address),
+            )
+            .await?;
+            assert_eq!(summary.requested_resolver_count, 1);
+            assert_eq!(summary.upserted_row_count, 1);
+        }
+
+        let supported_row =
+            load_resolver_current(database.pool(), "base-mainnet", supported_resolver_address)
+                .await?
+                .context("supported Basenames resolver_current row should exist")?;
+        assert_eq!(
+            supported_row.declared_summary["bindings"]["status"],
+            json!("supported")
+        );
+        assert_eq!(
+            supported_row.declared_summary["bindings"]["count"],
+            json!(1)
+        );
+        assert_eq!(
+            supported_row.declared_summary["bindings"]["items"][0]["logical_name_id"],
+            json!("basenames:supported.base.eth")
+        );
+        assert_eq!(supported_row.coverage["unsupported_reason"], Value::Null);
+
+        for (resolver_address, logical_name_id) in [
+            (pending_resolver_address, "basenames:pending.base.eth"),
+            (
+                unsupported_resolver_address,
+                "basenames:unsupported.base.eth",
+            ),
+        ] {
+            let row = load_resolver_current(database.pool(), "base-mainnet", resolver_address)
+                .await?
+                .with_context(|| format!("{logical_name_id} resolver_current row should exist"))?;
+            for section in [
+                "bindings",
+                "aliases",
+                "permissions",
+                "role_holders",
+                "event_summary",
+            ] {
+                assert_eq!(
+                    row.declared_summary[section]["status"],
+                    json!("unsupported")
+                );
+                assert_eq!(
+                    row.declared_summary[section]["unsupported_reason"],
+                    json!(RESOLVER_FAMILY_PENDING_REASON)
+                );
+            }
+            assert_eq!(
+                row.coverage["unsupported_reason"],
+                json!(RESOLVER_FAMILY_PENDING_REASON)
+            );
+            assert_eq!(
+                row.provenance["normalized_event_ids"]
+                    .as_array()
+                    .map(Vec::len),
+                Some(1)
+            );
+        }
+
+        database.cleanup().await
+    }
+
     async fn seed_identity(
         pool: &PgPool,
         logical_name_id: &str,
@@ -1940,6 +2127,212 @@ mod tests {
         Ok(())
     }
 
+    const BASENAMES_L2_CODE_HASH: &str =
+        "0x1111111111111111111111111111111111111111111111111111111111111111";
+    const UNSUPPORTED_CODE_HASH: &str =
+        "0x2222222222222222222222222222222222222222222222222222222222222222";
+
+    async fn insert_basenames_dynamic_resolver_profile_fixture(
+        pool: &PgPool,
+        seed_contract_instance_id: Uuid,
+        seed_address: &str,
+        dynamic_resolvers: &[(Uuid, &str)],
+        code_hashes: &[(&str, Option<&str>)],
+    ) -> Result<()> {
+        let resolver_manifest_id = insert_basenames_manifest_version(
+            pool,
+            SOURCE_FAMILY_BASENAMES_BASE_RESOLVER,
+            "manifests/basenames/basenames_base_resolver/v1.toml",
+        )
+        .await?;
+        let registry_manifest_id = insert_basenames_manifest_version(
+            pool,
+            SOURCE_FAMILY_BASENAMES_BASE_REGISTRY,
+            "manifests/basenames/basenames_base_registry/v1.toml",
+        )
+        .await?;
+        insert_basenames_contract_instance(
+            pool,
+            seed_contract_instance_id,
+            seed_address,
+            resolver_manifest_id,
+            "contract",
+        )
+        .await?;
+        insert_basenames_manifest_contract_instance(
+            pool,
+            resolver_manifest_id,
+            "resolver",
+            seed_contract_instance_id,
+            seed_address,
+        )
+        .await?;
+
+        let registry_contract_instance_id = Uuid::from_u128(0x86ff);
+        insert_basenames_contract_instance(
+            pool,
+            registry_contract_instance_id,
+            "0x00000000000000000000000000000000000086ff",
+            registry_manifest_id,
+            "root",
+        )
+        .await?;
+
+        for (contract_instance_id, address) in dynamic_resolvers {
+            insert_basenames_contract_instance(
+                pool,
+                *contract_instance_id,
+                address,
+                resolver_manifest_id,
+                "contract",
+            )
+            .await?;
+            sqlx::query(
+                r#"
+                INSERT INTO discovery_edges (
+                    chain_id,
+                    edge_kind,
+                    from_contract_instance_id,
+                    to_contract_instance_id,
+                    discovery_source,
+                    source_manifest_id,
+                    admission,
+                    provenance
+                )
+                VALUES (
+                    'base-mainnet',
+                    'resolver',
+                    $1,
+                    $2,
+                    $3,
+                    $4,
+                    'test',
+                    '{}'::jsonb
+                )
+                "#,
+            )
+            .bind(registry_contract_instance_id)
+            .bind(contract_instance_id)
+            .bind(format!("test:basenames-dynamic-resolver:{address}"))
+            .bind(registry_manifest_id)
+            .execute(pool)
+            .await
+            .context("failed to insert Basenames dynamic resolver discovery_edge")?;
+        }
+
+        let mut raw_code_hashes = vec![basenames_raw_code_hash(
+            seed_address,
+            BASENAMES_L2_CODE_HASH,
+        )];
+        raw_code_hashes.extend(code_hashes.iter().filter_map(|(address, code_hash)| {
+            code_hash.map(|code_hash| basenames_raw_code_hash(address, code_hash))
+        }));
+        upsert_raw_code_hashes(pool, &raw_code_hashes).await?;
+
+        Ok(())
+    }
+
+    async fn insert_basenames_manifest_version(
+        pool: &PgPool,
+        source_family: &str,
+        file_path: &str,
+    ) -> Result<i64> {
+        sqlx::query(
+            r#"
+            INSERT INTO manifest_versions (
+                manifest_version,
+                namespace,
+                source_family,
+                chain,
+                deployment_epoch,
+                rollout_status,
+                normalizer_version,
+                file_path,
+                manifest_payload
+            )
+            VALUES (1, 'basenames', $1, 'base-mainnet', 'basenames_v1', 'active', 'uts46-v1', $2, '{}'::jsonb)
+            RETURNING manifest_id
+            "#,
+        )
+        .bind(source_family)
+        .bind(file_path)
+        .fetch_one(pool)
+        .await
+        .with_context(|| format!("failed to insert manifest_version for {source_family}"))?
+        .try_get::<i64, _>("manifest_id")
+        .context("failed to read Basenames manifest_id")
+    }
+
+    async fn insert_basenames_contract_instance(
+        pool: &PgPool,
+        contract_instance_id: Uuid,
+        address: &str,
+        source_manifest_id: i64,
+        contract_kind: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO contract_instances (contract_instance_id, chain_id, contract_kind, provenance)
+            VALUES ($1, 'base-mainnet', $2, '{}'::jsonb)
+            "#,
+        )
+        .bind(contract_instance_id)
+        .bind(contract_kind)
+        .execute(pool)
+        .await
+        .context("failed to insert Basenames contract_instance")?;
+        sqlx::query(
+            r#"
+            INSERT INTO contract_instance_addresses (
+                contract_instance_id,
+                chain_id,
+                address,
+                source_manifest_id,
+                provenance
+            )
+            VALUES ($1, 'base-mainnet', lower($2), $3, '{}'::jsonb)
+            "#,
+        )
+        .bind(contract_instance_id)
+        .bind(address)
+        .bind(source_manifest_id)
+        .execute(pool)
+        .await
+        .context("failed to insert Basenames contract_instance_address")?;
+        Ok(())
+    }
+
+    async fn insert_basenames_manifest_contract_instance(
+        pool: &PgPool,
+        manifest_id: i64,
+        role: &str,
+        contract_instance_id: Uuid,
+        address: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO manifest_contract_instances (
+                manifest_id,
+                declaration_kind,
+                declaration_name,
+                contract_instance_id,
+                declared_address,
+                role,
+                proxy_kind
+            )
+            VALUES ($1, 'contract', $2, $3, lower($4), $2, 'none')
+            "#,
+        )
+        .bind(manifest_id)
+        .bind(role)
+        .bind(contract_instance_id)
+        .bind(address)
+        .execute(pool)
+        .await
+        .context("failed to insert Basenames manifest_contract_instance")?;
+        Ok(())
+    }
+
     async fn insert_manifest_version(
         pool: &PgPool,
         source_family: &str,
@@ -1967,7 +2360,7 @@ mod tests {
         .fetch_one(pool)
         .await
         .with_context(|| format!("failed to insert manifest_version for {source_family}"))?
-        .try_get("manifest_id")
+        .try_get::<i64, _>("manifest_id")
         .context("failed to read manifest_id")
     }
 
@@ -2165,6 +2558,18 @@ mod tests {
             transactions_root: None,
             receipts_root: None,
             state_root: None,
+            canonicality_state: CanonicalityState::Finalized,
+        }
+    }
+
+    fn basenames_raw_code_hash(address: &str, code_hash: &str) -> RawCodeHash {
+        RawCodeHash {
+            chain_id: "base-mainnet".to_owned(),
+            block_hash: "0xbase-code-hash".to_owned(),
+            block_number: 41,
+            contract_address: address.to_owned(),
+            code_hash: code_hash.to_owned(),
+            code_byte_length: 5,
             canonicality_state: CanonicalityState::Finalized,
         }
     }

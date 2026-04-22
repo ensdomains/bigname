@@ -378,8 +378,16 @@ fn raw_block_on_chain(
 }
 
 fn raw_code_hash_for_address(address: &str, code_hash: &str) -> RawCodeHash {
+    raw_code_hash_for_address_on_chain("ethereum-mainnet", address, code_hash)
+}
+
+fn raw_code_hash_for_address_on_chain(
+    chain_id: &str,
+    address: &str,
+    code_hash: &str,
+) -> RawCodeHash {
     RawCodeHash {
-        chain_id: "ethereum-mainnet".to_owned(),
+        chain_id: chain_id.to_owned(),
         block_hash: "0x9999999999999999999999999999999999999999999999999999999999999999".to_owned(),
         block_number: 41,
         contract_address: address.to_owned(),
@@ -2950,6 +2958,369 @@ async fn sync_ens_v1_unwrapped_authority_emits_basenames_base_authority_events_i
             .await?,
             1
         );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn sync_ens_v1_unwrapped_authority_gates_basenames_dynamic_resolver_facts_by_l2_profile()
+-> Result<()> {
+    let _permit = crate::acquire_test_db_permit().await;
+    let database = TestDatabase::new().await?;
+
+    let registrar_manifest_id = insert_manifest_version(
+        database.pool(),
+        1,
+        "basenames",
+        SOURCE_FAMILY_BASENAMES_BASE_REGISTRAR,
+        "base-mainnet",
+        "basenames_v1",
+        "active",
+        "uts46-v1",
+        "manifests/basenames/basenames_base_registrar/v1.toml",
+    )
+    .await?;
+    let registry_manifest_id = insert_manifest_version(
+        database.pool(),
+        1,
+        "basenames",
+        SOURCE_FAMILY_BASENAMES_BASE_REGISTRY,
+        "base-mainnet",
+        "basenames_v1",
+        "active",
+        "uts46-v1",
+        "manifests/basenames/basenames_base_registry/v1.toml",
+    )
+    .await?;
+    let resolver_manifest_id = insert_manifest_version(
+        database.pool(),
+        1,
+        "basenames",
+        SOURCE_FAMILY_BASENAMES_BASE_RESOLVER,
+        "base-mainnet",
+        "basenames_v1",
+        "active",
+        "uts46-v1",
+        "manifests/basenames/basenames_base_resolver/v1.toml",
+    )
+    .await?;
+    let registrar_contract_instance_id = Uuid::new_v4();
+    let registry_contract_instance_id = Uuid::new_v4();
+    let seed_resolver_contract_instance_id = Uuid::new_v4();
+    let supported_resolver_contract_instance_id = Uuid::new_v4();
+    let pending_resolver_contract_instance_id = Uuid::new_v4();
+    let unsupported_resolver_contract_instance_id = Uuid::new_v4();
+    let registrar_address = "0x00000000000000000000000000000000000001aa";
+    let registry_address = "0x00000000000000000000000000000000000001bb";
+    let seed_resolver_address = "0x00000000000000000000000000000000000001cc";
+    let supported_resolver_address = "0x00000000000000000000000000000000000001dd";
+    let pending_resolver_address = "0x00000000000000000000000000000000000001ee";
+    let unsupported_resolver_address = "0x00000000000000000000000000000000000001ff";
+    let l2_resolver_code_hash =
+        "0x1111111111111111111111111111111111111111111111111111111111111111";
+
+    for (contract_instance_id, manifest_id, address, role) in [
+        (
+            registrar_contract_instance_id,
+            registrar_manifest_id,
+            registrar_address,
+            "registrar",
+        ),
+        (
+            registry_contract_instance_id,
+            registry_manifest_id,
+            registry_address,
+            "registry",
+        ),
+        (
+            seed_resolver_contract_instance_id,
+            resolver_manifest_id,
+            seed_resolver_address,
+            "resolver",
+        ),
+    ] {
+        insert_contract_instance(
+            database.pool(),
+            contract_instance_id,
+            "base-mainnet",
+            "contract",
+        )
+        .await?;
+        insert_manifest_contract_instance(
+            database.pool(),
+            manifest_id,
+            "contract",
+            role,
+            contract_instance_id,
+            address,
+            Some(role),
+            Some("none"),
+        )
+        .await?;
+        insert_contract_instance_address(
+            database.pool(),
+            contract_instance_id,
+            "base-mainnet",
+            address,
+            manifest_id,
+        )
+        .await?;
+    }
+
+    for (contract_instance_id, address) in [
+        (
+            supported_resolver_contract_instance_id,
+            supported_resolver_address,
+        ),
+        (
+            pending_resolver_contract_instance_id,
+            pending_resolver_address,
+        ),
+        (
+            unsupported_resolver_contract_instance_id,
+            unsupported_resolver_address,
+        ),
+    ] {
+        insert_contract_instance(
+            database.pool(),
+            contract_instance_id,
+            "base-mainnet",
+            "contract",
+        )
+        .await?;
+        insert_contract_instance_address(
+            database.pool(),
+            contract_instance_id,
+            "base-mainnet",
+            address,
+            resolver_manifest_id,
+        )
+        .await?;
+        insert_active_discovery_edge_with_range(
+            database.pool(),
+            "base-mainnet",
+            "resolver",
+            registry_contract_instance_id,
+            contract_instance_id,
+            registry_manifest_id,
+            None,
+            None,
+        )
+        .await?;
+    }
+    upsert_raw_code_hashes(
+        database.pool(),
+        &[
+            raw_code_hash_for_address_on_chain(
+                "base-mainnet",
+                seed_resolver_address,
+                l2_resolver_code_hash,
+            ),
+            raw_code_hash_for_address_on_chain(
+                "base-mainnet",
+                supported_resolver_address,
+                l2_resolver_code_hash,
+            ),
+            raw_code_hash_for_address_on_chain(
+                "base-mainnet",
+                unsupported_resolver_address,
+                "0x2222222222222222222222222222222222222222222222222222222222222222",
+            ),
+        ],
+    )
+    .await?;
+
+    let block_hash = "0xfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfb";
+    let transaction_hash = "0xtxfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfb";
+    let alice = observe_registrar_name_with_version(
+        "alice",
+        AuthorityProfile::Basenames,
+        ENS_NORMALIZER_VERSION,
+    )?;
+    upsert_raw_blocks(
+        database.pool(),
+        &[raw_block_on_chain(
+            "base-mainnet",
+            block_hash,
+            Some("0xfafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafa"),
+            42,
+            1_700_000_042,
+        )],
+    )
+    .await?;
+    upsert_raw_logs(
+        database.pool(),
+        &[
+            RawLog {
+                chain_id: "base-mainnet".to_owned(),
+                block_hash: block_hash.to_owned(),
+                block_number: 42,
+                transaction_hash: transaction_hash.to_owned(),
+                transaction_index: 0,
+                log_index: 0,
+                emitting_address: registrar_address.to_owned(),
+                topics: vec![
+                    name_registered_topic0(),
+                    keccak256_hex(b"alice"),
+                    hex_string(&abi_word_address(
+                        "0x0000000000000000000000000000000000000001",
+                    )),
+                ],
+                data: encode_registrar_name_registered_log_data("alice", 1_700_010_000),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            RawLog {
+                chain_id: "base-mainnet".to_owned(),
+                block_hash: block_hash.to_owned(),
+                block_number: 42,
+                transaction_hash: transaction_hash.to_owned(),
+                transaction_index: 0,
+                log_index: 1,
+                emitting_address: registry_address.to_owned(),
+                topics: vec![new_resolver_topic0(), alice.namehash.clone()],
+                data: encode_registry_new_resolver_log_data(supported_resolver_address),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            RawLog {
+                chain_id: "base-mainnet".to_owned(),
+                block_hash: block_hash.to_owned(),
+                block_number: 42,
+                transaction_hash: transaction_hash.to_owned(),
+                transaction_index: 0,
+                log_index: 2,
+                emitting_address: supported_resolver_address.to_owned(),
+                topics: vec![name_changed_topic0(), alice.namehash.clone()],
+                data: encode_dynamic_string_log_data("supported.base.eth"),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            RawLog {
+                chain_id: "base-mainnet".to_owned(),
+                block_hash: block_hash.to_owned(),
+                block_number: 42,
+                transaction_hash: transaction_hash.to_owned(),
+                transaction_index: 0,
+                log_index: 3,
+                emitting_address: supported_resolver_address.to_owned(),
+                topics: vec![version_changed_topic0(), alice.namehash.clone()],
+                data: encode_resolver_version_changed_log_data(7),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            RawLog {
+                chain_id: "base-mainnet".to_owned(),
+                block_hash: block_hash.to_owned(),
+                block_number: 42,
+                transaction_hash: transaction_hash.to_owned(),
+                transaction_index: 0,
+                log_index: 4,
+                emitting_address: registry_address.to_owned(),
+                topics: vec![new_resolver_topic0(), alice.namehash.clone()],
+                data: encode_registry_new_resolver_log_data(pending_resolver_address),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            RawLog {
+                chain_id: "base-mainnet".to_owned(),
+                block_hash: block_hash.to_owned(),
+                block_number: 42,
+                transaction_hash: transaction_hash.to_owned(),
+                transaction_index: 0,
+                log_index: 5,
+                emitting_address: pending_resolver_address.to_owned(),
+                topics: vec![name_changed_topic0(), alice.namehash.clone()],
+                data: encode_dynamic_string_log_data("pending.base.eth"),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            RawLog {
+                chain_id: "base-mainnet".to_owned(),
+                block_hash: block_hash.to_owned(),
+                block_number: 42,
+                transaction_hash: transaction_hash.to_owned(),
+                transaction_index: 0,
+                log_index: 6,
+                emitting_address: pending_resolver_address.to_owned(),
+                topics: vec![version_changed_topic0(), alice.namehash.clone()],
+                data: encode_resolver_version_changed_log_data(8),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            RawLog {
+                chain_id: "base-mainnet".to_owned(),
+                block_hash: block_hash.to_owned(),
+                block_number: 42,
+                transaction_hash: transaction_hash.to_owned(),
+                transaction_index: 0,
+                log_index: 7,
+                emitting_address: registry_address.to_owned(),
+                topics: vec![new_resolver_topic0(), alice.namehash.clone()],
+                data: encode_registry_new_resolver_log_data(unsupported_resolver_address),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            RawLog {
+                chain_id: "base-mainnet".to_owned(),
+                block_hash: block_hash.to_owned(),
+                block_number: 42,
+                transaction_hash: transaction_hash.to_owned(),
+                transaction_index: 0,
+                log_index: 8,
+                emitting_address: unsupported_resolver_address.to_owned(),
+                topics: vec![name_changed_topic0(), alice.namehash.clone()],
+                data: encode_dynamic_string_log_data("unsupported.base.eth"),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            RawLog {
+                chain_id: "base-mainnet".to_owned(),
+                block_hash: block_hash.to_owned(),
+                block_number: 42,
+                transaction_hash: transaction_hash.to_owned(),
+                transaction_index: 0,
+                log_index: 9,
+                emitting_address: unsupported_resolver_address.to_owned(),
+                topics: vec![version_changed_topic0(), alice.namehash.clone()],
+                data: encode_resolver_version_changed_log_data(9),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+        ],
+    )
+    .await?;
+
+    let summary = sync_ens_v1_unwrapped_authority(database.pool(), "base-mainnet").await?;
+    assert_eq!(summary.scanned_log_count, 10);
+    assert_eq!(summary.matched_log_count, 6);
+    assert_eq!(
+        summary.by_kind.get(EVENT_KIND_RESOLVER_CHANGED),
+        Some(&3_usize)
+    );
+    assert_eq!(
+        summary.by_kind.get(EVENT_KIND_RECORD_CHANGED),
+        Some(&1_usize)
+    );
+    assert_eq!(
+        summary.by_kind.get(EVENT_KIND_RECORD_VERSION_CHANGED),
+        Some(&1_usize)
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT after_state->>'raw_name' FROM normalized_events WHERE event_kind = 'RecordChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "supported.base.eth".to_owned()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT after_state->>'record_version' FROM normalized_events WHERE event_kind = 'RecordVersionChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "7".to_owned()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM normalized_events WHERE event_kind IN ('RecordChanged', 'RecordVersionChanged') AND log_index = ANY($1::BIGINT[])"
+        )
+        .bind(vec![5_i64, 6, 8, 9])
+        .fetch_one(database.pool())
+        .await?,
+        0
+    );
 
     database.cleanup().await
 }

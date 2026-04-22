@@ -1103,6 +1103,175 @@ fn basenames_supported_topology(
     })
 }
 
+fn basenames_dynamic_resolver_record_inventory_boundary(
+    logical_name_id: &str,
+    resource_id: Uuid,
+    normalized_event_id: Option<i64>,
+    event_kind: Option<&str>,
+) -> Value {
+    json!({
+        "logical_name_id": logical_name_id,
+        "resource_id": resource_id.to_string(),
+        "normalized_event_id": normalized_event_id,
+        "event_kind": event_kind,
+        "chain_position": {
+            "chain_id": "base-mainnet",
+            "block_number": 21_000_003,
+            "block_hash": "0xbase-binding",
+            "timestamp": "2026-04-17T00:00:03Z",
+        }
+    })
+}
+
+fn basenames_l2resolver_record_inventory_current_row(
+    logical_name_id: &str,
+    resource_id: Uuid,
+) -> bigname_storage::RecordInventoryCurrentRow {
+    bigname_storage::RecordInventoryCurrentRow {
+        resource_id,
+        record_version_boundary: basenames_dynamic_resolver_record_inventory_boundary(
+            logical_name_id,
+            resource_id,
+            Some(1201),
+            Some("RecordChanged"),
+        ),
+        enumeration_basis: json!({
+            "observed_selectors": true,
+            "capability_declared_families": true,
+            "globally_enumerable": false,
+        }),
+        selectors: json!([
+            {
+                "record_key": "text",
+                "record_family": "text",
+                "selector_key": null,
+                "cacheable": true,
+            }
+        ]),
+        explicit_gaps: json!([]),
+        unsupported_families: json!([]),
+        last_change: Some(json!({
+            "normalized_event_id": 1201,
+            "event_kind": "RecordChanged",
+            "chain_position": {
+                "chain_id": "base-mainnet",
+                "block_number": 21_000_003,
+                "block_hash": "0xbase-binding",
+                "timestamp": "2026-04-17T00:00:03Z",
+            }
+        })),
+        entries: json!([
+            {
+                "record_key": "text",
+                "record_family": "text",
+                "selector_key": null,
+                "status": "unsupported",
+                "unsupported_reason": "value_not_retained_in_normalized_events",
+            }
+        ]),
+        provenance: json!({
+            "normalized_event_ids": [1201],
+            "derivation_kind": "record_inventory_current_rebuild",
+        }),
+        coverage: json!({
+            "status": "full",
+            "exhaustiveness": "authoritative",
+            "source_classes_considered": [
+                "basenames_base_registry",
+                "basenames_base_resolver",
+            ],
+            "unsupported_reason": null,
+            "enumeration_basis": "declared_record_inventory",
+        }),
+        chain_positions: json!({
+            "base-mainnet": {
+                "chain_id": "base-mainnet",
+                "block_number": 21_000_003,
+                "block_hash": "0xbase-binding",
+                "timestamp": "2026-04-17T00:00:03Z",
+            }
+        }),
+        canonicality_summary: json!({
+            "status": "finalized",
+            "chains": {
+                "base-mainnet": "finalized",
+            }
+        }),
+        manifest_version: 6,
+        last_recomputed_at: timestamp(1_717_171_719),
+    }
+}
+
+fn basenames_dynamic_resolver_pending_record_inventory_current_row(
+    logical_name_id: &str,
+    resource_id: Uuid,
+) -> bigname_storage::RecordInventoryCurrentRow {
+    bigname_storage::RecordInventoryCurrentRow {
+        resource_id,
+        record_version_boundary: basenames_dynamic_resolver_record_inventory_boundary(
+            logical_name_id,
+            resource_id,
+            Some(1202),
+            Some("ResolverChanged"),
+        ),
+        enumeration_basis: json!({
+            "observed_selectors": false,
+            "capability_declared_families": true,
+            "globally_enumerable": false,
+        }),
+        selectors: json!([]),
+        explicit_gaps: json!([]),
+        unsupported_families: json!([
+            {
+                "record_family": "addr",
+                "unsupported_reason": "resolver_family_pending",
+            },
+            {
+                "record_family": "text",
+                "unsupported_reason": "resolver_family_pending",
+            }
+        ]),
+        last_change: Some(json!({
+            "normalized_event_id": 1202,
+            "event_kind": "ResolverChanged",
+            "chain_position": {
+                "chain_id": "base-mainnet",
+                "block_number": 21_000_003,
+                "block_hash": "0xbase-binding",
+                "timestamp": "2026-04-17T00:00:03Z",
+            }
+        })),
+        entries: json!([]),
+        provenance: json!({
+            "normalized_event_ids": [1202],
+            "derivation_kind": "record_inventory_current_rebuild",
+        }),
+        coverage: json!({
+            "status": "partial",
+            "exhaustiveness": "best_effort",
+            "source_classes_considered": ["basenames_base_registry"],
+            "unsupported_reason": "resolver_family_pending",
+            "enumeration_basis": "declared_record_inventory",
+        }),
+        chain_positions: json!({
+            "base-mainnet": {
+                "chain_id": "base-mainnet",
+                "block_number": 21_000_003,
+                "block_hash": "0xbase-binding",
+                "timestamp": "2026-04-17T00:00:03Z",
+            }
+        }),
+        canonicality_summary: json!({
+            "status": "finalized",
+            "chains": {
+                "base-mainnet": "finalized",
+            }
+        }),
+        manifest_version: 6,
+        last_recomputed_at: timestamp(1_717_171_720),
+    }
+}
+
 fn basenames_deferred_verified_path_topology(
     case: BasenamesDeferredVerifiedPathCase,
     logical_name_id: &str,
@@ -5311,17 +5480,20 @@ async fn get_resolution_dynamic_resolver_pending_profile_keeps_verified_records_
 }
 
 #[tokio::test]
-async fn get_resolution_dynamic_resolver_profile_non_graduation_keeps_basenames_records_unsupported()
+async fn get_resolution_dynamic_resolver_l2resolver_profile_reads_supported_basenames_records()
 -> Result<()> {
     let database = TestDatabase::new_with_schemas(false, true).await?;
     let namespace = "basenames";
     let normalized_name = "alice.base.eth";
     let canonical_display_name = "Alice.base.eth";
     let logical_name_id = "basenames:alice.base.eth";
-    let resource_id = Uuid::from_u128(0x9d20);
-    let token_lineage_id = Uuid::from_u128(0x9d21);
-    let surface_binding_id = Uuid::from_u128(0x9d22);
-    let dynamic_resolver_address = "0x0000000000000000000000000000000000000b11";
+    let resource_id = Uuid::from_u128(0x9d60);
+    let token_lineage_id = Uuid::from_u128(0x9d61);
+    let surface_binding_id = Uuid::from_u128(0x9d62);
+    let dynamic_resolver_address = "0x0000000000000000000000000000000000000b60";
+    let inventory_row =
+        basenames_l2resolver_record_inventory_current_row(logical_name_id, resource_id);
+    let record_version_boundary = inventory_row.record_version_boundary.clone();
 
     database
         .seed_name_current_binding(
@@ -5349,16 +5521,19 @@ async fn get_resolution_dynamic_resolver_profile_non_graduation_keeps_basenames_
             dynamic_resolver_address,
         ))
         .await?;
+    database
+        .insert_record_inventory_current_row(inventory_row)
+        .await?;
 
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/basenames/alice.base.eth?mode=declared&records=addr:60,text:com.twitter")
+                .uri("/v1/resolutions/basenames/alice.base.eth?mode=declared&records=text")
                 .body(Body::empty())
                 .expect("request must build"),
         )
         .await
-        .context("Basenames dynamic resolver non-graduation request failed")?;
+        .context("supported Basenames dynamic resolver declared resolution request failed")?;
 
     assert_eq!(response.status(), StatusCode::OK);
 
@@ -5377,20 +5552,220 @@ async fn get_resolution_dynamic_resolver_profile_non_graduation_keeps_basenames_
         Some(&json!("base-mainnet"))
     );
     assert_eq!(
+        declared_state.pointer("/topology/transport"),
+        Some(&json!({
+            "source_chain_id": "base-mainnet",
+            "target_chain_id": "ethereum-mainnet",
+            "contract_address": "0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31",
+            "latest_event_kind": null,
+        }))
+    );
+    assert_eq!(
+        declared_state.pointer("/topology/version_boundaries/record_version_boundary"),
+        Some(&record_version_boundary)
+    );
+    assert_eq!(
         declared_state.get("record_inventory"),
         Some(&json!({
-            "status": "unsupported",
-            "unsupported_reason": "declared resolution record inventory is not yet projected",
+            "record_version_boundary": record_version_boundary.clone(),
+            "enumeration_basis": {
+                "observed_selectors": true,
+                "capability_declared_families": true,
+                "globally_enumerable": false,
+            },
+            "selectors": [
+                {
+                    "record_key": "text",
+                    "record_family": "text",
+                    "selector_key": null,
+                    "cacheable": true,
+                }
+            ],
+            "explicit_gaps": [],
+            "unsupported_families": [],
+            "last_change": {
+                "normalized_event_id": 1201,
+                "event_kind": "RecordChanged",
+                "chain_position": {
+                    "chain_id": "base-mainnet",
+                    "block_number": 21_000_003,
+                    "block_hash": "0xbase-binding",
+                    "timestamp": "2026-04-17T00:00:03Z",
+                }
+            },
         }))
     );
     assert_eq!(
         declared_state.get("record_cache"),
         Some(&json!({
-            "status": "unsupported",
-            "unsupported_reason": "declared resolution record cache is not yet projected",
+            "record_version_boundary": record_version_boundary,
+            "entries": [
+                {
+                    "record_key": "text",
+                    "record_family": "text",
+                    "selector_key": null,
+                    "status": "unsupported",
+                    "unsupported_reason": "value_not_retained_in_normalized_events",
+                }
+            ],
         }))
     );
     assert_eq!(payload.verified_state, None);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_resolution_dynamic_resolver_profile_non_graduation_keeps_basenames_records_unsupported()
+-> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    let namespace = "basenames";
+    let cases = [
+        (
+            "pending.base.eth",
+            "Pending.base.eth",
+            "basenames:pending.base.eth",
+            Uuid::from_u128(0x9d20),
+            Uuid::from_u128(0x9d21),
+            Uuid::from_u128(0x9d22),
+            "0x0000000000000000000000000000000000000b11",
+        ),
+        (
+            "unsupported.base.eth",
+            "Unsupported.base.eth",
+            "basenames:unsupported.base.eth",
+            Uuid::from_u128(0x9d23),
+            Uuid::from_u128(0x9d24),
+            Uuid::from_u128(0x9d25),
+            "0x0000000000000000000000000000000000000b12",
+        ),
+    ];
+
+    for (
+        normalized_name,
+        canonical_display_name,
+        logical_name_id,
+        resource_id,
+        token_lineage_id,
+        surface_binding_id,
+        dynamic_resolver_address,
+    ) in cases
+    {
+        let inventory_row =
+            basenames_dynamic_resolver_pending_record_inventory_current_row(
+                logical_name_id,
+                resource_id,
+            );
+        let record_version_boundary = inventory_row.record_version_boundary.clone();
+
+        database
+            .seed_name_current_binding(
+                logical_name_id,
+                namespace,
+                normalized_name,
+                canonical_display_name,
+                &format!("namehash:{normalized_name}"),
+                resource_id,
+                token_lineage_id,
+                surface_binding_id,
+            )
+            .await?;
+        database
+            .insert_name_current_row(name_current_row_with_current_resolver(
+                resolution_route_name_row(
+                    namespace,
+                    normalized_name,
+                    canonical_display_name,
+                    resource_id,
+                    token_lineage_id,
+                    surface_binding_id,
+                ),
+                "base-mainnet",
+                dynamic_resolver_address,
+            ))
+            .await?;
+        database
+            .insert_record_inventory_current_row(inventory_row)
+            .await?;
+
+        let response = app_router(database.app_state())
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/v1/resolutions/basenames/{normalized_name}?mode=declared&records=addr:60,text:com.twitter"
+                    ))
+                    .body(Body::empty())
+                    .expect("request must build"),
+            )
+            .await
+            .with_context(|| {
+                format!(
+                    "Basenames dynamic resolver non-graduation request failed for {normalized_name}"
+                )
+            })?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let payload: ResolutionResponse = read_json(response).await?;
+        let declared_state = payload
+            .declared_state
+            .as_ref()
+            .expect("declared_state must be present");
+        assert_eq!(
+            declared_state.pointer("/topology/resolver_path/0/address"),
+            Some(&json!(dynamic_resolver_address))
+        );
+        assert_eq!(
+            declared_state
+                .pointer("/topology/resolver_path/0/chain_id"),
+            Some(&json!("base-mainnet"))
+        );
+        assert_eq!(
+            declared_state
+                .get("record_inventory")
+                .and_then(|inventory| inventory.get("selectors")),
+            Some(&json!([]))
+        );
+        assert_eq!(
+            declared_state
+                .get("record_inventory")
+                .and_then(|inventory| inventory.get("unsupported_families")),
+            Some(&json!([
+                {
+                    "record_family": "addr",
+                    "unsupported_reason": "resolver_family_pending",
+                },
+                {
+                    "record_family": "text",
+                    "unsupported_reason": "resolver_family_pending",
+                }
+            ]))
+        );
+        assert_eq!(
+            declared_state.get("record_cache"),
+            Some(&json!({
+                "record_version_boundary": record_version_boundary,
+                "entries": [
+                    {
+                        "record_key": "addr:60",
+                        "record_family": "addr",
+                        "selector_key": "60",
+                        "status": "unsupported",
+                        "unsupported_reason": "resolver_family_pending",
+                    },
+                    {
+                        "record_key": "text:com.twitter",
+                        "record_family": "text",
+                        "selector_key": "com.twitter",
+                        "status": "unsupported",
+                        "unsupported_reason": "resolver_family_pending",
+                    }
+                ]
+            }))
+        );
+        assert_eq!(payload.verified_state, None);
+    }
 
     database.cleanup().await?;
     Ok(())
