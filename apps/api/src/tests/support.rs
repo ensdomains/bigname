@@ -2663,6 +2663,21 @@ fn exact_name_row(
     }
 }
 
+fn name_current_row_with_current_resolver(
+    mut row: bigname_storage::NameCurrentRow,
+    chain_id: &str,
+    resolver_address: &str,
+) -> bigname_storage::NameCurrentRow {
+    let resolver = row
+        .declared_summary
+        .get_mut("resolver")
+        .and_then(Value::as_object_mut)
+        .expect("name_current fixture must include a resolver summary");
+    resolver.insert("chain_id".to_owned(), json!(chain_id));
+    resolver.insert("address".to_owned(), json!(resolver_address));
+    row
+}
+
 fn basenames_exact_name_control_summary() -> Value {
     json!({
         "registrant": "0x00000000000000000000000000000000000000aa",
@@ -2827,6 +2842,77 @@ fn record_inventory_current_row(
         }),
         manifest_version: 3,
         last_recomputed_at: timestamp(1_717_171_718),
+    }
+}
+
+fn dynamic_resolver_unsupported_profile_record_inventory_current_row(
+    logical_name_id: &str,
+    resource_id: Uuid,
+) -> bigname_storage::RecordInventoryCurrentRow {
+    bigname_storage::RecordInventoryCurrentRow {
+        resource_id,
+        record_version_boundary: record_inventory_boundary(logical_name_id, resource_id),
+        enumeration_basis: json!({
+            "observed_selectors": false,
+            "capability_declared_families": true,
+            "globally_enumerable": false
+        }),
+        selectors: json!([]),
+        explicit_gaps: json!([
+            {
+                "record_key": "contenthash",
+                "record_family": "contenthash",
+                "selector_key": null,
+                "gap_reason": "not_observed_on_current_resolver"
+            }
+        ]),
+        unsupported_families: json!([
+            {
+                "record_family": "addr",
+                "unsupported_reason": "resolver_family_pending"
+            },
+            {
+                "record_family": "text",
+                "unsupported_reason": "resolver_family_pending"
+            }
+        ]),
+        last_change: Some(json!({
+            "normalized_event_id": 1201,
+            "event_kind": "ResolverChanged",
+            "chain_position": {
+                "chain_id": "ethereum-mainnet",
+                "block_number": 21_000_003,
+                "block_hash": "0xdynamicresolver",
+                "timestamp": "2026-04-17T00:00:04Z"
+            }
+        })),
+        entries: json!([]),
+        provenance: json!({
+            "normalized_event_ids": [1201],
+            "derivation_kind": "record_inventory_current_rebuild"
+        }),
+        coverage: json!({
+            "status": "partial",
+            "exhaustiveness": "best_effort",
+            "enumeration_basis": "declared_record_inventory",
+            "unsupported_reason": "resolver_family_pending"
+        }),
+        chain_positions: json!({
+            "ethereum-mainnet": {
+                "chain_id": "ethereum-mainnet",
+                "block_number": 21_000_003,
+                "block_hash": "0xdynamicresolver",
+                "timestamp": "2026-04-17T00:00:03Z"
+            }
+        }),
+        canonicality_summary: json!({
+            "status": "finalized",
+            "chains": {
+                "ethereum-mainnet": "finalized"
+            }
+        }),
+        manifest_version: 7,
+        last_recomputed_at: timestamp(1_717_171_719),
     }
 }
 

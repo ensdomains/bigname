@@ -4821,6 +4821,223 @@ async fn get_resolution_returns_unsupported_record_inventory_sections_when_proje
 }
 
 #[tokio::test]
+async fn get_resolution_dynamic_resolver_profile_non_graduation_keeps_ensv1_records_explicit()
+-> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0x9d10);
+    let token_lineage_id = Uuid::from_u128(0x9d11);
+    let surface_binding_id = Uuid::from_u128(0x9d12);
+    let dynamic_resolver_address = "0x0000000000000000000000000000000000000d11";
+
+    database
+        .seed_name_current_binding(
+            logical_name_id,
+            "ens",
+            "alice.eth",
+            "Alice.eth",
+            "namehash:alice.eth",
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    database
+        .insert_name_current_row(name_current_row_with_current_resolver(
+            exact_name_row(
+                logical_name_id,
+                surface_binding_id,
+                resource_id,
+                token_lineage_id,
+            ),
+            "ethereum-mainnet",
+            dynamic_resolver_address,
+        ))
+        .await?;
+    database
+        .insert_record_inventory_current_row(
+            dynamic_resolver_unsupported_profile_record_inventory_current_row(
+                logical_name_id,
+                resource_id,
+            ),
+        )
+        .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resolutions/ens/alice.eth?mode=declared&records=addr:60,text:com.twitter,contenthash")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("ENSv1 dynamic resolver non-graduation request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let payload: ResolutionResponse = read_json(response).await?;
+    let declared_state = payload
+        .declared_state
+        .as_ref()
+        .expect("declared_state must be present");
+    assert_eq!(
+        declared_state.pointer("/topology/resolver_path/0/address"),
+        Some(&json!(dynamic_resolver_address))
+    );
+    assert_eq!(
+        declared_state
+            .pointer("/topology/resolver_path/0/chain_id"),
+        Some(&json!("ethereum-mainnet"))
+    );
+    assert_eq!(
+        declared_state
+            .get("record_inventory")
+            .and_then(|inventory| inventory.get("explicit_gaps")),
+        Some(&json!([
+            {
+                "record_key": "contenthash",
+                "record_family": "contenthash",
+                "selector_key": null,
+                "gap_reason": "not_observed_on_current_resolver",
+            }
+        ]))
+    );
+    assert_eq!(
+        declared_state
+            .get("record_inventory")
+            .and_then(|inventory| inventory.get("unsupported_families")),
+        Some(&json!([
+            {
+                "record_family": "addr",
+                "unsupported_reason": "resolver_family_pending",
+            },
+            {
+                "record_family": "text",
+                "unsupported_reason": "resolver_family_pending",
+            }
+        ]))
+    );
+    assert_eq!(
+        declared_state.get("record_cache"),
+        Some(&json!({
+            "record_version_boundary": record_inventory_boundary(logical_name_id, resource_id),
+            "entries": [
+                {
+                    "record_key": "addr:60",
+                    "record_family": "addr",
+                    "selector_key": "60",
+                    "status": "unsupported",
+                    "unsupported_reason": "resolver_family_pending",
+                },
+                {
+                    "record_key": "text:com.twitter",
+                    "record_family": "text",
+                    "selector_key": "com.twitter",
+                    "status": "unsupported",
+                    "unsupported_reason": "resolver_family_pending",
+                },
+                {
+                    "record_key": "contenthash",
+                    "record_family": "contenthash",
+                    "selector_key": null,
+                    "status": "not_found",
+                }
+            ]
+        }))
+    );
+    assert_eq!(payload.verified_state, None);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_resolution_dynamic_resolver_profile_non_graduation_keeps_basenames_records_unsupported()
+-> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    let namespace = "basenames";
+    let normalized_name = "alice.base.eth";
+    let canonical_display_name = "Alice.base.eth";
+    let logical_name_id = "basenames:alice.base.eth";
+    let resource_id = Uuid::from_u128(0x9d20);
+    let token_lineage_id = Uuid::from_u128(0x9d21);
+    let surface_binding_id = Uuid::from_u128(0x9d22);
+    let dynamic_resolver_address = "0x0000000000000000000000000000000000000b11";
+
+    database
+        .seed_name_current_binding(
+            logical_name_id,
+            namespace,
+            normalized_name,
+            canonical_display_name,
+            "namehash:alice.base.eth",
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    database
+        .insert_name_current_row(name_current_row_with_current_resolver(
+            resolution_route_name_row(
+                namespace,
+                normalized_name,
+                canonical_display_name,
+                resource_id,
+                token_lineage_id,
+                surface_binding_id,
+            ),
+            "base-mainnet",
+            dynamic_resolver_address,
+        ))
+        .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resolutions/basenames/alice.base.eth?mode=declared&records=addr:60,text:com.twitter")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("Basenames dynamic resolver non-graduation request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let payload: ResolutionResponse = read_json(response).await?;
+    let declared_state = payload
+        .declared_state
+        .as_ref()
+        .expect("declared_state must be present");
+    assert_eq!(
+        declared_state.pointer("/topology/resolver_path/0/address"),
+        Some(&json!(dynamic_resolver_address))
+    );
+    assert_eq!(
+        declared_state
+            .pointer("/topology/resolver_path/0/chain_id"),
+        Some(&json!("base-mainnet"))
+    );
+    assert_eq!(
+        declared_state.get("record_inventory"),
+        Some(&json!({
+            "status": "unsupported",
+            "unsupported_reason": "declared resolution record inventory is not yet projected",
+        }))
+    );
+    assert_eq!(
+        declared_state.get("record_cache"),
+        Some(&json!({
+            "status": "unsupported",
+            "unsupported_reason": "declared resolution record cache is not yet projected",
+        }))
+    );
+    assert_eq!(payload.verified_state, None);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn get_resolution_declared_records_narrow_record_cache_in_request_order() -> Result<()> {
     let database = TestDatabase::new_with_schemas(false, true).await?;
     let logical_name_id = "ens:alice.eth";

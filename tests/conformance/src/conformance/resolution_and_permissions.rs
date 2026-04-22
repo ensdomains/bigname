@@ -238,6 +238,287 @@
             read_json(response).await
         }
 
+        fn set_declared_current_resolver(
+            row: &mut bigname_storage::NameCurrentRow,
+            chain_id: &str,
+            resolver_address: &str,
+        ) {
+            let resolver = row
+                .declared_summary
+                .get_mut("resolver")
+                .and_then(Value::as_object_mut)
+                .expect("name_current row must include declared resolver summary");
+            resolver.insert("chain_id".to_owned(), json!(chain_id));
+            resolver.insert("address".to_owned(), json!(resolver_address));
+        }
+
+        fn dynamic_resolver_unsupported_profile_record_inventory_current_row(
+            logical_name_id: &str,
+            resource_id: Uuid,
+        ) -> bigname_storage::RecordInventoryCurrentRow {
+            bigname_storage::RecordInventoryCurrentRow {
+                resource_id,
+                record_version_boundary: resolution_record_inventory_boundary(
+                    logical_name_id,
+                    resource_id,
+                ),
+                enumeration_basis: json!({
+                    "observed_selectors": false,
+                    "capability_declared_families": true,
+                    "globally_enumerable": false,
+                }),
+                selectors: json!([]),
+                explicit_gaps: json!([
+                    {
+                        "record_key": "contenthash",
+                        "record_family": "contenthash",
+                        "selector_key": null,
+                        "gap_reason": "not_observed_on_current_resolver",
+                    }
+                ]),
+                unsupported_families: json!([
+                    {
+                        "record_family": "addr",
+                        "unsupported_reason": "resolver_family_pending",
+                    },
+                    {
+                        "record_family": "text",
+                        "unsupported_reason": "resolver_family_pending",
+                    }
+                ]),
+                last_change: Some(json!({
+                    "normalized_event_id": 1201,
+                    "event_kind": "ResolverChanged",
+                    "chain_position": {
+                        "chain_id": "ethereum-mainnet",
+                        "block_number": 106,
+                        "block_hash": "0xdynamicresolver",
+                        "timestamp": "2024-05-31T16:08:26Z",
+                    }
+                })),
+                entries: json!([]),
+                provenance: json!({
+                    "normalized_event_ids": [1201],
+                    "derivation_kind": "record_inventory_current_rebuild",
+                }),
+                coverage: json!({
+                    "status": "partial",
+                    "exhaustiveness": "best_effort",
+                    "enumeration_basis": "declared_record_inventory",
+                    "unsupported_reason": "resolver_family_pending",
+                }),
+                chain_positions: json!({
+                    "ethereum-mainnet": {
+                        "chain_id": "ethereum-mainnet",
+                        "block_number": 106,
+                        "block_hash": "0xdynamicresolver",
+                        "timestamp": "2024-05-31T16:08:26Z",
+                    }
+                }),
+                canonicality_summary: json!({
+                    "status": "finalized",
+                    "chains": {
+                        "ethereum-mainnet": "finalized",
+                    }
+                }),
+                manifest_version: 7,
+                last_recomputed_at: timestamp(1_717_171_719),
+            }
+        }
+
+        #[tokio::test]
+        async fn dynamic_resolver_profile_non_graduation_keeps_ensv1_record_sections_explicit()
+        -> Result<()> {
+            let database = HarnessDatabase::new().await?;
+            let logical_name_id = "ens:alice.eth";
+            let resource_id = Uuid::from_u128(0x9d40);
+            let token_lineage_id = Uuid::from_u128(0x9d41);
+            let surface_binding_id = Uuid::from_u128(0x9d42);
+            let dynamic_resolver_address = "0x0000000000000000000000000000000000000d44";
+
+            database
+                .seed_exact_name_rebuild_inputs(
+                    logical_name_id,
+                    resource_id,
+                    token_lineage_id,
+                    surface_binding_id,
+                )
+                .await?;
+            database.rebuild_name_current(logical_name_id).await?;
+            let mut name_row = bigname_storage::load_name_current(
+                &database.pool,
+                logical_name_id,
+            )
+            .await?
+            .context("ENSv1 dynamic resolver test requires name_current row")?;
+            set_declared_current_resolver(
+                &mut name_row,
+                "ethereum-mainnet",
+                dynamic_resolver_address,
+            );
+            database.insert_name_current_row(name_row).await?;
+            database
+                .insert_record_inventory_current_row(
+                    dynamic_resolver_unsupported_profile_record_inventory_current_row(
+                        logical_name_id,
+                        resource_id,
+                    ),
+                )
+                .await?;
+
+            let payload = get_resolution_payload(
+                &database,
+                "/v1/resolutions/ens/alice.eth?mode=declared&records=addr:60,text:com.twitter,contenthash",
+            )
+            .await?;
+            let declared_state = payload
+                .declared_state
+                .as_ref()
+                .context("ENSv1 dynamic resolver response must include declared_state")?;
+
+            assert_eq!(
+                declared_state.pointer("/topology/resolver_path/0/address"),
+                Some(&json!(dynamic_resolver_address))
+            );
+            assert_eq!(
+                declared_state.pointer("/topology/resolver_path/0/chain_id"),
+                Some(&json!("ethereum-mainnet"))
+            );
+            assert_eq!(
+                declared_state
+                    .get("record_inventory")
+                    .and_then(|inventory| inventory.get("explicit_gaps")),
+                Some(&json!([
+                    {
+                        "record_key": "contenthash",
+                        "record_family": "contenthash",
+                        "selector_key": null,
+                        "gap_reason": "not_observed_on_current_resolver",
+                    }
+                ]))
+            );
+            assert_eq!(
+                declared_state
+                    .get("record_inventory")
+                    .and_then(|inventory| inventory.get("unsupported_families")),
+                Some(&json!([
+                    {
+                        "record_family": "addr",
+                        "unsupported_reason": "resolver_family_pending",
+                    },
+                    {
+                        "record_family": "text",
+                        "unsupported_reason": "resolver_family_pending",
+                    }
+                ]))
+            );
+            assert_eq!(
+                declared_state.get("record_cache"),
+                Some(&json!({
+                    "record_version_boundary": resolution_record_inventory_boundary(
+                        logical_name_id,
+                        resource_id,
+                    ),
+                    "entries": [
+                        {
+                            "record_key": "addr:60",
+                            "record_family": "addr",
+                            "selector_key": "60",
+                            "status": "unsupported",
+                            "unsupported_reason": "resolver_family_pending",
+                        },
+                        {
+                            "record_key": "text:com.twitter",
+                            "record_family": "text",
+                            "selector_key": "com.twitter",
+                            "status": "unsupported",
+                            "unsupported_reason": "resolver_family_pending",
+                        },
+                        {
+                            "record_key": "contenthash",
+                            "record_family": "contenthash",
+                            "selector_key": null,
+                            "status": "not_found",
+                        }
+                    ]
+                }))
+            );
+            assert_eq!(payload.verified_state, None);
+
+            database.cleanup().await?;
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn dynamic_resolver_profile_non_graduation_keeps_basenames_record_sections_unsupported()
+        -> Result<()> {
+            let database = HarnessDatabase::new().await?;
+            let logical_name_id = "basenames:alice.base.eth";
+            let resource_id = Uuid::from_u128(0x9d50);
+            let token_lineage_id = Uuid::from_u128(0x9d51);
+            let surface_binding_id = Uuid::from_u128(0x9d52);
+            let dynamic_resolver_address = "0x0000000000000000000000000000000000000b55";
+
+            database
+                .seed_basenames_exact_name_rebuild_inputs(
+                    logical_name_id,
+                    resource_id,
+                    token_lineage_id,
+                    surface_binding_id,
+                )
+                .await?;
+            database.rebuild_name_current(logical_name_id).await?;
+            let mut name_row = bigname_storage::load_name_current(
+                &database.pool,
+                logical_name_id,
+            )
+            .await?
+            .context("Basenames dynamic resolver test requires name_current row")?;
+            set_declared_current_resolver(
+                &mut name_row,
+                "base-mainnet",
+                dynamic_resolver_address,
+            );
+            database.insert_name_current_row(name_row).await?;
+
+            let payload = get_resolution_payload(
+                &database,
+                "/v1/resolutions/basenames/alice.base.eth?mode=declared&records=addr:60,text:com.twitter",
+            )
+            .await?;
+            let declared_state = payload
+                .declared_state
+                .as_ref()
+                .context("Basenames dynamic resolver response must include declared_state")?;
+
+            assert_eq!(
+                declared_state.pointer("/topology/resolver_path/0/address"),
+                Some(&json!(dynamic_resolver_address))
+            );
+            assert_eq!(
+                declared_state.pointer("/topology/resolver_path/0/chain_id"),
+                Some(&json!("base-mainnet"))
+            );
+            assert_eq!(
+                declared_state.get("record_inventory"),
+                Some(&json!({
+                    "status": "unsupported",
+                    "unsupported_reason": "declared resolution record inventory is not yet projected",
+                }))
+            );
+            assert_eq!(
+                declared_state.get("record_cache"),
+                Some(&json!({
+                    "status": "unsupported",
+                    "unsupported_reason": "declared resolution record cache is not yet projected",
+                }))
+            );
+            assert_eq!(payload.verified_state, None);
+
+            database.cleanup().await?;
+            Ok(())
+        }
+
         #[tokio::test]
         async fn resolution_inferred_route_matches_canonical_ens_for_exact_base_eth() -> Result<()> {
             let database = HarnessDatabase::new().await?;

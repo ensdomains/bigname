@@ -223,6 +223,94 @@ async fn get_resolver_overview_returns_not_found_when_projection_is_missing() ->
 }
 
 #[tokio::test]
+async fn resolver_overview_dynamic_resolver_profile_non_graduation_requires_resolver_current_row()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0x9d30);
+    let token_lineage_id = Uuid::from_u128(0x9d31);
+    let surface_binding_id = Uuid::from_u128(0x9d32);
+    let chain_id = "ethereum-mainnet";
+    let dynamic_resolver_address = "0x0000000000000000000000000000000000000d33";
+
+    database
+        .seed_name_current_binding_migrated(
+            logical_name_id,
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    database
+        .insert_name_current_row(name_current_row_with_current_resolver(
+            exact_name_row(
+                logical_name_id,
+                surface_binding_id,
+                resource_id,
+                token_lineage_id,
+            ),
+            chain_id,
+            dynamic_resolver_address,
+        ))
+        .await?;
+
+    let missing_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/resolvers/{chain_id}/{dynamic_resolver_address}"))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("dynamic resolver overview request without projection failed")?;
+
+    assert_eq!(missing_response.status(), StatusCode::NOT_FOUND);
+
+    let missing_payload: ErrorResponse = read_json(missing_response).await?;
+    assert_eq!(missing_payload.error.code, "not_found");
+    assert_eq!(
+        missing_payload.error.message,
+        format!("resolver {dynamic_resolver_address} was not found on chain {chain_id}")
+    );
+
+    bigname_storage::upsert_resolver_current_rows(
+        &database.pool,
+        &[resolver_current_row(chain_id, dynamic_resolver_address)],
+    )
+    .await?;
+
+    let projected_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/resolvers/{chain_id}/{dynamic_resolver_address}"))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("dynamic resolver overview request with projection failed")?;
+
+    assert_eq!(projected_response.status(), StatusCode::OK);
+
+    let projected_payload: ResolverResponse = read_json(projected_response).await?;
+    assert_eq!(
+        projected_payload.data,
+        json!({
+            "chain_id": chain_id,
+            "resolver_address": dynamic_resolver_address,
+        })
+    );
+    assert_eq!(
+        projected_payload
+            .declared_state
+            .pointer("/bindings/status"),
+        Some(&json!("supported"))
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn get_resolver_overview_summarizes_basenames_permissions_current_projection() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let logical_name_id = "basenames:alice.base.eth";
