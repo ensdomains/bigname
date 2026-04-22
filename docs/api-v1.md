@@ -149,6 +149,8 @@ Use this object for `declared_state.resolver` on `GET /v1/names/{namespace}/{nam
 
 For ENSv1 and Basenames, this exact-name resolver summary is topology only. It does not prove that resolver-local record, cache, or resolver-overview facts have been indexed; those facts require the resolver address to be direct manifest-admitted or discovery-admitted into the relevant resolver source family and admitted as a supported resolver profile for the relevant record family (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L12 @ ens_v1@91c966f) (upstream: .refs/basenames/src/L2/Registry.sol:L132 @ basenames@1809bbc).
 
+For ENSv1 discovered resolver targets, the first supported dynamic profile is PublicResolver-compatible only. A resolver target whose contract instance is admitted for watching but whose profile state is `pending` or `unsupported` stays topology-only in this summary and must not make record inventory, record cache, or resolver overview appear supported. PublicResolver compatibility is anchored to the upstream PublicResolver profile mixins, ERC165 support, and ResolverBase record-versioning (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L20 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L31 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L131 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L150 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/ResolverBase.sol:L17 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/ResolverBase.sol:L23 @ ens_v1@91c966f).
+
 ### `HistoryPointer`
 
 - `normalized_event_id`
@@ -269,6 +271,7 @@ Rules:
 - `unsupported_families` is sorted by `record_family` ascending
 - this object may be authoritative for exact lookup while `enumeration_basis.globally_enumerable` remains `false`
 - for ENSv1 and Basenames, resolver-local selector and cache facts may be populated only from the current resolver after direct manifest admission or resolver discovery admission plus supported resolver-profile admission for the relevant record family; an unadmitted or unsupported-profile current resolver must surface explicit gaps such as `gap_reason="not_observed_on_current_resolver"` and unsupported families such as `unsupported_reason="resolver_family_pending"` rather than silently appearing complete (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L12 @ ens_v1@91c966f) (upstream: .refs/basenames/src/L2/Registry.sol:L132 @ basenames@1809bbc)
+- for ENSv1 discovered resolvers, `unsupported_reason="resolver_family_pending"` is the required route-visible state for a watched resolver whose PublicResolver-compatible profile state is still `pending`; `unsupported` profile state must remain explicit unsupported state until a later doc-first profile admission supports that resolver family (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L20 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L31 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/ResolverBase.sol:L17 @ ens_v1@91c966f)
 
 ### `ResolutionRecordCacheEntry`
 
@@ -784,6 +787,7 @@ Rules:
 - supported `declared_state.aliases` ships in the initial resolver-overview contract and reuses the same `{status, count, items}` summary envelope as `bindings`, but `items` is only the current `binding_kind=resolver_alias_path` subset of those same resolver-linked bindings
 - `declared_state.aliases` is sourced from current resolver-linked bindings only; it does not enumerate historical alias rows or create a second alias ledger
 - when no current alias binding exists for the target resolver, `declared_state.aliases` returns `{status:"supported", count:0, items:[]}`
+- for ENSv1, supported resolver overview over a dynamically discovered target requires that target's resolver-profile state be PublicResolver-compatible and `supported` for the requested summary family; a watched resolver with `pending` or `unsupported` profile state returns explicit `UnsupportedSummary` sections rather than zero-count supported summaries (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L20 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L31 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L131 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L150 @ ens_v1@91c966f)
 - counts for nodes, aliases, and role holders live inside those declared summaries rather than as a separate truth system
 - any other declared summary that is not yet projected returns `UnsupportedSummary`
 
@@ -930,6 +934,7 @@ Rules:
 - `record_inventory` defines the known record-selector space, explicit gaps, and the current version boundary for the requested surface; it does not imply global record enumeration
 - `record_cache` is the declared last-known-value view over that same selector space and version boundary; it never implies that verified execution was run
 - for ENSv1 and Basenames, a current resolver target in `topology.resolver_path` is not enough to claim complete `record_inventory`, `record_cache`, or resolver-overview support; resolver-local declared facts require direct manifest admission or resolver discovery admission into the relevant resolver source family plus supported resolver-profile admission for the relevant record family (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L12 @ ens_v1@91c966f) (upstream: .refs/basenames/src/L2/Registry.sol:L132 @ basenames@1809bbc)
+- for ENSv1, the supported discovered-resolver profile is PublicResolver-compatible only; unknown dynamic resolvers remain watched topology targets with explicit `pending` or `unsupported` profile state and cannot produce supported record or resolver-overview sections (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L20 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L31 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/ResolverBase.sol:L17 @ ens_v1@91c966f)
 - `topology.version_boundaries.record_version_boundary` must equal `record_inventory.record_version_boundary` and `record_cache.record_version_boundary` when those sections are supported together
 - selector-level declared cache results live in `record_cache.entries`
 - `record_cache.entries[*]` and `verified_queries[*]` always echo the applicable `record_key`, even when the selector status is not `success`
