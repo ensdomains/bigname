@@ -747,7 +747,7 @@ async fn get_resource_history_returns_chain_position_desc_ordering() -> Result<(
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri(&format!("/v1/history/resources/{resource_id}"))
+                .uri(format!("/v1/history/resources/{resource_id}"))
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -789,7 +789,7 @@ async fn get_resource_history_returns_chain_position_desc_ordering() -> Result<(
     let first_page_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri(&format!("/v1/history/resources/{resource_id}?page_size=1"))
+                .uri(format!("/v1/history/resources/{resource_id}?page_size=1"))
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -806,7 +806,7 @@ async fn get_resource_history_returns_chain_position_desc_ordering() -> Result<(
     let second_page_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri(&format!(
+                .uri(format!(
                     "/v1/history/resources/{resource_id}?page_size=1&cursor={cursor}"
                 ))
                 .body(Body::empty())
@@ -820,7 +820,7 @@ async fn get_resource_history_returns_chain_position_desc_ordering() -> Result<(
     let replay_page_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri(&format!(
+                .uri(format!(
                     "/v1/history/resources/{resource_id}?page_size=1&cursor={cursor}"
                 ))
                 .body(Body::empty())
@@ -962,9 +962,7 @@ async fn get_resource_history_honors_scope_query_parameter() -> Result<()> {
     let surface_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri(&format!(
-                    "/v1/history/resources/{resource_id}?scope=surface"
-                ))
+                .uri(format!("/v1/history/resources/{resource_id}?scope=surface"))
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -979,7 +977,7 @@ async fn get_resource_history_honors_scope_query_parameter() -> Result<()> {
     let resource_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri(&format!(
+                .uri(format!(
                     "/v1/history/resources/{resource_id}?scope=resource"
                 ))
                 .body(Body::empty())
@@ -996,7 +994,7 @@ async fn get_resource_history_honors_scope_query_parameter() -> Result<()> {
     let both_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri(&format!("/v1/history/resources/{resource_id}?scope=both"))
+                .uri(format!("/v1/history/resources/{resource_id}?scope=both"))
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -1118,9 +1116,7 @@ async fn get_resource_history_surface_scope_preserves_multiple_bound_surfaces() 
     let surface_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri(&format!(
-                    "/v1/history/resources/{resource_id}?scope=surface"
-                ))
+                .uri(format!("/v1/history/resources/{resource_id}?scope=surface"))
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -1135,7 +1131,7 @@ async fn get_resource_history_surface_scope_preserves_multiple_bound_surfaces() 
     let both_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri(&format!("/v1/history/resources/{resource_id}?scope=both"))
+                .uri(format!("/v1/history/resources/{resource_id}?scope=both"))
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -1352,18 +1348,18 @@ async fn get_address_history_composes_current_and_historical_matches() -> Result
                 Some(0),
                 CanonicalityState::Canonical,
             ),
-            authority_history_event(
-                "historical-match",
-                "ens",
-                "ens:historical.eth",
-                historical_resource_id,
-                "RegistrationGranted",
-                541,
-                "0x541",
-                json!({
+            authority_history_event(AuthorityHistorySeed {
+                event_identity: "historical-match",
+                namespace: "ens",
+                logical_name_id: "ens:historical.eth",
+                resource_id: historical_resource_id,
+                event_kind: "RegistrationGranted",
+                block_number: 541,
+                block_hash: "0x541",
+                after_state: json!({
                     "registrant": "0x0000000000000000000000000000000000000ABC",
                 }),
-            ),
+            }),
             history_event(
                 "filtered-basenames",
                 Some("basenames:filtered.base.eth"),
@@ -1476,6 +1472,7 @@ async fn get_address_history_composes_current_and_historical_matches() -> Result
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn ensv2_history_event(
     event_identity: &str,
     logical_name_id: Option<&str>,
@@ -2051,7 +2048,7 @@ async fn get_ensv2_history_routes_read_back_canonical_rows_and_address_filters()
     let resource_both_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri(&format!("/v1/history/resources/{current_resource_id}"))
+                .uri(format!("/v1/history/resources/{current_resource_id}"))
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -2067,7 +2064,7 @@ async fn get_ensv2_history_routes_read_back_canonical_rows_and_address_filters()
     let resource_surface_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri(&format!(
+                .uri(format!(
                     "/v1/history/resources/{current_resource_id}?scope=surface"
                 ))
                 .body(Body::empty())
@@ -2085,7 +2082,7 @@ async fn get_ensv2_history_routes_read_back_canonical_rows_and_address_filters()
     let resource_resource_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri(&format!(
+                .uri(format!(
                     "/v1/history/resources/{current_resource_id}?scope=resource"
                 ))
                 .body(Body::empty())
@@ -2285,7 +2282,7 @@ async fn get_ensv2_history_routes_read_back_canonical_rows_and_address_filters()
     let missing_resource_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri(&format!("/v1/history/resources/{missing_resource_id}"))
+                .uri(format!("/v1/history/resources/{missing_resource_id}"))
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -2501,18 +2498,18 @@ async fn get_basenames_history_routes_read_back_canonical_rows() -> Result<()> {
                 namespace: "basenames".to_owned(),
                 source_family: "basenames_base_registry".to_owned(),
                 chain_id: Some("base-mainnet".to_owned()),
-                ..authority_history_event(
-                    "historical-match",
-                    "basenames",
-                    historical_logical_name_id,
-                    historical_resource_id,
-                    "RegistrationGranted",
-                    641,
-                    "0xb641",
-                    json!({
+                ..authority_history_event(AuthorityHistorySeed {
+                    event_identity: "historical-match",
+                    namespace: "basenames",
+                    logical_name_id: historical_logical_name_id,
+                    resource_id: historical_resource_id,
+                    event_kind: "RegistrationGranted",
+                    block_number: 641,
+                    block_hash: "0xb641",
+                    after_state: json!({
                         "registrant": "0x0000000000000000000000000000000000000B0B",
                     }),
-                )
+                })
             },
         ],
     )
@@ -2553,7 +2550,7 @@ async fn get_basenames_history_routes_read_back_canonical_rows() -> Result<()> {
     let resource_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri(&format!("/v1/history/resources/{current_resource_id}"))
+                .uri(format!("/v1/history/resources/{current_resource_id}"))
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -2773,18 +2770,18 @@ async fn get_address_history_honors_scope_and_relation_filters() -> Result<()> {
                 Some(0),
                 CanonicalityState::Canonical,
             ),
-            authority_history_event(
-                "historical-controller-match",
-                "ens",
-                "ens:historical-controller.eth",
-                controller_resource_id,
-                "AuthorityTransferred",
-                551,
-                "0x551",
-                json!({
+            authority_history_event(AuthorityHistorySeed {
+                event_identity: "historical-controller-match",
+                namespace: "ens",
+                logical_name_id: "ens:historical-controller.eth",
+                resource_id: controller_resource_id,
+                event_kind: "AuthorityTransferred",
+                block_number: 551,
+                block_hash: "0x551",
+                after_state: json!({
                     "owner": "0x0000000000000000000000000000000000000DEF",
                 }),
-            ),
+            }),
         ],
     )
     .await?;
@@ -2866,7 +2863,7 @@ async fn get_resource_history_returns_not_found_when_anchor_is_missing() -> Resu
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri(&format!("/v1/history/resources/{resource_id}"))
+                .uri(format!("/v1/history/resources/{resource_id}"))
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -2923,7 +2920,7 @@ async fn get_resource_permissions_returns_declared_state_collection() -> Result<
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri(&format!("/v1/resources/{resource_id}/permissions"))
+                .uri(format!("/v1/resources/{resource_id}/permissions"))
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -3043,7 +3040,7 @@ async fn get_resource_permissions_returns_declared_state_collection() -> Result<
     let first_page_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri(&format!(
+                .uri(format!(
                     "/v1/resources/{resource_id}/permissions?page_size=1"
                 ))
                 .body(Body::empty())
@@ -3062,7 +3059,7 @@ async fn get_resource_permissions_returns_declared_state_collection() -> Result<
     let second_page_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri(&format!(
+                .uri(format!(
                     "/v1/resources/{resource_id}/permissions?page_size=1&cursor={cursor}"
                 ))
                 .body(Body::empty())
@@ -3076,7 +3073,7 @@ async fn get_resource_permissions_returns_declared_state_collection() -> Result<
     let replay_page_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri(&format!(
+                .uri(format!(
                     "/v1/resources/{resource_id}/permissions?page_size=1&cursor={cursor}"
                 ))
                 .body(Body::empty())
@@ -3177,7 +3174,7 @@ async fn get_resource_permissions_honors_subject_and_scope_filters() -> Result<(
     let subject_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri(&format!(
+                .uri(format!(
                     "/v1/resources/{resource_id}/permissions?subject={shared_subject}"
                 ))
                 .body(Body::empty())
@@ -3200,7 +3197,7 @@ async fn get_resource_permissions_honors_subject_and_scope_filters() -> Result<(
     let scope_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri(&format!(
+                .uri(format!(
                     "/v1/resources/{resource_id}/permissions?scope={resolver_scope_filter}"
                 ))
                 .body(Body::empty())
@@ -3233,7 +3230,7 @@ async fn get_resource_permissions_honors_subject_and_scope_filters() -> Result<(
     let combined_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri(&format!(
+                .uri(format!(
                     "/v1/resources/{resource_id}/permissions?subject={shared_subject}&scope={resolver_scope_filter}"
                 ))
                 .body(Body::empty())

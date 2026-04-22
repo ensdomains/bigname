@@ -48,7 +48,7 @@ fn build_address_names_response(
         data,
         declared_state: empty_object(),
         verified_state: None,
-        provenance: build_address_names_provenance(&entries, &supplement),
+        provenance: build_address_names_provenance(entries, &supplement),
         coverage: CoverageResponse {
             status: "full".to_owned(),
             exhaustiveness: "authoritative".to_owned(),
@@ -528,4 +528,3 @@ fn build_address_name_role_summary(rows: &[PermissionsCurrentRow]) -> JsonValue 
             .collect::<Vec<_>>(),
     })
 }
-

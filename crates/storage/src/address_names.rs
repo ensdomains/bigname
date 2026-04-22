@@ -907,30 +907,32 @@ mod tests {
         Ok(())
     }
 
-    fn address_name_current_row(
-        address: &str,
-        logical_name_id: &str,
-        display_name: &str,
+    struct AddressNameCurrentRowSeed<'a> {
+        address: &'a str,
+        logical_name_id: &'a str,
+        display_name: &'a str,
         relation: AddressNameRelation,
         surface_binding_id: Uuid,
         resource_id: Uuid,
         token_lineage_id: Option<Uuid>,
         manifest_version: i64,
-    ) -> AddressNameCurrentRow {
+    }
+
+    fn address_name_current_row(seed: AddressNameCurrentRowSeed<'_>) -> AddressNameCurrentRow {
         AddressNameCurrentRow {
-            address: address.to_owned(),
-            logical_name_id: logical_name_id.to_owned(),
-            relation,
+            address: seed.address.to_owned(),
+            logical_name_id: seed.logical_name_id.to_owned(),
+            relation: seed.relation,
             namespace: "ens".to_owned(),
-            canonical_display_name: display_name.to_owned(),
-            normalized_name: display_name.to_owned(),
-            namehash: format!("namehash:{display_name}"),
-            surface_binding_id,
-            resource_id,
-            token_lineage_id,
+            canonical_display_name: seed.display_name.to_owned(),
+            normalized_name: seed.display_name.to_owned(),
+            namehash: format!("namehash:{}", seed.display_name),
+            surface_binding_id: seed.surface_binding_id,
+            resource_id: seed.resource_id,
+            token_lineage_id: seed.token_lineage_id,
             binding_kind: SurfaceBindingKind::DeclaredRegistryPath,
             provenance: json!({
-                "normalized_event_ids": [manifest_version],
+                "normalized_event_ids": [seed.manifest_version],
                 "derivation_kind": "address_names_current_rebuild"
             }),
             coverage: json!({
@@ -942,7 +944,7 @@ mod tests {
                 "ethereum": {
                     "chain_id": "ethereum-mainnet",
                     "block_number": 21_100_003,
-                    "block_hash": format!("0xbinding{}", surface_binding_id.simple()),
+                    "block_hash": format!("0xbinding{}", seed.surface_binding_id.simple()),
                     "timestamp": "2026-04-17T00:00:03Z"
                 }
             }),
@@ -952,8 +954,8 @@ mod tests {
                     "ethereum-mainnet": "finalized"
                 }
             }),
-            manifest_version,
-            last_recomputed_at: timestamp(1_717_171_717 + manifest_version),
+            manifest_version: seed.manifest_version,
+            last_recomputed_at: timestamp(1_717_171_717 + seed.manifest_version),
         }
     }
 
@@ -977,16 +979,16 @@ mod tests {
         )
         .await?;
 
-        let first = address_name_current_row(
+        let first = address_name_current_row(AddressNameCurrentRowSeed {
             address,
             logical_name_id,
-            "alice.eth",
-            AddressNameRelation::Registrant,
+            display_name: "alice.eth",
+            relation: AddressNameRelation::Registrant,
             surface_binding_id,
             resource_id,
-            Some(token_lineage_id),
-            1,
-        );
+            token_lineage_id: Some(token_lineage_id),
+            manifest_version: 1,
+        });
         upsert_address_names_current_rows(database.pool(), std::slice::from_ref(&first)).await?;
 
         let mut replacement = first.clone();
@@ -1043,26 +1045,26 @@ mod tests {
         )
         .await?;
 
-        let canonical = address_name_current_row(
+        let canonical = address_name_current_row(AddressNameCurrentRowSeed {
             address,
-            canonical_logical_name_id,
-            "alice.eth",
-            AddressNameRelation::Registrant,
-            canonical_surface_binding_id,
-            canonical_resource_id,
-            Some(canonical_token_lineage_id),
-            1,
-        );
-        let noncanonical = address_name_current_row(
+            logical_name_id: canonical_logical_name_id,
+            display_name: "alice.eth",
+            relation: AddressNameRelation::Registrant,
+            surface_binding_id: canonical_surface_binding_id,
+            resource_id: canonical_resource_id,
+            token_lineage_id: Some(canonical_token_lineage_id),
+            manifest_version: 1,
+        });
+        let noncanonical = address_name_current_row(AddressNameCurrentRowSeed {
             address,
-            noncanonical_logical_name_id,
-            "bob.eth",
-            AddressNameRelation::TokenHolder,
-            noncanonical_surface_binding_id,
-            noncanonical_resource_id,
-            Some(noncanonical_token_lineage_id),
-            1,
-        );
+            logical_name_id: noncanonical_logical_name_id,
+            display_name: "bob.eth",
+            relation: AddressNameRelation::TokenHolder,
+            surface_binding_id: noncanonical_surface_binding_id,
+            resource_id: noncanonical_resource_id,
+            token_lineage_id: Some(noncanonical_token_lineage_id),
+            manifest_version: 1,
+        });
         upsert_address_names_current_rows(
             database.pool(),
             &[canonical.clone(), noncanonical.clone()],
@@ -1108,46 +1110,46 @@ mod tests {
         )
         .await?;
 
-        let bob = address_name_current_row(
+        let bob = address_name_current_row(AddressNameCurrentRowSeed {
             address,
-            "ens:bob.eth",
-            "bob.eth",
-            AddressNameRelation::TokenHolder,
-            Uuid::from_u128(0x3301),
-            Uuid::from_u128(0x3201),
-            Some(Uuid::from_u128(0x3101)),
-            1,
-        );
-        let alice_controller = address_name_current_row(
+            logical_name_id: "ens:bob.eth",
+            display_name: "bob.eth",
+            relation: AddressNameRelation::TokenHolder,
+            surface_binding_id: Uuid::from_u128(0x3301),
+            resource_id: Uuid::from_u128(0x3201),
+            token_lineage_id: Some(Uuid::from_u128(0x3101)),
+            manifest_version: 1,
+        });
+        let alice_controller = address_name_current_row(AddressNameCurrentRowSeed {
             address,
-            "ens:alice.eth",
-            "alice.eth",
-            AddressNameRelation::EffectiveController,
-            Uuid::from_u128(0x4301),
-            Uuid::from_u128(0x4201),
-            Some(Uuid::from_u128(0x4101)),
-            1,
-        );
-        let alice_registrant = address_name_current_row(
+            logical_name_id: "ens:alice.eth",
+            display_name: "alice.eth",
+            relation: AddressNameRelation::EffectiveController,
+            surface_binding_id: Uuid::from_u128(0x4301),
+            resource_id: Uuid::from_u128(0x4201),
+            token_lineage_id: Some(Uuid::from_u128(0x4101)),
+            manifest_version: 1,
+        });
+        let alice_registrant = address_name_current_row(AddressNameCurrentRowSeed {
             address,
-            "ens:alice.eth",
-            "alice.eth",
-            AddressNameRelation::Registrant,
-            Uuid::from_u128(0x4301),
-            Uuid::from_u128(0x4201),
-            Some(Uuid::from_u128(0x4101)),
-            1,
-        );
-        let alice_token_holder = address_name_current_row(
+            logical_name_id: "ens:alice.eth",
+            display_name: "alice.eth",
+            relation: AddressNameRelation::Registrant,
+            surface_binding_id: Uuid::from_u128(0x4301),
+            resource_id: Uuid::from_u128(0x4201),
+            token_lineage_id: Some(Uuid::from_u128(0x4101)),
+            manifest_version: 1,
+        });
+        let alice_token_holder = address_name_current_row(AddressNameCurrentRowSeed {
             address,
-            "ens:alice.eth",
-            "alice.eth",
-            AddressNameRelation::TokenHolder,
-            Uuid::from_u128(0x4301),
-            Uuid::from_u128(0x4201),
-            Some(Uuid::from_u128(0x4101)),
-            1,
-        );
+            logical_name_id: "ens:alice.eth",
+            display_name: "alice.eth",
+            relation: AddressNameRelation::TokenHolder,
+            surface_binding_id: Uuid::from_u128(0x4301),
+            resource_id: Uuid::from_u128(0x4201),
+            token_lineage_id: Some(Uuid::from_u128(0x4101)),
+            manifest_version: 1,
+        });
         upsert_address_names_current_rows(
             database.pool(),
             &[
@@ -1173,36 +1175,36 @@ mod tests {
         let shared_resource_id = Uuid::from_u128(0x5201);
         let shared_token_lineage_id = Uuid::from_u128(0x5101);
 
-        let alpha_registrant = address_name_current_row(
+        let alpha_registrant = address_name_current_row(AddressNameCurrentRowSeed {
             address,
-            "ens:alpha.eth",
-            "alpha.eth",
-            AddressNameRelation::Registrant,
-            Uuid::from_u128(0x5301),
-            shared_resource_id,
-            Some(shared_token_lineage_id),
-            1,
-        );
-        let alpha_token_holder = address_name_current_row(
+            logical_name_id: "ens:alpha.eth",
+            display_name: "alpha.eth",
+            relation: AddressNameRelation::Registrant,
+            surface_binding_id: Uuid::from_u128(0x5301),
+            resource_id: shared_resource_id,
+            token_lineage_id: Some(shared_token_lineage_id),
+            manifest_version: 1,
+        });
+        let alpha_token_holder = address_name_current_row(AddressNameCurrentRowSeed {
             address,
-            "ens:alpha.eth",
-            "alpha.eth",
-            AddressNameRelation::TokenHolder,
-            Uuid::from_u128(0x5301),
-            shared_resource_id,
-            Some(shared_token_lineage_id),
-            1,
-        );
-        let beta_controller = address_name_current_row(
+            logical_name_id: "ens:alpha.eth",
+            display_name: "alpha.eth",
+            relation: AddressNameRelation::TokenHolder,
+            surface_binding_id: Uuid::from_u128(0x5301),
+            resource_id: shared_resource_id,
+            token_lineage_id: Some(shared_token_lineage_id),
+            manifest_version: 1,
+        });
+        let beta_controller = address_name_current_row(AddressNameCurrentRowSeed {
             address,
-            "ens:beta.eth",
-            "beta.eth",
-            AddressNameRelation::EffectiveController,
-            Uuid::from_u128(0x6301),
-            shared_resource_id,
-            Some(shared_token_lineage_id),
-            1,
-        );
+            logical_name_id: "ens:beta.eth",
+            display_name: "beta.eth",
+            relation: AddressNameRelation::EffectiveController,
+            surface_binding_id: Uuid::from_u128(0x6301),
+            resource_id: shared_resource_id,
+            token_lineage_id: Some(shared_token_lineage_id),
+            manifest_version: 1,
+        });
 
         let surface_entries = collapse_address_name_current_rows(
             &[
@@ -1273,26 +1275,26 @@ mod tests {
         )
         .await?;
 
-        let first = address_name_current_row(
-            first_address,
-            "ens:alice.eth",
-            "alice.eth",
-            AddressNameRelation::Registrant,
-            Uuid::from_u128(0x7301),
-            Uuid::from_u128(0x7201),
-            Some(Uuid::from_u128(0x7101)),
-            1,
-        );
-        let second = address_name_current_row(
-            second_address,
-            "ens:bob.eth",
-            "bob.eth",
-            AddressNameRelation::TokenHolder,
-            Uuid::from_u128(0x8301),
-            Uuid::from_u128(0x8201),
-            Some(Uuid::from_u128(0x8101)),
-            1,
-        );
+        let first = address_name_current_row(AddressNameCurrentRowSeed {
+            address: first_address,
+            logical_name_id: "ens:alice.eth",
+            display_name: "alice.eth",
+            relation: AddressNameRelation::Registrant,
+            surface_binding_id: Uuid::from_u128(0x7301),
+            resource_id: Uuid::from_u128(0x7201),
+            token_lineage_id: Some(Uuid::from_u128(0x7101)),
+            manifest_version: 1,
+        });
+        let second = address_name_current_row(AddressNameCurrentRowSeed {
+            address: second_address,
+            logical_name_id: "ens:bob.eth",
+            display_name: "bob.eth",
+            relation: AddressNameRelation::TokenHolder,
+            surface_binding_id: Uuid::from_u128(0x8301),
+            resource_id: Uuid::from_u128(0x8201),
+            token_lineage_id: Some(Uuid::from_u128(0x8101)),
+            manifest_version: 1,
+        });
         upsert_address_names_current_rows(database.pool(), &[first, second.clone()]).await?;
 
         assert_eq!(

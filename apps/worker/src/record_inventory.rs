@@ -1,7 +1,7 @@
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    str::FromStr,
-};
+use std::collections::{BTreeMap, BTreeSet};
+
+#[cfg(test)]
+use std::str::FromStr;
 
 use anyhow::{Context, Result};
 use bigname_storage::{
@@ -9,9 +9,10 @@ use bigname_storage::{
     upsert_record_inventory_current_rows,
 };
 use serde_json::{Value, json};
+#[cfg(test)]
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{
     PgPool, Row,
-    postgres::{PgConnectOptions, PgPoolOptions},
     types::time::{OffsetDateTime, UtcOffset},
 };
 use uuid::Uuid;
@@ -360,7 +361,7 @@ async fn build_row(
     let entries = build_entries(&selectors);
     let last_change = provenance_events
         .last()
-        .map(|event| build_last_change(event))
+        .map(build_last_change)
         .transpose()?;
 
     Ok(Some(RecordInventoryCurrentRow {
@@ -2722,6 +2723,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn record_changed_event(
         event_identity: &str,
         logical_name_id: &str,
@@ -2840,6 +2842,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn basenames_record_changed_event(
         event_identity: &str,
         logical_name_id: &str,
@@ -2959,6 +2962,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn record_version_boundary(
         logical_name_id: &str,
         resource_id: Uuid,

@@ -190,10 +190,10 @@ fn primary_name_claim_result(lookup_state: &PrimaryNameLookupState) -> JsonValue
                 "status": row.claim_status.as_str(),
                 "provenance": primary_name_claim_provenance(row),
             });
-            if row.claim_status == PrimaryNameClaimStatus::Success {
-                if let Some(normalized_claim_name) = lookup_state.normalized_claim_name.as_deref() {
-                    insert_string_field(&mut result, "name", normalized_claim_name.to_owned());
-                }
+            if row.claim_status == PrimaryNameClaimStatus::Success
+                && let Some(normalized_claim_name) = lookup_state.normalized_claim_name.as_deref()
+            {
+                insert_string_field(&mut result, "name", normalized_claim_name.to_owned());
             }
             if row.claim_status == PrimaryNameClaimStatus::InvalidName {
                 insert_string_field(
@@ -360,16 +360,18 @@ fn primary_name_verified_readback_provenance(
     Ok(provenance)
 }
 
-fn primary_name_route_coverage(namespace: &str, lookup_state: &PrimaryNameLookupState) -> JsonValue {
-    if matches!(lookup_state.tuple_state, PrimaryNameTupleState::TuplePresent(_))
-        && lookup_state.persisted_verified.is_some()
+fn primary_name_route_coverage(
+    namespace: &str,
+    lookup_state: &PrimaryNameLookupState,
+) -> JsonValue {
+    if matches!(
+        lookup_state.tuple_state,
+        PrimaryNameTupleState::TuplePresent(_)
+    ) && lookup_state.persisted_verified.is_some()
     {
         match namespace {
             "ens" => {
-                return primary_name_exact_tuple_coverage(&[
-                    "ens_v1_reverse_l1",
-                    "ens_execution",
-                ]);
+                return primary_name_exact_tuple_coverage(&["ens_v1_reverse_l1", "ens_execution"]);
             }
             "basenames" => {
                 return primary_name_exact_tuple_coverage(&[

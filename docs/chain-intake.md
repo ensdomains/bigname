@@ -75,6 +75,22 @@ Rules:
 - historical state-heavy enrichment and state rewrites require archive-capable upstreams or a separately retained local corpus
 - upstream history retention must be treated as bounded; intake must retain its own raw corpus for deterministic replay and rewrites
 
+### Local Runtime Provider Configuration
+
+The local `bigname-indexer run` command selects one manifest root with
+`BIGNAME_INDEXER_MANIFESTS_ROOT` and reads provider endpoints from
+`BIGNAME_INDEXER_CHAIN_RPC_URLS`. The provider setting is a comma-delimited list
+of `<chain>=<url>` entries, and each chain name must match an active watched
+chain produced by the selected manifest/watch state. The checked-in local
+default selects `manifests`; the ENSv2 Sepolia dev profile is selected by
+setting `BIGNAME_INDEXER_MANIFESTS_ROOT=manifests-sepolia-dev`.
+
+The provider list is an operational input, not a manifest admission rule. An
+unset provider list leaves manifest sync, watch-plan rebuild, and checkpoint row
+creation available, but provider-backed head fetch and live ingestion remain
+idle for every active watched chain. Current bootstrap provider support accepts
+`http://` JSON-RPC endpoints only.
+
 ## 6. Head Model And Recent Window
 
 Per chain, intake tracks these persisted checkpoints:

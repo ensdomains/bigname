@@ -726,16 +726,17 @@ mod tests {
         }
     }
 
-    async fn insert_manifest_version(
-        pool: &PgPool,
+    struct ManifestVersionSeed<'a> {
         manifest_version: i64,
-        namespace: &str,
-        source_family: &str,
-        chain: &str,
-        deployment_epoch: &str,
-        rollout_status: &str,
-        file_path: &str,
-    ) -> Result<i64> {
+        namespace: &'a str,
+        source_family: &'a str,
+        chain: &'a str,
+        deployment_epoch: &'a str,
+        rollout_status: &'a str,
+        file_path: &'a str,
+    }
+
+    async fn insert_manifest_version(pool: &PgPool, seed: ManifestVersionSeed<'_>) -> Result<i64> {
         sqlx::query_scalar(
             r#"
             INSERT INTO manifest_versions (
@@ -763,13 +764,13 @@ mod tests {
             RETURNING manifest_id
             "#,
         )
-        .bind(manifest_version)
-        .bind(namespace)
-        .bind(source_family)
-        .bind(chain)
-        .bind(deployment_epoch)
-        .bind(rollout_status)
-        .bind(file_path)
+        .bind(seed.manifest_version)
+        .bind(seed.namespace)
+        .bind(seed.source_family)
+        .bind(seed.chain)
+        .bind(seed.deployment_epoch)
+        .bind(seed.rollout_status)
+        .bind(seed.file_path)
         .fetch_one(pool)
         .await
         .context("failed to insert manifest version")
@@ -911,24 +912,28 @@ mod tests {
 
         let active_manifest_id = insert_manifest_version(
             database.pool(),
-            1,
-            config.namespace,
-            config.source_family,
-            config.chain,
-            config.deployment_epoch,
-            "active",
-            config.file_path,
+            ManifestVersionSeed {
+                manifest_version: 1,
+                namespace: config.namespace,
+                source_family: config.source_family,
+                chain: config.chain,
+                deployment_epoch: config.deployment_epoch,
+                rollout_status: "active",
+                file_path: config.file_path,
+            },
         )
         .await?;
         let draft_manifest_id = insert_manifest_version(
             database.pool(),
-            2,
-            config.namespace,
-            config.source_family,
-            config.chain,
-            config.deployment_epoch,
-            "draft",
-            "manifests/test/draft.toml",
+            ManifestVersionSeed {
+                manifest_version: 2,
+                namespace: config.namespace,
+                source_family: config.source_family,
+                chain: config.chain,
+                deployment_epoch: config.deployment_epoch,
+                rollout_status: "draft",
+                file_path: "manifests/test/draft.toml",
+            },
         )
         .await?;
         let active_contract_instance_id = Uuid::new_v4();
@@ -1077,13 +1082,15 @@ mod tests {
 
         let manifest_id = insert_manifest_version(
             database.pool(),
-            1,
-            config.namespace,
-            config.source_family,
-            config.chain,
-            config.deployment_epoch,
-            "active",
-            config.file_path,
+            ManifestVersionSeed {
+                manifest_version: 1,
+                namespace: config.namespace,
+                source_family: config.source_family,
+                chain: config.chain,
+                deployment_epoch: config.deployment_epoch,
+                rollout_status: "active",
+                file_path: config.file_path,
+            },
         )
         .await?;
         let contract_instance_id = Uuid::new_v4();

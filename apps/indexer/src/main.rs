@@ -18,10 +18,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use backfill::{BackfillBlockRange, BackfillJobRunConfig, run_resumable_hash_pinned_backfill_job};
+#[cfg(test)]
 use bigname_manifests::{
     ManifestLoadStatus, ManifestLoadSummary, ManifestSyncStatus, ManifestSyncSummary,
-    WatchedChainPlan, WatchedSourceSelector, WatchedTargetIdentity, load_watched_chain_plan,
-    load_watched_contract_summary, load_watched_source_selector_plan,
+    WatchedChainPlan, load_watched_chain_plan, load_watched_contract_summary,
+};
+use bigname_manifests::{
+    WatchedSourceSelector, WatchedTargetIdentity, load_watched_source_selector_plan,
 };
 #[allow(unused_imports)]
 use bigname_storage::{

@@ -1188,20 +1188,18 @@ pub(crate) fn raw_payload_candidate_hashes(
         hashes.insert(block.block_hash.clone());
     }
 
-    if head_change_set.safe_head_changed
-        || canonical.status == CanonicalReconciliationStatus::Initialized
+    if (head_change_set.safe_head_changed
+        || canonical.status == CanonicalReconciliationStatus::Initialized)
+        && let Some(safe) = &heads.safe
     {
-        if let Some(safe) = &heads.safe {
-            hashes.insert(safe.block_hash.clone());
-        }
+        hashes.insert(safe.block_hash.clone());
     }
 
-    if head_change_set.finalized_head_changed
-        || canonical.status == CanonicalReconciliationStatus::Initialized
+    if (head_change_set.finalized_head_changed
+        || canonical.status == CanonicalReconciliationStatus::Initialized)
+        && let Some(finalized) = &heads.finalized
     {
-        if let Some(finalized) = &heads.finalized {
-            hashes.insert(finalized.block_hash.clone());
-        }
+        hashes.insert(finalized.block_hash.clone());
     }
 
     hashes.into_iter().collect()
@@ -1455,7 +1453,7 @@ pub(crate) fn keccak256_hex(bytes: &[u8]) -> String {
 
 pub(crate) fn parse_hex_bytes(value: &str) -> Result<Vec<u8>> {
     let value = value.strip_prefix("0x").unwrap_or(value);
-    if value.len() % 2 != 0 {
+    if !value.len().is_multiple_of(2) {
         bail!("invalid hex byte string with odd length");
     }
 

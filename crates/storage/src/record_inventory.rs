@@ -445,13 +445,13 @@ fn validate_selector_array(value: &Value, resource_id: Uuid) -> Result<BTreeSet<
             resource_id,
             SelectorFieldExpectation::CacheableOnly,
         )?;
-        if let Some(previous_record_key) = previous_record_key {
-            if record_key <= previous_record_key {
-                bail!(
-                    "record_inventory_current row for resource_id {} selectors must be sorted by record_key ascending",
-                    resource_id
-                );
-            }
+        if let Some(previous_record_key) = previous_record_key
+            && record_key <= previous_record_key
+        {
+            bail!(
+                "record_inventory_current row for resource_id {} selectors must be sorted by record_key ascending",
+                resource_id
+            );
         }
         if required_bool_field(object, "cacheable", "selector entry")? {
             cacheable_record_keys.insert(record_key.to_owned());
@@ -485,13 +485,13 @@ fn validate_explicit_gap_array(value: &Value, resource_id: Uuid) -> Result<()> {
             resource_id,
             SelectorFieldExpectation::GapReasonOnly,
         )?;
-        if let Some(previous_record_key) = previous_record_key {
-            if record_key <= previous_record_key {
-                bail!(
-                    "record_inventory_current row for resource_id {} explicit_gaps must be sorted by record_key ascending",
-                    resource_id
-                );
-            }
+        if let Some(previous_record_key) = previous_record_key
+            && record_key <= previous_record_key
+        {
+            bail!(
+                "record_inventory_current row for resource_id {} explicit_gaps must be sorted by record_key ascending",
+                resource_id
+            );
         }
         previous_record_key = Some(record_key);
     }
@@ -525,13 +525,13 @@ fn validate_unsupported_families(value: &Value, resource_id: Uuid) -> Result<()>
             "unsupported_reason",
             "record_inventory_current unsupported_families entry",
         )?;
-        if let Some(previous_record_family) = previous_record_family {
-            if record_family <= previous_record_family {
-                bail!(
-                    "record_inventory_current row for resource_id {} unsupported_families must be sorted by record_family ascending",
-                    resource_id
-                );
-            }
+        if let Some(previous_record_family) = previous_record_family
+            && record_family <= previous_record_family
+        {
+            bail!(
+                "record_inventory_current row for resource_id {} unsupported_families must be sorted by record_family ascending",
+                resource_id
+            );
         }
         previous_record_family = Some(record_family);
     }
@@ -813,14 +813,14 @@ fn decode_record_version_boundary(
         "record_version_boundary",
     )?)
     .context("record_version_boundary resource_id must be a UUID")?;
-    if let Some(expected_resource_id) = expected_resource_id {
-        if resource_id != expected_resource_id {
-            bail!(
-                "record_version_boundary resource_id {} does not match storage key resource_id {}",
-                resource_id,
-                expected_resource_id
-            );
-        }
+    if let Some(expected_resource_id) = expected_resource_id
+        && resource_id != expected_resource_id
+    {
+        bail!(
+            "record_version_boundary resource_id {} does not match storage key resource_id {}",
+            resource_id,
+            expected_resource_id
+        );
     }
 
     let normalized_event_id = match object.get("normalized_event_id") {

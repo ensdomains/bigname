@@ -9,11 +9,18 @@ fn build_resolution_declared_state(
     records: &[ResolutionRecordKey],
 ) -> JsonValue {
     let mut declared_state = empty_object();
-    insert_value_field(
-        &mut declared_state,
-        "topology",
-        build_resolution_topology(row, record_inventory_row),
+    let topology = build_resolution_topology(row, record_inventory_row);
+    let mut record_cache = build_record_cache_section(
+        record_inventory_row,
+        records,
+        "declared resolution record cache is not yet projected",
     );
+    if classify_supported_resolution_topology(&row.namespace, &row.logical_name_id, &topology)
+        == Some(SupportedResolutionPathClass::BasenamesTransportDirect)
+    {
+        mark_basenames_transport_direct_unretained_record_cache_values(&mut record_cache);
+    }
+    insert_value_field(&mut declared_state, "topology", topology);
     insert_value_field(
         &mut declared_state,
         "record_inventory",
@@ -22,16 +29,37 @@ fn build_resolution_declared_state(
             "declared resolution record inventory is not yet projected",
         ),
     );
-    insert_value_field(
-        &mut declared_state,
-        "record_cache",
-        build_record_cache_section(
-            record_inventory_row,
-            records,
-            "declared resolution record cache is not yet projected",
-        ),
-    );
+    insert_value_field(&mut declared_state, "record_cache", record_cache);
     declared_state
+}
+
+fn mark_basenames_transport_direct_unretained_record_cache_values(record_cache: &mut JsonValue) {
+    let Some(entries) = record_cache
+        .as_object_mut()
+        .and_then(|object| object.get_mut("entries"))
+        .and_then(JsonValue::as_array_mut)
+    else {
+        return;
+    };
+
+    for entry in entries {
+        let is_missing_numeric_addr = string_field(provenance_field(entry, "status"))
+            .is_some_and(|status| status == "not_found")
+            && string_field(provenance_field(entry, "record_family"))
+                .is_some_and(|family| family == "addr")
+            && string_field(provenance_field(entry, "selector_key"))
+                .is_some_and(|selector| selector.as_bytes().iter().all(u8::is_ascii_digit));
+        if !is_missing_numeric_addr {
+            continue;
+        }
+
+        insert_string_field(entry, "status", "unsupported".to_owned());
+        insert_string_field(
+            entry,
+            "unsupported_reason",
+            "value_not_retained_in_normalized_events".to_owned(),
+        );
+    }
 }
 
 fn build_resolution_verified_state(
@@ -426,10 +454,8 @@ fn build_legacy_resolution_topology(
     row: &NameCurrentRow,
     record_inventory_row: Option<&RecordInventoryCurrentRow>,
 ) -> JsonValue {
-    if !matches!(
-        row.namespace.as_str(),
-        "ens" | BASENAMES_NAMESPACE
-    ) || row.binding_kind != Some(SurfaceBindingKind::DeclaredRegistryPath)
+    if !matches!(row.namespace.as_str(), "ens" | BASENAMES_NAMESPACE)
+        || row.binding_kind != Some(SurfaceBindingKind::DeclaredRegistryPath)
         || row.resource_id.is_none()
     {
         return unsupported_section("declared resolution topology is not yet projected");
@@ -651,14 +677,13 @@ fn build_resolution_execution_cache_key(
 
 fn build_resolution_boundary_chain_position(row: &NameCurrentRow) -> Option<ChainPositionResponse> {
     let chain_positions = row.chain_positions.as_object()?;
-    if row.namespace == BASENAMES_NAMESPACE {
-        if let Some(position) = chain_positions
+    if row.namespace == BASENAMES_NAMESPACE
+        && let Some(position) = chain_positions
             .values()
             .filter_map(chain_position_from_value)
             .find(|position| position.chain_id == BASENAMES_COMPAT_SOURCE_CHAIN_ID)
-        {
-            return Some(position);
-        }
+    {
+        return Some(position);
     }
     chain_positions
         .get("ethereum")
@@ -794,7 +819,10 @@ async fn load_supported_record_inventory_current(
 }
 
 fn record_inventory_lookup_key(row: &NameCurrentRow) -> Option<(Uuid, JsonValue)> {
-    Some((row.resource_id?, build_supported_resolution_declared_boundary(row)?))
+    Some((
+        row.resource_id?,
+        build_supported_resolution_declared_boundary(row)?,
+    ))
 }
 
 fn supports_resolution_verified_lookup_record(record: &ResolutionRecordKey) -> bool {
@@ -847,9 +875,7 @@ fn build_supported_resolution_declared_boundary(row: &NameCurrentRow) -> Option<
             row.binding_kind,
             Some(SurfaceBindingKind::DeclaredRegistryPath | SurfaceBindingKind::ResolverAliasPath)
         ),
-        BASENAMES_NAMESPACE => {
-            row.binding_kind == Some(SurfaceBindingKind::DeclaredRegistryPath)
-        }
+        BASENAMES_NAMESPACE => row.binding_kind == Some(SurfaceBindingKind::DeclaredRegistryPath),
         _ => false,
     };
     if !binding_supported || row.resource_id.is_none() {
@@ -889,7 +915,8 @@ fn resolution_verified_support_boundary(
     }
 
     if let Some(projected_topology) = projected_resolution_topology(&row.declared_summary) {
-        if row.namespace == BASENAMES_NAMESPACE && !row_has_basenames_supported_chain_positions(row) {
+        if row.namespace == BASENAMES_NAMESPACE && !row_has_basenames_supported_chain_positions(row)
+        {
             return None;
         }
         let path_class = classify_supported_resolution_topology(
@@ -916,11 +943,9 @@ fn resolution_verified_support_boundary(
     };
     let record_version_boundary = resolution_record_version_boundary(row, record_inventory_row)
         .or_else(|| Some(topology_version_boundary.clone()))?;
-    let path_class = match row.namespace.as_str() {
-        _ => match row.binding_kind {
-            Some(SurfaceBindingKind::ResolverAliasPath) => SupportedResolutionPathClass::AliasOnly,
-            _ => SupportedResolutionPathClass::Direct,
-        },
+    let path_class = match row.binding_kind {
+        Some(SurfaceBindingKind::ResolverAliasPath) => SupportedResolutionPathClass::AliasOnly,
+        _ => SupportedResolutionPathClass::Direct,
     };
 
     Some(ResolutionVerifiedSupportBoundary {
@@ -951,7 +976,9 @@ fn classify_supported_resolution_topology(
                 .filter(|_| resolver_logical_name_id == logical_name_id)
                 .filter(|_| !alias_present)
                 .filter(|_| wildcard_source_logical_name_id.is_none())
-                .filter(|_| resolution_topology_transport_matches_basenames_supported_class(topology))
+                .filter(|_| {
+                    resolution_topology_transport_matches_basenames_supported_class(topology)
+                })
                 .map(|_| SupportedResolutionPathClass::BasenamesTransportDirect);
         }
         return None;
@@ -1195,15 +1222,14 @@ async fn find_supported_record_inventory_boundary(
         return Ok(None);
     };
     let second_boundary = boundaries.get(1);
-    if let Some(second_boundary) = second_boundary {
-        if !(record_version_boundary_has_pointer(&first_boundary)
-            && !record_version_boundary_has_pointer(second_boundary))
-        {
-            anyhow::bail!(
-                "supported record_inventory_current lookup for resource_id {} found multiple projection rows for the same boundary anchor",
-                resource_id
-            );
-        }
+    if let Some(second_boundary) = second_boundary
+        && (!record_version_boundary_has_pointer(&first_boundary)
+            || record_version_boundary_has_pointer(second_boundary))
+    {
+        anyhow::bail!(
+            "supported record_inventory_current lookup for resource_id {} found multiple projection rows for the same boundary anchor",
+            resource_id
+        );
     }
 
     Ok(Some(first_boundary))

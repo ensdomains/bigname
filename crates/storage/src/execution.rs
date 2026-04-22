@@ -1367,7 +1367,7 @@ fn decode_manifest_versions(value: &Value, request_key: &str) -> Result<Vec<Mani
         manifest_versions.push(manifest_version);
     }
 
-    manifest_versions.sort_by(|left, right| left.identity_key().cmp(&right.identity_key()));
+    manifest_versions.sort_by_key(|version| version.identity_key());
     Ok(manifest_versions)
 }
 

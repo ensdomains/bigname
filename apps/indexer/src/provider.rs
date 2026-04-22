@@ -99,6 +99,7 @@ pub struct ProviderLog {
     pub data: String,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProviderBlockTag {
     Latest,
@@ -116,6 +117,7 @@ impl ProviderBlockTag {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProviderBlockSelection {
     Number(i64),
@@ -945,7 +947,7 @@ fn parse_hex_i64(value: &str) -> Result<i64> {
 
 fn parse_hex_bytes(value: &str) -> Result<Vec<u8>> {
     let value = value.strip_prefix("0x").unwrap_or(value);
-    if value.len() % 2 != 0 {
+    if !value.len().is_multiple_of(2) {
         bail!("invalid hex byte string with odd length");
     }
 
@@ -1682,7 +1684,7 @@ mod tests {
                 .and_then(Value::as_array)
                 .cloned()
                 .unwrap_or_default();
-            let response = match method {
+            match method {
                 "eth_getBlockByHash" => {
                     assert_eq!(params.get(1), Some(&Value::Bool(true)));
                     json!({
@@ -1776,9 +1778,7 @@ mod tests {
                     })
                 }
                 _ => panic!("unexpected RPC request: {body}"),
-            };
-
-            response
+            }
         }))
         .await?;
         let provider = JsonRpcProvider::new(&url)?;
@@ -2000,28 +2000,27 @@ mod tests {
                         }
                         buffer.extend_from_slice(&chunk[..read]);
 
-                        if header_end.is_none() {
-                            if let Some(index) = find_header_end(&buffer) {
-                                header_end = Some(index);
-                                content_length =
-                                    parse_content_length(&buffer[..index]).unwrap_or(0);
-                            }
+                        if header_end.is_none()
+                            && let Some(index) = find_header_end(&buffer)
+                        {
+                            header_end = Some(index);
+                            content_length = parse_content_length(&buffer[..index]).unwrap_or(0);
                         }
 
-                        if let Some(index) = header_end {
-                            if buffer.len() >= index + 4 + content_length {
-                                let body = &buffer[index + 4..index + 4 + content_length];
-                                let request_body = serde_json::from_slice::<Value>(body).unwrap();
-                                let response_body = handler(request_body).to_string();
-                                let response = format!(
-                                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-                                    response_body.len(),
-                                    response_body
-                                );
-                                let _ = stream.write_all(response.as_bytes()).await;
-                                let _ = stream.shutdown().await;
-                                return;
-                            }
+                        if let Some(index) = header_end
+                            && buffer.len() >= index + 4 + content_length
+                        {
+                            let body = &buffer[index + 4..index + 4 + content_length];
+                            let request_body = serde_json::from_slice::<Value>(body).unwrap();
+                            let response_body = handler(request_body).to_string();
+                            let response = format!(
+                                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                                response_body.len(),
+                                response_body
+                            );
+                            let _ = stream.write_all(response.as_bytes()).await;
+                            let _ = stream.shutdown().await;
+                            return;
                         }
                     }
                 });

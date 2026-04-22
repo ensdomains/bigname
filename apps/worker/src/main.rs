@@ -142,6 +142,7 @@ enum ChildrenCurrentCommand {
 }
 
 #[derive(Subcommand, Debug)]
+#[allow(clippy::enum_variant_names)]
 enum ExecutionCommand {
     InvalidateVerifiedResolutionManifest(InvalidateVerifiedResolutionManifestArgs),
     InvalidateVerifiedResolutionTopologyBoundary(InvalidateVerifiedResolutionBoundaryArgs),

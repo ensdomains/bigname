@@ -1,7 +1,7 @@
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    str::FromStr,
-};
+use std::collections::{BTreeMap, BTreeSet};
+
+#[cfg(test)]
+use std::str::FromStr;
 
 use anyhow::{Context, Result, bail};
 use bigname_storage::{
@@ -10,11 +10,9 @@ use bigname_storage::{
     load_surface_bindings_by_logical_name_id, upsert_name_current_rows,
 };
 use serde_json::{Value, json};
-use sqlx::{
-    PgPool, Row,
-    postgres::{PgConnectOptions, PgPoolOptions},
-    types::time::OffsetDateTime,
-};
+#[cfg(test)]
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+use sqlx::{PgPool, Row, types::time::OffsetDateTime};
 use uuid::Uuid;
 
 const ENS_NAMESPACE: &str = "ens";
@@ -25,6 +23,7 @@ const ENS_V2_REGISTRAR_DERIVATION_KIND: &str = "ens_v2_registrar";
 const SOURCE_FAMILY_ENS_V2_REGISTRY_L1: &str = "ens_v2_registry_l1";
 const SOURCE_FAMILY_ENS_V2_REGISTRAR_L1: &str = "ens_v2_registrar_l1";
 const SELECTED_ENS_V2_EXACT_NAME_DEPLOYMENT_EPOCH: &str = "ens_v2_sepolia_dev";
+#[cfg(test)]
 const EXACT_NAME_PROFILE_CAPABILITY: &str = "exact_name_profile";
 const CAPABILITY_STATUS_SUPPORTED: &str = "supported";
 const MANIFEST_ROLLOUT_STATUS_ACTIVE: &str = "active";
@@ -3599,6 +3598,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn authority_event(
         binding: &IdentityBinding,
         identity_suffix: &str,
@@ -3638,6 +3638,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn ens_v2_registry_event(
         binding: &IdentityBinding,
         identity_suffix: &str,
@@ -3677,6 +3678,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn ens_v2_registrar_event(
         binding: &IdentityBinding,
         identity_suffix: &str,
@@ -3809,6 +3811,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn basenames_authority_event(
         binding: &IdentityBinding,
         identity_suffix: &str,

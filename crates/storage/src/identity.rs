@@ -483,14 +483,18 @@ async fn upsert_token_lineage(
     ensure_token_lineage_identity_matches(&existing, token_lineage)?;
     let next_observation = merge_stable_row_observation(
         existing.canonicality_state,
-        &existing.chain_id,
-        &existing.block_hash,
-        existing.block_number,
-        &existing.provenance,
-        &token_lineage.chain_id,
-        &token_lineage.block_hash,
-        token_lineage.block_number,
-        &token_lineage.provenance,
+        StableObservationInput {
+            chain_id: &existing.chain_id,
+            block_hash: &existing.block_hash,
+            block_number: existing.block_number,
+            provenance: &existing.provenance,
+        },
+        StableObservationInput {
+            chain_id: &token_lineage.chain_id,
+            block_hash: &token_lineage.block_hash,
+            block_number: token_lineage.block_number,
+            provenance: &token_lineage.provenance,
+        },
     )
     .with_context(|| {
         format!(
@@ -599,14 +603,18 @@ async fn upsert_resource(
         merge_token_lineage_anchor(existing.token_lineage_id, resource.token_lineage_id)?;
     let next_observation = merge_stable_row_observation(
         existing.canonicality_state,
-        &existing.chain_id,
-        &existing.block_hash,
-        existing.block_number,
-        &existing.provenance,
-        &resource.chain_id,
-        &resource.block_hash,
-        resource.block_number,
-        &resource.provenance,
+        StableObservationInput {
+            chain_id: &existing.chain_id,
+            block_hash: &existing.block_hash,
+            block_number: existing.block_number,
+            provenance: &existing.provenance,
+        },
+        StableObservationInput {
+            chain_id: &resource.chain_id,
+            block_hash: &resource.block_hash,
+            block_number: resource.block_number,
+            provenance: &resource.provenance,
+        },
     )
     .with_context(|| {
         format!(
@@ -765,14 +773,18 @@ async fn upsert_name_surface(
     ensure_name_surface_identity_matches(&existing, name_surface)?;
     let next_observation = merge_stable_row_observation(
         existing.canonicality_state,
-        &existing.chain_id,
-        &existing.block_hash,
-        existing.block_number,
-        &existing.provenance,
-        &name_surface.chain_id,
-        &name_surface.block_hash,
-        name_surface.block_number,
-        &name_surface.provenance,
+        StableObservationInput {
+            chain_id: &existing.chain_id,
+            block_hash: &existing.block_hash,
+            block_number: existing.block_number,
+            provenance: &existing.provenance,
+        },
+        StableObservationInput {
+            chain_id: &name_surface.chain_id,
+            block_hash: &name_surface.block_hash,
+            block_number: name_surface.block_number,
+            provenance: &name_surface.provenance,
+        },
     )
     .with_context(|| {
         format!(
@@ -1475,6 +1487,13 @@ struct StableObservationRefresh {
     provenance: String,
 }
 
+struct StableObservationInput<'a> {
+    chain_id: &'a str,
+    block_hash: &'a str,
+    block_number: i64,
+    provenance: &'a Value,
+}
+
 fn merge_token_lineage_anchor(
     current: Option<Uuid>,
     incoming: Option<Uuid>,
@@ -1490,37 +1509,37 @@ fn merge_token_lineage_anchor(
 
 fn merge_stable_row_observation(
     current_state: CanonicalityState,
-    current_chain_id: &str,
-    current_block_hash: &str,
-    current_block_number: i64,
-    current_provenance: &Value,
-    incoming_chain_id: &str,
-    incoming_block_hash: &str,
-    incoming_block_number: i64,
-    incoming_provenance: &Value,
+    current: StableObservationInput<'_>,
+    incoming: StableObservationInput<'_>,
 ) -> Result<StableObservationRefresh> {
-    let same_anchor = current_chain_id == incoming_chain_id
-        && current_block_hash == incoming_block_hash
-        && current_block_number == incoming_block_number;
+    let same_anchor = current.chain_id == incoming.chain_id
+        && current.block_hash == incoming.block_hash
+        && current.block_number == incoming.block_number;
 
     if !same_anchor && current_state != CanonicalityState::Orphaned {
         bail!(
-            "stable identity row cannot change observation anchor before orphaning: stored {current_chain_id}/{current_block_hash}/{current_block_number}, incoming {incoming_chain_id}/{incoming_block_hash}/{incoming_block_number}"
+            "stable identity row cannot change observation anchor before orphaning: stored {}/{}/{}, incoming {}/{}/{}",
+            current.chain_id,
+            current.block_hash,
+            current.block_number,
+            incoming.chain_id,
+            incoming.block_hash,
+            incoming.block_number
         );
     }
 
-    let provenance = if same_anchor && current_provenance == incoming_provenance {
-        serde_json::to_string(current_provenance)
+    let provenance = if same_anchor && current.provenance == incoming.provenance {
+        serde_json::to_string(current.provenance)
             .context("failed to serialize stable-row provenance")?
     } else {
-        serde_json::to_string(incoming_provenance)
+        serde_json::to_string(incoming.provenance)
             .context("failed to serialize stable-row provenance")?
     };
 
     Ok(StableObservationRefresh {
-        chain_id: incoming_chain_id.to_owned(),
-        block_hash: incoming_block_hash.to_owned(),
-        block_number: incoming_block_number,
+        chain_id: incoming.chain_id.to_owned(),
+        block_hash: incoming.block_hash.to_owned(),
+        block_number: incoming.block_number,
         provenance,
     })
 }

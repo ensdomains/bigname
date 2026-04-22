@@ -341,7 +341,7 @@ fn encode_hex(bytes: &[u8]) -> String {
 }
 
 fn decode_hex(value: &str) -> Option<Vec<u8>> {
-    if value.len() % 2 != 0 {
+    if !value.len().is_multiple_of(2) {
         return None;
     }
 
@@ -1032,9 +1032,7 @@ fn persisted_verified_primary_name_section(
         )));
     }
 
-    ensure_persisted_primary_name_execution_source_family(
-        outcome, address, namespace, coin_type,
-    )?;
+    ensure_persisted_primary_name_execution_source_family(outcome, address, namespace, coin_type)?;
 
     let verified_primary_name = extract_persisted_verified_primary_name_section(
         outcome.outcome_payload.as_ref(),

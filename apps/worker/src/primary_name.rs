@@ -8,12 +8,13 @@ use bigname_storage::{
     upsert_primary_name_current_snapshots,
 };
 use serde_json::{Map, Value, json};
-use sqlx::{
-    PgPool, Row,
-    postgres::{PgConnectOptions, PgPoolOptions, PgRow},
-};
+#[cfg(test)]
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+use sqlx::{PgPool, Row, postgres::PgRow};
 
+#[cfg(test)]
 const ENS_NAMESPACE: &str = "ens";
+#[cfg(test)]
 const BASENAMES_NAMESPACE: &str = "basenames";
 const EVENT_KIND_REVERSE_CHANGED: &str = "ReverseChanged";
 const CANONICAL_STATE_FILTER: &str = r#"

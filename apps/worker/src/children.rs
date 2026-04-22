@@ -1,19 +1,22 @@
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    str::FromStr,
-};
+use std::collections::{BTreeMap, BTreeSet};
+
+#[cfg(test)]
+use std::str::FromStr;
 
 use anyhow::{Context, Result};
 use bigname_storage::{
     CanonicalityState, ChildrenCurrentRow, clear_children_current, delete_children_current,
-    load_canonical_declared_child_sources, load_children_current, load_raw_block,
-    upsert_children_current_rows, upsert_name_surfaces, upsert_normalized_events,
-    upsert_raw_blocks,
+    load_canonical_declared_child_sources, load_raw_block, upsert_children_current_rows,
+};
+#[cfg(test)]
+use bigname_storage::{
+    load_children_current, upsert_name_surfaces, upsert_normalized_events, upsert_raw_blocks,
 };
 use serde_json::{Value, json};
+#[cfg(test)]
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{
     PgPool,
-    postgres::{PgConnectOptions, PgPoolOptions},
     types::time::{OffsetDateTime, UtcOffset},
 };
 
@@ -797,6 +800,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn subregistry_event(
         namespace: &str,
         event_identity: &str,

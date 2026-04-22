@@ -1656,12 +1656,13 @@ fn validate_raw_call_snapshots(
 }
 
 fn parse_supported_verified_record_key(record_key: &str) -> Result<SupportedVerifiedRecordKey> {
-    if let Some(coin_type) = record_key.strip_prefix("addr:") {
-        if !coin_type.is_empty() && coin_type.as_bytes().iter().all(u8::is_ascii_digit) {
-            return Ok(SupportedVerifiedRecordKey::Addr {
-                coin_type: coin_type.to_owned(),
-            });
-        }
+    if let Some(coin_type) = record_key.strip_prefix("addr:")
+        && !coin_type.is_empty()
+        && coin_type.as_bytes().iter().all(u8::is_ascii_digit)
+    {
+        return Ok(SupportedVerifiedRecordKey::Addr {
+            coin_type: coin_type.to_owned(),
+        });
     }
 
     if record_key == "contenthash" {
@@ -1672,10 +1673,10 @@ fn parse_supported_verified_record_key(record_key: &str) -> Result<SupportedVeri
         return Ok(SupportedVerifiedRecordKey::Avatar);
     }
 
-    if let Some(text_key) = record_key.strip_prefix("text:") {
-        if !text_key.is_empty() {
-            return Ok(SupportedVerifiedRecordKey::Text);
-        }
+    if let Some(text_key) = record_key.strip_prefix("text:")
+        && !text_key.is_empty()
+    {
+        return Ok(SupportedVerifiedRecordKey::Text);
     }
 
     bail!(
@@ -2078,15 +2079,15 @@ fn ensure_steps_are_supported_basenames_transport_direct_path(
                 Some(&step.step_payload),
                 "Basenames transport-direct verified resolution trace.steps.l1_resolver.step_payload",
             )?;
-            if let Some(name) = payload.get("name").and_then(Value::as_str) {
-                if name != requested_selectors.surface {
-                    bail!(
-                        "Basenames transport-direct verified resolution trace {} must anchor L1 resolver name {} to request surface {}",
-                        execution_trace_id,
-                        name,
-                        requested_selectors.surface
-                    );
-                }
+            if let Some(name) = payload.get("name").and_then(Value::as_str)
+                && name != requested_selectors.surface
+            {
+                bail!(
+                    "Basenames transport-direct verified resolution trace {} must anchor L1 resolver name {} to request surface {}",
+                    execution_trace_id,
+                    name,
+                    requested_selectors.surface
+                );
             }
         }
         if normalized.contains("ccip")
@@ -2260,15 +2261,15 @@ fn ensure_universal_resolver_steps_anchor_to_surface(
             Some(&step.step_payload),
             &format!("{context} trace.steps.call_universal_resolver.step_payload"),
         )?;
-        if let Some(name) = payload.get("name").and_then(Value::as_str) {
-            if name != surface {
-                bail!(
-                    "{context} trace {} must anchor call_universal_resolver name {} to request surface {}",
-                    execution_trace_id,
-                    name,
-                    surface
-                );
-            }
+        if let Some(name) = payload.get("name").and_then(Value::as_str)
+            && name != surface
+        {
+            bail!(
+                "{context} trace {} must anchor call_universal_resolver name {} to request surface {}",
+                execution_trace_id,
+                name,
+                surface
+            );
         }
     }
 

@@ -18,6 +18,35 @@ The compose stack starts:
 
 Stop the local services with `docker compose down`. Add `-v` if you also want to remove the local data volumes.
 
+## Live Indexing Configuration
+
+`./scripts/dev-up` sources `.env`, applies migrations, starts the API, starts
+`bigname-indexer run`, and starts the worker. On startup the indexer loads the
+selected manifest root, syncs manifest state into PostgreSQL, rebuilds the
+stored watch plan, creates persisted chain checkpoint rows for active watched
+chains, and then polls configured RPC providers.
+
+Set `BIGNAME_INDEXER_MANIFESTS_ROOT` to select one runtime profile. The default
+is `manifests` for the shipped mainnet profile. Use `manifests-sepolia-dev` only
+when running the ENSv2 Sepolia dev profile; do not load it beside `manifests` in
+the same local database.
+
+Set `BIGNAME_INDEXER_CHAIN_RPC_URLS` to a comma-delimited list of
+`<chain>=<url>` entries matching active watched chains in the selected profile:
+
+```sh
+BIGNAME_INDEXER_CHAIN_RPC_URLS=ethereum-mainnet=http://127.0.0.1:8545,base-mainnet=http://127.0.0.1:9545
+```
+
+If `BIGNAME_INDEXER_CHAIN_RPC_URLS` is unset, `./scripts/dev-up` still boots the
+processes and the indexer still syncs manifest/watch state, but provider-backed
+head fetch and live ingestion stay idle. Current bootstrap RPC support accepts
+`http://` endpoints only; use a local node or local HTTP proxy for hosted RPC
+providers that expose only HTTPS.
+
+`BIGNAME_INDEXER_POLL_INTERVAL_SECS` controls the local indexer poll interval
+and defaults to `5`.
+
 ## Private Readiness Endpoint
 
 The API process exposes `GET /healthz` on the same bind address as

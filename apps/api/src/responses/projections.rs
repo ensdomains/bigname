@@ -510,6 +510,16 @@ fn build_record_cache_entries(
             ))
         })
         .collect::<BTreeMap<_, _>>();
+    let cacheable_selector_lookup = row
+        .selectors
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|selector| {
+            provenance_field(selector, "cacheable").and_then(JsonValue::as_bool) == Some(true)
+        })
+        .filter_map(|selector| string_field(provenance_field(selector, "record_key")))
+        .collect::<BTreeSet<_>>();
 
     if records.is_empty() {
         return JsonValue::Array(
@@ -535,7 +545,11 @@ fn build_record_cache_entries(
                     .get(&record.record_key)
                     .cloned()
                     .unwrap_or_else(|| {
-                        build_missing_record_cache_entry(record, &unsupported_family_lookup)
+                        build_missing_record_cache_entry(
+                            record,
+                            &unsupported_family_lookup,
+                            &cacheable_selector_lookup,
+                        )
                     })
             })
             .collect(),
@@ -552,6 +566,7 @@ fn phase_unsupported_record_family_reason(record_family: &str) -> Option<&'stati
 fn build_missing_record_cache_entry(
     record: &ResolutionRecordKey,
     unsupported_family_lookup: &BTreeMap<String, String>,
+    cacheable_selector_lookup: &BTreeSet<String>,
 ) -> JsonValue {
     let mut entry = empty_object();
     insert_string_field(&mut entry, "record_key", record.record_key.clone());
@@ -567,6 +582,13 @@ fn build_missing_record_cache_entry(
     {
         insert_string_field(&mut entry, "status", "unsupported".to_owned());
         insert_string_field(&mut entry, "unsupported_reason", unsupported_reason);
+    } else if cacheable_selector_lookup.contains(&record.record_key) {
+        insert_string_field(&mut entry, "status", "unsupported".to_owned());
+        insert_string_field(
+            &mut entry,
+            "unsupported_reason",
+            "value_not_retained_in_normalized_events".to_owned(),
+        );
     } else {
         insert_string_field(&mut entry, "status", "not_found".to_owned());
     }

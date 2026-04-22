@@ -701,17 +701,18 @@ mod tests {
         }
     }
 
-    async fn insert_manifest_version(
-        pool: &PgPool,
+    struct ManifestVersionSeed<'a> {
         manifest_version: i64,
-        namespace: &str,
-        source_family: &str,
-        chain: &str,
-        deployment_epoch: &str,
-        rollout_status: &str,
-        normalizer_version: &str,
-        file_path: &str,
-    ) -> Result<i64> {
+        namespace: &'a str,
+        source_family: &'a str,
+        chain: &'a str,
+        deployment_epoch: &'a str,
+        rollout_status: &'a str,
+        normalizer_version: &'a str,
+        file_path: &'a str,
+    }
+
+    async fn insert_manifest_version(pool: &PgPool, seed: ManifestVersionSeed<'_>) -> Result<i64> {
         sqlx::query_scalar(
             r#"
             INSERT INTO manifest_versions (
@@ -729,14 +730,14 @@ mod tests {
             RETURNING manifest_id
             "#,
         )
-        .bind(manifest_version)
-        .bind(namespace)
-        .bind(source_family)
-        .bind(chain)
-        .bind(deployment_epoch)
-        .bind(rollout_status)
-        .bind(normalizer_version)
-        .bind(file_path)
+        .bind(seed.manifest_version)
+        .bind(seed.namespace)
+        .bind(seed.source_family)
+        .bind(seed.chain)
+        .bind(seed.deployment_epoch)
+        .bind(seed.rollout_status)
+        .bind(seed.normalizer_version)
+        .bind(seed.file_path)
         .bind("{}")
         .fetch_one(pool)
         .await
@@ -798,17 +799,18 @@ mod tests {
         Ok(())
     }
 
-    async fn insert_contract(
-        pool: &PgPool,
+    struct ContractSeed<'a> {
         manifest_id: i64,
         contract_instance_id: Uuid,
-        declaration_name: &str,
-        role: &str,
-        address: &str,
-        proxy_kind: &str,
+        declaration_name: &'a str,
+        role: &'a str,
+        address: &'a str,
+        proxy_kind: &'a str,
         implementation_contract_instance_id: Option<Uuid>,
-        implementation: Option<&str>,
-    ) -> Result<()> {
+        implementation: Option<&'a str>,
+    }
+
+    async fn insert_contract(pool: &PgPool, seed: ContractSeed<'_>) -> Result<()> {
         sqlx::query(
             r#"
             INSERT INTO manifest_contract_instances (
@@ -827,14 +829,14 @@ mod tests {
             VALUES ($1, 'contract', $2, $3, $4, NULL, NULL, $5, $6, $7, $8)
             "#,
         )
-        .bind(manifest_id)
-        .bind(declaration_name)
-        .bind(contract_instance_id)
-        .bind(address)
-        .bind(role)
-        .bind(proxy_kind)
-        .bind(implementation_contract_instance_id)
-        .bind(implementation)
+        .bind(seed.manifest_id)
+        .bind(seed.declaration_name)
+        .bind(seed.contract_instance_id)
+        .bind(seed.address)
+        .bind(seed.role)
+        .bind(seed.proxy_kind)
+        .bind(seed.implementation_contract_instance_id)
+        .bind(seed.implementation)
         .execute(pool)
         .await
         .context("failed to insert manifest contract instance")?;
@@ -848,26 +850,30 @@ mod tests {
 
         let active_manifest_id = insert_manifest_version(
             database.pool(),
-            1,
-            "ens",
-            "ens_v2_registry_l1",
-            "ethereum-mainnet",
-            "ens_v2",
-            "active",
-            "uts46-v1",
-            "manifests/ens/ens_v2_registry_l1/1.toml",
+            ManifestVersionSeed {
+                manifest_version: 1,
+                namespace: "ens",
+                source_family: "ens_v2_registry_l1",
+                chain: "ethereum-mainnet",
+                deployment_epoch: "ens_v2",
+                rollout_status: "active",
+                normalizer_version: "uts46-v1",
+                file_path: "manifests/ens/ens_v2_registry_l1/1.toml",
+            },
         )
         .await?;
         let inactive_manifest_id = insert_manifest_version(
             database.pool(),
-            2,
-            "ens",
-            "ens_v2_registry_l1",
-            "ethereum-mainnet",
-            "ens_v2_shadow",
-            "draft",
-            "uts46-v1",
-            "manifests/ens/ens_v2_registry_l1/2.toml",
+            ManifestVersionSeed {
+                manifest_version: 2,
+                namespace: "ens",
+                source_family: "ens_v2_registry_l1",
+                chain: "ethereum-mainnet",
+                deployment_epoch: "ens_v2_shadow",
+                rollout_status: "draft",
+                normalizer_version: "uts46-v1",
+                file_path: "manifests/ens/ens_v2_registry_l1/2.toml",
+            },
         )
         .await?;
 
@@ -931,26 +937,34 @@ mod tests {
 
         insert_contract(
             database.pool(),
-            active_manifest_id,
-            active_contract_instance_id,
-            "registry",
-            "registry",
-            "0x00000000000000000000000000000000000000aa",
-            "erc1967",
-            Some(active_implementation_contract_instance_id),
-            Some("0x00000000000000000000000000000000000000dd"),
+            ContractSeed {
+                manifest_id: active_manifest_id,
+                contract_instance_id: active_contract_instance_id,
+                declaration_name: "registry",
+                role: "registry",
+                address: "0x00000000000000000000000000000000000000aa",
+                proxy_kind: "erc1967",
+                implementation_contract_instance_id: Some(
+                    active_implementation_contract_instance_id,
+                ),
+                implementation: Some("0x00000000000000000000000000000000000000dd"),
+            },
         )
         .await?;
         insert_contract(
             database.pool(),
-            inactive_manifest_id,
-            inactive_contract_instance_id,
-            "registry",
-            "registry",
-            "0x00000000000000000000000000000000000000bb",
-            "erc1967",
-            Some(inactive_implementation_contract_instance_id),
-            Some("0x00000000000000000000000000000000000000ee"),
+            ContractSeed {
+                manifest_id: inactive_manifest_id,
+                contract_instance_id: inactive_contract_instance_id,
+                declaration_name: "registry",
+                role: "registry",
+                address: "0x00000000000000000000000000000000000000bb",
+                proxy_kind: "erc1967",
+                implementation_contract_instance_id: Some(
+                    inactive_implementation_contract_instance_id,
+                ),
+                implementation: Some("0x00000000000000000000000000000000000000ee"),
+            },
         )
         .await?;
 
@@ -1058,26 +1072,30 @@ mod tests {
 
         let active_manifest_id = insert_manifest_version(
             database.pool(),
-            1,
-            "ens",
-            "ens_v2_registry_l1",
-            "ethereum-mainnet",
-            "ens_v2",
-            "active",
-            "uts46-v1",
-            "manifests/ens/ens_v2_registry_l1/1.toml",
+            ManifestVersionSeed {
+                manifest_version: 1,
+                namespace: "ens",
+                source_family: "ens_v2_registry_l1",
+                chain: "ethereum-mainnet",
+                deployment_epoch: "ens_v2",
+                rollout_status: "active",
+                normalizer_version: "uts46-v1",
+                file_path: "manifests/ens/ens_v2_registry_l1/1.toml",
+            },
         )
         .await?;
         let inactive_manifest_id = insert_manifest_version(
             database.pool(),
-            2,
-            "ens",
-            "ens_v2_registry_l1",
-            "ethereum-mainnet",
-            "ens_v2_shadow",
-            "deprecated",
-            "uts46-v1",
-            "manifests/ens/ens_v2_registry_l1/2.toml",
+            ManifestVersionSeed {
+                manifest_version: 2,
+                namespace: "ens",
+                source_family: "ens_v2_registry_l1",
+                chain: "ethereum-mainnet",
+                deployment_epoch: "ens_v2_shadow",
+                rollout_status: "deprecated",
+                normalizer_version: "uts46-v1",
+                file_path: "manifests/ens/ens_v2_registry_l1/2.toml",
+            },
         )
         .await?;
 
@@ -1133,26 +1151,34 @@ mod tests {
 
         insert_contract(
             database.pool(),
-            active_manifest_id,
-            active_contract_instance_id,
-            "registry",
-            "registry",
-            "0x00000000000000000000000000000000000000aa",
-            "erc1967",
-            Some(active_implementation_contract_instance_id),
-            Some("0x00000000000000000000000000000000000000dd"),
+            ContractSeed {
+                manifest_id: active_manifest_id,
+                contract_instance_id: active_contract_instance_id,
+                declaration_name: "registry",
+                role: "registry",
+                address: "0x00000000000000000000000000000000000000aa",
+                proxy_kind: "erc1967",
+                implementation_contract_instance_id: Some(
+                    active_implementation_contract_instance_id,
+                ),
+                implementation: Some("0x00000000000000000000000000000000000000dd"),
+            },
         )
         .await?;
         insert_contract(
             database.pool(),
-            inactive_manifest_id,
-            inactive_contract_instance_id,
-            "registry",
-            "registry",
-            "0x00000000000000000000000000000000000000bb",
-            "erc1967",
-            Some(inactive_implementation_contract_instance_id),
-            Some("0x00000000000000000000000000000000000000ee"),
+            ContractSeed {
+                manifest_id: inactive_manifest_id,
+                contract_instance_id: inactive_contract_instance_id,
+                declaration_name: "registry",
+                role: "registry",
+                address: "0x00000000000000000000000000000000000000bb",
+                proxy_kind: "erc1967",
+                implementation_contract_instance_id: Some(
+                    inactive_implementation_contract_instance_id,
+                ),
+                implementation: Some("0x00000000000000000000000000000000000000ee"),
+            },
         )
         .await?;
 

@@ -347,7 +347,6 @@ fn finalize_history(mut history: NameHistory, head_ref: &BoundaryRef) -> Result<
                         anchor,
                         &subject,
                         history.current_resolver.as_deref(),
-                        &release_ref.chain_id,
                         EVENT_KIND_REGISTRATION_RELEASED,
                     );
                 }
@@ -525,9 +524,10 @@ struct ResolverProfileGate {
 
 impl ResolverProfileGate {
     async fn load(pool: &PgPool) -> Result<Self> {
-        let mut admissions = bigname_manifests::load_ens_v1_public_resolver_profile_admissions(pool)
-            .await
-            .context("failed to load ENSv1 PublicResolver profile admissions")?;
+        let mut admissions =
+            bigname_manifests::load_ens_v1_public_resolver_profile_admissions(pool)
+                .await
+                .context("failed to load ENSv1 PublicResolver profile admissions")?;
         admissions.extend(
             bigname_manifests::load_basenames_l2_resolver_profile_admissions(pool)
                 .await
@@ -1190,10 +1190,12 @@ async fn apply_observation(
                 &event.reference,
                 &name.logical_name_id,
                 &anchor,
-                Some(previous_registrant.as_str()),
-                Some(event.to_address.as_str()),
-                current_resolver.as_deref(),
-                EVENT_KIND_TOKEN_CONTROL_TRANSFERRED,
+                PermissionSubjectChange {
+                    before_subject: Some(previous_registrant.as_str()),
+                    after_subject: Some(event.to_address.as_str()),
+                    resolver: current_resolver.as_deref(),
+                    source_event_kind: EVENT_KIND_TOKEN_CONTROL_TRANSFERRED,
+                },
             );
         }
         AuthorityObservation::WrapperNameWrapped(event) => {
@@ -1296,11 +1298,13 @@ async fn apply_observation(
                 &event.reference,
                 &event.name.logical_name_id,
                 after_anchor.as_ref().context("wrapper anchor must exist")?,
-                &event.name.namehash,
-                before_fuses,
-                event.fuses,
-                "wrapper-fuses",
-                EVENT_KIND_PERMISSION_SCOPE_CHANGED,
+                WrapperFuseChange {
+                    namehash: &event.name.namehash,
+                    before_fuses,
+                    after_fuses: event.fuses,
+                    identity_prefix: "wrapper-fuses",
+                    event_kind: EVENT_KIND_PERMISSION_SCOPE_CHANGED,
+                },
             );
             transition_authority(
                 history,
@@ -1347,11 +1351,13 @@ async fn apply_observation(
                 &event.reference,
                 &name.logical_name_id,
                 &anchor,
-                &event.namehash,
-                Some(before_fuses),
-                event.fuses,
-                "wrapper-fuses",
-                EVENT_KIND_PERMISSION_SCOPE_CHANGED,
+                WrapperFuseChange {
+                    namehash: &event.namehash,
+                    before_fuses: Some(before_fuses),
+                    after_fuses: event.fuses,
+                    identity_prefix: "wrapper-fuses",
+                    event_kind: EVENT_KIND_PERMISSION_SCOPE_CHANGED,
+                },
             );
         }
         AuthorityObservation::WrapperExpiryExtended(event) => {
@@ -1442,10 +1448,12 @@ async fn apply_observation(
                 &event.reference,
                 &name.logical_name_id,
                 &anchor,
-                Some(before_owner.as_str()),
-                Some(event.to_address.as_str()),
-                history.current_resolver.as_deref(),
-                EVENT_KIND_TOKEN_CONTROL_TRANSFERRED,
+                PermissionSubjectChange {
+                    before_subject: Some(before_owner.as_str()),
+                    after_subject: Some(event.to_address.as_str()),
+                    resolver: history.current_resolver.as_deref(),
+                    source_event_kind: EVENT_KIND_TOKEN_CONTROL_TRANSFERRED,
+                },
             );
         }
         AuthorityObservation::ResolverChanged(event) => {
@@ -1507,15 +1515,17 @@ async fn apply_observation(
                                 &event.reference,
                                 &name.logical_name_id,
                                 anchor,
-                                &subject,
-                                resolver_permission_scope(
-                                    &event.reference.chain_id,
-                                    previous_resolver,
-                                ),
-                                format!("resolver:{previous_resolver}"),
-                                PERMISSION_POWER_RESOLVER_CONTROL,
-                                PermissionAction::Revoke,
-                                EVENT_KIND_RESOLVER_CHANGED,
+                                PermissionChange {
+                                    subject: &subject,
+                                    scope: resolver_permission_scope(
+                                        &event.reference.chain_id,
+                                        previous_resolver,
+                                    ),
+                                    scope_identity: format!("resolver:{previous_resolver}"),
+                                    power: PERMISSION_POWER_RESOLVER_CONTROL,
+                                    action: PermissionAction::Revoke,
+                                    source_event_kind: EVENT_KIND_RESOLVER_CHANGED,
+                                },
                             ));
                     }
                     if let Some(current_resolver) = after_resolver.as_deref() {
@@ -1525,15 +1535,17 @@ async fn apply_observation(
                                 &event.reference,
                                 &name.logical_name_id,
                                 anchor,
-                                &subject,
-                                resolver_permission_scope(
-                                    &event.reference.chain_id,
-                                    current_resolver,
-                                ),
-                                format!("resolver:{current_resolver}"),
-                                PERMISSION_POWER_RESOLVER_CONTROL,
-                                PermissionAction::Grant,
-                                EVENT_KIND_RESOLVER_CHANGED,
+                                PermissionChange {
+                                    subject: &subject,
+                                    scope: resolver_permission_scope(
+                                        &event.reference.chain_id,
+                                        current_resolver,
+                                    ),
+                                    scope_identity: format!("resolver:{current_resolver}"),
+                                    power: PERMISSION_POWER_RESOLVER_CONTROL,
+                                    action: PermissionAction::Grant,
+                                    source_event_kind: EVENT_KIND_RESOLVER_CHANGED,
+                                },
                             ));
                     }
                 }
@@ -1619,32 +1631,31 @@ async fn apply_observation(
                     if left.kind == AuthorityKind::RegistryOnly
                         && right.kind == AuthorityKind::RegistryOnly
                         && before_owner != history.current_registry_owner
-            ) {
-                if let Some(name) = history.name.as_ref() {
-                    history.events.push(build_normalized_event(
-                        &event.reference,
-                        Some(name.logical_name_id.clone()),
-                        after_anchor.as_ref().map(|value| value.resource_id),
-                        EVENT_KIND_AUTHORITY_TRANSFERRED,
-                        json!({
-                            "owner": before_owner,
-                        }),
-                        json!({
-                            "owner": history.current_registry_owner,
-                            "labelhash": event.labelhash,
-                        }),
-                        format!(
-                            "registry-transfer:{}:{}:{}",
-                            event.reference.block_hash,
-                            event
-                                .reference
-                                .transaction_hash
-                                .as_deref()
-                                .unwrap_or_default(),
-                            event.reference.log_index.unwrap_or_default()
-                        ),
-                    ));
-                }
+            ) && let Some(name) = history.name.as_ref()
+            {
+                history.events.push(build_normalized_event(
+                    &event.reference,
+                    Some(name.logical_name_id.clone()),
+                    after_anchor.as_ref().map(|value| value.resource_id),
+                    EVENT_KIND_AUTHORITY_TRANSFERRED,
+                    json!({
+                        "owner": before_owner,
+                    }),
+                    json!({
+                        "owner": history.current_registry_owner,
+                        "labelhash": event.labelhash,
+                    }),
+                    format!(
+                        "registry-transfer:{}:{}:{}",
+                        event.reference.block_hash,
+                        event
+                            .reference
+                            .transaction_hash
+                            .as_deref()
+                            .unwrap_or_default(),
+                        event.reference.log_index.unwrap_or_default()
+                    ),
+                ));
             }
             if let Some(name) = history.name.clone() {
                 match (before_anchor.as_ref(), after_anchor.as_ref()) {
@@ -1657,10 +1668,12 @@ async fn apply_observation(
                             &event.reference,
                             &name.logical_name_id,
                             after,
-                            before_owner.as_deref(),
-                            history.current_registry_owner.as_deref(),
-                            history.current_resolver.as_deref(),
-                            EVENT_KIND_AUTHORITY_TRANSFERRED,
+                            PermissionSubjectChange {
+                                before_subject: before_owner.as_deref(),
+                                after_subject: history.current_registry_owner.as_deref(),
+                                resolver: history.current_resolver.as_deref(),
+                                source_event_kind: EVENT_KIND_AUTHORITY_TRANSFERRED,
+                            },
                         );
                     }
                     (_, Some(after)) if after.kind == AuthorityKind::RegistryOnly => {
@@ -1894,26 +1907,30 @@ fn transition_authority(
         if let Some(name) = history.name.as_ref() {
             history.events.push(build_boundary_event(
                 reference,
-                Some(name.logical_name_id.clone()),
-                Some(open_binding.authority.resource_id),
-                EVENT_KIND_SURFACE_UNBOUND,
-                json!({
-                    "authority_kind": open_binding.authority.kind.as_str(),
-                    "authority_key": open_binding.authority.authority_key,
-                }),
-                json!({
-                    "authority_kind": open_binding.authority.kind.as_str(),
-                    "authority_key": open_binding.authority.authority_key,
-                    "active_to": effective_time.unix_timestamp(),
-                }),
-                format!(
-                    "surface-unbound:{}:{}:{}",
-                    reference.block_hash, name.logical_name_id, open_binding.surface_binding_id
-                ),
-                open_binding.authority.binding_source_family.clone(),
-                open_binding.authority.binding_manifest_version,
-                Some(open_binding.authority.binding_manifest_id),
-                reference.canonicality_state,
+                BoundaryEventPayload {
+                    logical_name_id: Some(name.logical_name_id.clone()),
+                    resource_id: Some(open_binding.authority.resource_id),
+                    event_kind: EVENT_KIND_SURFACE_UNBOUND,
+                    before_state: json!({
+                        "authority_kind": open_binding.authority.kind.as_str(),
+                        "authority_key": open_binding.authority.authority_key,
+                    }),
+                    after_state: json!({
+                        "authority_kind": open_binding.authority.kind.as_str(),
+                        "authority_key": open_binding.authority.authority_key,
+                        "active_to": effective_time.unix_timestamp(),
+                    }),
+                    identity_suffix: format!(
+                        "surface-unbound:{}:{}:{}",
+                        reference.block_hash, name.logical_name_id, open_binding.surface_binding_id
+                    ),
+                },
+                BoundaryEventSource {
+                    source_family: open_binding.authority.binding_source_family.clone(),
+                    manifest_version: open_binding.authority.binding_manifest_version,
+                    source_manifest_id: Some(open_binding.authority.binding_manifest_id),
+                    canonicality_state: reference.canonicality_state,
+                },
             ));
         }
     }
@@ -1933,24 +1950,28 @@ fn transition_authority(
         if let Some(name) = history.name.as_ref() {
             history.events.push(build_boundary_event(
                 reference,
-                Some(name.logical_name_id.clone()),
-                Some(after_anchor.resource_id),
-                EVENT_KIND_SURFACE_BOUND,
-                json!({}),
-                json!({
-                    "authority_kind": after_anchor.kind.as_str(),
-                    "authority_key": after_anchor.authority_key,
-                    "active_from": effective_time.unix_timestamp(),
-                    "binding_kind": SurfaceBindingKind::DeclaredRegistryPath.as_str(),
-                }),
-                format!(
-                    "surface-bound:{}:{}:{}",
-                    reference.block_hash, name.logical_name_id, surface_binding_id
-                ),
-                after_anchor.binding_source_family.clone(),
-                after_anchor.binding_manifest_version,
-                Some(after_anchor.binding_manifest_id),
-                reference.canonicality_state,
+                BoundaryEventPayload {
+                    logical_name_id: Some(name.logical_name_id.clone()),
+                    resource_id: Some(after_anchor.resource_id),
+                    event_kind: EVENT_KIND_SURFACE_BOUND,
+                    before_state: json!({}),
+                    after_state: json!({
+                        "authority_kind": after_anchor.kind.as_str(),
+                        "authority_key": after_anchor.authority_key,
+                        "active_from": effective_time.unix_timestamp(),
+                        "binding_kind": SurfaceBindingKind::DeclaredRegistryPath.as_str(),
+                    }),
+                    identity_suffix: format!(
+                        "surface-bound:{}:{}:{}",
+                        reference.block_hash, name.logical_name_id, surface_binding_id
+                    ),
+                },
+                BoundaryEventSource {
+                    source_family: after_anchor.binding_source_family.clone(),
+                    manifest_version: after_anchor.binding_manifest_version,
+                    source_manifest_id: Some(after_anchor.binding_manifest_id),
+                    canonicality_state: reference.canonicality_state,
+                },
             ));
         }
     }
@@ -1977,38 +1998,42 @@ fn transition_authority(
             .unwrap_or(0);
         history.events.push(build_boundary_event(
             reference,
-            Some(name.logical_name_id.clone()),
-            after
-                .as_ref()
-                .map(|value| value.resource_id)
-                .or(before.as_ref().map(|value| value.resource_id)),
-            EVENT_KIND_AUTHORITY_EPOCH_CHANGED,
-            json!({
-                "authority_kind": before.as_ref().map(|value| value.kind.as_str()),
-                "authority_key": before.as_ref().map(|value| value.authority_key.clone()),
-            }),
-            json!({
-                "authority_kind": after.as_ref().map(|value| value.kind.as_str()),
-                "authority_key": after.as_ref().map(|value| value.authority_key.clone()),
-            }),
-            format!(
-                "authority-epoch:{}:{}:{}:{}:{}",
-                reference.block_hash,
-                name.logical_name_id,
-                effective_time.unix_timestamp(),
-                before
+            BoundaryEventPayload {
+                logical_name_id: Some(name.logical_name_id.clone()),
+                resource_id: after
                     .as_ref()
-                    .map(|value| value.authority_key.as_str())
-                    .unwrap_or("none"),
-                after
-                    .as_ref()
-                    .map(|value| value.authority_key.as_str())
-                    .unwrap_or("none")
-            ),
-            source_family,
-            manifest_version,
-            Some(manifest_id).filter(|value| *value > 0),
-            reference.canonicality_state,
+                    .map(|value| value.resource_id)
+                    .or(before.as_ref().map(|value| value.resource_id)),
+                event_kind: EVENT_KIND_AUTHORITY_EPOCH_CHANGED,
+                before_state: json!({
+                    "authority_kind": before.as_ref().map(|value| value.kind.as_str()),
+                    "authority_key": before.as_ref().map(|value| value.authority_key.clone()),
+                }),
+                after_state: json!({
+                    "authority_kind": after.as_ref().map(|value| value.kind.as_str()),
+                    "authority_key": after.as_ref().map(|value| value.authority_key.clone()),
+                }),
+                identity_suffix: format!(
+                    "authority-epoch:{}:{}:{}:{}:{}",
+                    reference.block_hash,
+                    name.logical_name_id,
+                    effective_time.unix_timestamp(),
+                    before
+                        .as_ref()
+                        .map(|value| value.authority_key.as_str())
+                        .unwrap_or("none"),
+                    after
+                        .as_ref()
+                        .map(|value| value.authority_key.as_str())
+                        .unwrap_or("none")
+                ),
+            },
+            BoundaryEventSource {
+                source_family,
+                manifest_version,
+                source_manifest_id: Some(manifest_id).filter(|value| *value > 0),
+                canonicality_state: reference.canonicality_state,
+            },
         ));
     }
 
@@ -2087,27 +2112,76 @@ fn permission_state(
     })
 }
 
+struct PermissionChange<'a> {
+    subject: &'a str,
+    scope: serde_json::Value,
+    scope_identity: String,
+    power: &'a str,
+    action: PermissionAction,
+    source_event_kind: &'a str,
+}
+
+struct PermissionSubjectChange<'a> {
+    before_subject: Option<&'a str>,
+    after_subject: Option<&'a str>,
+    resolver: Option<&'a str>,
+    source_event_kind: &'a str,
+}
+
+struct WrapperFuseChange<'a> {
+    namehash: &'a str,
+    before_fuses: Option<i64>,
+    after_fuses: i64,
+    identity_prefix: &'a str,
+    event_kind: &'a str,
+}
+
+struct BoundaryEventPayload<'a> {
+    logical_name_id: Option<String>,
+    resource_id: Option<Uuid>,
+    event_kind: &'a str,
+    before_state: serde_json::Value,
+    after_state: serde_json::Value,
+    identity_suffix: String,
+}
+
+struct BoundaryEventSource {
+    source_family: String,
+    manifest_version: i64,
+    source_manifest_id: Option<i64>,
+    canonicality_state: CanonicalityState,
+}
+
 fn build_observation_permission_change_event(
     reference: &ObservationRef,
     logical_name_id: &str,
     anchor: &AuthorityAnchor,
-    subject: &str,
-    scope: serde_json::Value,
-    scope_identity: String,
-    power: &str,
-    action: PermissionAction,
-    source_event_kind: &str,
+    change: PermissionChange<'_>,
 ) -> NormalizedEvent {
-    let source = permission_source(anchor, source_event_kind);
-    let before_state = match action {
-        PermissionAction::Grant => permission_state(subject, scope.clone(), &[], None, None),
-        PermissionAction::Revoke => {
-            permission_state(subject, scope.clone(), &[power], Some(source.clone()), None)
+    let source = permission_source(anchor, change.source_event_kind);
+    let before_state = match change.action {
+        PermissionAction::Grant => {
+            permission_state(change.subject, change.scope.clone(), &[], None, None)
         }
+        PermissionAction::Revoke => permission_state(
+            change.subject,
+            change.scope.clone(),
+            &[change.power],
+            Some(source.clone()),
+            None,
+        ),
     };
-    let after_state = match action {
-        PermissionAction::Grant => permission_state(subject, scope, &[power], Some(source), None),
-        PermissionAction::Revoke => permission_state(subject, scope, &[], None, Some(source)),
+    let after_state = match change.action {
+        PermissionAction::Grant => permission_state(
+            change.subject,
+            change.scope,
+            &[change.power],
+            Some(source),
+            None,
+        ),
+        PermissionAction::Revoke => {
+            permission_state(change.subject, change.scope, &[], None, Some(source))
+        }
     };
 
     build_normalized_event(
@@ -2119,9 +2193,9 @@ fn build_observation_permission_change_event(
         after_state,
         format!(
             "permission:{}:{}:{}:{}:{}:{}",
-            action.as_str(),
-            scope_identity,
-            subject,
+            change.action.as_str(),
+            change.scope_identity,
+            change.subject,
             reference.block_hash,
             reference.transaction_hash.as_deref().unwrap_or_default(),
             reference.log_index.unwrap_or_default()
@@ -2133,44 +2207,57 @@ fn build_boundary_permission_change_event(
     reference: &BoundaryRef,
     logical_name_id: &str,
     anchor: &AuthorityAnchor,
-    subject: &str,
-    scope: serde_json::Value,
-    scope_identity: String,
-    power: &str,
-    action: PermissionAction,
-    source_event_kind: &str,
+    change: PermissionChange<'_>,
 ) -> NormalizedEvent {
-    let source = permission_source(anchor, source_event_kind);
-    let before_state = match action {
-        PermissionAction::Grant => permission_state(subject, scope.clone(), &[], None, None),
-        PermissionAction::Revoke => {
-            permission_state(subject, scope.clone(), &[power], Some(source.clone()), None)
+    let source = permission_source(anchor, change.source_event_kind);
+    let before_state = match change.action {
+        PermissionAction::Grant => {
+            permission_state(change.subject, change.scope.clone(), &[], None, None)
         }
+        PermissionAction::Revoke => permission_state(
+            change.subject,
+            change.scope.clone(),
+            &[change.power],
+            Some(source.clone()),
+            None,
+        ),
     };
-    let after_state = match action {
-        PermissionAction::Grant => permission_state(subject, scope, &[power], Some(source), None),
-        PermissionAction::Revoke => permission_state(subject, scope, &[], None, Some(source)),
+    let after_state = match change.action {
+        PermissionAction::Grant => permission_state(
+            change.subject,
+            change.scope,
+            &[change.power],
+            Some(source),
+            None,
+        ),
+        PermissionAction::Revoke => {
+            permission_state(change.subject, change.scope, &[], None, Some(source))
+        }
     };
 
     build_boundary_event(
         reference,
-        Some(logical_name_id.to_owned()),
-        Some(anchor.resource_id),
-        EVENT_KIND_PERMISSION_CHANGED,
-        before_state,
-        after_state,
-        format!(
-            "permission:{}:{}:{}:{}:{}",
-            action.as_str(),
-            scope_identity,
-            subject,
-            reference.block_hash,
-            anchor.authority_key
-        ),
-        anchor.binding_source_family.clone(),
-        anchor.binding_manifest_version,
-        Some(anchor.binding_manifest_id),
-        reference.canonicality_state,
+        BoundaryEventPayload {
+            logical_name_id: Some(logical_name_id.to_owned()),
+            resource_id: Some(anchor.resource_id),
+            event_kind: EVENT_KIND_PERMISSION_CHANGED,
+            before_state,
+            after_state,
+            identity_suffix: format!(
+                "permission:{}:{}:{}:{}:{}",
+                change.action.as_str(),
+                change.scope_identity,
+                change.subject,
+                reference.block_hash,
+                anchor.authority_key
+            ),
+        },
+        BoundaryEventSource {
+            source_family: anchor.binding_source_family.clone(),
+            manifest_version: anchor.binding_manifest_version,
+            source_manifest_id: Some(anchor.binding_manifest_id),
+            canonicality_state: reference.canonicality_state,
+        },
     )
 }
 
@@ -2187,12 +2274,14 @@ fn emit_observation_permission_grants(
         reference,
         logical_name_id,
         anchor,
-        subject,
-        resource_permission_scope(),
-        "resource".to_owned(),
-        PERMISSION_POWER_RESOURCE_CONTROL,
-        PermissionAction::Grant,
-        source_event_kind,
+        PermissionChange {
+            subject,
+            scope: resource_permission_scope(),
+            scope_identity: "resource".to_owned(),
+            power: PERMISSION_POWER_RESOURCE_CONTROL,
+            action: PermissionAction::Grant,
+            source_event_kind,
+        },
     ));
 
     if let Some(resolver) = nonzero_address(resolver) {
@@ -2200,12 +2289,14 @@ fn emit_observation_permission_grants(
             reference,
             logical_name_id,
             anchor,
-            subject,
-            resolver_permission_scope(&reference.chain_id, &resolver),
-            format!("resolver:{resolver}"),
-            PERMISSION_POWER_RESOLVER_CONTROL,
-            PermissionAction::Grant,
-            source_event_kind,
+            PermissionChange {
+                subject,
+                scope: resolver_permission_scope(&reference.chain_id, &resolver),
+                scope_identity: format!("resolver:{resolver}"),
+                power: PERMISSION_POWER_RESOLVER_CONTROL,
+                action: PermissionAction::Grant,
+                source_event_kind,
+            },
         ));
     }
 }
@@ -2217,19 +2308,20 @@ fn emit_boundary_permission_grants(
     anchor: &AuthorityAnchor,
     subject: &str,
     resolver: Option<&str>,
-    chain_id: &str,
     source_event_kind: &str,
 ) {
     events.push(build_boundary_permission_change_event(
         reference,
         logical_name_id,
         anchor,
-        subject,
-        resource_permission_scope(),
-        "resource".to_owned(),
-        PERMISSION_POWER_RESOURCE_CONTROL,
-        PermissionAction::Grant,
-        source_event_kind,
+        PermissionChange {
+            subject,
+            scope: resource_permission_scope(),
+            scope_identity: "resource".to_owned(),
+            power: PERMISSION_POWER_RESOURCE_CONTROL,
+            action: PermissionAction::Grant,
+            source_event_kind,
+        },
     ));
 
     if let Some(resolver) = nonzero_address(resolver) {
@@ -2237,12 +2329,14 @@ fn emit_boundary_permission_grants(
             reference,
             logical_name_id,
             anchor,
-            subject,
-            resolver_permission_scope(chain_id, &resolver),
-            format!("resolver:{resolver}"),
-            PERMISSION_POWER_RESOLVER_CONTROL,
-            PermissionAction::Grant,
-            source_event_kind,
+            PermissionChange {
+                subject,
+                scope: resolver_permission_scope(&reference.chain_id, &resolver),
+                scope_identity: format!("resolver:{resolver}"),
+                power: PERMISSION_POWER_RESOLVER_CONTROL,
+                action: PermissionAction::Grant,
+                source_event_kind,
+            },
         ));
     }
 }
@@ -2252,13 +2346,10 @@ fn emit_observation_permission_subject_change(
     reference: &ObservationRef,
     logical_name_id: &str,
     anchor: &AuthorityAnchor,
-    before_subject: Option<&str>,
-    after_subject: Option<&str>,
-    resolver: Option<&str>,
-    source_event_kind: &str,
+    change: PermissionSubjectChange<'_>,
 ) {
-    let before_subject = nonzero_address(before_subject);
-    let after_subject = nonzero_address(after_subject);
+    let before_subject = nonzero_address(change.before_subject);
+    let after_subject = nonzero_address(change.after_subject);
     if before_subject == after_subject {
         return;
     }
@@ -2268,24 +2359,28 @@ fn emit_observation_permission_subject_change(
             reference,
             logical_name_id,
             anchor,
-            subject,
-            resource_permission_scope(),
-            "resource".to_owned(),
-            PERMISSION_POWER_RESOURCE_CONTROL,
-            PermissionAction::Revoke,
-            source_event_kind,
+            PermissionChange {
+                subject,
+                scope: resource_permission_scope(),
+                scope_identity: "resource".to_owned(),
+                power: PERMISSION_POWER_RESOURCE_CONTROL,
+                action: PermissionAction::Revoke,
+                source_event_kind: change.source_event_kind,
+            },
         ));
-        if let Some(resolver) = nonzero_address(resolver) {
+        if let Some(resolver) = nonzero_address(change.resolver) {
             events.push(build_observation_permission_change_event(
                 reference,
                 logical_name_id,
                 anchor,
-                subject,
-                resolver_permission_scope(&reference.chain_id, &resolver),
-                format!("resolver:{resolver}"),
-                PERMISSION_POWER_RESOLVER_CONTROL,
-                PermissionAction::Revoke,
-                source_event_kind,
+                PermissionChange {
+                    subject,
+                    scope: resolver_permission_scope(&reference.chain_id, &resolver),
+                    scope_identity: format!("resolver:{resolver}"),
+                    power: PERMISSION_POWER_RESOLVER_CONTROL,
+                    action: PermissionAction::Revoke,
+                    source_event_kind: change.source_event_kind,
+                },
             ));
         }
     }
@@ -2297,8 +2392,8 @@ fn emit_observation_permission_subject_change(
             logical_name_id,
             anchor,
             subject,
-            resolver,
-            source_event_kind,
+            change.resolver,
+            change.source_event_kind,
         );
     }
 }
@@ -2308,13 +2403,9 @@ fn emit_wrapper_fuse_event(
     reference: &ObservationRef,
     logical_name_id: &str,
     anchor: &AuthorityAnchor,
-    namehash: &str,
-    before_fuses: Option<i64>,
-    after_fuses: i64,
-    identity_prefix: &str,
-    event_kind: &str,
+    change: WrapperFuseChange<'_>,
 ) {
-    if before_fuses == Some(after_fuses) {
+    if change.before_fuses == Some(change.after_fuses) {
         return;
     }
 
@@ -2322,19 +2413,19 @@ fn emit_wrapper_fuse_event(
         reference,
         Some(logical_name_id.to_owned()),
         Some(anchor.resource_id),
-        event_kind,
+        change.event_kind,
         json!({
-            "fuses": before_fuses,
+            "fuses": change.before_fuses,
         }),
         json!({
-            "fuses": after_fuses,
-            "namehash": namehash,
+            "fuses": change.after_fuses,
+            "namehash": change.namehash,
             "authority_kind": anchor.kind.as_str(),
             "authority_key": anchor.authority_key,
         }),
         format!(
             "{}:{}:{}:{}",
-            identity_prefix,
+            change.identity_prefix,
             reference.block_hash,
             reference.transaction_hash.as_deref().unwrap_or_default(),
             reference.log_index.unwrap_or_default()
@@ -2352,28 +2443,32 @@ fn emit_registration_released_event(
     };
     history.events.push(build_boundary_event(
         release_ref,
-        Some(name.logical_name_id.clone()),
-        Some(deterministic_uuid(&format!(
-            "resource:{}",
-            lease.authority_key
-        ))),
-        EVENT_KIND_REGISTRATION_RELEASED,
-        json!({
-            "registrant": lease.registrant,
-            "expiry": lease.expiry.unix_timestamp(),
-        }),
-        json!({
-            "released_at": release_ref.block_timestamp.unix_timestamp(),
-            "labelhash": lease.labelhash,
-        }),
-        format!(
-            "release:{}:{}:{}",
-            release_ref.block_hash, name.logical_name_id, lease.authority_key
-        ),
-        lease.start_ref.source_family.clone(),
-        lease.start_ref.manifest_version,
-        Some(lease.start_ref.source_manifest_id),
-        release_ref.canonicality_state,
+        BoundaryEventPayload {
+            logical_name_id: Some(name.logical_name_id.clone()),
+            resource_id: Some(deterministic_uuid(&format!(
+                "resource:{}",
+                lease.authority_key
+            ))),
+            event_kind: EVENT_KIND_REGISTRATION_RELEASED,
+            before_state: json!({
+                "registrant": lease.registrant,
+                "expiry": lease.expiry.unix_timestamp(),
+            }),
+            after_state: json!({
+                "released_at": release_ref.block_timestamp.unix_timestamp(),
+                "labelhash": lease.labelhash,
+            }),
+            identity_suffix: format!(
+                "release:{}:{}:{}",
+                release_ref.block_hash, name.logical_name_id, lease.authority_key
+            ),
+        },
+        BoundaryEventSource {
+            source_family: lease.start_ref.source_family.clone(),
+            manifest_version: lease.start_ref.manifest_version,
+            source_manifest_id: Some(lease.start_ref.source_manifest_id),
+            canonicality_state: release_ref.canonicality_state,
+        },
     ));
     Ok(())
 }
@@ -2450,29 +2545,21 @@ fn build_normalized_event(
 
 fn build_boundary_event(
     reference: &BoundaryRef,
-    logical_name_id: Option<String>,
-    resource_id: Option<Uuid>,
-    event_kind: &str,
-    before_state: serde_json::Value,
-    after_state: serde_json::Value,
-    identity_suffix: String,
-    source_family: String,
-    manifest_version: i64,
-    source_manifest_id: Option<i64>,
-    canonicality_state: CanonicalityState,
+    payload: BoundaryEventPayload<'_>,
+    source: BoundaryEventSource,
 ) -> NormalizedEvent {
     NormalizedEvent {
         event_identity: format!(
             "{}:{}:{}",
-            DERIVATION_KIND_ENS_V1_UNWRAPPED_AUTHORITY, event_kind, identity_suffix
+            DERIVATION_KIND_ENS_V1_UNWRAPPED_AUTHORITY, payload.event_kind, payload.identity_suffix
         ),
         namespace: reference.namespace.clone(),
-        logical_name_id,
-        resource_id,
-        event_kind: event_kind.to_owned(),
-        source_family,
-        manifest_version,
-        source_manifest_id,
+        logical_name_id: payload.logical_name_id,
+        resource_id: payload.resource_id,
+        event_kind: payload.event_kind.to_owned(),
+        source_family: source.source_family,
+        manifest_version: source.manifest_version,
+        source_manifest_id: source.source_manifest_id,
         chain_id: Some(reference.chain_id.clone()),
         block_number: Some(reference.block_number),
         block_hash: Some(reference.block_hash.clone()),
@@ -2486,9 +2573,9 @@ fn build_boundary_event(
             "block_timestamp": reference.block_timestamp.unix_timestamp(),
         }),
         derivation_kind: DERIVATION_KIND_ENS_V1_UNWRAPPED_AUTHORITY.to_owned(),
-        canonicality_state,
-        before_state,
-        after_state,
+        canonicality_state: source.canonicality_state,
+        before_state: payload.before_state,
+        after_state: payload.after_state,
     }
 }
 

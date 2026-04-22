@@ -1,7 +1,7 @@
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    str::FromStr,
-};
+use std::collections::{BTreeMap, BTreeSet};
+
+#[cfg(test)]
+use std::str::FromStr;
 
 use anyhow::{Context, Result, bail};
 use bigname_storage::{
@@ -9,9 +9,10 @@ use bigname_storage::{
     clear_address_names_current, delete_address_names_current, upsert_address_names_current_rows,
 };
 use serde_json::{Value, json};
+#[cfg(test)]
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{
     PgPool, Row,
-    postgres::{PgConnectOptions, PgPoolOptions},
     types::time::{OffsetDateTime, UtcOffset},
 };
 use uuid::Uuid;
@@ -2035,6 +2036,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn authority_event(
         binding: &IdentityBinding,
         identity_suffix: &str,
@@ -2075,6 +2077,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn ensv2_registry_event(
         binding: &IdentityBinding,
         identity_suffix: &str,
@@ -2100,6 +2103,7 @@ mod tests {
         event
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn ignored_event(
         binding: &IdentityBinding,
         identity_suffix: &str,

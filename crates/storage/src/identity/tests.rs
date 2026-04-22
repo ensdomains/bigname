@@ -200,31 +200,33 @@ fn name_surface(
     }
 }
 
-fn binding(
+struct BindingSeed<'a> {
     surface_binding_id: Uuid,
-    logical_name_id: &str,
+    logical_name_id: &'a str,
     resource_id: Uuid,
     binding_kind: SurfaceBindingKind,
     active_from: OffsetDateTime,
     active_to: Option<OffsetDateTime>,
-    source: &str,
-    chain_label: &str,
+    source: &'a str,
+    chain_label: &'a str,
     block_number: i64,
     canonicality_state: CanonicalityState,
-) -> SurfaceBinding {
-    let (chain_id, block_hash, block_number) = anchor(chain_label, block_number);
+}
+
+fn binding(seed: BindingSeed<'_>) -> SurfaceBinding {
+    let (chain_id, block_hash, block_number) = anchor(seed.chain_label, seed.block_number);
     SurfaceBinding {
-        surface_binding_id,
-        logical_name_id: logical_name_id.to_owned(),
-        resource_id,
-        binding_kind,
-        active_from,
-        active_to,
+        surface_binding_id: seed.surface_binding_id,
+        logical_name_id: seed.logical_name_id.to_owned(),
+        resource_id: seed.resource_id,
+        binding_kind: seed.binding_kind,
+        active_from: seed.active_from,
+        active_to: seed.active_to,
         chain_id,
         block_hash,
         block_number,
-        provenance: json!({"source": source}),
-        canonicality_state,
+        provenance: json!({"source": seed.source}),
+        canonicality_state: seed.canonicality_state,
     }
 }
 
@@ -258,33 +260,37 @@ async fn persists_canonical_surface_round_trip_with_resource_and_token_lineage()
         103,
         CanonicalityState::Finalized,
     );
-    let expected_binding = binding(
+    let expected_binding = binding(BindingSeed {
         surface_binding_id,
-        "ens:test.eth",
+        logical_name_id: "ens:test.eth",
         resource_id,
-        SurfaceBindingKind::DeclaredRegistryPath,
-        timestamp(1_717_171_700),
-        None,
-        "declared_registry_path",
-        "binding_round_trip",
-        104,
-        CanonicalityState::Safe,
-    );
+        binding_kind: SurfaceBindingKind::DeclaredRegistryPath,
+        active_from: timestamp(1_717_171_700),
+        active_to: None,
+        source: "declared_registry_path",
+        chain_label: "binding_round_trip",
+        block_number: 104,
+        canonicality_state: CanonicalityState::Safe,
+    });
 
     assert_eq!(
-        upsert_token_lineages(database.pool(), &[expected_token_lineage.clone()]).await?,
+        upsert_token_lineages(
+            database.pool(),
+            std::slice::from_ref(&expected_token_lineage)
+        )
+        .await?,
         vec![expected_token_lineage.clone()]
     );
     assert_eq!(
-        upsert_resources(database.pool(), &[expected_resource.clone()]).await?,
+        upsert_resources(database.pool(), std::slice::from_ref(&expected_resource)).await?,
         vec![expected_resource.clone()]
     );
     assert_eq!(
-        upsert_name_surfaces(database.pool(), &[expected_surface.clone()]).await?,
+        upsert_name_surfaces(database.pool(), std::slice::from_ref(&expected_surface)).await?,
         vec![expected_surface.clone()]
     );
     assert_eq!(
-        upsert_surface_bindings(database.pool(), &[expected_binding.clone()]).await?,
+        upsert_surface_bindings(database.pool(), std::slice::from_ref(&expected_binding)).await?,
         vec![expected_binding.clone()]
     );
 
@@ -383,44 +389,44 @@ async fn closes_open_binding_interval_on_rebind_and_preserves_history_continuity
     )
     .await?;
 
-    let initial_binding = binding(
-        first_binding_id,
-        "ens:rebind.eth",
-        old_resource_id,
-        SurfaceBindingKind::DeclaredRegistryPath,
-        first_start,
-        None,
-        "initial_bind",
-        "binding_initial",
-        206,
-        CanonicalityState::Finalized,
-    );
+    let initial_binding = binding(BindingSeed {
+        surface_binding_id: first_binding_id,
+        logical_name_id: "ens:rebind.eth",
+        resource_id: old_resource_id,
+        binding_kind: SurfaceBindingKind::DeclaredRegistryPath,
+        active_from: first_start,
+        active_to: None,
+        source: "initial_bind",
+        chain_label: "binding_initial",
+        block_number: 206,
+        canonicality_state: CanonicalityState::Finalized,
+    });
     upsert_surface_bindings(database.pool(), &[initial_binding]).await?;
 
-    let closed_binding = binding(
-        first_binding_id,
-        "ens:rebind.eth",
-        old_resource_id,
-        SurfaceBindingKind::DeclaredRegistryPath,
-        first_start,
-        Some(rebind_at),
-        "initial_bind",
-        "binding_initial",
-        206,
-        CanonicalityState::Finalized,
-    );
-    let rebound_binding = binding(
-        second_binding_id,
-        "ens:rebind.eth",
-        new_resource_id,
-        SurfaceBindingKind::MigrationRebind,
-        rebind_at,
-        None,
-        "migration_rebind",
-        "binding_rebind",
-        207,
-        CanonicalityState::Safe,
-    );
+    let closed_binding = binding(BindingSeed {
+        surface_binding_id: first_binding_id,
+        logical_name_id: "ens:rebind.eth",
+        resource_id: old_resource_id,
+        binding_kind: SurfaceBindingKind::DeclaredRegistryPath,
+        active_from: first_start,
+        active_to: Some(rebind_at),
+        source: "initial_bind",
+        chain_label: "binding_initial",
+        block_number: 206,
+        canonicality_state: CanonicalityState::Finalized,
+    });
+    let rebound_binding = binding(BindingSeed {
+        surface_binding_id: second_binding_id,
+        logical_name_id: "ens:rebind.eth",
+        resource_id: new_resource_id,
+        binding_kind: SurfaceBindingKind::MigrationRebind,
+        active_from: rebind_at,
+        active_to: None,
+        source: "migration_rebind",
+        chain_label: "binding_rebind",
+        block_number: 207,
+        canonicality_state: CanonicalityState::Safe,
+    });
     upsert_surface_bindings(
         database.pool(),
         &[closed_binding.clone(), rebound_binding.clone()],
@@ -452,30 +458,30 @@ async fn loads_shared_resource_bindings_for_multiple_surfaces() -> Result<()> {
     let database = TestDatabase::new().await?;
     let token_lineage_id = Uuid::from_u128(0xa000);
     let shared_resource_id = Uuid::from_u128(0xb000);
-    let first_binding = binding(
-        Uuid::from_u128(0xc000),
-        "ens:alpha.eth",
-        shared_resource_id,
-        SurfaceBindingKind::DeclaredRegistryPath,
-        timestamp(1_717_171_720),
-        None,
-        "alpha_declared",
-        "binding_alpha",
-        305,
-        CanonicalityState::Finalized,
-    );
-    let second_binding = binding(
-        Uuid::from_u128(0xd000),
-        "ens:beta.eth",
-        shared_resource_id,
-        SurfaceBindingKind::LinkedSubregistryPath,
-        timestamp(1_717_171_730),
-        None,
-        "beta_linked",
-        "binding_beta",
-        306,
-        CanonicalityState::Safe,
-    );
+    let first_binding = binding(BindingSeed {
+        surface_binding_id: Uuid::from_u128(0xc000),
+        logical_name_id: "ens:alpha.eth",
+        resource_id: shared_resource_id,
+        binding_kind: SurfaceBindingKind::DeclaredRegistryPath,
+        active_from: timestamp(1_717_171_720),
+        active_to: None,
+        source: "alpha_declared",
+        chain_label: "binding_alpha",
+        block_number: 305,
+        canonicality_state: CanonicalityState::Finalized,
+    });
+    let second_binding = binding(BindingSeed {
+        surface_binding_id: Uuid::from_u128(0xd000),
+        logical_name_id: "ens:beta.eth",
+        resource_id: shared_resource_id,
+        binding_kind: SurfaceBindingKind::LinkedSubregistryPath,
+        active_from: timestamp(1_717_171_730),
+        active_to: None,
+        source: "beta_linked",
+        chain_label: "binding_beta",
+        block_number: 306,
+        canonicality_state: CanonicalityState::Safe,
+    });
 
     upsert_token_lineages(
         database.pool(),
@@ -634,35 +640,35 @@ async fn rejects_overlapping_or_duplicate_current_bindings_for_one_logical_name_
 
     upsert_surface_bindings(
         database.pool(),
-        &[binding(
-            Uuid::from_u128(0xe104),
-            "ens:overlap.eth",
-            first_resource_id,
-            SurfaceBindingKind::DeclaredRegistryPath,
-            timestamp(1_717_172_000),
-            None,
-            "current_1",
-            "binding_overlap_1",
-            406,
-            CanonicalityState::Finalized,
-        )],
+        &[binding(BindingSeed {
+            surface_binding_id: Uuid::from_u128(0xe104),
+            logical_name_id: "ens:overlap.eth",
+            resource_id: first_resource_id,
+            binding_kind: SurfaceBindingKind::DeclaredRegistryPath,
+            active_from: timestamp(1_717_172_000),
+            active_to: None,
+            source: "current_1",
+            chain_label: "binding_overlap_1",
+            block_number: 406,
+            canonicality_state: CanonicalityState::Finalized,
+        })],
     )
     .await?;
 
     let error = upsert_surface_bindings(
         database.pool(),
-        &[binding(
-            Uuid::from_u128(0xe105),
-            "ens:overlap.eth",
-            second_resource_id,
-            SurfaceBindingKind::MigrationRebind,
-            timestamp(1_717_172_100),
-            None,
-            "current_2",
-            "binding_overlap_2",
-            407,
-            CanonicalityState::Finalized,
-        )],
+        &[binding(BindingSeed {
+            surface_binding_id: Uuid::from_u128(0xe105),
+            logical_name_id: "ens:overlap.eth",
+            resource_id: second_resource_id,
+            binding_kind: SurfaceBindingKind::MigrationRebind,
+            active_from: timestamp(1_717_172_100),
+            active_to: None,
+            source: "current_2",
+            chain_label: "binding_overlap_2",
+            block_number: 407,
+            canonicality_state: CanonicalityState::Finalized,
+        })],
     )
     .await
     .expect_err("overlapping current bindings must be rejected");
@@ -806,7 +812,7 @@ async fn orphaned_binding_can_coexist_with_overlapping_replacement_after_repair(
         provenance: json!({"source": "losing_binding"}),
         canonicality_state: CanonicalityState::Finalized,
     };
-    upsert_surface_bindings(database.pool(), &[old_binding.clone()]).await?;
+    upsert_surface_bindings(database.pool(), std::slice::from_ref(&old_binding)).await?;
 
     let orphaned_count = mark_surface_binding_range_orphaned(
         database.pool(),
@@ -876,7 +882,7 @@ async fn orphaned_binding_can_coexist_with_overlapping_replacement_after_repair(
         provenance: json!({"source": "replacement_binding"}),
         canonicality_state: CanonicalityState::Finalized,
     };
-    upsert_surface_bindings(database.pool(), &[replacement_binding.clone()]).await?;
+    upsert_surface_bindings(database.pool(), std::slice::from_ref(&replacement_binding)).await?;
 
     let orphaned_binding =
         load_surface_binding_including_noncanonical(database.pool(), old_binding_id)
@@ -1057,9 +1063,13 @@ async fn orphaned_stable_identity_rows_can_be_reobserved_with_same_ids_on_winnin
         canonicality_state: CanonicalityState::Finalized,
     };
 
-    upsert_token_lineages(database.pool(), &[winning_token_lineage.clone()]).await?;
-    upsert_resources(database.pool(), &[winning_resource.clone()]).await?;
-    upsert_name_surfaces(database.pool(), &[winning_surface.clone()]).await?;
+    upsert_token_lineages(
+        database.pool(),
+        std::slice::from_ref(&winning_token_lineage),
+    )
+    .await?;
+    upsert_resources(database.pool(), std::slice::from_ref(&winning_resource)).await?;
+    upsert_name_surfaces(database.pool(), std::slice::from_ref(&winning_surface)).await?;
 
     assert_eq!(
         load_token_lineage(database.pool(), token_lineage_id).await?,
@@ -1119,23 +1129,27 @@ async fn canonical_only_default_reads_exclude_observed_and_orphaned() -> Result<
         503,
         CanonicalityState::Orphaned,
     );
-    let observed_binding = binding(
+    let observed_binding = binding(BindingSeed {
         surface_binding_id,
-        "ens:hidden.eth",
+        logical_name_id: "ens:hidden.eth",
         resource_id,
-        SurfaceBindingKind::ObservedOnly,
-        timestamp(1_717_172_200),
-        None,
-        "observed_only",
-        "binding_observed",
-        504,
-        CanonicalityState::Observed,
-    );
+        binding_kind: SurfaceBindingKind::ObservedOnly,
+        active_from: timestamp(1_717_172_200),
+        active_to: None,
+        source: "observed_only",
+        chain_label: "binding_observed",
+        block_number: 504,
+        canonicality_state: CanonicalityState::Observed,
+    });
 
-    upsert_token_lineages(database.pool(), &[observed_token_lineage.clone()]).await?;
-    upsert_resources(database.pool(), &[observed_resource.clone()]).await?;
-    upsert_name_surfaces(database.pool(), &[orphaned_surface.clone()]).await?;
-    upsert_surface_bindings(database.pool(), &[observed_binding.clone()]).await?;
+    upsert_token_lineages(
+        database.pool(),
+        std::slice::from_ref(&observed_token_lineage),
+    )
+    .await?;
+    upsert_resources(database.pool(), std::slice::from_ref(&observed_resource)).await?;
+    upsert_name_surfaces(database.pool(), std::slice::from_ref(&orphaned_surface)).await?;
+    upsert_surface_bindings(database.pool(), std::slice::from_ref(&observed_binding)).await?;
 
     assert_eq!(
         load_token_lineage(database.pool(), token_lineage_id).await?,
@@ -1194,23 +1208,27 @@ async fn explicit_noncanonical_opt_in_reads_include_observed_and_orphaned_histor
         603,
         CanonicalityState::Observed,
     );
-    let orphaned_binding = binding(
+    let orphaned_binding = binding(BindingSeed {
         surface_binding_id,
-        "ens:history.eth",
+        logical_name_id: "ens:history.eth",
         resource_id,
-        SurfaceBindingKind::ObservedOnly,
-        timestamp(1_717_172_300),
-        None,
-        "observed_history",
-        "binding_history",
-        604,
-        CanonicalityState::Orphaned,
-    );
+        binding_kind: SurfaceBindingKind::ObservedOnly,
+        active_from: timestamp(1_717_172_300),
+        active_to: None,
+        source: "observed_history",
+        chain_label: "binding_history",
+        block_number: 604,
+        canonicality_state: CanonicalityState::Orphaned,
+    });
 
-    upsert_token_lineages(database.pool(), &[observed_token_lineage.clone()]).await?;
-    upsert_resources(database.pool(), &[orphaned_resource.clone()]).await?;
-    upsert_name_surfaces(database.pool(), &[observed_surface.clone()]).await?;
-    upsert_surface_bindings(database.pool(), &[orphaned_binding.clone()]).await?;
+    upsert_token_lineages(
+        database.pool(),
+        std::slice::from_ref(&observed_token_lineage),
+    )
+    .await?;
+    upsert_resources(database.pool(), std::slice::from_ref(&orphaned_resource)).await?;
+    upsert_name_surfaces(database.pool(), std::slice::from_ref(&observed_surface)).await?;
+    upsert_surface_bindings(database.pool(), std::slice::from_ref(&orphaned_binding)).await?;
 
     assert_eq!(
         load_token_lineage_including_noncanonical(database.pool(), token_lineage_id).await?,

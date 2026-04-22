@@ -3,23 +3,23 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use bigname_manifests::{
-    DiscoveryObservation, DiscoveryReconciliationSummary, WatchedContractSource,
-    load_watched_contracts, reconcile_discovery_observations,
+    load_watched_contracts, reconcile_discovery_observations, DiscoveryObservation,
+    DiscoveryReconciliationSummary, WatchedContractSource,
 };
 use bigname_storage::{
-    CanonicalityState, NameSurface, NormalizedEvent, Resource, SurfaceBinding, SurfaceBindingKind,
-    TokenLineage, load_name_surface_including_noncanonical, load_resource_including_noncanonical,
+    load_name_surface_including_noncanonical, load_resource_including_noncanonical,
     load_surface_binding_including_noncanonical, load_token_lineage_including_noncanonical,
     upsert_name_surfaces, upsert_normalized_events, upsert_resources, upsert_surface_bindings,
-    upsert_token_lineages,
+    upsert_token_lineages, CanonicalityState, NameSurface, NormalizedEvent, Resource,
+    SurfaceBinding, SurfaceBindingKind, TokenLineage,
 };
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use sha3::{Digest, Keccak256};
 use sqlx::{
+    types::{time::OffsetDateTime, Uuid},
     PgPool, Row,
-    types::{Uuid, time::OffsetDateTime},
 };
 
 const SOURCE_FAMILY_ENS_V2_ROOT_L1: &str = "ens_v2_root_l1";
@@ -317,17 +317,17 @@ async fn sync_ens_v2_registry_resource_surface_with_scope(
             continue;
         };
         matched_log_count += 1;
-        apply_registry_observation(
-            observation,
-            &mut registry_suffix_by_address,
-            &mut registry_contract_by_address,
-            &mut states_by_registry_token,
-            &mut linked_resource_states,
-            &mut closed_bindings,
-            &mut token_aliases,
-            &mut observations,
-            &mut graph_events,
-        )?;
+        let mut context = RegistryObservationContext {
+            registry_suffix_by_address: &mut registry_suffix_by_address,
+            registry_contract_by_address: &mut registry_contract_by_address,
+            states_by_registry_token: &mut states_by_registry_token,
+            linked_resource_states: &mut linked_resource_states,
+            closed_bindings: &mut closed_bindings,
+            token_aliases: &mut token_aliases,
+            observations: &mut observations,
+            graph_events: &mut graph_events,
+        };
+        apply_registry_observation(observation, &mut context)?;
     }
 
     let latest_observations = latest_discovery_observations(observations)?;
@@ -402,16 +402,20 @@ async fn upsert_surface_bindings_close_before_open(
     Ok(())
 }
 
+struct RegistryObservationContext<'a> {
+    registry_suffix_by_address: &'a mut HashMap<String, String>,
+    registry_contract_by_address: &'a mut HashMap<String, Uuid>,
+    states_by_registry_token: &'a mut BTreeMap<(String, String), RegistryNameState>,
+    linked_resource_states: &'a mut BTreeMap<Uuid, RegistryNameState>,
+    closed_bindings: &'a mut BTreeMap<Uuid, SurfaceBinding>,
+    token_aliases: &'a mut HashMap<(String, String), (String, String)>,
+    observations: &'a mut Vec<DiscoveryObservation>,
+    graph_events: &'a mut Vec<NormalizedEvent>,
+}
+
 fn apply_registry_observation(
     observation: RegistryObservation,
-    registry_suffix_by_address: &mut HashMap<String, String>,
-    registry_contract_by_address: &mut HashMap<String, Uuid>,
-    states_by_registry_token: &mut BTreeMap<(String, String), RegistryNameState>,
-    linked_resource_states: &mut BTreeMap<Uuid, RegistryNameState>,
-    closed_bindings: &mut BTreeMap<Uuid, SurfaceBinding>,
-    token_aliases: &mut HashMap<(String, String), (String, String)>,
-    observations: &mut Vec<DiscoveryObservation>,
-    graph_events: &mut Vec<NormalizedEvent>,
+    context: &mut RegistryObservationContext<'_>,
 ) -> Result<()> {
     match observation {
         RegistryObservation::LabelRegistered {
@@ -426,7 +430,7 @@ fn apply_registry_observation(
             let Some(full_name) = name_under_registry(
                 &reference.emitting_address,
                 &label,
-                registry_suffix_by_address,
+                context.registry_suffix_by_address,
             ) else {
                 return Ok(());
             };
@@ -453,7 +457,7 @@ fn apply_registry_observation(
                 subregistry: None,
                 binding_kind: SurfaceBindingKind::DeclaredRegistryPath,
             };
-            graph_events.push(normalized_event(
+            context.graph_events.push(normalized_event(
                 &reference,
                 Some(state.name.logical_name_id.clone()),
                 None,
@@ -473,7 +477,7 @@ fn apply_registry_observation(
                 }),
                 format!("label-registered:{}", state.token_id),
             ));
-            states_by_registry_token.insert(key, state);
+            context.states_by_registry_token.insert(key, state);
         }
         RegistryObservation::LabelReserved {
             token_id,
@@ -486,13 +490,13 @@ fn apply_registry_observation(
             let Some(full_name) = name_under_registry(
                 &reference.emitting_address,
                 &label,
-                registry_suffix_by_address,
+                context.registry_suffix_by_address,
             ) else {
                 return Ok(());
             };
             let key = (reference.emitting_address.clone(), token_id.clone());
             let name = observe_name(&reference.namespace, &full_name, &reference, &label)?;
-            states_by_registry_token.insert(
+            context.states_by_registry_token.insert(
                 key,
                 RegistryNameState {
                     token_id: token_id.clone(),
@@ -516,7 +520,7 @@ fn apply_registry_observation(
                     binding_kind: SurfaceBindingKind::DeclaredRegistryPath,
                 },
             );
-            graph_events.push(normalized_event(
+            context.graph_events.push(normalized_event(
                 &reference,
                 None,
                 None,
@@ -539,17 +543,19 @@ fn apply_registry_observation(
             reference,
         } => {
             if let Some(state) = state_for_token_mut(
-                states_by_registry_token,
-                token_aliases,
+                context.states_by_registry_token,
+                context.token_aliases,
                 &reference.emitting_address,
                 &token_id,
             ) {
                 if let Some(binding) = closed_surface_binding_for_unregister(state, &reference) {
-                    closed_bindings.insert(binding.surface_binding_id, binding);
+                    context
+                        .closed_bindings
+                        .insert(binding.surface_binding_id, binding);
                 }
                 state.status = "unregistered";
                 state.current_ref = reference.clone();
-                graph_events.push(normalized_event(
+                context.graph_events.push(normalized_event(
                     &reference,
                     Some(state.name.logical_name_id.clone()),
                     state.resource.as_ref().map(|link| link.resource_id),
@@ -573,16 +579,16 @@ fn apply_registry_observation(
             reference,
         } => {
             if let Some(state) = state_for_token_mut(
-                states_by_registry_token,
-                token_aliases,
+                context.states_by_registry_token,
+                context.token_aliases,
                 &reference.emitting_address,
                 &token_id,
             ) {
                 let before_expiry = state.expiry;
                 state.expiry = Some(new_expiry);
                 state.current_ref = reference.clone();
-                remember_linked_resource_state(linked_resource_states, state);
-                graph_events.push(normalized_event(
+                remember_linked_resource_state(context.linked_resource_states, state);
+                context.graph_events.push(normalized_event(
                     &reference,
                     Some(state.name.logical_name_id.clone()),
                     state.resource.as_ref().map(|link| link.resource_id),
@@ -596,7 +602,7 @@ fn apply_registry_observation(
                     }),
                     format!("expiry-updated:{token_id}"),
                 ));
-                graph_events.push(normalized_event(
+                context.graph_events.push(normalized_event(
                     &reference,
                     Some(state.name.logical_name_id.clone()),
                     state.resource.as_ref().map(|link| link.resource_id),
@@ -623,15 +629,15 @@ fn apply_registry_observation(
             let mut resource_id = None;
             let mut observation_key = format!("{}:{token_id}", reference.emitting_address);
             if let Some(state) = state_for_token_mut(
-                states_by_registry_token,
-                token_aliases,
+                context.states_by_registry_token,
+                context.token_aliases,
                 &reference.emitting_address,
                 &token_id,
             ) {
                 let before = state.subregistry.clone();
                 if before.as_deref() != Some(subregistry.as_str()) {
                     deactivate_registry_suffix(
-                        registry_suffix_by_address,
+                        context.registry_suffix_by_address,
                         before.as_deref(),
                         &state.full_name,
                     );
@@ -642,10 +648,12 @@ fn apply_registry_observation(
                 resource_id = state.resource.as_ref().map(|link| link.resource_id);
                 observation_key = format!("{}:{}", reference.emitting_address, state.name.namehash);
                 if subregistry != ZERO_ADDRESS {
-                    registry_suffix_by_address.insert(subregistry.clone(), state.full_name.clone());
+                    context
+                        .registry_suffix_by_address
+                        .insert(subregistry.clone(), state.full_name.clone());
                 }
-                remember_linked_resource_state(linked_resource_states, state);
-                graph_events.push(normalized_event(
+                remember_linked_resource_state(context.linked_resource_states, state);
+                context.graph_events.push(normalized_event(
                     &reference,
                     logical_name_id.clone(),
                     resource_id,
@@ -657,14 +665,14 @@ fn apply_registry_observation(
                         "subregistry": null_if_zero_address(&subregistry),
                         "sender": sender,
                         "from_contract_instance_id": reference.emitting_contract_instance_id.to_string(),
-                        "to_contract_instance_id": registry_contract_by_address
+                        "to_contract_instance_id": context.registry_contract_by_address
                             .get(&subregistry)
                             .map(ToString::to_string),
                     }),
                     format!("subregistry-updated:{token_id}"),
                 ));
             }
-            observations.push(DiscoveryObservation {
+            context.observations.push(DiscoveryObservation {
                 chain: reference.chain_id.clone(),
                 from_address: reference.emitting_address.clone(),
                 to_address: subregistry.clone(),
@@ -700,16 +708,16 @@ fn apply_registry_observation(
             reference,
         } => {
             if let Some(state) = state_for_token_mut(
-                states_by_registry_token,
-                token_aliases,
+                context.states_by_registry_token,
+                context.token_aliases,
                 &reference.emitting_address,
                 &token_id,
             ) {
                 let before = state.resolver.clone();
                 state.resolver = Some(resolver.clone());
                 state.current_ref = reference.clone();
-                remember_linked_resource_state(linked_resource_states, state);
-                graph_events.push(normalized_event(
+                remember_linked_resource_state(context.linked_resource_states, state);
+                context.graph_events.push(normalized_event(
                     &reference,
                     Some(state.name.logical_name_id.clone()),
                     state.resource.as_ref().map(|link| link.resource_id),
@@ -723,7 +731,7 @@ fn apply_registry_observation(
                     }),
                     format!("resolver-updated:{token_id}"),
                 ));
-                observations.push(DiscoveryObservation {
+                context.observations.push(DiscoveryObservation {
                     chain: reference.chain_id.clone(),
                     from_address: reference.emitting_address.clone(),
                     to_address: resolver.clone(),
@@ -759,8 +767,8 @@ fn apply_registry_observation(
             reference,
         } => {
             if let Some(state) = state_for_token_mut(
-                states_by_registry_token,
-                token_aliases,
+                context.states_by_registry_token,
+                context.token_aliases,
                 &reference.emitting_address,
                 &token_id,
             ) {
@@ -788,7 +796,7 @@ fn apply_registry_observation(
                     linked_ref: reference.clone(),
                 });
                 state.current_ref = reference;
-                remember_linked_resource_state(linked_resource_states, state);
+                remember_linked_resource_state(context.linked_resource_states, state);
             }
         }
         RegistryObservation::TokenRegenerated {
@@ -796,23 +804,26 @@ fn apply_registry_observation(
             new_token_id,
             reference,
         } => {
-            let canonical_key =
-                resolve_token_key(token_aliases, &reference.emitting_address, &old_token_id)
-                    .unwrap_or_else(|| (reference.emitting_address.clone(), old_token_id.clone()));
-            if let Some(state) = states_by_registry_token.get_mut(&canonical_key) {
+            let canonical_key = resolve_token_key(
+                context.token_aliases,
+                &reference.emitting_address,
+                &old_token_id,
+            )
+            .unwrap_or_else(|| (reference.emitting_address.clone(), old_token_id.clone()));
+            if let Some(state) = context.states_by_registry_token.get_mut(&canonical_key) {
                 let previous_token_id = state.token_id.clone();
                 state.token_id = new_token_id.clone();
                 state.current_ref = reference.clone();
-                remember_linked_resource_state(linked_resource_states, state);
-                token_aliases.insert(
+                remember_linked_resource_state(context.linked_resource_states, state);
+                context.token_aliases.insert(
                     (reference.emitting_address.clone(), old_token_id.clone()),
                     canonical_key.clone(),
                 );
-                token_aliases.insert(
+                context.token_aliases.insert(
                     (reference.emitting_address.clone(), new_token_id.clone()),
                     canonical_key,
                 );
-                graph_events.push(normalized_event(
+                context.graph_events.push(normalized_event(
                     &reference,
                     Some(state.name.logical_name_id.clone()),
                     state.resource.as_ref().map(|link| link.resource_id),
@@ -835,11 +846,12 @@ fn apply_registry_observation(
             reference,
         } => {
             if let Some(full_name) =
-                name_under_registry(&parent, &label, registry_suffix_by_address)
+                name_under_registry(&parent, &label, context.registry_suffix_by_address)
             {
-                registry_suffix_by_address
+                context
+                    .registry_suffix_by_address
                     .insert(reference.emitting_address.clone(), full_name.clone());
-                graph_events.push(normalized_event(
+                context.graph_events.push(normalized_event(
                     &reference,
                     None,
                     None,
@@ -852,7 +864,7 @@ fn apply_registry_observation(
                         "registry_name": full_name,
                         "sender": sender,
                         "registry_contract_instance_id": reference.emitting_contract_instance_id.to_string(),
-                        "parent_contract_instance_id": registry_contract_by_address
+                        "parent_contract_instance_id": context.registry_contract_by_address
                             .get(&parent)
                             .map(ToString::to_string),
                     }),
@@ -1740,11 +1752,11 @@ fn observe_name(
         dns_encoded_name,
         namehash: format!("0x{}", hex_string(namehash_bytes(&labels))),
         labelhashes,
-        normalizer_version: reference
-            .source_family
-            .starts_with("ens_v2")
-            .then(|| "uts46-v1".to_owned())
-            .unwrap_or_else(|| label.to_owned()),
+        normalizer_version: if reference.source_family.starts_with("ens_v2") {
+            "uts46-v1".to_owned()
+        } else {
+            label.to_owned()
+        },
     })
 }
 
@@ -2007,7 +2019,7 @@ fn normalize_hex_32(value: &str) -> Result<String> {
 fn decode_hex_32(value: &str) -> Result<[u8; 32]> {
     let normalized = normalize_hex_32(value)?;
     let mut output = [0u8; 32];
-    for (index, chunk) in normalized[2..].as_bytes().chunks(2).enumerate() {
+    for (index, chunk) in normalized.as_bytes()[2..].chunks(2).enumerate() {
         let hex = std::str::from_utf8(chunk).context("hex chunk must be UTF-8")?;
         output[index] =
             u8::from_str_radix(hex, 16).with_context(|| format!("invalid hex byte {hex}"))?;
@@ -2227,56 +2239,71 @@ mod tests {
         let mut observations = Vec::new();
         let mut graph_events = Vec::new();
 
-        apply_registry_observation(
-            RegistryObservation::LabelRegistered {
-                token_id: old_token_id.clone(),
-                labelhash: "0x0000000000000000000000000000000000000000000000000000000000000b0b"
-                    .to_owned(),
-                label: "bob".to_owned(),
-                owner: "0x0000000000000000000000000000000000000b0b".to_owned(),
-                expiry: 1_900_000_000,
-                sender: "0x0000000000000000000000000000000000000dad".to_owned(),
-                reference: reference(&registry, contract_instance_id, 10, 0),
-            },
-            &mut registry_suffix_by_address,
-            &mut registry_contract_by_address,
-            &mut states_by_registry_token,
-            &mut linked_resource_states,
-            &mut closed_bindings,
-            &mut token_aliases,
-            &mut observations,
-            &mut graph_events,
-        )?;
-        apply_registry_observation(
-            RegistryObservation::TokenResource {
-                token_id: old_token_id.clone(),
-                upstream_resource: upstream_resource.clone(),
-                reference: reference(&registry, contract_instance_id, 10, 1),
-            },
-            &mut registry_suffix_by_address,
-            &mut registry_contract_by_address,
-            &mut states_by_registry_token,
-            &mut linked_resource_states,
-            &mut closed_bindings,
-            &mut token_aliases,
-            &mut observations,
-            &mut graph_events,
-        )?;
-        apply_registry_observation(
-            RegistryObservation::TokenRegenerated {
-                old_token_id: old_token_id.clone(),
-                new_token_id: new_token_id.clone(),
-                reference: reference(&registry, contract_instance_id, 11, 0),
-            },
-            &mut registry_suffix_by_address,
-            &mut registry_contract_by_address,
-            &mut states_by_registry_token,
-            &mut linked_resource_states,
-            &mut closed_bindings,
-            &mut token_aliases,
-            &mut observations,
-            &mut graph_events,
-        )?;
+        {
+            let mut context = RegistryObservationContext {
+                registry_suffix_by_address: &mut registry_suffix_by_address,
+                registry_contract_by_address: &mut registry_contract_by_address,
+                states_by_registry_token: &mut states_by_registry_token,
+                linked_resource_states: &mut linked_resource_states,
+                closed_bindings: &mut closed_bindings,
+                token_aliases: &mut token_aliases,
+                observations: &mut observations,
+                graph_events: &mut graph_events,
+            };
+            apply_registry_observation(
+                RegistryObservation::LabelRegistered {
+                    token_id: old_token_id.clone(),
+                    labelhash: "0x0000000000000000000000000000000000000000000000000000000000000b0b"
+                        .to_owned(),
+                    label: "bob".to_owned(),
+                    owner: "0x0000000000000000000000000000000000000b0b".to_owned(),
+                    expiry: 1_900_000_000,
+                    sender: "0x0000000000000000000000000000000000000dad".to_owned(),
+                    reference: reference(&registry, contract_instance_id, 10, 0),
+                },
+                &mut context,
+            )?;
+        }
+        {
+            let mut context = RegistryObservationContext {
+                registry_suffix_by_address: &mut registry_suffix_by_address,
+                registry_contract_by_address: &mut registry_contract_by_address,
+                states_by_registry_token: &mut states_by_registry_token,
+                linked_resource_states: &mut linked_resource_states,
+                closed_bindings: &mut closed_bindings,
+                token_aliases: &mut token_aliases,
+                observations: &mut observations,
+                graph_events: &mut graph_events,
+            };
+            apply_registry_observation(
+                RegistryObservation::TokenResource {
+                    token_id: old_token_id.clone(),
+                    upstream_resource: upstream_resource.clone(),
+                    reference: reference(&registry, contract_instance_id, 10, 1),
+                },
+                &mut context,
+            )?;
+        }
+        {
+            let mut context = RegistryObservationContext {
+                registry_suffix_by_address: &mut registry_suffix_by_address,
+                registry_contract_by_address: &mut registry_contract_by_address,
+                states_by_registry_token: &mut states_by_registry_token,
+                linked_resource_states: &mut linked_resource_states,
+                closed_bindings: &mut closed_bindings,
+                token_aliases: &mut token_aliases,
+                observations: &mut observations,
+                graph_events: &mut graph_events,
+            };
+            apply_registry_observation(
+                RegistryObservation::TokenRegenerated {
+                    old_token_id: old_token_id.clone(),
+                    new_token_id: new_token_id.clone(),
+                    reference: reference(&registry, contract_instance_id, 11, 0),
+                },
+                &mut context,
+            )?;
+        }
 
         let state = states_by_registry_token
             .get(&(registry.clone(), old_token_id.clone()))
@@ -2469,16 +2496,12 @@ mod tests {
             "ens-v2-resource:{}:{}:{}",
             "ethereum-sepolia", contract_instance_id, second_resource
         ));
-        assert!(
-            harness
-                .linked_resource_states
-                .contains_key(&first_resource_id)
-        );
-        assert!(
-            harness
-                .linked_resource_states
-                .contains_key(&second_resource_id)
-        );
+        assert!(harness
+            .linked_resource_states
+            .contains_key(&first_resource_id));
+        assert!(harness
+            .linked_resource_states
+            .contains_key(&second_resource_id));
         let closed_binding = harness
             .closed_bindings
             .values()
@@ -2656,10 +2679,9 @@ mod tests {
             .context("new binding should be stored")?;
         assert!(old.active_to.is_some());
         assert!(new.active_to.is_none());
-        assert!(
-            old.active_to
-                .is_some_and(|active_to| active_to <= new.active_from)
-        );
+        assert!(old
+            .active_to
+            .is_some_and(|active_to| active_to <= new.active_from));
 
         database.cleanup().await
     }
@@ -2694,11 +2716,9 @@ mod tests {
             .find(|event| event.event_kind == EVENT_KIND_SUBREGISTRY_CHANGED)
             .context("SubregistryChanged should be emitted")?;
         assert_eq!(event.after_state["to_contract_instance_id"], Value::Null);
-        assert!(
-            !harness
-                .registry_contract_by_address
-                .contains_key("0x00000000000000000000000000000000000000c1")
-        );
+        assert!(!harness
+            .registry_contract_by_address
+            .contains_key("0x00000000000000000000000000000000000000c1"));
 
         Ok(())
     }
@@ -2752,12 +2772,9 @@ mod tests {
             sender: "0x0000000000000000000000000000000000000dad".to_owned(),
             reference: reference(&child_one, child_instance_id, 13, 0),
         })?;
-        assert!(
-            harness
-                .states_by_registry_token
-                .get(&(child_one.clone(), child_token.clone()))
-                .is_none()
-        );
+        assert!(!harness
+            .states_by_registry_token
+            .contains_key(&(child_one.clone(), child_token.clone())));
 
         harness.apply(RegistryObservation::SubregistryUpdated {
             token_id: parent_token,
@@ -2788,18 +2805,12 @@ mod tests {
             sender: "0x0000000000000000000000000000000000000dad".to_owned(),
             reference: reference(&child_two, child_instance_id, 16, 0),
         })?;
-        assert!(
-            harness
-                .states_by_registry_token
-                .get(&(child_one, child_token.clone()))
-                .is_none()
-        );
-        assert!(
-            harness
-                .states_by_registry_token
-                .get(&(child_two, child_token))
-                .is_some()
-        );
+        assert!(!harness
+            .states_by_registry_token
+            .contains_key(&(child_one, child_token.clone())));
+        assert!(harness
+            .states_by_registry_token
+            .contains_key(&(child_two, child_token)));
 
         Ok(())
     }
@@ -2836,17 +2847,17 @@ mod tests {
         }
 
         fn apply(&mut self, observation: RegistryObservation) -> Result<()> {
-            apply_registry_observation(
-                observation,
-                &mut self.registry_suffix_by_address,
-                &mut self.registry_contract_by_address,
-                &mut self.states_by_registry_token,
-                &mut self.linked_resource_states,
-                &mut self.closed_bindings,
-                &mut self.token_aliases,
-                &mut self.observations,
-                &mut self.graph_events,
-            )
+            let mut context = RegistryObservationContext {
+                registry_suffix_by_address: &mut self.registry_suffix_by_address,
+                registry_contract_by_address: &mut self.registry_contract_by_address,
+                states_by_registry_token: &mut self.states_by_registry_token,
+                linked_resource_states: &mut self.linked_resource_states,
+                closed_bindings: &mut self.closed_bindings,
+                token_aliases: &mut self.token_aliases,
+                observations: &mut self.observations,
+                graph_events: &mut self.graph_events,
+            };
+            apply_registry_observation(observation, &mut context)
         }
     }
 

@@ -941,6 +941,7 @@ async fn insert_raw_new_owner_log(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn insert_raw_new_owner_log_for_parent(
     pool: &PgPool,
     chain: &str,
@@ -1078,6 +1079,7 @@ async fn insert_raw_name_wrapped_log(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn insert_raw_resolver_name_changed_log_for_node(
     pool: &PgPool,
     chain: &str,
@@ -1101,6 +1103,7 @@ async fn insert_raw_resolver_name_changed_log_for_node(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn insert_raw_resolver_version_changed_log_for_node(
     pool: &PgPool,
     chain: &str,
@@ -1124,6 +1127,7 @@ async fn insert_raw_resolver_version_changed_log_for_node(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn insert_raw_resolver_log(
     pool: &PgPool,
     chain: &str,
@@ -1267,6 +1271,7 @@ async fn insert_manifest_root_contract_instance(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn insert_manifest_contract_instance(
     pool: &PgPool,
     manifest_id: i64,
@@ -1374,6 +1379,7 @@ async fn insert_active_discovery_edge(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn insert_active_discovery_edge_with_range(
     pool: &PgPool,
     chain: &str,
@@ -1762,7 +1768,7 @@ fn encode_name_wrapped_log_data(dns_name: &[u8]) -> String {
         u64::try_from(dns_name.len()).expect("dns name test payload length must fit in u64"),
     ));
     data.extend_from_slice(dns_name);
-    let padded_length = ((dns_name.len() + 31) / 32) * 32;
+    let padded_length = dns_name.len().div_ceil(32) * 32;
     data.resize(32 * 5 + padded_length, 0);
 
     hex_string(&data)
@@ -1846,7 +1852,7 @@ fn encode_registrar_name_registered_log_data(label: &str, expiry_unix: i64) -> S
     ));
     data.extend_from_slice(label_bytes);
 
-    let padded_length = ((label_bytes.len() + 31) / 32) * 32;
+    let padded_length = label_bytes.len().div_ceil(32) * 32;
     data.resize(32 * 4 + padded_length, 0);
 
     hex_string(&data)
@@ -1864,7 +1870,7 @@ fn encode_ens_v2_label_registered_log_data(label: &str, owner: &str, expiry_unix
     ));
     data.extend_from_slice(label_bytes);
 
-    let padded_length = ((label_bytes.len() + 31) / 32) * 32;
+    let padded_length = label_bytes.len().div_ceil(32) * 32;
     data.resize(32 * 4 + padded_length, 0);
 
     hex_string(&data)
@@ -1925,13 +1931,13 @@ fn encode_dynamic_bytes_log_data(value: &[u8]) -> String {
         u64::try_from(value.len()).expect("test bytes length must fit in u64"),
     ));
     output.extend_from_slice(value);
-    let padded_length = ((value.len() + 31) / 32) * 32;
+    let padded_length = value.len().div_ceil(32) * 32;
     output.resize(64 + padded_length, 0);
     hex_string(&output)
 }
 
 fn encode_two_dynamic_bytes_log_data(left: &[u8], right: &[u8]) -> String {
-    let left_padded_length = ((left.len() + 31) / 32) * 32;
+    let left_padded_length = left.len().div_ceil(32) * 32;
     let right_offset = 64 + 32 + left_padded_length;
     let mut output = Vec::new();
     output.extend_from_slice(&abi_word_u64(64));
@@ -1947,7 +1953,7 @@ fn encode_two_dynamic_bytes_log_data(left: &[u8], right: &[u8]) -> String {
         u64::try_from(right.len()).expect("right bytes length must fit in u64"),
     ));
     output.extend_from_slice(right);
-    let right_padded_length = ((right.len() + 31) / 32) * 32;
+    let right_padded_length = right.len().div_ceil(32) * 32;
     output.resize(right_offset + 32 + right_padded_length, 0);
     hex_string(&output)
 }
@@ -1960,7 +1966,7 @@ fn encode_dynamic_string_log_data(value: &str) -> String {
         u64::try_from(value_bytes.len()).expect("test string length must fit in u64"),
     ));
     output.extend_from_slice(value_bytes);
-    let padded_length = ((value_bytes.len() + 31) / 32) * 32;
+    let padded_length = value_bytes.len().div_ceil(32) * 32;
     output.resize(64 + padded_length, 0);
     hex_string(&output)
 }
@@ -1977,7 +1983,7 @@ fn encode_ens_v2_resolver_address_changed_log_data(coin_type: u64, address_bytes
         u64::try_from(address_bytes.len()).expect("address bytes test payload must fit in u64"),
     ));
     data.extend_from_slice(address_bytes);
-    let padded_length = ((address_bytes.len() + 31) / 32) * 32;
+    let padded_length = address_bytes.len().div_ceil(32) * 32;
     data.resize(96 + padded_length, 0);
     hex_string(&data)
 }

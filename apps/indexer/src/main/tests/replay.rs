@@ -670,8 +670,8 @@ async fn replay_normalized_events_rejects_mixed_canonicality_raw_logs() -> Resul
 }
 
 #[tokio::test]
-async fn replay_normalized_events_respects_ensv1_dynamic_resolver_watch_target_range()
--> Result<()> {
+async fn replay_normalized_events_respects_ensv1_dynamic_resolver_watch_target_range() -> Result<()>
+{
     assert_dynamic_resolver_replay_respects_watch_target_range(DynamicResolverReplayConfig {
         namespace: "ens",
         chain: "ethereum-mainnet",
@@ -847,8 +847,13 @@ async fn assert_dynamic_resolver_replay_respects_watch_target_range(
             None,
         ),
     ] {
-        insert_contract_instance(database.pool(), contract_instance_id, config.chain, "contract")
-            .await?;
+        insert_contract_instance(
+            database.pool(),
+            contract_instance_id,
+            config.chain,
+            "contract",
+        )
+        .await?;
         insert_active_contract_instance_address(
             database.pool(),
             contract_instance_id,
@@ -1220,16 +1225,8 @@ async fn assert_dynamic_resolver_replay_respects_watch_target_range(
     assert_eq!(
         profile_statuses,
         vec![
-            (
-                supported_resolver_address,
-                "supported",
-                "code_hash_match"
-            ),
-            (
-                pending_resolver_address,
-                "pending",
-                "code_hash_pending"
-            ),
+            (supported_resolver_address, "supported", "code_hash_match"),
+            (pending_resolver_address, "pending", "code_hash_pending"),
             (
                 unsupported_resolver_address,
                 "unsupported",
@@ -1242,6 +1239,7 @@ async fn assert_dynamic_resolver_replay_respects_watch_target_range(
     database.cleanup().await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn insert_raw_new_resolver_log_for_node_at_index(
     pool: &PgPool,
     chain: &str,
@@ -1435,6 +1433,7 @@ async fn insert_active_replay_watched_contract_with_source_family(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn insert_active_replay_manifest_contract(
     pool: &PgPool,
     manifest_id: i64,

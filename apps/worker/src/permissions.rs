@@ -1,7 +1,7 @@
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    str::FromStr,
-};
+use std::collections::{BTreeMap, BTreeSet};
+
+#[cfg(test)]
+use std::str::FromStr;
 
 use anyhow::{Context, Result, bail};
 use bigname_storage::{
@@ -9,9 +9,10 @@ use bigname_storage::{
     delete_permissions_current, upsert_permissions_current_rows,
 };
 use serde_json::{Value, json};
+#[cfg(test)]
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{
     PgPool, Row,
-    postgres::{PgConnectOptions, PgPoolOptions},
     types::time::{OffsetDateTime, UtcOffset},
 };
 use uuid::Uuid;
@@ -1094,6 +1095,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn permission_event(
         event_identity: &str,
         resource_id: Uuid,

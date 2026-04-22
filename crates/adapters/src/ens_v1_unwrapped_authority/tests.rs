@@ -92,17 +92,18 @@ impl TestDatabase {
     }
 }
 
-async fn insert_manifest_version(
-    pool: &PgPool,
+struct ManifestVersionSeed<'a> {
     manifest_version: i64,
-    namespace: &str,
-    source_family: &str,
-    chain: &str,
-    deployment_epoch: &str,
-    rollout_status: &str,
-    normalizer_version: &str,
-    file_path: &str,
-) -> Result<i64> {
+    namespace: &'a str,
+    source_family: &'a str,
+    chain: &'a str,
+    deployment_epoch: &'a str,
+    rollout_status: &'a str,
+    normalizer_version: &'a str,
+    file_path: &'a str,
+}
+
+async fn insert_manifest_version(pool: &PgPool, seed: ManifestVersionSeed<'_>) -> Result<i64> {
     sqlx::query_scalar(
         r#"
             INSERT INTO manifest_versions (
@@ -120,29 +121,33 @@ async fn insert_manifest_version(
             RETURNING manifest_id
             "#,
     )
-    .bind(manifest_version)
-    .bind(namespace)
-    .bind(source_family)
-    .bind(chain)
-    .bind(deployment_epoch)
-    .bind(rollout_status)
-    .bind(normalizer_version)
-    .bind(file_path)
+    .bind(seed.manifest_version)
+    .bind(seed.namespace)
+    .bind(seed.source_family)
+    .bind(seed.chain)
+    .bind(seed.deployment_epoch)
+    .bind(seed.rollout_status)
+    .bind(seed.normalizer_version)
+    .bind(seed.file_path)
     .bind("{}")
     .fetch_one(pool)
     .await
     .context("failed to insert manifest version")
 }
 
+struct ManifestContractInstanceSeed<'a> {
+    manifest_id: i64,
+    declaration_kind: &'a str,
+    declaration_name: &'a str,
+    contract_instance_id: Uuid,
+    declared_address: &'a str,
+    role: Option<&'a str>,
+    proxy_kind: Option<&'a str>,
+}
+
 async fn insert_manifest_contract_instance(
     pool: &PgPool,
-    manifest_id: i64,
-    declaration_kind: &str,
-    declaration_name: &str,
-    contract_instance_id: Uuid,
-    declared_address: &str,
-    role: Option<&str>,
-    proxy_kind: Option<&str>,
+    seed: ManifestContractInstanceSeed<'_>,
 ) -> Result<()> {
     sqlx::query(
         r#"
@@ -162,13 +167,13 @@ async fn insert_manifest_contract_instance(
             VALUES ($1, $2, $3, $4, $5, NULL, NULL, $6, $7, NULL, NULL)
             "#,
     )
-    .bind(manifest_id)
-    .bind(declaration_kind)
-    .bind(declaration_name)
-    .bind(contract_instance_id)
-    .bind(declared_address)
-    .bind(role)
-    .bind(proxy_kind)
+    .bind(seed.manifest_id)
+    .bind(seed.declaration_kind)
+    .bind(seed.declaration_name)
+    .bind(seed.contract_instance_id)
+    .bind(seed.declared_address)
+    .bind(seed.role)
+    .bind(seed.proxy_kind)
     .execute(pool)
     .await
     .context("failed to insert manifest contract instance")?;
@@ -232,18 +237,27 @@ async fn insert_contract_instance_address(
     Ok(())
 }
 
-async fn insert_active_discovery_edge_with_range(
-    pool: &PgPool,
-    chain_id: &str,
-    edge_kind: &str,
+struct ActiveDiscoveryEdgeSeed<'a> {
+    chain_id: &'a str,
+    edge_kind: &'a str,
     from_contract_instance_id: Uuid,
     to_contract_instance_id: Uuid,
     source_manifest_id: i64,
     active_from_block_number: Option<i64>,
     active_to_block_number: Option<i64>,
+}
+
+async fn insert_active_discovery_edge_with_range(
+    pool: &PgPool,
+    seed: ActiveDiscoveryEdgeSeed<'_>,
 ) -> Result<()> {
     let discovery_source = format!(
-        "test:{edge_kind}:{from_contract_instance_id}:{to_contract_instance_id}:{active_from_block_number:?}:{active_to_block_number:?}"
+        "test:{}:{}:{}:{:?}:{:?}",
+        seed.edge_kind,
+        seed.from_contract_instance_id,
+        seed.to_contract_instance_id,
+        seed.active_from_block_number,
+        seed.active_to_block_number,
     );
     sqlx::query(
         r#"
@@ -251,7 +265,7 @@ async fn insert_active_discovery_edge_with_range(
                 chain_id,
                 edge_kind,
                 from_contract_instance_id,
-                to_contract_instance_id,
+                to_contract_instance_id: contract_instance_id,
                 discovery_source,
                 source_manifest_id,
                 admission,
@@ -262,14 +276,14 @@ async fn insert_active_discovery_edge_with_range(
             VALUES ($1, $2, $3, $4, $5, $6, 'test', $7, $8, $9::jsonb)
             "#,
     )
-    .bind(chain_id)
-    .bind(edge_kind)
-    .bind(from_contract_instance_id)
-    .bind(to_contract_instance_id)
+    .bind(seed.chain_id)
+    .bind(seed.edge_kind)
+    .bind(seed.from_contract_instance_id)
+    .bind(seed.to_contract_instance_id)
     .bind(discovery_source)
-    .bind(source_manifest_id)
-    .bind(active_from_block_number)
-    .bind(active_to_block_number)
+    .bind(seed.source_manifest_id)
+    .bind(seed.active_from_block_number)
+    .bind(seed.active_to_block_number)
     .bind("{}")
     .execute(pool)
     .await
@@ -287,56 +301,72 @@ async fn insert_active_contract_fixture(
 ) -> Result<i64> {
     insert_active_contract_fixture_with_manifest(
         pool,
-        "ens",
-        source_family,
-        "ethereum-mainnet",
-        "ens_v1",
-        declaration_name,
-        address,
-        role,
-        file_path,
+        ActiveContractFixtureSeed {
+            namespace: "ens",
+            source_family,
+            chain: "ethereum-mainnet",
+            deployment_epoch: "ens_v1",
+            declaration_name,
+            address,
+            role,
+            file_path,
+        },
     )
     .await
 }
 
+struct ActiveContractFixtureSeed<'a> {
+    namespace: &'a str,
+    source_family: &'a str,
+    chain: &'a str,
+    deployment_epoch: &'a str,
+    declaration_name: &'a str,
+    address: &'a str,
+    role: Option<&'a str>,
+    file_path: &'a str,
+}
+
 async fn insert_active_contract_fixture_with_manifest(
     pool: &PgPool,
-    namespace: &str,
-    source_family: &str,
-    chain: &str,
-    deployment_epoch: &str,
-    declaration_name: &str,
-    address: &str,
-    role: Option<&str>,
-    file_path: &str,
+    seed: ActiveContractFixtureSeed<'_>,
 ) -> Result<i64> {
     let manifest_id = insert_manifest_version(
         pool,
-        1,
-        namespace,
-        source_family,
-        chain,
-        deployment_epoch,
-        "active",
-        "uts46-v1",
-        file_path,
+        ManifestVersionSeed {
+            manifest_version: 1,
+            namespace: seed.namespace,
+            source_family: seed.source_family,
+            chain: seed.chain,
+            deployment_epoch: seed.deployment_epoch,
+            rollout_status: "active",
+            normalizer_version: "uts46-v1",
+            file_path: seed.file_path,
+        },
     )
     .await?;
     let contract_instance_id = Uuid::new_v4();
-    insert_contract_instance(pool, contract_instance_id, chain, "contract").await?;
+    insert_contract_instance(pool, contract_instance_id, seed.chain, "contract").await?;
     insert_manifest_contract_instance(
         pool,
-        manifest_id,
-        "contract",
-        declaration_name,
-        contract_instance_id,
-        address,
-        role,
-        Some("none"),
+        ManifestContractInstanceSeed {
+            manifest_id,
+            declaration_kind: "contract",
+            declaration_name: seed.declaration_name,
+            contract_instance_id,
+            declared_address: seed.address,
+            role: seed.role,
+            proxy_kind: Some("none"),
+        },
     )
     .await?;
-    insert_contract_instance_address(pool, contract_instance_id, chain, address, manifest_id)
-        .await?;
+    insert_contract_instance_address(
+        pool,
+        contract_instance_id,
+        seed.chain,
+        seed.address,
+        manifest_id,
+    )
+    .await?;
     Ok(manifest_id)
 }
 
@@ -426,7 +456,7 @@ fn encode_registrar_name_registered_log_data(label: &str, expiry_unix: i64) -> V
     ));
     output.extend_from_slice(label_bytes);
 
-    let padded_length = ((label_bytes.len() + 31) / 32) * 32;
+    let padded_length = label_bytes.len().div_ceil(32) * 32;
     output.resize(32 * 4 + padded_length, 0);
     output
 }
@@ -443,7 +473,7 @@ fn encode_dynamic_string_log_data(value: &str) -> Vec<u8> {
         u64::try_from(value_bytes.len()).expect("test string length must fit in u64"),
     ));
     output.extend_from_slice(value_bytes);
-    let padded_length = ((value_bytes.len() + 31) / 32) * 32;
+    let padded_length = value_bytes.len().div_ceil(32) * 32;
     output.resize(64 + padded_length, 0);
     output
 }
@@ -460,7 +490,7 @@ fn encode_resolver_address_changed_log_data(coin_type: u64, address_bytes: &[u8]
         u64::try_from(address_bytes.len()).expect("test address length must fit in u64"),
     ));
     output.extend_from_slice(address_bytes);
-    let padded_length = ((address_bytes.len() + 31) / 32) * 32;
+    let padded_length = address_bytes.len().div_ceil(32) * 32;
     output.resize(96 + padded_length, 0);
     output
 }
@@ -494,7 +524,7 @@ fn encode_name_wrapped_log_data(
         u64::try_from(dns_name.len()).expect("test DNS name length must fit in u64"),
     ));
     output.extend_from_slice(dns_name);
-    let padded_length = ((dns_name.len() + 31) / 32) * 32;
+    let padded_length = dns_name.len().div_ceil(32) * 32;
     output.resize(160 + padded_length, 0);
     output
 }
@@ -931,14 +961,16 @@ async fn sync_ens_v1_unwrapped_authority_persists_registrar_identity_rows_idempo
 
     let manifest_id = insert_manifest_version(
         database.pool(),
-        1,
-        "ens",
-        SOURCE_FAMILY_ENS_V1_REGISTRAR_L1,
-        "ethereum-mainnet",
-        "ens_v1",
-        "active",
-        "uts46-v1",
-        "manifests/ens/ens_v1_registrar_l1/v1.toml",
+        ManifestVersionSeed {
+            manifest_version: 1,
+            namespace: "ens",
+            source_family: SOURCE_FAMILY_ENS_V1_REGISTRAR_L1,
+            chain: "ethereum-mainnet",
+            deployment_epoch: "ens_v1",
+            rollout_status: "active",
+            normalizer_version: "uts46-v1",
+            file_path: "manifests/ens/ens_v1_registrar_l1/v1.toml",
+        },
     )
     .await?;
     let contract_instance_id = Uuid::new_v4();
@@ -951,13 +983,15 @@ async fn sync_ens_v1_unwrapped_authority_persists_registrar_identity_rows_idempo
     .await?;
     insert_manifest_contract_instance(
         database.pool(),
-        manifest_id,
-        "contract",
-        "registrar",
-        contract_instance_id,
-        "0x00000000000000000000000000000000000000aa",
-        Some("registrar"),
-        Some("none"),
+        ManifestContractInstanceSeed {
+            manifest_id,
+            declaration_kind: "contract",
+            declaration_name: "registrar",
+            contract_instance_id,
+            declared_address: "0x00000000000000000000000000000000000000aa",
+            role: Some("registrar"),
+            proxy_kind: Some("none"),
+        },
     )
     .await?;
     insert_contract_instance_address(
@@ -1084,14 +1118,16 @@ async fn sync_ens_v1_unwrapped_authority_emits_resolver_changed_idempotently() -
 
     let registrar_manifest_id = insert_manifest_version(
         database.pool(),
-        1,
-        "ens",
-        SOURCE_FAMILY_ENS_V1_REGISTRAR_L1,
-        "ethereum-mainnet",
-        "ens_v1",
-        "active",
-        "uts46-v1",
-        "manifests/ens/ens_v1_registrar_l1/v1.toml",
+        ManifestVersionSeed {
+            manifest_version: 1,
+            namespace: "ens",
+            source_family: SOURCE_FAMILY_ENS_V1_REGISTRAR_L1,
+            chain: "ethereum-mainnet",
+            deployment_epoch: "ens_v1",
+            rollout_status: "active",
+            normalizer_version: "uts46-v1",
+            file_path: "manifests/ens/ens_v1_registrar_l1/v1.toml",
+        },
     )
     .await?;
     let registrar_contract_instance_id = Uuid::new_v4();
@@ -1104,13 +1140,15 @@ async fn sync_ens_v1_unwrapped_authority_emits_resolver_changed_idempotently() -
     .await?;
     insert_manifest_contract_instance(
         database.pool(),
-        registrar_manifest_id,
-        "contract",
-        "registrar",
-        registrar_contract_instance_id,
-        "0x00000000000000000000000000000000000000aa",
-        Some("registrar"),
-        Some("none"),
+        ManifestContractInstanceSeed {
+            manifest_id: registrar_manifest_id,
+            declaration_kind: "contract",
+            declaration_name: "registrar",
+            contract_instance_id: registrar_contract_instance_id,
+            declared_address: "0x00000000000000000000000000000000000000aa",
+            role: Some("registrar"),
+            proxy_kind: Some("none"),
+        },
     )
     .await?;
     insert_contract_instance_address(
@@ -1124,14 +1162,16 @@ async fn sync_ens_v1_unwrapped_authority_emits_resolver_changed_idempotently() -
 
     let registry_manifest_id = insert_manifest_version(
         database.pool(),
-        1,
-        "ens",
-        SOURCE_FAMILY_ENS_V1_REGISTRY_L1,
-        "ethereum-mainnet",
-        "ens_v1",
-        "active",
-        "uts46-v1",
-        "manifests/ens/ens_v1_registry_l1/v1.toml",
+        ManifestVersionSeed {
+            manifest_version: 1,
+            namespace: "ens",
+            source_family: SOURCE_FAMILY_ENS_V1_REGISTRY_L1,
+            chain: "ethereum-mainnet",
+            deployment_epoch: "ens_v1",
+            rollout_status: "active",
+            normalizer_version: "uts46-v1",
+            file_path: "manifests/ens/ens_v1_registry_l1/v1.toml",
+        },
     )
     .await?;
     let registry_contract_instance_id = Uuid::new_v4();
@@ -1144,13 +1184,15 @@ async fn sync_ens_v1_unwrapped_authority_emits_resolver_changed_idempotently() -
     .await?;
     insert_manifest_contract_instance(
         database.pool(),
-        registry_manifest_id,
-        "contract",
-        "registry",
-        registry_contract_instance_id,
-        "0x00000000000000000000000000000000000000bb",
-        Some("registry"),
-        Some("none"),
+        ManifestContractInstanceSeed {
+            manifest_id: registry_manifest_id,
+            declaration_kind: "contract",
+            declaration_name: "registry",
+            contract_instance_id: registry_contract_instance_id,
+            declared_address: "0x00000000000000000000000000000000000000bb",
+            role: Some("registry"),
+            proxy_kind: Some("none"),
+        },
     )
     .await?;
     insert_contract_instance_address(
@@ -1796,38 +1838,44 @@ async fn sync_ens_v1_unwrapped_authority_new_resolver_discovery_edge_respects_ef
 
     let reverse_manifest_id = insert_manifest_version(
         database.pool(),
-        1,
-        "ens",
-        "ens_v1_reverse_l1",
-        "ethereum-mainnet",
-        "ens_v1",
-        "active",
-        "uts46-v1",
-        "manifests/ens/ens_v1_reverse_l1/v1.toml",
+        ManifestVersionSeed {
+            manifest_version: 1,
+            namespace: "ens",
+            source_family: "ens_v1_reverse_l1",
+            chain: "ethereum-mainnet",
+            deployment_epoch: "ens_v1",
+            rollout_status: "active",
+            normalizer_version: "uts46-v1",
+            file_path: "manifests/ens/ens_v1_reverse_l1/v1.toml",
+        },
     )
     .await?;
     let registry_manifest_id = insert_manifest_version(
         database.pool(),
-        1,
-        "ens",
-        SOURCE_FAMILY_ENS_V1_REGISTRY_L1,
-        "ethereum-mainnet",
-        "ens_v1",
-        "active",
-        "uts46-v1",
-        "manifests/ens/ens_v1_registry_l1/v1.toml",
+        ManifestVersionSeed {
+            manifest_version: 1,
+            namespace: "ens",
+            source_family: SOURCE_FAMILY_ENS_V1_REGISTRY_L1,
+            chain: "ethereum-mainnet",
+            deployment_epoch: "ens_v1",
+            rollout_status: "active",
+            normalizer_version: "uts46-v1",
+            file_path: "manifests/ens/ens_v1_registry_l1/v1.toml",
+        },
     )
     .await?;
     let resolver_manifest_id = insert_manifest_version(
         database.pool(),
-        1,
-        "ens",
-        SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
-        "ethereum-mainnet",
-        "ens_v1",
-        "active",
-        "uts46-v1",
-        "manifests/ens/ens_v1_resolver_l1/v1.toml",
+        ManifestVersionSeed {
+            manifest_version: 1,
+            namespace: "ens",
+            source_family: SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
+            chain: "ethereum-mainnet",
+            deployment_epoch: "ens_v1",
+            rollout_status: "active",
+            normalizer_version: "uts46-v1",
+            file_path: "manifests/ens/ens_v1_resolver_l1/v1.toml",
+        },
     )
     .await?;
     let registry_contract_instance_id = Uuid::new_v4();
@@ -1847,13 +1895,15 @@ async fn sync_ens_v1_unwrapped_authority_new_resolver_discovery_edge_respects_ef
     .await?;
     insert_manifest_contract_instance(
         database.pool(),
-        registry_manifest_id,
-        "contract",
-        "registry",
-        registry_contract_instance_id,
-        registry_address,
-        Some("registry"),
-        Some("none"),
+        ManifestContractInstanceSeed {
+            manifest_id: registry_manifest_id,
+            declaration_kind: "contract",
+            declaration_name: "registry",
+            contract_instance_id: registry_contract_instance_id,
+            declared_address: registry_address,
+            role: Some("registry"),
+            proxy_kind: Some("none"),
+        },
     )
     .await?;
     insert_contract_instance_address(
@@ -1873,13 +1923,15 @@ async fn sync_ens_v1_unwrapped_authority_new_resolver_discovery_edge_respects_ef
     .await?;
     insert_manifest_contract_instance(
         database.pool(),
-        resolver_manifest_id,
-        "contract",
-        "public_resolver_seed",
-        public_resolver_seed_contract_instance_id,
-        public_resolver_seed_address,
-        Some("public_resolver"),
-        Some("none"),
+        ManifestContractInstanceSeed {
+            manifest_id: resolver_manifest_id,
+            declaration_kind: "contract",
+            declaration_name: "public_resolver_seed",
+            contract_instance_id: public_resolver_seed_contract_instance_id,
+            declared_address: public_resolver_seed_address,
+            role: Some("public_resolver"),
+            proxy_kind: Some("none"),
+        },
     )
     .await?;
     insert_contract_instance_address(
@@ -1907,25 +1959,29 @@ async fn sync_ens_v1_unwrapped_authority_new_resolver_discovery_edge_respects_ef
     .await?;
     insert_active_discovery_edge_with_range(
         database.pool(),
-        "ethereum-mainnet",
-        "resolver",
-        registry_contract_instance_id,
-        resolver_contract_instance_id,
-        registry_manifest_id,
-        Some(42),
-        Some(42),
+        ActiveDiscoveryEdgeSeed {
+            chain_id: "ethereum-mainnet",
+            edge_kind: "resolver",
+            from_contract_instance_id: registry_contract_instance_id,
+            to_contract_instance_id: resolver_contract_instance_id,
+            source_manifest_id: registry_manifest_id,
+            active_from_block_number: Some(42),
+            active_to_block_number: Some(42),
+        },
     )
     .await?;
 
     insert_active_discovery_edge_with_range(
         database.pool(),
-        "ethereum-mainnet",
-        "resolver",
-        registry_contract_instance_id,
-        resolver_contract_instance_id,
-        registry_manifest_id,
-        Some(44),
-        Some(44),
+        ActiveDiscoveryEdgeSeed {
+            chain_id: "ethereum-mainnet",
+            edge_kind: "resolver",
+            from_contract_instance_id: registry_contract_instance_id,
+            to_contract_instance_id: resolver_contract_instance_id,
+            source_manifest_id: registry_manifest_id,
+            active_from_block_number: Some(44),
+            active_to_block_number: Some(44),
+        },
     )
     .await?;
     upsert_raw_code_hashes(
@@ -2121,38 +2177,44 @@ async fn sync_ens_v1_unwrapped_authority_gates_discovered_ensv1_resolver_local_f
 
     let registrar_manifest_id = insert_manifest_version(
         database.pool(),
-        1,
-        "ens",
-        SOURCE_FAMILY_ENS_V1_REGISTRAR_L1,
-        "ethereum-mainnet",
-        "ens_v1",
-        "active",
-        "uts46-v1",
-        "manifests/ens/ens_v1_registrar_l1/v1.toml",
+        ManifestVersionSeed {
+            manifest_version: 1,
+            namespace: "ens",
+            source_family: SOURCE_FAMILY_ENS_V1_REGISTRAR_L1,
+            chain: "ethereum-mainnet",
+            deployment_epoch: "ens_v1",
+            rollout_status: "active",
+            normalizer_version: "uts46-v1",
+            file_path: "manifests/ens/ens_v1_registrar_l1/v1.toml",
+        },
     )
     .await?;
     let registry_manifest_id = insert_manifest_version(
         database.pool(),
-        1,
-        "ens",
-        SOURCE_FAMILY_ENS_V1_REGISTRY_L1,
-        "ethereum-mainnet",
-        "ens_v1",
-        "active",
-        "uts46-v1",
-        "manifests/ens/ens_v1_registry_l1/v1.toml",
+        ManifestVersionSeed {
+            manifest_version: 1,
+            namespace: "ens",
+            source_family: SOURCE_FAMILY_ENS_V1_REGISTRY_L1,
+            chain: "ethereum-mainnet",
+            deployment_epoch: "ens_v1",
+            rollout_status: "active",
+            normalizer_version: "uts46-v1",
+            file_path: "manifests/ens/ens_v1_registry_l1/v1.toml",
+        },
     )
     .await?;
     let resolver_manifest_id = insert_manifest_version(
         database.pool(),
-        1,
-        "ens",
-        SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
-        "ethereum-mainnet",
-        "ens_v1",
-        "active",
-        "uts46-v1",
-        "manifests/ens/ens_v1_resolver_l1/v1.toml",
+        ManifestVersionSeed {
+            manifest_version: 1,
+            namespace: "ens",
+            source_family: SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
+            chain: "ethereum-mainnet",
+            deployment_epoch: "ens_v1",
+            rollout_status: "active",
+            normalizer_version: "uts46-v1",
+            file_path: "manifests/ens/ens_v1_resolver_l1/v1.toml",
+        },
     )
     .await?;
 
@@ -2200,13 +2262,15 @@ async fn sync_ens_v1_unwrapped_authority_gates_discovered_ensv1_resolver_local_f
         .await?;
         insert_manifest_contract_instance(
             database.pool(),
-            manifest_id,
-            "contract",
-            role,
-            contract_instance_id,
-            address,
-            Some(role),
-            Some("none"),
+            ManifestContractInstanceSeed {
+                manifest_id,
+                declaration_kind: "contract",
+                declaration_name: role,
+                contract_instance_id,
+                declared_address: address,
+                role: Some(role),
+                proxy_kind: Some("none"),
+            },
         )
         .await?;
         insert_contract_instance_address(
@@ -2250,13 +2314,15 @@ async fn sync_ens_v1_unwrapped_authority_gates_discovered_ensv1_resolver_local_f
         .await?;
         insert_active_discovery_edge_with_range(
             database.pool(),
-            "ethereum-mainnet",
-            "resolver",
-            registry_contract_instance_id,
-            contract_instance_id,
-            registry_manifest_id,
-            None,
-            None,
+            ActiveDiscoveryEdgeSeed {
+                chain_id: "ethereum-mainnet",
+                edge_kind: "resolver",
+                from_contract_instance_id: registry_contract_instance_id,
+                to_contract_instance_id: contract_instance_id,
+                source_manifest_id: registry_manifest_id,
+                active_from_block_number: None,
+                active_to_block_number: None,
+            },
         )
         .await?;
     }
@@ -2692,38 +2758,44 @@ async fn sync_ens_v1_unwrapped_authority_emits_basenames_base_authority_events_i
 
     insert_active_contract_fixture_with_manifest(
         database.pool(),
-        "basenames",
-        SOURCE_FAMILY_BASENAMES_BASE_REGISTRAR,
-        "base-mainnet",
-        "basenames_v1",
-        "registrar",
-        "0x00000000000000000000000000000000000000aa",
-        Some("registrar"),
-        "manifests/basenames/basenames_base_registrar/v1.toml",
+        ActiveContractFixtureSeed {
+            namespace: "basenames",
+            source_family: SOURCE_FAMILY_BASENAMES_BASE_REGISTRAR,
+            chain: "base-mainnet",
+            deployment_epoch: "basenames_v1",
+            declaration_name: "registrar",
+            address: "0x00000000000000000000000000000000000000aa",
+            role: Some("registrar"),
+            file_path: "manifests/basenames/basenames_base_registrar/v1.toml",
+        },
     )
     .await?;
     insert_active_contract_fixture_with_manifest(
         database.pool(),
-        "basenames",
-        SOURCE_FAMILY_BASENAMES_BASE_REGISTRY,
-        "base-mainnet",
-        "basenames_v1",
-        "registry",
-        "0x00000000000000000000000000000000000000bb",
-        Some("registry"),
-        "manifests/basenames/basenames_base_registry/v1.toml",
+        ActiveContractFixtureSeed {
+            namespace: "basenames",
+            source_family: SOURCE_FAMILY_BASENAMES_BASE_REGISTRY,
+            chain: "base-mainnet",
+            deployment_epoch: "basenames_v1",
+            declaration_name: "registry",
+            address: "0x00000000000000000000000000000000000000bb",
+            role: Some("registry"),
+            file_path: "manifests/basenames/basenames_base_registry/v1.toml",
+        },
     )
     .await?;
     let resolver_manifest_id = insert_active_contract_fixture_with_manifest(
         database.pool(),
-        "basenames",
-        SOURCE_FAMILY_BASENAMES_BASE_RESOLVER,
-        "base-mainnet",
-        "basenames_v1",
-        "resolver",
-        "0x00000000000000000000000000000000000000cc",
-        Some("resolver"),
-        "manifests/basenames/basenames_base_resolver/v1.toml",
+        ActiveContractFixtureSeed {
+            namespace: "basenames",
+            source_family: SOURCE_FAMILY_BASENAMES_BASE_RESOLVER,
+            chain: "base-mainnet",
+            deployment_epoch: "basenames_v1",
+            declaration_name: "resolver",
+            address: "0x00000000000000000000000000000000000000cc",
+            role: Some("resolver"),
+            file_path: "manifests/basenames/basenames_base_resolver/v1.toml",
+        },
     )
     .await?;
     let pending_resolver_contract_instance_id = Uuid::new_v4();
@@ -2737,13 +2809,15 @@ async fn sync_ens_v1_unwrapped_authority_emits_basenames_base_authority_events_i
     .await?;
     insert_manifest_contract_instance(
         database.pool(),
-        resolver_manifest_id,
-        "contract",
-        "pending_resolver",
-        pending_resolver_contract_instance_id,
-        pending_resolver_address,
-        Some("candidate_resolver"),
-        Some("none"),
+        ManifestContractInstanceSeed {
+            manifest_id: resolver_manifest_id,
+            declaration_kind: "contract",
+            declaration_name: "pending_resolver",
+            contract_instance_id: pending_resolver_contract_instance_id,
+            declared_address: pending_resolver_address,
+            role: Some("candidate_resolver"),
+            proxy_kind: Some("none"),
+        },
     )
     .await?;
     insert_contract_instance_address(
@@ -2970,38 +3044,44 @@ async fn sync_ens_v1_unwrapped_authority_gates_basenames_dynamic_resolver_facts_
 
     let registrar_manifest_id = insert_manifest_version(
         database.pool(),
-        1,
-        "basenames",
-        SOURCE_FAMILY_BASENAMES_BASE_REGISTRAR,
-        "base-mainnet",
-        "basenames_v1",
-        "active",
-        "uts46-v1",
-        "manifests/basenames/basenames_base_registrar/v1.toml",
+        ManifestVersionSeed {
+            manifest_version: 1,
+            namespace: "basenames",
+            source_family: SOURCE_FAMILY_BASENAMES_BASE_REGISTRAR,
+            chain: "base-mainnet",
+            deployment_epoch: "basenames_v1",
+            rollout_status: "active",
+            normalizer_version: "uts46-v1",
+            file_path: "manifests/basenames/basenames_base_registrar/v1.toml",
+        },
     )
     .await?;
     let registry_manifest_id = insert_manifest_version(
         database.pool(),
-        1,
-        "basenames",
-        SOURCE_FAMILY_BASENAMES_BASE_REGISTRY,
-        "base-mainnet",
-        "basenames_v1",
-        "active",
-        "uts46-v1",
-        "manifests/basenames/basenames_base_registry/v1.toml",
+        ManifestVersionSeed {
+            manifest_version: 1,
+            namespace: "basenames",
+            source_family: SOURCE_FAMILY_BASENAMES_BASE_REGISTRY,
+            chain: "base-mainnet",
+            deployment_epoch: "basenames_v1",
+            rollout_status: "active",
+            normalizer_version: "uts46-v1",
+            file_path: "manifests/basenames/basenames_base_registry/v1.toml",
+        },
     )
     .await?;
     let resolver_manifest_id = insert_manifest_version(
         database.pool(),
-        1,
-        "basenames",
-        SOURCE_FAMILY_BASENAMES_BASE_RESOLVER,
-        "base-mainnet",
-        "basenames_v1",
-        "active",
-        "uts46-v1",
-        "manifests/basenames/basenames_base_resolver/v1.toml",
+        ManifestVersionSeed {
+            manifest_version: 1,
+            namespace: "basenames",
+            source_family: SOURCE_FAMILY_BASENAMES_BASE_RESOLVER,
+            chain: "base-mainnet",
+            deployment_epoch: "basenames_v1",
+            rollout_status: "active",
+            normalizer_version: "uts46-v1",
+            file_path: "manifests/basenames/basenames_base_resolver/v1.toml",
+        },
     )
     .await?;
     let registrar_contract_instance_id = Uuid::new_v4();
@@ -3048,13 +3128,15 @@ async fn sync_ens_v1_unwrapped_authority_gates_basenames_dynamic_resolver_facts_
         .await?;
         insert_manifest_contract_instance(
             database.pool(),
-            manifest_id,
-            "contract",
-            role,
-            contract_instance_id,
-            address,
-            Some(role),
-            Some("none"),
+            ManifestContractInstanceSeed {
+                manifest_id,
+                declaration_kind: "contract",
+                declaration_name: role,
+                contract_instance_id,
+                declared_address: address,
+                role: Some(role),
+                proxy_kind: Some("none"),
+            },
         )
         .await?;
         insert_contract_instance_address(
@@ -3098,13 +3180,15 @@ async fn sync_ens_v1_unwrapped_authority_gates_basenames_dynamic_resolver_facts_
         .await?;
         insert_active_discovery_edge_with_range(
             database.pool(),
-            "base-mainnet",
-            "resolver",
-            registry_contract_instance_id,
-            contract_instance_id,
-            registry_manifest_id,
-            None,
-            None,
+            ActiveDiscoveryEdgeSeed {
+                chain_id: "base-mainnet",
+                edge_kind: "resolver",
+                from_contract_instance_id: registry_contract_instance_id,
+                to_contract_instance_id: contract_instance_id,
+                source_manifest_id: registry_manifest_id,
+                active_from_block_number: None,
+                active_to_block_number: None,
+            },
         )
         .await?;
     }
@@ -3333,38 +3417,44 @@ async fn sync_ens_v1_unwrapped_authority_backfills_basenames_primary_claim_sourc
 
     let reverse_manifest_id = insert_active_contract_fixture_with_manifest(
         database.pool(),
-        "basenames",
-        "basenames_base_primary",
-        "base-mainnet",
-        "basenames_v1",
-        "reverse_registrar",
-        "0x00000000000000000000000000000000000000ad",
-        Some(CONTRACT_ROLE_REVERSE_REGISTRAR),
-        "manifests/basenames/basenames_base_primary/v1.toml",
+        ActiveContractFixtureSeed {
+            namespace: "basenames",
+            source_family: "basenames_base_primary",
+            chain: "base-mainnet",
+            deployment_epoch: "basenames_v1",
+            declaration_name: "reverse_registrar",
+            address: "0x00000000000000000000000000000000000000ad",
+            role: Some(CONTRACT_ROLE_REVERSE_REGISTRAR),
+            file_path: "manifests/basenames/basenames_base_primary/v1.toml",
+        },
     )
     .await?;
     insert_active_contract_fixture_with_manifest(
         database.pool(),
-        "basenames",
-        SOURCE_FAMILY_BASENAMES_BASE_REGISTRY,
-        "base-mainnet",
-        "basenames_v1",
-        "registry",
-        "0x00000000000000000000000000000000000000bb",
-        Some("registry"),
-        "manifests/basenames/basenames_base_registry/v1.toml",
+        ActiveContractFixtureSeed {
+            namespace: "basenames",
+            source_family: SOURCE_FAMILY_BASENAMES_BASE_REGISTRY,
+            chain: "base-mainnet",
+            deployment_epoch: "basenames_v1",
+            declaration_name: "registry",
+            address: "0x00000000000000000000000000000000000000bb",
+            role: Some("registry"),
+            file_path: "manifests/basenames/basenames_base_registry/v1.toml",
+        },
     )
     .await?;
     insert_active_contract_fixture_with_manifest(
         database.pool(),
-        "basenames",
-        SOURCE_FAMILY_BASENAMES_BASE_RESOLVER,
-        "base-mainnet",
-        "basenames_v1",
-        "resolver",
-        "0x00000000000000000000000000000000000000cc",
-        Some("resolver"),
-        "manifests/basenames/basenames_base_resolver/v1.toml",
+        ActiveContractFixtureSeed {
+            namespace: "basenames",
+            source_family: SOURCE_FAMILY_BASENAMES_BASE_RESOLVER,
+            chain: "base-mainnet",
+            deployment_epoch: "basenames_v1",
+            declaration_name: "resolver",
+            address: "0x00000000000000000000000000000000000000cc",
+            role: Some("resolver"),
+            file_path: "manifests/basenames/basenames_base_resolver/v1.toml",
+        },
     )
     .await?;
 
@@ -3563,13 +3653,15 @@ async fn sync_ens_v1_unwrapped_authority_drops_resolver_record_logs_without_curr
     .await?;
     insert_manifest_contract_instance(
         database.pool(),
-        resolver_manifest_id,
-        "contract",
-        "resolver_alt",
-        alternate_resolver_contract_instance_id,
-        "0x00000000000000000000000000000000000000dd",
-        Some("public_resolver"),
-        Some("none"),
+        ManifestContractInstanceSeed {
+            manifest_id: resolver_manifest_id,
+            declaration_kind: "contract",
+            declaration_name: "resolver_alt",
+            contract_instance_id: alternate_resolver_contract_instance_id,
+            declared_address: "0x00000000000000000000000000000000000000dd",
+            role: Some("public_resolver"),
+            proxy_kind: Some("none"),
+        },
     )
     .await?;
     insert_contract_instance_address(
@@ -3699,14 +3791,16 @@ async fn sync_ens_v1_unwrapped_authority_partitions_permission_events_by_authori
 
     let registrar_manifest_id = insert_manifest_version(
         database.pool(),
-        1,
-        "ens",
-        SOURCE_FAMILY_ENS_V1_REGISTRAR_L1,
-        "ethereum-mainnet",
-        "ens_v1",
-        "active",
-        "uts46-v1",
-        "manifests/ens/ens_v1_registrar_l1/v1.toml",
+        ManifestVersionSeed {
+            manifest_version: 1,
+            namespace: "ens",
+            source_family: SOURCE_FAMILY_ENS_V1_REGISTRAR_L1,
+            chain: "ethereum-mainnet",
+            deployment_epoch: "ens_v1",
+            rollout_status: "active",
+            normalizer_version: "uts46-v1",
+            file_path: "manifests/ens/ens_v1_registrar_l1/v1.toml",
+        },
     )
     .await?;
     let registrar_contract_instance_id = Uuid::new_v4();
@@ -3719,13 +3813,15 @@ async fn sync_ens_v1_unwrapped_authority_partitions_permission_events_by_authori
     .await?;
     insert_manifest_contract_instance(
         database.pool(),
-        registrar_manifest_id,
-        "contract",
-        "registrar",
-        registrar_contract_instance_id,
-        "0x00000000000000000000000000000000000000aa",
-        Some("registrar"),
-        Some("none"),
+        ManifestContractInstanceSeed {
+            manifest_id: registrar_manifest_id,
+            declaration_kind: "contract",
+            declaration_name: "registrar",
+            contract_instance_id: registrar_contract_instance_id,
+            declared_address: "0x00000000000000000000000000000000000000aa",
+            role: Some("registrar"),
+            proxy_kind: Some("none"),
+        },
     )
     .await?;
     insert_contract_instance_address(
@@ -3739,14 +3835,16 @@ async fn sync_ens_v1_unwrapped_authority_partitions_permission_events_by_authori
 
     let registry_manifest_id = insert_manifest_version(
         database.pool(),
-        1,
-        "ens",
-        SOURCE_FAMILY_ENS_V1_REGISTRY_L1,
-        "ethereum-mainnet",
-        "ens_v1",
-        "active",
-        "uts46-v1",
-        "manifests/ens/ens_v1_registry_l1/v1.toml",
+        ManifestVersionSeed {
+            manifest_version: 1,
+            namespace: "ens",
+            source_family: SOURCE_FAMILY_ENS_V1_REGISTRY_L1,
+            chain: "ethereum-mainnet",
+            deployment_epoch: "ens_v1",
+            rollout_status: "active",
+            normalizer_version: "uts46-v1",
+            file_path: "manifests/ens/ens_v1_registry_l1/v1.toml",
+        },
     )
     .await?;
     let registry_contract_instance_id = Uuid::new_v4();
@@ -3759,13 +3857,15 @@ async fn sync_ens_v1_unwrapped_authority_partitions_permission_events_by_authori
     .await?;
     insert_manifest_contract_instance(
         database.pool(),
-        registry_manifest_id,
-        "contract",
-        "registry",
-        registry_contract_instance_id,
-        "0x00000000000000000000000000000000000000bb",
-        Some("registry"),
-        Some("none"),
+        ManifestContractInstanceSeed {
+            manifest_id: registry_manifest_id,
+            declaration_kind: "contract",
+            declaration_name: "registry",
+            contract_instance_id: registry_contract_instance_id,
+            declared_address: "0x00000000000000000000000000000000000000bb",
+            role: Some("registry"),
+            proxy_kind: Some("none"),
+        },
     )
     .await?;
     insert_contract_instance_address(

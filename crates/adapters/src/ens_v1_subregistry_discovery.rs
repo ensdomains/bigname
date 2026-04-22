@@ -1,10 +1,10 @@
 use std::collections::{BTreeMap, HashMap};
 
-use anyhow::{Context, Result, bail};
-use bigname_manifests::{DiscoveryObservation, reconcile_discovery_observations};
-use bigname_storage::{CanonicalityState, NormalizedEvent, upsert_normalized_events};
+use anyhow::{bail, Context, Result};
+use bigname_manifests::{reconcile_discovery_observations, DiscoveryObservation};
+use bigname_storage::{upsert_normalized_events, CanonicalityState, NormalizedEvent};
 use sha3::{Digest, Keccak256};
-use sqlx::{PgPool, Row, types::Uuid};
+use sqlx::{types::Uuid, PgPool, Row};
 
 const ENS_V1_REGISTRY_SOURCE_FAMILY: &str = "ens_v1_registry_l1";
 #[cfg(test)]
@@ -731,13 +731,13 @@ fn child_node(parent_node: &str, labelhash: &str) -> Result<String> {
     let mut hasher = Keccak256::new();
     hasher.update(parent_node);
     hasher.update(labelhash);
-    Ok(format!("0x{}", hex_string(&hasher.finalize())))
+    Ok(format!("0x{}", hex_string(hasher.finalize())))
 }
 
 fn decode_hex_32(value: &str) -> Result<[u8; 32]> {
     let normalized = normalize_hex_32(value)?;
     let mut output = [0u8; 32];
-    for (index, chunk) in normalized[2..].as_bytes().chunks(2).enumerate() {
+    for (index, chunk) in normalized.as_bytes()[2..].chunks(2).enumerate() {
         let hex = std::str::from_utf8(chunk).context("hex topic chunk must be utf-8")?;
         output[index] =
             u8::from_str_radix(hex, 16).with_context(|| format!("invalid hex byte {hex}"))?;
@@ -792,7 +792,7 @@ fn new_resolver_topic0() -> String {
 fn keccak_signature_hex(signature: &str) -> String {
     let mut hasher = Keccak256::new();
     hasher.update(signature.as_bytes());
-    format!("0x{}", hex_string(&hasher.finalize()))
+    format!("0x{}", hex_string(hasher.finalize()))
 }
 
 fn null_if_zero_address(address: &str) -> Option<String> {
@@ -822,19 +822,19 @@ mod tests {
 
     use anyhow::Result;
     use bigname_manifests::{
-        WatchedChainPlan, WatchedContractSource, WatchedSourceSelector, load_repository,
-        load_watched_chain_plan, load_watched_contract_summary, load_watched_contracts,
-        load_watched_source_selector_plan, sync_repository,
+        load_repository, load_watched_chain_plan, load_watched_contract_summary,
+        load_watched_contracts, load_watched_source_selector_plan, sync_repository,
+        WatchedChainPlan, WatchedContractSource, WatchedSourceSelector,
     };
     use bigname_storage::{
-        RawBlock, RawLog, default_database_url, load_normalized_events_by_namespace,
-        upsert_raw_blocks, upsert_raw_logs,
+        default_database_url, load_normalized_events_by_namespace, upsert_raw_blocks,
+        upsert_raw_logs, RawBlock, RawLog,
     };
     use sqlx::{
-        PgPool,
         postgres::{PgConnectOptions, PgPoolOptions},
         query_scalar,
         types::time::OffsetDateTime,
+        PgPool,
     };
 
     use super::*;
@@ -1064,42 +1064,48 @@ discovery_rules = []
     ) -> Result<()> {
         insert_raw_new_owner_log_with_key(
             pool,
-            chain_id,
-            block_hash,
-            block_number,
-            emitting_address,
-            owner,
-            ZERO_NODE,
-            "eth",
-            canonicality_state,
+            RawNewOwnerLog {
+                chain_id,
+                block_hash,
+                block_number,
+                emitting_address,
+                owner,
+                parent_node: ZERO_NODE,
+                label: "eth",
+                canonicality_state,
+            },
         )
         .await
     }
 
+    struct RawNewOwnerLog<'a> {
+        chain_id: &'a str,
+        block_hash: &'a str,
+        block_number: i64,
+        emitting_address: &'a str,
+        owner: &'a str,
+        parent_node: &'a str,
+        label: &'a str,
+        canonicality_state: CanonicalityState,
+    }
+
     async fn insert_raw_new_owner_log_with_key(
         pool: &PgPool,
-        chain_id: &str,
-        block_hash: &str,
-        block_number: i64,
-        emitting_address: &str,
-        owner: &str,
-        parent_node: &str,
-        label: &str,
-        canonicality_state: CanonicalityState,
+        log: RawNewOwnerLog<'_>,
     ) -> Result<()> {
         upsert_raw_blocks(
             pool,
             &[RawBlock {
-                chain_id: chain_id.to_owned(),
-                block_hash: block_hash.to_owned(),
+                chain_id: log.chain_id.to_owned(),
+                block_hash: log.block_hash.to_owned(),
                 parent_hash: None,
-                block_number,
+                block_number: log.block_number,
                 block_timestamp: OffsetDateTime::UNIX_EPOCH,
                 logs_bloom: None,
                 transactions_root: None,
                 receipts_root: None,
                 state_root: None,
-                canonicality_state,
+                canonicality_state: log.canonicality_state,
             }],
         )
         .await?;
@@ -1107,20 +1113,20 @@ discovery_rules = []
         upsert_raw_logs(
             pool,
             &[RawLog {
-                chain_id: chain_id.to_owned(),
-                block_hash: block_hash.to_owned(),
-                block_number,
-                transaction_hash: format!("0xtx{block_number:02x}"),
+                chain_id: log.chain_id.to_owned(),
+                block_hash: log.block_hash.to_owned(),
+                block_number: log.block_number,
+                transaction_hash: format!("0xtx{:02x}", log.block_number),
                 transaction_index: 0,
                 log_index: 0,
-                emitting_address: emitting_address.to_owned(),
+                emitting_address: log.emitting_address.to_owned(),
                 topics: vec![
                     new_owner_topic0(),
-                    parent_node.to_owned(),
-                    labelhash_hex(label),
+                    log.parent_node.to_owned(),
+                    labelhash_hex(log.label),
                 ],
-                data: encode_new_owner_log_data(owner),
-                canonicality_state,
+                data: encode_new_owner_log_data(log.owner),
+                canonicality_state: log.canonicality_state,
             }],
         )
         .await?;
@@ -1128,29 +1134,30 @@ discovery_rules = []
         Ok(())
     }
 
-    async fn insert_raw_new_resolver_log(
-        pool: &PgPool,
-        chain_id: &str,
-        block_hash: &str,
+    struct RawNewResolverLog<'a> {
+        chain_id: &'a str,
+        block_hash: &'a str,
         block_number: i64,
-        emitting_address: &str,
-        resolver: &str,
-        node: &str,
+        emitting_address: &'a str,
+        resolver: &'a str,
+        node: &'a str,
         canonicality_state: CanonicalityState,
-    ) -> Result<()> {
+    }
+
+    async fn insert_raw_new_resolver_log(pool: &PgPool, log: RawNewResolverLog<'_>) -> Result<()> {
         upsert_raw_blocks(
             pool,
             &[RawBlock {
-                chain_id: chain_id.to_owned(),
-                block_hash: block_hash.to_owned(),
+                chain_id: log.chain_id.to_owned(),
+                block_hash: log.block_hash.to_owned(),
                 parent_hash: None,
-                block_number,
+                block_number: log.block_number,
                 block_timestamp: OffsetDateTime::UNIX_EPOCH,
                 logs_bloom: None,
                 transactions_root: None,
                 receipts_root: None,
                 state_root: None,
-                canonicality_state,
+                canonicality_state: log.canonicality_state,
             }],
         )
         .await?;
@@ -1158,16 +1165,16 @@ discovery_rules = []
         upsert_raw_logs(
             pool,
             &[RawLog {
-                chain_id: chain_id.to_owned(),
-                block_hash: block_hash.to_owned(),
-                block_number,
-                transaction_hash: format!("0xtx{block_number:02x}"),
+                chain_id: log.chain_id.to_owned(),
+                block_hash: log.block_hash.to_owned(),
+                block_number: log.block_number,
+                transaction_hash: format!("0xtx{:02x}", log.block_number),
                 transaction_index: 0,
                 log_index: 0,
-                emitting_address: emitting_address.to_owned(),
-                topics: vec![new_resolver_topic0(), normalize_hex_32(node)?],
-                data: encode_registry_new_resolver_log_data(resolver),
-                canonicality_state,
+                emitting_address: log.emitting_address.to_owned(),
+                topics: vec![new_resolver_topic0(), normalize_hex_32(log.node)?],
+                data: encode_registry_new_resolver_log_data(log.resolver),
+                canonicality_state: log.canonicality_state,
             }],
         )
         .await?;
@@ -1252,8 +1259,8 @@ discovery_rules = []
     }
 
     #[tokio::test]
-    async fn canonical_new_owner_log_persists_one_active_subregistry_edge_and_expands_watch_plan()
-    -> Result<()> {
+    async fn canonical_new_owner_log_persists_one_active_subregistry_edge_and_expands_watch_plan(
+    ) -> Result<()> {
         let _permit = crate::acquire_test_db_permit().await;
         let test_dir = TestDir::new()?;
         let database = TestDatabase::new().await?;
@@ -1365,8 +1372,8 @@ discovery_rules = []
     }
 
     #[tokio::test]
-    async fn basenames_finalized_new_owner_log_emits_basenames_subregistry_event_idempotently()
-    -> Result<()> {
+    async fn basenames_finalized_new_owner_log_emits_basenames_subregistry_event_idempotently(
+    ) -> Result<()> {
         let _permit = crate::acquire_test_db_permit().await;
         let test_dir = TestDir::new()?;
         let database = TestDatabase::new().await?;
@@ -1388,14 +1395,16 @@ discovery_rules = []
         sync_repository(database.pool(), &load_repository(&test_dir.path)?).await?;
         insert_raw_new_owner_log_with_key(
             database.pool(),
-            "base-mainnet",
-            "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-            42,
-            "0x00000000000000000000000000000000000000bb",
-            "0x00000000000000000000000000000000000000cc",
-            &base_eth_node()?,
-            "alice",
-            CanonicalityState::Finalized,
+            RawNewOwnerLog {
+                chain_id: "base-mainnet",
+                block_hash: "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                block_number: 42,
+                emitting_address: "0x00000000000000000000000000000000000000bb",
+                owner: "0x00000000000000000000000000000000000000cc",
+                parent_node: &base_eth_node()?,
+                label: "alice",
+                canonicality_state: CanonicalityState::Finalized,
+            },
         )
         .await?;
 
@@ -1483,8 +1492,8 @@ discovery_rules = []
     }
 
     #[tokio::test]
-    async fn canonical_new_resolver_log_persists_resolver_edge_without_profile_support()
-    -> Result<()> {
+    async fn canonical_new_resolver_log_persists_resolver_edge_without_profile_support(
+    ) -> Result<()> {
         let _permit = crate::acquire_test_db_permit().await;
         let test_dir = TestDir::new()?;
         let database = TestDatabase::new().await?;
@@ -1517,13 +1526,15 @@ discovery_rules = []
         let node = child_node(ZERO_NODE, &labelhash_hex("eth"))?;
         insert_raw_new_resolver_log(
             database.pool(),
-            "ethereum-mainnet",
-            "0x9999999999999999999999999999999999999999999999999999999999999999",
-            58,
-            "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E",
-            "0x00000000000000000000000000000000000000CC",
-            &node,
-            CanonicalityState::Canonical,
+            RawNewResolverLog {
+                chain_id: "ethereum-mainnet",
+                block_hash: "0x9999999999999999999999999999999999999999999999999999999999999999",
+                block_number: 58,
+                emitting_address: "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E",
+                resolver: "0x00000000000000000000000000000000000000CC",
+                node: &node,
+                canonicality_state: CanonicalityState::Canonical,
+            },
         )
         .await?;
 
@@ -1571,13 +1582,11 @@ discovery_rules = []
                 .expect("resolver edge must retain registry source manifest provenance"),
             registry_manifest_id
         );
-        assert!(
-            !discovery_edge
-                .try_get::<serde_json::Value, _>("provenance")?
-                .as_object()
-                .expect("resolver discovery provenance must be an object")
-                .contains_key("propagated_role")
-        );
+        assert!(!discovery_edge
+            .try_get::<serde_json::Value, _>("provenance")?
+            .as_object()
+            .expect("resolver discovery provenance must be an object")
+            .contains_key("propagated_role"));
 
         let normalized_events = load_normalized_events_by_namespace(database.pool(), "ens").await?;
         assert_eq!(normalized_events.len(), 1);
@@ -1678,13 +1687,15 @@ discovery_rules = []
         let resolver_address = "0x00000000000000000000000000000000000000CC";
         insert_raw_new_resolver_log(
             database.pool(),
-            "ethereum-mainnet",
-            "0x8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a",
-            70,
-            "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E",
-            resolver_address,
-            &node,
-            CanonicalityState::Canonical,
+            RawNewResolverLog {
+                chain_id: "ethereum-mainnet",
+                block_hash: "0x8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a",
+                block_number: 70,
+                emitting_address: "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E",
+                resolver: resolver_address,
+                node: &node,
+                canonicality_state: CanonicalityState::Canonical,
+            },
         )
         .await?;
         insert_raw_new_owner_log(
@@ -1728,8 +1739,8 @@ discovery_rules = []
     }
 
     #[tokio::test]
-    async fn basenames_new_resolver_log_admits_resolver_watch_target_without_profile_support()
-    -> Result<()> {
+    async fn basenames_new_resolver_log_admits_resolver_watch_target_without_profile_support(
+    ) -> Result<()> {
         let _permit = crate::acquire_test_db_permit().await;
         let test_dir = TestDir::new()?;
         let database = TestDatabase::new().await?;
@@ -1775,13 +1786,15 @@ discovery_rules = []
         let node = child_node(&base_eth_node()?, &labelhash_hex("alice"))?;
         insert_raw_new_resolver_log(
             database.pool(),
-            "base-mainnet",
-            "0x9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a",
-            59,
-            "0x00000000000000000000000000000000000000bb",
-            "0x00000000000000000000000000000000000000cc",
-            &node,
-            CanonicalityState::Finalized,
+            RawNewResolverLog {
+                chain_id: "base-mainnet",
+                block_hash: "0x9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a",
+                block_number: 59,
+                emitting_address: "0x00000000000000000000000000000000000000bb",
+                resolver: "0x00000000000000000000000000000000000000cc",
+                node: &node,
+                canonicality_state: CanonicalityState::Finalized,
+            },
         )
         .await?;
 
@@ -1857,13 +1870,11 @@ discovery_rules = []
                 .expect("resolver edge must retain registry source manifest provenance"),
             registry_manifest_id
         );
-        assert!(
-            !discovery_edge
-                .try_get::<serde_json::Value, _>("provenance")?
-                .as_object()
-                .expect("resolver discovery provenance must be an object")
-                .contains_key("propagated_role")
-        );
+        assert!(!discovery_edge
+            .try_get::<serde_json::Value, _>("provenance")?
+            .as_object()
+            .expect("resolver discovery provenance must be an object")
+            .contains_key("propagated_role"));
         let watched_contracts = load_watched_contracts(database.pool()).await?;
         assert!(watched_contracts.iter().any(|contract| {
             contract.chain == "base-mainnet"
@@ -1894,8 +1905,8 @@ discovery_rules = []
     }
 
     #[tokio::test]
-    async fn zero_resolver_update_closes_resolver_edge_without_closing_subregistry_edge()
-    -> Result<()> {
+    async fn zero_resolver_update_closes_resolver_edge_without_closing_subregistry_edge(
+    ) -> Result<()> {
         let _permit = crate::acquire_test_db_permit().await;
         let test_dir = TestDir::new()?;
         let database = TestDatabase::new().await?;
@@ -1915,26 +1926,30 @@ discovery_rules = []
         .await?;
         insert_raw_new_resolver_log(
             database.pool(),
-            "ethereum-mainnet",
-            "0x9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c",
-            61,
-            "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E",
-            "0x00000000000000000000000000000000000000CC",
-            &node,
-            CanonicalityState::Canonical,
+            RawNewResolverLog {
+                chain_id: "ethereum-mainnet",
+                block_hash: "0x9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c",
+                block_number: 61,
+                emitting_address: "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E",
+                resolver: "0x00000000000000000000000000000000000000CC",
+                node: &node,
+                canonicality_state: CanonicalityState::Canonical,
+            },
         )
         .await?;
         sync_ens_v1_subregistry_discovery(database.pool(), "ethereum-mainnet").await?;
 
         insert_raw_new_resolver_log(
             database.pool(),
-            "ethereum-mainnet",
-            "0x9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d",
-            62,
-            "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E",
-            ZERO_ADDRESS,
-            &node,
-            CanonicalityState::Canonical,
+            RawNewResolverLog {
+                chain_id: "ethereum-mainnet",
+                block_hash: "0x9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d",
+                block_number: 62,
+                emitting_address: "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E",
+                resolver: ZERO_ADDRESS,
+                node: &node,
+                canonicality_state: CanonicalityState::Canonical,
+            },
         )
         .await?;
 
@@ -2013,8 +2028,8 @@ discovery_rules = []
     }
 
     #[tokio::test]
-    async fn sync_ens_v1_subregistry_discovery_extends_transitively_from_discovered_subregistries()
-    -> Result<()> {
+    async fn sync_ens_v1_subregistry_discovery_extends_transitively_from_discovered_subregistries(
+    ) -> Result<()> {
         let _permit = crate::acquire_test_db_permit().await;
         let test_dir = TestDir::new()?;
         let database = TestDatabase::new().await?;
@@ -2036,14 +2051,16 @@ discovery_rules = []
         let first_child_node = child_node(ZERO_NODE, &labelhash_hex("eth"))?;
         insert_raw_new_owner_log_with_key(
             database.pool(),
-            "ethereum-mainnet",
-            "0x2222222222222222222222222222222222222222222222222222222222222222",
-            51,
-            "0x00000000000000000000000000000000000000CC",
-            "0x00000000000000000000000000000000000000DD",
-            &first_child_node,
-            "sub",
-            CanonicalityState::Canonical,
+            RawNewOwnerLog {
+                chain_id: "ethereum-mainnet",
+                block_hash: "0x2222222222222222222222222222222222222222222222222222222222222222",
+                block_number: 51,
+                emitting_address: "0x00000000000000000000000000000000000000CC",
+                owner: "0x00000000000000000000000000000000000000DD",
+                parent_node: &first_child_node,
+                label: "sub",
+                canonicality_state: CanonicalityState::Canonical,
+            },
         )
         .await?;
 
@@ -2165,8 +2182,8 @@ discovery_rules = []
     }
 
     #[tokio::test]
-    async fn sync_ens_v1_subregistry_discovery_clears_zero_owner_edges_deterministically()
-    -> Result<()> {
+    async fn sync_ens_v1_subregistry_discovery_clears_zero_owner_edges_deterministically(
+    ) -> Result<()> {
         let _permit = crate::acquire_test_db_permit().await;
         let test_dir = TestDir::new()?;
         let database = TestDatabase::new().await?;
@@ -2255,8 +2272,8 @@ discovery_rules = []
     }
 
     #[tokio::test]
-    async fn sync_ens_v1_subregistry_discovery_cascades_descendant_teardown_in_same_sync()
-    -> Result<()> {
+    async fn sync_ens_v1_subregistry_discovery_cascades_descendant_teardown_in_same_sync(
+    ) -> Result<()> {
         let _permit = crate::acquire_test_db_permit().await;
         let test_dir = TestDir::new()?;
         let database = TestDatabase::new().await?;
@@ -2278,14 +2295,16 @@ discovery_rules = []
         let first_child_node = child_node(ZERO_NODE, &labelhash_hex("eth"))?;
         insert_raw_new_owner_log_with_key(
             database.pool(),
-            "ethereum-mainnet",
-            "0x7777777777777777777777777777777777777777777777777777777777777777",
-            56,
-            "0x00000000000000000000000000000000000000CC",
-            "0x00000000000000000000000000000000000000DD",
-            &first_child_node,
-            "sub",
-            CanonicalityState::Canonical,
+            RawNewOwnerLog {
+                chain_id: "ethereum-mainnet",
+                block_hash: "0x7777777777777777777777777777777777777777777777777777777777777777",
+                block_number: 56,
+                emitting_address: "0x00000000000000000000000000000000000000CC",
+                owner: "0x00000000000000000000000000000000000000DD",
+                parent_node: &first_child_node,
+                label: "sub",
+                canonicality_state: CanonicalityState::Canonical,
+            },
         )
         .await?;
         sync_ens_v1_subregistry_discovery(database.pool(), "ethereum-mainnet").await?;
@@ -2357,8 +2376,8 @@ discovery_rules = []
     }
 
     #[tokio::test]
-    async fn sync_ens_v1_subregistry_discovery_reconciles_reassigned_children_to_one_active_edge()
-    -> Result<()> {
+    async fn sync_ens_v1_subregistry_discovery_reconciles_reassigned_children_to_one_active_edge(
+    ) -> Result<()> {
         let _permit = crate::acquire_test_db_permit().await;
         let test_dir = TestDir::new()?;
         let database = TestDatabase::new().await?;
@@ -2506,11 +2525,9 @@ discovery_rules = []
         assert_eq!(summary.active_edge_count, 0);
         assert_eq!(summary.admitted_edge_count, 0);
         assert_eq!(summary.inserted_edge_count, 0);
-        assert!(
-            load_normalized_events_by_namespace(database.pool(), "ens")
-                .await?
-                .is_empty()
-        );
+        assert!(load_normalized_events_by_namespace(database.pool(), "ens")
+            .await?
+            .is_empty());
 
         let watched_plan = load_watched_chain_plan(database.pool()).await?;
         assert_eq!(

@@ -11,6 +11,12 @@ if [ -f .env ]; then
 fi
 
 export BIGNAME_DATABASE_URL="${BIGNAME_DATABASE_URL:-${DATABASE_URL:-postgres://bigname:bigname@127.0.0.1:5432/bigname}}"
+export BIGNAME_INDEXER_MANIFESTS_ROOT="${BIGNAME_INDEXER_MANIFESTS_ROOT:-manifests}"
+export BIGNAME_INDEXER_POLL_INTERVAL_SECS="${BIGNAME_INDEXER_POLL_INTERVAL_SECS:-5}"
+
+if [ -z "${BIGNAME_INDEXER_CHAIN_RPC_URLS:-}" ]; then
+  printf '%s\n' "warning: BIGNAME_INDEXER_CHAIN_RPC_URLS is unset; indexer will sync manifests/watch state but provider-backed live ingestion will stay idle." >&2
+fi
 
 docker compose up -d
 cargo run -p bigname-worker -- migrate

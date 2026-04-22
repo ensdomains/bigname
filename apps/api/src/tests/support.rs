@@ -45,6 +45,17 @@ struct TestDatabase {
     database_name: String,
 }
 
+struct AuthorityHistorySeed<'a> {
+    event_identity: &'a str,
+    namespace: &'a str,
+    logical_name_id: &'a str,
+    resource_id: Uuid,
+    event_kind: &'a str,
+    block_number: i64,
+    block_hash: &'a str,
+    after_state: Value,
+}
+
 #[derive(Clone, Copy)]
 enum BasenamesControlVectorScenario {
     NftOnly,
@@ -462,6 +473,7 @@ impl TestDatabase {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn insert_manifest(
         &self,
         namespace: &str,
@@ -538,6 +550,7 @@ impl TestDatabase {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn seed_name_current_binding(
         &self,
         logical_name_id: &str,
@@ -2279,31 +2292,22 @@ fn history_event(
     }
 }
 
-fn authority_history_event(
-    event_identity: &str,
-    namespace: &str,
-    logical_name_id: &str,
-    resource_id: Uuid,
-    event_kind: &str,
-    block_number: i64,
-    block_hash: &str,
-    after_state: Value,
-) -> NormalizedEvent {
+fn authority_history_event(seed: AuthorityHistorySeed<'_>) -> NormalizedEvent {
     NormalizedEvent {
-        namespace: namespace.to_owned(),
-        event_kind: event_kind.to_owned(),
+        namespace: seed.namespace.to_owned(),
+        event_kind: seed.event_kind.to_owned(),
         source_family: "ens_v1_registrar_l1".to_owned(),
         derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
-        after_state,
+        after_state: seed.after_state,
         before_state: json!({}),
         ..history_event(
-            event_identity,
-            Some(logical_name_id),
-            Some(resource_id),
+            seed.event_identity,
+            Some(seed.logical_name_id),
+            Some(seed.resource_id),
             Some("ethereum-mainnet"),
-            Some(block_number),
-            Some(block_hash),
-            Some(&format!("0xtx{block_number}")),
+            Some(seed.block_number),
+            Some(seed.block_hash),
+            Some(&format!("0xtx{}", seed.block_number)),
             Some(0),
             CanonicalityState::Canonical,
         )
@@ -2413,6 +2417,7 @@ fn stable_row_strings(rows: &[Value]) -> Vec<String> {
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn assert_replay_stable_pagination(
     base_rows: &[Value],
     base_page: &HistoryPageResponse,
@@ -3399,6 +3404,7 @@ fn primary_name_execution_outcome(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn address_name_name_current_row(
     logical_name_id: &str,
     canonical_display_name: &str,
@@ -3631,6 +3637,7 @@ fn address_name_surface_binding(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn address_name_current_row(
     address: &str,
     logical_name_id: &str,

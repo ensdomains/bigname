@@ -422,14 +422,18 @@ fn permission_changed_event(
                 "resolver_address": raw_log.emitting_address,
             },
             "effective_powers": effective_powers,
-            "grant_source": has_effective_powers.then(|| json!({
-                "kind": "raw_log",
-                "source_event": "EACRolesChanged",
-                "upstream_resource": hint.upstream_resource,
-                "resolver_contract_instance_id": raw_log.emitting_contract_instance_id.to_string(),
-                "root_resource": root_resource,
-                "changed_powers": changed_powers.clone(),
-            })).unwrap_or_else(|| json!({})),
+            "grant_source": if has_effective_powers {
+                json!({
+                    "kind": "raw_log",
+                    "source_event": "EACRolesChanged",
+                    "upstream_resource": hint.upstream_resource,
+                    "resolver_contract_instance_id": raw_log.emitting_contract_instance_id.to_string(),
+                    "root_resource": root_resource,
+                    "changed_powers": changed_powers.clone(),
+                })
+            } else {
+                json!({})
+            },
             "revocation_source": fully_revoked.then(|| json!({
                 "kind": "raw_log",
                 "source_event": "EACRolesChanged",
@@ -1000,7 +1004,8 @@ fn role_bitmap_powers(bitmap: &str) -> Result<Vec<String>> {
     ];
     Ok(role_bits
         .into_iter()
-        .filter_map(|(bit, power)| bit_is_set(&bytes, bit).then(|| power.to_owned()))
+        .filter(|(bit, _)| bit_is_set(&bytes, *bit))
+        .map(|(_, power)| power.to_owned())
         .collect())
 }
 
@@ -1111,7 +1116,7 @@ fn normalize_hex_32_word(word: &[u8]) -> Result<String> {
 fn decode_hex_32(value: &str) -> Result<[u8; 32]> {
     let normalized = normalize_hex_32(value)?;
     let mut output = [0u8; 32];
-    for (index, chunk) in normalized[2..].as_bytes().chunks(2).enumerate() {
+    for (index, chunk) in normalized.as_bytes()[2..].chunks(2).enumerate() {
         let hex = std::str::from_utf8(chunk).context("hex chunk must be UTF-8")?;
         output[index] =
             u8::from_str_radix(hex, 16).with_context(|| format!("invalid hex byte {hex}"))?;

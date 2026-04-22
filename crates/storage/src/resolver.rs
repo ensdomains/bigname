@@ -1,15 +1,7 @@
-use std::{
-    str::FromStr,
-    sync::atomic::{AtomicU64, Ordering},
-    time::{SystemTime, UNIX_EPOCH},
-};
-
 use anyhow::{Context, Result, bail};
-use serde_json::{Value, json};
+use serde_json::Value;
 use sqlx::types::time::OffsetDateTime;
 use sqlx::{PgPool, Row, postgres::PgRow};
-
-use crate::default_database_url;
 
 /// Persisted resolver-overview projection row keyed by resolver target.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -280,11 +272,20 @@ fn normalize_resolver_address(resolver_address: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        str::FromStr,
+        sync::atomic::{AtomicU64, Ordering},
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
     use anyhow::Result;
+    use serde_json::json;
     use sqlx::{
         PgPool,
         postgres::{PgConnectOptions, PgPoolOptions},
     };
+
+    use crate::default_database_url;
 
     use super::*;
 

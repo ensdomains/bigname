@@ -669,7 +669,7 @@ async fn sync_adapter_owned_raw_log_state_backfills_basenames_reverse_claims_and
                 chain_id: "base-mainnet".to_owned(),
                 block_hash: stored_block.block_hash.clone(),
                 block_number: stored_block.block_number,
-                transaction_hash: transaction_hash,
+                transaction_hash,
                 transaction_index: 0,
                 log_index: 4,
                 emitting_address: resolver_address.to_owned(),

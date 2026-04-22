@@ -791,7 +791,8 @@ mod tests {
             }),
         };
 
-        let inserted = upsert_primary_name_current_rows(database.pool(), &[row.clone()]).await?;
+        let inserted =
+            upsert_primary_name_current_rows(database.pool(), std::slice::from_ref(&row)).await?;
         assert_eq!(inserted, vec![row.clone()]);
 
         let loaded = load_primary_name_current(

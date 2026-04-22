@@ -424,15 +424,19 @@ async fn active_manifest_id_for_source_family(
     .with_context(|| format!("failed to load active manifest_id for {namespace}/{source_family}"))
 }
 
+struct RawCodeHashObservation<'a> {
+    chain: &'a str,
+    block_hash: &'a str,
+    block_number: i64,
+    contract_address: &'a str,
+    code_hash: &'a str,
+    code_byte_length: i64,
+    canonicality_state: &'a str,
+}
+
 async fn insert_raw_code_hash_observation(
     pool: &PgPool,
-    chain: &str,
-    block_hash: &str,
-    block_number: i64,
-    contract_address: &str,
-    code_hash: &str,
-    code_byte_length: i64,
-    canonicality_state: &str,
+    observation: RawCodeHashObservation<'_>,
 ) -> Result<()> {
     sqlx::query(
         r#"
@@ -448,16 +452,21 @@ async fn insert_raw_code_hash_observation(
         VALUES ($1, $2, $3, $4, $5, $6, $7::canonicality_state)
         "#,
     )
-    .bind(chain)
-    .bind(block_hash)
-    .bind(block_number)
-    .bind(normalize_address(contract_address))
-    .bind(code_hash)
-    .bind(code_byte_length)
-    .bind(canonicality_state)
+    .bind(observation.chain)
+    .bind(observation.block_hash)
+    .bind(observation.block_number)
+    .bind(normalize_address(observation.contract_address))
+    .bind(observation.code_hash)
+    .bind(observation.code_byte_length)
+    .bind(observation.canonicality_state)
     .execute(pool)
     .await
-    .with_context(|| format!("failed to insert raw code hash for {chain}/{contract_address}"))?;
+    .with_context(|| {
+        format!(
+            "failed to insert raw code hash for {}/{}",
+            observation.chain, observation.contract_address
+        )
+    })?;
 
     Ok(())
 }
@@ -1826,35 +1835,41 @@ async fn ens_v1_resolver_public_resolver_profile_admission_keeps_unknowns_watch_
 
     insert_raw_code_hash_observation(
         database.pool(),
-        "ethereum-mainnet",
-        "0x1111111111111111111111111111111111111111111111111111111111111111",
-        100,
-        public_resolver_seed_address,
-        public_resolver_code_hash,
-        1,
-        "canonical",
+        RawCodeHashObservation {
+            chain: "ethereum-mainnet",
+            block_hash: "0x1111111111111111111111111111111111111111111111111111111111111111",
+            block_number: 100,
+            contract_address: public_resolver_seed_address,
+            code_hash: public_resolver_code_hash,
+            code_byte_length: 1,
+            canonicality_state: "canonical",
+        },
     )
     .await?;
     insert_raw_code_hash_observation(
         database.pool(),
-        "ethereum-mainnet",
-        "0x2222222222222222222222222222222222222222222222222222222222222222",
-        110,
-        supported_resolver_address,
-        public_resolver_code_hash,
-        1,
-        "canonical",
+        RawCodeHashObservation {
+            chain: "ethereum-mainnet",
+            block_hash: "0x2222222222222222222222222222222222222222222222222222222222222222",
+            block_number: 110,
+            contract_address: supported_resolver_address,
+            code_hash: public_resolver_code_hash,
+            code_byte_length: 1,
+            canonicality_state: "canonical",
+        },
     )
     .await?;
     insert_raw_code_hash_observation(
         database.pool(),
-        "ethereum-mainnet",
-        "0x3333333333333333333333333333333333333333333333333333333333333333",
-        120,
-        unsupported_resolver_address,
-        unsupported_code_hash,
-        1,
-        "canonical",
+        RawCodeHashObservation {
+            chain: "ethereum-mainnet",
+            block_hash: "0x3333333333333333333333333333333333333333333333333333333333333333",
+            block_number: 120,
+            contract_address: unsupported_resolver_address,
+            code_hash: unsupported_code_hash,
+            code_byte_length: 1,
+            canonicality_state: "canonical",
+        },
     )
     .await?;
 
@@ -1884,121 +1899,142 @@ async fn ens_v1_resolver_public_resolver_profile_admission_keeps_unknowns_watch_
 
     assert_profile_admission_rows(
         &admissions,
-        public_resolver_seed_address,
-        "supported",
-        "manifest_public_resolver_seed",
-        seed_contract_instance_id,
-        Some(public_resolver_code_hash),
-        Some(public_resolver_code_hash),
-        Some(seed_contract_instance_id),
+        EnsV1ProfileAdmissionExpectation {
+            address: public_resolver_seed_address,
+            status: "supported",
+            admission_basis: "manifest_public_resolver_seed",
+            contract_instance_id: seed_contract_instance_id,
+            observed_code_hash: Some(public_resolver_code_hash),
+            matched_code_hash: Some(public_resolver_code_hash),
+            matched_contract_instance_id: Some(seed_contract_instance_id),
+        },
     );
     assert_profile_admission_rows(
         &admissions,
-        supported_resolver_address,
-        "supported",
-        "code_hash_match",
-        supported_contract_instance_id,
-        Some(public_resolver_code_hash),
-        Some(public_resolver_code_hash),
-        Some(seed_contract_instance_id),
+        EnsV1ProfileAdmissionExpectation {
+            address: supported_resolver_address,
+            status: "supported",
+            admission_basis: "code_hash_match",
+            contract_instance_id: supported_contract_instance_id,
+            observed_code_hash: Some(public_resolver_code_hash),
+            matched_code_hash: Some(public_resolver_code_hash),
+            matched_contract_instance_id: Some(seed_contract_instance_id),
+        },
     );
     assert_profile_admission_rows(
         &admissions,
-        pending_resolver_address,
-        "pending",
-        "code_hash_pending",
-        pending_contract_instance_id,
-        None,
-        None,
-        None,
+        EnsV1ProfileAdmissionExpectation {
+            address: pending_resolver_address,
+            status: "pending",
+            admission_basis: "code_hash_pending",
+            contract_instance_id: pending_contract_instance_id,
+            observed_code_hash: None,
+            matched_code_hash: None,
+            matched_contract_instance_id: None,
+        },
     );
     assert_profile_admission_rows(
         &admissions,
-        unsupported_resolver_address,
-        "unsupported",
-        "code_hash_mismatch",
-        unsupported_contract_instance_id,
-        Some(unsupported_code_hash),
-        None,
-        None,
+        EnsV1ProfileAdmissionExpectation {
+            address: unsupported_resolver_address,
+            status: "unsupported",
+            admission_basis: "code_hash_mismatch",
+            contract_instance_id: unsupported_contract_instance_id,
+            observed_code_hash: Some(unsupported_code_hash),
+            matched_code_hash: None,
+            matched_contract_instance_id: None,
+        },
     );
 
     database.cleanup().await?;
     Ok(())
 }
 
+struct ProfileAdmissionExpectation<'a> {
+    address: &'a str,
+    chain: &'a str,
+    source_family: &'a str,
+    profile: &'a str,
+    fact_families: BTreeSet<&'a str>,
+    status: &'a str,
+    admission_basis: &'a str,
+    contract_instance_id: Uuid,
+    observed_code_hash: Option<&'a str>,
+    matched_code_hash: Option<&'a str>,
+    matched_contract_instance_id: Option<Uuid>,
+}
+
+struct EnsV1ProfileAdmissionExpectation<'a> {
+    address: &'a str,
+    status: &'a str,
+    admission_basis: &'a str,
+    contract_instance_id: Uuid,
+    observed_code_hash: Option<&'a str>,
+    matched_code_hash: Option<&'a str>,
+    matched_contract_instance_id: Option<Uuid>,
+}
+
 fn assert_profile_admission_rows(
     admissions: &[ResolverProfileAdmission],
-    address: &str,
-    expected_status: &str,
-    expected_admission_basis: &str,
-    expected_contract_instance_id: Uuid,
-    expected_observed_code_hash: Option<&str>,
-    expected_matched_code_hash: Option<&str>,
-    expected_matched_contract_instance_id: Option<Uuid>,
+    expectation: EnsV1ProfileAdmissionExpectation<'_>,
 ) {
     assert_profile_admission_rows_for_profile(
         admissions,
-        address,
-        "ethereum-mainnet",
-        "ens_v1_resolver_l1",
-        "public_resolver_compatible",
-        BTreeSet::from([
-            "resolver_authorization",
-            "resolver_record",
-            "resolver_record_version",
-        ]),
-        expected_status,
-        expected_admission_basis,
-        expected_contract_instance_id,
-        expected_observed_code_hash,
-        expected_matched_code_hash,
-        expected_matched_contract_instance_id,
+        ProfileAdmissionExpectation {
+            address: expectation.address,
+            chain: "ethereum-mainnet",
+            source_family: "ens_v1_resolver_l1",
+            profile: "public_resolver_compatible",
+            fact_families: BTreeSet::from([
+                "resolver_authorization",
+                "resolver_record",
+                "resolver_record_version",
+            ]),
+            status: expectation.status,
+            admission_basis: expectation.admission_basis,
+            contract_instance_id: expectation.contract_instance_id,
+            observed_code_hash: expectation.observed_code_hash,
+            matched_code_hash: expectation.matched_code_hash,
+            matched_contract_instance_id: expectation.matched_contract_instance_id,
+        },
     );
 }
 
 fn assert_profile_admission_rows_for_profile(
     admissions: &[ResolverProfileAdmission],
-    address: &str,
-    expected_chain: &str,
-    expected_source_family: &str,
-    expected_profile: &str,
-    expected_fact_families: BTreeSet<&str>,
-    expected_status: &str,
-    expected_admission_basis: &str,
-    expected_contract_instance_id: Uuid,
-    expected_observed_code_hash: Option<&str>,
-    expected_matched_code_hash: Option<&str>,
-    expected_matched_contract_instance_id: Option<Uuid>,
+    expectation: ProfileAdmissionExpectation<'_>,
 ) {
-    let address = normalize_address(address);
+    let address = normalize_address(expectation.address);
     let rows = admissions
         .iter()
         .filter(|admission| admission.address == address)
         .collect::<Vec<_>>();
-    assert_eq!(rows.len(), expected_fact_families.len());
+    assert_eq!(rows.len(), expectation.fact_families.len());
     assert_eq!(
         rows.iter()
             .map(|admission| admission.fact_family.as_str())
             .collect::<BTreeSet<_>>(),
-        expected_fact_families
+        expectation.fact_families
     );
 
     for row in rows {
-        assert_eq!(row.chain, expected_chain);
-        assert_eq!(row.source_family, expected_source_family);
-        assert_eq!(row.contract_instance_id, expected_contract_instance_id);
-        assert_eq!(row.profile, expected_profile);
-        assert_eq!(row.status, expected_status);
-        assert_eq!(row.admission_basis, expected_admission_basis);
+        assert_eq!(row.chain, expectation.chain);
+        assert_eq!(row.source_family, expectation.source_family);
+        assert_eq!(row.contract_instance_id, expectation.contract_instance_id);
+        assert_eq!(row.profile, expectation.profile);
+        assert_eq!(row.status, expectation.status);
+        assert_eq!(row.admission_basis, expectation.admission_basis);
         assert_eq!(
             row.observed_code_hash.as_deref(),
-            expected_observed_code_hash
+            expectation.observed_code_hash
         );
-        assert_eq!(row.matched_code_hash.as_deref(), expected_matched_code_hash);
+        assert_eq!(
+            row.matched_code_hash.as_deref(),
+            expectation.matched_code_hash
+        );
         assert_eq!(
             row.matched_contract_instance_id,
-            expected_matched_contract_instance_id
+            expectation.matched_contract_instance_id
         );
     }
 }
@@ -2144,35 +2180,41 @@ async fn basenames_l2_resolver_profile_admission_keeps_unknowns_watch_only() -> 
 
     insert_raw_code_hash_observation(
         database.pool(),
-        "base-mainnet",
-        "0x1111111111111111111111111111111111111111111111111111111111111111",
-        100,
-        l2_resolver_seed_address,
-        l2_resolver_code_hash,
-        1,
-        "canonical",
+        RawCodeHashObservation {
+            chain: "base-mainnet",
+            block_hash: "0x1111111111111111111111111111111111111111111111111111111111111111",
+            block_number: 100,
+            contract_address: l2_resolver_seed_address,
+            code_hash: l2_resolver_code_hash,
+            code_byte_length: 1,
+            canonicality_state: "canonical",
+        },
     )
     .await?;
     insert_raw_code_hash_observation(
         database.pool(),
-        "base-mainnet",
-        "0x2222222222222222222222222222222222222222222222222222222222222222",
-        110,
-        supported_resolver_address,
-        l2_resolver_code_hash,
-        1,
-        "canonical",
+        RawCodeHashObservation {
+            chain: "base-mainnet",
+            block_hash: "0x2222222222222222222222222222222222222222222222222222222222222222",
+            block_number: 110,
+            contract_address: supported_resolver_address,
+            code_hash: l2_resolver_code_hash,
+            code_byte_length: 1,
+            canonicality_state: "canonical",
+        },
     )
     .await?;
     insert_raw_code_hash_observation(
         database.pool(),
-        "base-mainnet",
-        "0x3333333333333333333333333333333333333333333333333333333333333333",
-        120,
-        unsupported_resolver_address,
-        unsupported_code_hash,
-        1,
-        "canonical",
+        RawCodeHashObservation {
+            chain: "base-mainnet",
+            block_hash: "0x3333333333333333333333333333333333333333333333333333333333333333",
+            block_number: 120,
+            contract_address: unsupported_resolver_address,
+            code_hash: unsupported_code_hash,
+            code_byte_length: 1,
+            canonicality_state: "canonical",
+        },
     )
     .await?;
 
@@ -2213,59 +2255,67 @@ async fn basenames_l2_resolver_profile_admission_keeps_unknowns_watch_only() -> 
 
     assert_profile_admission_rows_for_profile(
         &admissions,
-        l2_resolver_seed_address,
-        "base-mainnet",
-        "basenames_base_resolver",
-        "l2_resolver_compatible",
-        fact_families.clone(),
-        "supported",
-        "manifest_l2_resolver_seed",
-        seed_contract_instance_id,
-        Some(l2_resolver_code_hash),
-        Some(l2_resolver_code_hash),
-        Some(seed_contract_instance_id),
+        ProfileAdmissionExpectation {
+            address: l2_resolver_seed_address,
+            chain: "base-mainnet",
+            source_family: "basenames_base_resolver",
+            profile: "l2_resolver_compatible",
+            fact_families: fact_families.clone(),
+            status: "supported",
+            admission_basis: "manifest_l2_resolver_seed",
+            contract_instance_id: seed_contract_instance_id,
+            observed_code_hash: Some(l2_resolver_code_hash),
+            matched_code_hash: Some(l2_resolver_code_hash),
+            matched_contract_instance_id: Some(seed_contract_instance_id),
+        },
     );
     assert_profile_admission_rows_for_profile(
         &admissions,
-        supported_resolver_address,
-        "base-mainnet",
-        "basenames_base_resolver",
-        "l2_resolver_compatible",
-        fact_families.clone(),
-        "supported",
-        "code_hash_match",
-        supported_contract_instance_id,
-        Some(l2_resolver_code_hash),
-        Some(l2_resolver_code_hash),
-        Some(seed_contract_instance_id),
+        ProfileAdmissionExpectation {
+            address: supported_resolver_address,
+            chain: "base-mainnet",
+            source_family: "basenames_base_resolver",
+            profile: "l2_resolver_compatible",
+            fact_families: fact_families.clone(),
+            status: "supported",
+            admission_basis: "code_hash_match",
+            contract_instance_id: supported_contract_instance_id,
+            observed_code_hash: Some(l2_resolver_code_hash),
+            matched_code_hash: Some(l2_resolver_code_hash),
+            matched_contract_instance_id: Some(seed_contract_instance_id),
+        },
     );
     assert_profile_admission_rows_for_profile(
         &admissions,
-        pending_resolver_address,
-        "base-mainnet",
-        "basenames_base_resolver",
-        "l2_resolver_compatible",
-        fact_families.clone(),
-        "pending",
-        "code_hash_pending",
-        pending_contract_instance_id,
-        None,
-        None,
-        None,
+        ProfileAdmissionExpectation {
+            address: pending_resolver_address,
+            chain: "base-mainnet",
+            source_family: "basenames_base_resolver",
+            profile: "l2_resolver_compatible",
+            fact_families: fact_families.clone(),
+            status: "pending",
+            admission_basis: "code_hash_pending",
+            contract_instance_id: pending_contract_instance_id,
+            observed_code_hash: None,
+            matched_code_hash: None,
+            matched_contract_instance_id: None,
+        },
     );
     assert_profile_admission_rows_for_profile(
         &admissions,
-        unsupported_resolver_address,
-        "base-mainnet",
-        "basenames_base_resolver",
-        "l2_resolver_compatible",
-        fact_families,
-        "unsupported",
-        "code_hash_mismatch",
-        unsupported_contract_instance_id,
-        Some(unsupported_code_hash),
-        None,
-        None,
+        ProfileAdmissionExpectation {
+            address: unsupported_resolver_address,
+            chain: "base-mainnet",
+            source_family: "basenames_base_resolver",
+            profile: "l2_resolver_compatible",
+            fact_families,
+            status: "unsupported",
+            admission_basis: "code_hash_mismatch",
+            contract_instance_id: unsupported_contract_instance_id,
+            observed_code_hash: Some(unsupported_code_hash),
+            matched_code_hash: None,
+            matched_contract_instance_id: None,
+        },
     );
 
     database.cleanup().await?;
@@ -3390,79 +3440,93 @@ async fn manifest_drift_views_materialize_active_alert_inputs() -> Result<()> {
 
     insert_raw_code_hash_observation(
         database.pool(),
-        "ethereum-mainnet",
-        "0x1000000000000000000000000000000000000000000000000000000000000000",
-        100,
-        root_address,
-        "0xroot",
-        32,
-        "canonical",
+        RawCodeHashObservation {
+            chain: "ethereum-mainnet",
+            block_hash: "0x1000000000000000000000000000000000000000000000000000000000000000",
+            block_number: 100,
+            contract_address: root_address,
+            code_hash: "0xroot",
+            code_byte_length: 32,
+            canonicality_state: "canonical",
+        },
     )
     .await?;
     insert_raw_code_hash_observation(
         database.pool(),
-        "ethereum-mainnet",
-        "0x1010000000000000000000000000000000000000000000000000000000000000",
-        101,
-        proxy_address,
-        "0xproxy-old",
-        64,
-        "canonical",
+        RawCodeHashObservation {
+            chain: "ethereum-mainnet",
+            block_hash: "0x1010000000000000000000000000000000000000000000000000000000000000",
+            block_number: 101,
+            contract_address: proxy_address,
+            code_hash: "0xproxy-old",
+            code_byte_length: 64,
+            canonicality_state: "canonical",
+        },
     )
     .await?;
     insert_raw_code_hash_observation(
         database.pool(),
-        "ethereum-mainnet",
-        "0x1020000000000000000000000000000000000000000000000000000000000000",
-        102,
-        proxy_address,
-        "0xproxy-current",
-        65,
-        "finalized",
+        RawCodeHashObservation {
+            chain: "ethereum-mainnet",
+            block_hash: "0x1020000000000000000000000000000000000000000000000000000000000000",
+            block_number: 102,
+            contract_address: proxy_address,
+            code_hash: "0xproxy-current",
+            code_byte_length: 65,
+            canonicality_state: "finalized",
+        },
     )
     .await?;
     insert_raw_code_hash_observation(
         database.pool(),
-        "ethereum-mainnet",
-        "0x1030000000000000000000000000000000000000000000000000000000000000",
-        103,
-        second_implementation,
-        "0ximpl-current",
-        96,
-        "safe",
+        RawCodeHashObservation {
+            chain: "ethereum-mainnet",
+            block_hash: "0x1030000000000000000000000000000000000000000000000000000000000000",
+            block_number: 103,
+            contract_address: second_implementation,
+            code_hash: "0ximpl-current",
+            code_byte_length: 96,
+            canonicality_state: "safe",
+        },
     )
     .await?;
     insert_raw_code_hash_observation(
         database.pool(),
-        "ethereum-mainnet",
-        "0x1040000000000000000000000000000000000000000000000000000000000000",
-        104,
-        first_implementation,
-        "0ximpl-stale",
-        96,
-        "finalized",
+        RawCodeHashObservation {
+            chain: "ethereum-mainnet",
+            block_hash: "0x1040000000000000000000000000000000000000000000000000000000000000",
+            block_number: 104,
+            contract_address: first_implementation,
+            code_hash: "0ximpl-stale",
+            code_byte_length: 96,
+            canonicality_state: "finalized",
+        },
     )
     .await?;
     insert_raw_code_hash_observation(
         database.pool(),
-        "ethereum-mainnet",
-        "0x1050000000000000000000000000000000000000000000000000000000000000",
-        105,
-        inactive_execution,
-        "0xinactive",
-        128,
-        "finalized",
+        RawCodeHashObservation {
+            chain: "ethereum-mainnet",
+            block_hash: "0x1050000000000000000000000000000000000000000000000000000000000000",
+            block_number: 105,
+            contract_address: inactive_execution,
+            code_hash: "0xinactive",
+            code_byte_length: 128,
+            canonicality_state: "finalized",
+        },
     )
     .await?;
     insert_raw_code_hash_observation(
         database.pool(),
-        "ethereum-mainnet",
-        "0x1060000000000000000000000000000000000000000000000000000000000000",
-        106,
-        root_address,
-        "0xorphan-root",
-        33,
-        "orphaned",
+        RawCodeHashObservation {
+            chain: "ethereum-mainnet",
+            block_hash: "0x1060000000000000000000000000000000000000000000000000000000000000",
+            block_number: 106,
+            contract_address: root_address,
+            code_hash: "0xorphan-root",
+            code_byte_length: 33,
+            canonicality_state: "orphaned",
+        },
     )
     .await?;
 

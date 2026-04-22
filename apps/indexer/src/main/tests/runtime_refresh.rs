@@ -1141,12 +1141,14 @@ async fn runtime_refresh_adds_ensv1_resolver_watch_target_without_manifest_reloa
     )
     .await?;
 
-    let (refreshed_state, refreshed_tasks) =
-        refresh_runtime_state_from_storage_discovery(database.pool(), &initial_state)
-            .await?
-            .expect(
-                "stored ENSv1 resolver discovery must refresh the watched plan without manifest reload",
-            );
+    let (refreshed_state, refreshed_tasks) = refresh_runtime_state_from_storage_discovery(
+        database.pool(),
+        &initial_state,
+    )
+    .await?
+    .expect(
+        "stored ENSv1 resolver discovery must refresh the watched plan without manifest reload",
+    );
 
     assert_eq!(refreshed_state.manifest_summary, initial_manifest_summary);
     assert_eq!(refreshed_state.sync_summary, initial_sync_summary);
@@ -1218,13 +1220,12 @@ async fn runtime_refresh_adds_ensv1_resolver_watch_target_without_manifest_reloa
         .await?,
         1
     );
-    assert_eq!(
-        sqlx::query_scalar::<_, bool>(
+    assert!(
+        !sqlx::query_scalar::<_, bool>(
             "SELECT (after_state->>'resolver_profile_supported')::BOOLEAN FROM normalized_events WHERE event_kind = 'ResolverChanged' AND derivation_kind = 'ens_v1_registry_resolver_changed'"
         )
         .fetch_one(database.pool())
-        .await?,
-        false
+        .await?
     );
 
     server.abort();

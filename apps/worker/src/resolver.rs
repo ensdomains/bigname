@@ -1,7 +1,7 @@
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    str::FromStr,
-};
+use std::collections::{BTreeMap, BTreeSet};
+
+#[cfg(test)]
+use std::str::FromStr;
 
 use anyhow::{Context, Result, bail};
 use bigname_storage::{
@@ -10,9 +10,10 @@ use bigname_storage::{
     load_permissions_current_resolver_targets, upsert_resolver_current_rows,
 };
 use serde_json::{Value, json};
+#[cfg(test)]
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{
     PgPool, Row,
-    postgres::{PgConnectOptions, PgPoolOptions},
     types::time::{OffsetDateTime, UtcOffset},
 };
 use uuid::Uuid;
@@ -20,6 +21,7 @@ use uuid::Uuid;
 const EVENT_KIND_PERMISSION_CHANGED: &str = "PermissionChanged";
 const EVENT_KIND_ALIAS_CHANGED: &str = "AliasChanged";
 const EVENT_KIND_RESOLVER_CHANGED: &str = "ResolverChanged";
+#[cfg(test)]
 const BASENAMES_NAMESPACE: &str = "basenames";
 const SOURCE_FAMILY_ENS_V1_REGISTRY_L1: &str = "ens_v1_registry_l1";
 const SOURCE_FAMILY_ENS_V1_RESOLVER_L1: &str = "ens_v1_resolver_l1";
@@ -737,7 +739,7 @@ fn build_alias_item(alias: &AliasSeed) -> Value {
         "resource_id": alias.resource_id,
         "binding_kind": "resolver_alias_path",
         "alias_state": alias.after_state.get("alias_state").cloned().unwrap_or_else(|| json!("active")),
-        "active": alias.after_state.get("active").cloned().unwrap_or_else(|| json!(true)),
+        "active": alias.after_state.get("active").cloned().unwrap_or(Value::Bool(true)),
         "chain_id": alias.chain_id,
         "resolver_address": alias.resolver_address,
         "from_dns_encoded_name": alias.after_state.get("from_dns_encoded_name").cloned().unwrap_or(Value::Null),
@@ -1058,7 +1060,7 @@ fn build_canonicality_summary(
         }
     }
 
-    let status = weakest_canonicality(statuses.into_iter()).unwrap_or(CanonicalityState::Canonical);
+    let status = weakest_canonicality(statuses).unwrap_or(CanonicalityState::Canonical);
     Ok(json!({
         "status": status.as_str(),
         "chains": chain_states
@@ -2612,6 +2614,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn resolver_event_with_manifest(
         event_identity: &str,
         logical_name_id: &str,
@@ -2673,6 +2676,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn resolver_permission_event(
         event_identity: &str,
         logical_name_id: Option<&str>,
@@ -2726,6 +2730,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn alias_event(
         event_identity: &str,
         logical_name_id: Option<&str>,
