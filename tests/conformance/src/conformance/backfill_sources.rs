@@ -9,6 +9,19 @@ struct SourceFamilyBackfillFixture {
     range_end_block_number: i64,
 }
 
+struct DynamicResolverBackfillFixture {
+    deployment_profile: &'static str,
+    chain_id: &'static str,
+    source_family: &'static str,
+    contract_instance_id: &'static str,
+    address: &'static str,
+    range_start_block_number: i64,
+    range_end_block_number: i64,
+    effective_from_block: i64,
+    effective_to_block: i64,
+    idempotency_key: &'static str,
+}
+
 pub(crate) async fn run_backfill_source_family_existing_response_lock() -> Result<()> {
     let database = HarnessDatabase::new().await?;
     let corpus = seed_replay_supported_read_corpus(&database).await?;
@@ -26,11 +39,14 @@ pub(crate) async fn run_backfill_source_family_existing_response_lock() -> Resul
     let before_jobs = snapshot_replay_stale_current_answer_routes(&database, &corpus).await?;
     let completed_jobs = seed_completed_source_family_backfill_jobs(&database).await?;
     assert_completed_source_family_backfill_jobs(&completed_jobs);
+    let completed_dynamic_resolver_jobs =
+        seed_completed_dynamic_resolver_backfill_jobs(&database).await?;
+    assert_completed_dynamic_resolver_backfill_jobs(&completed_dynamic_resolver_jobs);
     let after_jobs_before_replay =
         snapshot_replay_stale_current_answer_routes(&database, &corpus).await?;
     assert_eq!(
         after_jobs_before_replay, before_jobs,
-        "completed source-family backfill jobs must not mutate shipped route responses before replay"
+        "completed source-family and dynamic resolver backfill jobs must not mutate shipped route responses before replay"
     );
 
     replay_all_current_projections(&database).await?;
@@ -221,6 +237,148 @@ async fn seed_completed_source_family_backfill_job(
     Ok(bigname_storage::BackfillJobRecord { job, ranges })
 }
 
+async fn seed_completed_dynamic_resolver_backfill_jobs(
+    database: &HarnessDatabase,
+) -> Result<
+    Vec<(
+        DynamicResolverBackfillFixture,
+        bigname_storage::BackfillJobRecord,
+    )>,
+> {
+    let mut records = Vec::new();
+    for fixture in dynamic_resolver_backfill_fixtures() {
+        let record = seed_completed_dynamic_resolver_backfill_job(database, &fixture).await?;
+        records.push((fixture, record));
+    }
+
+    Ok(records)
+}
+
+async fn seed_completed_dynamic_resolver_backfill_job(
+    database: &HarnessDatabase,
+    fixture: &DynamicResolverBackfillFixture,
+) -> Result<bigname_storage::BackfillJobRecord> {
+    let midpoint = fixture.range_start_block_number
+        + ((fixture.range_end_block_number - fixture.range_start_block_number) / 2);
+    let created = bigname_storage::create_backfill_job(
+        &database.pool,
+        &bigname_storage::BackfillJobCreate {
+            deployment_profile: fixture.deployment_profile.to_owned(),
+            chain_id: fixture.chain_id.to_owned(),
+            source_identity: dynamic_resolver_identity(fixture),
+            scan_mode: "hash_pinned_block".to_owned(),
+            range_start_block_number: fixture.range_start_block_number,
+            range_end_block_number: fixture.range_end_block_number,
+            idempotency_key: fixture.idempotency_key.to_owned(),
+            ranges: vec![
+                bigname_storage::BackfillRangeSpec {
+                    range_start_block_number: fixture.range_start_block_number,
+                    range_end_block_number: midpoint,
+                },
+                bigname_storage::BackfillRangeSpec {
+                    range_start_block_number: midpoint + 1,
+                    range_end_block_number: fixture.range_end_block_number,
+                },
+            ],
+        },
+    )
+    .await
+    .with_context(|| {
+        format!(
+            "failed to create dynamic resolver backfill job for {}",
+            fixture.source_family
+        )
+    })?;
+
+    for (index, range) in created.ranges.iter().enumerate() {
+        let lease_token = format!(
+            "conformance-dynamic-resolver-{}-lease-{index}",
+            fixture.source_family
+        );
+        let lease_expires_at =
+            OffsetDateTime::from_unix_timestamp(OffsetDateTime::now_utc().unix_timestamp() + 300)
+                .context("failed to build dynamic resolver conformance backfill lease deadline")?;
+        let reserved = bigname_storage::reserve_backfill_range(
+            &database.pool,
+            created.job.backfill_job_id,
+            "conformance-dynamic-resolver-backfill",
+            &lease_token,
+            lease_expires_at,
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "failed to reserve dynamic resolver backfill range for {}",
+                fixture.source_family
+            )
+        })?
+        .with_context(|| {
+            format!(
+                "dynamic resolver backfill range should be reservable for {}",
+                fixture.source_family
+            )
+        })?;
+        anyhow::ensure!(
+            reserved.backfill_range_id == range.backfill_range_id,
+            "reserved unexpected dynamic resolver backfill range {} instead of {} for {}",
+            reserved.backfill_range_id,
+            range.backfill_range_id,
+            fixture.source_family
+        );
+
+        bigname_storage::advance_backfill_range(
+            &database.pool,
+            range.backfill_range_id,
+            &lease_token,
+            range.range_end_block_number,
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "failed to advance dynamic resolver backfill range for {}",
+                fixture.source_family
+            )
+        })?;
+        bigname_storage::complete_backfill_range(
+            &database.pool,
+            range.backfill_range_id,
+            &lease_token,
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "failed to complete dynamic resolver backfill range for {}",
+                fixture.source_family
+            )
+        })?;
+    }
+
+    let job = bigname_storage::load_backfill_job(&database.pool, created.job.backfill_job_id)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to load completed dynamic resolver backfill job for {}",
+                fixture.source_family
+            )
+        })?
+        .with_context(|| {
+            format!(
+                "completed dynamic resolver backfill job must exist for {}",
+                fixture.source_family
+            )
+        })?;
+    let ranges = bigname_storage::load_backfill_ranges(&database.pool, created.job.backfill_job_id)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to load completed dynamic resolver backfill ranges for {}",
+                fixture.source_family
+            )
+        })?;
+
+    Ok(bigname_storage::BackfillJobRecord { job, ranges })
+}
+
 fn assert_completed_source_family_backfill_jobs(
     completed_jobs: &[(
         SourceFamilyBackfillFixture,
@@ -375,6 +533,135 @@ fn assert_completed_source_family_backfill_jobs(
     }
 }
 
+fn assert_completed_dynamic_resolver_backfill_jobs(
+    completed_jobs: &[(
+        DynamicResolverBackfillFixture,
+        bigname_storage::BackfillJobRecord,
+    )],
+) {
+    let covered_families = completed_jobs
+        .iter()
+        .map(|(fixture, _)| fixture.source_family)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        covered_families,
+        BTreeSet::from(["ens_v1_resolver_l1", "basenames_base_resolver"])
+    );
+
+    for (fixture, completed_job) in completed_jobs {
+        let expected_source_identity_hash =
+            stable_source_identity_hash(&dynamic_resolver_identity_payload_without_hash(fixture));
+        assert_eq!(
+            completed_job.job.status,
+            bigname_storage::BackfillLifecycleStatus::Completed,
+            "{} dynamic resolver job must be completed",
+            fixture.source_family
+        );
+        assert_eq!(
+            completed_job.job.idempotency_key, fixture.idempotency_key,
+            "{} dynamic resolver idempotency key should stay fixture-owned",
+            fixture.source_family
+        );
+        assert_ne!(
+            completed_job.job.idempotency_key,
+            format!("conformance-source-family-{}", fixture.source_family),
+            "{} dynamic resolver job must not reuse the source-family fixture key",
+            fixture.source_family
+        );
+        assert_eq!(
+            completed_job.job.deployment_profile,
+            fixture.deployment_profile
+        );
+        assert_eq!(completed_job.job.chain_id, fixture.chain_id);
+        assert_eq!(completed_job.job.scan_mode, "hash_pinned_block");
+        assert_eq!(
+            completed_job
+                .job
+                .source_identity
+                .get("selector_kind")
+                .and_then(Value::as_str),
+            Some("source_family")
+        );
+        assert_eq!(
+            completed_job
+                .job
+                .source_identity
+                .get("source_family")
+                .and_then(Value::as_str),
+            Some(fixture.source_family)
+        );
+        assert_eq!(
+            completed_job
+                .job
+                .source_identity
+                .get("requested_watched_targets")
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(0)
+        );
+        assert_eq!(
+            completed_job
+                .job
+                .source_identity
+                .get("source_identity_hash")
+                .and_then(Value::as_str),
+            Some(expected_source_identity_hash.as_str()),
+            "{} dynamic resolver job hash must cover the selected target lock",
+            fixture.source_family
+        );
+        let selected_targets = completed_job
+            .job
+            .source_identity
+            .get("selected_targets")
+            .and_then(Value::as_array)
+            .expect("dynamic resolver job should persist selected targets");
+        assert_eq!(selected_targets.len(), 1);
+        let selected_target = &selected_targets[0];
+        assert_eq!(
+            selected_target.get("source_family").and_then(Value::as_str),
+            Some(fixture.source_family)
+        );
+        assert_eq!(
+            selected_target
+                .get("contract_instance_id")
+                .and_then(Value::as_str),
+            Some(fixture.contract_instance_id)
+        );
+        assert_eq!(
+            selected_target.get("address").and_then(Value::as_str),
+            Some(fixture.address)
+        );
+        assert_eq!(
+            selected_target
+                .get("effective_from_block")
+                .and_then(Value::as_i64),
+            Some(fixture.effective_from_block)
+        );
+        assert_eq!(
+            selected_target
+                .get("effective_to_block")
+                .and_then(Value::as_i64),
+            Some(fixture.effective_to_block)
+        );
+        assert!(
+            fixture.range_start_block_number < fixture.effective_from_block
+                && fixture.effective_to_block < fixture.range_end_block_number,
+            "{} dynamic resolver selected target should be narrower than the requested job range",
+            fixture.source_family
+        );
+        assert_eq!(completed_job.ranges.len(), 2);
+        assert!(
+            completed_job.ranges.iter().all(|range| {
+                range.status == bigname_storage::BackfillLifecycleStatus::Completed
+                    && range.checkpoint_block_number == range.range_end_block_number
+                    && range.completed_at.is_some()
+            }),
+            "{} dynamic resolver job must persist completed child ranges",
+            fixture.source_family
+        );
+    }
+}
+
 async fn assert_existing_ensv1_exact_name_after_jobs_and_replay(
     database: &HarnessDatabase,
     logical_name_id: &str,
@@ -450,6 +737,36 @@ fn source_family_identity_payload_without_hash(fixture: &SourceFamilyBackfillFix
     })
 }
 
+fn dynamic_resolver_identity(fixture: &DynamicResolverBackfillFixture) -> Value {
+    let mut payload = dynamic_resolver_identity_payload_without_hash(fixture);
+    let source_identity_hash = stable_source_identity_hash(&payload);
+    payload
+        .as_object_mut()
+        .expect("dynamic resolver identity payload must be an object")
+        .insert(
+            "source_identity_hash".to_owned(),
+            Value::String(source_identity_hash),
+        );
+    payload
+}
+
+fn dynamic_resolver_identity_payload_without_hash(
+    fixture: &DynamicResolverBackfillFixture,
+) -> Value {
+    json!({
+        "selector_kind": "source_family",
+        "source_family": fixture.source_family,
+        "requested_watched_targets": [],
+        "selected_targets": [{
+            "source_family": fixture.source_family,
+            "contract_instance_id": fixture.contract_instance_id,
+            "address": fixture.address,
+            "effective_from_block": fixture.effective_from_block,
+            "effective_to_block": fixture.effective_to_block,
+        }],
+    })
+}
+
 fn stable_source_identity_hash(payload_without_hash: &Value) -> String {
     let serialized = serde_json::to_string(payload_without_hash)
         .expect("source-family identity payload must be serializable");
@@ -457,6 +774,35 @@ fn stable_source_identity_hash(payload_without_hash: &Value) -> String {
         (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
     });
     format!("fnv1a64:{hash:016x}")
+}
+
+fn dynamic_resolver_backfill_fixtures() -> Vec<DynamicResolverBackfillFixture> {
+    vec![
+        DynamicResolverBackfillFixture {
+            deployment_profile: "mainnet",
+            chain_id: "ethereum-mainnet",
+            source_family: "ens_v1_resolver_l1",
+            contract_instance_id: "00000000-0000-0000-0000-00000000a105",
+            address: "0x0000000000000000000000000000000000000a51",
+            range_start_block_number: 340,
+            range_end_block_number: 420,
+            effective_from_block: 361,
+            effective_to_block: 400,
+            idempotency_key: "conformance-dynamic-resolver-ens-v1-lock",
+        },
+        DynamicResolverBackfillFixture {
+            deployment_profile: "mainnet",
+            chain_id: "base-mainnet",
+            source_family: "basenames_base_resolver",
+            contract_instance_id: "00000000-0000-0000-0000-00000000a303",
+            address: "0x0000000000000000000000000000000000000a53",
+            range_start_block_number: 190,
+            range_end_block_number: 280,
+            effective_from_block: 211,
+            effective_to_block: 261,
+            idempotency_key: "conformance-dynamic-resolver-basenames-lock",
+        },
+    ]
 }
 
 fn source_family_backfill_fixtures() -> Vec<SourceFamilyBackfillFixture> {

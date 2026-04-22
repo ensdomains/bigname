@@ -25,6 +25,18 @@ struct FocusedSourceFamilyFixture {
     block_hash: &'static str,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct DynamicResolverBackfillFixture {
+    namespace: &'static str,
+    chain: &'static str,
+    deployment_epoch: &'static str,
+    registry_source_family: &'static str,
+    resolver_source_family: &'static str,
+    manifest_id_base: i64,
+    uuid_base: u128,
+    idempotency_key: &'static str,
+}
+
 #[tokio::test]
 async fn hash_pinned_backfill_persists_range_and_is_idempotent_without_advancing_checkpoints()
 -> Result<()> {
@@ -682,6 +694,38 @@ async fn frozen_source_family_backfills_lock_wrapper_resolver_and_basenames_l1_i
 
     server.abort();
     database.cleanup().await
+}
+
+#[tokio::test]
+async fn source_scoped_backfill_dynamic_resolver_ensv1_selected_targets_are_range_locked()
+-> Result<()> {
+    assert_dynamic_resolver_backfill_is_selected_target_only(DynamicResolverBackfillFixture {
+        namespace: "ens",
+        chain: "ethereum-mainnet",
+        deployment_epoch: "ens_v1",
+        registry_source_family: "ens_v1_registry_l1",
+        resolver_source_family: "ens_v1_resolver_l1",
+        manifest_id_base: 401,
+        uuid_base: 4_100,
+        idempotency_key: "dynamic-resolver-ensv1-selected-target-lock",
+    })
+    .await
+}
+
+#[tokio::test]
+async fn source_scoped_backfill_dynamic_resolver_basenames_selected_targets_are_range_locked()
+-> Result<()> {
+    assert_dynamic_resolver_backfill_is_selected_target_only(DynamicResolverBackfillFixture {
+        namespace: "basenames",
+        chain: "base-mainnet",
+        deployment_epoch: "basenames_v1",
+        registry_source_family: "basenames_base_registry",
+        resolver_source_family: "basenames_base_resolver",
+        manifest_id_base: 501,
+        uuid_base: 5_100,
+        idempotency_key: "dynamic-resolver-basenames-selected-target-lock",
+    })
+    .await
 }
 
 #[tokio::test]
@@ -1520,6 +1564,464 @@ fn focused_source_family_fixture(source_family: &str) -> FocusedSourceFamilyFixt
         .expect("focused source-family fixture must exist")
 }
 
+async fn assert_dynamic_resolver_backfill_is_selected_target_only(
+    fixture: DynamicResolverBackfillFixture,
+) -> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_backfill_job_tables(database.pool()).await?;
+
+    let registry_manifest_id = fixture.manifest_id_base;
+    let resolver_manifest_id = fixture.manifest_id_base + 1;
+    let registry_contract_instance_id = Uuid::from_u128(fixture.uuid_base);
+    let selected_resolver_contract_instance_id = Uuid::from_u128(fixture.uuid_base + 1);
+    let closed_resolver_contract_instance_id = Uuid::from_u128(fixture.uuid_base + 2);
+    let deactivated_resolver_contract_instance_id = Uuid::from_u128(fixture.uuid_base + 3);
+    let orphan_equivalent_resolver_contract_instance_id = Uuid::from_u128(fixture.uuid_base + 4);
+    let registry_address = "0x0000000000000000000000000000000000000a00";
+    let selected_resolver_address = "0x0000000000000000000000000000000000000a01";
+    let closed_resolver_address = "0x0000000000000000000000000000000000000a02";
+    let deactivated_resolver_address = "0x0000000000000000000000000000000000000a03";
+    let orphan_equivalent_resolver_address = "0x0000000000000000000000000000000000000a04";
+
+    insert_active_backfill_manifest_version(
+        database.pool(),
+        registry_manifest_id,
+        fixture.namespace,
+        fixture.chain,
+        fixture.registry_source_family,
+        fixture.deployment_epoch,
+    )
+    .await?;
+    insert_active_backfill_manifest_version(
+        database.pool(),
+        resolver_manifest_id,
+        fixture.namespace,
+        fixture.chain,
+        fixture.resolver_source_family,
+        fixture.deployment_epoch,
+    )
+    .await?;
+    insert_contract_instance(
+        database.pool(),
+        registry_contract_instance_id,
+        fixture.chain,
+        "registry",
+    )
+    .await?;
+    insert_active_contract_instance_address(
+        database.pool(),
+        registry_contract_instance_id,
+        fixture.chain,
+        registry_address,
+        Some(registry_manifest_id),
+    )
+    .await?;
+    for (contract_instance_id, address) in [
+        (
+            selected_resolver_contract_instance_id,
+            selected_resolver_address,
+        ),
+        (
+            closed_resolver_contract_instance_id,
+            closed_resolver_address,
+        ),
+        (
+            deactivated_resolver_contract_instance_id,
+            deactivated_resolver_address,
+        ),
+        (
+            orphan_equivalent_resolver_contract_instance_id,
+            orphan_equivalent_resolver_address,
+        ),
+    ] {
+        insert_contract_instance(
+            database.pool(),
+            contract_instance_id,
+            fixture.chain,
+            "resolver",
+        )
+        .await?;
+        insert_active_contract_instance_address(
+            database.pool(),
+            contract_instance_id,
+            fixture.chain,
+            address,
+            None,
+        )
+        .await?;
+    }
+    set_contract_instance_address_range(
+        database.pool(),
+        selected_resolver_contract_instance_id,
+        Some(40),
+        Some(44),
+    )
+    .await?;
+    set_contract_instance_address_range(
+        database.pool(),
+        closed_resolver_contract_instance_id,
+        Some(30),
+        Some(39),
+    )
+    .await?;
+    set_contract_instance_address_range(
+        database.pool(),
+        deactivated_resolver_contract_instance_id,
+        Some(42),
+        Some(43),
+    )
+    .await?;
+    set_contract_instance_address_range(
+        database.pool(),
+        orphan_equivalent_resolver_contract_instance_id,
+        Some(44),
+        Some(45),
+    )
+    .await?;
+
+    insert_active_discovery_edge_with_range(
+        database.pool(),
+        fixture.chain,
+        "resolver",
+        registry_contract_instance_id,
+        selected_resolver_contract_instance_id,
+        Some(registry_manifest_id),
+        Some(42),
+        Some(43),
+    )
+    .await?;
+    insert_active_discovery_edge_with_range(
+        database.pool(),
+        fixture.chain,
+        "resolver",
+        registry_contract_instance_id,
+        closed_resolver_contract_instance_id,
+        Some(registry_manifest_id),
+        Some(30),
+        Some(39),
+    )
+    .await?;
+    insert_active_discovery_edge_with_range(
+        database.pool(),
+        fixture.chain,
+        "resolver",
+        registry_contract_instance_id,
+        deactivated_resolver_contract_instance_id,
+        Some(registry_manifest_id),
+        Some(42),
+        Some(43),
+    )
+    .await?;
+    deactivate_discovery_edge(database.pool(), deactivated_resolver_contract_instance_id).await?;
+    insert_active_discovery_edge_with_range(
+        database.pool(),
+        fixture.chain,
+        "resolver",
+        registry_contract_instance_id,
+        orphan_equivalent_resolver_contract_instance_id,
+        Some(registry_manifest_id),
+        Some(42),
+        Some(43),
+    )
+    .await?;
+
+    let range = BackfillBlockRange::new(40, 44)?;
+    let source_plan = load_watched_source_selector_plan(
+        database.pool(),
+        fixture.chain,
+        WatchedSourceSelector::SourceFamily(fixture.resolver_source_family.to_owned()),
+        range.from_block,
+        range.to_block,
+    )
+    .await?;
+    assert_eq!(source_plan.selected_targets.len(), 1);
+    assert_eq!(source_plan.watched_chain_plan.discovery_edge_entry_count, 1);
+    assert_eq!(
+        source_plan.watched_chain_plan.addresses,
+        vec![selected_resolver_address.to_owned()]
+    );
+    let selected_target = &source_plan.selected_targets[0];
+    assert_eq!(
+        selected_target.source_family,
+        fixture.resolver_source_family
+    );
+    assert_eq!(
+        selected_target.contract_instance_id,
+        selected_resolver_contract_instance_id
+    );
+    assert_eq!(selected_target.address, selected_resolver_address);
+    assert_eq!(selected_target.effective_from_block, 42);
+    assert_eq!(selected_target.effective_to_block, 43);
+
+    let block_40 = provider_block(
+        &repeated_byte_hash("40"),
+        Some(&repeated_byte_hash("3f")),
+        40,
+    );
+    let block_41 = provider_block(&repeated_byte_hash("41"), Some(&block_40.block_hash), 41);
+    let block_42 = provider_block(&repeated_byte_hash("42"), Some(&block_41.block_hash), 42);
+    let block_43 = provider_block(&repeated_byte_hash("43"), Some(&block_42.block_hash), 43);
+    let block_44 = provider_block(&repeated_byte_hash("44"), Some(&block_43.block_hash), 44);
+    let requests = Arc::new(Mutex::new(Vec::<RecordedRpcRequest>::new()));
+    let (provider, server) = number_resolving_provider_with_fixtures(
+        vec![
+            ProviderBlockFixture {
+                block: block_40.clone(),
+                logs: vec![rpc_log_payload_at_address(
+                    &block_40,
+                    selected_resolver_address,
+                    0,
+                )],
+            },
+            ProviderBlockFixture {
+                block: block_41.clone(),
+                logs: vec![rpc_log_payload_at_address(
+                    &block_41,
+                    selected_resolver_address,
+                    0,
+                )],
+            },
+            ProviderBlockFixture {
+                block: block_42.clone(),
+                logs: vec![
+                    rpc_log_payload_at_address(&block_42, selected_resolver_address, 0),
+                    rpc_log_payload_at_address(&block_42, closed_resolver_address, 1),
+                    rpc_log_payload_at_address(&block_42, deactivated_resolver_address, 2),
+                    rpc_log_payload_at_address(&block_42, orphan_equivalent_resolver_address, 3),
+                ],
+            },
+            ProviderBlockFixture {
+                block: block_43.clone(),
+                logs: vec![rpc_log_payload_at_address(
+                    &block_43,
+                    selected_resolver_address,
+                    0,
+                )],
+            },
+            ProviderBlockFixture {
+                block: block_44.clone(),
+                logs: vec![rpc_log_payload_at_address(
+                    &block_44,
+                    selected_resolver_address,
+                    0,
+                )],
+            },
+        ],
+        Arc::clone(&requests),
+    )
+    .await?;
+
+    let outcome = run_resumable_hash_pinned_backfill_job(
+        database.pool(),
+        &source_plan,
+        &provider,
+        backfill_job_config(range, fixture.idempotency_key, "lease-dynamic-resolver")?,
+    )
+    .await?;
+    assert_eq!(outcome.resolved_block_count, 5);
+    assert_eq!(outcome.raw_log_count, 2);
+    assert_eq!(outcome.raw_code_hash_count, 2);
+
+    let job = load_backfill_job(database.pool(), outcome.backfill_job_id)
+        .await?
+        .expect("dynamic resolver backfill job must exist");
+    assert_eq!(job.source_identity, source_plan.source_identity_payload());
+    let source_identity = serde_json::to_string(&job.source_identity)
+        .context("dynamic resolver source identity must serialize")?;
+    let forbidden_targets = vec![
+        closed_resolver_address.to_owned(),
+        deactivated_resolver_address.to_owned(),
+        orphan_equivalent_resolver_address.to_owned(),
+        closed_resolver_contract_instance_id.to_string(),
+        deactivated_resolver_contract_instance_id.to_string(),
+        orphan_equivalent_resolver_contract_instance_id.to_string(),
+    ];
+    for forbidden in forbidden_targets {
+        assert!(
+            !source_identity.contains(&forbidden),
+            "excluded resolver target leaked into source_identity: {source_identity}"
+        );
+    }
+
+    assert_eq!(
+        sqlx::query_scalar::<_, Vec<String>>(
+            r#"
+            SELECT COALESCE(
+                ARRAY_AGG(emitting_address ORDER BY block_number, log_index),
+                ARRAY[]::TEXT[]
+            )
+            FROM raw_logs
+            "#
+        )
+        .fetch_one(database.pool())
+        .await?,
+        vec![
+            selected_resolver_address.to_owned(),
+            selected_resolver_address.to_owned()
+        ]
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, Vec<i64>>(
+            r#"
+            SELECT COALESCE(
+                ARRAY_AGG(block_number ORDER BY block_number, log_index),
+                ARRAY[]::BIGINT[]
+            )
+            FROM raw_logs
+            "#
+        )
+        .fetch_one(database.pool())
+        .await?,
+        vec![42, 43]
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, Vec<String>>(
+            r#"
+            SELECT COALESCE(
+                ARRAY_AGG(block_hash ORDER BY block_number, log_index),
+                ARRAY[]::TEXT[]
+            )
+            FROM raw_logs
+            "#
+        )
+        .fetch_one(database.pool())
+        .await?,
+        vec![block_42.block_hash.clone(), block_43.block_hash.clone()]
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, Vec<String>>(
+            r#"
+            SELECT COALESCE(
+                ARRAY_AGG(contract_address ORDER BY block_number, contract_address),
+                ARRAY[]::TEXT[]
+            )
+            FROM raw_code_hashes
+            "#
+        )
+        .fetch_one(database.pool())
+        .await?,
+        vec![
+            selected_resolver_address.to_owned(),
+            selected_resolver_address.to_owned()
+        ]
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, Vec<i64>>(
+            r#"
+            SELECT COALESCE(
+                ARRAY_AGG(block_number ORDER BY block_number, contract_address),
+                ARRAY[]::BIGINT[]
+            )
+            FROM raw_code_hashes
+            "#
+        )
+        .fetch_one(database.pool())
+        .await?,
+        vec![42, 43]
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, Vec<String>>(
+            r#"
+            SELECT COALESCE(
+                ARRAY_AGG(raw_fact_ref->>'block_hash' ORDER BY block_number, log_index),
+                ARRAY[]::TEXT[]
+            )
+            FROM normalized_events
+            WHERE source_family = $1
+            "#
+        )
+        .bind(fixture.resolver_source_family)
+        .fetch_one(database.pool())
+        .await?,
+        vec![block_42.block_hash.clone(), block_43.block_hash.clone()]
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM normalized_events WHERE raw_fact_ref->>'emitting_address' = $1"
+        )
+        .bind(selected_resolver_address)
+        .fetch_one(database.pool())
+        .await?,
+        2
+    );
+    for excluded_address in [
+        closed_resolver_address,
+        deactivated_resolver_address,
+        orphan_equivalent_resolver_address,
+    ] {
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM raw_logs WHERE emitting_address = $1"
+            )
+            .bind(excluded_address)
+            .fetch_one(database.pool())
+            .await?,
+            0,
+            "{excluded_address} must not be admitted as raw logs"
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM raw_code_hashes WHERE contract_address = $1"
+            )
+            .bind(excluded_address)
+            .fetch_one(database.pool())
+            .await?,
+            0,
+            "{excluded_address} must not be admitted as raw code hashes"
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM normalized_events WHERE raw_fact_ref->>'emitting_address' = $1"
+            )
+            .bind(excluded_address)
+            .fetch_one(database.pool())
+            .await?,
+            0,
+            "{excluded_address} must not produce normalized events"
+        );
+    }
+
+    let code_requests = requests
+        .lock()
+        .expect("request log must not be poisoned")
+        .iter()
+        .filter(|request| request.method == "eth_getCode")
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(code_requests.len(), 2);
+    assert_eq!(
+        code_requests
+            .iter()
+            .map(|request| request.params.first().and_then(Value::as_str))
+            .collect::<Vec<_>>(),
+        vec![
+            Some(selected_resolver_address),
+            Some(selected_resolver_address)
+        ]
+    );
+    assert_eq!(
+        code_requests
+            .iter()
+            .map(|request| {
+                request
+                    .params
+                    .get(1)
+                    .and_then(Value::as_object)
+                    .and_then(|selection| selection.get("blockHash"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+            .collect::<Vec<_>>(),
+        vec![
+            Some(block_42.block_hash.clone()),
+            Some(block_43.block_hash.clone())
+        ]
+    );
+
+    server.abort();
+    database.cleanup().await
+}
+
 async fn set_contract_instance_address_range(
     pool: &PgPool,
     contract_instance_id: Uuid,
@@ -1544,6 +2046,80 @@ async fn set_contract_instance_address_range(
     })?;
 
     Ok(())
+}
+
+async fn insert_active_backfill_manifest_version(
+    pool: &PgPool,
+    manifest_id: i64,
+    namespace: &str,
+    chain: &str,
+    source_family: &str,
+    deployment_epoch: &str,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+            INSERT INTO manifest_versions (
+                manifest_id,
+                manifest_version,
+                namespace,
+                source_family,
+                chain,
+                deployment_epoch,
+                rollout_status,
+                normalizer_version,
+                file_path,
+                manifest_payload
+            )
+            VALUES (
+                $1,
+                1,
+                $2,
+                $3,
+                $4,
+                $5,
+                'active',
+                'uts46-v1',
+                ('manifests/' || $2 || '/' || $3 || '/v1.toml'),
+                '{}'::jsonb
+            )
+            "#,
+    )
+    .bind(manifest_id)
+    .bind(namespace)
+    .bind(source_family)
+    .bind(chain)
+    .bind(deployment_epoch)
+    .execute(pool)
+    .await
+    .with_context(|| {
+        format!("failed to insert active manifest {manifest_id} for {chain}:{source_family}")
+    })?;
+
+    Ok(())
+}
+
+async fn deactivate_discovery_edge(pool: &PgPool, to_contract_instance_id: Uuid) -> Result<()> {
+    sqlx::query(
+        r#"
+            UPDATE discovery_edges
+            SET deactivated_at = now()
+            WHERE to_contract_instance_id = $1
+            "#,
+    )
+    .bind(to_contract_instance_id)
+    .execute(pool)
+    .await
+    .with_context(|| format!("failed to deactivate discovery edge to {to_contract_instance_id}"))?;
+
+    Ok(())
+}
+
+fn repeated_byte_hash(byte_hex: &str) -> String {
+    let mut hash = String::from("0x");
+    for _ in 0..32 {
+        hash.push_str(byte_hex);
+    }
+    hash
 }
 
 fn backfill_job_config(

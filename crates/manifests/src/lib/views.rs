@@ -683,8 +683,16 @@ pub async fn load_watched_contracts(pool: &PgPool) -> Result<Vec<WatchedContract
                 de.to_contract_instance_id AS contract_instance_id,
                 'discovery_edge'::TEXT AS source,
                 COALESCE(target_mv.manifest_id, de.source_manifest_id) AS source_manifest_id,
-                de.active_from_block_number AS active_from_block_number,
-                de.active_to_block_number AS active_to_block_number
+                CASE
+                    WHEN de.active_from_block_number IS NULL THEN cia.active_from_block_number
+                    WHEN cia.active_from_block_number IS NULL THEN de.active_from_block_number
+                    ELSE GREATEST(de.active_from_block_number, cia.active_from_block_number)
+                END AS active_from_block_number,
+                CASE
+                    WHEN de.active_to_block_number IS NULL THEN cia.active_to_block_number
+                    WHEN cia.active_to_block_number IS NULL THEN de.active_to_block_number
+                    ELSE LEAST(de.active_to_block_number, cia.active_to_block_number)
+                END AS active_to_block_number
             FROM discovery_edges de
             JOIN manifest_versions mv ON mv.manifest_id = de.source_manifest_id
             LEFT JOIN manifest_versions target_mv
@@ -709,6 +717,16 @@ pub async fn load_watched_contracts(pool: &PgPool) -> Result<Vec<WatchedContract
                   de.edge_kind <> 'resolver'
                   OR mv.source_family NOT IN ('ens_v1_registry_l1', 'basenames_base_registry')
                   OR target_mv.manifest_id IS NOT NULL
+              )
+              AND (
+                  de.active_from_block_number IS NULL
+                  OR cia.active_to_block_number IS NULL
+                  OR de.active_from_block_number <= cia.active_to_block_number
+              )
+              AND (
+                  cia.active_from_block_number IS NULL
+                  OR de.active_to_block_number IS NULL
+                  OR cia.active_from_block_number <= de.active_to_block_number
               )
         ) watched_contracts
         ORDER BY chain, source_family, address, source, source_manifest_id, contract_instance_id
@@ -991,12 +1009,32 @@ fn watched_contract_range_intersects(
     range_start_block_number: i64,
     range_end_block_number: i64,
 ) -> bool {
-    watched_contract
+    watched_contract_effective_range(
+        watched_contract,
+        range_start_block_number,
+        range_end_block_number,
+    )
+    .is_some()
+}
+
+fn watched_contract_effective_range(
+    watched_contract: &WatchedContract,
+    range_start_block_number: i64,
+    range_end_block_number: i64,
+) -> Option<(i64, i64)> {
+    let effective_from_block = watched_contract
         .active_from_block_number
-        .is_none_or(|active_from| active_from <= range_end_block_number)
-        && watched_contract
-            .active_to_block_number
-            .is_none_or(|active_to| active_to >= range_start_block_number)
+        .map_or(range_start_block_number, |active_from| {
+            active_from.max(range_start_block_number)
+        });
+    let effective_to_block = watched_contract
+        .active_to_block_number
+        .map_or(range_end_block_number, |active_to| {
+            active_to.min(range_end_block_number)
+        });
+
+    (effective_from_block <= effective_to_block)
+        .then_some((effective_from_block, effective_to_block))
 }
 
 fn selected_backfill_targets(
@@ -1004,23 +1042,17 @@ fn selected_backfill_targets(
     range_start_block_number: i64,
     range_end_block_number: i64,
 ) -> Result<Vec<WatchedBackfillTarget>> {
-    let mut targets_by_identity = BTreeMap::<(String, uuid::Uuid), WatchedBackfillTarget>::new();
+    let mut addresses_by_identity = BTreeMap::<(String, uuid::Uuid), String>::new();
     let mut selected_targets = BTreeSet::<WatchedBackfillTarget>::new();
 
     for watched_contract in watched_contracts {
-        let effective_from_block = watched_contract
-            .active_from_block_number
-            .map_or(range_start_block_number, |active_from| {
-                active_from.max(range_start_block_number)
-            });
-        let effective_to_block = watched_contract
-            .active_to_block_number
-            .map_or(range_end_block_number, |active_to| {
-                active_to.min(range_end_block_number)
-            });
-        if effective_from_block > effective_to_block {
+        let Some((effective_from_block, effective_to_block)) = watched_contract_effective_range(
+            watched_contract,
+            range_start_block_number,
+            range_end_block_number,
+        ) else {
             continue;
-        }
+        };
 
         let target = WatchedBackfillTarget {
             source_family: watched_contract.source_family.clone(),
@@ -1030,8 +1062,8 @@ fn selected_backfill_targets(
             effective_to_block,
         };
         let identity = (target.source_family.clone(), target.contract_instance_id);
-        if let Some(existing_target) = targets_by_identity.get(&identity) {
-            if existing_target != &target {
+        if let Some(existing_address) = addresses_by_identity.get(&identity) {
+            if existing_address != &target.address {
                 bail!(
                     "source identity conflict for watched target {} in source family {}",
                     target.contract_instance_id,
@@ -1039,7 +1071,7 @@ fn selected_backfill_targets(
                 );
             }
         } else {
-            targets_by_identity.insert(identity, target.clone());
+            addresses_by_identity.insert(identity, target.address.clone());
         }
         selected_targets.insert(target);
     }

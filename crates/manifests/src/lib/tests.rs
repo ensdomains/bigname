@@ -630,6 +630,218 @@ fn source_family_selector_filters_targets_and_builds_chain_plan() -> Result<()> 
 }
 
 #[test]
+fn watched_selector_dynamic_resolver_backfill() -> Result<()> {
+    let ens_resolver_a = Uuid::from_u128(30);
+    let ens_resolver_b = Uuid::from_u128(10);
+    let ens_closed_resolver = Uuid::from_u128(20);
+    let ens_future_resolver = Uuid::from_u128(40);
+    let ens_registry = Uuid::from_u128(50);
+    let basenames_resolver = Uuid::from_u128(60);
+    let watched_contracts = vec![
+        watched_contract_for_test(
+            "ethereum-mainnet",
+            "ens_v1_resolver_l1",
+            "0x0000000000000000000000000000000000000030",
+            ens_resolver_a,
+            WatchedContractSource::DiscoveryEdge,
+            Some(110),
+            Some(180),
+        ),
+        watched_contract_for_test(
+            "ethereum-mainnet",
+            "ens_v1_resolver_l1",
+            "0x0000000000000000000000000000000000000010",
+            ens_resolver_b,
+            WatchedContractSource::DiscoveryEdge,
+            Some(90),
+            Some(150),
+        ),
+        watched_contract_for_test(
+            "ethereum-mainnet",
+            "ens_v1_resolver_l1",
+            "0x0000000000000000000000000000000000000020",
+            ens_closed_resolver,
+            WatchedContractSource::DiscoveryEdge,
+            Some(10),
+            Some(99),
+        ),
+        watched_contract_for_test(
+            "ethereum-mainnet",
+            "ens_v1_resolver_l1",
+            "0x0000000000000000000000000000000000000040",
+            ens_future_resolver,
+            WatchedContractSource::DiscoveryEdge,
+            Some(181),
+            None,
+        ),
+        watched_contract_for_test(
+            "ethereum-mainnet",
+            "ens_v1_registry_l1",
+            "0x0000000000000000000000000000000000000050",
+            ens_registry,
+            WatchedContractSource::ManifestRoot,
+            None,
+            None,
+        ),
+        watched_contract_for_test(
+            "base-mainnet",
+            "basenames_base_resolver",
+            "0x0000000000000000000000000000000000000060",
+            basenames_resolver,
+            WatchedContractSource::DiscoveryEdge,
+            Some(500),
+            Some(700),
+        ),
+    ];
+
+    let ens_plan = resolve_watched_source_selector(
+        &watched_contracts,
+        "ethereum-mainnet",
+        WatchedSourceSelector::SourceFamily("ens_v1_resolver_l1".to_owned()),
+        100,
+        175,
+    )?;
+    assert_eq!(
+        ens_plan.selected_targets,
+        vec![
+            WatchedBackfillTarget {
+                source_family: "ens_v1_resolver_l1".to_owned(),
+                contract_instance_id: ens_resolver_b,
+                address: "0x0000000000000000000000000000000000000010".to_owned(),
+                effective_from_block: 100,
+                effective_to_block: 150,
+            },
+            WatchedBackfillTarget {
+                source_family: "ens_v1_resolver_l1".to_owned(),
+                contract_instance_id: ens_resolver_a,
+                address: "0x0000000000000000000000000000000000000030".to_owned(),
+                effective_from_block: 110,
+                effective_to_block: 175,
+            },
+        ]
+    );
+    let mut sorted_targets = ens_plan.selected_targets.clone();
+    sorted_targets.sort();
+    assert_eq!(ens_plan.selected_targets, sorted_targets);
+
+    let basenames_plan = resolve_watched_source_selector(
+        &watched_contracts,
+        "base-mainnet",
+        WatchedSourceSelector::SourceFamily("basenames_base_resolver".to_owned()),
+        600,
+        650,
+    )?;
+    assert_eq!(
+        basenames_plan.selected_targets,
+        vec![WatchedBackfillTarget {
+            source_family: "basenames_base_resolver".to_owned(),
+            contract_instance_id: basenames_resolver,
+            address: "0x0000000000000000000000000000000000000060".to_owned(),
+            effective_from_block: 600,
+            effective_to_block: 650,
+        }]
+    );
+
+    let empty_family_error = resolve_watched_source_selector(
+        &watched_contracts,
+        "ethereum-mainnet",
+        WatchedSourceSelector::SourceFamily(String::new()),
+        100,
+        175,
+    )
+    .expect_err("empty source-family selector must fail before job creation");
+    assert!(
+        empty_family_error
+            .to_string()
+            .contains("source_family  found no active watched targets"),
+        "unexpected empty source-family error: {empty_family_error:#}"
+    );
+
+    let unknown_family_error = resolve_watched_source_selector(
+        &watched_contracts,
+        "ethereum-mainnet",
+        WatchedSourceSelector::SourceFamily("unknown_resolver_family".to_owned()),
+        100,
+        175,
+    )
+    .expect_err("unknown source-family selector must fail before job creation");
+    assert!(
+        unknown_family_error
+            .to_string()
+            .contains("source_family unknown_resolver_family found no active watched targets"),
+        "unexpected unknown source-family error: {unknown_family_error:#}"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn watched_selector_preserves_duplicate_identity_effective_ranges() -> Result<()> {
+    let resolver = Uuid::from_u128(70);
+    let resolver_address = "0x0000000000000000000000000000000000000070";
+    let watched_contracts = vec![
+        watched_contract_for_test(
+            "ethereum-mainnet",
+            "ens_v1_resolver_l1",
+            resolver_address,
+            resolver,
+            WatchedContractSource::ManifestContract,
+            None,
+            None,
+        ),
+        watched_contract_for_test(
+            "ethereum-mainnet",
+            "ens_v1_resolver_l1",
+            resolver_address,
+            resolver,
+            WatchedContractSource::DiscoveryEdge,
+            Some(123),
+            None,
+        ),
+    ];
+
+    let plan = resolve_watched_source_selector(
+        &watched_contracts,
+        "ethereum-mainnet",
+        WatchedSourceSelector::SourceFamily("ens_v1_resolver_l1".to_owned()),
+        100,
+        200,
+    )?;
+
+    assert_eq!(
+        plan.watched_chain_plan,
+        WatchedChainPlan {
+            chain: "ethereum-mainnet".to_owned(),
+            addresses: vec![normalize_address(resolver_address)],
+            manifest_root_entry_count: 0,
+            manifest_contract_entry_count: 1,
+            discovery_edge_entry_count: 1,
+        }
+    );
+    assert_eq!(
+        plan.selected_targets,
+        vec![
+            WatchedBackfillTarget {
+                source_family: "ens_v1_resolver_l1".to_owned(),
+                contract_instance_id: resolver,
+                address: normalize_address(resolver_address),
+                effective_from_block: 100,
+                effective_to_block: 200,
+            },
+            WatchedBackfillTarget {
+                source_family: "ens_v1_resolver_l1".to_owned(),
+                contract_instance_id: resolver,
+                address: normalize_address(resolver_address),
+                effective_from_block: 123,
+                effective_to_block: 200,
+            },
+        ]
+    );
+
+    Ok(())
+}
+
+#[test]
 fn explicit_watched_target_set_is_normalized_sorted_and_validated() -> Result<()> {
     let registry = Uuid::from_u128(30);
     let registrar = Uuid::from_u128(10);
@@ -1442,24 +1654,35 @@ async fn checked_in_registry_v2_manifests_admit_resolver_discovery() -> Result<(
                 && contract.source == WatchedContractSource::DiscoveryEdge
                 && contract.source_manifest_id == Some(resolver_manifest_id)
         }));
+        let resolver_contract_instance_id = persistence_summary.admitted_edges[0]
+            .to_contract_instance_id
+            .expect("resolver discovery must admit a target contract instance");
         let resolver_source_plan = load_watched_source_selector_plan(
             database.pool(),
             chain,
             WatchedSourceSelector::SourceFamily(resolver_source_family.to_owned()),
-            123,
-            123,
+            100,
+            200,
         )
         .await?;
-        assert_eq!(resolver_source_plan.selected_targets.len(), 1);
         assert_eq!(
-            resolver_source_plan.selected_targets[0].source_family,
-            resolver_source_family
-        );
-        assert_eq!(
-            resolver_source_plan.selected_targets[0].contract_instance_id,
-            persistence_summary.admitted_edges[0]
-                .to_contract_instance_id
-                .expect("resolver discovery must admit a target contract instance")
+            resolver_source_plan.selected_targets,
+            vec![
+                WatchedBackfillTarget {
+                    source_family: resolver_source_family.to_owned(),
+                    contract_instance_id: resolver_contract_instance_id,
+                    address: resolver_address.clone(),
+                    effective_from_block: 100,
+                    effective_to_block: 200,
+                },
+                WatchedBackfillTarget {
+                    source_family: resolver_source_family.to_owned(),
+                    contract_instance_id: resolver_contract_instance_id,
+                    address: resolver_address.clone(),
+                    effective_from_block: 123,
+                    effective_to_block: 200,
+                },
+            ]
         );
         let discovery_edge = sqlx::query(
             r#"
@@ -1484,6 +1707,250 @@ async fn checked_in_registry_v2_manifests_admit_resolver_discovery() -> Result<(
                 .expect("resolver discovery provenance must be an object")
                 .contains_key(PROPAGATED_ROLE_PROVENANCE_FIELD)
         );
+
+        database.cleanup().await?;
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn dynamic_resolver_backfill_selector_loads_edge_address_intersections() -> Result<()> {
+    for case in [
+        (
+            "ens",
+            "ens_v1_registry_l1",
+            "ens_v1_resolver_l1",
+            "ethereum-mainnet",
+            "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E",
+            "0x0000000000000000000000000000000000000101",
+            "0x0000000000000000000000000000000000000102",
+            "0x0000000000000000000000000000000000000103",
+        ),
+        (
+            "basenames",
+            "basenames_base_registry",
+            "basenames_base_resolver",
+            "base-mainnet",
+            "0xb94704422c2a1e396835a571837aa5ae53285a95",
+            "0x0000000000000000000000000000000000000201",
+            "0x0000000000000000000000000000000000000202",
+            "0x0000000000000000000000000000000000000203",
+        ),
+    ] {
+        let (
+            namespace,
+            registry_source_family,
+            resolver_source_family,
+            chain,
+            registry_address,
+            selected_resolver_address,
+            closed_resolver_address,
+            deactivated_resolver_address,
+        ) = case;
+        let test_dir = TestDir::new()?;
+        let database = TestDatabase::new().await?;
+
+        test_dir.write_manifest(
+            namespace,
+            registry_source_family,
+            "v2",
+            &checked_in_manifest_contents(namespace, registry_source_family, "v2")?,
+        )?;
+        test_dir.write_manifest(
+            namespace,
+            resolver_source_family,
+            "v1",
+            &checked_in_manifest_contents(namespace, resolver_source_family, "v1")?,
+        )?;
+        sync_repository(database.pool(), &load_repository(&test_dir.path)?).await?;
+
+        let selected_summary = persist_discovery_observation(
+            database.pool(),
+            &DiscoveryObservation {
+                chain: chain.to_owned(),
+                from_address: registry_address.to_owned(),
+                to_address: selected_resolver_address.to_owned(),
+                edge_kind: "resolver".to_owned(),
+                discovery_source: "dynamic-resolver-backfill-selector-test".to_owned(),
+                active_from_block_number: Some(100),
+                active_from_block_hash: Some(
+                    "0x1111111111111111111111111111111111111111111111111111111111111111".to_owned(),
+                ),
+                active_to_block_number: Some(220),
+                active_to_block_hash: Some(
+                    "0x2222222222222222222222222222222222222222222222222222222222222222".to_owned(),
+                ),
+                provenance: serde_json::json!({
+                    "provider": "unit-test",
+                    "kind": "selected-resolver",
+                }),
+            },
+        )
+        .await?;
+        let selected_contract_instance_id = selected_summary.admitted_edges[0]
+            .to_contract_instance_id
+            .expect("selected resolver discovery must admit a target contract instance");
+        sqlx::query(
+            r#"
+            UPDATE contract_instance_addresses
+            SET active_from_block_number = 150,
+                active_to_block_number = 190
+            WHERE contract_instance_id = $1
+              AND deactivated_at IS NULL
+            "#,
+        )
+        .bind(selected_contract_instance_id)
+        .execute(database.pool())
+        .await?;
+
+        let closed_summary = persist_discovery_observation(
+            database.pool(),
+            &DiscoveryObservation {
+                chain: chain.to_owned(),
+                from_address: registry_address.to_owned(),
+                to_address: closed_resolver_address.to_owned(),
+                edge_kind: "resolver".to_owned(),
+                discovery_source: "dynamic-resolver-backfill-selector-test".to_owned(),
+                active_from_block_number: Some(20),
+                active_from_block_hash: Some(
+                    "0x3333333333333333333333333333333333333333333333333333333333333333".to_owned(),
+                ),
+                active_to_block_number: Some(90),
+                active_to_block_hash: Some(
+                    "0x4444444444444444444444444444444444444444444444444444444444444444".to_owned(),
+                ),
+                provenance: serde_json::json!({
+                    "provider": "unit-test",
+                    "kind": "closed-resolver",
+                }),
+            },
+        )
+        .await?;
+        let closed_contract_instance_id = closed_summary.admitted_edges[0]
+            .to_contract_instance_id
+            .expect("closed resolver discovery must admit a target contract instance");
+
+        let deactivated_summary = persist_discovery_observation(
+            database.pool(),
+            &DiscoveryObservation {
+                chain: chain.to_owned(),
+                from_address: registry_address.to_owned(),
+                to_address: deactivated_resolver_address.to_owned(),
+                edge_kind: "resolver".to_owned(),
+                discovery_source: "dynamic-resolver-backfill-selector-test".to_owned(),
+                active_from_block_number: Some(150),
+                active_from_block_hash: Some(
+                    "0x5555555555555555555555555555555555555555555555555555555555555555".to_owned(),
+                ),
+                active_to_block_number: Some(190),
+                active_to_block_hash: Some(
+                    "0x6666666666666666666666666666666666666666666666666666666666666666".to_owned(),
+                ),
+                provenance: serde_json::json!({
+                    "provider": "unit-test",
+                    "kind": "deactivated-resolver",
+                }),
+            },
+        )
+        .await?;
+        let deactivated_contract_instance_id = deactivated_summary.admitted_edges[0]
+            .to_contract_instance_id
+            .expect("deactivated resolver discovery must admit a target contract instance");
+        sqlx::query(
+            r#"
+            UPDATE discovery_edges
+            SET deactivated_at = now()
+            WHERE to_contract_instance_id = $1
+              AND deactivated_at IS NULL
+            "#,
+        )
+        .bind(deactivated_contract_instance_id)
+        .execute(database.pool())
+        .await?;
+
+        let watched_contracts = load_watched_contracts(database.pool()).await?;
+        let selected_watched_contract = watched_contracts
+            .iter()
+            .find(|contract| contract.contract_instance_id == selected_contract_instance_id)
+            .expect("selected resolver discovery target must be in the watched plan");
+        assert_eq!(selected_watched_contract.chain, chain);
+        assert_eq!(
+            selected_watched_contract.source_family,
+            resolver_source_family
+        );
+        assert_eq!(
+            selected_watched_contract.address,
+            normalize_address(selected_resolver_address)
+        );
+        assert_eq!(
+            selected_watched_contract.source,
+            WatchedContractSource::DiscoveryEdge
+        );
+        assert_eq!(
+            selected_watched_contract.active_from_block_number,
+            Some(150)
+        );
+        assert_eq!(selected_watched_contract.active_to_block_number, Some(190));
+        assert!(
+            watched_contracts
+                .iter()
+                .all(|contract| contract.contract_instance_id != deactivated_contract_instance_id),
+            "deactivated resolver discovery edge must not remain in the watched plan"
+        );
+
+        let selected_plan = load_watched_source_selector_plan(
+            database.pool(),
+            chain,
+            WatchedSourceSelector::SourceFamily(resolver_source_family.to_owned()),
+            120,
+            175,
+        )
+        .await?;
+        let mut sorted_targets = selected_plan.selected_targets.clone();
+        sorted_targets.sort();
+        assert_eq!(selected_plan.selected_targets, sorted_targets);
+        assert_eq!(
+            selected_plan
+                .selected_targets
+                .iter()
+                .find(|target| target.contract_instance_id == selected_contract_instance_id),
+            Some(&WatchedBackfillTarget {
+                source_family: resolver_source_family.to_owned(),
+                contract_instance_id: selected_contract_instance_id,
+                address: normalize_address(selected_resolver_address),
+                effective_from_block: 150,
+                effective_to_block: 175,
+            })
+        );
+        assert!(
+            selected_plan
+                .selected_targets
+                .iter()
+                .all(
+                    |target| target.contract_instance_id != closed_contract_instance_id
+                        && target.contract_instance_id != deactivated_contract_instance_id
+                ),
+            "closed and deactivated resolver discovery targets must not be selected"
+        );
+
+        for (range_start, range_end) in [(100, 149), (191, 220)] {
+            let out_of_range_plan = load_watched_source_selector_plan(
+                database.pool(),
+                chain,
+                WatchedSourceSelector::SourceFamily(resolver_source_family.to_owned()),
+                range_start,
+                range_end,
+            )
+            .await?;
+            assert!(
+                out_of_range_plan
+                    .selected_targets
+                    .iter()
+                    .all(|target| target.contract_instance_id != selected_contract_instance_id),
+                "resolver target must not be selected outside the edge/address intersection"
+            );
+        }
 
         database.cleanup().await?;
     }
@@ -2868,6 +3335,17 @@ async fn rebuilds_watched_plan_from_active_contract_instance_address_ranges() ->
             .selected_targets
             .iter()
             .all(|target| target.source_family == "ens_v2_registry_l1")
+    );
+    let mut sorted_targets = selected_source_family_plan.selected_targets.clone();
+    sorted_targets.sort();
+    assert_eq!(selected_source_family_plan.selected_targets, sorted_targets);
+    assert_eq!(
+        selected_source_family_plan
+            .selected_targets
+            .iter()
+            .find(|target| { target.address == "0x00000000000000000000000000000000000000cc" })
+            .map(|target| (target.effective_from_block, target.effective_to_block)),
+        Some((123, 200))
     );
 
     database.cleanup().await?;
