@@ -95,6 +95,73 @@
             Ok(())
         }
 
+        #[tokio::test]
+        async fn ensv2_sepolia_dev_exact_name_replay() -> Result<()> {
+            let database = HarnessDatabase::new().await?;
+            let corpus = seed_ensv2_sepolia_dev_exact_name_replay_corpus(&database).await?;
+
+            let stale_name = request_replay_route(
+                &database,
+                &ReplayRoute {
+                    label: "ensv2-exact-name-before-replay",
+                    uri: format!("/v1/names/ens/{}", corpus.route_name),
+                },
+            )
+            .await?;
+            assert_eq!(
+                stale_name["coverage"]["unsupported_reason"],
+                json!("ensv2_exact_name_profile_shadow")
+            );
+            assert_json_contains(
+                &stale_name,
+                corpus.stale_registrant,
+                "stale current row should be visible before replay",
+            );
+
+            replay_all_current_projections(&database).await?;
+
+            let name_payload = request_replay_route(
+                &database,
+                &ReplayRoute {
+                    label: "ensv2-exact-name-after-replay",
+                    uri: format!("/v1/names/ens/{}", corpus.route_name),
+                },
+            )
+            .await?;
+            let coverage_payload = request_replay_route(
+                &database,
+                &ReplayRoute {
+                    label: "ensv2-coverage-after-replay",
+                    uri: format!("/v1/coverage/ens/{}", corpus.route_name),
+                },
+            )
+            .await?;
+
+            assert_ensv2_sepolia_dev_exact_name_replay_payloads(
+                &name_payload,
+                &coverage_payload,
+                &corpus,
+            );
+
+            database.cleanup().await?;
+            Ok(())
+        }
+
+        struct EnsV2ExactNameReplayCorpus {
+            logical_name_id: &'static str,
+            route_name: &'static str,
+            resource_id: Uuid,
+            token_lineage_id: Uuid,
+            surface_binding_id: Uuid,
+            registry_manifest_id: i64,
+            registrar_manifest_id: i64,
+            registrant: &'static str,
+            controller: &'static str,
+            stale_registrant: &'static str,
+            stale_controller: &'static str,
+            stale_resolver: &'static str,
+        }
+
         async fn seed_replay_supported_read_corpus(database: &HarnessDatabase) -> Result<ReplayCorpus> {
             let corpus = ReplayCorpus {
                 logical_name_id: "basenames:alice.base.eth",
@@ -160,6 +227,238 @@
             seed_replay_winning_branch_source_rows(database, &corpus).await?;
 
             Ok(corpus)
+        }
+
+        async fn seed_ensv2_sepolia_dev_exact_name_replay_corpus(
+            database: &HarnessDatabase,
+        ) -> Result<EnsV2ExactNameReplayCorpus> {
+            let registry_manifest_id = database
+                .insert_manifest(
+                    "ens",
+                    "ens_v2_registry_l1",
+                    "ethereum-sepolia",
+                    "ens_v2_sepolia_dev",
+                    11,
+                    "active",
+                    "ensip15@2026-04-16",
+                )
+                .await?;
+            let registrar_manifest_id = database
+                .insert_manifest(
+                    "ens",
+                    "ens_v2_registrar_l1",
+                    "ethereum-sepolia",
+                    "ens_v2_sepolia_dev",
+                    11,
+                    "active",
+                    "ensip15@2026-04-16",
+                )
+                .await?;
+            database
+                .insert_capability_flag(
+                    registrar_manifest_id,
+                    "exact_name_profile",
+                    "supported",
+                    None,
+                )
+                .await?;
+
+            let corpus = EnsV2ExactNameReplayCorpus {
+                logical_name_id: "ens:sepolia-dev-replay.eth",
+                route_name: "sepolia-dev-replay.eth",
+                resource_id: Uuid::from_u128(0xc9a0),
+                token_lineage_id: Uuid::from_u128(0xc9a1),
+                surface_binding_id: Uuid::from_u128(0xc9a2),
+                registry_manifest_id,
+                registrar_manifest_id,
+                registrant: "0x0000000000000000000000000000000000000b0b",
+                controller: "0x0000000000000000000000000000000000000c0c",
+                stale_registrant: "0x0000000000000000000000000000000000000bad",
+                stale_controller: "0x0000000000000000000000000000000000000dad",
+                stale_resolver: "0x0000000000000000000000000000000000000fed",
+            };
+
+            seed_ens_v2_address_name_rebuild_inputs(
+                database,
+                corpus.logical_name_id,
+                corpus.resource_id,
+                corpus.token_lineage_id,
+                corpus.surface_binding_id,
+                corpus.registrant,
+                corpus.controller,
+            )
+            .await?;
+            seed_ensv2_sepolia_dev_exact_name_registrar_truth(database, &corpus).await?;
+            assign_ensv2_sepolia_dev_exact_name_manifest_links(database, &corpus).await?;
+            database
+                .insert_name_current_row(stale_ensv2_sepolia_dev_exact_name_row(&corpus))
+                .await?;
+
+            Ok(corpus)
+        }
+
+        async fn seed_ensv2_sepolia_dev_exact_name_registrar_truth(
+            database: &HarnessDatabase,
+            corpus: &EnsV2ExactNameReplayCorpus,
+        ) -> Result<()> {
+            bigname_storage::upsert_raw_blocks(
+                &database.pool,
+                &[raw_block(
+                    "ethereum-sepolia",
+                    "0xensv2-replay-renew",
+                    Some("0xensv2-regen"),
+                    207,
+                    1_717_182_207,
+                )],
+            )
+            .await
+            .context("failed to upsert ENSv2 replay registrar raw block")?;
+
+            bigname_storage::upsert_normalized_events(
+                &database.pool,
+                &[NormalizedEvent {
+                    event_identity: format!(
+                        "conformance:{}:ensv2-replay-registrar-renew",
+                        corpus.logical_name_id
+                    ),
+                    namespace: "ens".to_owned(),
+                    logical_name_id: Some(corpus.logical_name_id.to_owned()),
+                    resource_id: Some(corpus.resource_id),
+                    event_kind: "RegistrationRenewed".to_owned(),
+                    source_family: "ens_v2_registrar_l1".to_owned(),
+                    manifest_version: 11,
+                    source_manifest_id: Some(corpus.registrar_manifest_id),
+                    chain_id: Some("ethereum-sepolia".to_owned()),
+                    block_number: Some(207),
+                    block_hash: Some("0xensv2-replay-renew".to_owned()),
+                    transaction_hash: Some(format!(
+                        "0xtx:{}:ensv2-replay-registrar-renew",
+                        corpus.logical_name_id
+                    )),
+                    log_index: Some(0),
+                    raw_fact_ref: json!({
+                        "kind": "raw_log",
+                        "event_identity": format!(
+                            "conformance:{}:ensv2-replay-registrar-renew",
+                            corpus.logical_name_id
+                        ),
+                    }),
+                    derivation_kind: "ens_v2_registrar".to_owned(),
+                    canonicality_state: CanonicalityState::Finalized,
+                    before_state: json!({}),
+                    after_state: json!({
+                        "duration": 31_536_000_i64,
+                        "expiry": 1_931_536_000_i64,
+                    }),
+                }],
+            )
+            .await
+            .context("failed to upsert ENSv2 replay registrar normalized event")?;
+
+            Ok(())
+        }
+
+        async fn assign_ensv2_sepolia_dev_exact_name_manifest_links(
+            database: &HarnessDatabase,
+            corpus: &EnsV2ExactNameReplayCorpus,
+        ) -> Result<()> {
+            sqlx::query(
+                r#"
+                UPDATE normalized_events
+                SET source_manifest_id = CASE source_family
+                    WHEN 'ens_v2_registry_l1' THEN $2
+                    WHEN 'ens_v2_registrar_l1' THEN $3
+                    ELSE source_manifest_id
+                END
+                WHERE logical_name_id = $1
+                  AND source_family IN ('ens_v2_registry_l1', 'ens_v2_registrar_l1')
+                "#,
+            )
+            .bind(corpus.logical_name_id)
+            .bind(corpus.registry_manifest_id)
+            .bind(corpus.registrar_manifest_id)
+            .execute(&database.pool)
+            .await
+            .context("failed to attach ENSv2 replay exact-name source manifests")?;
+
+            Ok(())
+        }
+
+        fn stale_ensv2_sepolia_dev_exact_name_row(
+            corpus: &EnsV2ExactNameReplayCorpus,
+        ) -> bigname_storage::NameCurrentRow {
+            bigname_storage::NameCurrentRow {
+                logical_name_id: corpus.logical_name_id.to_owned(),
+                namespace: "ens".to_owned(),
+                canonical_display_name: corpus.route_name.to_owned(),
+                normalized_name: corpus.route_name.to_owned(),
+                namehash: format!("namehash:{}", corpus.route_name),
+                surface_binding_id: Some(corpus.surface_binding_id),
+                resource_id: Some(corpus.resource_id),
+                token_lineage_id: Some(corpus.token_lineage_id),
+                binding_kind: Some(SurfaceBindingKind::LinkedSubregistryPath),
+                declared_summary: json!({
+                    "registration": {
+                        "status": "active",
+                        "authority_kind": "ens_v2_registry",
+                        "authority_key": format!(
+                            "ens-v2-registry:ethereum-sepolia:{}:0xeac",
+                            corpus.route_name
+                        ),
+                        "registrant": corpus.stale_registrant,
+                        "expiry": 1_800_000_000_i64,
+                        "latest_event_kind": "RegistrationGranted",
+                    },
+                    "control": {
+                        "registrant": corpus.stale_registrant,
+                        "registry_owner": corpus.stale_controller,
+                        "latest_event_kind": "AuthorityTransferred",
+                    },
+                    "resolver": {
+                        "chain_id": "ethereum-sepolia",
+                        "address": corpus.stale_resolver,
+                        "latest_event_kind": "ResolverChanged",
+                    },
+                    "history": {
+                        "surface_head": null,
+                        "resource_head": null,
+                    },
+                }),
+                provenance: json!({
+                    "normalized_event_ids": [],
+                    "raw_fact_refs": [],
+                    "manifest_versions": [{
+                        "manifest_version": 10,
+                        "source_family": "ens_v2_registry_l1",
+                        "source_manifest_id": null,
+                    }],
+                    "execution_trace_id": null,
+                    "derivation_kind": "stale_name_current_fixture",
+                }),
+                coverage: json!({
+                    "status": "unsupported",
+                    "exhaustiveness": "not_applicable",
+                    "source_classes_considered": ["ensv2_registry_resource_surface"],
+                    "unsupported_reason": "ensv2_exact_name_profile_shadow",
+                    "enumeration_basis": "exact_name",
+                }),
+                chain_positions: json!({
+                    "ethereum-sepolia": {
+                        "chain_id": "ethereum-sepolia",
+                        "block_number": 200,
+                        "block_hash": "0xensv2-stale-current",
+                        "timestamp": "2024-05-31T16:00:00Z",
+                    }
+                }),
+                canonicality_summary: json!({
+                    "status": "finalized",
+                    "chains": {
+                        "ethereum-sepolia": "finalized",
+                    }
+                }),
+                manifest_version: 10,
+                last_recomputed_at: timestamp(1_717_182_000),
+            }
         }
 
         async fn seed_replay_permissions(
@@ -957,6 +1256,108 @@
                         forbidden,
                         &format!(
                             "{label} route should not expose orphaned losing-branch marker {forbidden} after replay"
+                        ),
+                    );
+                }
+            }
+        }
+
+        fn assert_ensv2_sepolia_dev_exact_name_replay_payloads(
+            name_payload: &Value,
+            coverage_payload: &Value,
+            corpus: &EnsV2ExactNameReplayCorpus,
+        ) {
+            let expected_coverage = json!({
+                "status": "full",
+                "exhaustiveness": "authoritative",
+                "source_classes_considered": ["ens_v2_registry_l1", "ens_v2_registrar_l1"],
+                "unsupported_reason": null,
+                "enumeration_basis": "exact_name_profile",
+            });
+
+            assert_eq!(
+                name_payload["data"]["logical_name_id"],
+                json!(corpus.logical_name_id)
+            );
+            assert_eq!(name_payload["data"]["namespace"], json!("ens"));
+            assert_eq!(
+                name_payload["data"]["binding_kind"],
+                json!("linked_subregistry_path")
+            );
+            assert_eq!(
+                name_payload["declared_state"]["registration"]["status"],
+                json!("active")
+            );
+            assert_eq!(
+                name_payload["declared_state"]["registration"]["authority_kind"],
+                json!("ens_v2_registry")
+            );
+            assert_eq!(
+                name_payload["declared_state"]["registration"]["registrant"],
+                json!(corpus.registrant)
+            );
+            assert_eq!(
+                name_payload["declared_state"]["registration"]["latest_event_kind"],
+                json!("RegistrationRenewed")
+            );
+            assert_eq!(
+                name_payload["declared_state"]["control"]["registry_owner"],
+                json!(corpus.controller)
+            );
+            assert_eq!(
+                name_payload["declared_state"]["resolver"]["address"],
+                Value::Null
+            );
+            assert_eq!(
+                name_payload["declared_state"]["record_inventory"]["status"],
+                json!("unsupported")
+            );
+            assert_eq!(name_payload["coverage"], expected_coverage);
+            assert_eq!(coverage_payload["coverage"], expected_coverage);
+            assert_eq!(coverage_payload["declared_state"], expected_coverage);
+            assert_eq!(coverage_payload["data"], name_payload["data"]);
+            assert_eq!(
+                name_payload["chain_positions"]["ethereum-sepolia"]["block_number"],
+                json!(207)
+            );
+            assert_eq!(name_payload["verified_state"], Value::Null);
+            assert_eq!(coverage_payload["verified_state"], Value::Null);
+            assert_eq!(
+                name_payload["provenance"]["derivation_kind"],
+                json!("name_current_rebuild")
+            );
+
+            let manifest_versions = name_payload["provenance"]["manifest_versions"]
+                .as_array()
+                .expect("name provenance manifest_versions must be an array");
+            assert!(manifest_versions.iter().any(|entry| {
+                entry.get("source_family") == Some(&json!("ens_v2_registry_l1"))
+                    && entry.get("manifest_version") == Some(&json!(11))
+                    && entry.get("source_manifest_id") == Some(&json!(corpus.registry_manifest_id))
+            }));
+            assert!(manifest_versions.iter().any(|entry| {
+                entry.get("source_family") == Some(&json!("ens_v2_registrar_l1"))
+                    && entry.get("manifest_version") == Some(&json!(11))
+                    && entry.get("source_manifest_id") == Some(&json!(corpus.registrar_manifest_id))
+            }));
+
+            for payload in [name_payload, coverage_payload] {
+                for forbidden in [
+                    corpus.stale_registrant,
+                    corpus.stale_controller,
+                    corpus.stale_resolver,
+                    "ensv2_exact_name_profile_shadow",
+                    "mixed_ensv1_ensv2_exact_name_corpus",
+                    "ensv2_registry_resource_surface",
+                    "ensv1_registry_path",
+                    "stale_name_current_fixture",
+                    "0xensv2-stale-current",
+                ] {
+                    assert_json_not_contains(
+                        payload,
+                        forbidden,
+                        &format!(
+                            "ENSv2 sepolia-dev replay payload should not expose stale or unsupported marker {forbidden}"
                         ),
                     );
                 }
