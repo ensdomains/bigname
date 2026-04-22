@@ -1,0 +1,41 @@
+{
+  "capability_group": "exact name profile",
+  "conformance_owner": "exact_name.rs::exact_name_contract_* and exact_name.rs::coverage_contract_*",
+  "fixture_id": "exact-name-profile",
+  "request": {
+    "method": "GET",
+    "path": "/v1/names/{namespace}/{name}",
+    "query": {}
+  },
+  "response": {
+    "coverage": {
+      "enumeration_basis": "exact_name_current",
+      "exhaustiveness": "authoritative",
+      "status": "full",
+      "unsupported_reason": null
+    },
+    "data": {
+      "fixture_version": 1,
+      "stable_identity": "capability-golden:exact-name-profile"
+    },
+    "provenance": {
+      "boundary": "local_route_conformance",
+      "source": "checked_in_fixture"
+    }
+  },
+  "rollback_gate": [
+    "scripts/rollback-smoke",
+    "route envelope returns prior supported / unsupported coverage state"
+  ],
+  "rollout_gate": [
+    "OpenAPI route owner guard",
+    "focused exact-name conformance",
+    "scripts/release-smoke",
+    "matching manifest support state where applicable"
+  ],
+  "route_owner": [
+    "/v1/names/{namespace}/{name}",
+    "/v1/coverage/{namespace}/{name}"
+  ],
+  "scope": "local_cutover_evidence"
+}

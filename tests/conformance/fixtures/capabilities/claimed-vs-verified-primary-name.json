@@ -1,0 +1,40 @@
+{
+  "capability_group": "claimed vs verified primary name",
+  "conformance_owner": "primary_names.rs::primary_names_contract_*",
+  "fixture_id": "claimed-vs-verified-primary-name",
+  "request": {
+    "method": "GET",
+    "path": "/v1/primary-names/{address}",
+    "query": {}
+  },
+  "response": {
+    "coverage": {
+      "enumeration_basis": "persisted_primary_name",
+      "exhaustiveness": "non_enumerable",
+      "status": "partial",
+      "unsupported_reason": null
+    },
+    "data": {
+      "fixture_version": 1,
+      "stable_identity": "capability-golden:claimed-vs-verified-primary-name"
+    },
+    "provenance": {
+      "boundary": "local_route_conformance",
+      "source": "checked_in_fixture"
+    }
+  },
+  "rollback_gate": [
+    "scripts/rollback-smoke",
+    "stable partial exact-tuple coverage, explicit unsupported out-of-class behavior, and execution-derived verification rollback"
+  ],
+  "rollout_gate": [
+    "OpenAPI route owner guard",
+    "focused primary-name conformance",
+    "persisted execution readback checks",
+    "scripts/release-smoke"
+  ],
+  "route_owner": [
+    "/v1/primary-names/{address}"
+  ],
+  "scope": "local_cutover_evidence"
+}

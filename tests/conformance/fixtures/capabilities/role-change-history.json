@@ -1,0 +1,39 @@
+{
+  "capability_group": "role change history",
+  "conformance_owner": "history.rs::resource_history_contract_*",
+  "fixture_id": "role-change-history",
+  "request": {
+    "method": "GET",
+    "path": "/v1/history/resources/{resource_id}",
+    "query": {}
+  },
+  "response": {
+    "coverage": {
+      "enumeration_basis": "normalized_event_history",
+      "exhaustiveness": "authoritative",
+      "status": "full",
+      "unsupported_reason": null
+    },
+    "data": {
+      "fixture_version": 1,
+      "stable_identity": "capability-golden:role-change-history"
+    },
+    "provenance": {
+      "boundary": "local_route_conformance",
+      "source": "checked_in_fixture"
+    }
+  },
+  "rollback_gate": [
+    "scripts/rollback-smoke",
+    "stable resource-history cursor behavior"
+  ],
+  "rollout_gate": [
+    "OpenAPI route owner guard",
+    "focused history conformance",
+    "scripts/release-smoke"
+  ],
+  "route_owner": [
+    "/v1/history/resources/{resource_id}"
+  ],
+  "scope": "local_cutover_evidence"
+}

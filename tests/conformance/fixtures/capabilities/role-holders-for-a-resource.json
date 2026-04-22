@@ -1,0 +1,39 @@
+{
+  "capability_group": "role holders for a resource",
+  "conformance_owner": "resolution_and_permissions.rs::resource_permissions_contract_*",
+  "fixture_id": "role-holders-for-a-resource",
+  "request": {
+    "method": "GET",
+    "path": "/v1/resources/{resource_id}/permissions",
+    "query": {}
+  },
+  "response": {
+    "coverage": {
+      "enumeration_basis": "resource_permissions",
+      "exhaustiveness": "authoritative",
+      "status": "full",
+      "unsupported_reason": null
+    },
+    "data": {
+      "fixture_version": 1,
+      "stable_identity": "capability-golden:role-holders-for-a-resource"
+    },
+    "provenance": {
+      "boundary": "local_route_conformance",
+      "source": "checked_in_fixture"
+    }
+  },
+  "rollback_gate": [
+    "scripts/rollback-smoke",
+    "stable permission envelope and explicit unsupported summaries"
+  ],
+  "rollout_gate": [
+    "OpenAPI route owner guard",
+    "focused permissions conformance",
+    "scripts/release-smoke"
+  ],
+  "route_owner": [
+    "/v1/resources/{resource_id}/permissions"
+  ],
+  "scope": "local_cutover_evidence"
+}

@@ -1,0 +1,39 @@
+{
+  "capability_group": "names owned / controlled by address",
+  "conformance_owner": "collections.rs::address_names_contract_*",
+  "fixture_id": "names-owned-controlled-by-address",
+  "request": {
+    "method": "GET",
+    "path": "/v1/addresses/{address}/names",
+    "query": {}
+  },
+  "response": {
+    "coverage": {
+      "enumeration_basis": "address_name_current",
+      "exhaustiveness": "authoritative",
+      "status": "full",
+      "unsupported_reason": null
+    },
+    "data": {
+      "fixture_version": 1,
+      "stable_identity": "capability-golden:names-owned-controlled-by-address"
+    },
+    "provenance": {
+      "boundary": "local_route_conformance",
+      "source": "checked_in_fixture"
+    }
+  },
+  "rollback_gate": [
+    "scripts/rollback-smoke",
+    "stable cursor / response-shape rollback for address collection"
+  ],
+  "rollout_gate": [
+    "OpenAPI route owner guard",
+    "focused collection conformance",
+    "scripts/release-smoke"
+  ],
+  "route_owner": [
+    "/v1/addresses/{address}/names"
+  ],
+  "scope": "local_cutover_evidence"
+}

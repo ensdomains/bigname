@@ -1,0 +1,39 @@
+{
+  "capability_group": "declared child subnames and counts",
+  "conformance_owner": "collections.rs::name_children_contract_*",
+  "fixture_id": "declared-child-subnames-and-counts",
+  "request": {
+    "method": "GET",
+    "path": "/v1/names/{namespace}/{name}/children",
+    "query": {}
+  },
+  "response": {
+    "coverage": {
+      "enumeration_basis": "declared_children",
+      "exhaustiveness": "authoritative",
+      "status": "full",
+      "unsupported_reason": null
+    },
+    "data": {
+      "fixture_version": 1,
+      "stable_identity": "capability-golden:declared-child-subnames-and-counts"
+    },
+    "provenance": {
+      "boundary": "local_route_conformance",
+      "source": "checked_in_fixture"
+    }
+  },
+  "rollback_gate": [
+    "scripts/rollback-smoke",
+    "stable child collection pagination / unsupported behavior"
+  ],
+  "rollout_gate": [
+    "OpenAPI route owner guard",
+    "focused children conformance",
+    "scripts/release-smoke"
+  ],
+  "route_owner": [
+    "/v1/names/{namespace}/{name}/children"
+  ],
+  "scope": "local_cutover_evidence"
+}

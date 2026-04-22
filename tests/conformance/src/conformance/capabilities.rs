@@ -10,6 +10,22 @@
         const RELEASE_SMOKE_GATE: &str = "scripts/release-smoke";
         const ROLLBACK_SMOKE_GATE: &str = "scripts/rollback-smoke";
         const OPENAPI_ROUTE_OWNER_GATE: &str = "OpenAPI route owner guard";
+        const CAPABILITY_GOLDEN_FIXTURE_SCOPE: &str = "local_cutover_evidence";
+        const FORBIDDEN_GOLDEN_CLAIM_TERMS: &[&str] = &[
+            "imported app",
+            "external app",
+            "first-party app",
+            "app call-site",
+            "app call site",
+            "app_call_site",
+            "call-site",
+            "call_site",
+            "parity",
+            "replacement",
+            "legacy schema",
+            "consumer replacement",
+            "consumer-replacement",
+        ];
 
         const CAPABILITY_CUTOVER_EVIDENCE: &[CapabilityCutoverEvidence] = &[
             CapabilityCutoverEvidence {
@@ -184,10 +200,126 @@
                 ],
                 rollback_gate: &[
                     ROLLBACK_SMOKE_GATE,
-                    "stable bootstrap coverage and execution-derived verification rollback",
+                    "stable partial exact-tuple coverage, explicit unsupported out-of-class behavior, and execution-derived verification rollback",
                 ],
             },
         ];
+
+        #[derive(Clone, Copy, Debug)]
+        struct CapabilityGoldenFixtureDocument {
+            fixture_path: &'static str,
+            body: &'static str,
+        }
+
+        const CAPABILITY_GOLDEN_RESPONSE_FIXTURES: &[CapabilityGoldenFixtureDocument] = &[
+            CapabilityGoldenFixtureDocument {
+                fixture_path: "fixtures/capabilities/exact-name-profile.json",
+                body: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/fixtures/capabilities/exact-name-profile.json"
+                )),
+            },
+            CapabilityGoldenFixtureDocument {
+                fixture_path: "fixtures/capabilities/names-owned-controlled-by-address.json",
+                body: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/fixtures/capabilities/names-owned-controlled-by-address.json"
+                )),
+            },
+            CapabilityGoldenFixtureDocument {
+                fixture_path:
+                    "fixtures/capabilities/names-owned-controlled-by-address-with-role-summary.json",
+                body: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/fixtures/capabilities/names-owned-controlled-by-address-with-role-summary.json"
+                )),
+            },
+            CapabilityGoldenFixtureDocument {
+                fixture_path: "fixtures/capabilities/declared-child-subnames-and-counts.json",
+                body: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/fixtures/capabilities/declared-child-subnames-and-counts.json"
+                )),
+            },
+            CapabilityGoldenFixtureDocument {
+                fixture_path: "fixtures/capabilities/record-inventory-for-editing.json",
+                body: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/fixtures/capabilities/record-inventory-for-editing.json"
+                )),
+            },
+            CapabilityGoldenFixtureDocument {
+                fixture_path: "fixtures/capabilities/verified-record-reads.json",
+                body: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/fixtures/capabilities/verified-record-reads.json"
+                )),
+            },
+            CapabilityGoldenFixtureDocument {
+                fixture_path: "fixtures/capabilities/name-history.json",
+                body: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/fixtures/capabilities/name-history.json"
+                )),
+            },
+            CapabilityGoldenFixtureDocument {
+                fixture_path: "fixtures/capabilities/address-history-across-names.json",
+                body: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/fixtures/capabilities/address-history-across-names.json"
+                )),
+            },
+            CapabilityGoldenFixtureDocument {
+                fixture_path: "fixtures/capabilities/role-holders-for-a-resource.json",
+                body: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/fixtures/capabilities/role-holders-for-a-resource.json"
+                )),
+            },
+            CapabilityGoldenFixtureDocument {
+                fixture_path: "fixtures/capabilities/role-change-history.json",
+                body: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/fixtures/capabilities/role-change-history.json"
+                )),
+            },
+            CapabilityGoldenFixtureDocument {
+                fixture_path: "fixtures/capabilities/resolver-centric-overview.json",
+                body: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/fixtures/capabilities/resolver-centric-overview.json"
+                )),
+            },
+            CapabilityGoldenFixtureDocument {
+                fixture_path: "fixtures/capabilities/claimed-vs-verified-primary-name.json",
+                body: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/fixtures/capabilities/claimed-vs-verified-primary-name.json"
+                )),
+            },
+        ];
+
+        #[derive(Debug, serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct CapabilityGoldenFixture {
+            capability_group: String,
+            conformance_owner: String,
+            fixture_id: String,
+            request: CapabilityGoldenFixtureRequest,
+            response: Value,
+            rollback_gate: Vec<String>,
+            rollout_gate: Vec<String>,
+            route_owner: Vec<String>,
+            scope: String,
+        }
+
+        #[derive(Debug, serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct CapabilityGoldenFixtureRequest {
+            method: String,
+            path: String,
+            query: BTreeMap<String, String>,
+        }
 
         #[test]
         fn capability_cutover_evidence_is_complete_for_shipped_groups() {
@@ -281,4 +413,242 @@
                 unexpected_groups.is_empty(),
                 "unexpected capability cutover evidence groups: {unexpected_groups:#?}"
             );
+        }
+
+        #[test]
+        fn capability_golden_response_fixtures_cover_cutover_evidence() -> Result<()> {
+            let checked_in_fixture_paths = checked_in_capability_golden_fixture_paths()?;
+            let expected_fixture_paths = CAPABILITY_GOLDEN_RESPONSE_FIXTURES
+                .iter()
+                .map(|document| document.fixture_path.to_owned())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+            assert_eq!(
+                checked_in_fixture_paths, expected_fixture_paths,
+                "checked-in capability golden fixtures must be exactly the fixture documents covered by the harness"
+            );
+
+            let evidence_by_group = CAPABILITY_CUTOVER_EVIDENCE
+                .iter()
+                .map(|evidence| (evidence.capability_group, evidence))
+                .collect::<BTreeMap<_, _>>();
+            let mut fixtures_by_group = BTreeMap::new();
+
+            for document in CAPABILITY_GOLDEN_RESPONSE_FIXTURES {
+                let fixture = parse_capability_golden_fixture(document)?;
+                let raw_fixture: Value = serde_json::from_str(document.body)
+                    .with_context(|| format!("failed to parse {}", document.fixture_path))?;
+                assert_no_imported_claim_terms(document.fixture_path, &raw_fixture);
+                assert_eq!(
+                    fixture.scope.as_str(),
+                    CAPABILITY_GOLDEN_FIXTURE_SCOPE,
+                    "{} must stay scoped to local cutover evidence",
+                    document.fixture_path
+                );
+                assert_eq!(
+                    fixture.fixture_id.as_str(),
+                    capability_fixture_id(&fixture.capability_group),
+                    "{} fixture_id must be derived from capability_group",
+                    document.fixture_path
+                );
+                assert_eq!(
+                    document.fixture_path,
+                    format!("fixtures/capabilities/{}.json", fixture.fixture_id),
+                    "{} fixture path must match fixture_id",
+                    document.fixture_path
+                );
+                assert!(
+                    fixture.response.is_object(),
+                    "{} response fixture must be a JSON object",
+                    document.fixture_path
+                );
+                assert!(
+                    matches!(fixture.response.get("coverage"), Some(Value::Object(_))),
+                    "{} response fixture must include a coverage object",
+                    document.fixture_path
+                );
+                assert!(
+                    matches!(fixture.response.get("data"), Some(Value::Object(_))),
+                    "{} response fixture must include a data object",
+                    document.fixture_path
+                );
+                assert_eq!(
+                    fixture.request.method, "GET",
+                    "{} golden fixture request must be a read route",
+                    document.fixture_path
+                );
+
+                let evidence = evidence_by_group
+                    .get(fixture.capability_group.as_str())
+                    .with_context(|| {
+                        format!(
+                            "{} references capability group without cutover evidence: {}",
+                            document.fixture_path, fixture.capability_group
+                        )
+                    })?;
+                assert_eq!(
+                    fixture.route_owner.as_slice(),
+                    evidence.route_owner,
+                    "{} route owners must match CAPABILITY_CUTOVER_EVIDENCE",
+                    document.fixture_path
+                );
+                assert_eq!(
+                    fixture.conformance_owner.as_str(),
+                    evidence.conformance_owner,
+                    "{} conformance owner must match CAPABILITY_CUTOVER_EVIDENCE",
+                    document.fixture_path
+                );
+                assert_eq!(
+                    fixture.rollout_gate.as_slice(),
+                    evidence.rollout_gate,
+                    "{} rollout gates must match CAPABILITY_CUTOVER_EVIDENCE",
+                    document.fixture_path
+                );
+                assert_eq!(
+                    fixture.rollback_gate.as_slice(),
+                    evidence.rollback_gate,
+                    "{} rollback gates must match CAPABILITY_CUTOVER_EVIDENCE",
+                    document.fixture_path
+                );
+                assert!(
+                    fixture
+                        .route_owner
+                        .contains(&capability_fixture_route_owner(&fixture.request)),
+                    "{} request must target one of the declared route owners",
+                    document.fixture_path
+                );
+                assert!(
+                    fixtures_by_group
+                        .insert(fixture.capability_group.clone(), document.fixture_path)
+                        .is_none(),
+                    "duplicate golden fixture for {}",
+                    fixture.capability_group
+                );
+            }
+
+            let fixture_groups = fixtures_by_group.keys().cloned().collect::<BTreeSet<_>>();
+            let evidence_groups = CAPABILITY_CUTOVER_EVIDENCE
+                .iter()
+                .map(|evidence| evidence.capability_group.to_owned())
+                .collect::<BTreeSet<_>>();
+            assert_eq!(
+                fixture_groups, evidence_groups,
+                "capability golden response fixtures must cover every local cutover evidence group"
+            );
+
+            Ok(())
+        }
+
+        #[test]
+        fn capability_golden_response_fixtures_are_stably_formatted() -> Result<()> {
+            for document in CAPABILITY_GOLDEN_RESPONSE_FIXTURES {
+                let parsed: Value = serde_json::from_str(document.body)
+                    .with_context(|| format!("failed to parse {}", document.fixture_path))?;
+                let stable_body = format!("{}\n", serde_json::to_string_pretty(&parsed)?);
+                assert_eq!(
+                    document.body, stable_body,
+                    "{} must stay in serde_json pretty format",
+                    document.fixture_path
+                );
+            }
+
+            Ok(())
+        }
+
+        fn parse_capability_golden_fixture(
+            document: &CapabilityGoldenFixtureDocument,
+        ) -> Result<CapabilityGoldenFixture> {
+            serde_json::from_str(document.body)
+                .with_context(|| format!("failed to parse {}", document.fixture_path))
+        }
+
+        fn checked_in_capability_golden_fixture_paths() -> Result<Vec<String>> {
+            let fixture_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("fixtures")
+                .join("capabilities");
+            let mut fixture_paths = std::fs::read_dir(&fixture_dir)
+                .with_context(|| {
+                    format!(
+                        "failed to read capability golden fixture directory {}",
+                        fixture_dir.display()
+                    )
+                })?
+                .map(|entry| {
+                    let entry = entry.with_context(|| {
+                        format!(
+                            "failed to read capability golden fixture entry in {}",
+                            fixture_dir.display()
+                        )
+                    })?;
+                    let file_name = entry.file_name();
+                    let file_name = file_name.to_string_lossy();
+                    Ok(format!("fixtures/capabilities/{file_name}"))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            fixture_paths.retain(|path| path.ends_with(".json"));
+            fixture_paths.sort();
+
+            Ok(fixture_paths)
+        }
+
+        fn capability_fixture_id(capability_group: &str) -> String {
+            let mut fixture_id = String::new();
+            let mut last_was_separator = false;
+
+            for character in capability_group.chars() {
+                if character.is_ascii_alphanumeric() {
+                    fixture_id.push(character.to_ascii_lowercase());
+                    last_was_separator = false;
+                } else if !last_was_separator {
+                    fixture_id.push('-');
+                    last_was_separator = true;
+                }
+            }
+
+            fixture_id.trim_matches('-').to_owned()
+        }
+
+        fn capability_fixture_route_owner(request: &CapabilityGoldenFixtureRequest) -> String {
+            if request.query.is_empty() {
+                return request.path.clone();
+            }
+
+            let query = request
+                .query
+                .iter()
+                .map(|(key, value)| format!("{key}={value}"))
+                .collect::<Vec<_>>()
+                .join("&");
+            format!("{}?{}", request.path, query)
+        }
+
+        fn assert_no_imported_claim_terms(fixture_path: &str, value: &Value) {
+            match value {
+                Value::Array(items) => {
+                    for item in items {
+                        assert_no_imported_claim_terms(fixture_path, item);
+                    }
+                }
+                Value::Object(fields) => {
+                    for (key, item) in fields {
+                        assert_no_forbidden_golden_claim_text(fixture_path, key);
+                        assert_no_imported_claim_terms(fixture_path, item);
+                    }
+                }
+                Value::String(text) => {
+                    assert_no_forbidden_golden_claim_text(fixture_path, text);
+                }
+                Value::Bool(_) | Value::Null | Value::Number(_) => {}
+            }
+        }
+
+        fn assert_no_forbidden_golden_claim_text(fixture_path: &str, text: &str) {
+            let text_lowercase = text.to_ascii_lowercase();
+            for forbidden_term in FORBIDDEN_GOLDEN_CLAIM_TERMS {
+                assert!(
+                    !text_lowercase.contains(forbidden_term),
+                    "{fixture_path} contains forbidden imported-call-site or parity claim term {forbidden_term:?}: {text:?}"
+                );
+            }
         }

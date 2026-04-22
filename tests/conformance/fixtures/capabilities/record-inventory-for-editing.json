@@ -1,0 +1,40 @@
+{
+  "capability_group": "record inventory for editing",
+  "conformance_owner": "resolution_and_permissions.rs::resolution_record_inventory_contract_*",
+  "fixture_id": "record-inventory-for-editing",
+  "request": {
+    "method": "GET",
+    "path": "/v1/resolutions/{namespace}/{name}",
+    "query": {}
+  },
+  "response": {
+    "coverage": {
+      "enumeration_basis": "record_inventory_current",
+      "exhaustiveness": "authoritative",
+      "status": "full",
+      "unsupported_reason": null
+    },
+    "data": {
+      "fixture_version": 1,
+      "stable_identity": "capability-golden:record-inventory-for-editing"
+    },
+    "provenance": {
+      "boundary": "local_route_conformance",
+      "source": "checked_in_fixture"
+    }
+  },
+  "rollback_gate": [
+    "scripts/rollback-smoke",
+    "explicit unsupported / pending resolver-family state"
+  ],
+  "rollout_gate": [
+    "OpenAPI route owner guard",
+    "focused resolution conformance",
+    "supported resolver-profile evidence",
+    "scripts/release-smoke"
+  ],
+  "route_owner": [
+    "/v1/resolutions/{namespace}/{name}"
+  ],
+  "scope": "local_cutover_evidence"
+}

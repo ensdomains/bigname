@@ -74,6 +74,21 @@ Focused primary-name route contract coverage, from the repository root:
 cargo test --manifest-path tests/conformance/Cargo.toml primary_names_contract -- --nocapture
 ```
 
+Focused Basenames verified-resolution promotion and deferred-path coverage, from the repository
+root:
+
+```sh
+cargo test --manifest-path tests/conformance/Cargo.toml basenames_transport -- --nocapture
+cargo test --manifest-path tests/conformance/Cargo.toml basenames_deferred_path_classes -- --nocapture
+```
+
+Focused capability golden fixture pack guards, from the repository root:
+
+```sh
+cargo test --manifest-path tests/conformance/Cargo.toml capability
+cargo test --manifest-path tests/conformance/Cargo.toml capability_golden_response_fixtures
+```
+
 Execution notes:
 
 - uses `BIGNAME_DATABASE_URL` when set, then `DATABASE_URL` when set
@@ -84,6 +99,17 @@ Execution notes:
   Postgres is available, standalone backfill jobs and the focused chaos drill may be treated as
   no-run fallback instead of route contract failures, and should be rerun in an environment with
   Postgres before relying on them
+- the capability golden fixture guards are static no-Postgres checks; route readback, replay,
+  backfill, chaos-drill, and Basenames verified-resolution commands use the configured local
+  PostgreSQL expectations above whenever they create temporary databases
+- the golden fixture pack under `tests/conformance/fixtures/capabilities` is deterministic local
+  bigname cutover evidence only. The harness asserts that the checked-in fixture set is exactly
+  the local cutover evidence set, each fixture keeps `scope=local_cutover_evidence`, fixture IDs
+  match `fixtures/capabilities/{fixture_id}.json`, requests are `GET` read routes, responses
+  include `data` and `coverage`, and route, conformance, rollout, and rollback owners match the
+  native conformance table. This is a local-only/no app-parity guard: the fixtures are not
+  imported app call-site replacement, external app parity, first-party app replacement, legacy
+  schema parity, or consumer-replacement evidence
 - the child collection contract seeds `children_current` rows and covers both the base
   `GET /v1/names/{namespace}/{name}/children` response and the shipped `include=counts`
   variant; the harness also asserts that unsupported non-`declared` `surface_classes` are

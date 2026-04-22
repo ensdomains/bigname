@@ -1,0 +1,40 @@
+{
+  "capability_group": "address history across names",
+  "conformance_owner": "history.rs::address_history_contract_*",
+  "fixture_id": "address-history-across-names",
+  "request": {
+    "method": "GET",
+    "path": "/v1/history/addresses/{address}",
+    "query": {}
+  },
+  "response": {
+    "coverage": {
+      "enumeration_basis": "normalized_event_history",
+      "exhaustiveness": "authoritative",
+      "status": "full",
+      "unsupported_reason": null
+    },
+    "data": {
+      "fixture_version": 1,
+      "stable_identity": "capability-golden:address-history-across-names"
+    },
+    "provenance": {
+      "boundary": "local_route_conformance",
+      "source": "checked_in_fixture"
+    }
+  },
+  "rollback_gate": [
+    "scripts/rollback-smoke",
+    "stable address-anchor selection and pagination behavior"
+  ],
+  "rollout_gate": [
+    "OpenAPI route owner guard",
+    "focused address-history conformance",
+    "replay stability checks",
+    "scripts/release-smoke"
+  ],
+  "route_owner": [
+    "/v1/history/addresses/{address}"
+  ],
+  "scope": "local_cutover_evidence"
+}

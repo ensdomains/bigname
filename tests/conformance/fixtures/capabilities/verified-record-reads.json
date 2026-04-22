@@ -1,0 +1,41 @@
+{
+  "capability_group": "verified record reads",
+  "conformance_owner": "resolution_and_permissions.rs::resolution_execution_explain_*",
+  "fixture_id": "verified-record-reads",
+  "request": {
+    "method": "GET",
+    "path": "/v1/explain/resolutions/{namespace}/{name}/execution",
+    "query": {}
+  },
+  "response": {
+    "coverage": {
+      "enumeration_basis": "resolver_execution",
+      "exhaustiveness": "non_enumerable",
+      "status": "partial",
+      "unsupported_reason": null
+    },
+    "data": {
+      "fixture_version": 1,
+      "stable_identity": "capability-golden:verified-record-reads"
+    },
+    "provenance": {
+      "boundary": "local_route_conformance",
+      "source": "checked_in_fixture"
+    }
+  },
+  "rollback_gate": [
+    "scripts/rollback-smoke",
+    "execution cache invalidation / unsupported verified-query behavior remains stable"
+  ],
+  "rollout_gate": [
+    "OpenAPI route owner guard",
+    "focused verified-resolution conformance",
+    "execution trace persistence checks",
+    "scripts/release-smoke"
+  ],
+  "route_owner": [
+    "/v1/resolutions/{namespace}/{name}",
+    "/v1/explain/resolutions/{namespace}/{name}/execution"
+  ],
+  "scope": "local_cutover_evidence"
+}

@@ -1,0 +1,41 @@
+{
+  "capability_group": "names owned / controlled by address with role summary",
+  "conformance_owner": "collections.rs::address_names_role_summary_contract_*",
+  "fixture_id": "names-owned-controlled-by-address-with-role-summary",
+  "request": {
+    "method": "GET",
+    "path": "/v1/addresses/{address}/names",
+    "query": {
+      "include": "role_summary"
+    }
+  },
+  "response": {
+    "coverage": {
+      "enumeration_basis": "address_name_current",
+      "exhaustiveness": "authoritative",
+      "status": "full",
+      "unsupported_reason": null
+    },
+    "data": {
+      "fixture_version": 1,
+      "stable_identity": "capability-golden:names-owned-controlled-by-address-with-role-summary"
+    },
+    "provenance": {
+      "boundary": "local_route_conformance",
+      "source": "checked_in_fixture"
+    }
+  },
+  "rollback_gate": [
+    "scripts/rollback-smoke",
+    "base address collection remains stable without role-summary widening"
+  ],
+  "rollout_gate": [
+    "OpenAPI route owner guard",
+    "role-summary conformance",
+    "scripts/release-smoke"
+  ],
+  "route_owner": [
+    "/v1/addresses/{address}/names?include=role_summary"
+  ],
+  "scope": "local_cutover_evidence"
+}

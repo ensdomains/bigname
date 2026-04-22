@@ -1,0 +1,40 @@
+{
+  "capability_group": "name history",
+  "conformance_owner": "history.rs::name_history_contract_*",
+  "fixture_id": "name-history",
+  "request": {
+    "method": "GET",
+    "path": "/v1/history/names/{namespace}/{name}",
+    "query": {}
+  },
+  "response": {
+    "coverage": {
+      "enumeration_basis": "normalized_event_history",
+      "exhaustiveness": "authoritative",
+      "status": "full",
+      "unsupported_reason": null
+    },
+    "data": {
+      "fixture_version": 1,
+      "stable_identity": "capability-golden:name-history"
+    },
+    "provenance": {
+      "boundary": "local_route_conformance",
+      "source": "checked_in_fixture"
+    }
+  },
+  "rollback_gate": [
+    "scripts/rollback-smoke",
+    "stable cursor and canonical-only history behavior"
+  ],
+  "rollout_gate": [
+    "OpenAPI route owner guard",
+    "focused history conformance",
+    "replay stability checks",
+    "scripts/release-smoke"
+  ],
+  "route_owner": [
+    "/v1/history/names/{namespace}/{name}"
+  ],
+  "scope": "local_cutover_evidence"
+}

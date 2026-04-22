@@ -1,0 +1,40 @@
+{
+  "capability_group": "resolver-centric overview",
+  "conformance_owner": "resolution_and_permissions.rs::resolver_overview_contract_*",
+  "fixture_id": "resolver-centric-overview",
+  "request": {
+    "method": "GET",
+    "path": "/v1/resolvers/{chain_id}/{resolver_address}",
+    "query": {}
+  },
+  "response": {
+    "coverage": {
+      "enumeration_basis": "resolver_current",
+      "exhaustiveness": "non_enumerable",
+      "status": "partial",
+      "unsupported_reason": null
+    },
+    "data": {
+      "fixture_version": 1,
+      "stable_identity": "capability-golden:resolver-centric-overview"
+    },
+    "provenance": {
+      "boundary": "local_route_conformance",
+      "source": "checked_in_fixture"
+    }
+  },
+  "rollback_gate": [
+    "scripts/rollback-smoke",
+    "UnsupportedSummary for pending / unsupported resolver profiles"
+  ],
+  "rollout_gate": [
+    "OpenAPI route owner guard",
+    "focused resolver conformance",
+    "supported resolver-profile evidence",
+    "scripts/release-smoke"
+  ],
+  "route_owner": [
+    "/v1/resolvers/{chain_id}/{resolver_address}"
+  ],
+  "scope": "local_cutover_evidence"
+}
