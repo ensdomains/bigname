@@ -4,6 +4,8 @@ mod backfill;
 #[allow(dead_code, unused_imports)]
 #[path = "main/tests/backfill.rs"]
 mod backfill_tests;
+#[path = "main/bootstrap_backfill.rs"]
+mod bootstrap_backfill;
 mod provider;
 #[path = "main/reconciliation.rs"]
 mod reconciliation;
@@ -33,6 +35,8 @@ use bigname_storage::{
     upsert_chain_lineage_blocks, upsert_raw_blocks, upsert_raw_code_hashes, upsert_raw_logs,
     upsert_raw_receipts, upsert_raw_transactions,
 };
+#[allow(unused_imports)]
+use bootstrap_backfill::*;
 use clap::{Args, Parser, Subcommand};
 #[allow(unused_imports)]
 use provider::{JsonRpcProvider, ProviderBlock, ProviderHeadSnapshot, ProviderRegistry};
@@ -186,6 +190,13 @@ async fn run(args: RunArgs) -> Result<()> {
     let intake_runtime_state = intake_runtime_state(&intake_chain_tasks);
     let provider_registry = ProviderRegistry::from_chain_rpc_urls(&args.chain_rpc_urls)?;
     log_provider_registry("startup", &intake_chain_tasks, &provider_registry);
+    let bootstrap_backfill_outcome = run_startup_bootstrap_backfills(
+        &pool,
+        &args.manifests_root,
+        &intake_chain_tasks,
+        &provider_registry,
+    )
+    .await?;
 
     info!(
         service = "indexer",
@@ -240,6 +251,14 @@ async fn run(args: RunArgs) -> Result<()> {
         intake_safe_checkpoint_chain_count = intake_runtime_state.safe_checkpoint_chain_count,
         intake_finalized_checkpoint_chain_count = intake_runtime_state.finalized_checkpoint_chain_count,
         rpc_configured_chain_count = provider_registry.configured_chain_count(),
+        bootstrap_backfill_active_chain_count = bootstrap_backfill_outcome.active_chain_count,
+        bootstrap_backfill_provider_configured_chain_count = bootstrap_backfill_outcome.provider_configured_chain_count,
+        bootstrap_backfill_missing_provider_chain_count = bootstrap_backfill_outcome.missing_provider_chain_count,
+        bootstrap_backfill_eligible_target_count = bootstrap_backfill_outcome.eligible_target_count,
+        bootstrap_backfill_drained_job_count = bootstrap_backfill_outcome.drained_job_count,
+        bootstrap_backfill_skipped_future_target_count = bootstrap_backfill_outcome.skipped_future_target_count,
+        bootstrap_backfill_reserved_range_count = bootstrap_backfill_outcome.reserved_range_count,
+        bootstrap_backfill_completed_range_count = bootstrap_backfill_outcome.completed_range_count,
         watched_plan_refresh_interval_secs = args.poll_interval_secs,
         adapter_status = bigname_adapters::bootstrap_status(),
         poll_interval_secs = args.poll_interval_secs,
@@ -392,7 +411,7 @@ fn backfill_source_selector(args: &BackfillArgs) -> Result<WatchedSourceSelector
     Ok(WatchedSourceSelector::WholeActiveWatchedChain)
 }
 
-fn deployment_profile_from_manifest_root(manifests_root: &std::path::Path) -> String {
+pub(crate) fn deployment_profile_from_manifest_root(manifests_root: &std::path::Path) -> String {
     let root_name = manifests_root
         .file_name()
         .and_then(|name| name.to_str())
@@ -406,11 +425,11 @@ fn deployment_profile_from_manifest_root(manifests_root: &std::path::Path) -> St
     }
 }
 
-fn default_backfill_lease_owner() -> String {
+pub(crate) fn default_backfill_lease_owner() -> String {
     format!("bigname-indexer:{}", std::process::id())
 }
 
-fn generated_backfill_lease_token() -> Result<String> {
+pub(crate) fn generated_backfill_lease_token() -> Result<String> {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .context("system clock is before unix epoch")?
@@ -418,7 +437,7 @@ fn generated_backfill_lease_token() -> Result<String> {
     Ok(format!("bigname-indexer:{}:{nanos}", std::process::id()))
 }
 
-fn backfill_lease_expires_at(lease_duration_secs: u64) -> Result<OffsetDateTime> {
+pub(crate) fn backfill_lease_expires_at(lease_duration_secs: u64) -> Result<OffsetDateTime> {
     if lease_duration_secs == 0 {
         bail!("backfill lease duration must be greater than zero");
     }

@@ -14,11 +14,17 @@ normalizer_version = "uts46-v1"
 [[roots]]
 name = "RootRegistry"
 address = "0x3a3e15a5d27ff6f05c844313312f2e72096d3ed3"
+# Start block follows the sepolia-dev deployment transaction.
+# (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/RootRegistry.json:L2617 @ ens_v2@554c309).
+start_block = 10462881
 
 [[contracts]]
 role = "root_registry"
 address = "0x3a3e15a5d27ff6f05c844313312f2e72096d3ed3"
 proxy_kind = "none"
+# Start block follows the sepolia-dev deployment transaction.
+# (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/RootRegistry.json:L2617 @ ens_v2@554c309).
+start_block = 10462881
 
 [[discovery_rules]]
 edge_kind = "subregistry"

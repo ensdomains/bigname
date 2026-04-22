@@ -45,6 +45,12 @@ async fn backfilled_data_consumer_conformance_job() -> anyhow::Result<()> {
 
 #[cfg(test)]
 #[tokio::test]
+async fn backfill_sources_auto_bootstrap() -> anyhow::Result<()> {
+    shipped_api::conformance::run_backfill_sources_auto_bootstrap().await
+}
+
+#[cfg(test)]
+#[tokio::test]
 async fn backfill_sources_source_family_existing_response_lock() -> anyhow::Result<()> {
     shipped_api::conformance::run_backfill_source_family_existing_response_lock().await
 }

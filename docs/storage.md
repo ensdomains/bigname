@@ -130,10 +130,10 @@ Raw-fact normalized-event replay does not introduce a new storage owner. The ind
 At minimum, manifests/discovery persistence must carry:
 
 - `contract_instances`: one row per stable `contract_instance_id` with chain, contract kind, and provenance; roots use the same identity family as other contract instances
-- `contract_instance_addresses`: time-ranged address attributes keyed by `contract_instance_id` for lookup from raw facts and watch targets to source-graph identity; one `contract_instance_id` may carry multiple non-overlapping active ranges when the same address is re-admitted after an inactive gap
+- `contract_instance_addresses`: time-ranged address attributes keyed by `contract_instance_id` for lookup from raw facts and watch targets to source-graph identity; one `contract_instance_id` may carry multiple non-overlapping active ranges when the same address is re-admitted after an inactive gap, and manifest-declared address ranges may carry nullable inclusive `start_block` metadata where the manifest supplied it
 - `discovery_edges`: edges keyed by `edge_id` with `from_contract_instance_id`, `to_contract_instance_id`, `edge_kind`, active range, provenance, and canonicality
 - resolver-profile admission state, when present: status and provenance keyed conceptually by `contract_instance_id`, source family, supported profile, fact family, and active range; it may be derived from existing discovery / normalized-event / code-hash / proxy-edge material until a later doc-first storage family exists, and it gates resolver-local normalized-event consumption but is not manifest truth, a capability flag, or public coverage state
-- any materialized watch-plan table keyed by `contract_instance_id` plus chain and range, including root start nodes keyed by the root `contract_instance_id`; raw address is a derived watch target, not the durable identity
+- any materialized watch-plan table keyed by `contract_instance_id` plus chain and range, including root start nodes keyed by the root `contract_instance_id`; raw address is a derived watch target, not the durable identity, and an omitted `start_block` is persisted as unknown/null rather than converted to block zero or a job start
 
 The worker-owned `manifest_alert_*` family persists manifest/proxy alert observations produced by the audit job. At minimum it must carry an observation identity, observation kind (`manifest_drift` or `proxy_implementation_drift`), lifecycle status, manifest version, source family, chain, contract-instance references, nullable proxy / implementation edge references, expected and observed code-hash or implementation-edge material, derived watch-plan metadata, first/last observed timestamps, and nullable remediation metadata. Writing this family must not write adapter-owned `normalized_events`, mutate manifest truth, mutate discovery admission, admit contracts, rewrite discovery edges, change capability flags, update watch-plan inputs, write projections, expose public API state, or claim consumer replacement. A proxy implementation observation preserves the proxy `contract_instance_id`; implementation churn is represented by an observed or admitted proxy / implementation edge, not by minting a replacement proxy identity.
 
@@ -160,6 +160,14 @@ Backfill source selector storage freezes the job identity fields used by the sou
 - `source_identity_hash`: a digest of `selector_kind`, `source_family`, `requested_watched_targets`, and `selected_targets`; the canonical selector payload remains authoritative if a hash collision or payload mismatch is detected
 
 The selected target range fields are the intersection of the watched target's active range with the job's finite declared block range. `effective_to_block` is finite for every persisted selected target because backfill jobs are finite at creation time.
+
+Automatic bootstrap backfill uses the same `backfill_jobs`,
+`backfill_ranges`, and source-identity payloads as explicitly requested
+backfill. It must persist finite declared range bounds before job creation and
+store selected targets keyed by `contract_instance_id` plus effective range. A
+watched target whose manifest-declared `start_block` is unknown is skipped by
+bootstrap and leaves no synthetic block-zero, provider-history, or job-start
+range in `backfill_*`.
 
 Backfill job and range checkpoint rows are operational state. They do not replace `chain_lineage`, do not define canonicality, and do not promote `canonical_head`, `safe_head`, or `finalized_head`.
 

@@ -88,8 +88,11 @@ setting `BIGNAME_INDEXER_MANIFESTS_ROOT=manifests-sepolia-dev`.
 The provider list is an operational input, not a manifest admission rule. An
 unset provider list leaves manifest sync, watch-plan rebuild, and checkpoint row
 creation available, but provider-backed head fetch and live ingestion remain
-idle for every active watched chain. Current bootstrap provider support accepts
-`http://` JSON-RPC endpoints only.
+idle for every active watched chain. A selected manifest root may therefore
+declare active watched chains that are fully synchronized into manifest,
+discovery, watch-plan, and checkpoint setup while automatic bootstrap and live
+provider work stay idle until that chain has a configured provider. Current
+bootstrap provider support accepts `http://` JSON-RPC endpoints only.
 
 ## 6. Head Model And Recent Window
 
@@ -170,6 +173,29 @@ Backfill may use either:
 - block-centric receipt or block scans
 
 Backfill is scheduled as persisted, bounded jobs. A job is scoped to one selected deployment profile, chain, source selector, scan mode, and explicit block range. The source selector mode is `whole_active_watched_chain` by default when no selector is supplied, `source_family`, or an explicit `watched_target_set`. The job range must be finite at creation time; open-ended tail following remains live intake, not a backfill job.
+
+### Automatic Bootstrap Backfill
+
+`phase9-indexer-run-auto-backfill-bootstrap` is a shared-interface,
+doc-first Phase 9 contract for `bigname-indexer run`. Automatic bootstrap is
+allowed to create historical backfill work from the selected manifest root and
+materialized watch plan, but only as finite persisted backfill jobs. It must not
+run an implicit unbounded scanner, tail follower, or address-only fetch path.
+
+Automatic bootstrap follows these rules:
+
+- it runs after manifest sync, discovery admission, watch-plan materialization, and per-chain checkpoint row setup for the selected deployment profile
+- active watched chains without configured providers remain idle after that setup; bootstrap must not create jobs for a chain whose provider cannot supply a finite bootstrap end
+- each candidate target is the resolved watched target keyed by `contract_instance_id`, source family, chain, normalized address, and effective range; raw address is never accepted as durable source identity
+- the persisted source identity for an automatically created job is the sorted resolved target set with effective range start and effective range end, matching the same canonical target tuple used by source-scoped backfill
+- a target with declared `start_block` is eligible only from that inclusive block, further narrowed by its active watch range and the finite bootstrap range end resolved at job creation time
+- a target with omitted `start_block` has unknown historical start and must be skipped explicitly with that reason; bootstrap must not infer the target start from block zero, the current job range start, manifest activation, provider history, or any default range
+- every created job must have finite declared range start and finite declared range end before insertion into `backfill_jobs`; open-ended historical catch-up remains live intake or a later explicit job, not automatic bootstrap
+- creating, reusing, reserving, advancing, completing, or failing an automatic bootstrap job follows the same backfill lifecycle as manual jobs and must not mutate or promote `canonical_head`, `safe_head`, or `finalized_head`
+
+Automatic bootstrap is operational intake readiness only. It does not add or
+widen public API routes, route-level coverage, manifest capability flags,
+additional ENSv2 profile support, or consumer-replacement meaning.
 
 Backfill jobs use a bounded lifecycle:
 

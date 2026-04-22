@@ -22,6 +22,109 @@ struct DynamicResolverBackfillFixture {
     idempotency_key: &'static str,
 }
 
+#[derive(Clone)]
+struct AutoBootstrapBackfillFixture {
+    namespace: &'static str,
+    deployment_profile: &'static str,
+    chain_id: &'static str,
+    source_family: &'static str,
+    contract_instance_id: &'static str,
+    address: &'static str,
+    manifest_role: &'static str,
+    manifest_start_block_number: i64,
+    active_from_block_number: Option<i64>,
+    active_to_block_number: Option<i64>,
+    provider_head_block_number: i64,
+}
+
+struct AutoBootstrapUnknownStartFixture {
+    namespace: &'static str,
+    chain_id: &'static str,
+    source_family: &'static str,
+    contract_instance_id: &'static str,
+    address: &'static str,
+    manifest_role: &'static str,
+}
+
+pub(crate) async fn run_backfill_sources_auto_bootstrap() -> Result<()> {
+    let database = HarnessDatabase::new().await?;
+    let corpus = seed_replay_supported_read_corpus(&database).await?;
+    let ensv1_logical_name_id = "ens:alice.eth";
+    let ensv1_resource_id = Uuid::from_u128(0xf940);
+    database
+        .seed_exact_name_rebuild_inputs(
+            ensv1_logical_name_id,
+            ensv1_resource_id,
+            Uuid::from_u128(0xf941),
+            Uuid::from_u128(0xf942),
+        )
+        .await?;
+
+    seed_auto_bootstrap_manifest_sources(&database).await?;
+    let eligible_targets = load_auto_bootstrap_manifest_started_targets(&database).await?;
+    let skipped_targets = load_auto_bootstrap_manifest_skipped_targets(&database).await?;
+    assert_auto_bootstrap_manifest_targets_skip_unknown_start(&eligible_targets);
+    assert_auto_bootstrap_unknown_start_reported_skipped(&skipped_targets);
+
+    let before_jobs = snapshot_auto_bootstrap_existing_routes(&database, &corpus).await?;
+    let completed_jobs =
+        seed_completed_auto_bootstrap_backfill_jobs(&database, &eligible_targets).await?;
+    assert_completed_auto_bootstrap_backfill_jobs(&completed_jobs);
+    assert_auto_bootstrap_unknown_start_absent_from_source_identity(&completed_jobs);
+    let after_jobs_before_replay =
+        snapshot_auto_bootstrap_existing_routes(&database, &corpus).await?;
+    assert_eq!(
+        after_jobs_before_replay, before_jobs,
+        "completed automatic bootstrap backfill jobs must not mutate shipped route responses before replay"
+    );
+
+    replay_all_current_projections(&database).await?;
+
+    let after_replay = snapshot_replay_supported_read_routes(&database, &corpus).await?;
+    assert_replayed_current_answers_are_canonical(&after_replay, &corpus);
+    assert_existing_ensv1_exact_name_after_jobs_and_replay(&database, ensv1_logical_name_id)
+        .await?;
+    assert_ensv2_shadow_exact_name_coverage_is_not_graduated(&after_replay);
+    assert_auto_bootstrap_api_coverage_is_not_graduated(&database, &corpus, &after_replay).await?;
+    assert_replay_collection_empty(
+        &database,
+        ReplayRoute {
+            label: "auto-bootstrap-losing-address-names-after-replay",
+            uri: format!(
+                "/v1/addresses/{}/names?namespace=basenames",
+                corpus.losing_address_names_address
+            ),
+        },
+    )
+    .await?;
+    assert_replay_collection_empty(
+        &database,
+        ReplayRoute {
+            label: "auto-bootstrap-losing-address-history-after-replay",
+            uri: format!(
+                "/v1/history/addresses/{}?namespace=basenames&relation=registrant",
+                corpus.losing_address_names_address
+            ),
+        },
+    )
+    .await?;
+    assert_replay_route_status(
+        &database,
+        ReplayRoute {
+            label: "auto-bootstrap-losing-resolver-after-replay",
+            uri: format!(
+                "/v1/resolvers/{}/{}",
+                corpus.resolver_chain_id, corpus.losing_resolver_address
+            ),
+        },
+        StatusCode::NOT_FOUND,
+    )
+    .await?;
+
+    database.cleanup().await?;
+    Ok(())
+}
+
 pub(crate) async fn run_backfill_source_family_existing_response_lock() -> Result<()> {
     let database = HarnessDatabase::new().await?;
     let corpus = seed_replay_supported_read_corpus(&database).await?;
@@ -93,6 +196,148 @@ pub(crate) async fn run_backfill_source_family_existing_response_lock() -> Resul
 
     database.cleanup().await?;
     Ok(())
+}
+
+async fn seed_completed_auto_bootstrap_backfill_jobs(
+    database: &HarnessDatabase,
+    fixtures: &[AutoBootstrapBackfillFixture],
+) -> Result<
+    Vec<(
+        AutoBootstrapBackfillFixture,
+        bigname_storage::BackfillJobRecord,
+    )>,
+> {
+    let mut records = Vec::new();
+    for fixture in fixtures {
+        let record = seed_completed_auto_bootstrap_backfill_job(database, fixture).await?;
+        records.push((fixture.clone(), record));
+    }
+
+    Ok(records)
+}
+
+async fn seed_completed_auto_bootstrap_backfill_job(
+    database: &HarnessDatabase,
+    fixture: &AutoBootstrapBackfillFixture,
+) -> Result<bigname_storage::BackfillJobRecord> {
+    let range_start_block_number = fixture.effective_from_block_number();
+    let range_end_block_number = fixture.effective_to_block_number();
+    let created = bigname_storage::create_backfill_job(
+        &database.pool,
+        &bigname_storage::BackfillJobCreate {
+            deployment_profile: fixture.deployment_profile.to_owned(),
+            chain_id: fixture.chain_id.to_owned(),
+            source_identity: auto_bootstrap_identity(fixture),
+            scan_mode: "hash_pinned_block".to_owned(),
+            range_start_block_number,
+            range_end_block_number,
+            idempotency_key: format!(
+                "conformance-auto-bootstrap:{}:{}:{}:{}-{}",
+                fixture.deployment_profile,
+                fixture.chain_id,
+                fixture.contract_instance_id,
+                range_start_block_number,
+                range_end_block_number
+            ),
+            ranges: vec![bigname_storage::BackfillRangeSpec {
+                range_start_block_number,
+                range_end_block_number,
+            }],
+        },
+    )
+    .await
+    .with_context(|| {
+        format!(
+            "failed to create automatic bootstrap backfill job for {} {}",
+            fixture.source_family, fixture.contract_instance_id
+        )
+    })?;
+
+    let range = created
+        .ranges
+        .first()
+        .expect("automatic bootstrap conformance job should have one range");
+    let lease_token = format!(
+        "conformance-auto-bootstrap-{}-lease",
+        fixture.contract_instance_id
+    );
+    let lease_expires_at =
+        OffsetDateTime::from_unix_timestamp(OffsetDateTime::now_utc().unix_timestamp() + 300)
+            .context("failed to build automatic bootstrap conformance lease deadline")?;
+    let reserved = bigname_storage::reserve_backfill_range(
+        &database.pool,
+        created.job.backfill_job_id,
+        "conformance-auto-bootstrap-backfill",
+        &lease_token,
+        lease_expires_at,
+    )
+    .await
+    .with_context(|| {
+        format!(
+            "failed to reserve automatic bootstrap range for {}",
+            fixture.contract_instance_id
+        )
+    })?
+    .with_context(|| {
+        format!(
+            "automatic bootstrap range should be reservable for {}",
+            fixture.contract_instance_id
+        )
+    })?;
+    anyhow::ensure!(
+        reserved.backfill_range_id == range.backfill_range_id,
+        "reserved unexpected automatic bootstrap range {} instead of {} for {}",
+        reserved.backfill_range_id,
+        range.backfill_range_id,
+        fixture.contract_instance_id
+    );
+
+    bigname_storage::advance_backfill_range(
+        &database.pool,
+        range.backfill_range_id,
+        &lease_token,
+        range.range_end_block_number,
+    )
+    .await
+    .with_context(|| {
+        format!(
+            "failed to advance automatic bootstrap range for {}",
+            fixture.contract_instance_id
+        )
+    })?;
+    bigname_storage::complete_backfill_range(&database.pool, range.backfill_range_id, &lease_token)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to complete automatic bootstrap range for {}",
+                fixture.contract_instance_id
+            )
+        })?;
+
+    let job = bigname_storage::load_backfill_job(&database.pool, created.job.backfill_job_id)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to load completed automatic bootstrap job for {}",
+                fixture.contract_instance_id
+            )
+        })?
+        .with_context(|| {
+            format!(
+                "completed automatic bootstrap job must exist for {}",
+                fixture.contract_instance_id
+            )
+        })?;
+    let ranges = bigname_storage::load_backfill_ranges(&database.pool, created.job.backfill_job_id)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to load completed automatic bootstrap ranges for {}",
+                fixture.contract_instance_id
+            )
+        })?;
+
+    Ok(bigname_storage::BackfillJobRecord { job, ranges })
 }
 
 async fn seed_completed_source_family_backfill_jobs(
@@ -377,6 +622,154 @@ async fn seed_completed_dynamic_resolver_backfill_job(
         })?;
 
     Ok(bigname_storage::BackfillJobRecord { job, ranges })
+}
+
+fn assert_completed_auto_bootstrap_backfill_jobs(
+    completed_jobs: &[(
+        AutoBootstrapBackfillFixture,
+        bigname_storage::BackfillJobRecord,
+    )],
+) {
+    let covered_targets = completed_jobs
+        .iter()
+        .map(|(fixture, _)| (fixture.source_family, fixture.contract_instance_id))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        covered_targets,
+        auto_bootstrap_manifest_started_fixtures()
+            .into_iter()
+            .map(|fixture| (fixture.source_family, fixture.contract_instance_id))
+            .collect::<BTreeSet<_>>()
+    );
+
+    for (fixture, completed_job) in completed_jobs {
+        let expected_source_identity_hash =
+            stable_source_identity_hash(&auto_bootstrap_identity_payload_without_hash(fixture));
+        assert_eq!(
+            completed_job.job.status,
+            bigname_storage::BackfillLifecycleStatus::Completed,
+            "{} automatic bootstrap job must be completed",
+            fixture.source_family
+        );
+        assert_eq!(
+            completed_job.job.deployment_profile,
+            fixture.deployment_profile
+        );
+        assert_eq!(completed_job.job.chain_id, fixture.chain_id);
+        assert_eq!(completed_job.job.scan_mode, "hash_pinned_block");
+        assert_eq!(
+            completed_job.job.range_start_block_number,
+            fixture.effective_from_block_number()
+        );
+        assert_eq!(
+            completed_job.job.range_end_block_number,
+            fixture.effective_to_block_number()
+        );
+        assert_eq!(
+            completed_job
+                .job
+                .source_identity
+                .get("selector_kind")
+                .and_then(Value::as_str),
+            Some("watched_target_set")
+        );
+        assert_eq!(
+            completed_job.job.source_identity.get("source_family"),
+            Some(&Value::Null),
+            "{} automatic bootstrap source identity must not collapse to a source-family selector",
+            fixture.source_family
+        );
+        assert_eq!(
+            completed_job
+                .job
+                .source_identity
+                .get("source_identity_hash")
+                .and_then(Value::as_str),
+            Some(expected_source_identity_hash.as_str()),
+            "{} automatic bootstrap job hash must cover the selected target lock",
+            fixture.source_family
+        );
+        assert_eq!(
+            completed_job
+                .job
+                .source_identity
+                .get("source_identity_hash")
+                .and_then(Value::as_str)
+                .map(|hash| hash.starts_with("fnv1a64:")),
+            Some(true)
+        );
+
+        let requested_targets = completed_job
+            .job
+            .source_identity
+            .get("requested_watched_targets")
+            .and_then(Value::as_array)
+            .expect("automatic bootstrap job should persist requested targets");
+        assert_eq!(requested_targets.len(), 1);
+        assert_eq!(
+            requested_targets[0]
+                .get("contract_instance_id")
+                .and_then(Value::as_str),
+            Some(fixture.contract_instance_id)
+        );
+
+        let selected_targets = completed_job
+            .job
+            .source_identity
+            .get("selected_targets")
+            .and_then(Value::as_array)
+            .expect("automatic bootstrap job should persist selected targets");
+        assert_eq!(selected_targets.len(), 1);
+        let selected_target = &selected_targets[0];
+        assert_eq!(
+            selected_target.get("source_family").and_then(Value::as_str),
+            Some(fixture.source_family)
+        );
+        assert_eq!(
+            selected_target
+                .get("contract_instance_id")
+                .and_then(Value::as_str),
+            Some(fixture.contract_instance_id)
+        );
+        assert!(
+            Uuid::parse_str(fixture.contract_instance_id).is_ok(),
+            "{} automatic bootstrap contract_instance_id should be UUID-shaped",
+            fixture.source_family
+        );
+        assert_eq!(
+            selected_target.get("address").and_then(Value::as_str),
+            Some(fixture.address)
+        );
+        assert_eq!(
+            selected_target
+                .get("effective_from_block")
+                .and_then(Value::as_i64),
+            Some(fixture.effective_from_block_number())
+        );
+        assert_eq!(
+            selected_target
+                .get("effective_to_block")
+                .and_then(Value::as_i64),
+            Some(fixture.effective_to_block_number())
+        );
+        assert!(
+            completed_job.job.completed_at.is_some(),
+            "{} automatic bootstrap job must record completion time",
+            fixture.source_family
+        );
+        assert_eq!(completed_job.ranges.len(), 1);
+        assert!(
+            completed_job.ranges.iter().all(|range| {
+                range.status == bigname_storage::BackfillLifecycleStatus::Completed
+                    && range.range_start_block_number == fixture.effective_from_block_number()
+                    && range.range_end_block_number == fixture.effective_to_block_number()
+                    && range.checkpoint_block_number == range.range_end_block_number
+                    && range.completed_at.is_some()
+            }),
+            "{} automatic bootstrap job must persist one completed finite child range",
+            fixture.source_family
+        );
+    }
 }
 
 fn assert_completed_source_family_backfill_jobs(
@@ -709,6 +1102,159 @@ fn assert_ensv2_shadow_exact_name_coverage_is_not_graduated(snapshots: &[(&'stat
     );
 }
 
+async fn assert_auto_bootstrap_api_coverage_is_not_graduated(
+    database: &HarnessDatabase,
+    corpus: &ReplayCorpus,
+    snapshots: &[(&'static str, Value)],
+) -> Result<()> {
+    let exact_name = replay_route_payload(snapshots, "exact-name");
+    let coverage_payload = request_replay_route(
+        database,
+        &ReplayRoute {
+            label: "auto-bootstrap-coverage-after-replay",
+            uri: format!("/v1/coverage/basenames/{}", corpus.route_name),
+        },
+    )
+    .await?;
+
+    assert_eq!(
+        coverage_payload.get("coverage"),
+        exact_name.get("coverage"),
+        "automatic bootstrap jobs must not graduate a separate API coverage contract"
+    );
+    assert_eq!(
+        coverage_payload.get("data"),
+        exact_name.get("data"),
+        "coverage route should remain an alias of the existing exact-name response data"
+    );
+    for forbidden in [
+        "auto_bootstrap",
+        "bootstrap_backfill",
+        "backfill_job",
+        "source_identity_hash",
+        "watched_target_set",
+    ] {
+        assert_json_not_contains(
+            &coverage_payload,
+            forbidden,
+            &format!(
+                "automatic bootstrap operational evidence must not surface API coverage marker {forbidden}"
+            ),
+        );
+    }
+
+    Ok(())
+}
+
+fn assert_auto_bootstrap_manifest_targets_skip_unknown_start(
+    eligible_targets: &[AutoBootstrapBackfillFixture],
+) {
+    let expected_targets = auto_bootstrap_manifest_started_fixtures()
+        .into_iter()
+        .map(|fixture| (fixture.source_family, fixture.contract_instance_id))
+        .collect::<BTreeSet<_>>();
+    let actual_targets = eligible_targets
+        .iter()
+        .map(|fixture| (fixture.source_family, fixture.contract_instance_id))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        actual_targets, expected_targets,
+        "automatic bootstrap should only select manifest-started targets"
+    );
+
+    let unknown = auto_bootstrap_unknown_start_fixture();
+    assert!(
+        !actual_targets.contains(&(unknown.source_family, unknown.contract_instance_id)),
+        "unknown-start Basenames target must be absent from automatic bootstrap manifest targets"
+    );
+}
+
+fn assert_auto_bootstrap_unknown_start_reported_skipped(
+    skipped_targets: &[bigname_manifests::ManifestBootstrapSkippedTarget],
+) {
+    let unknown = auto_bootstrap_unknown_start_fixture();
+    assert_eq!(skipped_targets.len(), 1);
+    let skipped_target = &skipped_targets[0];
+    assert_eq!(skipped_target.source_family, unknown.source_family);
+    assert_eq!(
+        skipped_target.contract_instance_id.to_string(),
+        unknown.contract_instance_id
+    );
+    assert_eq!(skipped_target.address, unknown.address);
+    assert_eq!(skipped_target.skip_reason, "unknown_start");
+}
+
+fn assert_auto_bootstrap_unknown_start_absent_from_source_identity(
+    completed_jobs: &[(
+        AutoBootstrapBackfillFixture,
+        bigname_storage::BackfillJobRecord,
+    )],
+) {
+    let unknown = auto_bootstrap_unknown_start_fixture();
+    for (_, completed_job) in completed_jobs {
+        let source_identity = serde_json::to_string(&completed_job.job.source_identity)
+            .expect("source identity should serialize for unknown-start absence assertion");
+        for forbidden in [
+            unknown.source_family,
+            unknown.contract_instance_id,
+            unknown.address,
+        ] {
+            assert!(
+                !source_identity.contains(forbidden),
+                "unknown-start Basenames target marker {forbidden} leaked into automatic bootstrap source_identity: {source_identity}"
+            );
+        }
+    }
+}
+
+async fn snapshot_auto_bootstrap_existing_routes(
+    database: &HarnessDatabase,
+    corpus: &ReplayCorpus,
+) -> Result<Vec<(&'static str, Value)>> {
+    let mut snapshots = snapshot_replay_stale_current_answer_routes(database, corpus).await?;
+    let coverage_payload = request_replay_route(
+        database,
+        &ReplayRoute {
+            label: "auto-bootstrap-coverage-before-replay",
+            uri: format!("/v1/coverage/basenames/{}", corpus.route_name),
+        },
+    )
+    .await?;
+    snapshots.push(("coverage", coverage_payload));
+
+    Ok(snapshots)
+}
+
+fn auto_bootstrap_identity(fixture: &AutoBootstrapBackfillFixture) -> Value {
+    let mut payload = auto_bootstrap_identity_payload_without_hash(fixture);
+    let source_identity_hash = stable_source_identity_hash(&payload);
+    payload
+        .as_object_mut()
+        .expect("automatic bootstrap identity payload must be an object")
+        .insert(
+            "source_identity_hash".to_owned(),
+            Value::String(source_identity_hash),
+        );
+    payload
+}
+
+fn auto_bootstrap_identity_payload_without_hash(fixture: &AutoBootstrapBackfillFixture) -> Value {
+    json!({
+        "selector_kind": "watched_target_set",
+        "source_family": null,
+        "requested_watched_targets": [{
+            "contract_instance_id": fixture.contract_instance_id,
+        }],
+        "selected_targets": [{
+            "source_family": fixture.source_family,
+            "contract_instance_id": fixture.contract_instance_id,
+            "address": fixture.address,
+            "effective_from_block": fixture.effective_from_block_number(),
+            "effective_to_block": fixture.effective_to_block_number(),
+        }],
+    })
+}
+
 fn source_family_identity(fixture: &SourceFamilyBackfillFixture) -> Value {
     let mut payload = source_family_identity_payload_without_hash(fixture);
     let source_identity_hash = stable_source_identity_hash(&payload);
@@ -979,5 +1525,301 @@ fn source_family_backfill_fixture(
         address,
         range_start_block_number,
         range_end_block_number,
+    }
+}
+
+async fn seed_auto_bootstrap_manifest_sources(database: &HarnessDatabase) -> Result<()> {
+    for fixture in auto_bootstrap_manifest_started_fixtures() {
+        let manifest_id = insert_auto_bootstrap_manifest(
+            database,
+            fixture.namespace,
+            fixture.source_family,
+            fixture.chain_id,
+            json!({
+                "contracts": [{
+                    "role": fixture.manifest_role,
+                    "address": fixture.address,
+                    "start_block": fixture.manifest_start_block_number,
+                }],
+                "roots": [],
+            }),
+        )
+        .await?;
+        insert_auto_bootstrap_contract_target(
+            database,
+            manifest_id,
+            fixture.chain_id,
+            fixture.contract_instance_id,
+            fixture.address,
+            fixture.manifest_role,
+            fixture.active_from_block_number,
+            fixture.active_to_block_number,
+        )
+        .await?;
+    }
+
+    let unknown = auto_bootstrap_unknown_start_fixture();
+    let manifest_id = insert_auto_bootstrap_manifest(
+        database,
+        unknown.namespace,
+        unknown.source_family,
+        unknown.chain_id,
+        json!({
+            "contracts": [{
+                "role": unknown.manifest_role,
+                "address": unknown.address,
+            }],
+            "roots": [],
+        }),
+    )
+    .await?;
+    insert_auto_bootstrap_contract_target(
+        database,
+        manifest_id,
+        unknown.chain_id,
+        unknown.contract_instance_id,
+        unknown.address,
+        unknown.manifest_role,
+        None,
+        None,
+    )
+    .await?;
+
+    Ok(())
+}
+
+async fn load_auto_bootstrap_manifest_started_targets(
+    database: &HarnessDatabase,
+) -> Result<Vec<AutoBootstrapBackfillFixture>> {
+    let expected_fixtures = auto_bootstrap_manifest_started_fixtures()
+        .into_iter()
+        .map(|fixture| ((fixture.chain_id, fixture.contract_instance_id), fixture))
+        .collect::<BTreeMap<_, _>>();
+    let mut resolved_fixtures = Vec::new();
+    for chain in ["base-mainnet", "ethereum-sepolia"] {
+        for target in
+            bigname_manifests::load_manifest_declared_bootstrap_targets(&database.pool, chain)
+                .await
+                .with_context(|| {
+                    format!("failed to load automatic bootstrap targets for chain {chain}")
+                })?
+        {
+            let contract_instance_id = target.contract_instance_id.to_string();
+            if let Some(fixture) = expected_fixtures.get(&(chain, contract_instance_id.as_str())) {
+                assert_eq!(target.source_family, fixture.source_family);
+                assert_eq!(target.address, fixture.address);
+                assert_eq!(
+                    target.effective_from_block,
+                    fixture.effective_from_block_number()
+                );
+                assert_eq!(target.effective_to_block, fixture.active_to_block_number);
+                resolved_fixtures.push(fixture.clone());
+            } else {
+                assert_ne!(
+                    contract_instance_id,
+                    auto_bootstrap_unknown_start_fixture().contract_instance_id,
+                    "unknown-start Basenames target must not be returned by manifest bootstrap helper"
+                );
+            }
+        }
+    }
+
+    resolved_fixtures.sort_by_key(|fixture| {
+        (
+            fixture.source_family,
+            fixture.contract_instance_id,
+            fixture.address,
+            fixture.effective_from_block_number(),
+            fixture.effective_to_block_number(),
+        )
+    });
+    Ok(resolved_fixtures)
+}
+
+async fn load_auto_bootstrap_manifest_skipped_targets(
+    database: &HarnessDatabase,
+) -> Result<Vec<bigname_manifests::ManifestBootstrapSkippedTarget>> {
+    bigname_manifests::load_manifest_skipped_bootstrap_targets(&database.pool, "base-mainnet")
+        .await
+        .context("failed to load skipped automatic bootstrap targets for base-mainnet")
+}
+
+async fn insert_auto_bootstrap_manifest(
+    database: &HarnessDatabase,
+    namespace: &str,
+    source_family: &str,
+    chain: &str,
+    manifest_payload: Value,
+) -> Result<i64> {
+    let sequence = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
+    let file_path =
+        format!("tests/auto-bootstrap/{namespace}/{source_family}/{chain}-{sequence}.toml");
+    sqlx::query(
+        r#"
+        INSERT INTO manifest_versions (
+            manifest_version,
+            namespace,
+            source_family,
+            chain,
+            deployment_epoch,
+            rollout_status,
+            normalizer_version,
+            file_path,
+            manifest_payload
+        )
+        VALUES (1, $1, $2, $3, 'auto-bootstrap-conformance', 'active', 'uts46-v1', $4, $5::jsonb)
+        RETURNING manifest_id
+        "#,
+    )
+    .bind(namespace)
+    .bind(source_family)
+    .bind(chain)
+    .bind(file_path)
+    .bind(manifest_payload)
+    .fetch_one(&database.pool)
+    .await
+    .with_context(|| {
+        format!("failed to insert automatic bootstrap manifest for {chain}:{source_family}")
+    })?
+    .try_get("manifest_id")
+    .context("failed to read automatic bootstrap manifest_id")
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn insert_auto_bootstrap_contract_target(
+    database: &HarnessDatabase,
+    manifest_id: i64,
+    chain: &str,
+    contract_instance_id: &str,
+    address: &str,
+    role: &str,
+    active_from_block_number: Option<i64>,
+    active_to_block_number: Option<i64>,
+) -> Result<()> {
+    let contract_instance_id = Uuid::parse_str(contract_instance_id)
+        .context("automatic bootstrap contract_instance_id must be UUID-shaped")?;
+    sqlx::query(
+        r#"
+        INSERT INTO contract_instances (contract_instance_id, chain_id, contract_kind)
+        VALUES ($1, $2, 'contract')
+        "#,
+    )
+    .bind(contract_instance_id)
+    .bind(chain)
+    .execute(&database.pool)
+    .await
+    .with_context(|| {
+        format!("failed to insert automatic bootstrap contract_instance_id {contract_instance_id}")
+    })?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO manifest_contract_instances (
+            manifest_id,
+            declaration_kind,
+            declaration_name,
+            contract_instance_id,
+            declared_address,
+            role,
+            proxy_kind
+        )
+        VALUES ($1, 'contract', $2, $3, lower($4), $2, 'none')
+        "#,
+    )
+    .bind(manifest_id)
+    .bind(role)
+    .bind(contract_instance_id)
+    .bind(address)
+    .execute(&database.pool)
+    .await
+    .with_context(|| {
+        format!(
+            "failed to insert automatic bootstrap manifest contract {role} for {contract_instance_id}"
+        )
+    })?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO contract_instance_addresses (
+            contract_instance_id,
+            chain_id,
+            address,
+            active_from_block_number,
+            active_to_block_number,
+            source_manifest_id
+        )
+        VALUES ($1, $2, lower($3), $4, $5, $6)
+        "#,
+    )
+    .bind(contract_instance_id)
+    .bind(chain)
+    .bind(address)
+    .bind(active_from_block_number)
+    .bind(active_to_block_number)
+    .bind(manifest_id)
+    .execute(&database.pool)
+    .await
+    .with_context(|| {
+        format!(
+            "failed to insert automatic bootstrap active address {address} for {contract_instance_id}"
+        )
+    })?;
+
+    Ok(())
+}
+
+impl AutoBootstrapBackfillFixture {
+    fn effective_from_block_number(&self) -> i64 {
+        self.active_from_block_number
+            .map(|active_from| active_from.max(self.manifest_start_block_number))
+            .unwrap_or(self.manifest_start_block_number)
+    }
+
+    fn effective_to_block_number(&self) -> i64 {
+        self.active_to_block_number
+            .map(|active_to| active_to.min(self.provider_head_block_number))
+            .unwrap_or(self.provider_head_block_number)
+    }
+}
+
+fn auto_bootstrap_manifest_started_fixtures() -> Vec<AutoBootstrapBackfillFixture> {
+    vec![
+        AutoBootstrapBackfillFixture {
+            namespace: "ens",
+            deployment_profile: "sepolia-dev",
+            chain_id: "ethereum-sepolia",
+            source_family: "ens_v2_registry_l1",
+            contract_instance_id: "00000000-0000-0000-0000-00000000b201",
+            address: "0x000000000000000000000000000000000000b201",
+            manifest_role: "registry",
+            manifest_start_block_number: 120,
+            active_from_block_number: Some(125),
+            active_to_block_number: Some(160),
+            provider_head_block_number: 170,
+        },
+        AutoBootstrapBackfillFixture {
+            namespace: "ens",
+            deployment_profile: "sepolia-dev",
+            chain_id: "ethereum-sepolia",
+            source_family: "ens_v2_registrar_l1",
+            contract_instance_id: "00000000-0000-0000-0000-00000000b301",
+            address: "0x000000000000000000000000000000000000b301",
+            manifest_role: "registrar",
+            manifest_start_block_number: 210,
+            active_from_block_number: None,
+            active_to_block_number: None,
+            provider_head_block_number: 260,
+        },
+    ]
+}
+
+fn auto_bootstrap_unknown_start_fixture() -> AutoBootstrapUnknownStartFixture {
+    AutoBootstrapUnknownStartFixture {
+        namespace: "basenames",
+        chain_id: "base-mainnet",
+        source_family: "basenames_base_resolver",
+        contract_instance_id: "00000000-0000-0000-0000-00000000b302",
+        address: "0x000000000000000000000000000000000000b302",
+        manifest_role: "resolver",
     }
 }

@@ -31,3 +31,7 @@ discovery_rules = []
 role = "name_wrapper"
 address = "0xD4416b13d2b3a9aBae7AcD5D6C2BbDBE25686401"
 proxy_kind = "none"
+# Start block follows the mainnet deployment transaction and agrees with ens_subgraph.
+# (upstream: .refs/ens_v1/deployments/mainnet/NameWrapper.json:L1498 @ ens_v1@91c966f)
+# (upstream: .refs/ens_subgraph/subgraph.yaml:L200 @ ens_subgraph@723f1b6).
+start_block = 16925608

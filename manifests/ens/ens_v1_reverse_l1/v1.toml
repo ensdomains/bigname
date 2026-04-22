@@ -15,3 +15,6 @@ discovery_rules = []
 role = "reverse_registrar"
 address = "0xa58E81fe9b61B5c3fE2AFD33CF304c454AbFc7Cb"
 proxy_kind = "none"
+# Start block follows the mainnet deployment transaction.
+# (upstream: .refs/ens_v1/deployments/mainnet/ReverseRegistrar.json:L379 @ ens_v1@91c966f).
+start_block = 16925606

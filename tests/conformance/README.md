@@ -56,6 +56,12 @@ Focused source-family backfill conformance lock, from the repository root:
 cargo test --manifest-path tests/conformance/Cargo.toml backfill_sources_source_family
 ```
 
+Focused automatic-bootstrap backfill conformance lock, from the repository root:
+
+```sh
+cargo test --manifest-path tests/conformance/Cargo.toml backfill_sources_auto_bootstrap -- --nocapture
+```
+
 Focused reorg chaos drill conformance job, from the repository root:
 
 ```sh
@@ -352,6 +358,13 @@ Execution notes:
   admitted the route data or
   graduate unsupported coverage, ENSv2 exact-name support, wrapper/migration history, manifest
   capabilities, public API routes, or consumer-replacement semantics
+- the automatic-bootstrap backfill conformance lock is focused with
+  `cargo test --manifest-path tests/conformance/Cargo.toml backfill_sources_auto_bootstrap -- --nocapture`.
+  It uses the same local Postgres and per-test temporary database expectations as the nearby
+  backfill conformance entries, persists automatic-bootstrap job identity and effective ranges,
+  covers the conformance-only Basenames unknown-start exclusion case, and keeps unsupported
+  coverage non-graduated. It exercises no live RPC scheduling or drain; those remain covered by
+  `apps/indexer` unit tests
 - `reorg_chaos_drill_conformance_job` is the standalone reorg chaos drill conformance entry
   point. It is focused with
   `cargo test --manifest-path tests/conformance/Cargo.toml reorg_chaos_drill_conformance_job`.

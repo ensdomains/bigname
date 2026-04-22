@@ -46,6 +46,13 @@ Each manifest contains:
 - `contracts`
 - `discovery_rules`
 
+Each `[[roots]]` and `[[contracts]]` entry may also declare `start_block`.
+`start_block` is an optional unsigned integer whose value is the inclusive
+first historical block for that manifest-declared target. Omitted
+`start_block` means the historical start is unknown for that target; consumers
+must preserve that unknown state rather than inferring block zero, the current
+job range start, the manifest version activation height, or any other fallback.
+
 ### `rollout_status`
 
 - `draft`
@@ -84,12 +91,14 @@ name = "RootRegistry"
 address = "0x0000000000000000000000000000000000000000"
 code_hash = "sha256:..."
 abi_ref = "abis/ens_v2_root_registry.json"
+start_block = 123456
 
 [[contracts]]
 role = "registry"
 address = "0x0000000000000000000000000000000000000000"
 proxy_kind = "none"
 # Omit `implementation` when `proxy_kind = "none"`.
+start_block = 123456
 
 [[discovery_rules]]
 edge_kind = "subregistry"
@@ -138,6 +147,26 @@ That freeze fixes the authoritative reverse entrypoint, source-family owner, and
 Within the claimed-vs-verified primary-name contract, that reverse family owns only the declared claim intake. The truth split stays explicit: `ens_v1_reverse_l1` admits the authoritative reverse claim source, while any verified primary-name result remains execution-derived through the execution owner already frozen above. The current reverse manifest may therefore be `rollout_status = "active"` with no dedicated primary-name capability flag at all. That combination is sufficient for the namespace-local ENS exact-tuple persisted-readback coverage class when paired with persisted `ens_execution` readback, but it must not widen coverage beyond that requested tuple, imply address-wide or app-parity primary-name support, admit fallback claim sources, or combine the admitted reverse tuple with resolver-backed or execution-derived name identity to fill richer ENS `claimed_primary_name` payloads (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L100 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L123 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L129 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L130 @ ens_v1@91c966f).
 
 That absence is intentional for the shipped Phase 7 route: `ens_v1_reverse_l1` does not need a dedicated `claimed_primary_name`, `primary_name_claim`, or similar capability flag to admit the declared reverse-claim tuple, and `ens_execution` does not need a dedicated `verified_primary_name` flag for persisted exact-tuple readback. Later primary-name capability flagging, if ever needed, would be additive and would have to preserve the existing truth split between reverse-owned declared intake, execution-derived verification, and route-local exact-tuple coverage.
+
+Phase 9 freezes `start_block` as shared-interface, doc-first manifest schema
+for automatic bootstrap-backfill planning. Known values may be declared only
+when backed by the pinned sources below:
+
+- ENSv1 registry may use `start_block = 9380380` as an `ens_subgraph` reference candidate only, not as an authoritative deployment receipt (upstream: .refs/ens_subgraph/subgraph.yaml:L15 @ ens_subgraph@723f1b6).
+- ENSv1 `.eth` BaseRegistrar may use `start_block = 9380410` as an `ens_subgraph` reference candidate only, not as an authoritative deployment receipt (upstream: .refs/ens_subgraph/subgraph.yaml:L122 @ ens_subgraph@723f1b6).
+- ENSv1 NameWrapper may use `start_block = 16925608` from the authoritative deployment receipt, with `ens_subgraph` agreement (upstream: .refs/ens_v1/deployments/mainnet/NameWrapper.json:L1498 @ ens_v1@91c966f) (upstream: .refs/ens_subgraph/subgraph.yaml:L200 @ ens_subgraph@723f1b6).
+- ENSv1 PublicResolver may use `start_block = 22764828` from the authoritative deployment receipt (upstream: .refs/ens_v1/deployments/mainnet/PublicResolver.json:L1104 @ ens_v1@91c966f).
+- ENSv1 ReverseRegistrar may use `start_block = 16925606` from the authoritative deployment receipt (upstream: .refs/ens_v1/deployments/mainnet/ReverseRegistrar.json:L379 @ ens_v1@91c966f).
+- ENSv2 `sepolia-dev` RootRegistry may use `start_block = 10462881`, decoded from receipt block `0x9fa6a1` (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/RootRegistry.json:L2617 @ ens_v2@554c309).
+- ENSv2 `sepolia-dev` ETHRegistry may use `start_block = 10462895`, decoded from receipt block `0x9fa6af` (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistry.json:L2617 @ ens_v2@554c309).
+- ENSv2 `sepolia-dev` ETHRegistrar may use `start_block = 10462909`, decoded from receipt block `0x9fa6bd` (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistrar.json:L1922 @ ens_v2@554c309).
+
+Basenames mainnet source families and the ENS UniversalResolver remain
+unknown for `start_block` in this freeze. Manifests must omit `start_block` for
+those targets until a later doc-first update cites a pinned upstream source;
+automatic bootstrap must skip them explicitly rather than inventing values.
+This schema freeze does not graduate capability flags, API coverage, or
+consumer-replacement claims.
 
 ENSv1 Phase 4 NameWrapper and PublicResolver admission is frozen to two source-family owners on the shipped mainnet profile:
 
@@ -254,6 +283,8 @@ Watch-plan expansion starts from active manifest roots by `contract_instance_id`
 Rules:
 
 - the chain-intake watch target is the address range attached to each active contract instance at the requested time
+- if a manifest-declared `[[roots]]` or `[[contracts]]` target carries `start_block`, the materialized watch range starts at that inclusive block unless a later active-range boundary narrows it
+- if `start_block` is omitted, the watch target's historical start remains unknown; watch-plan expansion may still produce a live watch target, but automatic historical bootstrap must treat that target as unbootstrapable until a finite start is declared
 - watch rows may denormalize address and code-hash state, but their durable explanation path is `manifest root -> discovery edge(s) -> contract_instance_id`
 - address-only watch state is derived and may be rebuilt from manifests, contract-instance address attributes, and active discovery edges
 

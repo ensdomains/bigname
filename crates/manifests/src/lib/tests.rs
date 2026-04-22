@@ -176,6 +176,54 @@ admission = "reachable_from_root"
     )
 }
 
+fn start_block_manifest_contents(
+    root_start_block: Option<i64>,
+    contract_start_block: Option<i64>,
+    omitted_contract_address: &str,
+) -> String {
+    let root_start_block = root_start_block
+        .map(|start_block| format!("start_block = {start_block}\n"))
+        .unwrap_or_default();
+    let contract_start_block = contract_start_block
+        .map(|start_block| format!("start_block = {start_block}\n"))
+        .unwrap_or_default();
+    format!(
+        r#"
+manifest_version = 1
+namespace = "ens"
+source_family = "ens_v2_registry_l1"
+chain = "ethereum-mainnet"
+deployment_epoch = "ens_v2"
+rollout_status = "active"
+normalizer_version = "uts46-v1"
+
+[capability_flags]
+declared_children = "supported"
+
+[[roots]]
+name = "RootRegistry"
+address = "0x0000000000000000000000000000000000000001"
+{root_start_block}
+
+[[contracts]]
+role = "registry"
+address = "0x0000000000000000000000000000000000000002"
+proxy_kind = "none"
+{contract_start_block}
+
+[[contracts]]
+role = "omitted_start"
+address = "{omitted_contract_address}"
+proxy_kind = "none"
+
+[[discovery_rules]]
+edge_kind = "subregistry"
+from_role = "registry"
+admission = "reachable_from_root"
+"#
+    )
+}
+
 fn registry_manifest_contents(rollout_status: &str) -> String {
     format!(
         r#"
@@ -1081,6 +1129,58 @@ fn loads_valid_repository_manifest() -> Result<()> {
 }
 
 #[test]
+fn parses_optional_start_block_on_roots_and_contracts() -> Result<()> {
+    let test_dir = TestDir::new()?;
+    test_dir.write_manifest(
+        "ens",
+        "ens_v2_registry_l1",
+        "v1",
+        &start_block_manifest_contents(
+            Some(12_345),
+            Some(23_456),
+            "0x0000000000000000000000000000000000000003",
+        ),
+    )?;
+
+    let repository = load_repository(&test_dir.path)?;
+    let manifest = &repository.manifests()[0].manifest;
+
+    assert_eq!(manifest.roots[0].start_block, Some(12_345));
+    assert_eq!(manifest.contracts[0].start_block, Some(23_456));
+    assert_eq!(manifest.contracts[1].start_block, None);
+
+    Ok(())
+}
+
+#[test]
+fn rejects_negative_start_block_values() -> Result<()> {
+    let test_dir = TestDir::new()?;
+    test_dir.write_manifest(
+        "ens",
+        "ens_v2_registry_l1",
+        "v1",
+        &start_block_manifest_contents(
+            Some(-1),
+            Some(23_456),
+            "0x0000000000000000000000000000000000000003",
+        ),
+    )?;
+
+    let error = load_repository(&test_dir.path)
+        .expect_err("negative start_block must fail manifest parsing");
+    assert!(
+        error.to_string().contains("failed to parse manifest TOML"),
+        "unexpected error: {error:#}"
+    );
+    assert!(
+        format!("{error:#}").contains("start_block must be a non-negative integer"),
+        "unexpected error: {error:#}"
+    );
+
+    Ok(())
+}
+
+#[test]
 fn rejects_namespace_mismatch() -> Result<()> {
     let test_dir = TestDir::new()?;
     let path = test_dir.write_manifest(
@@ -1503,6 +1603,184 @@ async fn syncing_sepolia_dev_profile_replaces_main_profile_without_mixing() -> R
 }
 
 #[tokio::test]
+async fn syncs_start_blocks_into_watch_plan_and_bootstrap_targets() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let test_dir = TestDir::new()?;
+    test_dir.write_manifest(
+        "ens",
+        "ens_v2_registry_l1",
+        "v1",
+        &start_block_manifest_contents(
+            Some(120),
+            Some(100),
+            "0x0000000000000000000000000000000000000003",
+        ),
+    )?;
+    let repository = load_repository(&test_dir.path)?;
+
+    sync_repository(database.pool(), &repository).await?;
+    sqlx::query(
+        r#"
+        UPDATE contract_instance_addresses
+        SET active_to_block_number = 160
+        WHERE chain_id = 'ethereum-mainnet'
+          AND address = $1
+        "#,
+    )
+    .bind("0x0000000000000000000000000000000000000002")
+    .execute(database.pool())
+    .await
+    .context("failed to constrain registry active range")?;
+
+    let watched_contracts = load_watched_contracts(database.pool()).await?;
+    let root = watched_contracts
+        .iter()
+        .find(|contract| contract.address == "0x0000000000000000000000000000000000000001")
+        .expect("root target must be watched");
+    let registry = watched_contracts
+        .iter()
+        .find(|contract| contract.address == "0x0000000000000000000000000000000000000002")
+        .expect("registry target must be watched");
+    let unknown_start = watched_contracts
+        .iter()
+        .find(|contract| contract.address == "0x0000000000000000000000000000000000000003")
+        .expect("unknown-start target must be watched");
+
+    assert_eq!(root.active_from_block_number, Some(120));
+    assert_eq!(root.active_to_block_number, None);
+    assert_eq!(registry.active_from_block_number, Some(100));
+    assert_eq!(registry.active_to_block_number, Some(160));
+    assert_eq!(unknown_start.active_from_block_number, None);
+    assert_eq!(unknown_start.active_to_block_number, None);
+
+    let stored_registry_start = query_scalar::<_, Option<i64>>(
+        r#"
+        SELECT active_from_block_number
+        FROM contract_instance_addresses
+        WHERE chain_id = 'ethereum-mainnet'
+          AND address = $1
+          AND deactivated_at IS NULL
+        "#,
+    )
+    .bind("0x0000000000000000000000000000000000000002")
+    .fetch_one(database.pool())
+    .await
+    .context("failed to load stored registry start")?;
+    assert_eq!(stored_registry_start, Some(100));
+
+    let selector_plan = load_watched_source_selector_plan(
+        database.pool(),
+        "ethereum-mainnet",
+        WatchedSourceSelector::SourceFamily("ens_v2_registry_l1".to_owned()),
+        50,
+        180,
+    )
+    .await?;
+    assert!(
+        selector_plan
+            .selected_targets
+            .contains(&WatchedBackfillTarget {
+                source_family: "ens_v2_registry_l1".to_owned(),
+                contract_instance_id: root.contract_instance_id,
+                address: root.address.clone(),
+                effective_from_block: 120,
+                effective_to_block: 180,
+            })
+    );
+    assert!(
+        selector_plan
+            .selected_targets
+            .contains(&WatchedBackfillTarget {
+                source_family: "ens_v2_registry_l1".to_owned(),
+                contract_instance_id: registry.contract_instance_id,
+                address: registry.address.clone(),
+                effective_from_block: 100,
+                effective_to_block: 160,
+            })
+    );
+
+    let bootstrap_targets =
+        load_manifest_declared_bootstrap_targets(database.pool(), "ethereum-mainnet").await?;
+    assert_eq!(bootstrap_targets.len(), 2);
+    assert!(bootstrap_targets.contains(&ManifestBootstrapTarget {
+        source_family: "ens_v2_registry_l1".to_owned(),
+        contract_instance_id: root.contract_instance_id,
+        address: root.address.clone(),
+        effective_from_block: 120,
+        effective_to_block: None,
+    }));
+    assert!(bootstrap_targets.contains(&ManifestBootstrapTarget {
+        source_family: "ens_v2_registry_l1".to_owned(),
+        contract_instance_id: registry.contract_instance_id,
+        address: registry.address.clone(),
+        effective_from_block: 100,
+        effective_to_block: Some(160),
+    }));
+    assert!(
+        !bootstrap_targets
+            .iter()
+            .any(|target| target.address == unknown_start.address)
+    );
+    let skipped_targets =
+        load_manifest_skipped_bootstrap_targets(database.pool(), "ethereum-mainnet").await?;
+    assert_eq!(
+        skipped_targets,
+        vec![ManifestBootstrapSkippedTarget {
+            source_family: "ens_v2_registry_l1".to_owned(),
+            contract_instance_id: unknown_start.contract_instance_id,
+            address: unknown_start.address.clone(),
+            skip_reason: "unknown_start".to_owned(),
+        }]
+    );
+    let mut sorted_targets = bootstrap_targets.clone();
+    sorted_targets.sort();
+    assert_eq!(bootstrap_targets, sorted_targets);
+    assert!(
+        load_manifest_declared_bootstrap_targets(database.pool(), "base-mainnet")
+            .await?
+            .is_empty()
+    );
+    assert!(
+        load_manifest_skipped_bootstrap_targets(database.pool(), "base-mainnet")
+            .await?
+            .is_empty()
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn rejects_conflicting_active_start_blocks_for_same_contract_instance() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let test_dir = TestDir::new()?;
+    let v1 = start_block_manifest_contents(
+        Some(100),
+        None,
+        "0x0000000000000000000000000000000000000003",
+    );
+    let v2 = v1
+        .replacen("manifest_version = 1", "manifest_version = 2", 1)
+        .replacen("start_block = 100", "start_block = 200", 1);
+    test_dir.write_manifest("ens", "ens_v2_registry_l1", "v1", &v1)?;
+    test_dir.write_manifest("ens", "ens_v2_registry_l1", "v2", &v2)?;
+    let repository = load_repository(&test_dir.path)?;
+
+    let error = sync_repository(database.pool(), &repository)
+        .await
+        .expect_err("conflicting active start blocks must fail sync");
+    assert!(
+        error
+            .to_string()
+            .contains("conflicting start_block declarations"),
+        "unexpected conflict error: {error:#}"
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn checked_in_registry_v2_manifests_admit_resolver_discovery() -> Result<()> {
     for case in [
         (
@@ -1512,6 +1790,9 @@ async fn checked_in_registry_v2_manifests_admit_resolver_discovery() -> Result<(
             "ethereum-mainnet",
             "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E",
             "0xF29100983E058B709F3D539b0c765937B804AC15",
+            22_764_828,
+            22_764_928,
+            22_764_850,
             [
                 "(upstream: .refs/ens_v1/contracts/registry/ENS.sol:L12 @ ens_v1@91c966f)",
                 "(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L89 @ ens_v1@91c966f)",
@@ -1525,6 +1806,9 @@ async fn checked_in_registry_v2_manifests_admit_resolver_discovery() -> Result<(
             "base-mainnet",
             "0xb94704422c2a1e396835a571837aa5ae53285a95",
             "0xC6d566A56A1aFf6508b41f6c90ff131615583BCD",
+            100,
+            200,
+            123,
             [
                 "(upstream: .refs/basenames/README.md:L28 @ basenames@1809bbc)",
                 "(upstream: .refs/basenames/src/L2/Registry.sol:L113 @ basenames@1809bbc)",
@@ -1539,6 +1823,9 @@ async fn checked_in_registry_v2_manifests_admit_resolver_discovery() -> Result<(
             chain,
             registry_address,
             resolver_address,
+            resolver_range_start,
+            resolver_range_end,
+            resolver_discovery_from,
             citations,
         ) = case;
         let test_dir = TestDir::new()?;
@@ -1628,7 +1915,7 @@ async fn checked_in_registry_v2_manifests_admit_resolver_discovery() -> Result<(
                 to_address: resolver_address.to_owned(),
                 edge_kind: "resolver".to_owned(),
                 discovery_source: "registry_resolver_observation".to_owned(),
-                active_from_block_number: Some(123),
+                active_from_block_number: Some(resolver_discovery_from),
                 active_from_block_hash: Some(
                     "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
                 ),
@@ -1670,8 +1957,8 @@ async fn checked_in_registry_v2_manifests_admit_resolver_discovery() -> Result<(
             database.pool(),
             chain,
             WatchedSourceSelector::SourceFamily(resolver_source_family.to_owned()),
-            100,
-            200,
+            resolver_range_start,
+            resolver_range_end,
         )
         .await?;
         assert_eq!(
@@ -1681,15 +1968,15 @@ async fn checked_in_registry_v2_manifests_admit_resolver_discovery() -> Result<(
                     source_family: resolver_source_family.to_owned(),
                     contract_instance_id: resolver_contract_instance_id,
                     address: resolver_address.clone(),
-                    effective_from_block: 100,
-                    effective_to_block: 200,
+                    effective_from_block: resolver_range_start,
+                    effective_to_block: resolver_range_end,
                 },
                 WatchedBackfillTarget {
                     source_family: resolver_source_family.to_owned(),
                     contract_instance_id: resolver_contract_instance_id,
                     address: resolver_address.clone(),
-                    effective_from_block: 123,
-                    effective_to_block: 200,
+                    effective_from_block: resolver_discovery_from,
+                    effective_to_block: resolver_range_end,
                 },
             ]
         );
@@ -2550,14 +2837,26 @@ async fn dynamic_resolver_backfill_selector_loads_edge_address_intersections() -
                 range_start,
                 range_end,
             )
-            .await?;
-            assert!(
-                out_of_range_plan
-                    .selected_targets
-                    .iter()
-                    .all(|target| target.contract_instance_id != selected_contract_instance_id),
-                "resolver target must not be selected outside the edge/address intersection"
-            );
+            .await;
+            if namespace == "ens" {
+                let error = out_of_range_plan
+                    .expect_err("ENS low historical resolver ranges have no active targets");
+                assert!(
+                    error.to_string().contains(
+                        "watched source selector source_family ens_v1_resolver_l1 found no active watched targets"
+                    ),
+                    "unexpected ENS out-of-range selector error: {error:#}"
+                );
+            } else {
+                let out_of_range_plan = out_of_range_plan?;
+                assert!(
+                    out_of_range_plan
+                        .selected_targets
+                        .iter()
+                        .all(|target| target.contract_instance_id != selected_contract_instance_id),
+                    "resolver target must not be selected outside the edge/address intersection"
+                );
+            }
         }
 
         database.cleanup().await?;

@@ -5,7 +5,10 @@ use std::{
 };
 
 use anyhow::{Result, bail};
-use serde::{Deserialize, Serialize};
+use serde::{
+    Deserialize, Deserializer, Serialize,
+    de::{self, Visitor},
+};
 use uuid::Uuid;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -257,6 +260,15 @@ impl WatchedSourceSelectorPlan {
     }
 }
 
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct ManifestBootstrapTarget {
+    pub source_family: String,
+    pub contract_instance_id: Uuid,
+    pub address: String,
+    pub effective_from_block: i64,
+    pub effective_to_block: Option<i64>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolverProfileAdmission {
     pub chain: String,
@@ -399,6 +411,8 @@ pub struct ManifestRoot {
     pub address: String,
     pub code_hash: Option<String>,
     pub abi_ref: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_start_block")]
+    pub start_block: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -407,6 +421,8 @@ pub struct ManifestContract {
     pub address: String,
     pub proxy_kind: String,
     pub implementation: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_start_block")]
+    pub start_block: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -467,4 +483,67 @@ impl From<RawSourceManifest> for SourceManifest {
             discovery_rules: value.discovery_rules,
         }
     }
+}
+
+fn deserialize_optional_start_block<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct OptionalStartBlockVisitor;
+
+    impl<'de> Visitor<'de> for OptionalStartBlockVisitor {
+        type Value = Option<u64>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a non-negative integer start_block")
+        }
+
+        fn visit_none<E>(self) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(None)
+        }
+
+        fn visit_unit<E>(self) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(None)
+        }
+
+        fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+        where
+            D: Deserializer<'de>,
+        {
+            deserializer.deserialize_any(StartBlockVisitor).map(Some)
+        }
+    }
+
+    struct StartBlockVisitor;
+
+    impl Visitor<'_> for StartBlockVisitor {
+        type Value = u64;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a non-negative integer start_block")
+        }
+
+        fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            u64::try_from(value)
+                .map_err(|_| E::custom("start_block must be a non-negative integer"))
+        }
+
+        fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(value)
+        }
+    }
+
+    deserializer.deserialize_option(OptionalStartBlockVisitor)
 }

@@ -201,6 +201,32 @@ fn validate_manifest_metadata(
         );
     }
 
+    for root in &manifest.roots {
+        validate_start_block_fits_i64(root.start_block, "root", &root.name, path)?;
+    }
+
+    for contract in &manifest.contracts {
+        validate_start_block_fits_i64(contract.start_block, "contract", &contract.role, path)?;
+    }
+
+    Ok(())
+}
+
+fn validate_start_block_fits_i64(
+    start_block: Option<u64>,
+    declaration_kind: &str,
+    declaration_name: &str,
+    path: &Path,
+) -> Result<()> {
+    if let Some(start_block) = start_block
+        && i64::try_from(start_block).is_err()
+    {
+        bail!(
+            "manifest {declaration_kind} {declaration_name} in {} has start_block {start_block} that does not fit into BIGINT",
+            path.display()
+        );
+    }
+
     Ok(())
 }
 

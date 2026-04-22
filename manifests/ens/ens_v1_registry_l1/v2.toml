@@ -18,11 +18,17 @@ declared_children = { status = "supported", notes = "registry-controlled child s
 [[roots]]
 name = "ENSRegistry"
 address = "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E"
+# Start block is ens_subgraph reference-only metadata.
+# (upstream: .refs/ens_subgraph/subgraph.yaml:L15 @ ens_subgraph@723f1b6).
+start_block = 9380380
 
 [[contracts]]
 role = "registry"
 address = "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E"
 proxy_kind = "none"
+# Start block is ens_subgraph reference-only metadata.
+# (upstream: .refs/ens_subgraph/subgraph.yaml:L15 @ ens_subgraph@723f1b6).
+start_block = 9380380
 
 [[discovery_rules]]
 edge_kind = "subregistry"

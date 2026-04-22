@@ -27,8 +27,14 @@ name_history = { status = "shadow", notes = "sepolia-dev registrar history remai
 [[roots]]
 name = "ETHRegistrar"
 address = "0x68586418353b771cf2425ed14a07512aa880c532"
+# Start block follows the sepolia-dev deployment transaction.
+# (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistrar.json:L1922 @ ens_v2@554c309).
+start_block = 10462909
 
 [[contracts]]
 role = "registrar"
 address = "0x68586418353b771cf2425ed14a07512aa880c532"
 proxy_kind = "none"
+# Start block follows the sepolia-dev deployment transaction.
+# (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistrar.json:L1922 @ ens_v2@554c309).
+start_block = 10462909

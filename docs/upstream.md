@@ -81,6 +81,12 @@ Intentional differences between our docs/manifests and upstream. Every divergenc
 > **Why**: freeze the first ENSv2 development-profile slice on root, registry, registrar, and resolver resource/event semantics before admitting reverse, DNS, wrapper, migration, universal-resolver/execution, factory, oracle, batch, or mock-payment surfaces.
 > **Since**: `2026-04-20`
 
+> **Phase 9 automatic bootstrap start-block narrowing** — bigname treats manifest `start_block` as optional inclusive bootstrap metadata for `[[roots]]` and `[[contracts]]`, not as an inferred deployment truth. ENSv1 registry and `.eth` registrar values are reference candidates from `ens_subgraph` only; ENSv1 NameWrapper, PublicResolver, ReverseRegistrar, and ENSv2 `sepolia-dev` RootRegistry / ETHRegistry / ETHRegistrar values come from pinned deployment receipt metadata. Basenames mainnet source families and ENS UniversalResolver remain unknown for this freeze, so automatic bootstrap skips those targets instead of defaulting to block zero or job-range start.
+> **Upstream**: `(upstream: .refs/ens_subgraph/subgraph.yaml:L15 @ ens_subgraph@723f1b6)` `(upstream: .refs/ens_subgraph/subgraph.yaml:L122 @ ens_subgraph@723f1b6)` `(upstream: .refs/ens_v1/deployments/mainnet/NameWrapper.json:L1498 @ ens_v1@91c966f)` `(upstream: .refs/ens_subgraph/subgraph.yaml:L200 @ ens_subgraph@723f1b6)` `(upstream: .refs/ens_v1/deployments/mainnet/PublicResolver.json:L1104 @ ens_v1@91c966f)` `(upstream: .refs/ens_v1/deployments/mainnet/ReverseRegistrar.json:L379 @ ens_v1@91c966f)` `(upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/RootRegistry.json:L2617 @ ens_v2@554c309)` `(upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistry.json:L2617 @ ens_v2@554c309)` `(upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistrar.json:L1922 @ ens_v2@554c309)`
+> **Our rule**: `docs/manifests.md` § Required Fields and § Watch-Plan Expansion; mirrored in `docs/chain-intake.md` § Backfill Contract / Automatic Bootstrap Backfill, `docs/storage.md` § Table Families And Write Ownership, and `docs/development-plan.md` § Phase 9: Reorg, Replay, And Backfill.
+> **Why**: prevent automatic historical bootstrap from silently widening unknown source history, address-only target identity, chain checkpoints, route coverage, or consumer-replacement claims.
+> **Since**: `2026-04-22`
+
 Per-entry format:
 
 > **Surface** — one-line description of what differs.

@@ -15,8 +15,14 @@ name_history = { status = "shadow", notes = "historical registration events rema
 [[roots]]
 name = "ETHRegistrar"
 address = "0x57f1887a8BF19b14fC0dF6Fd9B2acc9Af147eA85"
+# Start block is ens_subgraph reference-only metadata.
+# (upstream: .refs/ens_subgraph/subgraph.yaml:L122 @ ens_subgraph@723f1b6).
+start_block = 9380410
 
 [[contracts]]
 role = "registrar"
 address = "0x57f1887a8BF19b14fC0dF6Fd9B2acc9Af147eA85"
 proxy_kind = "none"
+# Start block is ens_subgraph reference-only metadata.
+# (upstream: .refs/ens_subgraph/subgraph.yaml:L122 @ ens_subgraph@723f1b6).
+start_block = 9380410

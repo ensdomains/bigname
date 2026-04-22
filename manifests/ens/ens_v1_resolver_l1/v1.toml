@@ -37,3 +37,6 @@ discovery_rules = []
 role = "public_resolver"
 address = "0xF29100983E058B709F3D539b0c765937B804AC15"
 proxy_kind = "none"
+# Start block follows the mainnet deployment transaction.
+# (upstream: .refs/ens_v1/deployments/mainnet/PublicResolver.json:L1104 @ ens_v1@91c966f).
+start_block = 22764828

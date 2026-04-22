@@ -47,6 +47,7 @@ pub async fn sync_repository(
 
     let mut retained_keys = HashSet::new();
     let mut in_place_transitions = Vec::new();
+    let mut active_declared_start_blocks = HashMap::<(String, Uuid), (i64, String, String)>::new();
     let mut sync_summary = ManifestSyncSummary {
         status: ManifestSyncStatus::Synced,
         synced_manifest_count: repository.manifests().len(),
@@ -80,6 +81,44 @@ pub async fn sync_repository(
 
         if loaded_manifest.manifest.rollout_status.is_active() {
             for planned_entry in &planned_entries {
+                if let Some(start_block) =
+                    declared_start_block_for_entry(loaded_manifest, &planned_entry.key)?
+                {
+                    let active_key = (
+                        loaded_manifest.manifest.source_family.clone(),
+                        planned_entry.contract_instance_id,
+                    );
+                    if let Some((
+                        existing_start_block,
+                        existing_declaration_kind,
+                        existing_declaration_name,
+                    )) = active_declared_start_blocks.get(&active_key)
+                    {
+                        if *existing_start_block != start_block {
+                            bail!(
+                                "conflicting start_block declarations for active source_family {} contract_instance_id {}: {} {} starts at {}, {} {} starts at {}",
+                                loaded_manifest.manifest.source_family,
+                                planned_entry.contract_instance_id,
+                                existing_declaration_kind,
+                                existing_declaration_name,
+                                existing_start_block,
+                                planned_entry.key.declaration_kind,
+                                planned_entry.key.declaration_name,
+                                start_block
+                            );
+                        }
+                    } else {
+                        active_declared_start_blocks.insert(
+                            active_key,
+                            (
+                                start_block,
+                                planned_entry.key.declaration_kind.clone(),
+                                planned_entry.key.declaration_name.clone(),
+                            ),
+                        );
+                    }
+                }
+
                 if let Some(existing_entry) = existing_entries.get(&planned_entry.key)
                     && existing_entry.contract_instance_id != planned_entry.contract_instance_id
                 {
@@ -162,6 +201,40 @@ pub async fn sync_repository(
         .context("failed to commit manifest sync transaction")?;
 
     Ok(sync_summary)
+}
+
+fn declared_start_block_for_entry(
+    loaded_manifest: &LoadedManifest,
+    key: &DeclarationKey,
+) -> Result<Option<i64>> {
+    let start_block = match key.declaration_kind.as_str() {
+        DECLARATION_KIND_ROOT => loaded_manifest
+            .manifest
+            .roots
+            .iter()
+            .find(|root| root.name == key.declaration_name)
+            .and_then(|root| root.start_block),
+        DECLARATION_KIND_CONTRACT => loaded_manifest
+            .manifest
+            .contracts
+            .iter()
+            .find(|contract| contract.role == key.declaration_name)
+            .and_then(|contract| contract.start_block),
+        _ => None,
+    };
+
+    start_block
+        .map(|start_block| {
+            i64::try_from(start_block).with_context(|| {
+                format!(
+                    "start_block {start_block} for {} {} in {} does not fit into BIGINT",
+                    key.declaration_kind,
+                    key.declaration_name,
+                    loaded_manifest.path.display()
+                )
+            })
+        })
+        .transpose()
 }
 
 async fn seed_planned_manifest_entry_addresses(

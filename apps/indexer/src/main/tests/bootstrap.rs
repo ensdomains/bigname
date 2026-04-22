@@ -1,3 +1,5 @@
+use std::sync::Mutex;
+
 #[test]
 fn ensure_manifest_root_ready_accepts_loaded_root() -> Result<()> {
     ensure_manifest_root_ready(&manifest_load_summary(ManifestLoadStatus::Loaded))
@@ -494,3 +496,611 @@ async fn sync_intake_chain_tasks_preserves_manifest_contract_implementation_addr
     Ok(())
 }
 
+#[tokio::test]
+async fn bootstrap_auto_backfill_drains_manifest_started_targets_and_preserves_checkpoints()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_bootstrap_backfill_job_tables(database.pool()).await?;
+    let manifest_root = PathBuf::from("manifests-sepolia-dev");
+    let eligible_contract_instance_id = Uuid::from_u128(9_001);
+    let unknown_start_contract_instance_id = Uuid::from_u128(9_002);
+    let eligible_address = "0x0000000000000000000000000000000000000901";
+    let unknown_start_address = "0x0000000000000000000000000000000000000902";
+
+    insert_bootstrap_manifest_version(
+        database.pool(),
+        901,
+        "ens",
+        "ethereum-mainnet",
+        "ens_bootstrap_registry",
+        json!({
+            "contracts": [
+                {
+                    "role": "registry",
+                    "address": eligible_address,
+                    "start_block": 42
+                }
+            ],
+            "roots": []
+        }),
+    )
+    .await?;
+    insert_contract_instance(
+        database.pool(),
+        eligible_contract_instance_id,
+        "ethereum-mainnet",
+        "contract",
+    )
+    .await?;
+    insert_active_contract_instance_address(
+        database.pool(),
+        eligible_contract_instance_id,
+        "ethereum-mainnet",
+        eligible_address,
+        Some(901),
+    )
+    .await?;
+    insert_manifest_contract_instance(
+        database.pool(),
+        901,
+        "registry",
+        eligible_contract_instance_id,
+        eligible_address,
+        "none",
+        None,
+        None,
+    )
+    .await?;
+    insert_bootstrap_manifest_version(
+        database.pool(),
+        902,
+        "basenames",
+        "base-mainnet",
+        "basenames_base_resolver",
+        json!({
+            "contracts": [
+                {
+                    "role": "resolver",
+                    "address": unknown_start_address
+                }
+            ],
+            "roots": []
+        }),
+    )
+    .await?;
+    insert_contract_instance(
+        database.pool(),
+        unknown_start_contract_instance_id,
+        "base-mainnet",
+        "contract",
+    )
+    .await?;
+    insert_active_contract_instance_address(
+        database.pool(),
+        unknown_start_contract_instance_id,
+        "base-mainnet",
+        unknown_start_address,
+        None,
+    )
+    .await?;
+    insert_manifest_contract_instance(
+        database.pool(),
+        902,
+        "resolver",
+        unknown_start_contract_instance_id,
+        unknown_start_address,
+        "none",
+        None,
+        None,
+    )
+    .await?;
+
+    sqlx::query(
+        r#"
+            INSERT INTO chain_checkpoints (
+                chain_id,
+                canonical_block_hash,
+                canonical_block_number,
+                safe_block_hash,
+                safe_block_number,
+                finalized_block_hash,
+                finalized_block_number
+            )
+            VALUES (
+                'ethereum-mainnet',
+                '0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+                7,
+                '0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',
+                6,
+                '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
+                5
+            )
+            "#,
+    )
+    .execute(database.pool())
+    .await
+    .context("failed to insert checkpoint guard row for bootstrap backfill test")?;
+
+    let watched_plan = load_watched_chain_plan(database.pool()).await?;
+    let intake_tasks = sync_intake_chain_tasks(database.pool(), &watched_plan).await?;
+    assert_eq!(intake_tasks.len(), 2);
+
+    let block_42 = provider_block(
+        "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        Some("0x9999999999999999999999999999999999999999999999999999999999999999"),
+        42,
+    );
+    let block_43 = provider_block(
+        "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        Some("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        43,
+    );
+    let requests = Arc::new(Mutex::new(Vec::<BootstrapRpcRequest>::new()));
+    let (provider, server) = bootstrap_auto_backfill_provider(
+        vec![
+            ProviderBlockFixture {
+                block: block_42.clone(),
+                logs: vec![bootstrap_rpc_log_payload_at_address(
+                    &block_42,
+                    eligible_address,
+                    0,
+                )],
+            },
+            ProviderBlockFixture {
+                block: block_43.clone(),
+                logs: vec![bootstrap_rpc_log_payload_at_address(
+                    &block_43,
+                    eligible_address,
+                    0,
+                )],
+            },
+        ],
+        Arc::clone(&requests),
+    )
+    .await?;
+    let provider_registry =
+        ProviderRegistry::from_chain_rpc_urls(&[format!("ethereum-mainnet={provider}")])?;
+
+    let outcome = run_startup_bootstrap_backfills(
+        database.pool(),
+        &manifest_root,
+        &intake_tasks,
+        &provider_registry,
+    )
+    .await?;
+    assert_eq!(outcome.active_chain_count, 2);
+    assert_eq!(outcome.provider_configured_chain_count, 1);
+    assert_eq!(outcome.missing_provider_chain_count, 1);
+    assert_eq!(outcome.eligible_target_count, 1);
+    assert_eq!(outcome.skipped_unknown_start_target_count, 1);
+    assert_eq!(outcome.skipped_unknown_start_targets.len(), 1);
+    assert_eq!(
+        outcome.skipped_unknown_start_targets[0].source_family,
+        "basenames_base_resolver"
+    );
+    assert_eq!(
+        outcome.skipped_unknown_start_targets[0].contract_instance_id,
+        unknown_start_contract_instance_id
+    );
+    assert_eq!(
+        outcome.skipped_unknown_start_targets[0].address,
+        unknown_start_address
+    );
+    assert_eq!(
+        outcome.skipped_unknown_start_targets[0].skip_reason,
+        "unknown_start"
+    );
+    assert_eq!(outcome.drained_job_count, 1);
+    assert_eq!(outcome.reserved_range_count, 1);
+    assert_eq!(outcome.completed_range_count, 1);
+    assert_eq!(outcome.resolved_block_count, 2);
+    assert_eq!(outcome.raw_log_count, 2);
+    assert_eq!(outcome.raw_code_hash_count, 2);
+
+    let jobs = sqlx::query_as::<_, (i64, String, String, i64, i64, String, Value)>(
+        r#"
+        SELECT
+            backfill_job_id,
+            deployment_profile,
+            chain_id,
+            range_start_block_number,
+            range_end_block_number,
+            idempotency_key,
+            source_identity
+        FROM backfill_jobs
+        ORDER BY backfill_job_id
+        "#,
+    )
+    .fetch_all(database.pool())
+    .await?;
+    assert_eq!(jobs.len(), 1);
+    let (
+        backfill_job_id,
+        deployment_profile,
+        chain_id,
+        from_block,
+        to_block,
+        idempotency_key,
+        source_identity,
+    ) = &jobs[0];
+    assert_eq!(deployment_profile, "sepolia-dev");
+    assert_eq!(chain_id, "ethereum-mainnet");
+    assert_eq!((*from_block, *to_block), (42, 43));
+    assert!(idempotency_key.contains("deployment_profile=sepolia-dev"));
+    assert!(idempotency_key.contains("manifest_root=manifests-sepolia-dev"));
+    assert!(idempotency_key.contains("chain=ethereum-mainnet"));
+    assert!(idempotency_key.contains("from=42:to=43"));
+    assert_eq!(
+        source_identity.get("selector_kind").and_then(Value::as_str),
+        Some("watched_target_set")
+    );
+    assert_eq!(
+        source_identity
+            .get("requested_watched_targets")
+            .and_then(Value::as_array)
+            .map(Vec::len),
+        Some(1)
+    );
+    assert_eq!(
+        source_identity
+            .get("selected_targets")
+            .and_then(Value::as_array)
+            .and_then(|targets| targets.first())
+            .and_then(|target| target.get("contract_instance_id"))
+            .and_then(Value::as_str),
+        Some(eligible_contract_instance_id.to_string().as_str())
+    );
+    let source_identity_hash = source_identity
+        .get("source_identity_hash")
+        .and_then(Value::as_str)
+        .expect("source identity hash must be persisted");
+    assert!(idempotency_key.contains(source_identity_hash));
+
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM raw_logs WHERE emitting_address = $1")
+            .bind(eligible_address)
+            .fetch_one(database.pool())
+            .await?,
+        2
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM raw_logs WHERE emitting_address = $1")
+            .bind(unknown_start_address)
+            .fetch_one(database.pool())
+            .await?,
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM raw_code_hashes WHERE contract_address = $1"
+        )
+        .bind(unknown_start_address)
+        .fetch_one(database.pool())
+        .await?,
+        0
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (String, i64, String, i64, String, i64)>(
+            r#"
+            SELECT
+                canonical_block_hash,
+                canonical_block_number,
+                safe_block_hash,
+                safe_block_number,
+                finalized_block_hash,
+                finalized_block_number
+            FROM chain_checkpoints
+            WHERE chain_id = 'ethereum-mainnet'
+            "#
+        )
+        .fetch_one(database.pool())
+        .await?,
+        (
+            "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_owned(),
+            7,
+            "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd".to_owned(),
+            6,
+            "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_owned(),
+            5,
+        )
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM chain_lineage")
+            .fetch_one(database.pool())
+            .await?,
+        0
+    );
+
+    let rerun = run_startup_bootstrap_backfills(
+        database.pool(),
+        &manifest_root,
+        &intake_tasks,
+        &provider_registry,
+    )
+    .await?;
+    assert_eq!(rerun.drained_job_count, 1);
+    assert_eq!(rerun.reserved_range_count, 0);
+    assert_eq!(rerun.completed_range_count, 0);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM backfill_jobs")
+            .fetch_one(database.pool())
+            .await?,
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT backfill_job_id FROM backfill_jobs WHERE idempotency_key = $1"
+        )
+        .bind(idempotency_key)
+        .fetch_one(database.pool())
+        .await?,
+        *backfill_job_id
+    );
+
+    let requests = requests
+        .lock()
+        .expect("request log must not be poisoned")
+        .clone();
+    assert!(
+        requests
+            .iter()
+            .any(|request| request.method == "eth_getBlockByNumber"
+                && request.params.first().and_then(Value::as_str) == Some("latest")),
+        "bootstrap backfill must fetch a finite provider head before scheduling"
+    );
+    assert!(
+        requests
+            .iter()
+            .filter(|request| request.method == "eth_getCode")
+            .all(|request| request.params.first().and_then(Value::as_str) == Some(eligible_address)),
+        "unknown-start targets must not be code-fetched by automatic bootstrap"
+    );
+
+    server.abort();
+    database.cleanup().await
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct BootstrapRpcRequest {
+    method: String,
+    params: Vec<Value>,
+}
+
+async fn insert_bootstrap_manifest_version(
+    pool: &PgPool,
+    manifest_id: i64,
+    namespace: &str,
+    chain: &str,
+    source_family: &str,
+    manifest_payload: Value,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+            INSERT INTO manifest_versions (
+                manifest_id,
+                namespace,
+                source_family,
+                chain,
+                rollout_status,
+                manifest_payload
+            )
+            VALUES ($1, $2, $3, $4, 'active', $5)
+            "#,
+    )
+    .bind(manifest_id)
+    .bind(namespace)
+    .bind(source_family)
+    .bind(chain)
+    .bind(manifest_payload)
+    .execute(pool)
+    .await
+    .with_context(|| {
+        format!("failed to insert bootstrap manifest {manifest_id} for {chain}:{source_family}")
+    })?;
+
+    Ok(())
+}
+
+async fn bootstrap_auto_backfill_provider(
+    fixtures: Vec<ProviderBlockFixture>,
+    requests: Arc<Mutex<Vec<BootstrapRpcRequest>>>,
+) -> Result<(String, JoinHandle<()>)> {
+    let fixtures_by_hash = Arc::new(
+        fixtures
+            .into_iter()
+            .map(|fixture| (fixture.block.block_hash.clone(), fixture))
+            .collect::<std::collections::BTreeMap<_, _>>(),
+    );
+    let hashes_by_number = Arc::new(
+        fixtures_by_hash
+            .values()
+            .map(|fixture| (fixture.block.block_number, fixture.block.block_hash.clone()))
+            .collect::<std::collections::BTreeMap<_, _>>(),
+    );
+    let latest_hash = hashes_by_number
+        .iter()
+        .next_back()
+        .map(|(_, hash)| hash.clone())
+        .context("bootstrap provider fixture must include a latest block")?;
+
+    spawn_json_rpc_server(Arc::new(move |body| {
+        let method = body
+            .get("method")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let params = body
+            .get("params")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        requests
+            .lock()
+            .expect("request log must not be poisoned")
+            .push(BootstrapRpcRequest {
+                method: method.to_owned(),
+                params: params.clone(),
+            });
+
+        let result = match method {
+            "eth_getBlockByNumber" => {
+                let selection = params
+                    .first()
+                    .and_then(Value::as_str)
+                    .expect("block number or tag parameter must be present");
+                match selection {
+                    "latest" => json!({ "hash": latest_hash }),
+                    "safe" | "finalized" => Value::Null,
+                    block_number => {
+                        let block_number = parse_bootstrap_rpc_block_number(block_number);
+                        let block_hash = hashes_by_number
+                            .get(&block_number)
+                            .unwrap_or_else(|| panic!("unexpected block number request: {body}"));
+                        let fixture = fixtures_by_hash
+                            .get(block_hash)
+                            .expect("number index must point at a fixture block");
+                        rpc_block_bundle_payload(&fixture.block)
+                    }
+                }
+            }
+            "eth_getBlockByHash" => {
+                let block_hash = params
+                    .first()
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                let fixture = fixtures_by_hash
+                    .get(&block_hash)
+                    .unwrap_or_else(|| panic!("unexpected block hash request: {body}"));
+                rpc_block_bundle_payload(&fixture.block)
+            }
+            "eth_getLogs" => {
+                let block_hash = params
+                    .first()
+                    .and_then(Value::as_object)
+                    .and_then(|filter| filter.get("blockHash"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                let fixture = fixtures_by_hash
+                    .get(&block_hash)
+                    .unwrap_or_else(|| panic!("unexpected log request: {body}"));
+                Value::Array(fixture.logs.clone())
+            }
+            "eth_getBlockReceipts" => {
+                let block_hash = params
+                    .first()
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                let fixture = fixtures_by_hash
+                    .get(&block_hash)
+                    .unwrap_or_else(|| panic!("unexpected receipt request: {body}"));
+                Value::Array(vec![rpc_receipt_payload(&fixture.block)])
+            }
+            "eth_getCode" => Value::String("0x6001600155".to_owned()),
+            _ => panic!("unexpected RPC request: {body}"),
+        };
+
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": result,
+        })
+    }))
+    .await
+}
+
+fn bootstrap_rpc_log_payload_at_address(
+    block: &ProviderBlock,
+    address: &str,
+    log_index: i64,
+) -> Value {
+    let mut payload = rpc_log_payload(block);
+    let fields = payload
+        .as_object_mut()
+        .expect("test log payload must be a JSON object");
+    fields.insert("address".to_owned(), Value::String(address.to_owned()));
+    fields.insert(
+        "logIndex".to_owned(),
+        Value::String(format!("0x{log_index:x}")),
+    );
+    payload
+}
+
+fn parse_bootstrap_rpc_block_number(value: &str) -> i64 {
+    i64::from_str_radix(value.trim_start_matches("0x"), 16)
+        .expect("test RPC block number must be hex")
+}
+
+async fn create_bootstrap_backfill_job_tables(pool: &PgPool) -> Result<()> {
+    sqlx::query(
+        r#"
+        CREATE TYPE backfill_lifecycle_status AS ENUM (
+            'pending',
+            'reserved',
+            'running',
+            'completed',
+            'failed'
+        )
+        "#,
+    )
+    .execute(pool)
+    .await
+    .context("failed to create backfill_lifecycle_status type for bootstrap tests")?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE backfill_jobs (
+            backfill_job_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+            deployment_profile TEXT NOT NULL,
+            chain_id TEXT NOT NULL,
+            source_identity JSONB NOT NULL,
+            scan_mode TEXT NOT NULL,
+            range_start_block_number BIGINT NOT NULL CHECK (range_start_block_number >= 0),
+            range_end_block_number BIGINT NOT NULL CHECK (range_end_block_number >= range_start_block_number),
+            idempotency_key TEXT NOT NULL,
+            status backfill_lifecycle_status NOT NULL DEFAULT 'pending',
+            failure_reason TEXT,
+            failure_metadata JSONB NOT NULL DEFAULT '{}'::JSONB,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            completed_at TIMESTAMPTZ,
+            UNIQUE (idempotency_key),
+            CHECK (jsonb_typeof(source_identity) IN ('object', 'array')),
+            CHECK (jsonb_typeof(failure_metadata) = 'object')
+        )
+        "#,
+    )
+    .execute(pool)
+    .await
+    .context("failed to create backfill_jobs table for bootstrap tests")?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE backfill_ranges (
+            backfill_range_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+            backfill_job_id BIGINT NOT NULL REFERENCES backfill_jobs (backfill_job_id) ON DELETE CASCADE,
+            range_start_block_number BIGINT NOT NULL CHECK (range_start_block_number >= 0),
+            range_end_block_number BIGINT NOT NULL CHECK (range_end_block_number >= range_start_block_number),
+            checkpoint_block_number BIGINT NOT NULL CHECK (checkpoint_block_number >= range_start_block_number AND checkpoint_block_number <= range_end_block_number),
+            status backfill_lifecycle_status NOT NULL DEFAULT 'pending',
+            lease_token TEXT,
+            lease_owner TEXT,
+            lease_expires_at TIMESTAMPTZ,
+            attempt_count BIGINT NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+            failure_reason TEXT,
+            failure_metadata JSONB NOT NULL DEFAULT '{}'::JSONB,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            completed_at TIMESTAMPTZ,
+            UNIQUE (backfill_job_id, range_start_block_number, range_end_block_number),
+            CHECK (jsonb_typeof(failure_metadata) = 'object')
+        )
+        "#,
+    )
+    .execute(pool)
+    .await
+    .context("failed to create backfill_ranges table for bootstrap tests")?;
+
+    Ok(())
+}

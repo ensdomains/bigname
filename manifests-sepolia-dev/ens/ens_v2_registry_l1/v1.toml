@@ -20,11 +20,17 @@ declared_children = { status = "supported", notes = "sepolia-dev registry and di
 [[roots]]
 name = "ETHRegistry"
 address = "0x796fff2e907449be8d5921bcc215b1b76d89d080"
+# Start block follows the sepolia-dev deployment transaction.
+# (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistry.json:L2617 @ ens_v2@554c309).
+start_block = 10462895
 
 [[contracts]]
 role = "registry"
 address = "0x796fff2e907449be8d5921bcc215b1b76d89d080"
 proxy_kind = "none"
+# Start block follows the sepolia-dev deployment transaction.
+# (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistry.json:L2617 @ ens_v2@554c309).
+start_block = 10462895
 
 [[discovery_rules]]
 edge_kind = "subregistry"
