@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::PathBuf,
     str::FromStr,
@@ -1715,6 +1715,265 @@ async fn checked_in_registry_v2_manifests_admit_resolver_discovery() -> Result<(
 }
 
 #[tokio::test]
+async fn ens_v1_resolver_public_resolver_profile_admission_keeps_unknowns_watch_only() -> Result<()>
+{
+    let test_dir = TestDir::new()?;
+    let database = TestDatabase::new().await?;
+    let registry_manifest = checked_in_manifest_contents("ens", "ens_v1_registry_l1", "v2")?;
+    let resolver_manifest = checked_in_manifest_contents("ens", "ens_v1_resolver_l1", "v1")?;
+    test_dir.write_manifest("ens", "ens_v1_registry_l1", "v2", &registry_manifest)?;
+    test_dir.write_manifest("ens", "ens_v1_resolver_l1", "v1", &resolver_manifest)?;
+
+    let repository = load_repository(&test_dir.path)?;
+    let summary = sync_repository(database.pool(), &repository).await?;
+    assert_eq!(summary.status, ManifestSyncStatus::Synced);
+    assert_eq!(summary.active_manifest_count, 2);
+
+    let registry_address = "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E";
+    let public_resolver_seed_address = "0xF29100983E058B709F3D539b0c765937B804AC15";
+    let supported_resolver_address = "0x0000000000000000000000000000000000000201";
+    let pending_resolver_address = "0x0000000000000000000000000000000000000202";
+    let unsupported_resolver_address = "0x0000000000000000000000000000000000000203";
+    let public_resolver_code_hash = "keccak256:ens-v1-public-resolver-compatible";
+    let unsupported_code_hash = "keccak256:unknown-resolver";
+
+    let seed_contract_instance_id = load_single_contract_instance_for_address(
+        database.pool(),
+        "ethereum-mainnet",
+        public_resolver_seed_address,
+    )
+    .await?;
+
+    let supported_summary = persist_discovery_observation(
+        database.pool(),
+        &DiscoveryObservation {
+            chain: "ethereum-mainnet".to_owned(),
+            from_address: registry_address.to_owned(),
+            to_address: supported_resolver_address.to_owned(),
+            edge_kind: "resolver".to_owned(),
+            discovery_source: "registry_resolver_observation".to_owned(),
+            active_from_block_number: Some(100),
+            active_from_block_hash: Some(
+                "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+            ),
+            active_to_block_number: None,
+            active_to_block_hash: None,
+            provenance: serde_json::json!({
+                "provider": "unit-test",
+                "kind": "resolver",
+                "case": "public-resolver-code-hash-match",
+            }),
+        },
+    )
+    .await?;
+    let pending_summary = persist_discovery_observation(
+        database.pool(),
+        &DiscoveryObservation {
+            chain: "ethereum-mainnet".to_owned(),
+            from_address: registry_address.to_owned(),
+            to_address: pending_resolver_address.to_owned(),
+            edge_kind: "resolver".to_owned(),
+            discovery_source: "registry_resolver_observation".to_owned(),
+            active_from_block_number: Some(110),
+            active_from_block_hash: Some(
+                "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
+            ),
+            active_to_block_number: None,
+            active_to_block_hash: None,
+            provenance: serde_json::json!({
+                "provider": "unit-test",
+                "kind": "resolver",
+                "case": "pending-code-hash",
+            }),
+        },
+    )
+    .await?;
+    let unsupported_summary = persist_discovery_observation(
+        database.pool(),
+        &DiscoveryObservation {
+            chain: "ethereum-mainnet".to_owned(),
+            from_address: registry_address.to_owned(),
+            to_address: unsupported_resolver_address.to_owned(),
+            edge_kind: "resolver".to_owned(),
+            discovery_source: "registry_resolver_observation".to_owned(),
+            active_from_block_number: Some(120),
+            active_from_block_hash: Some(
+                "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_owned(),
+            ),
+            active_to_block_number: None,
+            active_to_block_hash: None,
+            provenance: serde_json::json!({
+                "provider": "unit-test",
+                "kind": "resolver",
+                "case": "unsupported-code-hash",
+            }),
+        },
+    )
+    .await?;
+
+    assert_eq!(supported_summary.admitted_edge_count, 1);
+    assert_eq!(pending_summary.admitted_edge_count, 1);
+    assert_eq!(unsupported_summary.admitted_edge_count, 1);
+    let supported_contract_instance_id = supported_summary.admitted_edges[0]
+        .to_contract_instance_id
+        .expect("supported resolver discovery must admit a target");
+    let pending_contract_instance_id = pending_summary.admitted_edges[0]
+        .to_contract_instance_id
+        .expect("pending resolver discovery must admit a target");
+    let unsupported_contract_instance_id = unsupported_summary.admitted_edges[0]
+        .to_contract_instance_id
+        .expect("unsupported resolver discovery must admit a target");
+
+    insert_raw_code_hash_observation(
+        database.pool(),
+        "ethereum-mainnet",
+        "0x1111111111111111111111111111111111111111111111111111111111111111",
+        100,
+        public_resolver_seed_address,
+        public_resolver_code_hash,
+        1,
+        "canonical",
+    )
+    .await?;
+    insert_raw_code_hash_observation(
+        database.pool(),
+        "ethereum-mainnet",
+        "0x2222222222222222222222222222222222222222222222222222222222222222",
+        110,
+        supported_resolver_address,
+        public_resolver_code_hash,
+        1,
+        "canonical",
+    )
+    .await?;
+    insert_raw_code_hash_observation(
+        database.pool(),
+        "ethereum-mainnet",
+        "0x3333333333333333333333333333333333333333333333333333333333333333",
+        120,
+        unsupported_resolver_address,
+        unsupported_code_hash,
+        1,
+        "canonical",
+    )
+    .await?;
+
+    let watched_contracts = load_watched_contracts(database.pool()).await?;
+    for (address, contract_instance_id) in [
+        (supported_resolver_address, supported_contract_instance_id),
+        (pending_resolver_address, pending_contract_instance_id),
+        (
+            unsupported_resolver_address,
+            unsupported_contract_instance_id,
+        ),
+    ] {
+        let address = normalize_address(address);
+        assert!(
+            watched_contracts.iter().any(|contract| {
+                contract.source_family == "ens_v1_resolver_l1"
+                    && contract.address == address
+                    && contract.contract_instance_id == contract_instance_id
+                    && contract.source == WatchedContractSource::DiscoveryEdge
+            }),
+            "dynamic resolver {address} must remain an admitted watch target"
+        );
+    }
+
+    let admissions = load_ens_v1_public_resolver_profile_admissions(database.pool()).await?;
+    assert_eq!(admissions.len(), 12);
+
+    assert_profile_admission_rows(
+        &admissions,
+        public_resolver_seed_address,
+        "supported",
+        "manifest_public_resolver_seed",
+        seed_contract_instance_id,
+        Some(public_resolver_code_hash),
+        Some(public_resolver_code_hash),
+        Some(seed_contract_instance_id),
+    );
+    assert_profile_admission_rows(
+        &admissions,
+        supported_resolver_address,
+        "supported",
+        "code_hash_match",
+        supported_contract_instance_id,
+        Some(public_resolver_code_hash),
+        Some(public_resolver_code_hash),
+        Some(seed_contract_instance_id),
+    );
+    assert_profile_admission_rows(
+        &admissions,
+        pending_resolver_address,
+        "pending",
+        "code_hash_pending",
+        pending_contract_instance_id,
+        None,
+        None,
+        None,
+    );
+    assert_profile_admission_rows(
+        &admissions,
+        unsupported_resolver_address,
+        "unsupported",
+        "code_hash_mismatch",
+        unsupported_contract_instance_id,
+        Some(unsupported_code_hash),
+        None,
+        None,
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+fn assert_profile_admission_rows(
+    admissions: &[ResolverProfileAdmission],
+    address: &str,
+    expected_status: &str,
+    expected_admission_basis: &str,
+    expected_contract_instance_id: Uuid,
+    expected_observed_code_hash: Option<&str>,
+    expected_matched_code_hash: Option<&str>,
+    expected_matched_contract_instance_id: Option<Uuid>,
+) {
+    let address = normalize_address(address);
+    let rows = admissions
+        .iter()
+        .filter(|admission| admission.address == address)
+        .collect::<Vec<_>>();
+    assert_eq!(rows.len(), 3);
+    assert_eq!(
+        rows.iter()
+            .map(|admission| admission.fact_family.as_str())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            "resolver_authorization",
+            "resolver_record",
+            "resolver_record_version",
+        ])
+    );
+
+    for row in rows {
+        assert_eq!(row.chain, "ethereum-mainnet");
+        assert_eq!(row.source_family, "ens_v1_resolver_l1");
+        assert_eq!(row.contract_instance_id, expected_contract_instance_id);
+        assert_eq!(row.profile, "public_resolver_compatible");
+        assert_eq!(row.status, expected_status);
+        assert_eq!(row.admission_basis, expected_admission_basis);
+        assert_eq!(
+            row.observed_code_hash.as_deref(),
+            expected_observed_code_hash
+        );
+        assert_eq!(row.matched_code_hash.as_deref(), expected_matched_code_hash);
+        assert_eq!(
+            row.matched_contract_instance_id,
+            expected_matched_contract_instance_id
+        );
+    }
+}
+
+#[tokio::test]
 async fn dynamic_resolver_backfill_selector_loads_edge_address_intersections() -> Result<()> {
     for case in [
         (
@@ -2361,8 +2620,15 @@ async fn checked_in_wrapper_and_resolver_manifests_admit_phase4_input_families()
         "(upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L11 @ ens_v1@91c966f)",
         "(upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L12 @ ens_v1@91c966f)",
         "(upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L13 @ ens_v1@91c966f)",
+        "(upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L20 @ ens_v1@91c966f)",
+        "(upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L31 @ ens_v1@91c966f)",
         "(upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L66 @ ens_v1@91c966f)",
+        "(upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L75 @ ens_v1@91c966f)",
         "(upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L114 @ ens_v1@91c966f)",
+        "(upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L131 @ ens_v1@91c966f)",
+        "(upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L150 @ ens_v1@91c966f)",
+        "(upstream: .refs/ens_v1/contracts/resolvers/ResolverBase.sol:L17 @ ens_v1@91c966f)",
+        "(upstream: .refs/ens_v1/contracts/resolvers/ResolverBase.sol:L23 @ ens_v1@91c966f)",
     ] {
         assert!(
             resolver_manifest.contains(citation),

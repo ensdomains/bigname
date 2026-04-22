@@ -257,6 +257,25 @@ impl WatchedSourceSelectorPlan {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolverProfileAdmission {
+    pub chain: String,
+    pub source_family: String,
+    pub contract_instance_id: Uuid,
+    pub address: String,
+    pub source: WatchedContractSource,
+    pub source_manifest_id: Option<i64>,
+    pub active_from_block_number: Option<i64>,
+    pub active_to_block_number: Option<i64>,
+    pub profile: String,
+    pub fact_family: String,
+    pub status: String,
+    pub admission_basis: String,
+    pub observed_code_hash: Option<String>,
+    pub matched_code_hash: Option<String>,
+    pub matched_contract_instance_id: Option<Uuid>,
+}
+
 #[derive(Default)]
 struct StableFnv64(u64);
 
