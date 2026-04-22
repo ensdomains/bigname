@@ -10,6 +10,8 @@ Usage: scripts/rollback-smoke [--no-network]
 
 Runs the local rollback smoke gate:
   - no-network sanity, when requested
+  - local pinned upstream refs
+  - focused reorg chaos drill conformance guard
   - checked-in migrations twice, proving idempotence after rollback
   - checked-in OpenAPI artifact drift
   - conformance owner OpenAPI smoke guard
@@ -113,6 +115,16 @@ run_openapi_drift_check() {
   diff -u docs/api-v1.openapi.json "$openapi_tmp"
 }
 
+run_pinned_refs_check() {
+  log "checking local pinned upstream refs"
+  scripts/sync-refs --check
+}
+
+run_reorg_chaos_drill_gate() {
+  log "checking reorg chaos drill conformance guard"
+  cargo test "${cargo_args[@]}" --manifest-path tests/conformance/Cargo.toml reorg_chaos_drill_conformance_job -- --nocapture
+}
+
 run_conformance_owner_smoke_gate() {
   log "checking conformance owner OpenAPI smoke guard"
   cargo test "${cargo_args[@]}" --manifest-path tests/conformance/Cargo.toml openapi
@@ -182,6 +194,8 @@ require_command cargo
 require_command diff
 require_command seq
 assert_no_network_mode
+run_pinned_refs_check
+run_reorg_chaos_drill_gate
 run_migrations "applying checked-in migrations"
 run_migrations "re-applying checked-in migrations for rollback idempotence"
 run_openapi_drift_check
