@@ -9,6 +9,7 @@ This document freezes the chain-intake contract for the shipped mainnet deployme
 - chain intake is a canonical-chain reconciliation system with a fact log attached
 - subscriptions, filters, and provider notifications are latency hints only
 - raw facts are append-only; canonicality and head promotion are explicit state
+- Postgres is the hot indexed/replay store for replay-critical facts and payload-cache metadata, not the archive for every fetched block-scoped body
 - block hash is identity; block number is position
 - live ingestion and backfill must converge on the same raw-fact, normalized-event, and projection pipeline
 - a deployment selects one chain profile at a time; mainnet and Sepolia facts do not share the same canonical corpus, checkpoints, or projection state
@@ -16,14 +17,14 @@ This document freezes the chain-intake contract for the shipped mainnet deployme
 
 ## 2. Scope Boundary
 
-Initial truth-core intake covers:
+Initial truth-core intake covers durable replay facts and cache metadata for:
 
 - blocks and lineage metadata
-- transactions
-- receipts
-- logs
+- selected/admitted target logs
+- transaction, receipt, and block fields needed to decode selected logs or rebuild retained normalized events and execution outputs
 - code-hash observations
 - block-anchored call snapshots used by verified execution or enrichment
+- optional cache metadata or digests for large/full block, transaction, or receipt bodies fetched outside the hot replay set; hash-addressed cold pointers are required only for payload classes explicitly declared durable
 
 Out of scope for the initial intake contract:
 
@@ -72,8 +73,8 @@ Rules:
 
 - production correctness depends on `safe` and `finalized` support; sources that cannot surface those checkpoints are bootstrap or shadow sources only
 - if the platform self-hosts on post-Merge Ethereum, it must operate an execution client and a consensus client together
-- historical state-heavy enrichment and state rewrites require archive-capable upstreams or a separately retained local corpus
-- upstream history retention must be treated as bounded; intake must retain its own raw corpus for deterministic replay and rewrites
+- historical state-heavy enrichment and state rewrites require archive-capable upstreams, a separately retained durable replay corpus, or explicit fail-closed behavior when the relevant cache-fill path cannot satisfy its block-hash-scoped fetch and retained-digest checks
+- upstream history retention must be treated as bounded; intake must retain its own durable hot replay facts for deterministic replay and treat provider re-fetch as a cache-fill path, not as a substitute for selected replay facts
 
 ### Local Runtime Provider Configuration
 
@@ -136,6 +137,8 @@ Rules:
 - block hash is the identity anchor for every block-scoped object
 - `parent_hash` is required in lineage storage
 - every raw fact row that comes from chain data carries `chain_id`, `block_number`, and `block_hash`
+- full block, transaction, and receipt payloads may be fetched during live indexing, but Postgres retains only replay-critical hot facts and optional cache metadata for non-critical full bodies
+- cache metadata should be stable enough to explain which payload was fetched; any metadata that may authorize later byte use must include a retained digest, and that digest must be verified before a cached, object-backed, or provider-refetched payload is used
 - caches are keyed by block hash first; block number may be used only as a secondary lookup or pagination aid
 - if a downstream key needs "current block number," it must resolve that number to a block hash before reading block-scoped data
 
@@ -161,9 +164,10 @@ The live path is:
 
 For exact block-scoped data:
 
-- logs must be fetched by `blockHash`, not just block number, whenever the upstream supports it
+- logs must be fetched by `blockHash`, not just block number, for exact block-scoped ingestion; providers that cannot support that contract are not acceptable for that path
 - receipts should be fetched block-scoped first; transaction-by-transaction receipt fan-out is a fallback, not the preferred primitive
 - live ingestion must not rely on subscription payloads alone as the persisted source of truth
+- live ingestion may fetch full block-scoped payloads to derive selected facts, but the persisted Postgres admission unit should keep only replay-critical hot rows and optional cache metadata for non-critical full payloads
 
 ## 9. Backfill Contract
 
@@ -215,7 +219,9 @@ The source-scoped backfill runner selector has three mutually exclusive modes:
 
 The persisted source identity for any selector is the resolved target set, not the CLI spelling that produced it. It is stable and sorted by `source_family`, `contract_instance_id`, normalized address, effective target range start, and effective target range end. Duplicate target identities must collapse only when the full canonical target tuple matches; if the same selector resolves conflicting metadata for the same target identity, job creation fails with an explicit source identity conflict. For idempotency-key reuse, the runner compares the persisted selector mode and resolved source identity. If the active watch plan has changed such that the same CLI selector now resolves to a different target set, the same idempotency key conflicts instead of mutating the existing job.
 
-Backfill intake for a source-scoped job is selected-target-only and hash-pinned. The runner may use block-number ranges to enumerate candidate blocks, but every persisted block-scoped fact or enrichment must be anchored to the resolved block hash before admission through the shared intake path. The job may persist minimal lineage/header anchors needed for that hash pinning, but target-scoped log admission, call snapshots, normalized events, and downstream projection invalidation must be limited to the selected targets. A source-scoped job must not opportunistically admit unselected watched targets merely because they appear in the same block, receipt batch, source family, or chain range.
+Backfill intake for a source-scoped job is selected-target-only and block-hash-scoped. The runner may use block-number ranges to enumerate candidate blocks, but every persisted block-scoped fact or enrichment must be anchored to the resolved block hash before admission through the shared intake path. The job may persist minimal lineage/header anchors needed for that block-hash-scoped admission, but target-scoped log admission, call snapshots, normalized events, and downstream projection invalidation must be limited to the selected targets. A source-scoped job must not opportunistically admit unselected watched targets merely because they appear in the same block, receipt batch, source family, or chain range.
+
+Source-scoped backfill must avoid retaining unselected block-wide transaction, receipt, or full block bodies in Postgres. If the runner fetches broader block-scoped payloads to locate or verify selected target facts, the Postgres hot store keeps selected-target logs/facts, minimal lineage/header anchors, replay-required enrichments, and any cache metadata needed for block-hash-scoped admission or audit. Unselected full bodies are evictable cache unless an explicit doc-first retention policy declares that payload class durable; otherwise the selected replay contract must not depend on them.
 
 Source-family backfill conformance intake for the shipped mainnet profile is limited to proving that the source selector, resolved `source_identity`, bounded job lifecycle, shared raw-fact intake, and later raw-fact normalized-event replay coexist for already admitted targets. The initial conformance families are:
 
@@ -292,7 +298,7 @@ For each candidate canonical block:
 
 Reconciliation must never depend on ad hoc deletes or "latest row wins" semantics.
 
-Execution-cache invalidation emitted by reorg repair is hash-scoped. It invalidates `execution_cache_outcomes` rows for verified resolution and verified primary-name outcomes when their dependency set contains an orphaned `(chain_id, block_hash)` or a boundary resolved through one. It must not delete execution traces, execution steps, raw facts, or normalized events; those remain durable replay and audit inputs.
+Execution-cache invalidation emitted by reorg repair is block-hash-scoped. It invalidates `execution_cache_outcomes` rows for verified resolution and verified primary-name outcomes when their dependency set contains an orphaned `(chain_id, block_hash)` or a boundary resolved through one. It must not delete execution traces, execution steps, raw facts, or normalized events; those remain durable replay and audit inputs.
 
 Cache dependencies must be tied to explicit block-hash-bearing chain positions or boundaries before a verified outcome can be treated as reorg-safe. Number-only, tag-only, or dependency-free verified resolution and verified primary-name rows fail closed and cannot be served from cache after a reorg check; rows for request types explicitly documented outside this Phase 9 invalidation surface remain out of scope. This reorg/replay foundation does not promote ENSv2 exact-name support or any manifest capability.
 
@@ -300,7 +306,7 @@ Cache dependencies must be tied to explicit block-hash-bearing chain positions o
 
 Raw-fact normalized-event replay is bounded operational tooling over already persisted canonical raw facts. A replay request selects a finite deployment profile, chain, and block range or explicit block-hash set. For selected blocks, canonical raw facts are rows whose block identity is `canonical`, `safe`, or `finalized`; `observed` and `orphaned` facts are excluded unless a later audit-only contract explicitly admits them.
 
-The raw-fact normalized-event replay runner performs an upsert-only adapter resync by invoking the same adapter-owned `normalized_events` boundary used after live or backfill raw admission. It must read persisted raw facts, lineage state, and the already persisted manifest/source identity needed to route those facts. It must not perform RPC fetches, re-open live intake, create or reserve backfill ranges, advance backfill range checkpoints, mutate backfill jobs, promote `canonical_head`, `safe_head`, or `finalized_head`, rebuild projections, write public API state, or expose a public `v1` route.
+The raw-fact normalized-event replay runner performs an upsert-only adapter resync by invoking the same adapter-owned `normalized_events` boundary used after live or backfill raw admission. It must read persisted raw facts, lineage state, and the already persisted manifest/source identity needed to route those facts. It may use a retained durable cold payload only when the retained replay contract requires that payload. For block-scoped payloads, it may use provider re-fetch only through an explicit block-hash-scoped, retained-digest-checked, fail-closed cache-fill path; if no retained digest exists, the payload cannot satisfy that contract. Provider re-fetch must not replace selected replay facts that the docs require Postgres to retain. It must not re-open live intake, create or reserve backfill ranges, advance backfill range checkpoints, mutate backfill jobs, promote `canonical_head`, `safe_head`, or `finalized_head`, rebuild projections, write public API state, or expose a public `v1` route.
 
 Replay does not delete stale `normalized_events`, purge rows derived from selected blocks, or replace existing payloads for an already persisted normalized-event identity. Existing normalized-event identities can only be refreshed through the storage upsert canonicality path; stale conflicting payloads remain a hard storage mismatch rather than being rewritten by replay. Raw facts and lineage remain immutable, projection rebuild remains downstream worker-owned, and API responses continue to read projections and execution output rather than the replay runner.
 
@@ -311,7 +317,8 @@ The raw admission transaction boundary is one block.
 That transaction writes:
 
 - lineage rows for the admitted block
-- raw block, transaction, receipt, and log facts
+- hot raw block, transaction, receipt, and log facts needed for selected replay contracts
+- optional cache metadata or digests for non-critical full block-scoped payloads when the selected retention contract keeps them
 - any block-scoped call snapshots captured in intake
 - normalized events emitted from those facts
 - invalidation signals required by downstream workers
@@ -354,7 +361,7 @@ Required failure drills:
 - partial batch failures
 - crash and resume from a persisted checkpoint
 - crash and resume from a persisted backfill job range checkpoint
-- raw-fact normalized-event replay restart over the same bounded canonical selection as an upsert-only adapter resync without RPC fetch or checkpoint promotion
+- raw-fact normalized-event replay restart over the same bounded canonical selection as an upsert-only adapter resync whose selected replay facts come from persisted canonical raw facts; any explicit provider cache refill is block-hash-scoped, retained-digest-checked, fail-closed, and performs no checkpoint promotion
 - safe or finalized promotion lagging canonical intake
 
 ## 17. Acceptance Rules
@@ -363,7 +370,8 @@ The intake contract is acceptable for the first implementation milestone only if
 
 - live notifications can be lost without losing correctness
 - the system can reconcile short forks by hash and parent hash alone
-- block-scoped data ingestion never depends on ambiguous number-only reads when a hash-scoped primitive exists
+- block-scoped data ingestion never depends on ambiguous number-only reads when a block-hash-scoped primitive exists
 - raw facts are sufficient to rebuild canonical declared state after a reorg or decoder rewrite
 - backfill reuses the same downstream semantics as live ingestion
-- raw-fact normalized-event replay upserts normalized events only from persisted canonical raw facts without payload replacement, stale-row purge, RPC fetch, projection rebuild, public API exposure, or chain/backfill checkpoint mutation
+- raw-fact normalized-event replay upserts normalized events only from persisted canonical selected replay facts without payload replacement, stale-row purge, projection rebuild, public API exposure, or chain/backfill checkpoint mutation
+- any explicit replay cache refill uses provider re-fetch only as a block-hash-scoped, retained-digest-checked, fail-closed cache-fill path; missing digests, mismatched bytes, or unavailable historical payloads fail closed, and selected replay facts never depend on provider history

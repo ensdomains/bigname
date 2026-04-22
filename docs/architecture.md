@@ -716,7 +716,7 @@ Shared stages:
 
 1. block lineage intake
 2. transaction, receipt, and log intake
-3. raw fact persistence
+3. hot raw fact persistence plus payload-cache metadata persistence
 4. manifest and discovery updates
 5. adapter routing
 6. normalized event persistence
@@ -724,6 +724,8 @@ Shared stages:
 8. execution-cache invalidation
 
 Historical backfill enters through persisted, bounded jobs and range checkpoints, then uses the same raw fact, adapter, normalized-event, and projection stages as live intake. Backfill checkpoint state is operational worker state; it does not promote canonical, safe, or finalized chain checkpoints.
+
+Postgres is the hot indexed and replay-focused store for this path. Live ingestion and backfill may fetch full block-scoped payloads, but Postgres retains replay-critical facts, lineage/header anchors, selected/admitted target logs, replay-required call snapshots/enrichments, and optional payload-cache metadata. Large/full block payloads and non-indexed transaction or receipt bodies are evictable cache by default once durable replay facts have been extracted; hash-addressed cold storage is required only for payload classes explicitly declared durable.
 
 Exact lineage, fetch, notification, and reconciliation rules for this plane live in `docs/chain-intake.md`.
 
@@ -756,6 +758,8 @@ It must not leak into the public contract.
 - verification outcomes
 - metadata responses
 - sync cursors
+
+For large/full chain payloads, the durable fact retained in Postgres may be only selected replay fields plus optional cache metadata or a digest, not the full body. This does not weaken immutability: compaction may evict non-critical inline payload bytes after durable replay facts are extracted, while lineage anchors, selected replay facts, normalized events, execution artifacts, and retained metadata remain immutable and canonicality-bearing.
 
 ### Rebuildable state
 
@@ -1466,9 +1470,11 @@ On divergence:
 
 The exact unwind and replay algorithm lives in `docs/chain-intake.md`.
 
+Reorg repair preserves the audit trail for the losing branch. It marks lineage, selected raw facts, normalized events, and retained payload metadata `orphaned` where applicable; it must not delete replay/audit truth needed to explain or rebuild state. Evictable full-payload cache bytes may be absent, but their absence must not erase canonicality or replay-critical evidence.
+
 Backfills use the same path as live ingestion:
 
-- raw facts
+- hot raw facts and retained payload-cache metadata
 - manifests / discovery
 - normalized events
 - projections
@@ -1476,6 +1482,8 @@ Backfills use the same path as live ingestion:
 Backfill scheduling is persisted as bounded jobs with resumable range checkpoints. The shared substrate provides idempotent create, reserve, advance, complete, and fail transitions so workers can crash and resume without widening source ranges, duplicating range ownership, or rewriting admitted facts.
 
 Backfill range checkpoint ownership is separate from chain checkpoint ownership. Completing a backfill job means the declared range work reached its stored end; it does not make any block canonical, safe, or finalized and does not change API consistency semantics.
+
+Source-scoped backfill is selected-target-only. It may retain selected target logs/facts, minimal lineage/header anchors, replay-required enrichments, and cache metadata needed for block-hash-scoped admission or audit, but it must not turn unselected block-wide transaction, receipt, or block bodies into Postgres hot rows merely because they were fetched during scanning.
 
 Required backfills include:
 
@@ -1526,7 +1534,7 @@ Required tooling:
 - inspect surface bindings
 - inspect resolver topology
 
-Canonicality and raw-fact inspection is worker-owned operational tooling over read-only storage audit helpers. The worker inspection surface is the single-block command `bigname-worker inspect canonicality --chain-id <id> --block-hash <hash>` and resolves only one `(chain_id, block_hash)` at a time. It may report whether that block hash has a stored lineage row and, for stored rows, the lineage, canonicality state, parent hash, block number, raw fact counts, and normalized-event counts for that block. Range-oriented storage helpers, where present, are observed/stored lineage listings for known rows only; they do not infer missing heights, gaps, or range-level canonicality status. The tooling must not expose a public `v1` route, mutate storage, or let user-facing API code bypass the projection and execution-read boundaries.
+Canonicality and raw-fact inspection is worker-owned operational tooling over read-only storage audit helpers. The worker inspection surface is the single-block command `bigname-worker inspect canonicality --chain-id <id> --block-hash <hash>` and resolves only one `(chain_id, block_hash)` at a time. It may report whether that block hash has a stored lineage row and, for stored rows, the lineage, canonicality state, parent hash, block number, raw fact counts, payload-cache metadata counts or digests where retained, and normalized-event counts for that block. Range-oriented storage helpers, where present, are observed/stored lineage listings for known rows only; they do not infer missing heights, gaps, or range-level canonicality status. The tooling must not expose a public `v1` route, mutate storage, dereference object-backed cache or provider-refetched block-scoped payloads unless the fetch is block-hash-scoped and the retained digest verifies, treat payload metadata without a retained digest as reusable bytes, or let user-facing API code bypass the projection and execution-read boundaries.
 
 Execution trace inspection is worker-owned operational tooling over persisted `execution_traces` and `execution_steps`. It returns stable JSON for one stored trace and its persisted step summaries; it does not execute a fresh resolution or primary-name request, expose raw execution payload APIs, synthesize topology, mutate caches or projections, mutate manifests or discovery, or change the public `GET /v1/explain/resolutions/{namespace}/{name}/execution` boundary.
 
@@ -1669,8 +1677,8 @@ The system is done for its first production milestone when:
 Recommended baseline:
 
 - Rust modular monolith for the first production version
-- PostgreSQL as primary system of record
-- object storage for large raw payloads and execution artifacts
+- PostgreSQL as the primary hot indexed/replay system of record for lineage, replay-critical raw facts, projections, execution metadata, and retained payload-cache metadata
+- hash-addressed object storage for execution artifacts and for raw payload classes explicitly declared durable; otherwise large raw payload bytes are evictable cache
 - Rust workers for ingestion, projection, replay, and execution
 - Rust HTTP API for the public `v1` surface
 - small TypeScript conformance harness for protocol and consumer capability tests
@@ -1710,6 +1718,7 @@ These items are intentionally left open for the next ADR / spec pass:
 - exact Postgres schema and partitioning strategy
 - exact cache invalidation granularity for verified queries
 - which execution artifacts stay inline in Postgres vs object storage
+- exact raw-payload cache retention windows, compaction cadence, and which payload classes are durable rather than cache
 - whether subscriptions ship in the first `v1` release or after the first stable read milestone
 
 ---

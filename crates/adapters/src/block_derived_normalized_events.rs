@@ -1667,6 +1667,14 @@ mod tests {
         pool: &PgPool,
         seed: RegistrarLabelRawLogSeed<'_>,
     ) -> Result<()> {
+        insert_raw_registrar_label_log_at_index(pool, seed, 0).await
+    }
+
+    async fn insert_raw_registrar_label_log_at_index(
+        pool: &PgPool,
+        seed: RegistrarLabelRawLogSeed<'_>,
+        log_index: i64,
+    ) -> Result<()> {
         upsert_raw_blocks(
             pool,
             &[RawBlock {
@@ -1692,7 +1700,7 @@ mod tests {
                 block_number: seed.block_number,
                 transaction_hash: format!("0xtx{:02x}", seed.block_number),
                 transaction_index: 0,
-                log_index: 0,
+                log_index,
                 emitting_address: seed.address.to_owned(),
                 topics: seed.source_event.topics(seed.label),
                 data: encode_registrar_label_log_data(seed.label),
@@ -1702,6 +1710,59 @@ mod tests {
         .await?;
 
         Ok(())
+    }
+
+    #[derive(Clone, Debug, Default, Eq, PartialEq)]
+    struct UnselectedPayloadRowCounts {
+        transactions: i64,
+        receipts: i64,
+        payload_cache_metadata: i64,
+    }
+
+    async fn load_unselected_payload_row_counts(
+        pool: &PgPool,
+        chain_id: &str,
+        block_hash: &str,
+    ) -> Result<UnselectedPayloadRowCounts> {
+        Ok(UnselectedPayloadRowCounts {
+            transactions: count_block_rows(pool, "raw_transactions", chain_id, block_hash).await?,
+            receipts: count_block_rows(pool, "raw_receipts", chain_id, block_hash).await?,
+            payload_cache_metadata: count_block_rows(
+                pool,
+                "raw_payload_cache_metadata",
+                chain_id,
+                block_hash,
+            )
+            .await?,
+        })
+    }
+
+    async fn count_block_rows(
+        pool: &PgPool,
+        table_name: &'static str,
+        chain_id: &str,
+        block_hash: &str,
+    ) -> Result<i64> {
+        let qualified_table_name = format!("public.{table_name}");
+        let table_exists = sqlx::query_scalar::<_, Option<String>>("SELECT to_regclass($1)::TEXT")
+            .bind(&qualified_table_name)
+            .fetch_one(pool)
+            .await
+            .with_context(|| format!("failed to check whether {table_name} exists"))?
+            .is_some();
+        if !table_exists {
+            return Ok(0);
+        }
+
+        let query = format!(
+            "SELECT COUNT(*)::BIGINT FROM {table_name} WHERE chain_id = $1 AND block_hash = $2"
+        );
+        sqlx::query_scalar::<_, i64>(&query)
+            .bind(chain_id)
+            .bind(block_hash)
+            .fetch_one(pool)
+            .await
+            .with_context(|| format!("failed to count {table_name} rows for block {block_hash}"))
     }
 
     fn encode_registrar_label_log_data(label: &str) -> Vec<u8> {
@@ -2266,6 +2327,162 @@ mod tests {
             counts,
             BTreeMap::from([(EVENT_KIND_PREIMAGE_OBSERVED.to_owned(), 1_usize)])
         );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn sync_block_derived_normalized_events_replays_scoped_selected_logs_without_payload_rows()
+    -> Result<()> {
+        let _permit = crate::acquire_test_db_permit().await;
+        let database = TestDatabase::new().await?;
+
+        let manifest_id = insert_manifest_version(
+            database.pool(),
+            ManifestVersionSeed {
+                manifest_version: 1,
+                namespace: "ens",
+                source_family: SOURCE_FAMILY_ENS_V1_REGISTRAR_L1,
+                chain: "ethereum-mainnet",
+                deployment_epoch: "ens_v1",
+                rollout_status: "active",
+                normalizer_version: "uts46-v1",
+                file_path: "manifests/ens/ens_v1_registrar_l1/v1.toml",
+            },
+        )
+        .await?;
+
+        let selected_contract_instance_id = Uuid::new_v4();
+        let unselected_contract_instance_id = Uuid::new_v4();
+        insert_contract_instance(
+            database.pool(),
+            selected_contract_instance_id,
+            "ethereum-mainnet",
+            "contract",
+        )
+        .await?;
+        insert_contract_instance(
+            database.pool(),
+            unselected_contract_instance_id,
+            "ethereum-mainnet",
+            "contract",
+        )
+        .await?;
+
+        insert_manifest_contract_instance(
+            database.pool(),
+            ManifestContractInstanceSeed {
+                manifest_id,
+                declaration_kind: "contract",
+                declaration_name: "selected_registrar",
+                contract_instance_id: selected_contract_instance_id,
+                declared_address: "0x00000000000000000000000000000000000000aa",
+                role: Some("registrar"),
+                proxy_kind: Some("none"),
+                implementation_contract_instance_id: None,
+                declared_implementation_address: None,
+            },
+        )
+        .await?;
+        insert_contract_instance_address(
+            database.pool(),
+            selected_contract_instance_id,
+            "ethereum-mainnet",
+            "0x00000000000000000000000000000000000000aa",
+            manifest_id,
+        )
+        .await?;
+
+        insert_manifest_contract_instance(
+            database.pool(),
+            ManifestContractInstanceSeed {
+                manifest_id,
+                declaration_kind: "contract",
+                declaration_name: "unselected_registrar",
+                contract_instance_id: unselected_contract_instance_id,
+                declared_address: "0x00000000000000000000000000000000000000bb",
+                role: Some("registrar"),
+                proxy_kind: Some("none"),
+                implementation_contract_instance_id: None,
+                declared_implementation_address: None,
+            },
+        )
+        .await?;
+        insert_contract_instance_address(
+            database.pool(),
+            unselected_contract_instance_id,
+            "ethereum-mainnet",
+            "0x00000000000000000000000000000000000000bb",
+            manifest_id,
+        )
+        .await?;
+
+        let block_hash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        insert_raw_registrar_label_log_at_index(
+            database.pool(),
+            RegistrarLabelRawLogSeed {
+                chain_id: "ethereum-mainnet",
+                block_hash,
+                block_number: 42,
+                address: "0x00000000000000000000000000000000000000aa",
+                label: "selected",
+                source_event: RegistrarExplicitLabelEvent::NameRegistered,
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            0,
+        )
+        .await?;
+        insert_raw_registrar_label_log_at_index(
+            database.pool(),
+            RegistrarLabelRawLogSeed {
+                chain_id: "ethereum-mainnet",
+                block_hash,
+                block_number: 42,
+                address: "0x00000000000000000000000000000000000000bb",
+                label: "unselected",
+                source_event: RegistrarExplicitLabelEvent::NameRegistered,
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            1,
+        )
+        .await?;
+
+        let counts =
+            load_unselected_payload_row_counts(database.pool(), "ethereum-mainnet", block_hash)
+                .await?;
+        assert_eq!(counts, UnselectedPayloadRowCounts::default());
+
+        let summary = sync_block_derived_normalized_events(
+            database.pool(),
+            "ethereum-mainnet",
+            &[block_hash.to_owned()],
+            Some(&[(
+                SOURCE_FAMILY_ENS_V1_REGISTRAR_L1.to_owned(),
+                "0x00000000000000000000000000000000000000aa".to_owned(),
+                42,
+                42,
+            )]),
+        )
+        .await?;
+        assert_eq!(summary.scanned_log_count, 2);
+        assert_eq!(summary.matched_log_count, 1);
+        assert_eq!(summary.total_synced_count, 1);
+        assert_eq!(summary.total_inserted_count, 1);
+
+        let events = load_normalized_events_by_namespace(database.pool(), "ens").await?;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_kind, EVENT_KIND_PREIMAGE_OBSERVED);
+        assert_eq!(events[0].source_family, SOURCE_FAMILY_ENS_V1_REGISTRAR_L1);
+        assert_eq!(events[0].after_state["decoded_name"], "selected.eth");
+        assert_eq!(
+            events[0].raw_fact_ref["emitting_address"],
+            "0x00000000000000000000000000000000000000aa"
+        );
+
+        let counts =
+            load_unselected_payload_row_counts(database.pool(), "ethereum-mainnet", block_hash)
+                .await?;
+        assert_eq!(counts, UnselectedPayloadRowCounts::default());
 
         database.cleanup().await
     }

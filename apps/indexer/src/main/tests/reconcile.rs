@@ -128,6 +128,12 @@ async fn reconcile_fetched_heads_initializes_chain_from_provider_heads() -> Resu
         3
     );
     assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM raw_payload_cache_metadata")
+            .fetch_one(database.pool())
+            .await?,
+        9
+    );
+    assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM normalized_events")
             .fetch_one(database.pool())
             .await?,
@@ -273,6 +279,294 @@ async fn reconcile_fetched_heads_initializes_chain_from_provider_heads() -> Resu
     server.abort();
     database.cleanup().await?;
     Ok(())
+}
+
+#[tokio::test]
+async fn cache_fill_authorizes_full_block_metadata_from_provider_fetch() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let chain = "ethereum-mainnet";
+    let block = provider_block(
+        "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+        Some("0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0"),
+        100,
+    );
+    let (provider, server) = bundle_provider(vec![block.clone()]).await?;
+
+    let bundle = provider
+        .fetch_block_bundle_by_hash(&block.block_hash)
+        .await?;
+    let full_block_payload = bundle
+        .raw_payloads
+        .iter()
+        .find(|payload| payload.payload_kind == provider::RAW_PAYLOAD_KIND_FULL_BLOCK)
+        .expect("provider bundle fetch must retain full-block payload metadata");
+    let expected_response_body = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "result": rpc_block_bundle_payload(&block),
+    })
+    .to_string();
+    let expected_payload_size = i64::try_from(expected_response_body.len())
+        .context("expected JSON-RPC response body size must fit in i64")?;
+    assert_eq!(full_block_payload.digest_algorithm, "keccak256");
+    assert_eq!(
+        full_block_payload.retained_digest,
+        keccak256_hex(expected_response_body.as_bytes())
+    );
+    assert_eq!(full_block_payload.payload_size_bytes, expected_payload_size);
+    assert_eq!(
+        full_block_payload.cache_metadata,
+        json!({
+            "source": "json-rpc",
+            "method": "eth_getBlockByHash",
+            "fetch_mode": "block_hash",
+            "digest_scope": "json_rpc_response_body",
+        })
+    );
+
+    let raw_block = provider_block_to_raw_block(chain, &block, CanonicalityState::Canonical);
+    let upserts = provider_raw_payload_cache_metadata_to_upserts(
+        chain,
+        &raw_block,
+        std::slice::from_ref(full_block_payload),
+    );
+    bigname_storage::upsert_raw_payload_cache_metadata(database.pool(), &upserts).await?;
+
+    let persisted = bigname_storage::load_raw_payload_cache_metadata(
+        database.pool(),
+        chain,
+        &block.block_hash,
+        provider::RAW_PAYLOAD_KIND_FULL_BLOCK,
+        Some(&full_block_payload.digest_algorithm),
+        Some(&full_block_payload.retained_digest),
+    )
+    .await?
+    .expect("provider fetch metadata must be persisted for later cache fill");
+    assert_eq!(
+        persisted.retained_digest.as_deref(),
+        Some(full_block_payload.retained_digest.as_str())
+    );
+    assert_eq!(persisted.payload_size_bytes, expected_payload_size);
+
+    let filled_block = provider
+        .cache_fill_full_block_by_hash(
+            database.pool(),
+            chain,
+            &block.block_hash,
+            block.block_number,
+        )
+        .await?;
+    assert_eq!(filled_block, block);
+
+    let number_error = provider
+        .cache_fill_full_block_by_hash(
+            database.pool(),
+            chain,
+            &block.block_hash,
+            block.block_number + 1,
+        )
+        .await
+        .expect_err(
+            "cache-fill must validate the returned block number after digest authorization",
+        );
+    assert!(
+        number_error
+            .to_string()
+            .contains("with block number 100; expected 101"),
+        "unexpected error: {number_error:#}"
+    );
+
+    let requested_block = provider_block(
+        "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+        Some("0xd0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0"),
+        200,
+    );
+    let returned_block = provider_block(
+        "0xe0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0",
+        requested_block.parent_hash.as_deref(),
+        requested_block.block_number,
+    );
+    let mismatched_response_body = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "result": rpc_block_bundle_payload(&returned_block),
+    })
+    .to_string();
+    let mismatched_payload_size = i64::try_from(mismatched_response_body.len())
+        .context("mismatched JSON-RPC response body size must fit in i64")?;
+    bigname_storage::upsert_raw_payload_cache_metadata(
+        database.pool(),
+        &[bigname_storage::RawPayloadCacheMetadataUpsert {
+            chain_id: chain.to_owned(),
+            block_hash: requested_block.block_hash.clone(),
+            payload_kind: provider::RAW_PAYLOAD_KIND_FULL_BLOCK.to_owned(),
+            digest_algorithm: Some("keccak256".to_owned()),
+            retained_digest: Some(keccak256_hex(mismatched_response_body.as_bytes())),
+            block_number: Some(requested_block.block_number),
+            payload_size_bytes: mismatched_payload_size,
+            content_type: Some(provider::JSON_RPC_PAYLOAD_CONTENT_TYPE.to_owned()),
+            content_encoding: Some(provider::JSON_RPC_PAYLOAD_CONTENT_ENCODING.to_owned()),
+            cache_metadata: json!({
+                "source": "json-rpc",
+                "method": "eth_getBlockByHash",
+                "fetch_mode": "block_hash",
+                "digest_scope": "json_rpc_response_body"
+            }),
+            canonicality_state: CanonicalityState::Canonical,
+        }],
+    )
+    .await?;
+    let requested_hash = requested_block.block_hash.clone();
+    let returned_hash = returned_block.block_hash.clone();
+    let (mismatched_url, mismatched_server) = spawn_json_rpc_server(Arc::new(move |body| {
+        let method = body
+            .get("method")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let first_param = body
+            .get("params")
+            .and_then(Value::as_array)
+            .and_then(|params| params.first())
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+
+        match (method, first_param.as_str()) {
+            ("eth_getBlockByHash", hash) if hash == requested_hash => json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": rpc_block_bundle_payload(&returned_block),
+            }),
+            _ => panic!("unexpected RPC request: {body}"),
+        }
+    }))
+    .await?;
+    let mismatched_provider = provider::JsonRpcProvider::new(&mismatched_url)?;
+
+    let hash_error = mismatched_provider
+        .cache_fill_full_block_by_hash(
+            database.pool(),
+            chain,
+            &requested_block.block_hash,
+            requested_block.block_number,
+        )
+        .await
+        .expect_err("cache-fill must validate the returned block hash after digest authorization");
+    assert!(
+        hash_error.to_string().contains(&format!(
+            "provider cache-fill returned block {returned_hash} for requested hash {}",
+            requested_block.block_hash
+        )),
+        "unexpected error: {hash_error:#}"
+    );
+
+    mismatched_server.abort();
+    server.abort();
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn cache_fill_requires_retained_digest() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let block = provider_block(
+        "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        Some("0xb1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1"),
+        101,
+    );
+    bigname_storage::upsert_raw_payload_cache_metadata(
+        database.pool(),
+        &[bigname_storage::RawPayloadCacheMetadataUpsert {
+            chain_id: "ethereum-mainnet".to_owned(),
+            block_hash: block.block_hash.clone(),
+            payload_kind: provider::RAW_PAYLOAD_KIND_FULL_BLOCK.to_owned(),
+            digest_algorithm: None,
+            retained_digest: None,
+            block_number: Some(block.block_number),
+            payload_size_bytes: 0,
+            content_type: Some(provider::JSON_RPC_PAYLOAD_CONTENT_TYPE.to_owned()),
+            content_encoding: Some(provider::JSON_RPC_PAYLOAD_CONTENT_ENCODING.to_owned()),
+            cache_metadata: json!({
+                "source": "json-rpc",
+                "method": "eth_getBlockByHash",
+                "fetch_mode": "block_hash",
+                "digest_scope": "json_rpc_response_body"
+            }),
+            canonicality_state: CanonicalityState::Canonical,
+        }],
+    )
+    .await?;
+    let (provider, server) = bundle_provider(vec![block.clone()]).await?;
+
+    let error = provider
+        .cache_fill_full_block_by_hash(
+            database.pool(),
+            "ethereum-mainnet",
+            &block.block_hash,
+            block.block_number,
+        )
+        .await
+        .expect_err("cache-fill must reject metadata without a retained digest");
+    assert!(
+        error.to_string().contains("has no retained digest"),
+        "unexpected error: {error:#}"
+    );
+
+    server.abort();
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn cache_fill_rejects_digest_mismatch() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let block = provider_block(
+        "0xa2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2",
+        Some("0xb2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"),
+        102,
+    );
+    bigname_storage::upsert_raw_payload_cache_metadata(
+        database.pool(),
+        &[bigname_storage::RawPayloadCacheMetadataUpsert {
+            chain_id: "ethereum-mainnet".to_owned(),
+            block_hash: block.block_hash.clone(),
+            payload_kind: provider::RAW_PAYLOAD_KIND_FULL_BLOCK.to_owned(),
+            digest_algorithm: Some("keccak256".to_owned()),
+            retained_digest: Some(
+                "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".to_owned(),
+            ),
+            block_number: Some(block.block_number),
+            payload_size_bytes: 1,
+            content_type: Some(provider::JSON_RPC_PAYLOAD_CONTENT_TYPE.to_owned()),
+            content_encoding: Some(provider::JSON_RPC_PAYLOAD_CONTENT_ENCODING.to_owned()),
+            cache_metadata: json!({
+                "source": "json-rpc",
+                "method": "eth_getBlockByHash",
+                "fetch_mode": "block_hash",
+                "digest_scope": "json_rpc_response_body"
+            }),
+            canonicality_state: CanonicalityState::Canonical,
+        }],
+    )
+    .await?;
+    let (provider, server) = bundle_provider(vec![block.clone()]).await?;
+
+    let error = provider
+        .cache_fill_full_block_by_hash(
+            database.pool(),
+            "ethereum-mainnet",
+            &block.block_hash,
+            block.block_number,
+        )
+        .await
+        .expect_err("cache-fill must reject mismatched retained digests");
+    assert!(
+        error
+            .to_string()
+            .contains("raw payload cache digest mismatch"),
+        "unexpected error: {error:#}"
+    );
+
+    server.abort();
+    database.cleanup().await
 }
 
 #[tokio::test]
@@ -2146,7 +2440,11 @@ async fn reconcile_fetched_heads_gates_basenames_dynamic_resolver_local_facts_by
     for (contract_instance_id, chain, contract_kind) in [
         (registrar_contract_instance_id, "base-mainnet", "contract"),
         (registry_contract_instance_id, "base-mainnet", "root"),
-        (seed_resolver_contract_instance_id, "base-mainnet", "contract"),
+        (
+            seed_resolver_contract_instance_id,
+            "base-mainnet",
+            "contract",
+        ),
         (
             supported_resolver_contract_instance_id,
             "base-mainnet",

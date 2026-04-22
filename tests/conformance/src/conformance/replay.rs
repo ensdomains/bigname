@@ -35,6 +35,21 @@
             "basenames:unsupported-profile.base.eth";
         const REPLAY_PROFILE_UNSUPPORTED_RESOLVER_ADDRESS: &str =
             "0x0000000000000000000000000000000000000f02";
+        const RAW_RETENTION_REPLAY_BLOCK_HASH: &str =
+            "0xc0ffee0000000000000000000000000000000000000000000000000000000303";
+        const RAW_RETENTION_REPLAY_WATCHED_ADDRESS: &str =
+            "0x0000000000000000000000000000000000000c0a";
+        const RAW_RETENTION_FULL_BLOCK_PAYLOAD_KIND: &str = "full_block";
+        const RAW_RETENTION_BLOCK_RECEIPTS_PAYLOAD_KIND: &str = "block_receipts";
+        const RAW_RETENTION_PAYLOAD_CONTENT_TYPE: &str = "application/json";
+        const RAW_RETENTION_PAYLOAD_CONTENT_ENCODING: &str = "identity";
+
+        struct RawRetentionProbe {
+            chain_id: &'static str,
+            block_hash: &'static str,
+            block_number: i64,
+            watched_address: &'static str,
+        }
 
         pub(crate) async fn run_replay_capability_conformance() -> Result<()> {
             let database = HarnessDatabase::new().await?;
@@ -65,6 +80,36 @@
                 StatusCode::NOT_FOUND,
             )
             .await?;
+
+            let raw_retention_probe =
+                seed_cache_first_raw_retention_replay_probe(&database).await?;
+            let after_raw_retention_seed =
+                snapshot_replay_stale_current_answer_routes(&database, &corpus).await?;
+            assert_eq!(
+                after_raw_retention_seed, before_replay,
+                "selected raw facts plus payload-cache metadata must not change shipped public route or consumer-replacement behavior before replay"
+            );
+            let manifest_policy_before_raw_retention =
+                snapshot_manifest_policy_surface(&database).await?;
+            replay_raw_fact_normalized_events_for_blocks(
+                &database,
+                "mainnet",
+                raw_retention_probe.chain_id,
+                &[raw_retention_probe.block_hash],
+            )
+            .await?;
+            assert_cache_first_raw_retention_replay_probe(&database, &raw_retention_probe).await?;
+            let after_raw_retention_replay =
+                snapshot_replay_stale_current_answer_routes(&database, &corpus).await?;
+            assert_eq!(
+                after_raw_retention_replay, before_replay,
+                "provider-independent raw-fact replay over selected durable facts must not change shipped public route or consumer-replacement behavior"
+            );
+            assert_eq!(
+                snapshot_manifest_policy_surface(&database).await?,
+                manifest_policy_before_raw_retention,
+                "raw-retention replay must not change manifest rollout or capability policy state"
+            );
 
             replay_all_current_projections(&database).await?;
             let after_replay = snapshot_replay_supported_read_routes(&database, &corpus).await?;
@@ -240,6 +285,246 @@
             seed_replay_winning_branch_source_rows(database, &corpus).await?;
 
             Ok(corpus)
+        }
+
+        async fn seed_cache_first_raw_retention_replay_probe(
+            database: &HarnessDatabase,
+        ) -> Result<RawRetentionProbe> {
+            let probe = RawRetentionProbe {
+                chain_id: "ethereum-mainnet",
+                block_hash: RAW_RETENTION_REPLAY_BLOCK_HASH,
+                block_number: 303,
+                watched_address: RAW_RETENTION_REPLAY_WATCHED_ADDRESS,
+            };
+            seed_raw_fact_replay_probe(
+                database,
+                probe.chain_id,
+                probe.block_hash,
+                probe.watched_address,
+            )
+            .await?;
+            seed_raw_retention_cache_metadata(database, &probe, "replay-capability").await?;
+
+            Ok(probe)
+        }
+
+        async fn seed_raw_retention_cache_metadata(
+            database: &HarnessDatabase,
+            probe: &RawRetentionProbe,
+            fixture: &str,
+        ) -> Result<()> {
+            bigname_storage::upsert_raw_payload_cache_metadata(
+                &database.pool,
+                &[
+                    bigname_storage::RawPayloadCacheMetadataUpsert {
+                        chain_id: probe.chain_id.to_owned(),
+                        block_hash: probe.block_hash.to_owned(),
+                        payload_kind: RAW_RETENTION_FULL_BLOCK_PAYLOAD_KIND.to_owned(),
+                        digest_algorithm: None,
+                        retained_digest: None,
+                        block_number: Some(probe.block_number),
+                        payload_size_bytes: 2_048,
+                        content_type: Some(RAW_RETENTION_PAYLOAD_CONTENT_TYPE.to_owned()),
+                        content_encoding: Some(
+                            RAW_RETENTION_PAYLOAD_CONTENT_ENCODING.to_owned(),
+                        ),
+                        cache_metadata: json!({
+                            "fixture": fixture,
+                            "source": "json-rpc",
+                            "method": "eth_getBlockByHash",
+                            "fetch_mode": "block_hash",
+                            "retention": "metadata_only",
+                            "selected_for_replay": false,
+                        }),
+                        canonicality_state: CanonicalityState::Canonical,
+                    },
+                    bigname_storage::RawPayloadCacheMetadataUpsert {
+                        chain_id: probe.chain_id.to_owned(),
+                        block_hash: probe.block_hash.to_owned(),
+                        payload_kind: RAW_RETENTION_BLOCK_RECEIPTS_PAYLOAD_KIND.to_owned(),
+                        digest_algorithm: Some("keccak256".to_owned()),
+                        retained_digest: Some(
+                            "0xfeedface00000000000000000000000000000000000000000000000000000303"
+                                .to_owned(),
+                        ),
+                        block_number: Some(probe.block_number),
+                        payload_size_bytes: 4_096,
+                        content_type: Some(RAW_RETENTION_PAYLOAD_CONTENT_TYPE.to_owned()),
+                        content_encoding: Some(
+                            RAW_RETENTION_PAYLOAD_CONTENT_ENCODING.to_owned(),
+                        ),
+                        cache_metadata: json!({
+                            "fixture": fixture,
+                            "source": "json-rpc",
+                            "method": "eth_getBlockReceipts",
+                            "fetch_mode": "block_hash",
+                            "retention": "digest_metadata_only",
+                            "selected_for_replay": false,
+                        }),
+                        canonicality_state: CanonicalityState::Canonical,
+                    },
+                ],
+            )
+            .await
+            .context("failed to seed raw-retention payload-cache metadata")?;
+
+            Ok(())
+        }
+
+        async fn assert_cache_first_raw_retention_replay_probe(
+            database: &HarnessDatabase,
+            probe: &RawRetentionProbe,
+        ) -> Result<()> {
+            let raw_log_count = sqlx::query_scalar::<_, i64>(
+                r#"
+                SELECT COUNT(*)::BIGINT
+                FROM raw_logs
+                WHERE chain_id = $1
+                  AND block_hash = $2
+                  AND block_number = $3
+                  AND emitting_address = $4
+                  AND canonicality_state = 'canonical'::canonicality_state
+                "#,
+            )
+            .bind(probe.chain_id)
+            .bind(probe.block_hash)
+            .bind(probe.block_number)
+            .bind(probe.watched_address)
+            .fetch_one(&database.pool)
+            .await
+            .context("failed to count raw-retention selected replay logs")?;
+            assert_eq!(
+                raw_log_count, 1,
+                "cache-first replay probe must retain the selected durable raw log"
+            );
+
+            let raw_transaction_count = sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*)::BIGINT FROM raw_transactions WHERE chain_id = $1 AND block_hash = $2",
+            )
+            .bind(probe.chain_id)
+            .bind(probe.block_hash)
+            .fetch_one(&database.pool)
+            .await
+            .context("failed to count raw_transactions for raw-retention probe")?;
+            assert_eq!(
+                raw_transaction_count, 0,
+                "raw_transactions must not be required when selected replay facts are already durable"
+            );
+            let raw_receipt_count = sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*)::BIGINT FROM raw_receipts WHERE chain_id = $1 AND block_hash = $2",
+            )
+            .bind(probe.chain_id)
+            .bind(probe.block_hash)
+            .fetch_one(&database.pool)
+            .await
+            .context("failed to count raw_receipts for raw-retention probe")?;
+            assert_eq!(
+                raw_receipt_count, 0,
+                "raw_receipts must not be required when selected replay facts are already durable"
+            );
+
+            let metadata = bigname_storage::list_raw_payload_cache_metadata_by_block_hash(
+                &database.pool,
+                probe.chain_id,
+                probe.block_hash,
+            )
+            .await
+            .context("failed to list raw-retention payload-cache metadata")?;
+            assert_eq!(
+                metadata.len(),
+                2,
+                "unselected full block-scoped payloads should be retained only as compact metadata"
+            );
+            assert!(
+                metadata.iter().any(|entry| {
+                    entry.payload_kind == RAW_RETENTION_FULL_BLOCK_PAYLOAD_KIND
+                        && entry.retained_digest.is_none()
+                        && entry.cache_metadata["retention"] == json!("metadata_only")
+                }),
+                "full block payload bytes must not be required for selected raw-log replay"
+            );
+            assert!(
+                metadata.iter().any(|entry| {
+                    entry.payload_kind == RAW_RETENTION_BLOCK_RECEIPTS_PAYLOAD_KIND
+                        && entry.digest_algorithm.as_deref() == Some("keccak256")
+                        && entry.retained_digest.is_some()
+                        && entry.cache_metadata["retention"] == json!("digest_metadata_only")
+                }),
+                "unselected receipt payloads should remain digest/cache metadata, not durable replay facts"
+            );
+
+            let normalized_event_count = sqlx::query_scalar::<_, i64>(
+                r#"
+                SELECT COUNT(*)::BIGINT
+                FROM normalized_events
+                WHERE chain_id = $1
+                  AND block_hash = $2
+                  AND source_family = $3
+                  AND event_kind = 'ReverseChanged'
+                  AND canonicality_state = 'canonical'::canonicality_state
+                  AND source_manifest_id IS NOT NULL
+                  AND raw_fact_ref->>'block_hash' = $2
+                  AND after_state->>'address' = $4
+                "#,
+            )
+            .bind(probe.chain_id)
+            .bind(probe.block_hash)
+            .bind(RAW_REPLAY_PROBE_SOURCE_FAMILY)
+            .bind(RAW_REPLAY_PROBE_CLAIMED_ADDRESS)
+            .fetch_one(&database.pool)
+            .await
+            .context("failed to count raw-retention replay normalized events")?;
+            assert_eq!(
+                normalized_event_count, 1,
+                "raw-fact replay must be provider-independent once the selected durable raw log is retained"
+            );
+
+            Ok(())
+        }
+
+        async fn snapshot_manifest_policy_surface(
+            database: &HarnessDatabase,
+        ) -> Result<Vec<(String, String, String, String, String, Value)>> {
+            sqlx::query_as::<_, (String, String, String, String, String, Value)>(
+                r#"
+                SELECT
+                    mv.namespace,
+                    mv.source_family,
+                    mv.chain,
+                    mv.deployment_epoch,
+                    mv.rollout_status::TEXT AS rollout_status,
+                    COALESCE(
+                        JSONB_AGG(
+                            JSONB_BUILD_OBJECT(
+                                'capability_name', flags.capability_name,
+                                'status', flags.status::TEXT,
+                                'notes', flags.notes
+                            )
+                            ORDER BY flags.capability_name
+                        ) FILTER (WHERE flags.capability_name IS NOT NULL),
+                        '[]'::JSONB
+                    ) AS capability_flags
+                FROM manifest_versions AS mv
+                LEFT JOIN manifest_capability_flags AS flags
+                  ON flags.manifest_id = mv.manifest_id
+                GROUP BY
+                    mv.manifest_id,
+                    mv.namespace,
+                    mv.source_family,
+                    mv.chain,
+                    mv.deployment_epoch,
+                    mv.rollout_status
+                ORDER BY
+                    mv.namespace,
+                    mv.source_family,
+                    mv.chain,
+                    mv.deployment_epoch,
+                    mv.manifest_id
+                "#,
+            )
+            .fetch_all(&database.pool)
+            .await
+            .context("failed to snapshot manifest rollout and capability policy surface")
         }
 
         async fn seed_ensv2_sepolia_dev_exact_name_replay_corpus(

@@ -3,7 +3,10 @@ use serde_json::{Map, Value, json};
 use sqlx::{PgPool, Row, types::time::OffsetDateTime};
 use uuid::Uuid;
 
-use crate::{CanonicalityState, ChainLineageBlock, load_chain_lineage_block};
+use crate::{
+    CanonicalityState, ChainLineageBlock, RawPayloadCacheMetadata,
+    list_raw_payload_cache_metadata_by_block_hash, load_chain_lineage_block,
+};
 
 const EVENT_KIND_MANIFEST_CODE_HASH_DRIFT_ALERT: &str = "ManifestCodeHashDriftAlert";
 const EVENT_KIND_MANIFEST_PROXY_IMPLEMENTATION_ALERT: &str = "ManifestProxyImplementationAlert";
@@ -55,6 +58,22 @@ impl RawFactAuditCounts {
             + self.raw_log_count
             + self.raw_call_snapshot_count
     }
+}
+
+/// Read-only audit summary for retained payload-cache metadata on one block.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RawPayloadCacheAuditMetadata {
+    pub payload_kind: String,
+    pub digest_algorithm: Option<String>,
+    pub retained_digest: Option<String>,
+    pub block_number: Option<i64>,
+    pub payload_size_bytes: i64,
+    pub content_type: Option<String>,
+    pub content_encoding: Option<String>,
+    pub cache_metadata: Value,
+    pub canonicality_state: CanonicalityState,
+    pub first_observed_at: OffsetDateTime,
+    pub last_observed_at: OffsetDateTime,
 }
 
 /// Read-only canonicality and fact-count inspection for one block hash.
@@ -277,6 +296,22 @@ pub async fn inspect_block_canonicality(
         raw_fact_counts,
         normalized_event_count,
     ))
+}
+
+/// List retained payload-cache metadata for audit tooling without dereferencing
+/// object-backed cache or re-fetching provider bytes.
+pub async fn list_raw_payload_cache_audit_metadata(
+    pool: &PgPool,
+    chain_id: &str,
+    block_hash: &str,
+) -> Result<Vec<RawPayloadCacheAuditMetadata>> {
+    validate_block_identity(chain_id, block_hash)?;
+
+    let rows = list_raw_payload_cache_metadata_by_block_hash(pool, chain_id, block_hash).await?;
+    Ok(rows
+        .into_iter()
+        .map(raw_payload_cache_audit_metadata)
+        .collect())
 }
 
 /// Inspect every stored lineage block in a bounded block-number range. Missing
@@ -792,6 +827,22 @@ fn build_inspection(
         block_number,
         raw_fact_counts,
         normalized_event_count,
+    }
+}
+
+fn raw_payload_cache_audit_metadata(row: RawPayloadCacheMetadata) -> RawPayloadCacheAuditMetadata {
+    RawPayloadCacheAuditMetadata {
+        payload_kind: row.payload_kind,
+        digest_algorithm: row.digest_algorithm,
+        retained_digest: row.retained_digest,
+        block_number: row.block_number,
+        payload_size_bytes: row.payload_size_bytes,
+        content_type: row.content_type,
+        content_encoding: row.content_encoding,
+        cache_metadata: row.cache_metadata,
+        canonicality_state: row.canonicality_state,
+        first_observed_at: row.first_observed_at,
+        last_observed_at: row.last_observed_at,
     }
 }
 

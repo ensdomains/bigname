@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, bail};
+use bigname_storage::{RawPayloadCacheDigestVerification, verify_raw_payload_cache_digest};
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use hyper::{Request, Uri};
@@ -9,9 +10,16 @@ use hyper_util::{
     rt::TokioExecutor,
 };
 use serde_json::{Value, json};
+use sha3::{Digest, Keccak256};
 
 const ZERO_HASH: &str = "0x0000000000000000000000000000000000000000000000000000000000000000";
 const MAX_TRANSACTION_RECEIPT_FALLBACK: usize = 128;
+pub(crate) const RAW_PAYLOAD_KIND_FULL_BLOCK: &str = "full_block";
+pub(crate) const RAW_PAYLOAD_KIND_BLOCK_LOGS: &str = "block_logs";
+pub(crate) const RAW_PAYLOAD_KIND_BLOCK_RECEIPTS: &str = "block_receipts";
+pub(crate) const JSON_RPC_PAYLOAD_CONTENT_TYPE: &str = "application/json";
+pub(crate) const JSON_RPC_PAYLOAD_CONTENT_ENCODING: &str = "identity";
+const RAW_PAYLOAD_DIGEST_ALGORITHM: &str = "keccak256";
 
 #[derive(Clone)]
 pub struct ProviderRegistry {
@@ -62,6 +70,16 @@ pub struct ProviderBlockBundle {
     pub transactions: Vec<ProviderTransaction>,
     pub logs: Vec<ProviderLog>,
     pub receipts: Vec<ProviderReceipt>,
+    pub raw_payloads: Vec<ProviderRawPayloadCacheMetadata>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProviderRawPayloadCacheMetadata {
+    pub payload_kind: String,
+    pub digest_algorithm: String,
+    pub retained_digest: String,
+    pub payload_size_bytes: i64,
+    pub cache_metadata: Value,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -266,14 +284,22 @@ impl JsonRpcProvider {
         block_hash: &str,
     ) -> Result<ProviderBlockBundle> {
         let block_hash = normalize_hash(block_hash);
-        let block_value = self
-            .fetch_json_rpc_result(
+        let block_payload = self
+            .fetch_json_rpc_result_with_payload(
                 "eth_getBlockByHash",
                 vec![Value::String(block_hash.clone()), Value::Bool(true)],
             )
             .await?
+            .with_cache_metadata(
+                RAW_PAYLOAD_KIND_FULL_BLOCK,
+                "eth_getBlockByHash",
+                "block_hash",
+            );
+        let block_value = block_payload
+            .result
             .with_context(|| format!("provider did not return block {block_hash}"))?;
         let mut bundle = ProviderBlockBundle::from_value(block_value)?;
+        bundle.raw_payloads.push(block_payload.cache_metadata);
 
         if bundle.block.block_hash != block_hash {
             bail!(
@@ -302,18 +328,85 @@ impl JsonRpcProvider {
             }
         }
 
-        bundle.logs = self
+        let logs = self
             .fetch_logs_by_block_hash(&block_hash, bundle.block.block_number)
             .await?;
-        bundle.receipts = self
+        bundle.raw_payloads.push(logs.cache_metadata);
+        bundle.logs = logs.logs;
+
+        let receipts = self
             .fetch_receipts_by_block_hash(
                 &block_hash,
                 bundle.block.block_number,
                 &bundle.transactions,
             )
             .await?;
+        bundle.raw_payloads.extend(receipts.cache_metadata);
+        bundle.receipts = receipts.receipts;
 
         Ok(bundle)
+    }
+
+    pub async fn cache_fill_full_block_by_hash(
+        &self,
+        pool: &sqlx::PgPool,
+        chain: &str,
+        block_hash: &str,
+        expected_block_number: i64,
+    ) -> Result<ProviderBlock> {
+        if expected_block_number < 0 {
+            bail!("provider cache-fill expected block number cannot be negative");
+        }
+
+        let block_hash = normalize_hash(block_hash);
+        let payload = self
+            .fetch_json_rpc_result_with_payload(
+                "eth_getBlockByHash",
+                vec![Value::String(block_hash.clone()), Value::Bool(true)],
+            )
+            .await?
+            .with_cache_metadata(
+                RAW_PAYLOAD_KIND_FULL_BLOCK,
+                "eth_getBlockByHash",
+                "block_hash",
+            );
+
+        verify_raw_payload_cache_digest(
+            pool,
+            &RawPayloadCacheDigestVerification {
+                chain_id: chain.to_owned(),
+                block_hash: block_hash.clone(),
+                payload_kind: RAW_PAYLOAD_KIND_FULL_BLOCK.to_owned(),
+                digest_algorithm: payload.cache_metadata.digest_algorithm.clone(),
+                candidate_digest: payload.cache_metadata.retained_digest.clone(),
+                payload_size_bytes: payload.cache_metadata.payload_size_bytes,
+            },
+        )
+        .await?;
+
+        let block = ProviderBlock::from_value(
+            payload
+                .result
+                .context("provider cache-fill returned null full block payload")?,
+        )?;
+        if block.block_hash != block_hash {
+            bail!(
+                "provider cache-fill returned block {} for requested hash {}",
+                block.block_hash,
+                block_hash
+            );
+        }
+        if block.block_number != expected_block_number {
+            bail!(
+                "provider cache-fill returned block {} for requested hash {} with block number {}; expected {}",
+                block.block_hash,
+                block_hash,
+                block.block_number,
+                expected_block_number
+            );
+        }
+
+        Ok(block)
     }
 
     pub async fn fetch_code_observations_at_block(
@@ -386,23 +479,32 @@ impl JsonRpcProvider {
         &self,
         block_hash: &str,
         expected_block_number: i64,
-    ) -> Result<Vec<ProviderLog>> {
-        let logs = self
-            .fetch_json_rpc_result(
+    ) -> Result<ProviderLogsPayload> {
+        let payload = self
+            .fetch_json_rpc_result_with_payload(
                 "eth_getLogs",
                 vec![json!({
                     "blockHash": block_hash,
                 })],
             )
             .await?
-            .context("provider did not return logs for exact block hash lookup")?;
+            .with_cache_metadata(RAW_PAYLOAD_KIND_BLOCK_LOGS, "eth_getLogs", "block_hash");
+        let logs = payload
+            .result
+            .context("provider returned null logs for exact block hash lookup")?;
         let logs = logs
             .as_array()
             .context("expected logs array in JSON-RPC result")?;
 
-        logs.iter()
+        let logs = logs
+            .iter()
             .map(|value| ProviderLog::from_value(value, block_hash, expected_block_number))
-            .collect()
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok(ProviderLogsPayload {
+            logs,
+            cache_metadata: payload.cache_metadata,
+        })
     }
 
     async fn fetch_receipts_by_block_hash(
@@ -410,7 +512,7 @@ impl JsonRpcProvider {
         block_hash: &str,
         expected_block_number: i64,
         transactions: &[ProviderTransaction],
-    ) -> Result<Vec<ProviderReceipt>> {
+    ) -> Result<ProviderReceiptsPayload> {
         match self
             .fetch_block_receipts_by_block_hash(block_hash, expected_block_number, transactions)
             .await
@@ -434,14 +536,21 @@ impl JsonRpcProvider {
         block_hash: &str,
         expected_block_number: i64,
         transactions: &[ProviderTransaction],
-    ) -> Result<Vec<ProviderReceipt>> {
-        let receipts = self
-            .fetch_json_rpc_result(
+    ) -> Result<ProviderReceiptsPayload> {
+        let payload = self
+            .fetch_json_rpc_result_with_payload(
                 "eth_getBlockReceipts",
                 vec![Value::String(block_hash.to_owned())],
             )
             .await?
-            .context("provider did not return receipts for exact block hash lookup")?;
+            .with_cache_metadata(
+                RAW_PAYLOAD_KIND_BLOCK_RECEIPTS,
+                "eth_getBlockReceipts",
+                "block_hash",
+            );
+        let receipts = payload
+            .result
+            .context("provider returned null receipts for exact block hash lookup")?;
         let receipts = receipts
             .as_array()
             .context("expected receipts array in JSON-RPC result")?;
@@ -450,12 +559,17 @@ impl JsonRpcProvider {
             .map(ProviderReceipt::from_value)
             .collect::<Result<Vec<_>>>()?;
 
-        self.order_receipts_by_transaction_hash(
+        let receipts = self.order_receipts_by_transaction_hash(
             block_hash,
             expected_block_number,
             receipts,
             transactions,
-        )
+        )?;
+
+        Ok(ProviderReceiptsPayload {
+            receipts,
+            cache_metadata: vec![payload.cache_metadata],
+        })
     }
 
     async fn fetch_receipts_by_transaction_hashes(
@@ -463,7 +577,7 @@ impl JsonRpcProvider {
         block_hash: &str,
         expected_block_number: i64,
         transactions: &[ProviderTransaction],
-    ) -> Result<Vec<ProviderReceipt>> {
+    ) -> Result<ProviderReceiptsPayload> {
         if transactions.len() > MAX_TRANSACTION_RECEIPT_FALLBACK {
             bail!(
                 "refusing to fan out {} transaction receipts for block {}",
@@ -490,12 +604,17 @@ impl JsonRpcProvider {
             receipts.push(receipt);
         }
 
-        self.order_receipts_by_transaction_hash(
+        let receipts = self.order_receipts_by_transaction_hash(
             block_hash,
             expected_block_number,
             receipts,
             transactions,
-        )
+        )?;
+
+        Ok(ProviderReceiptsPayload {
+            receipts,
+            cache_metadata: Vec::new(),
+        })
     }
 
     fn order_receipts_by_transaction_hash(
@@ -598,6 +717,17 @@ impl JsonRpcProvider {
         method: &str,
         params: Vec<Value>,
     ) -> Result<Option<Value>> {
+        Ok(self
+            .fetch_json_rpc_result_with_payload(method, params)
+            .await?
+            .result)
+    }
+
+    async fn fetch_json_rpc_result_with_payload(
+        &self,
+        method: &str,
+        params: Vec<Value>,
+    ) -> Result<JsonRpcResultPayload> {
         let payload = json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -626,6 +756,7 @@ impl JsonRpcProvider {
             bail!("provider request for {method} failed with HTTP {status}: {response_body}");
         }
 
+        let fingerprint = JsonRpcPayloadFingerprint::for_body(&body)?;
         let response = serde_json::from_slice::<JsonRpcResponse>(&body)
             .context("failed to decode JSON-RPC response")?;
         if let Some(error) = response.error {
@@ -636,7 +767,90 @@ impl JsonRpcProvider {
             );
         }
 
-        Ok(response.result)
+        Ok(JsonRpcResultPayload {
+            result: response.result,
+            fingerprint,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ProviderLogsPayload {
+    logs: Vec<ProviderLog>,
+    cache_metadata: ProviderRawPayloadCacheMetadata,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ProviderReceiptsPayload {
+    receipts: Vec<ProviderReceipt>,
+    cache_metadata: Vec<ProviderRawPayloadCacheMetadata>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct JsonRpcResultPayload {
+    result: Option<Value>,
+    fingerprint: JsonRpcPayloadFingerprint,
+}
+
+impl JsonRpcResultPayload {
+    fn with_cache_metadata(
+        self,
+        payload_kind: &str,
+        method: &str,
+        fetch_mode: &str,
+    ) -> JsonRpcResultWithCacheMetadata {
+        JsonRpcResultWithCacheMetadata {
+            result: self.result,
+            cache_metadata: self
+                .fingerprint
+                .cache_metadata(payload_kind, method, fetch_mode),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct JsonRpcResultWithCacheMetadata {
+    result: Option<Value>,
+    cache_metadata: ProviderRawPayloadCacheMetadata,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct JsonRpcPayloadFingerprint {
+    digest_algorithm: String,
+    retained_digest: String,
+    payload_size_bytes: i64,
+}
+
+impl JsonRpcPayloadFingerprint {
+    fn for_body(body: &[u8]) -> Result<Self> {
+        let payload_size_bytes =
+            i64::try_from(body.len()).context("JSON-RPC payload size does not fit in i64")?;
+
+        Ok(Self {
+            digest_algorithm: RAW_PAYLOAD_DIGEST_ALGORITHM.to_owned(),
+            retained_digest: keccak256_hex(body),
+            payload_size_bytes,
+        })
+    }
+
+    fn cache_metadata(
+        self,
+        payload_kind: &str,
+        method: &str,
+        fetch_mode: &str,
+    ) -> ProviderRawPayloadCacheMetadata {
+        ProviderRawPayloadCacheMetadata {
+            payload_kind: payload_kind.to_owned(),
+            digest_algorithm: self.digest_algorithm,
+            retained_digest: self.retained_digest,
+            payload_size_bytes: self.payload_size_bytes,
+            cache_metadata: json!({
+                "source": "json-rpc",
+                "method": method,
+                "fetch_mode": fetch_mode,
+                "digest_scope": "json_rpc_response_body",
+            }),
+        }
     }
 }
 
@@ -739,6 +953,7 @@ impl ProviderBlockBundle {
             transactions,
             logs: Vec::new(),
             receipts: Vec::new(),
+            raw_payloads: Vec::new(),
         })
     }
 }
@@ -964,6 +1179,20 @@ fn parse_hex_bytes(value: &str) -> Result<Vec<u8>> {
         index += 2;
     }
     Ok(bytes)
+}
+
+fn keccak256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Keccak256::new();
+    hasher.update(bytes);
+    hex_string(&hasher.finalize())
+}
+
+fn hex_string(bytes: &[u8]) -> String {
+    let mut output = String::from("0x");
+    for byte in bytes {
+        output.push_str(&format!("{byte:02x}"));
+    }
+    output
 }
 
 fn normalize_hash(value: &str) -> String {

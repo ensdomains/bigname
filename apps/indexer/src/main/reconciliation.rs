@@ -6,14 +6,15 @@ use bigname_manifests::{
 };
 use bigname_storage::{
     CanonicalityState, ChainCheckpoint, ChainCheckpointUpdate, ChainLineageBlock,
-    CheckpointBlockRef, RawBlock, RawCodeHash, RawLog, RawReceipt, RawTransaction,
-    advance_chain_checkpoints, invalidate_execution_outcomes_for_orphaned_blocks,
+    CheckpointBlockRef, RawBlock, RawCodeHash, RawLog, RawPayloadCacheMetadataUpsert, RawReceipt,
+    RawTransaction, advance_chain_checkpoints, invalidate_execution_outcomes_for_orphaned_blocks,
     list_canonical_raw_log_replay_inputs, list_canonical_raw_log_replay_inputs_for_block_hashes,
     load_chain_lineage_block, load_raw_block, load_raw_blocks_by_hashes,
     load_raw_code_hash_counts_by_block_hashes, mark_block_derived_normalized_events_range_orphaned,
     mark_chain_lineage_range_orphaned, mark_identity_rows_range_orphaned,
     mark_raw_block_facts_range_orphaned, upsert_chain_lineage_blocks, upsert_raw_blocks,
-    upsert_raw_code_hashes, upsert_raw_logs, upsert_raw_receipts, upsert_raw_transactions,
+    upsert_raw_code_hashes, upsert_raw_logs, upsert_raw_payload_cache_metadata,
+    upsert_raw_receipts, upsert_raw_transactions,
 };
 use sha3::{Digest, Keccak256};
 use tracing::{info, warn};
@@ -21,8 +22,10 @@ use tracing::{info, warn};
 use crate::{
     MAX_PARENT_FETCH_DEPTH,
     provider::{
-        self, ProviderBlock, ProviderBlockBundle, ProviderBlockSelection, ProviderCodeObservation,
-        ProviderHeadSnapshot, ProviderLog, ProviderReceipt, ProviderRegistry, ProviderTransaction,
+        self, JSON_RPC_PAYLOAD_CONTENT_ENCODING, JSON_RPC_PAYLOAD_CONTENT_TYPE, ProviderBlock,
+        ProviderBlockBundle, ProviderBlockSelection, ProviderCodeObservation, ProviderHeadSnapshot,
+        ProviderLog, ProviderRawPayloadCacheMetadata, ProviderReceipt, ProviderRegistry,
+        ProviderTransaction,
     },
     runtime::{
         IntakeChainTask, checkpoint_mode, log_block_derived_normalized_event_summary,
@@ -537,6 +540,7 @@ pub(crate) async fn reconcile_fetched_heads(
         persist_reconciled_raw_payloads(
             pool,
             &task.chain,
+            &task.addresses,
             provider,
             heads,
             &canonical,
@@ -897,6 +901,7 @@ pub(crate) async fn persist_reconciled_raw_blocks(
 pub(crate) async fn persist_reconciled_raw_payloads(
     pool: &sqlx::PgPool,
     chain: &str,
+    selected_addresses: &[String],
     provider: &provider::JsonRpcProvider,
     heads: &ProviderHeadSnapshot,
     canonical: &CanonicalReconciliation,
@@ -920,6 +925,8 @@ pub(crate) async fn persist_reconciled_raw_payloads(
     let mut transactions = Vec::<RawTransaction>::new();
     let mut receipts = Vec::<RawReceipt>::new();
     let mut logs = Vec::<RawLog>::new();
+    let mut cache_metadata = Vec::<RawPayloadCacheMetadataUpsert>::new();
+    let selected_addresses = selected_address_set(selected_addresses);
 
     for raw_block in &raw_blocks {
         let bundle = provider
@@ -927,31 +934,35 @@ pub(crate) async fn persist_reconciled_raw_payloads(
             .await?;
         ensure_provider_bundle_matches_raw_block(raw_block, &bundle)?;
 
-        transactions.extend(
-            bundle
-                .transactions
-                .iter()
-                .map(|transaction| {
-                    provider_transaction_to_raw_transaction(chain, raw_block, transaction)
-                })
-                .collect::<Result<Vec<_>>>()?,
-        );
-        receipts.extend(
-            bundle
-                .receipts
-                .iter()
-                .map(|receipt| provider_receipt_to_raw_receipt(chain, raw_block, receipt))
-                .collect::<Result<Vec<_>>>()?,
-        );
-        logs.extend(
-            bundle
-                .logs
-                .iter()
-                .map(|log| provider_log_to_raw_log(chain, raw_block, log))
-                .collect::<Result<Vec<_>>>()?,
-        );
+        cache_metadata.extend(provider_raw_payload_cache_metadata_to_upserts(
+            chain,
+            raw_block,
+            &bundle.raw_payloads,
+        ));
+        let selected_logs = provider_logs_to_live_selected_raw_logs(
+            chain,
+            raw_block,
+            &bundle.logs,
+            &selected_addresses,
+        )?;
+        let retained_transaction_keys = retained_transaction_keys_from_raw_logs(&selected_logs);
+
+        transactions.extend(provider_transactions_to_selected_raw_transactions(
+            chain,
+            raw_block,
+            &bundle.transactions,
+            &retained_transaction_keys,
+        )?);
+        receipts.extend(provider_receipts_to_selected_raw_receipts(
+            chain,
+            raw_block,
+            &bundle.receipts,
+            &retained_transaction_keys,
+        )?);
+        logs.extend(selected_logs);
     }
 
+    upsert_raw_payload_cache_metadata(pool, &cache_metadata).await?;
     upsert_raw_transactions(pool, &transactions).await?;
     upsert_raw_receipts(pool, &receipts).await?;
     upsert_raw_logs(pool, &logs).await?;
@@ -1160,7 +1171,7 @@ pub(crate) async fn persist_reconciled_raw_code_hashes(
         let observations = provider
             .fetch_code_observations_at_block(
                 &task.addresses,
-                ProviderBlockSelection::Number(raw_block.block_number),
+                ProviderBlockSelection::Hash(raw_block.block_hash.clone()),
             )
             .await?;
         code_hashes.extend(
@@ -1254,6 +1265,110 @@ pub(crate) fn ensure_provider_bundle_matches_raw_block(
     }
 
     Ok(())
+}
+
+pub(crate) fn selected_address_set(addresses: &[String]) -> BTreeSet<String> {
+    addresses
+        .iter()
+        .map(|address| address.to_ascii_lowercase())
+        .collect()
+}
+
+pub(crate) fn provider_logs_to_selected_raw_logs(
+    chain: &str,
+    raw_block: &RawBlock,
+    logs: &[ProviderLog],
+    selected_addresses: &BTreeSet<String>,
+) -> Result<Vec<RawLog>> {
+    logs.iter()
+        .filter(|log| selected_addresses.contains(&log.address.to_ascii_lowercase()))
+        .map(|log| provider_log_to_raw_log(chain, raw_block, log))
+        .collect()
+}
+
+pub(crate) fn provider_logs_to_live_selected_raw_logs(
+    chain: &str,
+    raw_block: &RawBlock,
+    logs: &[ProviderLog],
+    selected_addresses: &BTreeSet<String>,
+) -> Result<Vec<RawLog>> {
+    let selected_transaction_keys = logs
+        .iter()
+        .filter(|log| selected_addresses.contains(&log.address.to_ascii_lowercase()))
+        .map(|log| (log.transaction_hash.clone(), log.transaction_index))
+        .collect::<BTreeSet<_>>();
+
+    logs.iter()
+        .filter(|log| {
+            selected_addresses.contains(&log.address.to_ascii_lowercase())
+                || selected_transaction_keys
+                    .contains(&(log.transaction_hash.clone(), log.transaction_index))
+        })
+        .map(|log| provider_log_to_raw_log(chain, raw_block, log))
+        .collect()
+}
+
+pub(crate) fn retained_transaction_keys_from_raw_logs(logs: &[RawLog]) -> BTreeSet<(String, i64)> {
+    logs.iter()
+        .map(|log| (log.transaction_hash.clone(), log.transaction_index))
+        .collect()
+}
+
+pub(crate) fn provider_transactions_to_selected_raw_transactions(
+    chain: &str,
+    raw_block: &RawBlock,
+    transactions: &[ProviderTransaction],
+    retained_transaction_keys: &BTreeSet<(String, i64)>,
+) -> Result<Vec<RawTransaction>> {
+    transactions
+        .iter()
+        .filter(|transaction| {
+            retained_transaction_keys.contains(&(
+                transaction.transaction_hash.clone(),
+                transaction.transaction_index,
+            ))
+        })
+        .map(|transaction| provider_transaction_to_raw_transaction(chain, raw_block, transaction))
+        .collect()
+}
+
+pub(crate) fn provider_receipts_to_selected_raw_receipts(
+    chain: &str,
+    raw_block: &RawBlock,
+    receipts: &[ProviderReceipt],
+    retained_transaction_keys: &BTreeSet<(String, i64)>,
+) -> Result<Vec<RawReceipt>> {
+    receipts
+        .iter()
+        .filter(|receipt| {
+            retained_transaction_keys
+                .contains(&(receipt.transaction_hash.clone(), receipt.transaction_index))
+        })
+        .map(|receipt| provider_receipt_to_raw_receipt(chain, raw_block, receipt))
+        .collect()
+}
+
+pub(crate) fn provider_raw_payload_cache_metadata_to_upserts(
+    chain: &str,
+    raw_block: &RawBlock,
+    payloads: &[ProviderRawPayloadCacheMetadata],
+) -> Vec<RawPayloadCacheMetadataUpsert> {
+    payloads
+        .iter()
+        .map(|payload| RawPayloadCacheMetadataUpsert {
+            chain_id: chain.to_owned(),
+            block_hash: raw_block.block_hash.clone(),
+            payload_kind: payload.payload_kind.clone(),
+            digest_algorithm: Some(payload.digest_algorithm.clone()),
+            retained_digest: Some(payload.retained_digest.clone()),
+            block_number: Some(raw_block.block_number),
+            payload_size_bytes: payload.payload_size_bytes,
+            content_type: Some(JSON_RPC_PAYLOAD_CONTENT_TYPE.to_owned()),
+            content_encoding: Some(JSON_RPC_PAYLOAD_CONTENT_ENCODING.to_owned()),
+            cache_metadata: payload.cache_metadata.clone(),
+            canonicality_state: raw_block.canonicality_state,
+        })
+        .collect()
 }
 
 pub(crate) fn canonical_raw_state(status: CanonicalReconciliationStatus) -> CanonicalityState {

@@ -6,7 +6,7 @@ This document freezes the internal persistence strategy enough for storage, inta
 
 ## 1. Invariants
 
-- raw facts are immutable
+- durable raw facts are immutable; evictable full-payload cache entries are not system-of-record facts
 - projections are disposable and rebuildable
 - canonicality is explicit, never inferred from "latest row wins"
 - execution traces and execution steps are durable audit artifacts; cache outcomes are reusable only while their dependencies remain canonical
@@ -17,7 +17,7 @@ This document freezes the internal persistence strategy enough for storage, inta
 The system of record is split into six layers:
 
 1. `chain_lineage`: block ancestry, fork points, hash-first reconciliation, head promotion
-2. `raw_facts`: blocks, transactions, receipts, logs, code hashes, fetched call snapshots
+2. `raw_facts`: hot indexed replay facts, selected/admitted target logs, code hashes, fetched call snapshots, and compact payload-cache metadata
 3. `manifests_and_discovery`: source manifests, discovered edges, rollout flags
 4. `identity_and_events`: `NameSurface`, `SurfaceBinding`, resources, token lineage, normalized events
 5. `projections`: current-state and collection read models
@@ -26,6 +26,20 @@ The system of record is split into six layers:
 Only layers 1 through 5 are required to rebuild current declared state. Layer 6 is required to replay verified answers and explain them.
 
 Worker-owned manifest/proxy alert observations are an operational persistence family alongside those truth layers. They record audit findings for drift and proxy implementation changes, but they are not manifest truth, discovery admission, projection state, public API state, or adapter-owned normalized events.
+
+Postgres is the hot indexed and replay-focused store, not an archive-style raw corpus. It retains durable replay and audit facts:
+
+- lineage and header anchors needed to reconcile forks, prove ancestry, promote checkpoints, and audit canonicality
+- selected/admitted target logs and the minimal transaction, receipt, and block fields needed to decode those logs, route them through adapters, rebuild normalized events, or reproduce execution outputs
+- block-scoped call snapshots and enrichments only when they are part of a retained replay contract for normalized events, projections, or execution artifacts
+- code-hash observations and discovery/proxy evidence needed by manifests, adapter routing, or audit tooling
+- compact metadata and optional digests for full payloads that were fetched as cache but are not replay-critical hot rows
+
+Large/full block payloads and non-indexed transaction, receipt, or block bodies are evictable cache by default once the durable replay facts have been extracted. They may live inline during a hot window, in local/provider cache, in hash-addressed object storage, or not be retained at all. Hash-addressed cold storage is required only for payload classes that a doc-first policy explicitly declares durable. If metadata is retained for an evictable payload, it should be stable enough to explain what was fetched, such as payload kind, chain id, block hash/number where block-scoped, optional digest, size, content type or encoding, source observation metadata, observed time, and canonicality state when applicable.
+
+Provider re-fetch is an explicit, fallible cache-fill path. For block-scoped payloads, it must be block-hash-scoped, verify the retained digest before any bytes are used, and fail closed if the digest is absent, the digest mismatches, or the provider cannot serve the exact historical payload. Provider re-fetch is not a substitute for retaining selected replay facts, lineage, normalized events, execution artifacts, or orphaned-branch audit truth.
+
+Retention windows and compaction cadence are operational policy. They do not change route coverage, API consistency semantics, manifest capability flags, rollout status, or consumer-replacement graduation.
 
 ## 3. ID Strategy
 
@@ -99,7 +113,7 @@ Use `bigint generated always as identity` for:
 | Family | Write owner | Notes |
 | --- | --- | --- |
 | `chain_*` | intake | lineage and canonical block graph |
-| `raw_*` | intake | immutable blockchain and execution inputs |
+| `raw_*` | intake | immutable hot replay facts plus payload-cache metadata for blockchain and execution inputs |
 | `backfill_*` | worker/backfill substrate | persisted backfill jobs, bounded range leases, and resumable range checkpoints; not chain head checkpoints |
 | `manifest_*` | manifests/discovery | source manifests, declared contract admission, capability versions |
 | `discovery_*` | manifests/discovery | canonical reachable contract graph and watch-plan expansion keyed by `contract_instance_id` |
@@ -125,7 +139,7 @@ Basenames resolver-profile state is also separate from contract-instance admissi
 
 For ENSv2 identity rows and normalized event rows, adapters own the same boundary: they mint and reuse `resource_id`, `token_lineage_id`, and `surface_binding_id`, append `TokenResourceLinked`, `TokenRegenerated`, `SubregistryChanged`, `ParentChanged`, `AliasChanged`, permission events, and preimage observations from name-bearing events, and never write projection rows. Projection workers consume those events; they do not infer token-resource links, subregistry reachability, alias targets, wildcard coverage, EAC-derived effective powers, or exact-name support directly from raw logs, preimage observations, or manifest presence (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L34 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L15 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L30 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L49 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L75 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRegistrar.sol:L32 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRegistrar.sol:L53 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/resolver/interfaces/IPermissionedResolver.sol:L14 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/access-control/interfaces/IEnhancedAccessControl.sol:L19 @ ens_v2@554c309).
 
-Raw-fact normalized-event replay does not introduce a new storage owner. The indexer-owned operational runner may select bounded canonical raw facts and ask the adapter-owned `normalized_events` boundary to perform an upsert-only resync for the corresponding rows; it must not let storage helpers, projections, API code, or inspection tooling synthesize normalized events directly. Replay does not delete stale `normalized_events` or replace existing payloads for an already persisted normalized-event identity; the storage upsert path inserts absent rows and refreshes canonicality for matching identities, while conflicting payloads remain mismatches. Replay must not mutate `chain_*`, `raw_*`, `backfill_*`, `projection_*`, `execution_*`, manifests, discovery rows, public API state, or checkpoint promotion state.
+Raw-fact normalized-event replay does not introduce a new storage owner. The indexer-owned operational runner may select bounded canonical raw facts and ask the adapter-owned `normalized_events` boundary to perform an upsert-only resync for the corresponding rows; it must not let storage helpers, projections, API code, or inspection tooling synthesize normalized events directly. Replay reads canonical durable hot facts first. It may use a retained durable cold payload only when an explicitly retained replay contract requires that payload. For block-scoped payloads, it may use provider re-fetch only through an explicit block-hash-scoped, retained-digest-checked, fail-closed cache-fill path; if no retained digest exists, the payload cannot satisfy that contract. Provider re-fetch must not replace selected replay facts that the docs require Postgres to retain. Replay does not delete stale `normalized_events` or replace existing payloads for an already persisted normalized-event identity; the storage upsert path inserts absent rows and refreshes canonicality for matching identities, while conflicting payloads remain mismatches. Replay must not mutate `chain_*`, `raw_*`, `backfill_*`, `projection_*`, `execution_*`, manifests, discovery rows, public API state, or checkpoint promotion state.
 
 At minimum, manifests/discovery persistence must carry:
 
@@ -184,6 +198,8 @@ Start with partitioning on the highest-volume append-only tables:
 - `normalized_events`
 - `execution_steps`
 
+For `raw_blocks`, `raw_transactions`, and `raw_receipts`, partitioning applies to hot replay facts and any payload-cache metadata retained in Postgres. It is not a requirement to keep full block, transaction, or receipt bodies inline after those payloads are outside the hot reorg/replay window or were not selected for admitted target replay.
+
 Partition keys:
 
 - `chain_id`
@@ -221,6 +237,7 @@ Rules:
 
 - block hash is the identity anchor; block number is position only
 - fork detection marks affected rows `orphaned`; it does not delete them
+- reorg repair preserves lineage and selected replay facts for losing branches as audit truth; evictable payload-cache bytes may be absent, but their absence must not erase canonicality or replay-critical evidence
 - projection rebuilds read rows that are `canonical`, `safe`, or `finalized` by default
 - history and audit tools may opt into `observed` and `orphaned` rows explicitly
 - safe and finalized promotion is monotonic per chain
@@ -231,7 +248,7 @@ Reusable `execution_cache_outcomes` rows must carry dependencies tied to explici
 
 Backfill range checkpoints are separate from canonicality checkpoints. Advancing or completing a backfill job records only that bounded fetch/resume work reached a position in its declared range; it must not change any `canonicality_state` value and must not advance `canonical_head`, `safe_head`, or `finalized_head`.
 
-Read-only canonicality inspection uses storage audit helpers over `chain_lineage`, raw fact tables, and `normalized_events`. The worker single-block inspection contract remains `bigname-worker inspect canonicality --chain-id <id> --block-hash <hash>` and resolves one `(chain_id, block_hash)`. For that requested block hash, helpers may report whether a stored lineage row exists and, for stored rows, block lineage, parent hash, block number, canonicality state, raw fact counts, and normalized-event counts.
+Read-only canonicality inspection uses storage audit helpers over `chain_lineage`, raw fact tables, retained payload-cache metadata, and `normalized_events`. The worker single-block inspection contract remains `bigname-worker inspect canonicality --chain-id <id> --block-hash <hash>` and resolves one `(chain_id, block_hash)`. For that requested block hash, helpers may report whether a stored lineage row exists and, for stored rows, block lineage, parent hash, block number, canonicality state, raw fact counts, payload-cache metadata counts or digests where retained, and normalized-event counts.
 
 Read-only stored lineage range inspection is worker-owned operational tooling over `chain_lineage`. The bounded command `bigname-worker inspect stored-lineage-range` lists only lineage rows already stored for the requested chain and finite block range, ordered stably by `(block_number, block_hash)` unless a later doc-first contract adds another explicit order. It renders stable JSON per observed block with chain id, block number, block hash, parent hash, canonicality state, timestamp, and any stored promotion markers; nullable stored fields render as `null` rather than disappearing. It must not infer missing heights, gaps, span-wide canonicality, aggregate finality, or completeness for the requested range. It must not mutate lineage, raw facts, normalized events, projections, execution cache rows, backfill jobs, backfill range checkpoints, or `canonical_head`, `safe_head`, or `finalized_head`.
 
@@ -249,7 +266,18 @@ Every current-state projection row carries:
 
 Projection tables may be truncated and rebuilt from canonical facts plus normalized events.
 
-## 8. Execution Artifact Storage
+## 8. Raw Payload Cache and Object Storage
+
+Persist durable raw replay facts inline in Postgres when they are needed for indexed lookup, adapter replay, projection rebuild, execution-output rebuild, canonicality audit, or selected-target backfill proof. Treat large/full raw payload bytes as cache unless a doc-first policy declares that payload class durable:
+
+- full block bodies outside the hot reorg/replay window
+- non-indexed transaction bodies
+- non-indexed receipt bodies
+- block-scoped payload batches fetched by live ingestion or backfill but not selected for admitted target replay
+
+Evictable payload cache may be inline, local, object-backed, provider-refetchable, or absent after durable facts are extracted. Postgres stores only the metadata needed by the selected retention contract, such as payload kind, block identity fields, digest when the payload may later be dereferenced or refetched, size, content type or encoding, object key when object-backed, and observation metadata. Cache metadata without a retained digest may describe what was fetched, but it cannot authorize later byte use. Reads that dereference object-backed cache or re-fetch from a provider must verify the retained digest before use and fail closed on missing digest, mismatch, or unavailable historical data.
+
+Hash-addressed object storage is a durability boundary only for raw payload classes explicitly declared durable. It is an implementation detail for evictable cache otherwise and must not be required for every fetched full block, transaction, or receipt body.
 
 Persist small execution payloads inline in Postgres:
 
@@ -264,7 +292,7 @@ Persist large payloads in object storage addressed by SHA-256 digest:
 - large metadata responses
 - trace attachments
 
-Postgres stores the digest, size, content type, and object key.
+Postgres stores the digest, size, content type, and object key for execution attachments as well.
 
 The execution storage boundary separates durable audit artifacts from cache reuse. `execution_traces` and `execution_steps` preserve what was executed and why; normal `execution_cache_outcomes` writes record whether a verified outcome can be reused under its request key, manifest versions, and block-hash-bearing dependency boundaries. Phase 9 reorg invalidation updates cache eligibility only through the synchronous indexer/reorg repair exception and does not change the selected ENSv2 exact-name support boundary, widen verified execution support, promote additional deployment profiles, or graduate any manifest capability.
 
@@ -290,6 +318,7 @@ To keep parallel work safe:
 - execution workers own trace and step writes plus normal cache outcome writes
 - synchronous indexer/reorg repair owns only `execution_cache_outcomes` deletes or invalidations tied to orphaned block dependencies
 - raw-fact normalized-event replay is indexer-owned orchestration over the adapter-owned `normalized_events` boundary; it reads persisted canonical raw facts and may upsert only the corresponding `normalized_events` without stale-row purge or payload replacement
+- intake owns durable hot raw-fact writes plus optional payload-cache metadata for block-scoped payloads; replay and inspection tooling may dereference object-backed cache or re-fetch provider payloads only through an explicit block-hash-scoped, retained-digest-checked, fail-closed boundary and must not refetch provider history as a substitute for retained replay inputs
 - API code must not query raw-fact tables directly except for explicit audit endpoints
 - canonicality, raw-fact, and stored lineage range inspection tooling is worker-owned, read-only operational tooling over storage audit helpers; it does not create a public `v1` route, infer missing lineage, or bypass the API boundary for user-facing reads
 - backfill job inspection tooling is worker-owned, read-only operational tooling over `backfill_*`; it does not create a public `v1` route, mutate operational state, or bypass API read boundaries for user-facing data

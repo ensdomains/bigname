@@ -17,6 +17,7 @@ mod raw;
 mod raw_calls;
 mod raw_children;
 mod raw_code;
+mod raw_payload_cache;
 mod record_inventory;
 mod resolver;
 
@@ -34,8 +35,9 @@ pub use address_names::{
 pub use audit::{
     CanonicalityInspection, CanonicalityInspectionStatus, ManifestDriftAlertInspection,
     ManifestDriftAlertKind, ManifestDriftAlertObservation, RawFactAuditCounts,
-    StoredLineageRangeBlock, inspect_block_canonicality, inspect_canonicality_range,
-    list_manifest_drift_alert_observations, list_stored_lineage_range,
+    RawPayloadCacheAuditMetadata, StoredLineageRangeBlock, inspect_block_canonicality,
+    inspect_canonicality_range, list_manifest_drift_alert_observations,
+    list_raw_payload_cache_audit_metadata, list_stored_lineage_range,
 };
 pub use backfill_jobs::{
     BackfillJob, BackfillJobCreate, BackfillJobRecord, BackfillLifecycleStatus, BackfillRange,
@@ -125,6 +127,11 @@ pub use raw_children::{
 };
 pub use raw_code::{
     RawCodeHash, load_raw_code_hash_counts_by_block_hashes, upsert_raw_code_hashes,
+};
+pub use raw_payload_cache::{
+    RawPayloadCacheDigestVerification, RawPayloadCacheMetadata, RawPayloadCacheMetadataUpsert,
+    list_raw_payload_cache_metadata_by_block_hash, load_raw_payload_cache_metadata,
+    upsert_raw_payload_cache_metadata, verify_raw_payload_cache_digest,
 };
 pub use record_inventory::{
     RecordInventoryCurrentRow, clear_record_inventory_current, delete_record_inventory_current,

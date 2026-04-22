@@ -4,9 +4,10 @@ use anyhow::{Context, Result, bail};
 use bigname_manifests::{WatchedSourceSelectorKind, WatchedSourceSelectorPlan};
 use bigname_storage::{
     BackfillJobCreate, BackfillLifecycleStatus, BackfillRange, BackfillRangeSpec,
-    CanonicalityState, RawCodeHash, RawLog, RawReceipt, RawTransaction, advance_backfill_range,
-    complete_backfill_range, create_backfill_job, fail_backfill_range, load_backfill_job,
-    reserve_backfill_range, upsert_raw_blocks, upsert_raw_code_hashes, upsert_raw_logs,
+    CanonicalityState, RawCodeHash, RawLog, RawPayloadCacheMetadataUpsert, RawReceipt,
+    RawTransaction, advance_backfill_range, complete_backfill_range, create_backfill_job,
+    fail_backfill_range, load_backfill_job, reserve_backfill_range, upsert_raw_blocks,
+    upsert_raw_code_hashes, upsert_raw_logs, upsert_raw_payload_cache_metadata,
     upsert_raw_receipts, upsert_raw_transactions,
 };
 use serde_json::json;
@@ -17,9 +18,10 @@ use crate::{
     provider::{JsonRpcProvider, ProviderBlockSelection},
     reconciliation::{
         ensure_provider_bundle_matches_raw_block, provider_block_to_raw_block,
-        provider_code_observation_to_raw_code_hash, provider_log_to_raw_log,
-        provider_receipt_to_raw_receipt, provider_transaction_to_raw_transaction,
-        sync_adapter_state_from_persisted_raw_payloads,
+        provider_code_observation_to_raw_code_hash, provider_logs_to_selected_raw_logs,
+        provider_raw_payload_cache_metadata_to_upserts, provider_receipts_to_selected_raw_receipts,
+        provider_transactions_to_selected_raw_transactions,
+        retained_transaction_keys_from_raw_logs, sync_adapter_state_from_persisted_raw_payloads,
         sync_adapter_state_from_scoped_persisted_raw_payloads,
     },
 };
@@ -255,6 +257,7 @@ pub(crate) async fn run_hash_pinned_backfill_range(
     let mut receipts = Vec::<RawReceipt>::new();
     let mut logs = Vec::<RawLog>::new();
     let mut code_hashes = Vec::<RawCodeHash>::new();
+    let mut cache_metadata = Vec::<RawPayloadCacheMetadataUpsert>::new();
 
     for resolved_block in &resolved_blocks {
         let selected_addresses =
@@ -285,36 +288,31 @@ pub(crate) async fn run_hash_pinned_backfill_range(
         );
         ensure_provider_bundle_matches_raw_block(&raw_block, &bundle)?;
 
-        transactions.extend(
-            bundle
-                .transactions
-                .iter()
-                .map(|transaction| {
-                    provider_transaction_to_raw_transaction(
-                        &watched_chain.chain,
-                        &raw_block,
-                        transaction,
-                    )
-                })
-                .collect::<Result<Vec<_>>>()?,
-        );
-        receipts.extend(
-            bundle
-                .receipts
-                .iter()
-                .map(|receipt| {
-                    provider_receipt_to_raw_receipt(&watched_chain.chain, &raw_block, receipt)
-                })
-                .collect::<Result<Vec<_>>>()?,
-        );
-        logs.extend(
-            bundle
-                .logs
-                .iter()
-                .filter(|log| selected_addresses.contains(&log.address.to_ascii_lowercase()))
-                .map(|log| provider_log_to_raw_log(&watched_chain.chain, &raw_block, log))
-                .collect::<Result<Vec<_>>>()?,
-        );
+        cache_metadata.extend(provider_raw_payload_cache_metadata_to_upserts(
+            &watched_chain.chain,
+            &raw_block,
+            &bundle.raw_payloads,
+        ));
+        let selected_logs = provider_logs_to_selected_raw_logs(
+            &watched_chain.chain,
+            &raw_block,
+            &bundle.logs,
+            &selected_addresses,
+        )?;
+        let retained_transaction_keys = retained_transaction_keys_from_raw_logs(&selected_logs);
+        transactions.extend(provider_transactions_to_selected_raw_transactions(
+            &watched_chain.chain,
+            &raw_block,
+            &bundle.transactions,
+            &retained_transaction_keys,
+        )?);
+        receipts.extend(provider_receipts_to_selected_raw_receipts(
+            &watched_chain.chain,
+            &raw_block,
+            &bundle.receipts,
+            &retained_transaction_keys,
+        )?);
+        logs.extend(selected_logs);
 
         if !selected_addresses.is_empty() {
             let selected_addresses = selected_addresses.into_iter().collect::<Vec<_>>();
@@ -348,6 +346,7 @@ pub(crate) async fn run_hash_pinned_backfill_range(
     }
 
     upsert_raw_blocks(pool, &raw_blocks).await?;
+    upsert_raw_payload_cache_metadata(pool, &cache_metadata).await?;
     upsert_raw_transactions(pool, &transactions).await?;
     upsert_raw_receipts(pool, &receipts).await?;
     upsert_raw_logs(pool, &logs).await?;

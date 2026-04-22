@@ -145,11 +145,43 @@ pub(crate) async fn run_backfill_source_family_existing_response_lock() -> Resul
     let completed_dynamic_resolver_jobs =
         seed_completed_dynamic_resolver_backfill_jobs(&database).await?;
     assert_completed_dynamic_resolver_backfill_jobs(&completed_dynamic_resolver_jobs);
+    let source_family_raw_retention_probe =
+        seed_source_family_raw_retention_probe(&database, &completed_jobs).await?;
+    let backfill_surface_before_raw_retention =
+        snapshot_backfill_lifecycle_surface(&database).await?;
+    let manifest_policy_before_raw_retention = snapshot_manifest_policy_surface(&database).await?;
+    replay_raw_fact_normalized_events_for_blocks(
+        &database,
+        "mainnet",
+        source_family_raw_retention_probe.chain_id,
+        &[source_family_raw_retention_probe.block_hash],
+    )
+    .await?;
+    assert_cache_first_raw_retention_replay_probe(
+        &database,
+        &source_family_raw_retention_probe,
+    )
+    .await?;
+    assert_source_family_raw_retention_probe_scoped(
+        &database,
+        &source_family_raw_retention_probe,
+    )
+    .await?;
+    assert_eq!(
+        snapshot_backfill_lifecycle_surface(&database).await?,
+        backfill_surface_before_raw_retention,
+        "source-family raw-retention replay must not mutate completed backfill jobs or range checkpoints"
+    );
+    assert_eq!(
+        snapshot_manifest_policy_surface(&database).await?,
+        manifest_policy_before_raw_retention,
+        "source-family raw-retention replay must not change manifest rollout or capability policy state"
+    );
     let after_jobs_before_replay =
         snapshot_replay_stale_current_answer_routes(&database, &corpus).await?;
     assert_eq!(
         after_jobs_before_replay, before_jobs,
-        "completed source-family and dynamic resolver backfill jobs must not mutate shipped route responses before replay"
+        "completed source-family jobs, dynamic resolver jobs, and cache-first raw-retention replay must not mutate shipped route responses before projection replay"
     );
 
     replay_all_current_projections(&database).await?;
@@ -480,6 +512,189 @@ async fn seed_completed_source_family_backfill_job(
         })?;
 
     Ok(bigname_storage::BackfillJobRecord { job, ranges })
+}
+
+async fn seed_source_family_raw_retention_probe(
+    database: &HarnessDatabase,
+    completed_jobs: &[(
+        SourceFamilyBackfillFixture,
+        bigname_storage::BackfillJobRecord,
+    )],
+) -> Result<RawRetentionProbe> {
+    let fixture = completed_jobs
+        .iter()
+        .map(|(fixture, _)| fixture)
+        .find(|fixture| {
+            fixture.chain_id == "ethereum-mainnet"
+                && fixture.source_family == RAW_REPLAY_PROBE_SOURCE_FAMILY
+        })
+        .context("source-family backfill fixtures must include ENSv1 reverse replay target")?;
+    let manifest_id = database
+        .insert_manifest(
+            fixture.namespace,
+            fixture.source_family,
+            fixture.chain_id,
+            "ens_v1",
+            81,
+            "active",
+            "uts46-v1",
+        )
+        .await?;
+    let contract_instance_id = Uuid::parse_str(fixture.contract_instance_id).with_context(|| {
+        format!(
+            "source-family fixture {} contract_instance_id must parse as UUID",
+            fixture.source_family
+        )
+    })?;
+    seed_active_replay_contract(
+        database,
+        manifest_id,
+        contract_instance_id,
+        fixture.chain_id,
+        RAW_REPLAY_PROBE_CONTRACT_ROLE,
+        fixture.address,
+    )
+    .await?;
+
+    let probe = RawRetentionProbe {
+        chain_id: fixture.chain_id,
+        block_hash: "0xbac1f11100000000000000000000000000000000000000000000000000000303",
+        block_number: fixture.range_start_block_number,
+        watched_address: fixture.address,
+    };
+    bigname_storage::upsert_chain_lineage_blocks(
+        &database.pool,
+        &[bigname_storage::ChainLineageBlock {
+            chain_id: probe.chain_id.to_owned(),
+            block_hash: probe.block_hash.to_owned(),
+            parent_hash: Some(
+                "0xbac1f11000000000000000000000000000000000000000000000000000000302"
+                    .to_owned(),
+            ),
+            block_number: probe.block_number,
+            block_timestamp: timestamp(1_717_194_303),
+            logs_bloom: None,
+            transactions_root: None,
+            receipts_root: None,
+            state_root: None,
+            canonicality_state: CanonicalityState::Canonical,
+        }],
+    )
+    .await
+    .context("failed to seed source-family raw-retention chain lineage")?;
+    bigname_storage::upsert_raw_blocks(
+        &database.pool,
+        &[raw_block(
+            probe.chain_id,
+            probe.block_hash,
+            Some("0xbac1f11000000000000000000000000000000000000000000000000000000302"),
+            probe.block_number,
+            1_717_194_303,
+        )],
+    )
+    .await
+    .context("failed to seed source-family raw-retention raw block")?;
+    bigname_storage::upsert_raw_logs(
+        &database.pool,
+        &[bigname_storage::RawLog {
+            chain_id: probe.chain_id.to_owned(),
+            block_hash: probe.block_hash.to_owned(),
+            block_number: probe.block_number,
+            transaction_hash:
+                "0xbac1f1feedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeed303"
+                    .to_owned(),
+            transaction_index: 0,
+            log_index: 0,
+            emitting_address: probe.watched_address.to_ascii_lowercase(),
+            topics: vec![
+                RAW_REPLAY_PROBE_REVERSE_CLAIMED_TOPIC0.to_owned(),
+                RAW_REPLAY_PROBE_CLAIMED_ADDRESS_TOPIC.to_owned(),
+                RAW_REPLAY_PROBE_REVERSE_NODE_TOPIC.to_owned(),
+            ],
+            data: Vec::new(),
+            canonicality_state: CanonicalityState::Canonical,
+        }],
+    )
+    .await
+    .context("failed to seed source-family raw-retention selected raw log")?;
+    seed_raw_retention_cache_metadata(database, &probe, "source-family-backfill").await?;
+
+    Ok(probe)
+}
+
+async fn assert_source_family_raw_retention_probe_scoped(
+    database: &HarnessDatabase,
+    probe: &RawRetentionProbe,
+) -> Result<()> {
+    let unselected_log_count = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)::BIGINT
+        FROM raw_logs
+        WHERE chain_id = $1
+          AND block_hash = $2
+          AND emitting_address <> $3
+        "#,
+    )
+    .bind(probe.chain_id)
+    .bind(probe.block_hash)
+    .bind(probe.watched_address)
+    .fetch_one(&database.pool)
+    .await
+    .context("failed to count source-family raw-retention unselected raw logs")?;
+    assert_eq!(
+        unselected_log_count, 0,
+        "source-scoped admission must not retain unselected raw logs for the cache-first probe"
+    );
+
+    let selected_job_count = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)::BIGINT
+        FROM backfill_jobs
+        WHERE source_identity->>'selector_kind' = 'source_family'
+          AND source_identity->>'source_family' = $1
+          AND source_identity->'selected_targets' @> $2::JSONB
+        "#,
+    )
+    .bind(RAW_REPLAY_PROBE_SOURCE_FAMILY)
+    .bind(json!([{
+        "source_family": RAW_REPLAY_PROBE_SOURCE_FAMILY,
+        "address": probe.watched_address,
+    }])
+    .to_string())
+    .fetch_one(&database.pool)
+    .await
+    .context("failed to count source-family raw-retention selected backfill jobs")?;
+    assert_eq!(
+        selected_job_count, 1,
+        "cache-first source-family probe must stay scoped to the selected source identity"
+    );
+
+    Ok(())
+}
+
+async fn snapshot_backfill_lifecycle_surface(
+    database: &HarnessDatabase,
+) -> Result<Vec<(i64, String, String, String, String, i64, String, i64)>> {
+    sqlx::query_as::<_, (i64, String, String, String, String, i64, String, i64)>(
+        r#"
+        SELECT
+            jobs.backfill_job_id,
+            jobs.status::TEXT AS job_status,
+            jobs.deployment_profile,
+            jobs.chain_id,
+            jobs.source_identity::TEXT AS source_identity,
+            ranges.backfill_range_id,
+            ranges.status::TEXT AS range_status,
+            ranges.checkpoint_block_number
+        FROM backfill_jobs AS jobs
+        JOIN backfill_ranges AS ranges
+          ON ranges.backfill_job_id = jobs.backfill_job_id
+        ORDER BY jobs.backfill_job_id, ranges.backfill_range_id
+        "#,
+    )
+    .fetch_all(&database.pool)
+    .await
+    .context("failed to snapshot backfill lifecycle surface")
 }
 
 async fn seed_completed_dynamic_resolver_backfill_jobs(

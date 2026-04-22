@@ -13,8 +13,9 @@ use sqlx::{
 
 use super::*;
 use crate::{
-    RawBlock, RawCallSnapshot, RawCodeHash, default_database_url, upsert_raw_blocks,
-    upsert_raw_call_snapshots, upsert_raw_code_hashes,
+    RawBlock, RawCallSnapshot, RawCodeHash, RawPayloadCacheMetadataUpsert, default_database_url,
+    upsert_raw_blocks, upsert_raw_call_snapshots, upsert_raw_code_hashes,
+    upsert_raw_payload_cache_metadata,
 };
 
 static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
@@ -171,6 +172,29 @@ fn raw_call_snapshot(
         response_hash: format!("0xresponse-{request_hash}"),
         response_payload: json!({
             "result": format!("0xresult-{request_hash}")
+        }),
+        canonicality_state: state,
+    }
+}
+
+fn raw_payload_cache_metadata(
+    block_hash: &str,
+    block_number: i64,
+    retained_digest: &str,
+    state: CanonicalityState,
+) -> RawPayloadCacheMetadataUpsert {
+    RawPayloadCacheMetadataUpsert {
+        chain_id: "eth-mainnet".to_owned(),
+        block_hash: block_hash.to_owned(),
+        block_number: Some(block_number),
+        payload_kind: "full_block".to_owned(),
+        digest_algorithm: Some("sha256".to_owned()),
+        retained_digest: Some(retained_digest.to_owned()),
+        payload_size_bytes: 128,
+        content_type: Some("application/json".to_owned()),
+        content_encoding: Some("identity".to_owned()),
+        cache_metadata: json!({
+            "source": "raw-child-orphan-test"
         }),
         canonicality_state: state,
     }
@@ -364,6 +388,14 @@ async fn orphan_range_marks_raw_block_children_orphaned() -> Result<()> {
         ],
     )
     .await?;
+    upsert_raw_payload_cache_metadata(
+        database.pool(),
+        &[
+            raw_payload_cache_metadata("0x002", 2, "0xdigest002", CanonicalityState::Canonical),
+            raw_payload_cache_metadata("0x001", 1, "0xdigest001", CanonicalityState::Canonical),
+        ],
+    )
+    .await?;
 
     let counts =
         mark_raw_block_facts_range_orphaned(database.pool(), "eth-mainnet", "0x002", Some("0x001"))
@@ -377,6 +409,7 @@ async fn orphan_range_marks_raw_block_children_orphaned() -> Result<()> {
             receipt_count: 1,
             log_count: 1,
             call_snapshot_count: 1,
+            payload_cache_metadata_count: 1,
         }
     );
 
@@ -430,6 +463,14 @@ async fn orphan_range_marks_raw_block_children_orphaned() -> Result<()> {
         );
     assert_eq!(
         sqlx::query_scalar::<_, String>(
+            "SELECT canonicality_state::TEXT FROM raw_payload_cache_metadata WHERE block_hash = '0x002' AND retained_digest = '0xdigest002'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "orphaned".to_owned()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
             "SELECT canonicality_state::TEXT FROM raw_blocks WHERE block_hash = '0x001'"
         )
         .fetch_one(database.pool())
@@ -444,6 +485,14 @@ async fn orphan_range_marks_raw_block_children_orphaned() -> Result<()> {
             .await?,
             "canonical".to_owned()
         );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT canonicality_state::TEXT FROM raw_payload_cache_metadata WHERE block_hash = '0x001' AND retained_digest = '0xdigest001'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "canonical".to_owned()
+    );
 
     database.cleanup().await
 }

@@ -8,7 +8,7 @@ use bigname_storage::{
     BackfillJob, BackfillJobRecord, BackfillLifecycleStatus, BackfillRange, CanonicalityInspection,
     CanonicalityInspectionStatus, CanonicalityState, DatabaseConfig, ExecutionTraceInspection,
     ExecutionTraceStep, ManifestDriftAlertInspection, ManifestDriftAlertObservation,
-    RawFactAuditCounts, StoredLineageRangeBlock,
+    RawFactAuditCounts, RawPayloadCacheAuditMetadata, StoredLineageRangeBlock,
 };
 use clap::{Args, Subcommand};
 use serde_json::{Value, json};
@@ -27,7 +27,9 @@ pub(crate) struct InspectArgs {
 pub(crate) enum InspectCommand {
     #[command(about = "Inspect one persisted backfill job and its child ranges")]
     BackfillJob(InspectBackfillJobArgs),
-    #[command(about = "Inspect canonicality and block-scoped audit counts for one block hash")]
+    #[command(
+        about = "Inspect canonicality, durable raw fact counts, and retained payload-cache metadata for one block hash"
+    )]
     Canonicality(InspectCanonicalityArgs),
     #[command(about = "Inspect one persisted execution trace and its ordered steps")]
     ExecutionTrace(InspectExecutionTraceArgs),
@@ -115,12 +117,21 @@ async fn inspect_backfill_job(args: InspectBackfillJobArgs) -> Result<()> {
 }
 
 async fn inspect_canonicality(args: InspectCanonicalityArgs) -> Result<()> {
-    let pool = bigname_storage::connect(&args.database).await?;
+    let pool = connect_read_only(&args.database).await?;
     let inspection =
         bigname_storage::inspect_block_canonicality(&pool, &args.chain_id, &args.block_hash)
             .await?;
+    let payload_cache_metadata = bigname_storage::list_raw_payload_cache_audit_metadata(
+        &pool,
+        &args.chain_id,
+        &args.block_hash,
+    )
+    .await?;
 
-    println!("{}", render_canonicality_inspection(&inspection));
+    println!(
+        "{}",
+        render_canonicality_inspection(&inspection, &payload_cache_metadata)
+    );
     Ok(())
 }
 
@@ -358,7 +369,10 @@ fn render_execution_trace_step(step: &ExecutionTraceStep) -> Value {
     })
 }
 
-fn render_canonicality_inspection(inspection: &CanonicalityInspection) -> Value {
+fn render_canonicality_inspection(
+    inspection: &CanonicalityInspection,
+    payload_cache_metadata: &[RawPayloadCacheAuditMetadata],
+) -> Value {
     json!({
         "chain_id": inspection.chain_id.as_str(),
         "block_hash": inspection.block_hash.as_str(),
@@ -367,6 +381,7 @@ fn render_canonicality_inspection(inspection: &CanonicalityInspection) -> Value 
         "parent_hash": inspection.parent_hash.as_deref(),
         "block_number": inspection.block_number,
         "raw_fact_counts": render_raw_fact_counts(&inspection.raw_fact_counts),
+        "raw_payload_cache_metadata": render_raw_payload_cache_metadata(payload_cache_metadata),
         "normalized_event_count": inspection.normalized_event_count,
         "states": {
             "observed": inspection.status == CanonicalityInspectionStatus::Observed,
@@ -720,6 +735,50 @@ fn render_raw_fact_counts(counts: &RawFactAuditCounts) -> Value {
     })
 }
 
+fn render_raw_payload_cache_metadata(metadata: &[RawPayloadCacheAuditMetadata]) -> Value {
+    let retained_digest_count = metadata
+        .iter()
+        .filter(|entry| entry.retained_digest.is_some())
+        .count();
+    let metadata_only_count = metadata.len() - retained_digest_count;
+    let payload_size_bytes_total: i64 = metadata.iter().map(|entry| entry.payload_size_bytes).sum();
+
+    json!({
+        "metadata_count": metadata.len(),
+        "retained_digest_count": retained_digest_count,
+        "metadata_only_count": metadata_only_count,
+        "payload_size_bytes_total": payload_size_bytes_total,
+        "entries": metadata
+            .iter()
+            .map(render_raw_payload_cache_metadata_entry)
+            .collect::<Vec<_>>(),
+    })
+}
+
+fn render_raw_payload_cache_metadata_entry(metadata: &RawPayloadCacheAuditMetadata) -> Value {
+    let retained_digest_status = if metadata.retained_digest.is_some() {
+        "retained"
+    } else {
+        "metadata_only"
+    };
+
+    json!({
+        "payload_kind": metadata.payload_kind.as_str(),
+        "block_number": metadata.block_number,
+        "payload_size_bytes": metadata.payload_size_bytes,
+        "content_type": metadata.content_type.as_deref(),
+        "content_encoding": metadata.content_encoding.as_deref(),
+        "canonicality_state": canonicality_state_label(metadata.canonicality_state),
+        "retained_digest_status": retained_digest_status,
+        "digest_algorithm": metadata.digest_algorithm.as_deref(),
+        "retained_digest": metadata.retained_digest.as_deref(),
+        "timestamps": {
+            "first_observed_at": format_timestamp(metadata.first_observed_at),
+            "last_observed_at": format_timestamp(metadata.last_observed_at),
+        },
+    })
+}
+
 const fn canonicality_inspection_status_label(
     status: CanonicalityInspectionStatus,
 ) -> &'static str {
@@ -919,6 +978,29 @@ mod tests {
             receipts_root: None,
             state_root: None,
             canonicality_state,
+        }
+    }
+
+    fn payload_cache_audit_metadata(
+        payload_kind: &str,
+        digest_algorithm: Option<&str>,
+        retained_digest: Option<&str>,
+        block_number: Option<i64>,
+        payload_size_bytes: i64,
+        canonicality_state: CanonicalityState,
+    ) -> RawPayloadCacheAuditMetadata {
+        RawPayloadCacheAuditMetadata {
+            payload_kind: payload_kind.to_owned(),
+            digest_algorithm: digest_algorithm.map(str::to_owned),
+            retained_digest: retained_digest.map(str::to_owned),
+            block_number,
+            payload_size_bytes,
+            content_type: Some("application/json".to_owned()),
+            content_encoding: Some("identity".to_owned()),
+            cache_metadata: json!({ "source": "worker-inspect-test" }),
+            canonicality_state,
+            first_observed_at: timestamp(1_700_000_010),
+            last_observed_at: timestamp(1_700_000_020),
         }
     }
 
@@ -1384,23 +1466,44 @@ mod tests {
 
     #[test]
     fn renders_canonicality_inspection_json() {
-        let rendered = render_canonicality_inspection(&CanonicalityInspection {
-            chain_id: "eth-mainnet".to_owned(),
-            block_hash: "0xabc".to_owned(),
-            status: CanonicalityInspectionStatus::Safe,
-            lineage_state: Some(CanonicalityState::Safe),
-            parent_hash: Some("0xparent".to_owned()),
-            block_number: Some(123),
-            raw_fact_counts: RawFactAuditCounts {
-                raw_block_count: 1,
-                raw_code_hash_count: 2,
-                raw_transaction_count: 3,
-                raw_receipt_count: 4,
-                raw_log_count: 5,
-                raw_call_snapshot_count: 6,
+        let payload_cache_metadata = vec![
+            payload_cache_audit_metadata(
+                "full_block",
+                Some("sha256"),
+                Some("0xdigest"),
+                Some(123),
+                2048,
+                CanonicalityState::Safe,
+            ),
+            payload_cache_audit_metadata(
+                "full_receipts",
+                None,
+                None,
+                Some(123),
+                512,
+                CanonicalityState::Safe,
+            ),
+        ];
+        let rendered = render_canonicality_inspection(
+            &CanonicalityInspection {
+                chain_id: "eth-mainnet".to_owned(),
+                block_hash: "0xabc".to_owned(),
+                status: CanonicalityInspectionStatus::Safe,
+                lineage_state: Some(CanonicalityState::Safe),
+                parent_hash: Some("0xparent".to_owned()),
+                block_number: Some(123),
+                raw_fact_counts: RawFactAuditCounts {
+                    raw_block_count: 1,
+                    raw_code_hash_count: 2,
+                    raw_transaction_count: 3,
+                    raw_receipt_count: 4,
+                    raw_log_count: 5,
+                    raw_call_snapshot_count: 6,
+                },
+                normalized_event_count: 7,
             },
-            normalized_event_count: 7,
-        });
+            &payload_cache_metadata,
+        );
 
         assert_eq!(rendered["chain_id"], "eth-mainnet");
         assert_eq!(rendered["block_hash"], "0xabc");
@@ -1415,6 +1518,44 @@ mod tests {
         assert_eq!(rendered["raw_fact_counts"]["raw_logs"], 5);
         assert_eq!(rendered["raw_fact_counts"]["raw_call_snapshots"], 6);
         assert_eq!(rendered["raw_fact_counts"]["total"], 21);
+        assert_eq!(rendered["raw_payload_cache_metadata"]["metadata_count"], 2);
+        assert_eq!(
+            rendered["raw_payload_cache_metadata"]["retained_digest_count"],
+            1
+        );
+        assert_eq!(
+            rendered["raw_payload_cache_metadata"]["metadata_only_count"],
+            1
+        );
+        assert_eq!(
+            rendered["raw_payload_cache_metadata"]["payload_size_bytes_total"],
+            2560
+        );
+        assert_eq!(
+            rendered["raw_payload_cache_metadata"]["entries"][0]["payload_kind"],
+            "full_block"
+        );
+        assert_eq!(
+            rendered["raw_payload_cache_metadata"]["entries"][0]["retained_digest_status"],
+            "retained"
+        );
+        assert_eq!(
+            rendered["raw_payload_cache_metadata"]["entries"][0]["digest_algorithm"],
+            "sha256"
+        );
+        assert_eq!(
+            rendered["raw_payload_cache_metadata"]["entries"][0]["retained_digest"],
+            "0xdigest"
+        );
+        assert_eq!(
+            rendered["raw_payload_cache_metadata"]["entries"][1]["payload_kind"],
+            "full_receipts"
+        );
+        assert_eq!(
+            rendered["raw_payload_cache_metadata"]["entries"][1]["retained_digest_status"],
+            "metadata_only"
+        );
+        assert!(rendered["raw_payload_cache_metadata"]["entries"][1]["retained_digest"].is_null());
         assert_eq!(rendered["normalized_event_count"], 7);
         assert_eq!(rendered["states"]["safe"], true);
         assert_eq!(rendered["states"]["canonical"], false);
@@ -1422,22 +1563,26 @@ mod tests {
 
     #[test]
     fn renders_missing_lineage_as_nulls() {
-        let rendered = render_canonicality_inspection(&CanonicalityInspection {
-            chain_id: "eth-mainnet".to_owned(),
-            block_hash: "0xmissing".to_owned(),
-            status: CanonicalityInspectionStatus::Missing,
-            lineage_state: None,
-            parent_hash: None,
-            block_number: None,
-            raw_fact_counts: RawFactAuditCounts::default(),
-            normalized_event_count: 0,
-        });
+        let rendered = render_canonicality_inspection(
+            &CanonicalityInspection {
+                chain_id: "eth-mainnet".to_owned(),
+                block_hash: "0xmissing".to_owned(),
+                status: CanonicalityInspectionStatus::Missing,
+                lineage_state: None,
+                parent_hash: None,
+                block_number: None,
+                raw_fact_counts: RawFactAuditCounts::default(),
+                normalized_event_count: 0,
+            },
+            &[],
+        );
 
         assert_eq!(rendered["status"], "missing");
         assert!(rendered["lineage_canonicality"].is_null());
         assert!(rendered["parent_hash"].is_null());
         assert!(rendered["block_number"].is_null());
         assert_eq!(rendered["raw_fact_counts"]["total"], 0);
+        assert_eq!(rendered["raw_payload_cache_metadata"]["metadata_count"], 0);
         assert_eq!(rendered["states"]["missing"], true);
         assert_eq!(rendered["states"]["orphaned"], false);
     }
@@ -1863,6 +2008,53 @@ mod tests {
                 .contains(&format!("missing execution trace {missing_id}")),
             "unexpected error: {error:#}"
         );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn inspect_canonicality_does_not_mutate_payload_cache_metadata() -> Result<()> {
+        let database = TestDatabase::new().await?;
+
+        bigname_storage::upsert_raw_payload_cache_metadata(
+            database.pool(),
+            &[bigname_storage::RawPayloadCacheMetadataUpsert {
+                chain_id: "eth-mainnet".to_owned(),
+                block_hash: "0xcache".to_owned(),
+                payload_kind: "full_block".to_owned(),
+                digest_algorithm: Some("sha256".to_owned()),
+                retained_digest: Some("0xdigest".to_owned()),
+                block_number: Some(200),
+                payload_size_bytes: 2048,
+                content_type: Some("application/json".to_owned()),
+                content_encoding: Some("identity".to_owned()),
+                cache_metadata: json!({ "source": "worker-inspect-test" }),
+                canonicality_state: CanonicalityState::Canonical,
+            }],
+        )
+        .await?;
+
+        let before = bigname_storage::list_raw_payload_cache_audit_metadata(
+            database.pool(),
+            "eth-mainnet",
+            "0xcache",
+        )
+        .await?;
+
+        inspect_canonicality(InspectCanonicalityArgs {
+            database: database.database_config(),
+            chain_id: "eth-mainnet".to_owned(),
+            block_hash: "0xcache".to_owned(),
+        })
+        .await?;
+
+        let after = bigname_storage::list_raw_payload_cache_audit_metadata(
+            database.pool(),
+            "eth-mainnet",
+            "0xcache",
+        )
+        .await?;
+        assert_eq!(after, before);
 
         database.cleanup().await
     }

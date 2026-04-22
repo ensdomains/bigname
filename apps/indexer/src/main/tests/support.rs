@@ -411,6 +411,46 @@ impl TestDatabase {
         .context("failed to create raw_blocks table for indexer tests")?;
         sqlx::query(
             r#"
+                CREATE TABLE raw_payload_cache_metadata (
+                    raw_payload_cache_metadata_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                    chain_id TEXT NOT NULL,
+                    block_hash TEXT NOT NULL,
+                    payload_kind TEXT NOT NULL,
+                    digest_algorithm TEXT,
+                    retained_digest TEXT,
+                    block_number BIGINT,
+                    payload_size_bytes BIGINT NOT NULL,
+                    content_type TEXT,
+                    content_encoding TEXT,
+                    cache_metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    canonicality_state canonicality_state NOT NULL DEFAULT 'observed',
+                    first_observed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    last_observed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    CHECK ((digest_algorithm IS NULL) = (retained_digest IS NULL)),
+                    CHECK (jsonb_typeof(cache_metadata) = 'object')
+                )
+                "#,
+        )
+        .execute(&pool)
+        .await
+        .context("failed to create raw_payload_cache_metadata table for indexer tests")?;
+        sqlx::query(
+            r#"
+                CREATE UNIQUE INDEX raw_payload_cache_metadata_identity_idx
+                ON raw_payload_cache_metadata (
+                    chain_id,
+                    block_hash,
+                    payload_kind,
+                    COALESCE(digest_algorithm, ''),
+                    COALESCE(retained_digest, '')
+                )
+                "#,
+        )
+        .execute(&pool)
+        .await
+        .context("failed to create raw_payload_cache_metadata_identity_idx for indexer tests")?;
+        sqlx::query(
+            r#"
                 CREATE TABLE raw_transactions (
                     raw_transaction_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
                     chain_id TEXT NOT NULL,

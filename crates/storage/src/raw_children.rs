@@ -56,6 +56,7 @@ pub struct RawFactOrphanCounts {
     pub receipt_count: u64,
     pub log_count: u64,
     pub call_snapshot_count: u64,
+    pub payload_cache_metadata_count: u64,
 }
 
 /// Insert missing raw transaction rows or refresh canonicality for already
@@ -170,12 +171,18 @@ pub async fn mark_raw_block_facts_range_orphaned(
         bail!("missing stored raw block for chain {chain_id} block {from_hash}");
     }
 
-    let block_count =
-        mark_block_hash_set_orphaned(&mut *transaction, "raw_blocks", chain_id, &block_hashes)
-            .await?;
+    let block_count = mark_block_hash_set_orphaned(
+        &mut *transaction,
+        "raw_blocks",
+        "observed_at",
+        chain_id,
+        &block_hashes,
+    )
+    .await?;
     let code_hash_count = mark_block_hash_set_orphaned(
         &mut *transaction,
         "raw_code_hashes",
+        "observed_at",
         chain_id,
         &block_hashes,
     )
@@ -183,19 +190,39 @@ pub async fn mark_raw_block_facts_range_orphaned(
     let transaction_count = mark_block_hash_set_orphaned(
         &mut *transaction,
         "raw_transactions",
+        "observed_at",
         chain_id,
         &block_hashes,
     )
     .await?;
-    let receipt_count =
-        mark_block_hash_set_orphaned(&mut *transaction, "raw_receipts", chain_id, &block_hashes)
-            .await?;
-    let log_count =
-        mark_block_hash_set_orphaned(&mut *transaction, "raw_logs", chain_id, &block_hashes)
-            .await?;
+    let receipt_count = mark_block_hash_set_orphaned(
+        &mut *transaction,
+        "raw_receipts",
+        "observed_at",
+        chain_id,
+        &block_hashes,
+    )
+    .await?;
+    let log_count = mark_block_hash_set_orphaned(
+        &mut *transaction,
+        "raw_logs",
+        "observed_at",
+        chain_id,
+        &block_hashes,
+    )
+    .await?;
     let call_snapshot_count = mark_block_hash_set_orphaned(
         &mut *transaction,
         "raw_call_snapshots",
+        "observed_at",
+        chain_id,
+        &block_hashes,
+    )
+    .await?;
+    let payload_cache_metadata_count = mark_block_hash_set_orphaned(
+        &mut *transaction,
+        "raw_payload_cache_metadata",
+        "last_observed_at",
         chain_id,
         &block_hashes,
     )
@@ -213,6 +240,7 @@ pub async fn mark_raw_block_facts_range_orphaned(
         receipt_count,
         log_count,
         call_snapshot_count,
+        payload_cache_metadata_count,
     })
 }
 
@@ -712,6 +740,7 @@ where
 async fn mark_block_hash_set_orphaned<'e, E>(
     executor: E,
     table_name: &str,
+    timestamp_column: &str,
     chain_id: &str,
     block_hashes: &[String],
 ) -> Result<u64>
@@ -723,7 +752,7 @@ where
         UPDATE {table_name}
         SET
             canonicality_state = 'orphaned'::canonicality_state,
-            observed_at = now()
+            {timestamp_column} = now()
         WHERE chain_id = $1
           AND block_hash = ANY($2::TEXT[])
           AND canonicality_state <> 'orphaned'::canonicality_state

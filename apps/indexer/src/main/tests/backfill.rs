@@ -238,6 +238,10 @@ async fn hash_pinned_backfill_persists_range_and_is_idempotent_without_advancing
     assert_eq!(table_count(database.pool(), "raw_logs").await?, 2);
     assert_eq!(table_count(database.pool(), "raw_code_hashes").await?, 2);
     assert_eq!(
+        table_count(database.pool(), "raw_payload_cache_metadata").await?,
+        6
+    );
+    assert_eq!(
         sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM normalized_events WHERE event_kind = 'PreimageObserved'"
         )
@@ -410,6 +414,12 @@ async fn source_family_backfill_persists_selector_identity_and_only_selected_tar
     .await?;
     assert_eq!(outcome.raw_log_count, 1);
     assert_eq!(outcome.raw_code_hash_count, 1);
+    assert_eq!(table_count(database.pool(), "raw_transactions").await?, 1);
+    assert_eq!(table_count(database.pool(), "raw_receipts").await?, 1);
+    assert_eq!(
+        table_count(database.pool(), "raw_payload_cache_metadata").await?,
+        3
+    );
 
     let job = load_backfill_job(database.pool(), outcome.backfill_job_id)
         .await?

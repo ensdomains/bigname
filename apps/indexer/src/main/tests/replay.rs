@@ -501,6 +501,28 @@ async fn replay_normalized_events_uses_only_persisted_canonical_raw_log_inputs()
         CanonicalityState::Canonical,
     )
     .await?;
+    bigname_storage::upsert_raw_payload_cache_metadata(
+        database.pool(),
+        &[bigname_storage::RawPayloadCacheMetadataUpsert {
+            chain_id: chain.to_owned(),
+            block_hash: canonical_block.block_hash.clone(),
+            payload_kind: provider::RAW_PAYLOAD_KIND_FULL_BLOCK.to_owned(),
+            digest_algorithm: None,
+            retained_digest: None,
+            block_number: Some(canonical_block.block_number),
+            payload_size_bytes: 0,
+            content_type: Some(provider::JSON_RPC_PAYLOAD_CONTENT_TYPE.to_owned()),
+            content_encoding: Some(provider::JSON_RPC_PAYLOAD_CONTENT_ENCODING.to_owned()),
+            cache_metadata: json!({
+                "source": "json-rpc",
+                "method": "eth_getBlockByHash",
+                "fetch_mode": "block_hash",
+                "digest_scope": "json_rpc_response_body"
+            }),
+            canonicality_state: CanonicalityState::Canonical,
+        }],
+    )
+    .await?;
 
     let outcome = replay_raw_fact_normalized_events(
         database.pool(),
@@ -518,6 +540,24 @@ async fn replay_normalized_events_uses_only_persisted_canonical_raw_log_inputs()
     assert_eq!(outcome.selected_block_count, 1);
     assert_eq!(outcome.canonical_raw_log_count, 1);
     assert_eq!(outcome.normalized_event_inserted_count, 6);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM raw_transactions")
+            .fetch_one(database.pool())
+            .await?,
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM raw_receipts")
+            .fetch_one(database.pool())
+            .await?,
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM raw_payload_cache_metadata")
+            .fetch_one(database.pool())
+            .await?,
+        1
+    );
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM normalized_events WHERE block_hash = $1"

@@ -15,11 +15,12 @@ use uuid::Uuid;
 
 use super::*;
 use crate::{
-    NormalizedEvent, RawBlock, RawCallSnapshot, RawCodeHash, RawLog, RawReceipt, RawTransaction,
-    default_database_url, list_canonical_raw_log_replay_inputs,
+    NormalizedEvent, RawBlock, RawCallSnapshot, RawCodeHash, RawLog, RawPayloadCacheMetadataUpsert,
+    RawReceipt, RawTransaction, default_database_url, list_canonical_raw_log_replay_inputs,
     list_canonical_raw_log_replay_inputs_for_block_hashes, upsert_chain_lineage_blocks,
     upsert_normalized_events, upsert_raw_blocks, upsert_raw_call_snapshots, upsert_raw_code_hashes,
-    upsert_raw_logs, upsert_raw_receipts, upsert_raw_transactions,
+    upsert_raw_logs, upsert_raw_payload_cache_metadata, upsert_raw_receipts,
+    upsert_raw_transactions,
 };
 
 static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
@@ -609,6 +610,29 @@ fn raw_call_snapshot(block_hash: &str, block_number: i64) -> RawCallSnapshot {
     }
 }
 
+fn raw_payload_cache_metadata(
+    block_hash: &str,
+    block_number: i64,
+    retained_digest: &str,
+) -> RawPayloadCacheMetadataUpsert {
+    RawPayloadCacheMetadataUpsert {
+        chain_id: "eth-mainnet".to_owned(),
+        block_hash: block_hash.to_owned(),
+        payload_kind: "full_block".to_owned(),
+        digest_algorithm: Some("sha256".to_owned()),
+        retained_digest: Some(retained_digest.to_owned()),
+        block_number: Some(block_number),
+        payload_size_bytes: 2048,
+        content_type: Some("application/json".to_owned()),
+        content_encoding: Some("identity".to_owned()),
+        cache_metadata: json!({
+            "source": "audit-test",
+            "scope": "block"
+        }),
+        canonicality_state: CanonicalityState::Canonical,
+    }
+}
+
 fn normalized_event(block_hash: &str, block_number: i64, index: i64) -> NormalizedEvent {
     NormalizedEvent {
         event_identity: format!("eth-mainnet:{block_hash}:event:{index}"),
@@ -798,6 +822,36 @@ async fn audit_reports_lineage_status_and_block_scoped_counts() -> Result<()> {
     assert_eq!(inspection.raw_fact_counts.raw_call_snapshot_count, 1);
     assert_eq!(inspection.raw_fact_counts.total(), 7);
     assert_eq!(inspection.normalized_event_count, 2);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn audit_lists_payload_cache_metadata_without_payload_bytes() -> Result<()> {
+    let database = TestDatabase::new().await?;
+
+    upsert_raw_payload_cache_metadata(
+        database.pool(),
+        &[raw_payload_cache_metadata("0xaaa", 100, "0xdigest")],
+    )
+    .await?;
+
+    let metadata =
+        list_raw_payload_cache_audit_metadata(database.pool(), "eth-mainnet", "0xaaa").await?;
+
+    assert_eq!(metadata.len(), 1);
+    assert_eq!(metadata[0].payload_kind, "full_block");
+    assert_eq!(metadata[0].digest_algorithm.as_deref(), Some("sha256"));
+    assert_eq!(metadata[0].retained_digest.as_deref(), Some("0xdigest"));
+    assert_eq!(metadata[0].block_number, Some(100));
+    assert_eq!(metadata[0].payload_size_bytes, 2048);
+    assert_eq!(
+        metadata[0].content_type.as_deref(),
+        Some("application/json")
+    );
+    assert_eq!(metadata[0].content_encoding.as_deref(), Some("identity"));
+    assert_eq!(metadata[0].cache_metadata["source"], "audit-test");
+    assert_eq!(metadata[0].canonicality_state, CanonicalityState::Canonical);
 
     database.cleanup().await
 }
