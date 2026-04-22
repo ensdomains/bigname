@@ -173,7 +173,7 @@ async fn inspect_watch_plan(args: InspectWatchPlanArgs) -> Result<()> {
     Ok(())
 }
 
-async fn connect_read_only(config: &DatabaseConfig) -> Result<sqlx::PgPool> {
+pub(crate) async fn connect_read_only(config: &DatabaseConfig) -> Result<sqlx::PgPool> {
     let database_url = config
         .database_url
         .clone()

@@ -34,6 +34,7 @@ enum Command {
     ChildrenCurrent(ChildrenCurrentArgs),
     Execution(ExecutionArgs),
     Inspect(inspect::InspectArgs),
+    ManifestDrift(ManifestDriftArgs),
     NameCurrent(NameCurrentArgs),
     PermissionsCurrent(PermissionsCurrentArgs),
     PrimaryNamesCurrent(PrimaryNamesCurrentArgs),
@@ -82,6 +83,12 @@ struct ChildrenCurrentArgs {
 struct ExecutionArgs {
     #[command(subcommand)]
     command: ExecutionCommand,
+}
+
+#[derive(Args, Debug)]
+struct ManifestDriftArgs {
+    #[command(subcommand)]
+    command: ManifestDriftCommand,
 }
 
 #[derive(Args, Debug)]
@@ -137,6 +144,11 @@ enum ExecutionCommand {
     InvalidateVerifiedPrimaryNameManifest(InvalidateVerifiedPrimaryNameManifestArgs),
     InvalidateVerifiedPrimaryNameTopologyBoundary(InvalidateVerifiedPrimaryNameBoundaryArgs),
     InvalidateVerifiedPrimaryNameRecordBoundary(InvalidateVerifiedPrimaryNameBoundaryArgs),
+}
+
+#[derive(Subcommand, Debug)]
+enum ManifestDriftCommand {
+    Audit(ManifestDriftAuditArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -273,6 +285,14 @@ struct InvalidateVerifiedPrimaryNameBoundaryArgs {
 }
 
 #[derive(Args, Debug)]
+struct ManifestDriftAuditArgs {
+    #[command(flatten)]
+    database: DatabaseConfig,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args, Debug)]
 struct PermissionsCurrentRebuildArgs {
     #[command(flatten)]
     database: DatabaseConfig,
@@ -330,6 +350,7 @@ async fn main() -> Result<()> {
         Command::ChildrenCurrent(args) => children_current(args).await,
         Command::Execution(args) => execution_command(args).await,
         Command::Inspect(args) => inspect::inspect_command(args).await,
+        Command::ManifestDrift(args) => manifest_drift_command(args).await,
         Command::NameCurrent(args) => name_current(args).await,
         Command::PermissionsCurrent(args) => permissions_current(args).await,
         Command::PrimaryNamesCurrent(args) => primary_names_current(args).await,
@@ -405,6 +426,12 @@ async fn execution_command(args: ExecutionArgs) -> Result<()> {
     }
 }
 
+async fn manifest_drift_command(args: ManifestDriftArgs) -> Result<()> {
+    match args.command {
+        ManifestDriftCommand::Audit(args) => manifest_drift_audit(args).await,
+    }
+}
+
 async fn permissions_current(args: PermissionsCurrentArgs) -> Result<()> {
     match args.command {
         PermissionsCurrentCommand::Rebuild(args) => rebuild_permissions_current(args).await,
@@ -435,6 +462,17 @@ async fn resolver_current(args: ResolverCurrentArgs) -> Result<()> {
     match args.command {
         ResolverCurrentCommand::Rebuild(args) => rebuild_resolver_current(args).await,
     }
+}
+
+async fn manifest_drift_audit(args: ManifestDriftAuditArgs) -> Result<()> {
+    let _emit_json = args.json;
+    let pool = inspect::connect_read_only(&args.database).await?;
+    let audit =
+        bigname_storage::ManifestDriftAlertInspection::compute_live_manifest_drift_audit(&pool)
+            .await?;
+
+    println!("{audit}");
+    Ok(())
 }
 
 async fn rebuild_name_current(args: NameCurrentRebuildArgs) -> Result<()> {
@@ -805,6 +843,9 @@ impl Cli {
         matches!(
             &self.command,
             Command::Inspect(_)
+                | Command::ManifestDrift(ManifestDriftArgs {
+                    command: ManifestDriftCommand::Audit(ManifestDriftAuditArgs { json: true, .. })
+                })
                 | Command::Replay(ReplayArgs {
                     command: ReplayCommand::AllCurrentProjections(AllCurrentProjectionsArgs {
                         json: true,
@@ -971,6 +1012,21 @@ mod tests {
                 other => panic!("expected manifest drift inspect command, got {other:?}"),
             },
             other => panic!("expected inspect command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn manifest_drift_audit_cli_is_available() {
+        let cli = Cli::parse_from(["bigname-worker", "manifest-drift", "audit", "--json"]);
+        assert!(cli.writes_machine_json());
+
+        match cli.command {
+            Command::ManifestDrift(args) => match args.command {
+                ManifestDriftCommand::Audit(args) => {
+                    assert!(args.json);
+                }
+            },
+            other => panic!("expected manifest drift command, got {other:?}"),
         }
     }
 

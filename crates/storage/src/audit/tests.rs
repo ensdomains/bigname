@@ -11,6 +11,7 @@ use sqlx::{
     PgPool, Row,
     postgres::{PgConnectOptions, PgPoolOptions},
 };
+use uuid::Uuid;
 
 use super::*;
 use crate::{
@@ -194,15 +195,241 @@ fn raw_log_with_state(
 }
 
 fn raw_code_hash(block_hash: &str, block_number: i64) -> RawCodeHash {
+    raw_code_hash_for_address(
+        block_hash,
+        block_number,
+        "0x0000000000000000000000000000000000000003",
+        &format!("0xcode{block_number:02x}"),
+        CanonicalityState::Canonical,
+    )
+}
+
+fn raw_code_hash_for_address(
+    block_hash: &str,
+    block_number: i64,
+    contract_address: &str,
+    code_hash: &str,
+    canonicality_state: CanonicalityState,
+) -> RawCodeHash {
     RawCodeHash {
         chain_id: "eth-mainnet".to_owned(),
         block_hash: block_hash.to_owned(),
         block_number,
-        contract_address: "0x0000000000000000000000000000000000000003".to_owned(),
-        code_hash: format!("0xcode{block_number:02x}"),
+        contract_address: contract_address.to_owned(),
+        code_hash: code_hash.to_owned(),
         code_byte_length: 123,
-        canonicality_state: CanonicalityState::Canonical,
+        canonicality_state,
     }
+}
+
+async fn insert_live_manifest_audit_fixture(pool: &PgPool) -> Result<()> {
+    let root_id = Uuid::from_u128(0x0e7ec7ace00000000000000000001001);
+    let proxy_id = Uuid::from_u128(0x0e7ec7ace00000000000000000001002);
+    let expected_impl_id = Uuid::from_u128(0x0e7ec7ace00000000000000000001003);
+    let observed_impl_id = Uuid::from_u128(0x0e7ec7ace00000000000000000001004);
+
+    for (contract_instance_id, address) in [
+        (root_id, "0x0000000000000000000000000000000000000001"),
+        (proxy_id, "0x00000000000000000000000000000000000000aa"),
+        (
+            expected_impl_id,
+            "0x00000000000000000000000000000000000000dd",
+        ),
+        (
+            observed_impl_id,
+            "0x00000000000000000000000000000000000000ee",
+        ),
+    ] {
+        sqlx::query(
+            r#"
+            INSERT INTO contract_instances (
+                contract_instance_id,
+                chain_id,
+                contract_kind,
+                provenance
+            )
+            VALUES ($1, 'eth-mainnet', 'contract', '{}'::JSONB)
+            "#,
+        )
+        .bind(contract_instance_id)
+        .execute(pool)
+        .await
+        .context("failed to insert live audit contract instance")?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO contract_instance_addresses (
+                contract_instance_id,
+                chain_id,
+                address,
+                active_from_block_number,
+                provenance
+            )
+            VALUES ($1, 'eth-mainnet', $2, 10, '{}'::JSONB)
+            "#,
+        )
+        .bind(contract_instance_id)
+        .bind(address)
+        .execute(pool)
+        .await
+        .context("failed to insert live audit contract address")?;
+    }
+
+    let manifest_id = sqlx::query_scalar::<_, i64>(
+        r#"
+        INSERT INTO manifest_versions (
+            manifest_version,
+            namespace,
+            source_family,
+            chain,
+            deployment_epoch,
+            rollout_status,
+            normalizer_version,
+            file_path,
+            manifest_payload
+        )
+        VALUES (
+            3,
+            'ens',
+            'ens_v2_registry_l1',
+            'eth-mainnet',
+            'ens_v2',
+            'active',
+            'uts46-v1',
+            'manifests/ens/ens_v2_registry_l1/v1.toml',
+            '{"rollout_status":"active"}'::JSONB
+        )
+        RETURNING manifest_id
+        "#,
+    )
+    .fetch_one(pool)
+    .await
+    .context("failed to insert live audit manifest")?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO manifest_contract_instances (
+            manifest_id,
+            declaration_kind,
+            declaration_name,
+            contract_instance_id,
+            declared_address,
+            code_hash,
+            abi_ref
+        )
+        VALUES ($1, 'root', 'RootRegistry', $2, '0x0000000000000000000000000000000000000001', '0xroot-expected', 'abis/root.json')
+        "#,
+    )
+    .bind(manifest_id)
+    .bind(root_id)
+    .execute(pool)
+    .await
+    .context("failed to insert live audit root declaration")?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO manifest_contract_instances (
+            manifest_id,
+            declaration_kind,
+            declaration_name,
+            contract_instance_id,
+            declared_address,
+            code_hash,
+            role,
+            proxy_kind,
+            implementation_contract_instance_id,
+            declared_implementation_address
+        )
+        VALUES (
+            $1,
+            'contract',
+            'registry',
+            $2,
+            '0x00000000000000000000000000000000000000aa',
+            '0xproxy-current',
+            'registry',
+            'erc1967',
+            $3,
+            '0x00000000000000000000000000000000000000dd'
+        )
+        "#,
+    )
+    .bind(manifest_id)
+    .bind(proxy_id)
+    .bind(expected_impl_id)
+    .execute(pool)
+    .await
+    .context("failed to insert live audit proxy declaration")?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO discovery_edges (
+            chain_id,
+            edge_kind,
+            from_contract_instance_id,
+            to_contract_instance_id,
+            discovery_source,
+            source_manifest_id,
+            admission,
+            active_from_block_number,
+            provenance
+        )
+        VALUES (
+            'eth-mainnet',
+            'proxy_implementation',
+            $1,
+            $2,
+            'manifest_declared_proxy',
+            $3,
+            'observed',
+            20,
+            '{"slot":"eip1967.proxy.implementation"}'::JSONB
+        )
+        "#,
+    )
+    .bind(proxy_id)
+    .bind(observed_impl_id)
+    .bind(manifest_id)
+    .execute(pool)
+    .await
+    .context("failed to insert live audit proxy edge")?;
+
+    upsert_raw_code_hashes(
+        pool,
+        &[
+            raw_code_hash_for_address(
+                "0xroot100",
+                100,
+                "0x0000000000000000000000000000000000000001",
+                "0xroot-old",
+                CanonicalityState::Canonical,
+            ),
+            raw_code_hash_for_address(
+                "0xroot101",
+                101,
+                "0x0000000000000000000000000000000000000001",
+                "0xroot-observed",
+                CanonicalityState::Finalized,
+            ),
+            raw_code_hash_for_address(
+                "0xroot102",
+                102,
+                "0x0000000000000000000000000000000000000001",
+                "0xroot-orphaned",
+                CanonicalityState::Orphaned,
+            ),
+            raw_code_hash_for_address(
+                "0xproxy100",
+                100,
+                "0x00000000000000000000000000000000000000aa",
+                "0xproxy-current",
+                CanonicalityState::Canonical,
+            ),
+        ],
+    )
+    .await?;
+
+    Ok(())
 }
 
 fn raw_call_snapshot(block_hash: &str, block_number: i64) -> RawCallSnapshot {
@@ -590,6 +817,76 @@ async fn manifest_drift_audit_does_not_mutate_alert_observations() -> Result<()>
     assert_eq!(inspection, before);
     assert_eq!(after, before);
     assert_eq!(after_total, before_total);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn manifest_drift_audit_computes_live_candidates_without_persistence() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    insert_live_manifest_audit_fixture(database.pool()).await?;
+
+    let before_events = load_normalized_event_total(database.pool()).await?;
+    let audit =
+        ManifestDriftAlertInspection::compute_live_manifest_drift_audit(database.pool()).await?;
+    let after_events = load_normalized_event_total(database.pool()).await?;
+
+    assert_eq!(audit["command"], "manifest-drift audit");
+    assert_eq!(audit["read_only"], true);
+    assert_eq!(audit["persistence"]["writes_normalized_events"], false);
+    assert_eq!(audit["persistence"]["writes_alert_table"], false);
+    assert_eq!(audit["counts"]["manifest_code_hash_drift"], 1);
+    assert_eq!(audit["counts"]["manifest_proxy_implementation"], 1);
+    assert_eq!(audit["counts"]["total"], 2);
+
+    let code_alert = &audit["manifest_code_hash_drift_alerts"][0];
+    assert_eq!(code_alert["alert_type"], "manifest_code_hash_drift");
+    assert_eq!(code_alert["event_kind"], "ManifestCodeHashDriftAlert");
+    assert_eq!(code_alert["namespace"], "ens");
+    assert_eq!(code_alert["source_family"], "ens_v2_registry_l1");
+    assert_eq!(code_alert["manifest_version"], 3);
+    assert_eq!(code_alert["chain"], "eth-mainnet");
+    assert_eq!(code_alert["lifecycle"]["persisted"], false);
+    assert_eq!(code_alert["declaration"]["kind"], "root");
+    assert_eq!(code_alert["declaration"]["name"], "RootRegistry");
+    assert_eq!(code_alert["code_hash"]["expected"], "0xroot-expected");
+    assert_eq!(code_alert["code_hash"]["observed"], "0xroot-observed");
+    assert_eq!(code_alert["observed_block"]["number"], 101);
+    assert_eq!(code_alert["observed_block"]["hash"], "0xroot101");
+    assert_eq!(
+        code_alert["observed_block"]["canonicality_state"],
+        "finalized"
+    );
+    assert_eq!(code_alert["watched_target"]["source"], "manifest_root");
+
+    let proxy_alert = &audit["proxy_implementation_alerts"][0];
+    assert_eq!(
+        proxy_alert["alert_type"],
+        "manifest_proxy_implementation_edge"
+    );
+    assert_eq!(
+        proxy_alert["event_kind"],
+        "ManifestProxyImplementationAlert"
+    );
+    assert_eq!(proxy_alert["candidate_reason"], "implementation_mismatch");
+    assert_eq!(proxy_alert["declaration"]["name"], "registry");
+    assert_eq!(proxy_alert["declaration"]["role"], "registry");
+    assert_eq!(proxy_alert["declaration"]["proxy_kind"], "erc1967");
+    assert_eq!(
+        proxy_alert["expected_implementation"]["address"],
+        "0x00000000000000000000000000000000000000dd"
+    );
+    assert_eq!(
+        proxy_alert["observed_implementation"]["address"],
+        "0x00000000000000000000000000000000000000ee"
+    );
+    assert_eq!(proxy_alert["implementation_edge"]["admission"], "observed");
+    assert_eq!(
+        proxy_alert["implementation_edge"]["provenance"]["slot"],
+        "eip1967.proxy.implementation"
+    );
+
+    assert_eq!(after_events, before_events);
 
     database.cleanup().await
 }
