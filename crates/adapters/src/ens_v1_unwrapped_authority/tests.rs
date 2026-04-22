@@ -2706,7 +2706,7 @@ async fn sync_ens_v1_unwrapped_authority_emits_basenames_base_authority_events_i
         "manifests/basenames/basenames_base_registry/v1.toml",
     )
     .await?;
-    insert_active_contract_fixture_with_manifest(
+    let resolver_manifest_id = insert_active_contract_fixture_with_manifest(
         database.pool(),
         "basenames",
         SOURCE_FAMILY_BASENAMES_BASE_RESOLVER,
@@ -2716,6 +2716,34 @@ async fn sync_ens_v1_unwrapped_authority_emits_basenames_base_authority_events_i
         "0x00000000000000000000000000000000000000cc",
         Some("resolver"),
         "manifests/basenames/basenames_base_resolver/v1.toml",
+    )
+    .await?;
+    let pending_resolver_contract_instance_id = Uuid::new_v4();
+    let pending_resolver_address = "0x00000000000000000000000000000000000000dd";
+    insert_contract_instance(
+        database.pool(),
+        pending_resolver_contract_instance_id,
+        "base-mainnet",
+        "contract",
+    )
+    .await?;
+    insert_manifest_contract_instance(
+        database.pool(),
+        resolver_manifest_id,
+        "contract",
+        "pending_resolver",
+        pending_resolver_contract_instance_id,
+        pending_resolver_address,
+        Some("candidate_resolver"),
+        Some("none"),
+    )
+    .await?;
+    insert_contract_instance_address(
+        database.pool(),
+        pending_resolver_contract_instance_id,
+        "base-mainnet",
+        pending_resolver_address,
+        resolver_manifest_id,
     )
     .await?;
 
@@ -2801,12 +2829,40 @@ async fn sync_ens_v1_unwrapped_authority_emits_basenames_base_authority_events_i
                 data: encode_resolver_version_changed_log_data(7),
                 canonicality_state: CanonicalityState::Canonical,
             },
+            RawLog {
+                chain_id: "base-mainnet".to_owned(),
+                block_hash: block_hash.to_owned(),
+                block_number: 42,
+                transaction_hash: transaction_hash.to_owned(),
+                transaction_index: 0,
+                log_index: 4,
+                emitting_address: pending_resolver_address.to_owned(),
+                topics: vec![
+                    text_changed_topic0(),
+                    alice.namehash.clone(),
+                    keccak256_hex(b"com.github"),
+                ],
+                data: encode_dynamic_string_log_data("com.github"),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            RawLog {
+                chain_id: "base-mainnet".to_owned(),
+                block_hash: block_hash.to_owned(),
+                block_number: 42,
+                transaction_hash: transaction_hash.to_owned(),
+                transaction_index: 0,
+                log_index: 5,
+                emitting_address: pending_resolver_address.to_owned(),
+                topics: vec![version_changed_topic0(), alice.namehash.clone()],
+                data: encode_resolver_version_changed_log_data(8),
+                canonicality_state: CanonicalityState::Canonical,
+            },
         ],
     )
     .await?;
 
     let first = sync_ens_v1_unwrapped_authority(database.pool(), "base-mainnet").await?;
-    assert_eq!(first.scanned_log_count, 4);
+    assert_eq!(first.scanned_log_count, 6);
     assert_eq!(first.matched_log_count, 4);
     assert_eq!(first.total_name_surface_count, 1);
     assert_eq!(first.total_resource_count, 1);
@@ -2827,7 +2883,7 @@ async fn sync_ens_v1_unwrapped_authority_emits_basenames_base_authority_events_i
     );
 
     let second = sync_ens_v1_unwrapped_authority(database.pool(), "base-mainnet").await?;
-    assert_eq!(second.scanned_log_count, 4);
+    assert_eq!(second.scanned_log_count, 6);
     assert_eq!(second.matched_log_count, 4);
     assert_eq!(second.total_normalized_event_count, 9);
 

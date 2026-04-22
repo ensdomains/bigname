@@ -20,14 +20,21 @@ use uuid::Uuid;
 const EVENT_KIND_PERMISSION_CHANGED: &str = "PermissionChanged";
 const EVENT_KIND_ALIAS_CHANGED: &str = "AliasChanged";
 const EVENT_KIND_RESOLVER_CHANGED: &str = "ResolverChanged";
+const BASENAMES_NAMESPACE: &str = "basenames";
+const SOURCE_FAMILY_ENS_V1_REGISTRY_L1: &str = "ens_v1_registry_l1";
 const SOURCE_FAMILY_ENS_V1_RESOLVER_L1: &str = "ens_v1_resolver_l1";
+const SOURCE_FAMILY_BASENAMES_BASE_REGISTRY: &str = "basenames_base_registry";
+const SOURCE_FAMILY_BASENAMES_BASE_RESOLVER: &str = "basenames_base_resolver";
+const ENS_V1_PUBLIC_RESOLVER_COMPATIBLE_PROFILE: &str = "public_resolver_compatible";
+const BASENAMES_L2_RESOLVER_COMPATIBLE_PROFILE: &str = "l2_resolver_compatible";
 const RESOLVER_CURRENT_DERIVATION_KIND: &str = "resolver_current_rebuild";
 const RESOLVER_CURRENT_ENUMERATION_BASIS: &str = "resolver_overview";
+const RESOLVER_PROFILE_STATUS_PENDING: &str = "pending";
 const RESOLVER_PROFILE_STATUS_SUPPORTED: &str = "supported";
 const RESOLVER_PROFILE_FACT_FAMILY_AUTHORIZATION: &str = "resolver_authorization";
 const RESOLVER_PROFILE_FACT_FAMILY_RECORD: &str = "resolver_record";
 const RESOLVER_PROFILE_FACT_FAMILY_RECORD_VERSION: &str = "resolver_record_version";
-const RESOLVER_PROFILE_PENDING_REASON: &str = "resolver_profile_pending";
+const RESOLVER_FAMILY_PENDING_REASON: &str = "resolver_family_pending";
 const CANONICAL_STATE_FILTER: &str = r#"
   IN (
     'canonical'::canonicality_state,
@@ -99,20 +106,34 @@ struct ChainPositionCandidate {
 
 #[derive(Clone, Debug)]
 struct ResolverProfileGate {
-    admissions: BTreeMap<(String, String, String), String>,
+    admissions: BTreeMap<(String, String, String, String), String>,
 }
 
 impl ResolverProfileGate {
     async fn load(pool: &PgPool) -> Result<Self> {
-        let admissions = bigname_manifests::load_ens_v1_public_resolver_profile_admissions(pool)
-            .await
-            .context("failed to load ENSv1 PublicResolver profile admissions")?
+        let mut admissions =
+            bigname_manifests::load_ens_v1_public_resolver_profile_admissions(pool)
+                .await
+                .context("failed to load ENSv1 PublicResolver profile admissions")?
+                .into_iter()
+                .collect::<Vec<_>>();
+        admissions.extend(
+            bigname_manifests::load_basenames_l2_resolver_profile_admissions(pool)
+                .await
+                .context("failed to load Basenames L2Resolver profile admissions")?,
+        );
+
+        let admissions = admissions
             .into_iter()
-            .filter(|admission| admission.source_family == SOURCE_FAMILY_ENS_V1_RESOLVER_L1)
+            .filter(|admission| {
+                resolver_profile_for_source_family(&admission.source_family)
+                    .is_some_and(|profile| admission.profile == profile)
+            })
             .map(|admission| {
                 (
                     (
                         admission.chain,
+                        admission.source_family,
                         normalize_resolver_address(&admission.address),
                         admission.fact_family,
                     ),
@@ -124,27 +145,67 @@ impl ResolverProfileGate {
         Ok(Self { admissions })
     }
 
-    fn target_status(&self, target: &ResolverTarget) -> Option<&str> {
-        let mut saw_supported = false;
-        for fact_family in [
-            RESOLVER_PROFILE_FACT_FAMILY_AUTHORIZATION,
-            RESOLVER_PROFILE_FACT_FAMILY_RECORD,
-            RESOLVER_PROFILE_FACT_FAMILY_RECORD_VERSION,
-        ] {
+    fn target_status(&self, target: &ResolverTarget, source_family: &str) -> &str {
+        for &fact_family in resolver_overview_fact_families(source_family) {
             let Some(status) = self.admissions.get(&(
                 target.chain_id.clone(),
+                source_family.to_owned(),
                 target.resolver_address.clone(),
                 fact_family.to_owned(),
             )) else {
-                continue;
+                return RESOLVER_PROFILE_STATUS_PENDING;
             };
             if status != RESOLVER_PROFILE_STATUS_SUPPORTED {
-                return Some(status.as_str());
+                return status.as_str();
             }
-            saw_supported = true;
         }
 
-        saw_supported.then_some(RESOLVER_PROFILE_STATUS_SUPPORTED)
+        RESOLVER_PROFILE_STATUS_SUPPORTED
+    }
+}
+
+fn resolver_profile_for_source_family(source_family: &str) -> Option<&'static str> {
+    match source_family {
+        SOURCE_FAMILY_ENS_V1_RESOLVER_L1 => Some(ENS_V1_PUBLIC_RESOLVER_COMPATIBLE_PROFILE),
+        SOURCE_FAMILY_BASENAMES_BASE_RESOLVER => Some(BASENAMES_L2_RESOLVER_COMPATIBLE_PROFILE),
+        _ => None,
+    }
+}
+
+fn resolver_source_family_for_binding(source_family: &str) -> Option<&'static str> {
+    match source_family {
+        SOURCE_FAMILY_ENS_V1_REGISTRY_L1 => Some(SOURCE_FAMILY_ENS_V1_RESOLVER_L1),
+        SOURCE_FAMILY_BASENAMES_BASE_REGISTRY => Some(SOURCE_FAMILY_BASENAMES_BASE_RESOLVER),
+        _ => None,
+    }
+}
+
+fn resolver_profile_source_family_for_bindings(
+    bindings: &[CurrentBindingSeed],
+) -> Option<&'static str> {
+    let mut source_families = bindings
+        .iter()
+        .filter_map(|binding| resolver_source_family_for_binding(&binding.source_family))
+        .collect::<BTreeSet<_>>();
+    if source_families.len() == 1 {
+        source_families.pop_first()
+    } else {
+        None
+    }
+}
+
+fn resolver_overview_fact_families(source_family: &str) -> &'static [&'static str] {
+    match source_family {
+        SOURCE_FAMILY_ENS_V1_RESOLVER_L1 => &[
+            RESOLVER_PROFILE_FACT_FAMILY_AUTHORIZATION,
+            RESOLVER_PROFILE_FACT_FAMILY_RECORD,
+            RESOLVER_PROFILE_FACT_FAMILY_RECORD_VERSION,
+        ],
+        SOURCE_FAMILY_BASENAMES_BASE_RESOLVER => &[
+            RESOLVER_PROFILE_FACT_FAMILY_AUTHORIZATION,
+            RESOLVER_PROFILE_FACT_FAMILY_RECORD,
+        ],
+        _ => &[],
     }
 }
 
@@ -250,15 +311,19 @@ async fn build_resolver_current_row(
         )
         .max()
         .unwrap_or(OffsetDateTime::UNIX_EPOCH);
-    let (declared_summary, coverage) = match profile_gate.target_status(target) {
-        Some(status) if status != RESOLVER_PROFILE_STATUS_SUPPORTED => (
-            build_unsupported_declared_summary(RESOLVER_PROFILE_PENDING_REASON),
+    let target_status = resolver_profile_source_family_for_bindings(&bindings)
+        .map(|source_family| profile_gate.target_status(target, source_family))
+        .unwrap_or(RESOLVER_PROFILE_STATUS_SUPPORTED);
+    let (declared_summary, coverage) = if target_status != RESOLVER_PROFILE_STATUS_SUPPORTED {
+        (
+            build_unsupported_declared_summary(RESOLVER_FAMILY_PENDING_REASON),
             build_unsupported_coverage(&bindings, &aliases, &permissions),
-        ),
-        _ => (
+        )
+    } else {
+        (
             build_declared_summary(&bindings, &aliases, &permissions),
             build_coverage(&bindings, &aliases, &permissions),
-        ),
+        )
     };
 
     Ok(Some(ResolverCurrentRow {
@@ -872,7 +937,7 @@ fn build_unsupported_coverage(
     let mut coverage = build_coverage(bindings, aliases, permissions);
     coverage["status"] = json!("partial");
     coverage["exhaustiveness"] = json!("best_effort");
-    coverage["unsupported_reason"] = json!(RESOLVER_PROFILE_PENDING_REASON);
+    coverage["unsupported_reason"] = json!(RESOLVER_FAMILY_PENDING_REASON);
     coverage
 }
 
@@ -1239,6 +1304,30 @@ mod tests {
         let surface_binding_id = Uuid::from_u128(0x8200);
         let alias_resource_id = Uuid::from_u128(0x8101);
         let alias_surface_binding_id = Uuid::from_u128(0x8201);
+        let resolver_contract_instance_id = Uuid::from_u128(0x8202);
+        let resolver_address = "0x0000000000000000000000000000000000000aaa";
+
+        let resolver_manifest_id = insert_manifest_version(
+            database.pool(),
+            SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
+            "manifests/ens/ens_v1_resolver_l1/v1.toml",
+        )
+        .await?;
+        insert_contract_instance(
+            database.pool(),
+            resolver_contract_instance_id,
+            resolver_address,
+            resolver_manifest_id,
+        )
+        .await?;
+        insert_manifest_contract_instance(
+            database.pool(),
+            resolver_manifest_id,
+            "public_resolver",
+            resolver_contract_instance_id,
+            resolver_address,
+        )
+        .await?;
 
         seed_identity(
             database.pool(),
@@ -1273,7 +1362,7 @@ mod tests {
                     "resolver-alpha",
                     "ens:alpha.eth",
                     resource_id,
-                    "0x0000000000000000000000000000000000000aAa",
+                    resolver_address,
                     100,
                     0,
                 ),
@@ -1281,7 +1370,7 @@ mod tests {
                     "resolver-beta",
                     "ens:beta.eth",
                     alias_resource_id,
-                    "0x0000000000000000000000000000000000000AaA",
+                    resolver_address,
                     100,
                     1,
                 ),
@@ -1332,20 +1421,16 @@ mod tests {
         let summary = rebuild_resolver_current(
             database.pool(),
             Some("ethereum-mainnet"),
-            Some("0x0000000000000000000000000000000000000aaa"),
+            Some(resolver_address),
         )
         .await?;
         assert_eq!(summary.requested_resolver_count, 1);
         assert_eq!(summary.upserted_row_count, 1);
         assert_eq!(summary.deleted_row_count, 0);
 
-        let row = load_resolver_current(
-            database.pool(),
-            "ethereum-mainnet",
-            "0x0000000000000000000000000000000000000AaA",
-        )
-        .await?
-        .context("resolver_current row should exist")?;
+        let row = load_resolver_current(database.pool(), "ethereum-mainnet", resolver_address)
+            .await?
+            .context("resolver_current row should exist")?;
 
         assert_eq!(row.declared_summary["bindings"]["count"], json!(2));
         assert_eq!(
@@ -1591,7 +1676,6 @@ mod tests {
         let surface_binding_id = Uuid::from_u128(0x8401);
         let registry_contract_instance_id = Uuid::from_u128(0x8402);
         let public_resolver_contract_instance_id = Uuid::from_u128(0x8403);
-        let pending_resolver_contract_instance_id = Uuid::from_u128(0x8404);
         let registry_address = "0x0000000000000000000000000000000000008402";
         let public_resolver_address = "0x0000000000000000000000000000000000008403";
         let pending_resolver_address = "0x0000000000000000000000000000000000008404";
@@ -1628,20 +1712,6 @@ mod tests {
             "public_resolver",
             public_resolver_contract_instance_id,
             public_resolver_address,
-        )
-        .await?;
-        insert_contract_instance(
-            database.pool(),
-            pending_resolver_contract_instance_id,
-            pending_resolver_address,
-            resolver_manifest_id,
-        )
-        .await?;
-        insert_discovery_edge(
-            database.pool(),
-            registry_contract_instance_id,
-            pending_resolver_contract_instance_id,
-            registry_manifest_id,
         )
         .await?;
 
@@ -1708,12 +1778,89 @@ mod tests {
             );
             assert_eq!(
                 row.declared_summary[section]["unsupported_reason"],
-                json!(RESOLVER_PROFILE_PENDING_REASON)
+                json!(RESOLVER_FAMILY_PENDING_REASON)
             );
         }
         assert_eq!(
             row.coverage["unsupported_reason"],
-            json!(RESOLVER_PROFILE_PENDING_REASON)
+            json!(RESOLVER_FAMILY_PENDING_REASON)
+        );
+        assert_eq!(row.provenance["normalized_event_ids"], json!([1]));
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn resolver_current_keeps_unadmitted_basenames_dynamic_resolver_sections_unsupported()
+    -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let resource_id = Uuid::from_u128(0x8500);
+        let surface_binding_id = Uuid::from_u128(0x8501);
+        let resolver_address = "0x0000000000000000000000000000000000008502";
+
+        seed_basenames_identity(
+            database.pool(),
+            "basenames:pending.base.eth",
+            resource_id,
+            surface_binding_id,
+            "pending.base.eth",
+            SurfaceBindingKind::DeclaredRegistryPath,
+        )
+        .await?;
+        seed_raw_blocks(
+            database.pool(),
+            &[raw_block(
+                "base-mainnet",
+                "0xbase-res0400",
+                400,
+                1_776_200_400,
+            )],
+        )
+        .await?;
+        seed_resolver_events(
+            database.pool(),
+            &[basenames_resolver_event(
+                "base-pending-resolver",
+                "basenames:pending.base.eth",
+                resource_id,
+                resolver_address,
+                400,
+                0,
+            )],
+        )
+        .await?;
+
+        let summary = rebuild_resolver_current(
+            database.pool(),
+            Some("base-mainnet"),
+            Some(resolver_address),
+        )
+        .await?;
+        assert_eq!(summary.requested_resolver_count, 1);
+        assert_eq!(summary.upserted_row_count, 1);
+
+        let row = load_resolver_current(database.pool(), "base-mainnet", resolver_address)
+            .await?
+            .context("unadmitted Basenames resolver_current row should exist")?;
+        for section in [
+            "bindings",
+            "aliases",
+            "permissions",
+            "role_holders",
+            "event_summary",
+        ] {
+            assert_eq!(
+                row.declared_summary[section]["status"],
+                json!("unsupported")
+            );
+            assert_eq!(
+                row.declared_summary[section]["unsupported_reason"],
+                json!(RESOLVER_FAMILY_PENDING_REASON)
+            );
+        }
+        assert_eq!(
+            row.coverage["unsupported_reason"],
+            json!(RESOLVER_FAMILY_PENDING_REASON)
         );
         assert_eq!(row.provenance["normalized_event_ids"], json!([1]));
 
@@ -1733,6 +1880,33 @@ mod tests {
         upsert_surface_bindings(
             pool,
             &[surface_binding(
+                surface_binding_id,
+                logical_name_id,
+                resource_id,
+                binding_kind,
+            )],
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn seed_basenames_identity(
+        pool: &PgPool,
+        logical_name_id: &str,
+        resource_id: Uuid,
+        surface_binding_id: Uuid,
+        display_name: &str,
+        binding_kind: SurfaceBindingKind,
+    ) -> Result<()> {
+        upsert_name_surfaces(
+            pool,
+            &[basenames_name_surface(logical_name_id, display_name)],
+        )
+        .await?;
+        upsert_resources(pool, &[basenames_resource(resource_id)]).await?;
+        upsert_surface_bindings(
+            pool,
+            &[basenames_surface_binding(
                 surface_binding_id,
                 logical_name_id,
                 resource_id,
@@ -1867,45 +2041,6 @@ mod tests {
         Ok(())
     }
 
-    async fn insert_discovery_edge(
-        pool: &PgPool,
-        from_contract_instance_id: Uuid,
-        to_contract_instance_id: Uuid,
-        source_manifest_id: i64,
-    ) -> Result<()> {
-        sqlx::query(
-            r#"
-            INSERT INTO discovery_edges (
-                chain_id,
-                edge_kind,
-                from_contract_instance_id,
-                to_contract_instance_id,
-                discovery_source,
-                source_manifest_id,
-                admission,
-                provenance
-            )
-            VALUES (
-                'ethereum-mainnet',
-                'resolver',
-                $1,
-                $2,
-                'registry_resolver_observation',
-                $3,
-                'reachable_from_root',
-                '{}'::jsonb
-            )
-            "#,
-        )
-        .bind(from_contract_instance_id)
-        .bind(to_contract_instance_id)
-        .bind(source_manifest_id)
-        .execute(pool)
-        .await
-        .context("failed to insert discovery_edge")?;
-        Ok(())
-    }
-
     fn name_surface(logical_name_id: &str, display_name: &str) -> NameSurface {
         NameSurface {
             logical_name_id: logical_name_id.to_owned(),
@@ -1927,12 +2062,45 @@ mod tests {
         }
     }
 
+    fn basenames_name_surface(logical_name_id: &str, display_name: &str) -> NameSurface {
+        NameSurface {
+            logical_name_id: logical_name_id.to_owned(),
+            namespace: BASENAMES_NAMESPACE.to_owned(),
+            input_name: display_name.to_owned(),
+            canonical_display_name: display_name.to_owned(),
+            normalized_name: display_name.to_owned(),
+            dns_encoded_name: display_name.as_bytes().to_vec(),
+            namehash: format!("namehash:{display_name}"),
+            labelhashes: vec![format!("labelhash:{display_name}")],
+            normalizer_version: "ensip15".to_owned(),
+            normalization_warnings: json!([]),
+            normalization_errors: json!([]),
+            chain_id: "base-mainnet".to_owned(),
+            block_hash: "0xbase-surface".to_owned(),
+            block_number: 1,
+            provenance: json!({"source": "worker_resolver_current_test"}),
+            canonicality_state: CanonicalityState::Finalized,
+        }
+    }
+
     fn resource(resource_id: Uuid) -> Resource {
         Resource {
             resource_id,
             token_lineage_id: None,
             chain_id: "ethereum-mainnet".to_owned(),
             block_hash: format!("0xresource{}", &resource_id.simple().to_string()[..8]),
+            block_number: 10,
+            provenance: json!({"source": "worker_resolver_current_test"}),
+            canonicality_state: CanonicalityState::Finalized,
+        }
+    }
+
+    fn basenames_resource(resource_id: Uuid) -> Resource {
+        Resource {
+            resource_id,
+            token_lineage_id: None,
+            chain_id: "base-mainnet".to_owned(),
+            block_hash: format!("0xbase-resource{}", &resource_id.simple().to_string()[..8]),
             block_number: 10,
             provenance: json!({"source": "worker_resolver_current_test"}),
             canonicality_state: CanonicalityState::Finalized,
@@ -1954,6 +2122,27 @@ mod tests {
             active_to: None,
             chain_id: "ethereum-mainnet".to_owned(),
             block_hash: "0xbind".to_owned(),
+            block_number: 11,
+            provenance: json!({"source": "worker_resolver_current_test"}),
+            canonicality_state: CanonicalityState::Finalized,
+        }
+    }
+
+    fn basenames_surface_binding(
+        surface_binding_id: Uuid,
+        logical_name_id: &str,
+        resource_id: Uuid,
+        binding_kind: SurfaceBindingKind,
+    ) -> SurfaceBinding {
+        SurfaceBinding {
+            surface_binding_id,
+            logical_name_id: logical_name_id.to_owned(),
+            resource_id,
+            binding_kind,
+            active_from: timestamp(1_776_200_000),
+            active_to: None,
+            chain_id: "base-mainnet".to_owned(),
+            block_hash: "0xbase-bind".to_owned(),
             block_number: 11,
             provenance: json!({"source": "worker_resolver_current_test"}),
             canonicality_state: CanonicalityState::Finalized,
@@ -2039,6 +2228,44 @@ mod tests {
         event.source_family = source_family.to_owned();
         event.source_manifest_id = Some(source_manifest_id);
         event
+    }
+
+    fn basenames_resolver_event(
+        event_identity: &str,
+        logical_name_id: &str,
+        resource_id: Uuid,
+        resolver_address: &str,
+        block_number: i64,
+        log_index: i64,
+    ) -> NormalizedEvent {
+        NormalizedEvent {
+            event_identity: event_identity.to_owned(),
+            namespace: BASENAMES_NAMESPACE.to_owned(),
+            logical_name_id: Some(logical_name_id.to_owned()),
+            resource_id: Some(resource_id),
+            event_kind: EVENT_KIND_RESOLVER_CHANGED.to_owned(),
+            source_family: SOURCE_FAMILY_BASENAMES_BASE_REGISTRY.to_owned(),
+            manifest_version: 4,
+            source_manifest_id: None,
+            chain_id: Some("base-mainnet".to_owned()),
+            block_number: Some(block_number),
+            block_hash: Some(format!("0xbase-res{block_number:04}")),
+            transaction_hash: Some(format!("0xbase-tx{block_number:04x}")),
+            log_index: Some(log_index),
+            raw_fact_ref: json!({
+                "kind": "raw_log",
+                "chain_id": "base-mainnet",
+                "block_number": block_number,
+                "log_index": log_index
+            }),
+            derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+            canonicality_state: CanonicalityState::Finalized,
+            before_state: json!({}),
+            after_state: json!({
+                "resolver": resolver_address,
+                "namehash": format!("namehash:{logical_name_id}"),
+            }),
+        }
     }
 
     fn resolver_permission_event(
