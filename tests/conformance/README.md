@@ -62,6 +62,12 @@ Focused reorg chaos drill conformance job, from the repository root:
 cargo test --manifest-path tests/conformance/Cargo.toml reorg_chaos_drill_conformance_job
 ```
 
+Focused dynamic resolver profile conformance coverage, from the repository root:
+
+```sh
+cargo test --manifest-path tests/conformance/Cargo.toml dynamic_resolver_profile -- --nocapture
+```
+
 Execution notes:
 
 - uses `BIGNAME_DATABASE_URL` when set, then `DATABASE_URL` when set

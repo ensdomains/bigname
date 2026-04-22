@@ -6,9 +6,9 @@ use std::{
 
 use anyhow::{Context, Result};
 use bigname_storage::{
-    NormalizedEvent, RawBlock, RawLog, default_database_url, load_name_surface,
+    NormalizedEvent, RawBlock, RawCodeHash, RawLog, default_database_url, load_name_surface,
     load_normalized_event_counts_by_kind, load_surface_bindings_by_logical_name_id,
-    upsert_normalized_events, upsert_raw_blocks, upsert_raw_logs,
+    upsert_normalized_events, upsert_raw_blocks, upsert_raw_code_hashes, upsert_raw_logs,
 };
 use sqlx::{
     PgPool,
@@ -373,6 +373,18 @@ fn raw_block_on_chain(
         transactions_root: None,
         receipts_root: None,
         state_root: None,
+        canonicality_state: CanonicalityState::Canonical,
+    }
+}
+
+fn raw_code_hash_for_address(address: &str, code_hash: &str) -> RawCodeHash {
+    RawCodeHash {
+        chain_id: "ethereum-mainnet".to_owned(),
+        block_hash: "0x9999999999999999999999999999999999999999999999999999999999999999".to_owned(),
+        block_number: 41,
+        contract_address: address.to_owned(),
+        code_hash: code_hash.to_owned(),
+        code_byte_length: 5,
         canonicality_state: CanonicalityState::Canonical,
     }
 }
@@ -1612,7 +1624,7 @@ async fn sync_ens_v1_unwrapped_authority_emits_reverse_claim_source_observations
         SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
         "resolver",
         "0x00000000000000000000000000000000000000cc",
-        Some("resolver"),
+        Some("public_resolver"),
         "manifests/ens/ens_v1_resolver_l1/v1.toml",
     )
     .await?;
@@ -1811,8 +1823,10 @@ async fn sync_ens_v1_unwrapped_authority_new_resolver_discovery_edge_respects_ef
     )
     .await?;
     let registry_contract_instance_id = Uuid::new_v4();
+    let public_resolver_seed_contract_instance_id = Uuid::new_v4();
     let resolver_contract_instance_id = Uuid::new_v4();
     let registry_address = "0x00000000000000000000000000000000000000bb";
+    let public_resolver_seed_address = "0x00000000000000000000000000000000000000bc";
     let resolver_address = "0x00000000000000000000000000000000000000cc";
     let unadmitted_resolver_address = "0x00000000000000000000000000000000000000dd";
 
@@ -1840,6 +1854,32 @@ async fn sync_ens_v1_unwrapped_authority_new_resolver_discovery_edge_respects_ef
         "ethereum-mainnet",
         registry_address,
         registry_manifest_id,
+    )
+    .await?;
+    insert_contract_instance(
+        database.pool(),
+        public_resolver_seed_contract_instance_id,
+        "ethereum-mainnet",
+        "contract",
+    )
+    .await?;
+    insert_manifest_contract_instance(
+        database.pool(),
+        resolver_manifest_id,
+        "contract",
+        "public_resolver_seed",
+        public_resolver_seed_contract_instance_id,
+        public_resolver_seed_address,
+        Some("public_resolver"),
+        Some("none"),
+    )
+    .await?;
+    insert_contract_instance_address(
+        database.pool(),
+        public_resolver_seed_contract_instance_id,
+        "ethereum-mainnet",
+        public_resolver_seed_address,
+        resolver_manifest_id,
     )
     .await?;
     insert_contract_instance(
@@ -1878,6 +1918,20 @@ async fn sync_ens_v1_unwrapped_authority_new_resolver_discovery_edge_respects_ef
         registry_manifest_id,
         Some(44),
         Some(44),
+    )
+    .await?;
+    upsert_raw_code_hashes(
+        database.pool(),
+        &[
+            raw_code_hash_for_address(
+                public_resolver_seed_address,
+                "0x1111111111111111111111111111111111111111111111111111111111111111",
+            ),
+            raw_code_hash_for_address(
+                resolver_address,
+                "0x1111111111111111111111111111111111111111111111111111111111111111",
+            ),
+        ],
     )
     .await?;
 
@@ -2052,6 +2106,361 @@ async fn sync_ens_v1_unwrapped_authority_new_resolver_discovery_edge_respects_ef
 }
 
 #[tokio::test]
+async fn sync_ens_v1_unwrapped_authority_gates_discovered_ensv1_resolver_local_facts_by_profile()
+-> Result<()> {
+    let _permit = crate::acquire_test_db_permit().await;
+    let database = TestDatabase::new().await?;
+
+    let registrar_manifest_id = insert_manifest_version(
+        database.pool(),
+        1,
+        "ens",
+        SOURCE_FAMILY_ENS_V1_REGISTRAR_L1,
+        "ethereum-mainnet",
+        "ens_v1",
+        "active",
+        "uts46-v1",
+        "manifests/ens/ens_v1_registrar_l1/v1.toml",
+    )
+    .await?;
+    let registry_manifest_id = insert_manifest_version(
+        database.pool(),
+        1,
+        "ens",
+        SOURCE_FAMILY_ENS_V1_REGISTRY_L1,
+        "ethereum-mainnet",
+        "ens_v1",
+        "active",
+        "uts46-v1",
+        "manifests/ens/ens_v1_registry_l1/v1.toml",
+    )
+    .await?;
+    let resolver_manifest_id = insert_manifest_version(
+        database.pool(),
+        1,
+        "ens",
+        SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
+        "ethereum-mainnet",
+        "ens_v1",
+        "active",
+        "uts46-v1",
+        "manifests/ens/ens_v1_resolver_l1/v1.toml",
+    )
+    .await?;
+
+    let registrar_contract_instance_id = Uuid::new_v4();
+    let registry_contract_instance_id = Uuid::new_v4();
+    let public_resolver_seed_contract_instance_id = Uuid::new_v4();
+    let supported_resolver_contract_instance_id = Uuid::new_v4();
+    let pending_resolver_contract_instance_id = Uuid::new_v4();
+    let unsupported_resolver_contract_instance_id = Uuid::new_v4();
+    let registrar_address = "0x00000000000000000000000000000000000000aa";
+    let registry_address = "0x00000000000000000000000000000000000000bb";
+    let public_resolver_seed_address = "0x00000000000000000000000000000000000000bc";
+    let supported_resolver_address = "0x00000000000000000000000000000000000000c1";
+    let pending_resolver_address = "0x00000000000000000000000000000000000000c2";
+    let unsupported_resolver_address = "0x00000000000000000000000000000000000000c3";
+    let public_resolver_code_hash =
+        "0x1111111111111111111111111111111111111111111111111111111111111111";
+
+    for (contract_instance_id, address, manifest_id, role) in [
+        (
+            registrar_contract_instance_id,
+            registrar_address,
+            registrar_manifest_id,
+            "registrar",
+        ),
+        (
+            registry_contract_instance_id,
+            registry_address,
+            registry_manifest_id,
+            "registry",
+        ),
+        (
+            public_resolver_seed_contract_instance_id,
+            public_resolver_seed_address,
+            resolver_manifest_id,
+            "public_resolver",
+        ),
+    ] {
+        insert_contract_instance(
+            database.pool(),
+            contract_instance_id,
+            "ethereum-mainnet",
+            "contract",
+        )
+        .await?;
+        insert_manifest_contract_instance(
+            database.pool(),
+            manifest_id,
+            "contract",
+            role,
+            contract_instance_id,
+            address,
+            Some(role),
+            Some("none"),
+        )
+        .await?;
+        insert_contract_instance_address(
+            database.pool(),
+            contract_instance_id,
+            "ethereum-mainnet",
+            address,
+            manifest_id,
+        )
+        .await?;
+    }
+
+    for (contract_instance_id, address) in [
+        (
+            supported_resolver_contract_instance_id,
+            supported_resolver_address,
+        ),
+        (
+            pending_resolver_contract_instance_id,
+            pending_resolver_address,
+        ),
+        (
+            unsupported_resolver_contract_instance_id,
+            unsupported_resolver_address,
+        ),
+    ] {
+        insert_contract_instance(
+            database.pool(),
+            contract_instance_id,
+            "ethereum-mainnet",
+            "contract",
+        )
+        .await?;
+        insert_contract_instance_address(
+            database.pool(),
+            contract_instance_id,
+            "ethereum-mainnet",
+            address,
+            resolver_manifest_id,
+        )
+        .await?;
+        insert_active_discovery_edge_with_range(
+            database.pool(),
+            "ethereum-mainnet",
+            "resolver",
+            registry_contract_instance_id,
+            contract_instance_id,
+            registry_manifest_id,
+            None,
+            None,
+        )
+        .await?;
+    }
+
+    upsert_raw_code_hashes(
+        database.pool(),
+        &[
+            raw_code_hash_for_address(public_resolver_seed_address, public_resolver_code_hash),
+            raw_code_hash_for_address(supported_resolver_address, public_resolver_code_hash),
+            raw_code_hash_for_address(
+                unsupported_resolver_address,
+                "0x2222222222222222222222222222222222222222222222222222222222222222",
+            ),
+        ],
+    )
+    .await?;
+
+    let block_hash = "0xabababababababababababababababababababababababababababababababab";
+    let transaction_hash = "0xtxababababababababababababababababababababababababababababababab";
+    let alice = observe_registrar_eth_name_with_version("alice", ENS_NORMALIZER_VERSION)?;
+    upsert_raw_blocks(
+        database.pool(),
+        &[raw_block(
+            block_hash,
+            Some("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            42,
+            1_700_000_042,
+        )],
+    )
+    .await?;
+    upsert_raw_logs(
+        database.pool(),
+        &[
+            RawLog {
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: block_hash.to_owned(),
+                block_number: 42,
+                transaction_hash: transaction_hash.to_owned(),
+                transaction_index: 0,
+                log_index: 0,
+                emitting_address: registrar_address.to_owned(),
+                topics: vec![
+                    name_registered_topic0(),
+                    keccak256_hex(b"alice"),
+                    hex_string(&abi_word_address(
+                        "0x0000000000000000000000000000000000000001",
+                    )),
+                ],
+                data: encode_registrar_name_registered_log_data("alice", 1_700_010_000),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            RawLog {
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: block_hash.to_owned(),
+                block_number: 42,
+                transaction_hash: transaction_hash.to_owned(),
+                transaction_index: 0,
+                log_index: 1,
+                emitting_address: registry_address.to_owned(),
+                topics: vec![new_resolver_topic0(), alice.namehash.clone()],
+                data: encode_registry_new_resolver_log_data(supported_resolver_address),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            RawLog {
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: block_hash.to_owned(),
+                block_number: 42,
+                transaction_hash: transaction_hash.to_owned(),
+                transaction_index: 0,
+                log_index: 2,
+                emitting_address: supported_resolver_address.to_owned(),
+                topics: vec![name_changed_topic0(), alice.namehash.clone()],
+                data: encode_dynamic_string_log_data("supported.eth"),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            RawLog {
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: block_hash.to_owned(),
+                block_number: 42,
+                transaction_hash: transaction_hash.to_owned(),
+                transaction_index: 0,
+                log_index: 3,
+                emitting_address: supported_resolver_address.to_owned(),
+                topics: vec![version_changed_topic0(), alice.namehash.clone()],
+                data: encode_resolver_version_changed_log_data(7),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            RawLog {
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: block_hash.to_owned(),
+                block_number: 42,
+                transaction_hash: transaction_hash.to_owned(),
+                transaction_index: 0,
+                log_index: 4,
+                emitting_address: registry_address.to_owned(),
+                topics: vec![new_resolver_topic0(), alice.namehash.clone()],
+                data: encode_registry_new_resolver_log_data(pending_resolver_address),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            RawLog {
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: block_hash.to_owned(),
+                block_number: 42,
+                transaction_hash: transaction_hash.to_owned(),
+                transaction_index: 0,
+                log_index: 5,
+                emitting_address: pending_resolver_address.to_owned(),
+                topics: vec![name_changed_topic0(), alice.namehash.clone()],
+                data: encode_dynamic_string_log_data("pending.eth"),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            RawLog {
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: block_hash.to_owned(),
+                block_number: 42,
+                transaction_hash: transaction_hash.to_owned(),
+                transaction_index: 0,
+                log_index: 6,
+                emitting_address: pending_resolver_address.to_owned(),
+                topics: vec![version_changed_topic0(), alice.namehash.clone()],
+                data: encode_resolver_version_changed_log_data(8),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            RawLog {
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: block_hash.to_owned(),
+                block_number: 42,
+                transaction_hash: transaction_hash.to_owned(),
+                transaction_index: 0,
+                log_index: 7,
+                emitting_address: registry_address.to_owned(),
+                topics: vec![new_resolver_topic0(), alice.namehash.clone()],
+                data: encode_registry_new_resolver_log_data(unsupported_resolver_address),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            RawLog {
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: block_hash.to_owned(),
+                block_number: 42,
+                transaction_hash: transaction_hash.to_owned(),
+                transaction_index: 0,
+                log_index: 8,
+                emitting_address: unsupported_resolver_address.to_owned(),
+                topics: vec![name_changed_topic0(), alice.namehash.clone()],
+                data: encode_dynamic_string_log_data("unsupported.eth"),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            RawLog {
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: block_hash.to_owned(),
+                block_number: 42,
+                transaction_hash: transaction_hash.to_owned(),
+                transaction_index: 0,
+                log_index: 9,
+                emitting_address: unsupported_resolver_address.to_owned(),
+                topics: vec![version_changed_topic0(), alice.namehash.clone()],
+                data: encode_resolver_version_changed_log_data(9),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+        ],
+    )
+    .await?;
+
+    let summary = sync_ens_v1_unwrapped_authority(database.pool(), "ethereum-mainnet").await?;
+    assert_eq!(summary.scanned_log_count, 10);
+    assert_eq!(summary.matched_log_count, 6);
+    assert_eq!(
+        summary.by_kind.get(EVENT_KIND_RESOLVER_CHANGED),
+        Some(&3_usize)
+    );
+    assert_eq!(
+        summary.by_kind.get(EVENT_KIND_RECORD_CHANGED),
+        Some(&1_usize)
+    );
+    assert_eq!(
+        summary.by_kind.get(EVENT_KIND_RECORD_VERSION_CHANGED),
+        Some(&1_usize)
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, Vec<String>>(
+            "SELECT ARRAY_AGG(after_state->>'resolver' ORDER BY log_index) FROM normalized_events WHERE event_kind = 'ResolverChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        vec![
+            supported_resolver_address.to_owned(),
+            pending_resolver_address.to_owned(),
+            unsupported_resolver_address.to_owned(),
+        ]
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT after_state->>'raw_name' FROM normalized_events WHERE event_kind = 'RecordChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "supported.eth".to_owned()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM normalized_events WHERE event_kind IN ('RecordChanged', 'RecordVersionChanged') AND log_index = ANY($1::BIGINT[])"
+        )
+        .bind(vec![5_i64, 6, 8, 9])
+        .fetch_one(database.pool())
+        .await?,
+        0
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn sync_ens_v1_unwrapped_authority_emits_supported_record_change_events_idempotently()
 -> Result<()> {
     let _permit = crate::acquire_test_db_permit().await;
@@ -2080,7 +2489,7 @@ async fn sync_ens_v1_unwrapped_authority_emits_supported_record_change_events_id
         SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
         "resolver",
         "0x00000000000000000000000000000000000000cc",
-        Some("resolver"),
+        Some("public_resolver"),
         "manifests/ens/ens_v1_resolver_l1/v1.toml",
     )
     .await?;
@@ -2713,7 +3122,7 @@ async fn sync_ens_v1_unwrapped_authority_drops_resolver_record_logs_without_curr
         SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
         "resolver",
         "0x00000000000000000000000000000000000000cc",
-        Some("resolver"),
+        Some("public_resolver"),
         "manifests/ens/ens_v1_resolver_l1/v1.toml",
     )
     .await?;
@@ -2732,7 +3141,7 @@ async fn sync_ens_v1_unwrapped_authority_drops_resolver_record_logs_without_curr
         "resolver_alt",
         alternate_resolver_contract_instance_id,
         "0x00000000000000000000000000000000000000dd",
-        Some("resolver"),
+        Some("public_resolver"),
         Some("none"),
     )
     .await?;

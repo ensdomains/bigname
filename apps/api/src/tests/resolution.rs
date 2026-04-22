@@ -4821,6 +4821,249 @@ async fn get_resolution_returns_unsupported_record_inventory_sections_when_proje
 }
 
 #[tokio::test]
+async fn get_resolution_dynamic_resolver_publicresolver_profile_reads_supported_ensv1_records()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0x9d40);
+    let token_lineage_id = Uuid::from_u128(0x9d41);
+    let surface_binding_id = Uuid::from_u128(0x9d42);
+    let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000009d40);
+    let dynamic_resolver_address = "0x0000000000000000000000000000000000000d41";
+    let request_key = resolution_execution_request_key(&["text:com.twitter", "addr:60"]);
+    let persisted_verified_queries = json!([
+        {
+            "record_key": "avatar",
+            "status": "success",
+            "value": {
+                "value": "https://cdn.example.test/alice-dynamic.png"
+            },
+            "provenance": {
+                "execution_trace_id": execution_trace_id.to_string()
+            }
+        },
+        {
+            "record_key": "text:com.twitter",
+            "status": "success",
+            "value": {
+                "value": "@alice-dynamic"
+            },
+            "provenance": {
+                "execution_trace_id": execution_trace_id.to_string()
+            }
+        },
+        {
+            "record_key": "addr:60",
+            "status": "success",
+            "value": {
+                "coin_type": "60",
+                "value": "0x00000000000000000000000000000000000000dd"
+            },
+            "provenance": {
+                "execution_trace_id": execution_trace_id.to_string()
+            }
+        }
+    ]);
+
+    database
+        .seed_name_current_binding_migrated(
+            logical_name_id,
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    database
+        .insert_name_current_row(name_current_row_with_current_resolver(
+            exact_name_row(
+                logical_name_id,
+                surface_binding_id,
+                resource_id,
+                token_lineage_id,
+            ),
+            "ethereum-mainnet",
+            dynamic_resolver_address,
+        ))
+        .await?;
+    database
+        .insert_record_inventory_current_row(record_inventory_current_row(
+            logical_name_id,
+            resource_id,
+        ))
+        .await?;
+
+    let mut trace = resolution_execution_trace(
+        execution_trace_id,
+        &request_key,
+        &["avatar", "text:com.twitter", "addr:60"],
+        persisted_verified_queries.clone(),
+    );
+    trace.steps[0].step_payload = json!({
+        "entrypoint": "universal_resolver",
+        "resolver": dynamic_resolver_address,
+    });
+    let outcome = resolution_execution_outcome(
+        execution_trace_id,
+        &request_key,
+        persisted_verified_queries,
+        logical_name_id,
+        resource_id,
+    );
+    upsert_execution_trace(&database.pool, &trace).await?;
+    upsert_execution_outcome(&database.pool, &outcome).await?;
+
+    let resolution_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resolutions/ens/alice.eth?mode=both&records=avatar,text:com.twitter,addr:60")
+                .body(Body::empty())
+                .expect("resolution request must build"),
+        )
+        .await
+        .context("supported dynamic resolver resolution request failed")?;
+    let explain_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/explain/resolutions/ens/alice.eth/execution?records=avatar,text:com.twitter,addr:60")
+                .body(Body::empty())
+                .expect("explain request must build"),
+        )
+        .await
+        .context("supported dynamic resolver execution explain request failed")?;
+
+    assert_eq!(resolution_response.status(), StatusCode::OK);
+    assert_eq!(explain_response.status(), StatusCode::OK);
+
+    let resolution_payload: ResolutionResponse = read_json(resolution_response).await?;
+    let explain_payload: ResolutionResponse = read_json(explain_response).await?;
+    let declared_state = resolution_payload
+        .declared_state
+        .as_ref()
+        .expect("declared_state must be present");
+    let expected_verified_queries = json!([
+        {
+            "record_key": "avatar",
+            "status": "success",
+            "value": {
+                "value": "https://cdn.example.test/alice-dynamic.png"
+            },
+            "provenance": {
+                "execution_trace_id": execution_trace_id.to_string()
+            }
+        },
+        {
+            "record_key": "text:com.twitter",
+            "status": "success",
+            "value": {
+                "value": "@alice-dynamic"
+            },
+            "provenance": {
+                "execution_trace_id": execution_trace_id.to_string()
+            }
+        },
+        {
+            "record_key": "addr:60",
+            "status": "success",
+            "value": {
+                "coin_type": "60",
+                "value": "0x00000000000000000000000000000000000000dd"
+            },
+            "provenance": {
+                "execution_trace_id": execution_trace_id.to_string()
+            }
+        }
+    ]);
+
+    assert_eq!(
+        declared_state.pointer("/topology/resolver_path/0/address"),
+        Some(&json!(dynamic_resolver_address))
+    );
+    assert_eq!(
+        declared_state
+            .pointer("/topology/resolver_path/0/chain_id"),
+        Some(&json!("ethereum-mainnet"))
+    );
+    assert_eq!(
+        declared_state.pointer("/record_inventory/selectors"),
+        Some(&json!([
+            {
+                "record_key": "addr:60",
+                "record_family": "addr",
+                "selector_key": "60",
+                "cacheable": true
+            },
+            {
+                "record_key": "avatar",
+                "record_family": "avatar",
+                "selector_key": null,
+                "cacheable": true
+            },
+            {
+                "record_key": "text:com.twitter",
+                "record_family": "text",
+                "selector_key": "com.twitter",
+                "cacheable": false
+            }
+        ]))
+    );
+    assert_eq!(
+        resolution_payload.verified_state,
+        Some(json!({
+            "verified_queries": expected_verified_queries
+        }))
+    );
+    assert_eq!(
+        explain_payload
+            .verified_state
+            .as_ref()
+            .and_then(|state| state.pointer("/execution/resolver_discovery_path/0/address")),
+        Some(&json!(dynamic_resolver_address))
+    );
+    assert_eq!(
+        explain_payload
+            .verified_state
+            .as_ref()
+            .and_then(|state| state.pointer("/verified_queries")),
+        Some(&json!([
+            {
+                "record_key": "avatar",
+                "status": "success",
+                "value": {
+                    "value": "https://cdn.example.test/alice-dynamic.png"
+                },
+                "provenance": {
+                    "execution_trace_id": execution_trace_id.to_string()
+                }
+            },
+            {
+                "record_key": "text:com.twitter",
+                "status": "success",
+                "value": {
+                    "value": "@alice-dynamic"
+                },
+                "provenance": {
+                    "execution_trace_id": execution_trace_id.to_string()
+                }
+            },
+            {
+                "record_key": "addr:60",
+                "status": "success",
+                "value": {
+                    "coin_type": "60",
+                    "value": "0x00000000000000000000000000000000000000dd"
+                },
+                "provenance": {
+                    "execution_trace_id": execution_trace_id.to_string()
+                }
+            }
+        ]))
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn get_resolution_dynamic_resolver_profile_non_graduation_keeps_ensv1_records_explicit()
 -> Result<()> {
     let database = TestDatabase::new_with_schemas(false, true).await?;
@@ -4946,6 +5189,122 @@ async fn get_resolution_dynamic_resolver_profile_non_graduation_keeps_ensv1_reco
         }))
     );
     assert_eq!(payload.verified_state, None);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_resolution_dynamic_resolver_pending_profile_keeps_verified_records_explicit()
+-> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0x9d50);
+    let token_lineage_id = Uuid::from_u128(0x9d51);
+    let surface_binding_id = Uuid::from_u128(0x9d52);
+    let dynamic_resolver_address = "0x0000000000000000000000000000000000000d51";
+
+    database
+        .seed_name_current_binding(
+            logical_name_id,
+            "ens",
+            "alice.eth",
+            "Alice.eth",
+            "namehash:alice.eth",
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    database
+        .insert_name_current_row(name_current_row_with_current_resolver(
+            exact_name_row(
+                logical_name_id,
+                surface_binding_id,
+                resource_id,
+                token_lineage_id,
+            ),
+            "ethereum-mainnet",
+            dynamic_resolver_address,
+        ))
+        .await?;
+    database
+        .insert_record_inventory_current_row(
+            dynamic_resolver_unsupported_profile_record_inventory_current_row(
+                logical_name_id,
+                resource_id,
+            ),
+        )
+        .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resolutions/ens/alice.eth?mode=both&records=addr:60,text:com.twitter,contenthash")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("pending dynamic resolver mixed resolution request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let payload: ResolutionResponse = read_json(response).await?;
+    let declared_state = payload
+        .declared_state
+        .as_ref()
+        .expect("declared_state must be present");
+    assert_eq!(
+        declared_state.pointer("/topology/resolver_path/0/address"),
+        Some(&json!(dynamic_resolver_address))
+    );
+    assert_eq!(
+        declared_state.pointer("/record_cache/entries"),
+        Some(&json!([
+            {
+                "record_key": "addr:60",
+                "record_family": "addr",
+                "selector_key": "60",
+                "status": "unsupported",
+                "unsupported_reason": "resolver_family_pending",
+            },
+            {
+                "record_key": "text:com.twitter",
+                "record_family": "text",
+                "selector_key": "com.twitter",
+                "status": "unsupported",
+                "unsupported_reason": "resolver_family_pending",
+            },
+            {
+                "record_key": "contenthash",
+                "record_family": "contenthash",
+                "selector_key": null,
+                "status": "not_found",
+            }
+        ]))
+    );
+    assert_eq!(
+        payload.verified_state,
+        Some(json!({
+            "verified_queries": [
+                {
+                    "record_key": "addr:60",
+                    "status": "unsupported",
+                    "unsupported_reason": "verified resolution entrypoint is not yet supported",
+                },
+                {
+                    "record_key": "text:com.twitter",
+                    "status": "unsupported",
+                    "unsupported_reason": "verified resolution entrypoint is not yet supported",
+                },
+                {
+                    "record_key": "contenthash",
+                    "status": "unsupported",
+                    "unsupported_reason": "verified resolution entrypoint is not yet supported",
+                }
+            ]
+        }))
+    );
 
     database.cleanup().await?;
     Ok(())

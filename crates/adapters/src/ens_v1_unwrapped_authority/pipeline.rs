@@ -51,6 +51,7 @@ async fn sync_ens_v1_unwrapped_authority_with_scope(
         blocks: canonical_blocks,
     };
     let reverse_claim_sources = load_reverse_claim_sources(pool, chain).await?;
+    let resolver_profile_gate = ResolverProfileGate::load(pool).await?;
     let raw_logs = load_authority_raw_logs(
         pool,
         chain,
@@ -77,6 +78,9 @@ async fn sync_ens_v1_unwrapped_authority_with_scope(
     let mut namehash_to_labelhash = HashMap::<String, String>::new();
     let mut matched_log_count = 0usize;
     for raw_log in &raw_logs {
+        if resolver_profile_gate.rejects_resolver_local_fact(raw_log) {
+            continue;
+        }
         let Some(observation) = build_authority_observation(raw_log)? else {
             continue;
         };
@@ -512,6 +516,77 @@ fn count_events_by_kind(events: &[NormalizedEvent]) -> BTreeMap<String, usize> {
         *counts.entry(event.event_kind.clone()).or_default() += 1;
     }
     counts
+}
+
+#[derive(Clone, Debug, Default)]
+struct ResolverProfileGate {
+    supported_fact_families: HashSet<(String, &'static str)>,
+}
+
+impl ResolverProfileGate {
+    async fn load(pool: &PgPool) -> Result<Self> {
+        let admissions = bigname_manifests::load_ens_v1_public_resolver_profile_admissions(pool)
+            .await
+            .context("failed to load ENSv1 PublicResolver profile admissions")?;
+        let supported_fact_families = admissions
+            .into_iter()
+            .filter(|admission| {
+                admission.source_family == SOURCE_FAMILY_ENS_V1_RESOLVER_L1
+                    && admission.profile == "public_resolver_compatible"
+                    && admission.status == "supported"
+            })
+            .filter_map(|admission| {
+                resolver_fact_family_key(&admission.fact_family)
+                    .map(|fact_family| (admission.address, fact_family))
+            })
+            .collect();
+
+        Ok(Self {
+            supported_fact_families,
+        })
+    }
+
+    fn rejects_resolver_local_fact(&self, raw_log: &AuthorityRawLogRow) -> bool {
+        if raw_log.source_family != SOURCE_FAMILY_ENS_V1_RESOLVER_L1 {
+            return false;
+        }
+
+        let Some(topic0) = raw_log.topics.first() else {
+            return false;
+        };
+        let Some(fact_family) = resolver_fact_family_for_topic0(topic0) else {
+            return false;
+        };
+
+        !self.supported_fact_families.contains(&(
+            raw_log.emitting_address.to_ascii_lowercase(),
+            fact_family,
+        ))
+    }
+}
+
+fn resolver_fact_family_key(fact_family: &str) -> Option<&'static str> {
+    match fact_family {
+        "resolver_record" => Some("resolver_record"),
+        "resolver_record_version" => Some("resolver_record_version"),
+        _ => None,
+    }
+}
+
+fn resolver_fact_family_for_topic0(topic0: &str) -> Option<&'static str> {
+    if topic0.eq_ignore_ascii_case(&text_changed_topic0())
+        || topic0.eq_ignore_ascii_case(&name_changed_topic0())
+        || topic0.eq_ignore_ascii_case(&addr_changed_topic0())
+        || topic0.eq_ignore_ascii_case(&address_changed_topic0())
+    {
+        return Some("resolver_record");
+    }
+
+    if topic0.eq_ignore_ascii_case(&version_changed_topic0()) {
+        return Some("resolver_record_version");
+    }
+
+    None
 }
 
 async fn load_reverse_claim_sources(

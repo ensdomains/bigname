@@ -1454,7 +1454,7 @@ async fn reconcile_fetched_heads_backfills_unwrapped_ensv1_authority_identity_ro
     insert_manifest_contract_instance(
         database.pool(),
         3,
-        "resolver",
+        "public_resolver",
         resolver_contract_instance_id,
         resolver_address,
         "none",
@@ -1716,6 +1716,350 @@ async fn reconcile_fetched_heads_backfills_unwrapped_ensv1_authority_identity_ro
         .fetch_one(database.pool())
         .await?,
         "canonical".to_owned()
+    );
+
+    server.abort();
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn reconcile_fetched_heads_gates_discovered_ensv1_resolver_local_facts_by_profile()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let registrar_contract_instance_id = Uuid::from_u128(0x381);
+    let registry_contract_instance_id = Uuid::from_u128(0x382);
+    let public_resolver_seed_contract_instance_id = Uuid::from_u128(0x383);
+    let supported_resolver_contract_instance_id = Uuid::from_u128(0x384);
+    let pending_resolver_contract_instance_id = Uuid::from_u128(0x385);
+    let unsupported_resolver_contract_instance_id = Uuid::from_u128(0x386);
+    let registrar_address = "0x0000000000000000000000000000000000000381";
+    let registry_address = "0x0000000000000000000000000000000000000382";
+    let public_resolver_seed_address = "0x0000000000000000000000000000000000000383";
+    let supported_resolver_address = "0x0000000000000000000000000000000000000384";
+    let pending_resolver_address = "0x0000000000000000000000000000000000000385";
+    let unsupported_resolver_address = "0x0000000000000000000000000000000000000386";
+    let public_resolver_code_hash =
+        "0x1111111111111111111111111111111111111111111111111111111111111111";
+
+    sqlx::query(
+        r#"
+            INSERT INTO manifest_versions (
+                manifest_id,
+                manifest_version,
+                namespace,
+                source_family,
+                chain,
+                deployment_epoch,
+                rollout_status,
+                normalizer_version,
+                file_path,
+                manifest_payload
+            )
+            VALUES
+                (
+                    1,
+                    1,
+                    'ens',
+                    'ens_v1_registrar_l1',
+                    'ethereum-mainnet',
+                    'ens_v1',
+                    'active',
+                    'uts46-v1',
+                    'manifests/ens/ens_v1_registrar_l1/v1.toml',
+                    '{}'::jsonb
+                ),
+                (
+                    2,
+                    1,
+                    'ens',
+                    'ens_v1_registry_l1',
+                    'ethereum-mainnet',
+                    'ens_v1',
+                    'active',
+                    'uts46-v1',
+                    'manifests/ens/ens_v1_registry_l1/v1.toml',
+                    '{}'::jsonb
+                ),
+                (
+                    3,
+                    1,
+                    'ens',
+                    'ens_v1_resolver_l1',
+                    'ethereum-mainnet',
+                    'ens_v1',
+                    'active',
+                    'uts46-v1',
+                    'manifests/ens/ens_v1_resolver_l1/v1.toml',
+                    '{}'::jsonb
+                )
+            "#,
+    )
+    .execute(database.pool())
+    .await
+    .context("failed to insert manifest_versions for ENSv1 resolver profile gate test")?;
+
+    for (contract_instance_id, address, manifest_id, role) in [
+        (
+            registrar_contract_instance_id,
+            registrar_address,
+            1,
+            "registrar",
+        ),
+        (
+            registry_contract_instance_id,
+            registry_address,
+            2,
+            "registry",
+        ),
+        (
+            public_resolver_seed_contract_instance_id,
+            public_resolver_seed_address,
+            3,
+            "public_resolver",
+        ),
+    ] {
+        insert_contract_instance(
+            database.pool(),
+            contract_instance_id,
+            "ethereum-mainnet",
+            "contract",
+        )
+        .await?;
+        insert_active_contract_instance_address(
+            database.pool(),
+            contract_instance_id,
+            "ethereum-mainnet",
+            address,
+            Some(manifest_id),
+        )
+        .await?;
+        insert_manifest_contract_instance(
+            database.pool(),
+            manifest_id,
+            role,
+            contract_instance_id,
+            address,
+            "none",
+            None,
+            None,
+        )
+        .await?;
+    }
+
+    for (contract_instance_id, address) in [
+        (
+            supported_resolver_contract_instance_id,
+            supported_resolver_address,
+        ),
+        (
+            pending_resolver_contract_instance_id,
+            pending_resolver_address,
+        ),
+        (
+            unsupported_resolver_contract_instance_id,
+            unsupported_resolver_address,
+        ),
+    ] {
+        insert_contract_instance(
+            database.pool(),
+            contract_instance_id,
+            "ethereum-mainnet",
+            "contract",
+        )
+        .await?;
+        insert_active_contract_instance_address(
+            database.pool(),
+            contract_instance_id,
+            "ethereum-mainnet",
+            address,
+            Some(3),
+        )
+        .await?;
+        insert_active_discovery_edge(
+            database.pool(),
+            "ethereum-mainnet",
+            "resolver",
+            registry_contract_instance_id,
+            contract_instance_id,
+            Some(2),
+        )
+        .await?;
+    }
+
+    upsert_raw_code_hashes(
+        database.pool(),
+        &[
+            RawCodeHash {
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: "0x9999999999999999999999999999999999999999999999999999999999999999"
+                    .to_owned(),
+                block_number: 41,
+                contract_address: public_resolver_seed_address.to_owned(),
+                code_hash: public_resolver_code_hash.to_owned(),
+                code_byte_length: 5,
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            RawCodeHash {
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: "0x9999999999999999999999999999999999999999999999999999999999999999"
+                    .to_owned(),
+                block_number: 41,
+                contract_address: supported_resolver_address.to_owned(),
+                code_hash: public_resolver_code_hash.to_owned(),
+                code_byte_length: 5,
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            RawCodeHash {
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: "0x9999999999999999999999999999999999999999999999999999999999999999"
+                    .to_owned(),
+                block_number: 41,
+                contract_address: unsupported_resolver_address.to_owned(),
+                code_hash: "0x2222222222222222222222222222222222222222222222222222222222222222"
+                    .to_owned(),
+                code_byte_length: 5,
+                canonicality_state: CanonicalityState::Canonical,
+            },
+        ],
+    )
+    .await?;
+
+    let watched_plan = load_watched_chain_plan(database.pool()).await?;
+    let tasks = sync_intake_chain_tasks(database.pool(), &watched_plan).await?;
+    let canonical_head = provider_block(
+        "0x3838383838383838383838383838383838383838383838383838383838383838",
+        Some("0x3737373737373737373737373737373737373737373737373737373737373737"),
+        52,
+    );
+    let alice_namehash = namehash_for_dns_name(&dns_encoded_eth_name("alice"));
+    let (provider, server) = bundle_provider_with_fixtures(vec![ProviderBlockFixture {
+        logs: vec![
+            rpc_registrar_name_registered_log_payload(
+                &canonical_head,
+                registrar_address,
+                "alice",
+                canonical_head.block_timestamp_unix_secs + 31_536_000,
+            ),
+            rpc_registry_new_resolver_log_payload_for_namehash(
+                &canonical_head,
+                registry_address,
+                &alice_namehash,
+                supported_resolver_address,
+                1,
+            ),
+            rpc_resolver_name_changed_log_payload_for_namehash(
+                &canonical_head,
+                supported_resolver_address,
+                &alice_namehash,
+                "supported.eth",
+                2,
+            ),
+            rpc_resolver_version_changed_log_payload_for_namehash(
+                &canonical_head,
+                supported_resolver_address,
+                &alice_namehash,
+                7,
+                3,
+            ),
+            rpc_registry_new_resolver_log_payload_for_namehash(
+                &canonical_head,
+                registry_address,
+                &alice_namehash,
+                pending_resolver_address,
+                4,
+            ),
+            rpc_resolver_name_changed_log_payload_for_namehash(
+                &canonical_head,
+                pending_resolver_address,
+                &alice_namehash,
+                "pending.eth",
+                5,
+            ),
+            rpc_resolver_version_changed_log_payload_for_namehash(
+                &canonical_head,
+                pending_resolver_address,
+                &alice_namehash,
+                8,
+                6,
+            ),
+            rpc_registry_new_resolver_log_payload_for_namehash(
+                &canonical_head,
+                registry_address,
+                &alice_namehash,
+                unsupported_resolver_address,
+                7,
+            ),
+            rpc_resolver_name_changed_log_payload_for_namehash(
+                &canonical_head,
+                unsupported_resolver_address,
+                &alice_namehash,
+                "unsupported.eth",
+                8,
+            ),
+            rpc_resolver_version_changed_log_payload_for_namehash(
+                &canonical_head,
+                unsupported_resolver_address,
+                &alice_namehash,
+                9,
+                9,
+            ),
+        ],
+        block: canonical_head.clone(),
+    }])
+    .await?;
+
+    reconcile_fetched_heads(
+        database.pool(),
+        &tasks[0],
+        &provider,
+        &ProviderHeadSnapshot {
+            canonical: canonical_head.clone(),
+            safe: None,
+            finalized: None,
+        },
+    )
+    .await?
+    .expect("ENSv1 resolver profile gate reconciliation must update task state");
+
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM raw_logs")
+            .fetch_one(database.pool())
+            .await?,
+        10
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM normalized_events WHERE derivation_kind = 'ens_v1_unwrapped_authority' AND event_kind = 'ResolverChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        3
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT after_state->>'raw_name' FROM normalized_events WHERE derivation_kind = 'ens_v1_unwrapped_authority' AND event_kind = 'RecordChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "supported.eth".to_owned()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT after_state->>'record_version' FROM normalized_events WHERE derivation_kind = 'ens_v1_unwrapped_authority' AND event_kind = 'RecordVersionChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "7".to_owned()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM normalized_events WHERE derivation_kind = 'ens_v1_unwrapped_authority' AND event_kind IN ('RecordChanged', 'RecordVersionChanged') AND log_index = ANY($1::BIGINT[])"
+        )
+        .bind(vec![5_i64, 6, 8, 9])
+        .fetch_one(database.pool())
+        .await?,
+        0
     );
 
     server.abort();
@@ -2117,10 +2461,8 @@ async fn reconcile_fetched_heads_backfills_ensv2_resolver_and_permission_events(
         ]
     );
 
-    let pre_admission_hash =
-        "0xf0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0";
-    let pre_admission_tx =
-        "0x0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f";
+    let pre_admission_hash = "0xf0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0";
+    let pre_admission_tx = "0x0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f";
     sqlx::query(
         r#"
             INSERT INTO raw_blocks (
@@ -2181,10 +2523,9 @@ async fn reconcile_fetched_heads_backfills_ensv2_resolver_and_permission_events(
         ens_v2_resolver_address_changed_topic0(),
         alice_namehash.clone(),
     ])
-    .bind(decode_hex_string(&encode_ens_v2_resolver_address_changed_log_data(
-        60,
-        &decode_hex_string(record_address),
-    )))
+    .bind(decode_hex_string(
+        &encode_ens_v2_resolver_address_changed_log_data(60, &decode_hex_string(record_address)),
+    ))
     .execute(database.pool())
     .await
     .context("failed to insert pre-admission resolver raw log")?;

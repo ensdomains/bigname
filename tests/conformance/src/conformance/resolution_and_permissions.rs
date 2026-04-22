@@ -326,6 +326,747 @@
             }
         }
 
+        #[derive(Clone, Copy)]
+        struct Ensv1DynamicResolverProfileFixture {
+            supported_resolver_address: &'static str,
+            pending_resolver_address: &'static str,
+            unsupported_resolver_address: &'static str,
+        }
+
+        async fn seed_ensv1_dynamic_resolver_profile_fixture(
+            database: &HarnessDatabase,
+        ) -> Result<Ensv1DynamicResolverProfileFixture> {
+            let registry_manifest_id = database
+                .insert_manifest(
+                    "ens",
+                    "ens_v1_registry_l1",
+                    "ethereum-mainnet",
+                    "ens_v1",
+                    31,
+                    "active",
+                    "uts46-v1",
+                )
+                .await?;
+            let resolver_manifest_id = database
+                .insert_manifest(
+                    "ens",
+                    "ens_v1_resolver_l1",
+                    "ethereum-mainnet",
+                    "ens_v1",
+                    32,
+                    "active",
+                    "uts46-v1",
+                )
+                .await?;
+            let registry_contract_instance_id = Uuid::from_u128(0x9d600);
+            let public_resolver_seed_contract_instance_id = Uuid::from_u128(0x9d601);
+            let supported_resolver_contract_instance_id = Uuid::from_u128(0x9d602);
+            let pending_resolver_contract_instance_id = Uuid::from_u128(0x9d603);
+            let unsupported_resolver_contract_instance_id = Uuid::from_u128(0x9d604);
+            let registry_address = "0x0000000000000000000000000000000000009d60";
+            let public_resolver_seed_address = "0x0000000000000000000000000000000000009d61";
+            let supported_resolver_address = "0x0000000000000000000000000000000000009d62";
+            let pending_resolver_address = "0x0000000000000000000000000000000000009d63";
+            let unsupported_resolver_address = "0x0000000000000000000000000000000000009d64";
+            let public_resolver_code_hash = "keccak256:conformance-public-resolver";
+
+            for (contract_instance_id, contract_kind) in [
+                (registry_contract_instance_id, "contract"),
+                (public_resolver_seed_contract_instance_id, "contract"),
+                (supported_resolver_contract_instance_id, "contract"),
+                (pending_resolver_contract_instance_id, "contract"),
+                (unsupported_resolver_contract_instance_id, "contract"),
+            ] {
+                sqlx::query(
+                    r#"
+                    INSERT INTO contract_instances (
+                        contract_instance_id,
+                        chain_id,
+                        contract_kind,
+                        provenance
+                    )
+                    VALUES ($1, 'ethereum-mainnet', $2, '{}'::jsonb)
+                    "#,
+                )
+                .bind(contract_instance_id)
+                .bind(contract_kind)
+                .execute(&database.pool)
+                .await
+                .context("failed to seed ENSv1 dynamic resolver contract instance")?;
+            }
+
+            for (contract_instance_id, address, source_manifest_id) in [
+                (
+                    registry_contract_instance_id,
+                    registry_address,
+                    registry_manifest_id,
+                ),
+                (
+                    public_resolver_seed_contract_instance_id,
+                    public_resolver_seed_address,
+                    resolver_manifest_id,
+                ),
+                (
+                    supported_resolver_contract_instance_id,
+                    supported_resolver_address,
+                    resolver_manifest_id,
+                ),
+                (
+                    pending_resolver_contract_instance_id,
+                    pending_resolver_address,
+                    resolver_manifest_id,
+                ),
+                (
+                    unsupported_resolver_contract_instance_id,
+                    unsupported_resolver_address,
+                    resolver_manifest_id,
+                ),
+            ] {
+                sqlx::query(
+                    r#"
+                    INSERT INTO contract_instance_addresses (
+                        contract_instance_id,
+                        chain_id,
+                        address,
+                        source_manifest_id,
+                        provenance
+                    )
+                    VALUES ($1, 'ethereum-mainnet', $2, $3, '{}'::jsonb)
+                    "#,
+                )
+                .bind(contract_instance_id)
+                .bind(address)
+                .bind(source_manifest_id)
+                .execute(&database.pool)
+                .await
+                .context("failed to seed ENSv1 dynamic resolver contract address")?;
+            }
+
+            for (
+                manifest_id,
+                declaration_name,
+                contract_instance_id,
+                declared_address,
+                role,
+            ) in [
+                (
+                    registry_manifest_id,
+                    "registry",
+                    registry_contract_instance_id,
+                    registry_address,
+                    "registry",
+                ),
+                (
+                    resolver_manifest_id,
+                    "public_resolver",
+                    public_resolver_seed_contract_instance_id,
+                    public_resolver_seed_address,
+                    "public_resolver",
+                ),
+            ] {
+                sqlx::query(
+                    r#"
+                    INSERT INTO manifest_contract_instances (
+                        manifest_id,
+                        declaration_kind,
+                        declaration_name,
+                        contract_instance_id,
+                        declared_address,
+                        role,
+                        proxy_kind
+                    )
+                    VALUES ($1, 'contract', $2, $3, $4, $5, 'none')
+                    "#,
+                )
+                .bind(manifest_id)
+                .bind(declaration_name)
+                .bind(contract_instance_id)
+                .bind(declared_address)
+                .bind(role)
+                .execute(&database.pool)
+                .await
+                .context("failed to seed ENSv1 dynamic resolver manifest contract")?;
+            }
+
+            for to_contract_instance_id in [
+                supported_resolver_contract_instance_id,
+                pending_resolver_contract_instance_id,
+                unsupported_resolver_contract_instance_id,
+            ] {
+                sqlx::query(
+                    r#"
+                    INSERT INTO discovery_edges (
+                        chain_id,
+                        edge_kind,
+                        from_contract_instance_id,
+                        to_contract_instance_id,
+                        discovery_source,
+                        source_manifest_id,
+                        admission,
+                        provenance
+                    )
+                    VALUES (
+                        'ethereum-mainnet',
+                        'resolver',
+                        $1,
+                        $2,
+                        $3,
+                        $4,
+                        'conformance',
+                        '{}'::jsonb
+                    )
+                    "#,
+                )
+                .bind(registry_contract_instance_id)
+                .bind(to_contract_instance_id)
+                .bind(format!(
+                    "conformance:ensv1:dynamic-resolver:{to_contract_instance_id}"
+                ))
+                .bind(registry_manifest_id)
+                .execute(&database.pool)
+                .await
+                .context("failed to seed ENSv1 dynamic resolver discovery edge")?;
+            }
+
+            bigname_storage::upsert_raw_code_hashes(
+                &database.pool,
+                &[
+                    ensv1_dynamic_resolver_raw_code_hash(
+                        public_resolver_seed_address,
+                        public_resolver_code_hash,
+                    ),
+                    ensv1_dynamic_resolver_raw_code_hash(
+                        supported_resolver_address,
+                        public_resolver_code_hash,
+                    ),
+                    ensv1_dynamic_resolver_raw_code_hash(
+                        unsupported_resolver_address,
+                        "keccak256:unsupported-dynamic-resolver",
+                    ),
+                ],
+            )
+            .await
+            .context("failed to seed ENSv1 dynamic resolver code hashes")?;
+
+            Ok(Ensv1DynamicResolverProfileFixture {
+                supported_resolver_address,
+                pending_resolver_address,
+                unsupported_resolver_address,
+            })
+        }
+
+        fn ensv1_dynamic_resolver_raw_code_hash(
+            address: &str,
+            code_hash: &str,
+        ) -> bigname_storage::RawCodeHash {
+            bigname_storage::RawCodeHash {
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: "0xprofilegatecodehash".to_owned(),
+                block_number: 118,
+                contract_address: address.to_owned(),
+                code_hash: code_hash.to_owned(),
+                code_byte_length: 1,
+                canonicality_state: CanonicalityState::Canonical,
+            }
+        }
+
+        fn ensv1_dynamic_resolver_normalized_event(
+            event_identity: &str,
+            logical_name_id: &str,
+            resource_id: Uuid,
+            event_kind: &str,
+            source_family: &str,
+            block_number: i64,
+            block_hash: &str,
+            log_index: i64,
+            after_state: Value,
+        ) -> NormalizedEvent {
+            NormalizedEvent {
+                event_identity: event_identity.to_owned(),
+                namespace: "ens".to_owned(),
+                logical_name_id: Some(logical_name_id.to_owned()),
+                resource_id: Some(resource_id),
+                event_kind: event_kind.to_owned(),
+                source_family: source_family.to_owned(),
+                manifest_version: 32,
+                source_manifest_id: None,
+                chain_id: Some("ethereum-mainnet".to_owned()),
+                block_number: Some(block_number),
+                block_hash: Some(block_hash.to_owned()),
+                transaction_hash: Some(format!("0xtx{block_number:x}{log_index:x}")),
+                log_index: Some(log_index),
+                raw_fact_ref: json!({
+                    "kind": "raw_log",
+                    "event_identity": event_identity,
+                }),
+                derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+                canonicality_state: CanonicalityState::Canonical,
+                before_state: json!({}),
+                after_state,
+            }
+        }
+
+        fn ensv1_dynamic_resolver_raw_log(
+            block_number: i64,
+            block_hash: &str,
+            log_index: i64,
+            emitting_address: &str,
+        ) -> bigname_storage::RawLog {
+            bigname_storage::RawLog {
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: block_hash.to_owned(),
+                block_number,
+                transaction_hash: format!("0xtx{block_number:x}{log_index:x}"),
+                transaction_index: 0,
+                log_index,
+                emitting_address: emitting_address.to_owned(),
+                topics: vec![],
+                data: Vec::new(),
+                canonicality_state: CanonicalityState::Canonical,
+            }
+        }
+
+        async fn load_single_record_inventory_current_row(
+            database: &HarnessDatabase,
+            resource_id: Uuid,
+        ) -> Result<bigname_storage::RecordInventoryCurrentRow> {
+            let boundary = sqlx::query_scalar::<_, Value>(
+                "SELECT record_version_boundary FROM record_inventory_current WHERE resource_id = $1",
+            )
+            .bind(resource_id)
+            .fetch_one(&database.pool)
+            .await
+            .context("failed to load worker-produced record_inventory_current boundary")?;
+
+            bigname_storage::load_record_inventory_current(
+                &database.pool,
+                resource_id,
+                &boundary,
+            )
+            .await?
+            .context("worker-produced record_inventory_current row must exist")
+        }
+
+        async fn set_name_current_resolver_and_boundary(
+            database: &HarnessDatabase,
+            logical_name_id: &str,
+            resolver_address: &str,
+            record_inventory_row: &bigname_storage::RecordInventoryCurrentRow,
+        ) -> Result<()> {
+            let mut name_row = bigname_storage::load_name_current(
+                &database.pool,
+                logical_name_id,
+            )
+            .await?
+            .context("dynamic resolver profile test requires name_current row")?;
+            set_declared_current_resolver(
+                &mut name_row,
+                "ethereum-mainnet",
+                resolver_address,
+            );
+            name_row.chain_positions = json!({
+                "ethereum": record_inventory_row
+                    .record_version_boundary
+                    .get("chain_position")
+                    .cloned()
+                    .expect("record_inventory_current boundary must include chain_position"),
+            });
+            database.insert_name_current_row(name_row).await
+        }
+
+        async fn assert_ensv1_dynamic_profile_pending_or_unsupported_readback(
+            database: &HarnessDatabase,
+            resolver_address: &str,
+            record_inventory_row: &bigname_storage::RecordInventoryCurrentRow,
+            case_label: &str,
+        ) -> Result<()> {
+            let payload = get_resolution_payload(
+                database,
+                "/v1/resolutions/ens/alice.eth?mode=declared&records=addr:60,text,contenthash",
+            )
+            .await
+            .with_context(|| {
+                format!("ENSv1 dynamic resolver {case_label} readback request failed")
+            })?;
+            let declared_state = payload
+                .declared_state
+                .as_ref()
+                .context("ENSv1 dynamic resolver response must include declared_state")?;
+
+            assert_eq!(
+                declared_state.pointer("/topology/resolver_path/0/address"),
+                Some(&json!(resolver_address)),
+                "case {case_label}"
+            );
+            assert_eq!(
+                declared_state.get("record_inventory"),
+                Some(&json!({
+                    "record_version_boundary": record_inventory_row.record_version_boundary.clone(),
+                    "enumeration_basis": record_inventory_row.enumeration_basis.clone(),
+                    "selectors": [],
+                    "explicit_gaps": [
+                        {
+                            "record_key": "contenthash",
+                            "record_family": "contenthash",
+                            "selector_key": null,
+                            "gap_reason": "not_observed_on_current_resolver",
+                        }
+                    ],
+                    "unsupported_families": [
+                        {
+                            "record_family": "addr",
+                            "unsupported_reason": "resolver_family_pending",
+                        },
+                        {
+                            "record_family": "text",
+                            "unsupported_reason": "resolver_family_pending",
+                        }
+                    ],
+                    "last_change": record_inventory_row.last_change.clone().unwrap_or(Value::Null),
+                })),
+                "case {case_label}"
+            );
+            assert_eq!(
+                declared_state.get("record_cache"),
+                Some(&json!({
+                    "record_version_boundary": record_inventory_row.record_version_boundary.clone(),
+                    "entries": [
+                        {
+                            "record_key": "addr:60",
+                            "record_family": "addr",
+                            "selector_key": "60",
+                            "status": "unsupported",
+                            "unsupported_reason": "resolver_family_pending",
+                        },
+                        {
+                            "record_key": "text",
+                            "record_family": "text",
+                            "selector_key": null,
+                            "status": "unsupported",
+                            "unsupported_reason": "resolver_family_pending",
+                        },
+                        {
+                            "record_key": "contenthash",
+                            "record_family": "contenthash",
+                            "selector_key": null,
+                            "status": "not_found",
+                        }
+                    ]
+                })),
+                "case {case_label}"
+            );
+            assert_eq!(payload.verified_state, None, "case {case_label}");
+
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn dynamic_resolver_profile_gate_controls_ensv1_record_readback() -> Result<()> {
+            let database = HarnessDatabase::new().await?;
+            let logical_name_id = "ens:alice.eth";
+            let resource_id = Uuid::from_u128(0x9d70);
+            let token_lineage_id = Uuid::from_u128(0x9d71);
+            let surface_binding_id = Uuid::from_u128(0x9d72);
+            let profile_fixture =
+                seed_ensv1_dynamic_resolver_profile_fixture(&database).await?;
+
+            database
+                .seed_exact_name_rebuild_inputs(
+                    logical_name_id,
+                    resource_id,
+                    token_lineage_id,
+                    surface_binding_id,
+                )
+                .await?;
+            database.rebuild_name_current(logical_name_id).await?;
+            bigname_storage::upsert_raw_blocks(
+                &database.pool,
+                &[
+                    raw_block(
+                        "ethereum-mainnet",
+                        "0xdynamic-supported-resolver",
+                        None,
+                        120,
+                        1_717_171_720,
+                    ),
+                    raw_block(
+                        "ethereum-mainnet",
+                        "0xdynamic-supported-version",
+                        None,
+                        121,
+                        1_717_171_721,
+                    ),
+                    raw_block(
+                        "ethereum-mainnet",
+                        "0xdynamic-supported-records",
+                        None,
+                        122,
+                        1_717_171_722,
+                    ),
+                    raw_block(
+                        "ethereum-mainnet",
+                        "0xdynamic-pending-resolver",
+                        None,
+                        130,
+                        1_717_171_730,
+                    ),
+                    raw_block(
+                        "ethereum-mainnet",
+                        "0xdynamic-unsupported-resolver",
+                        None,
+                        140,
+                        1_717_171_740,
+                    ),
+                ],
+            )
+            .await
+            .context("failed to seed ENSv1 dynamic resolver raw blocks")?;
+            bigname_storage::upsert_raw_logs(
+                &database.pool,
+                &[
+                    ensv1_dynamic_resolver_raw_log(
+                        121,
+                        "0xdynamic-supported-version",
+                        0,
+                        profile_fixture.supported_resolver_address,
+                    ),
+                    ensv1_dynamic_resolver_raw_log(
+                        122,
+                        "0xdynamic-supported-records",
+                        0,
+                        profile_fixture.supported_resolver_address,
+                    ),
+                    ensv1_dynamic_resolver_raw_log(
+                        122,
+                        "0xdynamic-supported-records",
+                        1,
+                        profile_fixture.supported_resolver_address,
+                    ),
+                ],
+            )
+            .await
+            .context("failed to seed ENSv1 dynamic resolver raw logs")?;
+            bigname_storage::upsert_normalized_events(
+                &database.pool,
+                &[
+                    ensv1_dynamic_resolver_normalized_event(
+                        "conformance:ensv1:dynamic:supported-resolver",
+                        logical_name_id,
+                        resource_id,
+                        "ResolverChanged",
+                        "ens_v1_registry_l1",
+                        120,
+                        "0xdynamic-supported-resolver",
+                        0,
+                        json!({
+                            "resolver": profile_fixture.supported_resolver_address,
+                            "namehash": "namehash:alice.eth",
+                        }),
+                    ),
+                    ensv1_dynamic_resolver_normalized_event(
+                        "conformance:ensv1:dynamic:supported-record-version",
+                        logical_name_id,
+                        resource_id,
+                        "RecordVersionChanged",
+                        "ens_v1_resolver_l1",
+                        121,
+                        "0xdynamic-supported-version",
+                        0,
+                        json!({
+                            "record_version": 7,
+                        }),
+                    ),
+                    ensv1_dynamic_resolver_normalized_event(
+                        "conformance:ensv1:dynamic:supported-text",
+                        logical_name_id,
+                        resource_id,
+                        "RecordChanged",
+                        "ens_v1_resolver_l1",
+                        122,
+                        "0xdynamic-supported-records",
+                        0,
+                        json!({
+                            "record_key": "text",
+                            "record_family": "text",
+                            "selector_key": null,
+                        }),
+                    ),
+                    ensv1_dynamic_resolver_normalized_event(
+                        "conformance:ensv1:dynamic:supported-addr60",
+                        logical_name_id,
+                        resource_id,
+                        "RecordChanged",
+                        "ens_v1_resolver_l1",
+                        122,
+                        "0xdynamic-supported-records",
+                        1,
+                        json!({
+                            "record_key": "addr:60",
+                            "record_family": "addr",
+                            "selector_key": "60",
+                        }),
+                    ),
+                ],
+            )
+            .await
+            .context("failed to seed supported ENSv1 dynamic resolver events")?;
+
+            rebuild_record_inventory_current(&database, resource_id).await?;
+            let supported_row =
+                load_single_record_inventory_current_row(&database, resource_id).await?;
+            set_name_current_resolver_and_boundary(
+                &database,
+                logical_name_id,
+                profile_fixture.supported_resolver_address,
+                &supported_row,
+            )
+            .await?;
+
+            let supported_payload = get_resolution_payload(
+                &database,
+                "/v1/resolutions/ens/alice.eth?mode=declared&records=addr:60,text,contenthash",
+            )
+            .await?;
+            let supported_declared_state = supported_payload
+                .declared_state
+                .as_ref()
+                .context("supported ENSv1 dynamic resolver response must include declared_state")?;
+            assert_eq!(
+                supported_declared_state.pointer("/topology/resolver_path/0/address"),
+                Some(&json!(profile_fixture.supported_resolver_address))
+            );
+            assert_eq!(
+                supported_declared_state.get("record_inventory"),
+                Some(&json!({
+                    "record_version_boundary": supported_row.record_version_boundary.clone(),
+                    "enumeration_basis": supported_row.enumeration_basis.clone(),
+                    "selectors": [
+                        {
+                            "record_key": "addr:60",
+                            "record_family": "addr",
+                            "selector_key": "60",
+                            "cacheable": true,
+                        },
+                        {
+                            "record_key": "text",
+                            "record_family": "text",
+                            "selector_key": null,
+                            "cacheable": true,
+                        }
+                    ],
+                    "explicit_gaps": [],
+                    "unsupported_families": [],
+                    "last_change": supported_row.last_change.clone().unwrap_or(Value::Null),
+                }))
+            );
+            assert_eq!(
+                supported_declared_state.get("record_cache"),
+                Some(&json!({
+                    "record_version_boundary": supported_row.record_version_boundary.clone(),
+                    "entries": [
+                        {
+                            "record_key": "addr:60",
+                            "record_family": "addr",
+                            "selector_key": "60",
+                            "status": "unsupported",
+                            "unsupported_reason": "value_not_retained_in_normalized_events",
+                        },
+                        {
+                            "record_key": "text",
+                            "record_family": "text",
+                            "selector_key": null,
+                            "status": "unsupported",
+                            "unsupported_reason": "value_not_retained_in_normalized_events",
+                        },
+                        {
+                            "record_key": "contenthash",
+                            "record_family": "contenthash",
+                            "selector_key": null,
+                            "status": "not_found",
+                        }
+                    ]
+                }))
+            );
+            assert_eq!(supported_payload.verified_state, None);
+
+            bigname_storage::upsert_normalized_events(
+                &database.pool,
+                &[ensv1_dynamic_resolver_normalized_event(
+                    "conformance:ensv1:dynamic:pending-resolver",
+                    logical_name_id,
+                    resource_id,
+                    "ResolverChanged",
+                    "ens_v1_registry_l1",
+                    130,
+                    "0xdynamic-pending-resolver",
+                    0,
+                    json!({
+                        "resolver": profile_fixture.pending_resolver_address,
+                        "namehash": "namehash:alice.eth",
+                    }),
+                )],
+            )
+            .await
+            .context("failed to seed pending ENSv1 dynamic resolver event")?;
+            rebuild_record_inventory_current(&database, resource_id).await?;
+            let pending_row =
+                load_single_record_inventory_current_row(&database, resource_id).await?;
+            set_name_current_resolver_and_boundary(
+                &database,
+                logical_name_id,
+                profile_fixture.pending_resolver_address,
+                &pending_row,
+            )
+            .await?;
+            assert_ensv1_dynamic_profile_pending_or_unsupported_readback(
+                &database,
+                profile_fixture.pending_resolver_address,
+                &pending_row,
+                "pending",
+            )
+            .await?;
+
+            bigname_storage::upsert_normalized_events(
+                &database.pool,
+                &[ensv1_dynamic_resolver_normalized_event(
+                    "conformance:ensv1:dynamic:unsupported-resolver",
+                    logical_name_id,
+                    resource_id,
+                    "ResolverChanged",
+                    "ens_v1_registry_l1",
+                    140,
+                    "0xdynamic-unsupported-resolver",
+                    0,
+                    json!({
+                        "resolver": profile_fixture.unsupported_resolver_address,
+                        "namehash": "namehash:alice.eth",
+                    }),
+                )],
+            )
+            .await
+            .context("failed to seed unsupported ENSv1 dynamic resolver event")?;
+            rebuild_record_inventory_current(&database, resource_id).await?;
+            let unsupported_row =
+                load_single_record_inventory_current_row(&database, resource_id).await?;
+            set_name_current_resolver_and_boundary(
+                &database,
+                logical_name_id,
+                profile_fixture.unsupported_resolver_address,
+                &unsupported_row,
+            )
+            .await?;
+            assert_ensv1_dynamic_profile_pending_or_unsupported_readback(
+                &database,
+                profile_fixture.unsupported_resolver_address,
+                &unsupported_row,
+                "unsupported",
+            )
+            .await?;
+
+            database.cleanup().await?;
+            Ok(())
+        }
+
         #[tokio::test]
         async fn dynamic_resolver_profile_non_graduation_keeps_ensv1_record_sections_explicit()
         -> Result<()> {

@@ -18,18 +18,27 @@ use uuid::Uuid;
 
 const EVENT_KIND_RECORD_CHANGED: &str = "RecordChanged";
 const EVENT_KIND_RECORD_VERSION_CHANGED: &str = "RecordVersionChanged";
+const EVENT_KIND_RESOLVER_CHANGED: &str = "ResolverChanged";
 const DERIVATION_KIND_DECLARED_AUTHORITY: &str = "ens_v1_unwrapped_authority";
 const DERIVATION_KIND_ENS_V2_RESOLVER: &str = "ens_v2_resolver";
+const ENS_NAMESPACE: &str = "ens";
+const SOURCE_FAMILY_ENS_V1_RESOLVER_L1: &str = "ens_v1_resolver_l1";
 const SOURCE_FAMILY_BASENAMES_BASE_RESOLVER: &str = "basenames_base_resolver";
 const RECORD_INVENTORY_CURRENT_DERIVATION_KIND: &str = "record_inventory_current_rebuild";
 const RECORD_INVENTORY_ENUMERATION_BASIS: &str = "declared_record_inventory";
 const GAP_REASON_NOT_OBSERVED: &str = "not_observed_on_current_resolver";
 const CACHE_UNSUPPORTED_REASON_VALUE_NOT_RETAINED: &str = "value_not_retained_in_normalized_events";
 const UNSUPPORTED_FAMILY_REASON: &str = "record_family_not_supported_in_phase6_projection";
+const RESOLVER_FAMILY_PENDING_REASON: &str = "resolver_family_pending";
 const SUPPORTED_TEXT_RECORD_KEY: &str = "text";
 const SUPPORTED_TEXT_RECORD_FAMILY: &str = "text";
 const SUPPORTED_ADDR_RECORD_FAMILY: &str = "addr";
+const UNSUPPORTED_CONTENTHASH_RECORD_KEY: &str = "contenthash";
+const UNSUPPORTED_CONTENTHASH_RECORD_FAMILY: &str = "contenthash";
 const SUPPORTED_NATIVE_ADDR_SELECTOR_KEY: &str = "60";
+const RESOLVER_PROFILE_FACT_FAMILY_RECORD: &str = "resolver_record";
+const RESOLVER_PROFILE_FACT_FAMILY_RECORD_VERSION: &str = "resolver_record_version";
+const RESOLVER_PROFILE_STATUS_SUPPORTED: &str = "supported";
 const CANONICAL_STATE_FILTER: &str = r#"
   IN (
     'canonical'::canonicality_state,
@@ -48,6 +57,7 @@ pub struct RecordInventoryCurrentRebuildSummary {
 #[derive(Clone, Debug)]
 struct RelevantEvent {
     normalized_event_id: i64,
+    namespace: String,
     logical_name_id: String,
     resource_id: Uuid,
     event_kind: String,
@@ -61,6 +71,7 @@ struct RelevantEvent {
     raw_fact_ref: Value,
     canonicality_state: CanonicalityState,
     after_state: Value,
+    emitting_address: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -78,6 +89,82 @@ struct ChainPositionCandidate {
     timestamp: String,
 }
 
+#[derive(Clone, Debug)]
+struct ResolverProfileGate {
+    admissions: BTreeMap<(String, String, String), String>,
+}
+
+impl ResolverProfileGate {
+    async fn load(pool: &PgPool) -> Result<Self> {
+        let admissions = bigname_manifests::load_ens_v1_public_resolver_profile_admissions(pool)
+            .await
+            .context("failed to load ENSv1 PublicResolver profile admissions")?
+            .into_iter()
+            .filter(|admission| admission.source_family == SOURCE_FAMILY_ENS_V1_RESOLVER_L1)
+            .map(|admission| {
+                (
+                    (
+                        admission.chain,
+                        normalize_address(&admission.address),
+                        admission.fact_family,
+                    ),
+                    admission.status,
+                )
+            })
+            .collect();
+
+        Ok(Self { admissions })
+    }
+
+    fn status_for(
+        &self,
+        chain_id: &str,
+        resolver_address: &str,
+        fact_family: &str,
+    ) -> Option<&str> {
+        self.admissions
+            .get(&(
+                chain_id.to_owned(),
+                normalize_address(resolver_address),
+                fact_family.to_owned(),
+            ))
+            .map(String::as_str)
+    }
+
+    fn allows_event(&self, event: &RelevantEvent) -> bool {
+        if event.namespace != ENS_NAMESPACE
+            || event.source_family != SOURCE_FAMILY_ENS_V1_RESOLVER_L1
+        {
+            return true;
+        }
+
+        let fact_family = match event.event_kind.as_str() {
+            EVENT_KIND_RECORD_CHANGED => RESOLVER_PROFILE_FACT_FAMILY_RECORD,
+            EVENT_KIND_RECORD_VERSION_CHANGED => RESOLVER_PROFILE_FACT_FAMILY_RECORD_VERSION,
+            _ => return true,
+        };
+        let Some(emitting_address) = event.emitting_address.as_deref() else {
+            return false;
+        };
+
+        self.status_for(&event.chain_id, emitting_address, fact_family)
+            == Some(RESOLVER_PROFILE_STATUS_SUPPORTED)
+    }
+
+    fn current_record_status(&self, event: &RelevantEvent) -> Option<&str> {
+        if event.namespace != ENS_NAMESPACE || event.event_kind != EVENT_KIND_RESOLVER_CHANGED {
+            return None;
+        }
+
+        let resolver_address = resolver_address_from_event(event)?;
+        self.status_for(
+            &event.chain_id,
+            &resolver_address,
+            RESOLVER_PROFILE_FACT_FAMILY_RECORD,
+        )
+    }
+}
+
 pub async fn rebuild_record_inventory_current(
     pool: &PgPool,
     resource_id: Option<&str>,
@@ -89,12 +176,13 @@ pub async fn rebuild_record_inventory_current(
 }
 
 async fn rebuild_all_resources(pool: &PgPool) -> Result<RecordInventoryCurrentRebuildSummary> {
+    let profile_gate = ResolverProfileGate::load(pool).await?;
     let resource_ids = load_target_resource_ids(pool).await?;
     let deleted_row_count = clear_record_inventory_current(pool).await?;
 
     let mut rows = Vec::with_capacity(resource_ids.len());
     for resource_id in &resource_ids {
-        if let Some(row) = build_row(pool, *resource_id).await? {
+        if let Some(row) = build_row(pool, &profile_gate, *resource_id).await? {
             rows.push(row);
         }
     }
@@ -113,11 +201,12 @@ async fn rebuild_one_resource(
     pool: &PgPool,
     resource_id: &str,
 ) -> Result<RecordInventoryCurrentRebuildSummary> {
+    let profile_gate = ResolverProfileGate::load(pool).await?;
     let resource_id = Uuid::parse_str(resource_id)
         .with_context(|| format!("resource_id must be a UUID: {resource_id}"))?;
     let deleted_row_count = delete_record_inventory_rows_for_resource(pool, resource_id).await?;
 
-    let Some(row) = build_row(pool, resource_id).await? else {
+    let Some(row) = build_row(pool, &profile_gate, resource_id).await? else {
         return Ok(RecordInventoryCurrentRebuildSummary {
             requested_resource_count: 1,
             upserted_row_count: 0,
@@ -161,7 +250,8 @@ async fn load_target_resource_ids(pool: &PgPool) -> Result<Vec<Uuid>> {
         SELECT DISTINCT resource_id
         FROM normalized_events
         WHERE derivation_kind = ANY($1::TEXT[])
-          AND event_kind IN ($2, $3)
+          AND event_kind IN ($2, $3, $4)
+          AND (event_kind <> $4 OR namespace = $5)
           AND resource_id IS NOT NULL
           AND canonicality_state {CANONICAL_STATE_FILTER}
         ORDER BY resource_id
@@ -170,6 +260,8 @@ async fn load_target_resource_ids(pool: &PgPool) -> Result<Vec<Uuid>> {
     .bind(&derivation_kinds)
     .bind(EVENT_KIND_RECORD_CHANGED)
     .bind(EVENT_KIND_RECORD_VERSION_CHANGED)
+    .bind(EVENT_KIND_RESOLVER_CHANGED)
+    .bind(ENS_NAMESPACE)
     .fetch_all(pool)
     .await
     .context("failed to load record_inventory_current rebuild targets")?;
@@ -179,15 +271,32 @@ async fn load_target_resource_ids(pool: &PgPool) -> Result<Vec<Uuid>> {
         .collect()
 }
 
-async fn build_row(pool: &PgPool, resource_id: Uuid) -> Result<Option<RecordInventoryCurrentRow>> {
+async fn build_row(
+    pool: &PgPool,
+    profile_gate: &ResolverProfileGate,
+    resource_id: Uuid,
+) -> Result<Option<RecordInventoryCurrentRow>> {
     let events = load_relevant_events(pool, resource_id).await?;
     if events.is_empty() {
         return Ok(None);
     }
 
-    let boundary_index = events
+    let latest_resolver_event = events
         .iter()
-        .rposition(|event| event.event_kind == EVENT_KIND_RECORD_VERSION_CHANGED);
+        .rev()
+        .find(|event| event.event_kind == EVENT_KIND_RESOLVER_CHANGED);
+    if let Some(resolver_event) = latest_resolver_event
+        && profile_gate
+            .current_record_status(resolver_event)
+            .is_some_and(|status| status != RESOLVER_PROFILE_STATUS_SUPPORTED)
+    {
+        return build_pending_profile_row(resource_id, resolver_event);
+    }
+
+    let boundary_index = events.iter().rposition(|event| {
+        event.event_kind == EVENT_KIND_RECORD_VERSION_CHANGED
+            || event.event_kind == EVENT_KIND_RESOLVER_CHANGED
+    });
     let scoped_events = &events[boundary_index.unwrap_or(0)..];
     let boundary_anchor = match boundary_index {
         Some(index) => events
@@ -197,18 +306,31 @@ async fn build_row(pool: &PgPool, resource_id: Uuid) -> Result<Option<RecordInve
             .last()
             .context("record_inventory_current rebuild requires at least one event")?,
     };
+    let has_record_version_boundary_pointer =
+        boundary_anchor.event_kind == EVENT_KIND_RECORD_VERSION_CHANGED;
     let record_version_boundary =
-        build_record_version_boundary(boundary_anchor, boundary_index.is_some())?;
+        build_record_version_boundary(boundary_anchor, has_record_version_boundary_pointer)?;
     let record_change_events = scoped_events
         .iter()
-        .filter(|event| event.event_kind == EVENT_KIND_RECORD_CHANGED)
+        .filter(|event| {
+            event.event_kind == EVENT_KIND_RECORD_CHANGED && profile_gate.allows_event(event)
+        })
+        .collect::<Vec<_>>();
+    let provenance_events = scoped_events
+        .iter()
+        .filter(|event| {
+            event.event_kind == EVENT_KIND_RESOLVER_CHANGED
+                || event.source_family != SOURCE_FAMILY_ENS_V1_RESOLVER_L1
+                || profile_gate.allows_event(event)
+        })
+        .cloned()
         .collect::<Vec<_>>();
 
     let selectors = build_selectors(&record_change_events)?;
     let explicit_gaps = build_explicit_gaps(&selectors);
     let unsupported_families = build_unsupported_families(&record_change_events)?;
     let entries = build_entries(&selectors);
-    let last_change = scoped_events
+    let last_change = provenance_events
         .last()
         .map(|event| build_last_change(event))
         .transpose()?;
@@ -238,16 +360,16 @@ async fn build_row(pool: &PgPool, resource_id: Uuid) -> Result<Option<RecordInve
         unsupported_families: Value::Array(unsupported_families),
         last_change,
         entries: Value::Array(entries),
-        provenance: build_provenance(scoped_events)?,
-        coverage: build_coverage(scoped_events),
-        chain_positions: build_chain_positions(scoped_events),
-        canonicality_summary: build_canonicality_summary(scoped_events),
-        manifest_version: scoped_events
+        provenance: build_provenance(&provenance_events)?,
+        coverage: build_coverage(&provenance_events),
+        chain_positions: build_chain_positions(&provenance_events),
+        canonicality_summary: build_canonicality_summary(&provenance_events),
+        manifest_version: provenance_events
             .iter()
             .map(|event| event.manifest_version)
             .max()
             .unwrap_or(1),
-        last_recomputed_at: scoped_events
+        last_recomputed_at: provenance_events
             .iter()
             .filter_map(|event| event.block_timestamp)
             .max()
@@ -261,6 +383,7 @@ async fn load_relevant_events(pool: &PgPool, resource_id: Uuid) -> Result<Vec<Re
         r#"
         SELECT
             ne.normalized_event_id,
+            ne.namespace,
             ne.logical_name_id,
             ne.resource_id,
             ne.event_kind,
@@ -274,14 +397,20 @@ async fn load_relevant_events(pool: &PgPool, resource_id: Uuid) -> Result<Vec<Re
             rb.block_timestamp,
             ne.raw_fact_ref,
             ne.canonicality_state::TEXT AS canonicality_state,
-            ne.after_state
+            ne.after_state,
+            LOWER(rl.emitting_address) AS emitting_address
         FROM normalized_events ne
         LEFT JOIN raw_blocks rb
           ON rb.chain_id = ne.chain_id
          AND rb.block_hash = ne.block_hash
+        LEFT JOIN raw_logs rl
+          ON rl.chain_id = ne.chain_id
+         AND rl.block_hash = ne.block_hash
+         AND rl.log_index = ne.log_index
         WHERE ne.derivation_kind = ANY($1::TEXT[])
-          AND ne.event_kind IN ($2, $3)
-          AND ne.resource_id = $4
+          AND ne.event_kind IN ($2, $3, $4)
+          AND (ne.event_kind <> $4 OR ne.namespace = $5)
+          AND ne.resource_id = $6
           AND ne.logical_name_id IS NOT NULL
           AND ne.chain_id IS NOT NULL
           AND ne.block_number IS NOT NULL
@@ -296,6 +425,8 @@ async fn load_relevant_events(pool: &PgPool, resource_id: Uuid) -> Result<Vec<Re
     .bind(&derivation_kinds)
     .bind(EVENT_KIND_RECORD_CHANGED)
     .bind(EVENT_KIND_RECORD_VERSION_CHANGED)
+    .bind(EVENT_KIND_RESOLVER_CHANGED)
+    .bind(ENS_NAMESPACE)
     .bind(resource_id)
     .fetch_all(pool)
     .await
@@ -316,6 +447,7 @@ fn record_inventory_derivation_kinds() -> Vec<String> {
 fn decode_relevant_event(row: sqlx::postgres::PgRow) -> Result<RelevantEvent> {
     Ok(RelevantEvent {
         normalized_event_id: row.try_get("normalized_event_id")?,
+        namespace: row.try_get("namespace")?,
         logical_name_id: row
             .try_get::<Option<String>, _>("logical_name_id")?
             .context("record event must include logical_name_id")?,
@@ -341,7 +473,49 @@ fn decode_relevant_event(row: sqlx::postgres::PgRow) -> Result<RelevantEvent> {
             &row.try_get::<String, _>("canonicality_state")?,
         )?,
         after_state: row.try_get("after_state")?,
+        emitting_address: row.try_get("emitting_address")?,
     })
+}
+
+fn build_pending_profile_row(
+    resource_id: Uuid,
+    resolver_event: &RelevantEvent,
+) -> Result<Option<RecordInventoryCurrentRow>> {
+    Ok(Some(RecordInventoryCurrentRow {
+        resource_id,
+        record_version_boundary: build_record_version_boundary(resolver_event, false)?,
+        enumeration_basis: json!({
+            "observed_selectors": false,
+            "capability_declared_families": true,
+            "globally_enumerable": false,
+        }),
+        selectors: Value::Array(vec![]),
+        explicit_gaps: Value::Array(vec![gap_value(
+            UNSUPPORTED_CONTENTHASH_RECORD_KEY,
+            UNSUPPORTED_CONTENTHASH_RECORD_FAMILY,
+            None,
+        )]),
+        unsupported_families: Value::Array(vec![
+            resolver_family_pending_value(SUPPORTED_ADDR_RECORD_FAMILY),
+            resolver_family_pending_value(SUPPORTED_TEXT_RECORD_FAMILY),
+        ]),
+        last_change: Some(build_last_change(resolver_event)?),
+        entries: Value::Array(vec![]),
+        provenance: build_provenance(std::slice::from_ref(resolver_event))?,
+        coverage: json!({
+            "status": "partial",
+            "exhaustiveness": "best_effort",
+            "source_classes_considered": [resolver_event.source_family],
+            "unsupported_reason": RESOLVER_FAMILY_PENDING_REASON,
+            "enumeration_basis": RECORD_INVENTORY_ENUMERATION_BASIS,
+        }),
+        chain_positions: build_chain_positions(std::slice::from_ref(resolver_event)),
+        canonicality_summary: build_canonicality_summary(std::slice::from_ref(resolver_event)),
+        manifest_version: resolver_event.manifest_version,
+        last_recomputed_at: resolver_event
+            .block_timestamp
+            .unwrap_or(OffsetDateTime::UNIX_EPOCH),
+    }))
 }
 
 fn build_record_version_boundary(
@@ -458,6 +632,21 @@ fn gap_value(record_key: &str, record_family: &str, selector_key: Option<&str>) 
         "selector_key": selector_key,
         "gap_reason": GAP_REASON_NOT_OBSERVED,
     })
+}
+
+fn resolver_family_pending_value(record_family: &str) -> Value {
+    json!({
+        "record_family": record_family,
+        "unsupported_reason": RESOLVER_FAMILY_PENDING_REASON,
+    })
+}
+
+fn resolver_address_from_event(event: &RelevantEvent) -> Option<String> {
+    event
+        .after_state
+        .get("resolver")
+        .and_then(Value::as_str)
+        .map(normalize_address)
 }
 
 fn is_supported_selector(selector: &RecordSelector) -> bool {
@@ -672,6 +861,10 @@ fn parse_canonicality_state(value: &str) -> Result<CanonicalityState> {
 
 fn supported_native_addr_record_key() -> String {
     format!("{SUPPORTED_ADDR_RECORD_FAMILY}:{SUPPORTED_NATIVE_ADDR_SELECTOR_KEY}")
+}
+
+fn normalize_address(value: &str) -> String {
+    value.to_ascii_lowercase()
 }
 
 fn format_timestamp(value: OffsetDateTime) -> String {
@@ -1548,6 +1741,151 @@ mod tests {
         database.cleanup().await
     }
 
+    #[tokio::test]
+    async fn rebuild_keeps_pending_ensv1_dynamic_resolver_inventory_explicit() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let resource_id = Uuid::from_u128(0x9900);
+        let registry_contract_instance_id = Uuid::from_u128(0x9901);
+        let public_resolver_contract_instance_id = Uuid::from_u128(0x9902);
+        let pending_resolver_contract_instance_id = Uuid::from_u128(0x9903);
+        let registry_address = "0x0000000000000000000000000000000000009901";
+        let public_resolver_address = "0x0000000000000000000000000000000000009902";
+        let pending_resolver_address = "0x0000000000000000000000000000000000009903";
+
+        let registry_manifest_id = insert_manifest_version(
+            database.pool(),
+            "ens_v1_registry_l1",
+            "manifests/ens/ens_v1_registry_l1/v2.toml",
+        )
+        .await?;
+        let resolver_manifest_id = insert_manifest_version(
+            database.pool(),
+            SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
+            "manifests/ens/ens_v1_resolver_l1/v1.toml",
+        )
+        .await?;
+        insert_contract_instance(
+            database.pool(),
+            registry_contract_instance_id,
+            registry_address,
+            registry_manifest_id,
+        )
+        .await?;
+        insert_contract_instance(
+            database.pool(),
+            public_resolver_contract_instance_id,
+            public_resolver_address,
+            resolver_manifest_id,
+        )
+        .await?;
+        insert_manifest_contract_instance(
+            database.pool(),
+            resolver_manifest_id,
+            "public_resolver",
+            public_resolver_contract_instance_id,
+            public_resolver_address,
+        )
+        .await?;
+        insert_contract_instance(
+            database.pool(),
+            pending_resolver_contract_instance_id,
+            pending_resolver_address,
+            resolver_manifest_id,
+        )
+        .await?;
+        insert_discovery_edge(
+            database.pool(),
+            registry_contract_instance_id,
+            pending_resolver_contract_instance_id,
+            registry_manifest_id,
+        )
+        .await?;
+
+        seed_resources(database.pool(), &[resource_id]).await?;
+        seed_raw_blocks(
+            database.pool(),
+            &[raw_block(
+                "ethereum-mainnet",
+                "0xrec1060",
+                1060,
+                1_776_200_060,
+            )],
+        )
+        .await?;
+        seed_events(
+            database.pool(),
+            &[resolver_changed_event(
+                "pending-resolver",
+                "ens:pending.eth",
+                resource_id,
+                pending_resolver_address,
+                registry_manifest_id,
+                1060,
+                0,
+            )],
+        )
+        .await?;
+
+        let summary =
+            rebuild_record_inventory_current(database.pool(), Some(&resource_id.to_string()))
+                .await?;
+        assert_eq!(summary.requested_resource_count, 1);
+        assert_eq!(summary.upserted_row_count, 1);
+
+        let row = load_record_inventory_current(
+            database.pool(),
+            resource_id,
+            &record_version_boundary(
+                "ens:pending.eth",
+                resource_id,
+                None,
+                None,
+                1060,
+                "0xrec1060",
+                1_776_200_060,
+                "ethereum-mainnet",
+            ),
+        )
+        .await?
+        .context("pending resolver inventory row must exist")?;
+
+        assert_eq!(row.selectors, json!([]));
+        assert_eq!(
+            row.explicit_gaps,
+            json!([{
+                "record_key": "contenthash",
+                "record_family": "contenthash",
+                "selector_key": null,
+                "gap_reason": GAP_REASON_NOT_OBSERVED,
+            }])
+        );
+        assert_eq!(
+            row.unsupported_families,
+            json!([
+                {
+                    "record_family": "addr",
+                    "unsupported_reason": RESOLVER_FAMILY_PENDING_REASON,
+                },
+                {
+                    "record_family": "text",
+                    "unsupported_reason": RESOLVER_FAMILY_PENDING_REASON,
+                }
+            ])
+        );
+        assert_eq!(
+            row.coverage["unsupported_reason"],
+            json!(RESOLVER_FAMILY_PENDING_REASON)
+        );
+        assert_eq!(
+            row.last_change
+                .as_ref()
+                .and_then(|value| value.get("event_kind")),
+            Some(&json!(EVENT_KIND_RESOLVER_CHANGED))
+        );
+
+        database.cleanup().await
+    }
+
     async fn seed_resources(database: &PgPool, resource_ids: &[Uuid]) -> Result<()> {
         let resources = resource_ids
             .iter()
@@ -1597,6 +1935,146 @@ mod tests {
 
     async fn seed_events(database: &PgPool, events: &[NormalizedEvent]) -> Result<()> {
         upsert_normalized_events(database, events).await?;
+        Ok(())
+    }
+
+    async fn insert_manifest_version(
+        pool: &PgPool,
+        source_family: &str,
+        file_path: &str,
+    ) -> Result<i64> {
+        sqlx::query(
+            r#"
+            INSERT INTO manifest_versions (
+                manifest_version,
+                namespace,
+                source_family,
+                chain,
+                deployment_epoch,
+                rollout_status,
+                normalizer_version,
+                file_path,
+                manifest_payload
+            )
+            VALUES (1, 'ens', $1, 'ethereum-mainnet', 'ens_v1', 'active', 'uts46-v1', $2, '{}'::jsonb)
+            RETURNING manifest_id
+            "#,
+        )
+        .bind(source_family)
+        .bind(file_path)
+        .fetch_one(pool)
+        .await
+        .with_context(|| format!("failed to insert manifest_version for {source_family}"))?
+        .try_get("manifest_id")
+        .context("failed to read manifest_id")
+    }
+
+    async fn insert_contract_instance(
+        pool: &PgPool,
+        contract_instance_id: Uuid,
+        address: &str,
+        source_manifest_id: i64,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO contract_instances (contract_instance_id, chain_id, contract_kind, provenance)
+            VALUES ($1, 'ethereum-mainnet', 'contract', '{}'::jsonb)
+            "#,
+        )
+        .bind(contract_instance_id)
+        .execute(pool)
+        .await
+        .context("failed to insert contract_instance")?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO contract_instance_addresses (
+                contract_instance_id,
+                chain_id,
+                address,
+                source_manifest_id,
+                provenance
+            )
+            VALUES ($1, 'ethereum-mainnet', lower($2), $3, '{}'::jsonb)
+            "#,
+        )
+        .bind(contract_instance_id)
+        .bind(address)
+        .bind(source_manifest_id)
+        .execute(pool)
+        .await
+        .context("failed to insert contract_instance_address")?;
+
+        Ok(())
+    }
+
+    async fn insert_manifest_contract_instance(
+        pool: &PgPool,
+        manifest_id: i64,
+        role: &str,
+        contract_instance_id: Uuid,
+        address: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO manifest_contract_instances (
+                manifest_id,
+                declaration_kind,
+                declaration_name,
+                contract_instance_id,
+                declared_address,
+                role,
+                proxy_kind
+            )
+            VALUES ($1, 'contract', $2, $3, lower($4), $2, 'none')
+            "#,
+        )
+        .bind(manifest_id)
+        .bind(role)
+        .bind(contract_instance_id)
+        .bind(address)
+        .execute(pool)
+        .await
+        .context("failed to insert manifest_contract_instance")?;
+        Ok(())
+    }
+
+    async fn insert_discovery_edge(
+        pool: &PgPool,
+        from_contract_instance_id: Uuid,
+        to_contract_instance_id: Uuid,
+        source_manifest_id: i64,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO discovery_edges (
+                chain_id,
+                edge_kind,
+                from_contract_instance_id,
+                to_contract_instance_id,
+                discovery_source,
+                source_manifest_id,
+                admission,
+                provenance
+            )
+            VALUES (
+                'ethereum-mainnet',
+                'resolver',
+                $1,
+                $2,
+                'registry_resolver_observation',
+                $3,
+                'reachable_from_root',
+                '{}'::jsonb
+            )
+            "#,
+        )
+        .bind(from_contract_instance_id)
+        .bind(to_contract_instance_id)
+        .bind(source_manifest_id)
+        .execute(pool)
+        .await
+        .context("failed to insert discovery_edge")?;
         Ok(())
     }
 
@@ -1653,6 +2131,45 @@ mod tests {
                 "record_key": record_key,
                 "record_family": record_family,
                 "selector_key": selector_key,
+            }),
+        }
+    }
+
+    fn resolver_changed_event(
+        event_identity: &str,
+        logical_name_id: &str,
+        resource_id: Uuid,
+        resolver_address: &str,
+        source_manifest_id: i64,
+        block_number: i64,
+        log_index: i64,
+    ) -> NormalizedEvent {
+        NormalizedEvent {
+            event_identity: event_identity.to_owned(),
+            namespace: "ens".to_owned(),
+            logical_name_id: Some(logical_name_id.to_owned()),
+            resource_id: Some(resource_id),
+            event_kind: EVENT_KIND_RESOLVER_CHANGED.to_owned(),
+            source_family: "ens_v1_registry_l1".to_owned(),
+            manifest_version: 1,
+            source_manifest_id: Some(source_manifest_id),
+            chain_id: Some("ethereum-mainnet".to_owned()),
+            block_number: Some(block_number),
+            block_hash: Some(format!("0xrec{block_number}")),
+            transaction_hash: Some(format!("0xtx{block_number}")),
+            log_index: Some(log_index),
+            raw_fact_ref: json!({
+                "kind": "raw_log",
+                "chain_id": "ethereum-mainnet",
+                "block_hash": format!("0xrec{block_number}"),
+                "log_index": log_index,
+            }),
+            derivation_kind: DERIVATION_KIND_DECLARED_AUTHORITY.to_owned(),
+            canonicality_state: CanonicalityState::Finalized,
+            before_state: json!({}),
+            after_state: json!({
+                "resolver": resolver_address,
+                "namehash": format!("namehash:{logical_name_id}"),
             }),
         }
     }

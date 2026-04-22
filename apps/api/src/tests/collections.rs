@@ -311,6 +311,134 @@ async fn resolver_overview_dynamic_resolver_profile_non_graduation_requires_reso
 }
 
 #[tokio::test]
+async fn resolver_overview_dynamic_resolver_pending_profile_returns_explicit_unsupported_sections()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let chain_id = "ethereum-mainnet";
+    let dynamic_resolver_address = "0x0000000000000000000000000000000000000d44";
+
+    bigname_storage::upsert_resolver_current_rows(
+        &database.pool,
+        &[ResolverCurrentRow {
+            chain_id: chain_id.to_owned(),
+            resolver_address: dynamic_resolver_address.to_owned(),
+            declared_summary: json!({
+                "bindings": {
+                    "status": "unsupported",
+                    "unsupported_reason": "resolver_family_pending",
+                },
+                "aliases": {
+                    "status": "unsupported",
+                    "unsupported_reason": "resolver_family_pending",
+                },
+                "permissions": {
+                    "status": "unsupported",
+                    "unsupported_reason": "resolver_family_pending",
+                },
+                "role_holders": {
+                    "status": "unsupported",
+                    "unsupported_reason": "resolver_family_pending",
+                },
+                "event_summary": {
+                    "status": "unsupported",
+                    "unsupported_reason": "resolver_family_pending",
+                },
+            }),
+            provenance: json!({
+                "normalized_event_ids": [1201],
+                "raw_fact_refs": [{
+                    "kind": "raw_log",
+                    "chain_id": chain_id,
+                    "block_number": 21_000_044,
+                }],
+                "manifest_versions": [{
+                    "manifest_version": 7,
+                    "source_family": "ens_v1_resolver_l1",
+                    "chain": chain_id,
+                    "deployment_epoch": "ens_v1",
+                }],
+                "execution_trace_id": null,
+                "derivation_kind": "resolver_current_rebuild",
+            }),
+            coverage: json!({
+                "status": "partial",
+                "exhaustiveness": "best_effort",
+                "source_classes_considered": ["ens_v1_resolver_l1"],
+                "unsupported_reason": "resolver_family_pending",
+                "enumeration_basis": "resolver_target",
+            }),
+            chain_positions: json!({
+                "ethereum": {
+                    "chain_id": chain_id,
+                    "block_number": 21_000_044,
+                    "block_hash": "0xdynamicresolverpending",
+                    "timestamp": "2026-04-17T00:00:44Z",
+                }
+            }),
+            canonicality_summary: json!({
+                "status": "finalized",
+                "chains": {
+                    chain_id: "finalized",
+                }
+            }),
+            manifest_version: 7,
+            last_recomputed_at: timestamp(1_748_800_244),
+        }],
+    )
+    .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/resolvers/{chain_id}/{dynamic_resolver_address}"))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("pending dynamic resolver overview request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let payload: ResolverResponse = read_json(response).await?;
+    assert_eq!(
+        payload.data,
+        json!({
+            "chain_id": chain_id,
+            "resolver_address": dynamic_resolver_address,
+        })
+    );
+    for section_name in [
+        "bindings",
+        "aliases",
+        "permissions",
+        "role_holders",
+        "event_summary",
+    ] {
+        assert_eq!(
+            payload.declared_state.get(section_name),
+            Some(&json!({
+                "status": "unsupported",
+                "unsupported_reason": "resolver_family_pending",
+            }))
+        );
+    }
+    assert_eq!(
+        payload.coverage,
+        json!({
+            "status": "partial",
+            "exhaustiveness": "best_effort",
+            "source_classes_considered": ["ens_v1_resolver_l1"],
+            "unsupported_reason": "resolver_family_pending",
+            "enumeration_basis": "resolver_target",
+        })
+    );
+    assert_eq!(payload.verified_state, None);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn get_resolver_overview_summarizes_basenames_permissions_current_projection() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let logical_name_id = "basenames:alice.base.eth";

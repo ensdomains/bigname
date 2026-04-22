@@ -20,8 +20,14 @@ use uuid::Uuid;
 const EVENT_KIND_PERMISSION_CHANGED: &str = "PermissionChanged";
 const EVENT_KIND_ALIAS_CHANGED: &str = "AliasChanged";
 const EVENT_KIND_RESOLVER_CHANGED: &str = "ResolverChanged";
+const SOURCE_FAMILY_ENS_V1_RESOLVER_L1: &str = "ens_v1_resolver_l1";
 const RESOLVER_CURRENT_DERIVATION_KIND: &str = "resolver_current_rebuild";
 const RESOLVER_CURRENT_ENUMERATION_BASIS: &str = "resolver_overview";
+const RESOLVER_PROFILE_STATUS_SUPPORTED: &str = "supported";
+const RESOLVER_PROFILE_FACT_FAMILY_AUTHORIZATION: &str = "resolver_authorization";
+const RESOLVER_PROFILE_FACT_FAMILY_RECORD: &str = "resolver_record";
+const RESOLVER_PROFILE_FACT_FAMILY_RECORD_VERSION: &str = "resolver_record_version";
+const RESOLVER_PROFILE_PENDING_REASON: &str = "resolver_profile_pending";
 const CANONICAL_STATE_FILTER: &str = r#"
   IN (
     'canonical'::canonicality_state,
@@ -91,6 +97,57 @@ struct ChainPositionCandidate {
     timestamp: String,
 }
 
+#[derive(Clone, Debug)]
+struct ResolverProfileGate {
+    admissions: BTreeMap<(String, String, String), String>,
+}
+
+impl ResolverProfileGate {
+    async fn load(pool: &PgPool) -> Result<Self> {
+        let admissions = bigname_manifests::load_ens_v1_public_resolver_profile_admissions(pool)
+            .await
+            .context("failed to load ENSv1 PublicResolver profile admissions")?
+            .into_iter()
+            .filter(|admission| admission.source_family == SOURCE_FAMILY_ENS_V1_RESOLVER_L1)
+            .map(|admission| {
+                (
+                    (
+                        admission.chain,
+                        normalize_resolver_address(&admission.address),
+                        admission.fact_family,
+                    ),
+                    admission.status,
+                )
+            })
+            .collect();
+
+        Ok(Self { admissions })
+    }
+
+    fn target_status(&self, target: &ResolverTarget) -> Option<&str> {
+        let mut saw_supported = false;
+        for fact_family in [
+            RESOLVER_PROFILE_FACT_FAMILY_AUTHORIZATION,
+            RESOLVER_PROFILE_FACT_FAMILY_RECORD,
+            RESOLVER_PROFILE_FACT_FAMILY_RECORD_VERSION,
+        ] {
+            let Some(status) = self.admissions.get(&(
+                target.chain_id.clone(),
+                target.resolver_address.clone(),
+                fact_family.to_owned(),
+            )) else {
+                continue;
+            };
+            if status != RESOLVER_PROFILE_STATUS_SUPPORTED {
+                return Some(status.as_str());
+            }
+            saw_supported = true;
+        }
+
+        saw_supported.then_some(RESOLVER_PROFILE_STATUS_SUPPORTED)
+    }
+}
+
 pub async fn rebuild_resolver_current(
     pool: &PgPool,
     chain_id: Option<&str>,
@@ -108,12 +165,13 @@ pub async fn rebuild_resolver_current(
 }
 
 async fn rebuild_all_resolvers(pool: &PgPool) -> Result<ResolverCurrentRebuildSummary> {
+    let profile_gate = ResolverProfileGate::load(pool).await?;
     let targets = load_target_resolvers(pool).await?;
     let deleted_row_count = clear_resolver_current(pool).await?;
 
     let mut rows = Vec::with_capacity(targets.len());
     for target in &targets {
-        if let Some(row) = build_resolver_current_row(pool, target).await? {
+        if let Some(row) = build_resolver_current_row(pool, &profile_gate, target).await? {
             rows.push(row);
         }
     }
@@ -131,6 +189,7 @@ async fn rebuild_one_resolver(
     chain_id: &str,
     resolver_address: &str,
 ) -> Result<ResolverCurrentRebuildSummary> {
+    let profile_gate = ResolverProfileGate::load(pool).await?;
     let target = ResolverTarget {
         chain_id: chain_id.to_owned(),
         resolver_address: normalize_resolver_address(resolver_address),
@@ -138,7 +197,7 @@ async fn rebuild_one_resolver(
     let deleted_row_count =
         delete_resolver_current(pool, &target.chain_id, &target.resolver_address).await?;
 
-    let Some(row) = build_resolver_current_row(pool, &target).await? else {
+    let Some(row) = build_resolver_current_row(pool, &profile_gate, &target).await? else {
         return Ok(ResolverCurrentRebuildSummary {
             requested_resolver_count: 1,
             upserted_row_count: 0,
@@ -156,6 +215,7 @@ async fn rebuild_one_resolver(
 
 async fn build_resolver_current_row(
     pool: &PgPool,
+    profile_gate: &ResolverProfileGate,
     target: &ResolverTarget,
 ) -> Result<Option<ResolverCurrentRow>> {
     let bindings = load_current_bindings(pool, target).await?;
@@ -165,9 +225,7 @@ async fn build_resolver_current_row(
         return Ok(None);
     }
 
-    let declared_summary = build_declared_summary(&bindings, &aliases, &permissions);
     let provenance = build_provenance(&bindings, &aliases, &permissions)?;
-    let coverage = build_coverage(&bindings, &aliases, &permissions);
     let chain_positions = build_chain_positions(&bindings, &aliases, &permissions);
     let canonicality_summary = build_canonicality_summary(&bindings, &aliases, &permissions)?;
     let manifest_version = bindings
@@ -192,6 +250,16 @@ async fn build_resolver_current_row(
         )
         .max()
         .unwrap_or(OffsetDateTime::UNIX_EPOCH);
+    let (declared_summary, coverage) = match profile_gate.target_status(target) {
+        Some(status) if status != RESOLVER_PROFILE_STATUS_SUPPORTED => (
+            build_unsupported_declared_summary(RESOLVER_PROFILE_PENDING_REASON),
+            build_unsupported_coverage(&bindings, &aliases, &permissions),
+        ),
+        _ => (
+            build_declared_summary(&bindings, &aliases, &permissions),
+            build_coverage(&bindings, &aliases, &permissions),
+        ),
+    };
 
     Ok(Some(ResolverCurrentRow {
         chain_id: target.chain_id.clone(),
@@ -694,6 +762,23 @@ fn build_event_summary(
     })
 }
 
+fn build_unsupported_declared_summary(unsupported_reason: &str) -> Value {
+    json!({
+        "bindings": unsupported_summary(unsupported_reason),
+        "aliases": unsupported_summary(unsupported_reason),
+        "permissions": unsupported_summary(unsupported_reason),
+        "role_holders": unsupported_summary(unsupported_reason),
+        "event_summary": unsupported_summary(unsupported_reason),
+    })
+}
+
+fn unsupported_summary(unsupported_reason: &str) -> Value {
+    json!({
+        "status": "unsupported",
+        "unsupported_reason": unsupported_reason,
+    })
+}
+
 fn build_provenance(
     bindings: &[CurrentBindingSeed],
     aliases: &[AliasSeed],
@@ -777,6 +862,18 @@ fn build_coverage(
         "unsupported_reason": Value::Null,
         "enumeration_basis": RESOLVER_CURRENT_ENUMERATION_BASIS,
     })
+}
+
+fn build_unsupported_coverage(
+    bindings: &[CurrentBindingSeed],
+    aliases: &[AliasSeed],
+    permissions: &[PermissionsCurrentRow],
+) -> Value {
+    let mut coverage = build_coverage(bindings, aliases, permissions);
+    coverage["status"] = json!("partial");
+    coverage["exhaustiveness"] = json!("best_effort");
+    coverage["unsupported_reason"] = json!(RESOLVER_PROFILE_PENDING_REASON);
+    coverage
 }
 
 fn build_chain_positions(
@@ -1486,6 +1583,143 @@ mod tests {
         database.cleanup().await
     }
 
+    #[tokio::test]
+    async fn resolver_current_keeps_pending_ensv1_dynamic_resolver_sections_unsupported()
+    -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let resource_id = Uuid::from_u128(0x8400);
+        let surface_binding_id = Uuid::from_u128(0x8401);
+        let registry_contract_instance_id = Uuid::from_u128(0x8402);
+        let public_resolver_contract_instance_id = Uuid::from_u128(0x8403);
+        let pending_resolver_contract_instance_id = Uuid::from_u128(0x8404);
+        let registry_address = "0x0000000000000000000000000000000000008402";
+        let public_resolver_address = "0x0000000000000000000000000000000000008403";
+        let pending_resolver_address = "0x0000000000000000000000000000000000008404";
+
+        let registry_manifest_id = insert_manifest_version(
+            database.pool(),
+            "ens_v1_registry_l1",
+            "manifests/ens/ens_v1_registry_l1/v2.toml",
+        )
+        .await?;
+        let resolver_manifest_id = insert_manifest_version(
+            database.pool(),
+            SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
+            "manifests/ens/ens_v1_resolver_l1/v1.toml",
+        )
+        .await?;
+        insert_contract_instance(
+            database.pool(),
+            registry_contract_instance_id,
+            registry_address,
+            registry_manifest_id,
+        )
+        .await?;
+        insert_contract_instance(
+            database.pool(),
+            public_resolver_contract_instance_id,
+            public_resolver_address,
+            resolver_manifest_id,
+        )
+        .await?;
+        insert_manifest_contract_instance(
+            database.pool(),
+            resolver_manifest_id,
+            "public_resolver",
+            public_resolver_contract_instance_id,
+            public_resolver_address,
+        )
+        .await?;
+        insert_contract_instance(
+            database.pool(),
+            pending_resolver_contract_instance_id,
+            pending_resolver_address,
+            resolver_manifest_id,
+        )
+        .await?;
+        insert_discovery_edge(
+            database.pool(),
+            registry_contract_instance_id,
+            pending_resolver_contract_instance_id,
+            registry_manifest_id,
+        )
+        .await?;
+
+        seed_identity(
+            database.pool(),
+            "ens:pending.eth",
+            resource_id,
+            surface_binding_id,
+            "pending.eth",
+            SurfaceBindingKind::DeclaredRegistryPath,
+        )
+        .await?;
+        seed_raw_blocks(
+            database.pool(),
+            &[raw_block(
+                "ethereum-mainnet",
+                "0xres0400",
+                400,
+                1_776_200_400,
+            )],
+        )
+        .await?;
+        seed_resolver_events(
+            database.pool(),
+            &[resolver_event_with_manifest(
+                "pending-resolver",
+                "ens:pending.eth",
+                resource_id,
+                pending_resolver_address,
+                "ens_v1_registry_l1",
+                registry_manifest_id,
+                400,
+                0,
+            )],
+        )
+        .await?;
+
+        let summary = rebuild_resolver_current(
+            database.pool(),
+            Some("ethereum-mainnet"),
+            Some(pending_resolver_address),
+        )
+        .await?;
+        assert_eq!(summary.requested_resolver_count, 1);
+        assert_eq!(summary.upserted_row_count, 1);
+
+        let row = load_resolver_current(
+            database.pool(),
+            "ethereum-mainnet",
+            pending_resolver_address,
+        )
+        .await?
+        .context("pending resolver_current row should exist")?;
+        for section in [
+            "bindings",
+            "aliases",
+            "permissions",
+            "role_holders",
+            "event_summary",
+        ] {
+            assert_eq!(
+                row.declared_summary[section]["status"],
+                json!("unsupported")
+            );
+            assert_eq!(
+                row.declared_summary[section]["unsupported_reason"],
+                json!(RESOLVER_PROFILE_PENDING_REASON)
+            );
+        }
+        assert_eq!(
+            row.coverage["unsupported_reason"],
+            json!(RESOLVER_PROFILE_PENDING_REASON)
+        );
+        assert_eq!(row.provenance["normalized_event_ids"], json!([1]));
+
+        database.cleanup().await
+    }
+
     async fn seed_identity(
         pool: &PgPool,
         logical_name_id: &str,
@@ -1529,6 +1763,146 @@ mod tests {
         let resources = resource_ids.into_iter().map(resource).collect::<Vec<_>>();
         upsert_resources(pool, &resources).await?;
         upsert_normalized_events(pool, events).await?;
+        Ok(())
+    }
+
+    async fn insert_manifest_version(
+        pool: &PgPool,
+        source_family: &str,
+        file_path: &str,
+    ) -> Result<i64> {
+        sqlx::query(
+            r#"
+            INSERT INTO manifest_versions (
+                manifest_version,
+                namespace,
+                source_family,
+                chain,
+                deployment_epoch,
+                rollout_status,
+                normalizer_version,
+                file_path,
+                manifest_payload
+            )
+            VALUES (1, 'ens', $1, 'ethereum-mainnet', 'ens_v1', 'active', 'uts46-v1', $2, '{}'::jsonb)
+            RETURNING manifest_id
+            "#,
+        )
+        .bind(source_family)
+        .bind(file_path)
+        .fetch_one(pool)
+        .await
+        .with_context(|| format!("failed to insert manifest_version for {source_family}"))?
+        .try_get("manifest_id")
+        .context("failed to read manifest_id")
+    }
+
+    async fn insert_contract_instance(
+        pool: &PgPool,
+        contract_instance_id: Uuid,
+        address: &str,
+        source_manifest_id: i64,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO contract_instances (contract_instance_id, chain_id, contract_kind, provenance)
+            VALUES ($1, 'ethereum-mainnet', 'contract', '{}'::jsonb)
+            "#,
+        )
+        .bind(contract_instance_id)
+        .execute(pool)
+        .await
+        .context("failed to insert contract_instance")?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO contract_instance_addresses (
+                contract_instance_id,
+                chain_id,
+                address,
+                source_manifest_id,
+                provenance
+            )
+            VALUES ($1, 'ethereum-mainnet', lower($2), $3, '{}'::jsonb)
+            "#,
+        )
+        .bind(contract_instance_id)
+        .bind(address)
+        .bind(source_manifest_id)
+        .execute(pool)
+        .await
+        .context("failed to insert contract_instance_address")?;
+
+        Ok(())
+    }
+
+    async fn insert_manifest_contract_instance(
+        pool: &PgPool,
+        manifest_id: i64,
+        role: &str,
+        contract_instance_id: Uuid,
+        address: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO manifest_contract_instances (
+                manifest_id,
+                declaration_kind,
+                declaration_name,
+                contract_instance_id,
+                declared_address,
+                role,
+                proxy_kind
+            )
+            VALUES ($1, 'contract', $2, $3, lower($4), $2, 'none')
+            "#,
+        )
+        .bind(manifest_id)
+        .bind(role)
+        .bind(contract_instance_id)
+        .bind(address)
+        .execute(pool)
+        .await
+        .context("failed to insert manifest_contract_instance")?;
+        Ok(())
+    }
+
+    async fn insert_discovery_edge(
+        pool: &PgPool,
+        from_contract_instance_id: Uuid,
+        to_contract_instance_id: Uuid,
+        source_manifest_id: i64,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO discovery_edges (
+                chain_id,
+                edge_kind,
+                from_contract_instance_id,
+                to_contract_instance_id,
+                discovery_source,
+                source_manifest_id,
+                admission,
+                provenance
+            )
+            VALUES (
+                'ethereum-mainnet',
+                'resolver',
+                $1,
+                $2,
+                'registry_resolver_observation',
+                $3,
+                'reachable_from_root',
+                '{}'::jsonb
+            )
+            "#,
+        )
+        .bind(from_contract_instance_id)
+        .bind(to_contract_instance_id)
+        .bind(source_manifest_id)
+        .execute(pool)
+        .await
+        .context("failed to insert discovery_edge")?;
         Ok(())
     }
 
@@ -1642,6 +2016,29 @@ mod tests {
                 "namehash": format!("namehash:{logical_name_id}"),
             }),
         }
+    }
+
+    fn resolver_event_with_manifest(
+        event_identity: &str,
+        logical_name_id: &str,
+        resource_id: Uuid,
+        resolver_address: &str,
+        source_family: &str,
+        source_manifest_id: i64,
+        block_number: i64,
+        log_index: i64,
+    ) -> NormalizedEvent {
+        let mut event = resolver_event(
+            event_identity,
+            logical_name_id,
+            resource_id,
+            resolver_address,
+            block_number,
+            log_index,
+        );
+        event.source_family = source_family.to_owned();
+        event.source_manifest_id = Some(source_manifest_id);
+        event
     }
 
     fn resolver_permission_event(
