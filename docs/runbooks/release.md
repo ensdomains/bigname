@@ -3,10 +3,11 @@
 Use the release smoke gate before promoting a release candidate and as the CI
 release safety check. The gate is local: it validates the checked-out revision,
 the configured PostgreSQL database, generated OpenAPI artifact consistency, and
-the conformance ownership table for published OpenAPI paths, runs the live
-manifest-drift audit, and checks the API process readiness endpoint. It does not
-deploy, contact external RPC providers, contact GitHub or Fly, or validate a
-remote production target.
+the conformance ownership table for published OpenAPI paths, runs focused
+capability and resolver-profile conformance guards, runs the live manifest-drift
+audit, inspects the runtime watch plan, and checks the API process readiness
+endpoint. It does not deploy, contact external RPC providers, contact GitHub or
+Fly, or validate a remote production target.
 
 ## Command
 
@@ -34,9 +35,11 @@ scripts/release-smoke --help
 - A PostgreSQL URL is available through `BIGNAME_DATABASE_URL` or
   `DATABASE_URL`. If neither is set, the script defaults to
   `postgres://bigname:bigname@127.0.0.1:5432/bigname`.
-  Point this at the local PostgreSQL database used for smoke checks; migrations,
-  the manifest-drift audit, and readiness all require that database even when
-  `--no-network` is passed.
+  Point this at the local PostgreSQL database used for smoke checks. The focused
+  dynamic resolver-profile conformance guard needs a local PostgreSQL server
+  where it can create, migrate, and drop temporary test databases; migrations,
+  the manifest-drift audit, runtime watch-plan inspection, and readiness all use
+  the configured database even when `--no-network` is passed.
 - The API bind address is free. Set `BIGNAME_SMOKE_API_BIND_ADDR` when
   `127.0.0.1:3000` is already in use.
 - `BIGNAME_SMOKE_API_HEALTH_URL` is reachable from the operator host. By
@@ -60,11 +63,19 @@ The script loads `.env` when it exists, then uses the environment values above.
 4. Runs `cargo test --locked --manifest-path tests/conformance/Cargo.toml
    capability_cutover_evidence` as the focused capability cutover evidence
    guard.
-5. Runs `cargo run --locked -p bigname-worker -- migrate` against the configured
+5. Runs `cargo test --locked --manifest-path tests/conformance/Cargo.toml
+   dynamic_resolver_profile -- --nocapture` as the focused dynamic
+   resolver-profile conformance guard. This guard uses the configured local
+   PostgreSQL server to create, migrate, and drop temporary test databases; it
+   must not require external network access when dependencies are already
+   cached.
+6. Runs `cargo run --locked -p bigname-worker -- migrate` against the configured
    database.
-6. Runs `cargo run --locked -p bigname-worker -- manifest-drift audit --json`
+7. Runs `cargo run --locked -p bigname-worker -- manifest-drift audit --json`
    against the configured database.
-7. Starts `cargo run --locked -p bigname-api -- serve --bind-addr
+8. Runs `cargo run --locked -p bigname-worker -- inspect watch-plan --json`
+   against the configured database as a read-only runtime watch-plan inspection.
+9. Starts `cargo run --locked -p bigname-api -- serve --bind-addr
    <BIGNAME_SMOKE_API_BIND_ADDR>` and probes `/healthz` until it returns
    `200` with `"status":"ready"`.
 
@@ -85,9 +96,13 @@ A passing gate means:
 - every published OpenAPI public path has an explicit conformance harness owner
   or an explicit private/out-of-scope reason in the conformance owner table;
 - the focused capability cutover evidence guard passes for this revision;
+- the focused dynamic resolver-profile conformance guard passes using local
+  PostgreSQL temporary databases;
 - the checked-in migrations apply to the configured local database;
 - the manifest-drift audit command exits successfully against the configured
   local database;
+- the runtime watch-plan inspection command exits successfully and renders JSON
+  from the configured local database;
 - the API process can start from this revision; and
 - the private readiness endpoint reports ready against that database.
 
@@ -103,6 +118,10 @@ Any non-zero exit blocks the release candidate until triaged.
   blank, or an out-of-scope entry lacks an explicit reason. Do not promote until
   the route has an owning conformance harness or a deliberate private/out-of-scope
   reason.
+- Dynamic resolver-profile conformance failure: the focused
+  `dynamic_resolver_profile` guard failed or could not prepare its temporary
+  PostgreSQL databases. Do not promote until the conformance failure or local
+  database precondition is triaged.
 - Migration failure: the configured database cannot apply the checked-in
   migrations. Do not promote until the migration or database precondition is
   fixed.
@@ -110,6 +129,10 @@ Any non-zero exit blocks the release candidate until triaged.
   configured local database. Do not promote until the local manifest/discovery
   state, audit inputs, or database precondition is triaged. This is not
   production monitoring or external RPC coverage.
+- Watch-plan inspection failure: the read-only `inspect watch-plan --json`
+  command returned non-zero against the configured local database. Do not promote
+  until database reachability, manifest/discovery state, or the inspection
+  command failure is triaged.
 - Readiness failure: the API did not stay up or `/healthz` did not report
   ready. Do not promote until the API logs and database reachability explain the
   failure.
@@ -143,9 +166,11 @@ CI runs this gate as `release smoke gate (no network)` with:
 
 The CI no-network subset preserves the existing OpenAPI drift and migration
 checks while adding the no-Postgres OpenAPI conformance-owner guard, focused
-capability cutover evidence guard, live manifest-drift audit, and local API
+capability cutover evidence guard, focused dynamic resolver-profile conformance
+guard, live manifest-drift audit, runtime watch-plan inspection, and local API
 readiness. It uses loopback-only smoke URLs, offline Cargo execution, and the
-configured local PostgreSQL database for migrations, manifest-drift audit, and
-readiness. A CI failure has the same release-blocking meaning as a local
+configured local PostgreSQL server/database for dynamic resolver-profile
+temporary databases, migrations, manifest-drift audit, watch-plan inspection,
+and readiness. A CI failure has the same release-blocking meaning as a local
 non-zero exit, except that missing cached dependencies are a CI environment issue
 rather than a product regression.

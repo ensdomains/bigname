@@ -14,7 +14,9 @@ Runs the local rollback smoke gate:
   - checked-in OpenAPI artifact drift
   - conformance owner OpenAPI smoke guard
   - focused capability cutover evidence guard
+  - focused dynamic resolver profile conformance guard
   - live manifest-drift audit
+  - runtime watch-plan inspection
   - local API /healthz readiness
 
 Environment:
@@ -121,6 +123,11 @@ run_capability_cutover_evidence_gate() {
   cargo test "${cargo_args[@]}" --manifest-path tests/conformance/Cargo.toml capability_cutover_evidence
 }
 
+run_dynamic_resolver_profile_gate() {
+  log "checking dynamic resolver profile conformance guard"
+  cargo test "${cargo_args[@]}" --manifest-path tests/conformance/Cargo.toml dynamic_resolver_profile -- --nocapture
+}
+
 run_migrations() {
   log "$1"
   cargo run "${cargo_args[@]}" -p bigname-worker -- migrate
@@ -129,6 +136,11 @@ run_migrations() {
 run_manifest_drift_audit_gate() {
   log "checking live manifest-drift audit"
   cargo run "${cargo_args[@]}" -p bigname-worker -- manifest-drift audit --json
+}
+
+run_watch_plan_inspection_gate() {
+  log "checking runtime watch-plan inspection"
+  cargo run "${cargo_args[@]}" -p bigname-worker -- inspect watch-plan --json
 }
 
 run_readiness_check() {
@@ -175,6 +187,8 @@ run_migrations "re-applying checked-in migrations for rollback idempotence"
 run_openapi_drift_check
 run_conformance_owner_smoke_gate
 run_capability_cutover_evidence_gate
+run_dynamic_resolver_profile_gate
 run_manifest_drift_audit_gate
+run_watch_plan_inspection_gate
 run_readiness_check
 log "rollback smoke gate passed"
