@@ -379,10 +379,14 @@ fn render_canonicality_inspection(inspection: &CanonicalityInspection) -> Value 
     })
 }
 
-fn render_manifest_drift_inspection(inspection: &ManifestDriftAlertInspection) -> Value {
+pub(crate) fn render_manifest_drift_alert_observations(
+    command: &str,
+    read_only: bool,
+    inspection: &ManifestDriftAlertInspection,
+) -> Value {
     json!({
-        "command": "inspect manifest-drift",
-        "read_only": true,
+        "command": command,
+        "read_only": read_only,
         "counts": {
             "manifest_code_hash_drift": inspection.code_hash_drift_alerts.len(),
             "manifest_proxy_implementation": inspection.proxy_implementation_alerts.len(),
@@ -399,6 +403,10 @@ fn render_manifest_drift_inspection(inspection: &ManifestDriftAlertInspection) -
             .map(render_manifest_proxy_implementation_alert)
             .collect::<Vec<_>>(),
     })
+}
+
+fn render_manifest_drift_inspection(inspection: &ManifestDriftAlertInspection) -> Value {
+    render_manifest_drift_alert_observations("inspect manifest-drift", true, inspection)
 }
 
 fn render_manifest_code_hash_drift_alert(alert: &ManifestDriftAlertObservation) -> Value {

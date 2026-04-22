@@ -1,15 +1,16 @@
 use anyhow::{Context, Result, bail};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use sqlx::{PgPool, Row, types::time::OffsetDateTime};
 use uuid::Uuid;
 
 use crate::{CanonicalityState, ChainLineageBlock, load_chain_lineage_block};
 
-const DERIVATION_KIND_MANIFEST_ALERT: &str = "manifest_alert";
 const EVENT_KIND_MANIFEST_CODE_HASH_DRIFT_ALERT: &str = "ManifestCodeHashDriftAlert";
 const EVENT_KIND_MANIFEST_PROXY_IMPLEMENTATION_ALERT: &str = "ManifestProxyImplementationAlert";
 const MANIFEST_PROXY_IMPLEMENTATION_EDGE_KIND: &str = "proxy_implementation";
 const MANIFEST_PROXY_IMPLEMENTATION_DISCOVERY_SOURCE: &str = "manifest_declared_proxy";
+const OBSERVATION_KIND_MANIFEST_DRIFT: &str = "manifest_drift";
+const OBSERVATION_KIND_PROXY_IMPLEMENTATION_DRIFT: &str = "proxy_implementation_drift";
 
 /// Audit-facing canonicality status for one requested block identity.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -119,9 +120,20 @@ impl ManifestDriftAlertInspection {
             "proxy_implementation_alerts": proxy_alerts,
         }))
     }
+
+    /// Persist one rendered worker alert observation into the worker-owned
+    /// alert table. This compatibility API keeps callers on the exported
+    /// observation shape while avoiding adapter-owned normalized-event writes.
+    pub async fn persist_manifest_drift_alert_observation(
+        pool: &PgPool,
+        observation: &ManifestDriftAlertObservation,
+    ) -> Result<ManifestDriftAlertObservation> {
+        let create = manifest_alert_observation_create_from_rendered(observation)?;
+        upsert_manifest_drift_alert_observation(pool, &create).await
+    }
 }
 
-/// Alert family represented by a stored manifest alert normalized event.
+/// Alert family represented by a stored manifest alert observation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ManifestDriftAlertKind {
     CodeHashDrift,
@@ -129,6 +141,13 @@ pub enum ManifestDriftAlertKind {
 }
 
 impl ManifestDriftAlertKind {
+    pub const fn observation_kind(self) -> &'static str {
+        match self {
+            Self::CodeHashDrift => OBSERVATION_KIND_MANIFEST_DRIFT,
+            Self::ProxyImplementation => OBSERVATION_KIND_PROXY_IMPLEMENTATION_DRIFT,
+        }
+    }
+
     pub const fn event_kind(self) -> &'static str {
         match self {
             Self::CodeHashDrift => EVENT_KIND_MANIFEST_CODE_HASH_DRIFT_ALERT,
@@ -143,17 +162,84 @@ impl ManifestDriftAlertKind {
         }
     }
 
-    fn parse(event_kind: &str) -> Result<Self> {
-        match event_kind {
-            EVENT_KIND_MANIFEST_CODE_HASH_DRIFT_ALERT => Ok(Self::CodeHashDrift),
-            EVENT_KIND_MANIFEST_PROXY_IMPLEMENTATION_ALERT => Ok(Self::ProxyImplementation),
-            _ => bail!("unsupported manifest drift alert event kind {event_kind}"),
+    fn parse_observation_kind(observation_kind: &str) -> Result<Self> {
+        match observation_kind {
+            OBSERVATION_KIND_MANIFEST_DRIFT => Ok(Self::CodeHashDrift),
+            OBSERVATION_KIND_PROXY_IMPLEMENTATION_DRIFT => Ok(Self::ProxyImplementation),
+            _ => bail!("unsupported manifest drift observation kind {observation_kind}"),
         }
     }
 }
 
-/// One stored manifest drift/proxy alert observation. This is decoded from
-/// normalized events only and intentionally preserves the stored payloads.
+/// Persisted lifecycle state for a worker-owned manifest alert observation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ManifestDriftAlertLifecycleStatus {
+    Active,
+    Acknowledged,
+    Remediated,
+    Dismissed,
+}
+
+impl ManifestDriftAlertLifecycleStatus {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Acknowledged => "acknowledged",
+            Self::Remediated => "remediated",
+            Self::Dismissed => "dismissed",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "active" => Ok(Self::Active),
+            "acknowledged" => Ok(Self::Acknowledged),
+            "remediated" => Ok(Self::Remediated),
+            "dismissed" => Ok(Self::Dismissed),
+            _ => bail!("unsupported manifest drift alert lifecycle status {value}"),
+        }
+    }
+}
+
+/// Immutable creation contract for a worker-owned manifest drift/proxy alert
+/// observation. Reusing the same `observation_identity` is idempotent only when
+/// all persisted alert material matches the existing row.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ManifestDriftAlertObservationCreate {
+    pub observation_identity: String,
+    pub alert_kind: ManifestDriftAlertKind,
+    pub lifecycle_status: ManifestDriftAlertLifecycleStatus,
+    pub namespace: String,
+    pub source_family: String,
+    pub manifest_version: i64,
+    pub source_manifest_id: Option<i64>,
+    pub chain_id: String,
+    pub contract_instance_id: Uuid,
+    pub proxy_contract_instance_id: Option<Uuid>,
+    pub expected_implementation_contract_instance_id: Option<Uuid>,
+    pub observed_implementation_contract_instance_id: Option<Uuid>,
+    pub discovery_edge_id: Option<i64>,
+    pub expected_code_hash: Option<String>,
+    pub observed_code_hash: Option<String>,
+    pub observed_code_byte_length: Option<i64>,
+    pub observed_block_number: Option<i64>,
+    pub observed_block_hash: Option<String>,
+    pub observed_canonicality_state: Option<CanonicalityState>,
+    pub raw_fact_ref: Value,
+    pub expected_material: Value,
+    pub observed_material: Value,
+    pub watch_plan_metadata: Value,
+    pub alert_metadata: Value,
+    pub remediation_status: Option<String>,
+    pub remediation_metadata: Option<Value>,
+    pub first_observed_at: OffsetDateTime,
+    pub last_observed_at: OffsetDateTime,
+    pub remediated_at: Option<OffsetDateTime>,
+}
+
+/// One stored manifest drift/proxy alert observation. The `normalized_event_id`
+/// field is the alert observation row id kept under its historic API name so
+/// existing worker inspection rendering remains source-compatible.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ManifestDriftAlertObservation {
     pub normalized_event_id: i64,
@@ -282,7 +368,7 @@ pub async fn list_stored_lineage_range(
 }
 
 /// List stored manifest drift and proxy implementation alert observations.
-/// The helper reads the existing manifest-alert normalized events; it does not
+/// The helper reads the worker-owned manifest-alert table; it does not
 /// compare chain state, create alerts, update alert lifecycle, or mutate
 /// manifest/discovery state.
 pub async fn list_manifest_drift_alert_observations(
@@ -291,34 +377,48 @@ pub async fn list_manifest_drift_alert_observations(
     let rows = sqlx::query(
         r#"
         SELECT
-            normalized_event_id,
-            event_identity,
-            event_kind,
+            manifest_alert_observation_id,
+            observation_identity,
+            observation_kind,
+            lifecycle_status,
             namespace,
             source_family,
             manifest_version,
             source_manifest_id,
             chain_id,
-            block_number,
-            block_hash,
+            contract_instance_id,
+            proxy_contract_instance_id,
+            expected_implementation_contract_instance_id,
+            observed_implementation_contract_instance_id,
+            discovery_edge_id,
+            expected_code_hash,
+            observed_code_hash,
+            observed_code_byte_length,
+            observed_block_number,
+            observed_block_hash,
+            observed_canonicality_state::TEXT AS observed_canonicality_state,
             raw_fact_ref,
-            canonicality_state::TEXT AS canonicality_state,
-            after_state AS alert_state,
-            observed_at
-        FROM normalized_events
-        WHERE derivation_kind = $1
-          AND event_kind IN ($2, $3)
+            expected_material,
+            observed_material,
+            watch_plan_metadata,
+            alert_metadata,
+            remediation_status,
+            remediation_metadata,
+            first_observed_at,
+            last_observed_at,
+            remediated_at
+        FROM manifest_alert_observations
+        WHERE observation_kind IN ($1, $2)
         ORDER BY
-            event_kind,
-            COALESCE(chain_id, after_state ->> 'chain', ''),
+            observation_kind,
+            chain_id,
             source_family,
             manifest_version,
-            event_identity
+            observation_identity
         "#,
     )
-    .bind(DERIVATION_KIND_MANIFEST_ALERT)
-    .bind(EVENT_KIND_MANIFEST_CODE_HASH_DRIFT_ALERT)
-    .bind(EVENT_KIND_MANIFEST_PROXY_IMPLEMENTATION_ALERT)
+    .bind(OBSERVATION_KIND_MANIFEST_DRIFT)
+    .bind(OBSERVATION_KIND_PROXY_IMPLEMENTATION_DRIFT)
     .fetch_all(pool)
     .await
     .context("failed to list stored manifest drift alert observations")?;
@@ -337,6 +437,200 @@ pub async fn list_manifest_drift_alert_observations(
     }
 
     Ok(inspection)
+}
+
+/// Persist one worker-owned manifest drift/proxy alert observation
+/// idempotently. This writes only the `manifest_alert_observations` family.
+pub async fn upsert_manifest_drift_alert_observation(
+    pool: &PgPool,
+    observation: &ManifestDriftAlertObservationCreate,
+) -> Result<ManifestDriftAlertObservation> {
+    validate_manifest_drift_alert_observation_create(observation)?;
+
+    let raw_fact_ref = serialize_json_object(
+        "manifest drift alert raw_fact_ref",
+        &observation.raw_fact_ref,
+    )?;
+    let expected_material = serialize_json_object(
+        "manifest drift alert expected_material",
+        &observation.expected_material,
+    )?;
+    let observed_material = serialize_json_object(
+        "manifest drift alert observed_material",
+        &observation.observed_material,
+    )?;
+    let watch_plan_metadata = serialize_json_object(
+        "manifest drift alert watch_plan_metadata",
+        &observation.watch_plan_metadata,
+    )?;
+    let alert_metadata = serialize_json_object(
+        "manifest drift alert alert_metadata",
+        &observation.alert_metadata,
+    )?;
+    let remediation_metadata = observation
+        .remediation_metadata
+        .as_ref()
+        .map(|metadata| {
+            serialize_json_object("manifest drift alert remediation_metadata", metadata)
+        })
+        .transpose()?;
+
+    let inserted = sqlx::query(
+        r#"
+        INSERT INTO manifest_alert_observations (
+            observation_identity,
+            observation_kind,
+            lifecycle_status,
+            namespace,
+            source_family,
+            manifest_version,
+            source_manifest_id,
+            chain_id,
+            contract_instance_id,
+            proxy_contract_instance_id,
+            expected_implementation_contract_instance_id,
+            observed_implementation_contract_instance_id,
+            discovery_edge_id,
+            expected_code_hash,
+            observed_code_hash,
+            observed_code_byte_length,
+            observed_block_number,
+            observed_block_hash,
+            observed_canonicality_state,
+            raw_fact_ref,
+            expected_material,
+            observed_material,
+            watch_plan_metadata,
+            alert_metadata,
+            remediation_status,
+            remediation_metadata,
+            first_observed_at,
+            last_observed_at,
+            remediated_at
+        )
+        VALUES (
+            $1,
+            $2,
+            $3,
+            $4,
+            $5,
+            $6,
+            $7,
+            $8,
+            $9,
+            $10,
+            $11,
+            $12,
+            $13,
+            $14,
+            $15,
+            $16,
+            $17,
+            $18,
+            $19::canonicality_state,
+            $20::jsonb,
+            $21::jsonb,
+            $22::jsonb,
+            $23::jsonb,
+            $24::jsonb,
+            $25,
+            $26::jsonb,
+            $27,
+            $28,
+            $29
+        )
+        ON CONFLICT (observation_identity) DO NOTHING
+        RETURNING
+            manifest_alert_observation_id,
+            observation_identity,
+            observation_kind,
+            lifecycle_status,
+            namespace,
+            source_family,
+            manifest_version,
+            source_manifest_id,
+            chain_id,
+            contract_instance_id,
+            proxy_contract_instance_id,
+            expected_implementation_contract_instance_id,
+            observed_implementation_contract_instance_id,
+            discovery_edge_id,
+            expected_code_hash,
+            observed_code_hash,
+            observed_code_byte_length,
+            observed_block_number,
+            observed_block_hash,
+            observed_canonicality_state::TEXT AS observed_canonicality_state,
+            raw_fact_ref,
+            expected_material,
+            observed_material,
+            watch_plan_metadata,
+            alert_metadata,
+            remediation_status,
+            remediation_metadata,
+            first_observed_at,
+            last_observed_at,
+            remediated_at
+        "#,
+    )
+    .bind(&observation.observation_identity)
+    .bind(observation.alert_kind.observation_kind())
+    .bind(observation.lifecycle_status.as_str())
+    .bind(&observation.namespace)
+    .bind(&observation.source_family)
+    .bind(observation.manifest_version)
+    .bind(observation.source_manifest_id)
+    .bind(&observation.chain_id)
+    .bind(observation.contract_instance_id)
+    .bind(observation.proxy_contract_instance_id)
+    .bind(observation.expected_implementation_contract_instance_id)
+    .bind(observation.observed_implementation_contract_instance_id)
+    .bind(observation.discovery_edge_id)
+    .bind(&observation.expected_code_hash)
+    .bind(&observation.observed_code_hash)
+    .bind(observation.observed_code_byte_length)
+    .bind(observation.observed_block_number)
+    .bind(&observation.observed_block_hash)
+    .bind(
+        observation
+            .observed_canonicality_state
+            .map(CanonicalityState::as_str),
+    )
+    .bind(raw_fact_ref)
+    .bind(expected_material)
+    .bind(observed_material)
+    .bind(watch_plan_metadata)
+    .bind(alert_metadata)
+    .bind(&observation.remediation_status)
+    .bind(remediation_metadata)
+    .bind(observation.first_observed_at)
+    .bind(observation.last_observed_at)
+    .bind(observation.remediated_at)
+    .fetch_optional(pool)
+    .await
+    .with_context(|| {
+        format!(
+            "failed to insert manifest drift alert observation {}",
+            observation.observation_identity
+        )
+    })?;
+
+    let stored = match inserted {
+        Some(row) => decode_manifest_drift_alert_observation(row)?,
+        None => load_manifest_drift_alert_observation_by_identity(
+            pool,
+            &observation.observation_identity,
+        )
+        .await?
+        .with_context(|| {
+            format!(
+                "manifest drift alert observation {} conflicted but no row was found",
+                observation.observation_identity
+            )
+        })?,
+    };
+    ensure_existing_manifest_alert_matches_request(&stored, observation)?;
+    Ok(stored)
 }
 
 async fn load_live_code_hash_drift_candidates(pool: &PgPool) -> Result<Vec<Value>> {
@@ -588,18 +882,39 @@ fn decode_stored_lineage_block(row: sqlx::postgres::PgRow) -> Result<StoredLinea
 fn decode_manifest_drift_alert_observation(
     row: sqlx::postgres::PgRow,
 ) -> Result<ManifestDriftAlertObservation> {
-    let event_kind = row
-        .try_get::<String, _>("event_kind")
-        .context("missing event_kind")?;
-    let alert_kind = ManifestDriftAlertKind::parse(&event_kind)?;
+    let observation_kind = row
+        .try_get::<String, _>("observation_kind")
+        .context("missing observation_kind")?;
+    let alert_kind = ManifestDriftAlertKind::parse_observation_kind(&observation_kind)?;
+    let lifecycle_status = ManifestDriftAlertLifecycleStatus::parse(
+        &row.try_get::<String, _>("lifecycle_status")
+            .context("missing lifecycle_status")?,
+    )?;
+    let observed_canonicality_state = row
+        .try_get::<Option<String>, _>("observed_canonicality_state")
+        .context("missing observed_canonicality_state")?
+        .map(|value| CanonicalityState::parse(&value))
+        .transpose()?;
+    let last_observed_at = row
+        .try_get("last_observed_at")
+        .context("missing last_observed_at")?;
+    let raw_fact_ref = row
+        .try_get("raw_fact_ref")
+        .context("missing raw_fact_ref")?;
+    let alert_state = build_manifest_alert_state(
+        alert_kind,
+        lifecycle_status,
+        &row,
+        observed_canonicality_state,
+    )?;
 
     Ok(ManifestDriftAlertObservation {
         normalized_event_id: row
-            .try_get("normalized_event_id")
-            .context("missing normalized_event_id")?,
+            .try_get("manifest_alert_observation_id")
+            .context("missing manifest_alert_observation_id")?,
         event_identity: row
-            .try_get("event_identity")
-            .context("missing event_identity")?,
+            .try_get("observation_identity")
+            .context("missing observation_identity")?,
         alert_kind,
         namespace: row.try_get("namespace").context("missing namespace")?,
         source_family: row
@@ -613,19 +928,667 @@ fn decode_manifest_drift_alert_observation(
             .context("missing source_manifest_id")?,
         chain_id: row.try_get("chain_id").context("missing chain_id")?,
         block_number: row
-            .try_get("block_number")
-            .context("missing block_number")?,
-        block_hash: row.try_get("block_hash").context("missing block_hash")?,
-        raw_fact_ref: row
-            .try_get("raw_fact_ref")
-            .context("missing raw_fact_ref")?,
-        canonicality_state: CanonicalityState::parse(
-            &row.try_get::<String, _>("canonicality_state")
-                .context("missing canonicality_state")?,
-        )?,
-        alert_state: row.try_get("alert_state").context("missing alert_state")?,
-        observed_at: row.try_get("observed_at").context("missing observed_at")?,
+            .try_get("observed_block_number")
+            .context("missing observed_block_number")?,
+        block_hash: row
+            .try_get("observed_block_hash")
+            .context("missing observed_block_hash")?,
+        raw_fact_ref,
+        canonicality_state: observed_canonicality_state.unwrap_or(CanonicalityState::Observed),
+        alert_state,
+        observed_at: last_observed_at,
     })
+}
+
+async fn load_manifest_drift_alert_observation_by_identity(
+    pool: &PgPool,
+    observation_identity: &str,
+) -> Result<Option<ManifestDriftAlertObservation>> {
+    let row = sqlx::query(
+        r#"
+        SELECT
+            manifest_alert_observation_id,
+            observation_identity,
+            observation_kind,
+            lifecycle_status,
+            namespace,
+            source_family,
+            manifest_version,
+            source_manifest_id,
+            chain_id,
+            contract_instance_id,
+            proxy_contract_instance_id,
+            expected_implementation_contract_instance_id,
+            observed_implementation_contract_instance_id,
+            discovery_edge_id,
+            expected_code_hash,
+            observed_code_hash,
+            observed_code_byte_length,
+            observed_block_number,
+            observed_block_hash,
+            observed_canonicality_state::TEXT AS observed_canonicality_state,
+            raw_fact_ref,
+            expected_material,
+            observed_material,
+            watch_plan_metadata,
+            alert_metadata,
+            remediation_status,
+            remediation_metadata,
+            first_observed_at,
+            last_observed_at,
+            remediated_at
+        FROM manifest_alert_observations
+        WHERE observation_identity = $1
+        "#,
+    )
+    .bind(observation_identity)
+    .fetch_optional(pool)
+    .await
+    .with_context(|| {
+        format!("failed to load manifest drift alert observation {observation_identity}")
+    })?;
+
+    row.map(decode_manifest_drift_alert_observation).transpose()
+}
+
+fn build_manifest_alert_state(
+    alert_kind: ManifestDriftAlertKind,
+    lifecycle_status: ManifestDriftAlertLifecycleStatus,
+    row: &sqlx::postgres::PgRow,
+    observed_canonicality_state: Option<CanonicalityState>,
+) -> Result<Value> {
+    let mut state = json_object(
+        row.try_get("alert_metadata")
+            .context("missing alert_metadata")?,
+    )?;
+    let expected_material: Value = row
+        .try_get("expected_material")
+        .context("missing expected_material")?;
+    let observed_material: Value = row
+        .try_get("observed_material")
+        .context("missing observed_material")?;
+    let watch_plan_metadata: Value = row
+        .try_get("watch_plan_metadata")
+        .context("missing watch_plan_metadata")?;
+
+    insert_json(&mut state, "alert_type", alert_kind.alert_type());
+    insert_json(&mut state, "alert_status", lifecycle_status.as_str());
+    insert_json(
+        &mut state,
+        "source_family",
+        row.try_get::<String, _>("source_family")
+            .context("missing source_family")?,
+    );
+    insert_json(
+        &mut state,
+        "chain",
+        row.try_get::<String, _>("chain_id")
+            .context("missing chain_id")?,
+    );
+    insert_optional_json(
+        &mut state,
+        "source_manifest_id",
+        row.try_get::<Option<i64>, _>("source_manifest_id")
+            .context("missing source_manifest_id")?,
+    );
+    insert_optional_json(
+        &mut state,
+        "remediation_status",
+        row.try_get::<Option<String>, _>("remediation_status")
+            .context("missing remediation_status")?,
+    );
+    insert_optional_json(
+        &mut state,
+        "remediation_metadata",
+        row.try_get::<Option<Value>, _>("remediation_metadata")
+            .context("missing remediation_metadata")?,
+    );
+
+    merge_json_object(&mut state, "expected_material", expected_material)?;
+    merge_json_object(&mut state, "observed_material", observed_material)?;
+    merge_json_object(&mut state, "watch_plan_metadata", watch_plan_metadata)?;
+
+    match alert_kind {
+        ManifestDriftAlertKind::CodeHashDrift => {
+            insert_uuid(
+                &mut state,
+                "contract_instance_id",
+                row.try_get::<Option<Uuid>, _>("contract_instance_id")
+                    .context("missing contract_instance_id")?,
+            );
+            insert_optional_json(
+                &mut state,
+                "expected_code_hash",
+                row.try_get::<Option<String>, _>("expected_code_hash")
+                    .context("missing expected_code_hash")?,
+            );
+            insert_optional_json(
+                &mut state,
+                "observed_code_hash",
+                row.try_get::<Option<String>, _>("observed_code_hash")
+                    .context("missing observed_code_hash")?,
+            );
+            insert_optional_json(
+                &mut state,
+                "observed_code_byte_length",
+                row.try_get::<Option<i64>, _>("observed_code_byte_length")
+                    .context("missing observed_code_byte_length")?,
+            );
+            insert_optional_json(
+                &mut state,
+                "observed_block_number",
+                row.try_get::<Option<i64>, _>("observed_block_number")
+                    .context("missing observed_block_number")?,
+            );
+            insert_optional_json(
+                &mut state,
+                "observed_block_hash",
+                row.try_get::<Option<String>, _>("observed_block_hash")
+                    .context("missing observed_block_hash")?,
+            );
+            insert_optional_json(
+                &mut state,
+                "observed_canonicality_state",
+                observed_canonicality_state.map(CanonicalityState::as_str),
+            );
+        }
+        ManifestDriftAlertKind::ProxyImplementation => {
+            insert_uuid(
+                &mut state,
+                "proxy_contract_instance_id",
+                row.try_get::<Option<Uuid>, _>("proxy_contract_instance_id")
+                    .context("missing proxy_contract_instance_id")?,
+            );
+            insert_uuid(
+                &mut state,
+                "expected_implementation_contract_instance_id",
+                row.try_get::<Option<Uuid>, _>("expected_implementation_contract_instance_id")
+                    .context("missing expected_implementation_contract_instance_id")?,
+            );
+            insert_uuid(
+                &mut state,
+                "observed_implementation_contract_instance_id",
+                row.try_get::<Option<Uuid>, _>("observed_implementation_contract_instance_id")
+                    .context("missing observed_implementation_contract_instance_id")?,
+            );
+            insert_uuid(
+                &mut state,
+                "implementation_contract_instance_id",
+                row.try_get::<Option<Uuid>, _>("observed_implementation_contract_instance_id")
+                    .context("missing observed_implementation_contract_instance_id")?,
+            );
+            insert_optional_json(
+                &mut state,
+                "discovery_edge_id",
+                row.try_get::<Option<i64>, _>("discovery_edge_id")
+                    .context("missing discovery_edge_id")?,
+            );
+        }
+    }
+
+    Ok(Value::Object(state))
+}
+
+fn validate_manifest_drift_alert_observation_create(
+    observation: &ManifestDriftAlertObservationCreate,
+) -> Result<()> {
+    if observation.observation_identity.trim().is_empty() {
+        bail!("manifest drift alert observation_identity must not be empty");
+    }
+    if observation.namespace.trim().is_empty() {
+        bail!("manifest drift alert namespace must not be empty");
+    }
+    if observation.source_family.trim().is_empty() {
+        bail!("manifest drift alert source_family must not be empty");
+    }
+    if observation.manifest_version <= 0 {
+        bail!(
+            "manifest drift alert {} has non-positive manifest_version {}",
+            observation.observation_identity,
+            observation.manifest_version
+        );
+    }
+    if observation.chain_id.trim().is_empty() {
+        bail!("manifest drift alert chain_id must not be empty");
+    }
+    if observation
+        .observed_code_byte_length
+        .is_some_and(|value| value < 0)
+    {
+        bail!(
+            "manifest drift alert {} has negative observed_code_byte_length",
+            observation.observation_identity
+        );
+    }
+    if observation
+        .observed_block_number
+        .is_some_and(|value| value < 0)
+    {
+        bail!(
+            "manifest drift alert {} has negative observed_block_number",
+            observation.observation_identity
+        );
+    }
+    if observation.observed_block_number.is_some() != observation.observed_block_hash.is_some() {
+        bail!(
+            "manifest drift alert {} must include observed_block_number and observed_block_hash together",
+            observation.observation_identity
+        );
+    }
+    if observation.last_observed_at < observation.first_observed_at {
+        bail!(
+            "manifest drift alert {} last_observed_at is before first_observed_at",
+            observation.observation_identity
+        );
+    }
+    if observation
+        .remediated_at
+        .is_some_and(|value| value < observation.first_observed_at)
+    {
+        bail!(
+            "manifest drift alert {} remediated_at is before first_observed_at",
+            observation.observation_identity
+        );
+    }
+    ensure_json_object(
+        "manifest drift alert raw_fact_ref",
+        &observation.raw_fact_ref,
+    )?;
+    ensure_json_object(
+        "manifest drift alert expected_material",
+        &observation.expected_material,
+    )?;
+    ensure_json_object(
+        "manifest drift alert observed_material",
+        &observation.observed_material,
+    )?;
+    ensure_json_object(
+        "manifest drift alert watch_plan_metadata",
+        &observation.watch_plan_metadata,
+    )?;
+    ensure_json_object(
+        "manifest drift alert alert_metadata",
+        &observation.alert_metadata,
+    )?;
+    if let Some(metadata) = &observation.remediation_metadata {
+        ensure_json_object("manifest drift alert remediation_metadata", metadata)?;
+    }
+
+    match observation.alert_kind {
+        ManifestDriftAlertKind::CodeHashDrift => {
+            if observation.proxy_contract_instance_id.is_some() {
+                bail!(
+                    "manifest code-hash drift alert {} must not set proxy_contract_instance_id",
+                    observation.observation_identity
+                );
+            }
+            if observation.expected_code_hash.is_none()
+                || observation.observed_code_hash.is_none()
+                || observation.observed_canonicality_state.is_none()
+            {
+                bail!(
+                    "manifest code-hash drift alert {} must include expected and observed code-hash material",
+                    observation.observation_identity
+                );
+            }
+        }
+        ManifestDriftAlertKind::ProxyImplementation => {
+            if observation.proxy_contract_instance_id != Some(observation.contract_instance_id) {
+                bail!(
+                    "manifest proxy implementation alert {} must preserve the proxy contract_instance_id as the alert subject",
+                    observation.observation_identity
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn manifest_alert_observation_create_from_rendered(
+    observation: &ManifestDriftAlertObservation,
+) -> Result<ManifestDriftAlertObservationCreate> {
+    let lifecycle_status = ManifestDriftAlertLifecycleStatus::parse(
+        observation
+            .alert_state
+            .get("alert_status")
+            .and_then(Value::as_str)
+            .unwrap_or(ManifestDriftAlertLifecycleStatus::Active.as_str()),
+    )?;
+    let chain_id = observation
+        .chain_id
+        .clone()
+        .or_else(|| alert_state_string_owned(observation, "chain"))
+        .context("manifest drift alert observation is missing chain_id")?;
+    let source_manifest_id = observation.source_manifest_id.or_else(|| {
+        observation
+            .alert_state
+            .get("source_manifest_id")
+            .and_then(Value::as_i64)
+    });
+    let contract_instance_id = match observation.alert_kind {
+        ManifestDriftAlertKind::CodeHashDrift => {
+            parse_required_alert_uuid(observation, "contract_instance_id")?
+        }
+        ManifestDriftAlertKind::ProxyImplementation => {
+            parse_required_alert_uuid(observation, "proxy_contract_instance_id")?
+        }
+    };
+    let proxy_contract_instance_id = match observation.alert_kind {
+        ManifestDriftAlertKind::CodeHashDrift => None,
+        ManifestDriftAlertKind::ProxyImplementation => Some(contract_instance_id),
+    };
+    let observed_implementation_contract_instance_id =
+        parse_optional_alert_uuid(observation, "observed_implementation_contract_instance_id")?
+            .or_else(|| {
+                parse_optional_alert_uuid(observation, "implementation_contract_instance_id")
+                    .ok()
+                    .flatten()
+            });
+
+    Ok(ManifestDriftAlertObservationCreate {
+        observation_identity: observation.event_identity.clone(),
+        alert_kind: observation.alert_kind,
+        lifecycle_status,
+        namespace: observation.namespace.clone(),
+        source_family: observation.source_family.clone(),
+        manifest_version: observation.manifest_version,
+        source_manifest_id,
+        chain_id,
+        contract_instance_id,
+        proxy_contract_instance_id,
+        expected_implementation_contract_instance_id: parse_optional_alert_uuid(
+            observation,
+            "expected_implementation_contract_instance_id",
+        )?,
+        observed_implementation_contract_instance_id,
+        discovery_edge_id: observation
+            .alert_state
+            .get("discovery_edge_id")
+            .and_then(Value::as_i64)
+            .or_else(|| {
+                observation
+                    .raw_fact_ref
+                    .get("discovery_edge_id")
+                    .and_then(Value::as_i64)
+            }),
+        expected_code_hash: alert_state_string_owned(observation, "expected_code_hash"),
+        observed_code_hash: alert_state_string_owned(observation, "observed_code_hash"),
+        observed_code_byte_length: observation
+            .alert_state
+            .get("observed_code_byte_length")
+            .and_then(Value::as_i64),
+        observed_block_number: observation.block_number.or_else(|| {
+            observation
+                .alert_state
+                .get("observed_block_number")
+                .and_then(Value::as_i64)
+        }),
+        observed_block_hash: observation
+            .block_hash
+            .clone()
+            .or_else(|| alert_state_string_owned(observation, "observed_block_hash")),
+        observed_canonicality_state: Some(observation.canonicality_state),
+        raw_fact_ref: observation.raw_fact_ref.clone(),
+        expected_material: json!({}),
+        observed_material: json!({}),
+        watch_plan_metadata: json!({}),
+        alert_metadata: observation.alert_state.clone(),
+        remediation_status: alert_state_string_owned(observation, "remediation_status"),
+        remediation_metadata: observation
+            .alert_state
+            .get("remediation_metadata")
+            .cloned()
+            .or_else(|| observation.alert_state.get("remediation").cloned()),
+        first_observed_at: observation.observed_at,
+        last_observed_at: observation.observed_at,
+        remediated_at: None,
+    })
+}
+
+fn alert_state_string_owned(
+    observation: &ManifestDriftAlertObservation,
+    field: &str,
+) -> Option<String> {
+    observation
+        .alert_state
+        .get(field)
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
+fn parse_required_alert_uuid(
+    observation: &ManifestDriftAlertObservation,
+    field: &str,
+) -> Result<Uuid> {
+    let value = alert_state_string_owned(observation, field)
+        .with_context(|| format!("manifest drift alert observation is missing {field}"))?;
+    Uuid::parse_str(&value)
+        .with_context(|| format!("manifest drift alert observation has invalid {field}"))
+}
+
+fn parse_optional_alert_uuid(
+    observation: &ManifestDriftAlertObservation,
+    field: &str,
+) -> Result<Option<Uuid>> {
+    alert_state_string_owned(observation, field)
+        .map(|value| {
+            Uuid::parse_str(&value)
+                .with_context(|| format!("manifest drift alert observation has invalid {field}"))
+        })
+        .transpose()
+}
+
+fn ensure_existing_manifest_alert_matches_request(
+    stored: &ManifestDriftAlertObservation,
+    request: &ManifestDriftAlertObservationCreate,
+) -> Result<()> {
+    let expected_alert_state = manifest_alert_state_from_create(request)?;
+    let expected_canonicality = request
+        .observed_canonicality_state
+        .unwrap_or(CanonicalityState::Observed);
+
+    if stored.event_identity != request.observation_identity
+        || stored.alert_kind != request.alert_kind
+        || stored.namespace != request.namespace
+        || stored.source_family != request.source_family
+        || stored.manifest_version != request.manifest_version
+        || stored.source_manifest_id != request.source_manifest_id
+        || stored.chain_id.as_deref() != Some(request.chain_id.as_str())
+        || stored.block_number != request.observed_block_number
+        || stored.block_hash != request.observed_block_hash
+        || stored.raw_fact_ref != request.raw_fact_ref
+        || stored.canonicality_state != expected_canonicality
+        || stored.alert_state != expected_alert_state
+        || stored.observed_at != request.last_observed_at
+    {
+        bail!(
+            "manifest drift alert observation {} already exists with different persisted material",
+            request.observation_identity
+        );
+    }
+
+    Ok(())
+}
+
+fn manifest_alert_state_from_create(
+    observation: &ManifestDriftAlertObservationCreate,
+) -> Result<Value> {
+    let mut state = json_object(observation.alert_metadata.clone())?;
+
+    insert_json(
+        &mut state,
+        "alert_type",
+        observation.alert_kind.alert_type(),
+    );
+    insert_json(
+        &mut state,
+        "alert_status",
+        observation.lifecycle_status.as_str(),
+    );
+    insert_json(
+        &mut state,
+        "source_family",
+        observation.source_family.clone(),
+    );
+    insert_json(&mut state, "chain", observation.chain_id.clone());
+    insert_optional_json(
+        &mut state,
+        "source_manifest_id",
+        observation.source_manifest_id,
+    );
+    insert_optional_json(
+        &mut state,
+        "remediation_status",
+        observation.remediation_status.clone(),
+    );
+    insert_optional_json(
+        &mut state,
+        "remediation_metadata",
+        observation.remediation_metadata.clone(),
+    );
+    merge_json_object(
+        &mut state,
+        "expected_material",
+        observation.expected_material.clone(),
+    )?;
+    merge_json_object(
+        &mut state,
+        "observed_material",
+        observation.observed_material.clone(),
+    )?;
+    merge_json_object(
+        &mut state,
+        "watch_plan_metadata",
+        observation.watch_plan_metadata.clone(),
+    )?;
+
+    match observation.alert_kind {
+        ManifestDriftAlertKind::CodeHashDrift => {
+            insert_json(
+                &mut state,
+                "contract_instance_id",
+                observation.contract_instance_id.to_string(),
+            );
+            insert_optional_json(
+                &mut state,
+                "expected_code_hash",
+                observation.expected_code_hash.clone(),
+            );
+            insert_optional_json(
+                &mut state,
+                "observed_code_hash",
+                observation.observed_code_hash.clone(),
+            );
+            insert_optional_json(
+                &mut state,
+                "observed_code_byte_length",
+                observation.observed_code_byte_length,
+            );
+            insert_optional_json(
+                &mut state,
+                "observed_block_number",
+                observation.observed_block_number,
+            );
+            insert_optional_json(
+                &mut state,
+                "observed_block_hash",
+                observation.observed_block_hash.clone(),
+            );
+            insert_optional_json(
+                &mut state,
+                "observed_canonicality_state",
+                observation
+                    .observed_canonicality_state
+                    .map(CanonicalityState::as_str),
+            );
+        }
+        ManifestDriftAlertKind::ProxyImplementation => {
+            insert_json(
+                &mut state,
+                "proxy_contract_instance_id",
+                observation.contract_instance_id.to_string(),
+            );
+            insert_optional_json(
+                &mut state,
+                "expected_implementation_contract_instance_id",
+                observation
+                    .expected_implementation_contract_instance_id
+                    .map(|value| value.to_string()),
+            );
+            insert_optional_json(
+                &mut state,
+                "observed_implementation_contract_instance_id",
+                observation
+                    .observed_implementation_contract_instance_id
+                    .map(|value| value.to_string()),
+            );
+            insert_optional_json(
+                &mut state,
+                "implementation_contract_instance_id",
+                observation
+                    .observed_implementation_contract_instance_id
+                    .map(|value| value.to_string()),
+            );
+            insert_optional_json(
+                &mut state,
+                "discovery_edge_id",
+                observation.discovery_edge_id,
+            );
+        }
+    }
+
+    Ok(Value::Object(state))
+}
+
+fn serialize_json_object(context: &str, value: &Value) -> Result<String> {
+    ensure_json_object(context, value)?;
+    serde_json::to_string(value).with_context(|| format!("failed to serialize {context}"))
+}
+
+fn ensure_json_object(context: &str, value: &Value) -> Result<()> {
+    if !value.is_object() {
+        bail!("{context} must be a JSON object");
+    }
+    Ok(())
+}
+
+fn json_object(value: Value) -> Result<Map<String, Value>> {
+    match value {
+        Value::Object(object) => Ok(object),
+        _ => bail!("manifest drift alert JSON material must be an object"),
+    }
+}
+
+fn merge_json_object(state: &mut Map<String, Value>, context: &str, value: Value) -> Result<()> {
+    for (key, value) in
+        json_object(value).with_context(|| format!("{context} must be an object"))?
+    {
+        state.insert(key, value);
+    }
+    Ok(())
+}
+
+fn insert_json<T>(state: &mut Map<String, Value>, key: &str, value: T)
+where
+    T: Into<Value>,
+{
+    state.insert(key.to_owned(), value.into());
+}
+
+fn insert_optional_json<T>(state: &mut Map<String, Value>, key: &str, value: Option<T>)
+where
+    T: Into<Value>,
+{
+    if let Some(value) = value {
+        insert_json(state, key, value);
+    }
+}
+
+fn insert_uuid(state: &mut Map<String, Value>, key: &str, value: Option<Uuid>) {
+    if let Some(value) = value {
+        insert_json(state, key, value.to_string());
+    }
 }
 
 fn render_live_code_hash_drift_candidate(row: sqlx::postgres::PgRow) -> Result<Value> {

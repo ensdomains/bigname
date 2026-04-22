@@ -30,6 +30,15 @@ struct TestDatabase {
     database_name: String,
 }
 
+struct ManifestAlertFixture {
+    manifest_id: i64,
+    root_id: Uuid,
+    proxy_id: Uuid,
+    expected_impl_id: Uuid,
+    observed_impl_id: Uuid,
+    discovery_edge_id: i64,
+}
+
 impl TestDatabase {
     async fn new() -> Result<Self> {
         let database_url = std::env::var("BIGNAME_DATABASE_URL")
@@ -432,6 +441,158 @@ async fn insert_live_manifest_audit_fixture(pool: &PgPool) -> Result<()> {
     Ok(())
 }
 
+async fn insert_manifest_alert_persistence_fixture(pool: &PgPool) -> Result<ManifestAlertFixture> {
+    let root_id = Uuid::from_u128(0x0e7ec7ace00000000000000000002001);
+    let proxy_id = Uuid::from_u128(0x0e7ec7ace00000000000000000002002);
+    let expected_impl_id = Uuid::from_u128(0x0e7ec7ace00000000000000000002003);
+    let observed_impl_id = Uuid::from_u128(0x0e7ec7ace00000000000000000002004);
+
+    for contract_instance_id in [root_id, proxy_id, expected_impl_id, observed_impl_id] {
+        sqlx::query(
+            r#"
+            INSERT INTO contract_instances (
+                contract_instance_id,
+                chain_id,
+                contract_kind,
+                provenance
+            )
+            VALUES ($1, 'eth-mainnet', 'contract', '{}'::JSONB)
+            "#,
+        )
+        .bind(contract_instance_id)
+        .execute(pool)
+        .await
+        .context("failed to insert manifest alert contract instance")?;
+    }
+
+    let manifest_id = sqlx::query_scalar::<_, i64>(
+        r#"
+        INSERT INTO manifest_versions (
+            manifest_version,
+            namespace,
+            source_family,
+            chain,
+            deployment_epoch,
+            rollout_status,
+            normalizer_version,
+            file_path,
+            manifest_payload
+        )
+        VALUES (
+            7,
+            'ens',
+            'ens_v1_registry_l1',
+            'eth-mainnet',
+            'ens_v1',
+            'active',
+            'uts46-v1',
+            'manifests/ens/ens_v1_registry_l1/v7.toml',
+            '{"rollout_status":"active"}'::JSONB
+        )
+        RETURNING manifest_id
+        "#,
+    )
+    .fetch_one(pool)
+    .await
+    .context("failed to insert manifest alert manifest")?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO manifest_contract_instances (
+            manifest_id,
+            declaration_kind,
+            declaration_name,
+            contract_instance_id,
+            declared_address,
+            code_hash,
+            abi_ref
+        )
+        VALUES ($1, 'root', 'Registry', $2, '0x0000000000000000000000000000000000000001', '0xexpected', 'abis/registry.json')
+        "#,
+    )
+    .bind(manifest_id)
+    .bind(root_id)
+    .execute(pool)
+    .await
+    .context("failed to insert manifest alert root declaration")?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO manifest_contract_instances (
+            manifest_id,
+            declaration_kind,
+            declaration_name,
+            contract_instance_id,
+            declared_address,
+            role,
+            proxy_kind,
+            implementation_contract_instance_id,
+            declared_implementation_address
+        )
+        VALUES (
+            $1,
+            'contract',
+            'name_wrapper',
+            $2,
+            '0x00000000000000000000000000000000000000aa',
+            'name_wrapper',
+            'erc1967',
+            $3,
+            '0x00000000000000000000000000000000000000dd'
+        )
+        "#,
+    )
+    .bind(manifest_id)
+    .bind(proxy_id)
+    .bind(expected_impl_id)
+    .execute(pool)
+    .await
+    .context("failed to insert manifest alert proxy declaration")?;
+
+    let discovery_edge_id = sqlx::query_scalar::<_, i64>(
+        r#"
+        INSERT INTO discovery_edges (
+            chain_id,
+            edge_kind,
+            from_contract_instance_id,
+            to_contract_instance_id,
+            discovery_source,
+            source_manifest_id,
+            admission,
+            active_from_block_number,
+            provenance
+        )
+        VALUES (
+            'eth-mainnet',
+            'proxy_implementation',
+            $1,
+            $2,
+            'manifest_declared_proxy',
+            $3,
+            'observed',
+            120,
+            '{"slot":"eip1967.proxy.implementation"}'::JSONB
+        )
+        RETURNING discovery_edge_id
+        "#,
+    )
+    .bind(proxy_id)
+    .bind(observed_impl_id)
+    .bind(manifest_id)
+    .fetch_one(pool)
+    .await
+    .context("failed to insert manifest alert discovery edge")?;
+
+    Ok(ManifestAlertFixture {
+        manifest_id,
+        root_id,
+        proxy_id,
+        expected_impl_id,
+        observed_impl_id,
+        discovery_edge_id,
+    })
+}
+
 fn raw_call_snapshot(block_hash: &str, block_number: i64) -> RawCallSnapshot {
     RawCallSnapshot {
         chain_id: "eth-mainnet".to_owned(),
@@ -471,118 +632,122 @@ fn normalized_event(block_hash: &str, block_number: i64, index: i64) -> Normaliz
     }
 }
 
-fn manifest_code_hash_drift_alert(event_identity: &str, address: &str) -> NormalizedEvent {
-    NormalizedEvent {
-        event_identity: event_identity.to_owned(),
+fn manifest_code_hash_drift_alert_observation(
+    fixture: &ManifestAlertFixture,
+    observation_identity: &str,
+    address: &str,
+) -> ManifestDriftAlertObservationCreate {
+    ManifestDriftAlertObservationCreate {
+        observation_identity: observation_identity.to_owned(),
+        alert_kind: ManifestDriftAlertKind::CodeHashDrift,
+        lifecycle_status: ManifestDriftAlertLifecycleStatus::Active,
         namespace: "ens".to_owned(),
-        logical_name_id: None,
-        resource_id: None,
-        event_kind: "ManifestCodeHashDriftAlert".to_owned(),
         source_family: "ens_v1_registry_l1".to_owned(),
         manifest_version: 7,
-        source_manifest_id: None,
-        chain_id: Some("eth-mainnet".to_owned()),
-        block_number: Some(123),
-        block_hash: Some("0xalertblock".to_owned()),
-        transaction_hash: None,
-        log_index: None,
+        source_manifest_id: Some(fixture.manifest_id),
+        chain_id: "eth-mainnet".to_owned(),
+        contract_instance_id: fixture.root_id,
+        proxy_contract_instance_id: None,
+        expected_implementation_contract_instance_id: None,
+        observed_implementation_contract_instance_id: None,
+        discovery_edge_id: None,
+        expected_code_hash: Some("0xexpected".to_owned()),
+        observed_code_hash: Some("0xobserved".to_owned()),
+        observed_code_byte_length: Some(512),
+        observed_block_number: Some(123),
+        observed_block_hash: Some("0xalertblock".to_owned()),
+        observed_canonicality_state: Some(CanonicalityState::Canonical),
         raw_fact_ref: json!({
-            "manifest_id": 42,
-            "contract_instance_id": "0e7ec7ac-e000-0000-0000-000000000111",
+            "manifest_id": fixture.manifest_id,
+            "contract_instance_id": fixture.root_id.to_string(),
             "address": address,
+            "raw_code_hash_id": 88,
             "observed_block_number": 123,
             "observed_block_hash": "0xalertblock"
         }),
-        derivation_kind: "manifest_alert".to_owned(),
-        canonicality_state: CanonicalityState::Canonical,
-        before_state: json!({}),
-        after_state: json!({
-            "alert_type": "manifest_code_hash_drift",
-            "alert_status": "active",
-            "chain": "eth-mainnet",
-            "source_family": "ens_v1_registry_l1",
+        expected_material: json!({
+            "expected_code_hash": "0xexpected"
+        }),
+        observed_material: json!({
+            "observed_code_hash": "0xobserved",
+            "observed_code_byte_length": 512
+        }),
+        watch_plan_metadata: json!({
+            "watched_source": "manifest_contract",
+            "source_manifest_id": fixture.manifest_id
+        }),
+        alert_metadata: json!({
             "declaration_kind": "contract",
             "declaration_name": "registry",
-            "contract_instance_id": "0e7ec7ac-e000-0000-0000-000000000111",
             "address": address,
-            "expected_code_hash": "0xexpected",
-            "observed_code_hash": "0xobserved",
-            "observed_code_byte_length": 512,
-            "observed_block_number": 123,
-            "observed_block_hash": "0xalertblock",
-            "observed_canonicality_state": "canonical",
-            "watched_source": "manifest_contract",
-            "source_manifest_id": 42
         }),
+        remediation_status: None,
+        remediation_metadata: None,
+        first_observed_at: timestamp(123),
+        last_observed_at: timestamp(124),
+        remediated_at: None,
     }
 }
 
-fn manifest_proxy_implementation_alert(event_identity: &str) -> NormalizedEvent {
-    NormalizedEvent {
-        event_identity: event_identity.to_owned(),
+fn manifest_proxy_implementation_alert_observation(
+    fixture: &ManifestAlertFixture,
+    observation_identity: &str,
+) -> ManifestDriftAlertObservationCreate {
+    ManifestDriftAlertObservationCreate {
+        observation_identity: observation_identity.to_owned(),
+        alert_kind: ManifestDriftAlertKind::ProxyImplementation,
+        lifecycle_status: ManifestDriftAlertLifecycleStatus::Remediated,
         namespace: "ens".to_owned(),
-        logical_name_id: None,
-        resource_id: None,
-        event_kind: "ManifestProxyImplementationAlert".to_owned(),
         source_family: "ens_v1_wrapper_l1".to_owned(),
         manifest_version: 9,
-        source_manifest_id: None,
-        chain_id: Some("eth-mainnet".to_owned()),
-        block_number: None,
-        block_hash: None,
-        transaction_hash: None,
-        log_index: None,
+        source_manifest_id: Some(fixture.manifest_id),
+        chain_id: "eth-mainnet".to_owned(),
+        contract_instance_id: fixture.proxy_id,
+        proxy_contract_instance_id: Some(fixture.proxy_id),
+        expected_implementation_contract_instance_id: Some(fixture.expected_impl_id),
+        observed_implementation_contract_instance_id: Some(fixture.observed_impl_id),
+        discovery_edge_id: Some(fixture.discovery_edge_id),
+        expected_code_hash: None,
+        observed_code_hash: None,
+        observed_code_byte_length: None,
+        observed_block_number: None,
+        observed_block_hash: None,
+        observed_canonicality_state: None,
         raw_fact_ref: json!({
-            "manifest_id": 43,
-            "discovery_edge_id": 99,
-            "proxy_contract_instance_id": "0e7ec7ac-e000-0000-0000-000000000222",
-            "implementation_contract_instance_id": "0e7ec7ac-e000-0000-0000-000000000333"
+            "manifest_id": fixture.manifest_id,
+            "discovery_edge_id": fixture.discovery_edge_id,
+            "proxy_contract_instance_id": fixture.proxy_id.to_string(),
+            "expected_implementation_contract_instance_id": fixture.expected_impl_id.to_string(),
+            "observed_implementation_contract_instance_id": fixture.observed_impl_id.to_string()
         }),
-        derivation_kind: "manifest_alert".to_owned(),
-        canonicality_state: CanonicalityState::Finalized,
-        before_state: json!({}),
-        after_state: json!({
-            "alert_type": "manifest_proxy_implementation_edge",
-            "alert_status": "active",
-            "chain": "eth-mainnet",
-            "source_family": "ens_v1_wrapper_l1",
-            "proxy_contract_instance_id": "0e7ec7ac-e000-0000-0000-000000000222",
+        expected_material: json!({
+            "expected_implementation_address": "0xexpectedimpl"
+        }),
+        observed_material: json!({
+            "implementation_address": "0ximpl"
+        }),
+        watch_plan_metadata: json!({
+            "active_from_block_number": 120,
+            "active_to_block_number": null
+        }),
+        alert_metadata: json!({
             "proxy_address": "0xproxy",
-            "implementation_contract_instance_id": "0e7ec7ac-e000-0000-0000-000000000333",
-            "implementation_address": "0ximpl",
             "declaration_name": "name_wrapper",
             "role": "name_wrapper",
             "proxy_kind": "eip1967",
             "admission": "observed",
-            "active_from_block_number": 120,
-            "active_to_block_number": null,
             "provenance": {
                 "slot": "eip1967.proxy.implementation"
             }
         }),
-    }
-}
-
-fn ignored_manifest_alert_event() -> NormalizedEvent {
-    NormalizedEvent {
-        event_identity: "manifest_alert:ignored".to_owned(),
-        namespace: "ens".to_owned(),
-        logical_name_id: None,
-        resource_id: None,
-        event_kind: "SourceManifestUpdated".to_owned(),
-        source_family: "ens_v1_registry_l1".to_owned(),
-        manifest_version: 7,
-        source_manifest_id: None,
-        chain_id: Some("eth-mainnet".to_owned()),
-        block_number: None,
-        block_hash: None,
-        transaction_hash: None,
-        log_index: None,
-        raw_fact_ref: json!({}),
-        derivation_kind: "manifest_alert".to_owned(),
-        canonicality_state: CanonicalityState::Finalized,
-        before_state: json!({}),
-        after_state: json!({}),
+        remediation_status: Some("manifest_updated".to_owned()),
+        remediation_metadata: Some(json!({
+            "ticket": "OPS-42",
+            "resolved_by": "manifest-sync"
+        })),
+        first_observed_at: timestamp(125),
+        last_observed_at: timestamp(126),
+        remediated_at: Some(timestamp(127)),
     }
 }
 
@@ -727,15 +892,29 @@ async fn stored_lineage_range_lists_only_stored_rows_in_stable_order() -> Result
 #[tokio::test]
 async fn manifest_drift_audit_lists_stored_alert_observations() -> Result<()> {
     let database = TestDatabase::new().await?;
+    let fixture = insert_manifest_alert_persistence_fixture(database.pool()).await?;
 
-    upsert_normalized_events(
+    upsert_manifest_drift_alert_observation(
         database.pool(),
-        &[
-            manifest_proxy_implementation_alert("manifest_alert:proxy"),
-            manifest_code_hash_drift_alert("manifest_alert:code:z", "0xregistry-z"),
-            ignored_manifest_alert_event(),
-            manifest_code_hash_drift_alert("manifest_alert:code:a", "0xregistry-a"),
-        ],
+        &manifest_proxy_implementation_alert_observation(&fixture, "manifest_alert:proxy"),
+    )
+    .await?;
+    upsert_manifest_drift_alert_observation(
+        database.pool(),
+        &manifest_code_hash_drift_alert_observation(
+            &fixture,
+            "manifest_alert:code:z",
+            "0xregistry-z",
+        ),
+    )
+    .await?;
+    upsert_manifest_drift_alert_observation(
+        database.pool(),
+        &manifest_code_hash_drift_alert_observation(
+            &fixture,
+            "manifest_alert:code:a",
+            "0xregistry-a",
+        ),
     )
     .await?;
 
@@ -753,6 +932,7 @@ async fn manifest_drift_audit_lists_stored_alert_observations() -> Result<()> {
     for alert in &inspection.code_hash_drift_alerts {
         assert_eq!(alert.alert_kind, ManifestDriftAlertKind::CodeHashDrift);
         assert_eq!(alert.alert_kind.event_kind(), "ManifestCodeHashDriftAlert");
+        assert_eq!(alert.alert_kind.observation_kind(), "manifest_drift");
         assert_eq!(alert.alert_kind.alert_type(), "manifest_code_hash_drift");
         assert_eq!(alert.source_family, "ens_v1_registry_l1");
         assert_eq!(alert.manifest_version, 7);
@@ -760,6 +940,7 @@ async fn manifest_drift_audit_lists_stored_alert_observations() -> Result<()> {
         assert_eq!(alert.block_number, Some(123));
         assert_eq!(alert.block_hash.as_deref(), Some("0xalertblock"));
         assert_eq!(alert.canonicality_state, CanonicalityState::Canonical);
+        assert_eq!(alert.source_manifest_id, Some(fixture.manifest_id));
         assert_eq!(
             alert.alert_state["expected_code_hash"].as_str(),
             Some("0xexpected")
@@ -783,40 +964,105 @@ async fn manifest_drift_audit_lists_stored_alert_observations() -> Result<()> {
         proxy_alert.alert_kind,
         ManifestDriftAlertKind::ProxyImplementation
     );
+    assert_eq!(
+        proxy_alert.alert_kind.observation_kind(),
+        "proxy_implementation_drift"
+    );
     assert_eq!(proxy_alert.event_identity, "manifest_alert:proxy");
     assert_eq!(proxy_alert.source_family, "ens_v1_wrapper_l1");
     assert_eq!(proxy_alert.manifest_version, 9);
-    assert_eq!(proxy_alert.canonicality_state, CanonicalityState::Finalized);
+    assert_eq!(proxy_alert.source_manifest_id, Some(fixture.manifest_id));
+    assert_eq!(proxy_alert.canonicality_state, CanonicalityState::Observed);
     assert_eq!(proxy_alert.alert_state["proxy_address"], "0xproxy");
     assert_eq!(proxy_alert.alert_state["implementation_address"], "0ximpl");
-    assert_eq!(proxy_alert.raw_fact_ref["discovery_edge_id"], 99);
+    let proxy_id = fixture.proxy_id.to_string();
+    let observed_impl_id = fixture.observed_impl_id.to_string();
+    assert_eq!(
+        proxy_alert.alert_state["proxy_contract_instance_id"].as_str(),
+        Some(proxy_id.as_str())
+    );
+    assert_eq!(
+        proxy_alert.alert_state["implementation_contract_instance_id"].as_str(),
+        Some(observed_impl_id.as_str())
+    );
+    assert_eq!(
+        proxy_alert.raw_fact_ref["discovery_edge_id"],
+        fixture.discovery_edge_id
+    );
+    assert_eq!(
+        proxy_alert.alert_state["remediation_metadata"]["ticket"],
+        "OPS-42"
+    );
 
     database.cleanup().await
 }
 
 #[tokio::test]
-async fn manifest_drift_audit_does_not_mutate_alert_observations() -> Result<()> {
+async fn manifest_drift_alert_persistence_is_idempotent_and_operational_only() -> Result<()> {
     let database = TestDatabase::new().await?;
+    let fixture = insert_manifest_alert_persistence_fixture(database.pool()).await?;
+    let code_alert = manifest_code_hash_drift_alert_observation(
+        &fixture,
+        "manifest_alert:readonly:code",
+        "0xregistry",
+    );
+    let proxy_alert =
+        manifest_proxy_implementation_alert_observation(&fixture, "manifest_alert:readonly:proxy");
 
-    upsert_normalized_events(
-        database.pool(),
-        &[
-            manifest_code_hash_drift_alert("manifest_alert:readonly:code", "0xregistry"),
-            manifest_proxy_implementation_alert("manifest_alert:readonly:proxy"),
-        ],
-    )
-    .await?;
+    let before_events = load_normalized_event_total(database.pool()).await?;
+    let before_manifests = load_manifest_version_total(database.pool()).await?;
+    let before_manifest_contracts = load_manifest_contract_instance_total(database.pool()).await?;
+    let before_discovery_edges = load_discovery_edge_total(database.pool()).await?;
+    let before_contract_instances = load_contract_instance_total(database.pool()).await?;
 
-    let before = list_manifest_drift_alert_observations(database.pool()).await?;
-    let before_total = load_normalized_event_total(database.pool()).await?;
+    let inserted_code =
+        upsert_manifest_drift_alert_observation(database.pool(), &code_alert).await?;
+    let repeated_code =
+        upsert_manifest_drift_alert_observation(database.pool(), &code_alert).await?;
+    let inserted_proxy =
+        upsert_manifest_drift_alert_observation(database.pool(), &proxy_alert).await?;
+    let repeated_proxy =
+        upsert_manifest_drift_alert_observation(database.pool(), &proxy_alert).await?;
+
+    assert_eq!(repeated_code, inserted_code);
+    assert_eq!(repeated_proxy, inserted_proxy);
+    let proxy_id = fixture.proxy_id.to_string();
+    let observed_impl_id = fixture.observed_impl_id.to_string();
+    assert_eq!(
+        inserted_proxy.alert_state["proxy_contract_instance_id"].as_str(),
+        Some(proxy_id.as_str())
+    );
+    assert_eq!(
+        inserted_proxy.alert_state["implementation_contract_instance_id"].as_str(),
+        Some(observed_impl_id.as_str())
+    );
 
     let inspection = list_manifest_drift_alert_observations(database.pool()).await?;
-
-    let after = list_manifest_drift_alert_observations(database.pool()).await?;
-    let after_total = load_normalized_event_total(database.pool()).await?;
-    assert_eq!(inspection, before);
-    assert_eq!(after, before);
-    assert_eq!(after_total, before_total);
+    assert_eq!(inspection.total_alert_count(), 2);
+    assert_eq!(
+        load_manifest_alert_observation_total(database.pool()).await?,
+        2
+    );
+    assert_eq!(
+        load_normalized_event_total(database.pool()).await?,
+        before_events
+    );
+    assert_eq!(
+        load_manifest_version_total(database.pool()).await?,
+        before_manifests
+    );
+    assert_eq!(
+        load_manifest_contract_instance_total(database.pool()).await?,
+        before_manifest_contracts
+    );
+    assert_eq!(
+        load_discovery_edge_total(database.pool()).await?,
+        before_discovery_edges
+    );
+    assert_eq!(
+        load_contract_instance_total(database.pool()).await?,
+        before_contract_instances
+    );
 
     database.cleanup().await
 }
@@ -827,9 +1073,11 @@ async fn manifest_drift_audit_computes_live_candidates_without_persistence() -> 
     insert_live_manifest_audit_fixture(database.pool()).await?;
 
     let before_events = load_normalized_event_total(database.pool()).await?;
+    let before_alerts = load_manifest_alert_observation_total(database.pool()).await?;
     let audit =
         ManifestDriftAlertInspection::compute_live_manifest_drift_audit(database.pool()).await?;
     let after_events = load_normalized_event_total(database.pool()).await?;
+    let after_alerts = load_manifest_alert_observation_total(database.pool()).await?;
 
     assert_eq!(audit["command"], "manifest-drift audit");
     assert_eq!(audit["read_only"], true);
@@ -891,6 +1139,7 @@ async fn manifest_drift_audit_computes_live_candidates_without_persistence() -> 
     );
 
     assert_eq!(after_events, before_events);
+    assert_eq!(after_alerts, before_alerts);
 
     database.cleanup().await
 }
@@ -900,9 +1149,11 @@ async fn manifest_drift_audit_reports_clean_live_audit_without_persistence() -> 
     let database = TestDatabase::new().await?;
 
     let before_events = load_normalized_event_total(database.pool()).await?;
+    let before_alerts = load_manifest_alert_observation_total(database.pool()).await?;
     let audit =
         ManifestDriftAlertInspection::compute_live_manifest_drift_audit(database.pool()).await?;
     let after_events = load_normalized_event_total(database.pool()).await?;
+    let after_alerts = load_manifest_alert_observation_total(database.pool()).await?;
 
     assert_eq!(audit["command"], "manifest-drift audit");
     assert_eq!(audit["read_only"], true);
@@ -918,6 +1169,7 @@ async fn manifest_drift_audit_reports_clean_live_audit_without_persistence() -> 
     assert_eq!(audit["manifest_code_hash_drift_alerts"], json!([]));
     assert_eq!(audit["proxy_implementation_alerts"], json!([]));
     assert_eq!(after_events, before_events);
+    assert_eq!(after_alerts, before_alerts);
 
     database.cleanup().await
 }
@@ -1021,4 +1273,46 @@ async fn load_normalized_event_total(pool: &PgPool) -> Result<i64> {
 
     row.try_get("event_count")
         .context("missing normalized-event total")
+}
+
+async fn load_manifest_alert_observation_total(pool: &PgPool) -> Result<i64> {
+    load_table_count(
+        pool,
+        "manifest_alert_observations",
+        "manifest_alert_observation_count",
+    )
+    .await
+}
+
+async fn load_manifest_version_total(pool: &PgPool) -> Result<i64> {
+    load_table_count(pool, "manifest_versions", "manifest_version_count").await
+}
+
+async fn load_manifest_contract_instance_total(pool: &PgPool) -> Result<i64> {
+    load_table_count(
+        pool,
+        "manifest_contract_instances",
+        "manifest_contract_instance_count",
+    )
+    .await
+}
+
+async fn load_discovery_edge_total(pool: &PgPool) -> Result<i64> {
+    load_table_count(pool, "discovery_edges", "discovery_edge_count").await
+}
+
+async fn load_contract_instance_total(pool: &PgPool) -> Result<i64> {
+    load_table_count(pool, "contract_instances", "contract_instance_count").await
+}
+
+async fn load_table_count(pool: &PgPool, table_name: &str, column_name: &str) -> Result<i64> {
+    let row = sqlx::query(&format!(
+        "SELECT COUNT(*)::BIGINT AS {column_name} FROM {table_name}"
+    ))
+    .fetch_one(pool)
+    .await
+    .with_context(|| format!("failed to load {table_name} count"))?;
+
+    row.try_get(column_name)
+        .with_context(|| format!("missing {table_name} count"))
 }
