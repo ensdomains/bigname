@@ -1712,6 +1712,105 @@
             assert_eq!(replay_rows, second_rows);
         }
 
+        fn assert_page_walk_matches_base_prefix(base_rows: &[Value], page_rows: &[&[Value]]) {
+            let base_rows = stable_row_strings(base_rows);
+            let walked_rows = page_rows
+                .iter()
+                .flat_map(|rows| stable_row_strings(rows))
+                .collect::<Vec<_>>();
+
+            assert_eq!(
+                walked_rows,
+                base_rows
+                    .iter()
+                    .take(walked_rows.len())
+                    .cloned()
+                    .collect::<Vec<_>>()
+            );
+        }
+
+        async fn read_ok_json<T: DeserializeOwned>(
+            database: &HarnessDatabase,
+            uri: impl AsRef<str>,
+        ) -> Result<T> {
+            let response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(uri.as_ref())
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .with_context(|| format!("conformance request failed for {}", uri.as_ref()))?;
+
+            assert_eq!(response.status(), StatusCode::OK);
+            read_json(response).await
+        }
+
+        fn append_query(uri: &str, query: &str) -> String {
+            let separator = if uri.contains('?') { '&' } else { '?' };
+            format!("{uri}{separator}{query}")
+        }
+
+        async fn assert_large_history_route_pagination(
+            database: &HarnessDatabase,
+            base_uri: &str,
+            base_payload: &HistoryResponse,
+            page_size: u64,
+        ) -> Result<()> {
+            let first_payload: HistoryResponse =
+                read_ok_json(database, append_query(base_uri, &format!("page_size={page_size}")))
+                    .await?;
+            let first_cursor = first_payload
+                .page
+                .next_cursor
+                .clone()
+                .expect("larger history first page must include next_cursor");
+
+            let second_payload: HistoryResponse = read_ok_json(
+                database,
+                append_query(base_uri, &format!("page_size={page_size}&cursor={first_cursor}")),
+            )
+            .await?;
+            let second_cursor = second_payload
+                .page
+                .next_cursor
+                .clone()
+                .expect("larger history second page must include next_cursor");
+
+            let third_payload: HistoryResponse = read_ok_json(
+                database,
+                append_query(base_uri, &format!("page_size={page_size}&cursor={second_cursor}")),
+            )
+            .await?;
+            let replay_payload: HistoryResponse = read_ok_json(
+                database,
+                append_query(base_uri, &format!("page_size={page_size}&cursor={first_cursor}")),
+            )
+            .await?;
+
+            assert_replay_stable_pagination(
+                &base_payload.data,
+                &base_payload.page,
+                &first_payload.data,
+                &first_payload.page,
+                &second_payload.data,
+                &second_payload.page,
+                &replay_payload.data,
+                &replay_payload.page,
+                "chain_position_desc",
+                base_payload.page.page_size,
+                page_size,
+            );
+            assert_page_walk_matches_base_prefix(
+                &base_payload.data,
+                &[&first_payload.data, &second_payload.data, &third_payload.data],
+            );
+            assert_eq!(third_payload.page.next_cursor, None);
+
+            Ok(())
+        }
+
         fn collection_name_surface(
             logical_name_id: &str,
             display_name: &str,

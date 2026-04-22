@@ -2038,3 +2038,434 @@
             database.cleanup().await?;
             Ok(())
         }
+
+        #[tokio::test]
+        async fn collection_read_performance_conformance_baseline_collections() -> Result<()> {
+            let database = HarnessDatabase::new().await?;
+            let parent_logical_name_id = "ens:perf-parent.eth";
+            let address = "0x0000000000000000000000000000000000000c0f";
+            let resource_id = Uuid::from_u128(0xc400);
+
+            let child_count = 32;
+            let mut surfaces = vec![collection_name_surface(
+                parent_logical_name_id,
+                "perf-parent.eth",
+                "node:perf-parent.eth",
+                80,
+            )];
+            let mut children = Vec::new();
+            for index in (0..child_count).rev() {
+                let display_name = format!("perf-child-{index:02}.perf-parent.eth");
+                let logical_name_id = format!("ens:{display_name}");
+                let block_number = 81 + index as i64;
+                surfaces.push(collection_name_surface(
+                    &logical_name_id,
+                    &display_name,
+                    &format!("node:{display_name}"),
+                    block_number,
+                ));
+                children.push(declared_child_row(
+                    parent_logical_name_id,
+                    &logical_name_id,
+                    &display_name,
+                    &format!("node:{display_name}"),
+                    900 + index as i64,
+                    block_number,
+                ));
+            }
+
+            bigname_storage::upsert_name_surfaces(&database.pool, &surfaces)
+                .await
+                .context("failed to upsert larger children surfaces for conformance")?;
+            bigname_storage::upsert_children_current_rows(&database.pool, &children)
+                .await
+                .context("failed to upsert larger children rows for conformance")?;
+
+            let address_name_count = 27;
+            let mut token_lineages = Vec::new();
+            let mut resources = Vec::new();
+            let mut address_surfaces = Vec::new();
+            let mut surface_bindings = Vec::new();
+            let mut address_rows = Vec::new();
+            for index in (0..address_name_count).rev() {
+                let resource_id = Uuid::from_u128(0xc000 + index as u128);
+                let token_lineage_id = Uuid::from_u128(0xc100 + index as u128);
+                let surface_binding_id = Uuid::from_u128(0xc200 + index as u128);
+                let display_name = format!("perf-address-{index:02}.eth");
+                let logical_name_id = format!("ens:{display_name}");
+                let block_hash = format!("0xperfaddress{index:02x}");
+                let block_number = 120 + index as i64;
+
+                token_lineages.push(address_name_token_lineage(
+                    token_lineage_id,
+                    &block_hash,
+                    block_number,
+                ));
+                resources.push(address_name_resource(
+                    resource_id,
+                    Some(token_lineage_id),
+                    &block_hash,
+                    block_number,
+                ));
+                address_surfaces.push(collection_name_surface(
+                    &logical_name_id,
+                    &display_name,
+                    &format!("node:{display_name}"),
+                    block_number,
+                ));
+                surface_bindings.push(address_name_surface_binding(
+                    surface_binding_id,
+                    &logical_name_id,
+                    resource_id,
+                    &block_hash,
+                    block_number,
+                    1_717_173_120 + index as i64,
+                ));
+                address_rows.push(address_name_current_row(
+                    address,
+                    &logical_name_id,
+                    bigname_storage::AddressNameRelation::Registrant,
+                    &display_name,
+                    &display_name,
+                    &format!("node:{display_name}"),
+                    surface_binding_id,
+                    resource_id,
+                    Some(token_lineage_id),
+                    block_number,
+                ));
+            }
+            resources.push(address_name_resource(
+                resource_id,
+                None,
+                "0xperfpermissions",
+                149,
+            ));
+
+            bigname_storage::upsert_token_lineages(&database.pool, &token_lineages)
+                .await
+                .context("failed to upsert larger address-name token lineages")?;
+            bigname_storage::upsert_resources(&database.pool, &resources)
+                .await
+                .context("failed to upsert larger address-name resources")?;
+            bigname_storage::upsert_name_surfaces(&database.pool, &address_surfaces)
+                .await
+                .context("failed to upsert larger address-name surfaces")?;
+            bigname_storage::upsert_surface_bindings(&database.pool, &surface_bindings)
+                .await
+                .context("failed to upsert larger address-name surface bindings")?;
+            bigname_storage::upsert_address_names_current_rows(&database.pool, &address_rows)
+                .await
+                .context("failed to upsert larger address-name rows")?;
+
+            let permission_count = 18;
+            let permission_rows = (0..permission_count)
+                .rev()
+                .map(|index| {
+                    permission_current_row(
+                        resource_id,
+                        &format!("0x000000000000000000000000000000000000{index:04x}"),
+                        PermissionScope::Resource,
+                        30 + index as i64,
+                        150 + index as i64,
+                    )
+                })
+                .collect::<Vec<_>>();
+            bigname_storage::upsert_permissions_current_rows(&database.pool, &permission_rows)
+                .await
+                .context("failed to upsert larger permissions rows")?;
+
+            let children_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri("/v1/names/ens/perf-parent.eth/children")
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("larger children base request failed")?;
+            assert_eq!(children_response.status(), StatusCode::OK);
+            let children_payload: ChildrenResponse = read_json(children_response).await?;
+            assert_eq!(children_payload.data.len(), child_count);
+            assert_eq!(children_payload.page.sort, "display_name_asc");
+
+            let children_first_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri("/v1/names/ens/perf-parent.eth/children?page_size=11")
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("larger children first page request failed")?;
+            let children_first_payload: ChildrenResponse =
+                read_json(children_first_response).await?;
+            let children_cursor = children_first_payload
+                .page
+                .next_cursor
+                .clone()
+                .expect("larger children first page must include next_cursor");
+            let children_second_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/v1/names/ens/perf-parent.eth/children?page_size=11&cursor={children_cursor}"
+                        ))
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("larger children second page request failed")?;
+            let children_second_payload: ChildrenResponse =
+                read_json(children_second_response).await?;
+            let children_third_cursor = children_second_payload
+                .page
+                .next_cursor
+                .clone()
+                .expect("larger children second page must include next_cursor");
+            let children_third_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/v1/names/ens/perf-parent.eth/children?page_size=11&cursor={children_third_cursor}"
+                        ))
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("larger children third page request failed")?;
+            let children_third_payload: ChildrenResponse =
+                read_json(children_third_response).await?;
+            let children_replay_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/v1/names/ens/perf-parent.eth/children?page_size=11&cursor={children_cursor}"
+                        ))
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("larger children replay page request failed")?;
+            let children_replay_payload: ChildrenResponse =
+                read_json(children_replay_response).await?;
+            assert_replay_stable_pagination(
+                &children_payload.data,
+                &children_payload.page,
+                &children_first_payload.data,
+                &children_first_payload.page,
+                &children_second_payload.data,
+                &children_second_payload.page,
+                &children_replay_payload.data,
+                &children_replay_payload.page,
+                "display_name_asc",
+                child_count as u64,
+                11,
+            );
+            assert_page_walk_matches_base_prefix(
+                &children_payload.data,
+                &[
+                    &children_first_payload.data,
+                    &children_second_payload.data,
+                    &children_third_payload.data,
+                ],
+            );
+            assert_eq!(children_third_payload.page.next_cursor, None);
+
+            let address_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/v1/addresses/{address}/names"))
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("larger address names base request failed")?;
+            assert_eq!(address_response.status(), StatusCode::OK);
+            let address_payload: AddressNamesResponse = read_json(address_response).await?;
+            assert_eq!(address_payload.data.len(), address_name_count);
+            assert_eq!(address_payload.page.sort, "display_name_asc");
+
+            let address_first_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/v1/addresses/{address}/names?page_size=9"))
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("larger address names first page request failed")?;
+            let address_first_payload: AddressNamesResponse =
+                read_json(address_first_response).await?;
+            let address_cursor = address_first_payload
+                .page
+                .next_cursor
+                .clone()
+                .expect("larger address names first page must include next_cursor");
+            let address_second_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/v1/addresses/{address}/names?page_size=9&cursor={address_cursor}"
+                        ))
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("larger address names second page request failed")?;
+            let address_second_payload: AddressNamesResponse =
+                read_json(address_second_response).await?;
+            let address_third_cursor = address_second_payload
+                .page
+                .next_cursor
+                .clone()
+                .expect("larger address names second page must include next_cursor");
+            let address_third_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/v1/addresses/{address}/names?page_size=9&cursor={address_third_cursor}"
+                        ))
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("larger address names third page request failed")?;
+            let address_third_payload: AddressNamesResponse =
+                read_json(address_third_response).await?;
+            let address_replay_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/v1/addresses/{address}/names?page_size=9&cursor={address_cursor}"
+                        ))
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("larger address names replay page request failed")?;
+            let address_replay_payload: AddressNamesResponse =
+                read_json(address_replay_response).await?;
+            assert_replay_stable_pagination(
+                &address_payload.data,
+                &address_payload.page,
+                &address_first_payload.data,
+                &address_first_payload.page,
+                &address_second_payload.data,
+                &address_second_payload.page,
+                &address_replay_payload.data,
+                &address_replay_payload.page,
+                "display_name_asc",
+                address_name_count as u64,
+                9,
+            );
+            assert_page_walk_matches_base_prefix(
+                &address_payload.data,
+                &[
+                    &address_first_payload.data,
+                    &address_second_payload.data,
+                    &address_third_payload.data,
+                ],
+            );
+            assert_eq!(address_third_payload.page.next_cursor, None);
+
+            let permissions_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/v1/resources/{resource_id}/permissions"))
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("larger permissions base request failed")?;
+            assert_eq!(permissions_response.status(), StatusCode::OK);
+            let permissions_payload: ResourcePermissionsResponse =
+                read_json(permissions_response).await?;
+            assert_eq!(permissions_payload.data.len(), permission_count);
+            assert_eq!(permissions_payload.page.sort, "subject_scope_asc");
+
+            let permissions_first_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/v1/resources/{resource_id}/permissions?page_size=7"))
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("larger permissions first page request failed")?;
+            let permissions_first_payload: ResourcePermissionsResponse =
+                read_json(permissions_first_response).await?;
+            let permissions_cursor = permissions_first_payload
+                .page
+                .next_cursor
+                .clone()
+                .expect("larger permissions first page must include next_cursor");
+            let permissions_second_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/v1/resources/{resource_id}/permissions?page_size=7&cursor={permissions_cursor}"
+                        ))
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("larger permissions second page request failed")?;
+            let permissions_second_payload: ResourcePermissionsResponse =
+                read_json(permissions_second_response).await?;
+            let permissions_third_cursor = permissions_second_payload
+                .page
+                .next_cursor
+                .clone()
+                .expect("larger permissions second page must include next_cursor");
+            let permissions_third_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/v1/resources/{resource_id}/permissions?page_size=7&cursor={permissions_third_cursor}"
+                        ))
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("larger permissions third page request failed")?;
+            let permissions_third_payload: ResourcePermissionsResponse =
+                read_json(permissions_third_response).await?;
+            let permissions_replay_response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/v1/resources/{resource_id}/permissions?page_size=7&cursor={permissions_cursor}"
+                        ))
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("larger permissions replay page request failed")?;
+            let permissions_replay_payload: ResourcePermissionsResponse =
+                read_json(permissions_replay_response).await?;
+            assert_replay_stable_pagination(
+                &permissions_payload.data,
+                &permissions_payload.page,
+                &permissions_first_payload.data,
+                &permissions_first_payload.page,
+                &permissions_second_payload.data,
+                &permissions_second_payload.page,
+                &permissions_replay_payload.data,
+                &permissions_replay_payload.page,
+                "subject_scope_asc",
+                permission_count as u64,
+                7,
+            );
+            assert_page_walk_matches_base_prefix(
+                &permissions_payload.data,
+                &[
+                    &permissions_first_payload.data,
+                    &permissions_second_payload.data,
+                    &permissions_third_payload.data,
+                ],
+            );
+            assert_eq!(permissions_third_payload.page.next_cursor, None);
+
+            database.cleanup().await?;
+            Ok(())
+        }

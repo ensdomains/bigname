@@ -1925,6 +1925,122 @@
             Ok(())
         }
 
+        #[tokio::test]
+        async fn collection_read_performance_conformance_baseline_history() -> Result<()> {
+            let database = HarnessDatabase::new().await?;
+            let logical_name_id = "ens:perf-history.eth";
+            let resource_id = Uuid::from_u128(0xd100);
+            let surface_binding_id = Uuid::from_u128(0xd101);
+            let address = "0x0000000000000000000000000000000000000d0d";
+            let event_count = 30;
+
+            database
+                .seed_history_binding(logical_name_id, resource_id, surface_binding_id)
+                .await?;
+            bigname_storage::upsert_address_names_current_rows(
+                &database.pool,
+                &[address_name_current_row(
+                    address,
+                    logical_name_id,
+                    bigname_storage::AddressNameRelation::Registrant,
+                    "perf-history.eth",
+                    "perf-history.eth",
+                    "node:perf-history.eth",
+                    surface_binding_id,
+                    resource_id,
+                    None,
+                    229,
+                )],
+            )
+            .await
+            .context("failed to upsert larger history address-name anchor")?;
+
+            let raw_blocks = (0..event_count)
+                .map(|index| {
+                    let block_number = 200 + index as i64;
+                    raw_block(
+                        "ethereum-mainnet",
+                        &format!("0xperfhistory{index:02x}"),
+                        None,
+                        block_number,
+                        1_700_000_200 + index as i64,
+                    )
+                })
+                .collect::<Vec<_>>();
+            bigname_storage::upsert_raw_blocks(&database.pool, &raw_blocks)
+                .await
+                .context("failed to upsert larger history raw blocks")?;
+
+            let events = (0..event_count)
+                .rev()
+                .map(|index| {
+                    let block_number = 200 + index as i64;
+                    let event_identity = format!("perf-history:{index:02}");
+                    let block_hash = format!("0xperfhistory{index:02x}");
+                    let transaction_hash = format!("0xperfhistorytx{index:02x}");
+                    history_event(
+                        &event_identity,
+                        Some(logical_name_id),
+                        Some(resource_id),
+                        Some("ethereum-mainnet"),
+                        Some(block_number),
+                        Some(&block_hash),
+                        Some(&transaction_hash),
+                        Some((index % 4) as i64),
+                        CanonicalityState::Canonical,
+                    )
+                })
+                .collect::<Vec<_>>();
+            bigname_storage::upsert_normalized_events(&database.pool, &events)
+                .await
+                .context("failed to upsert larger history normalized events")?;
+
+            let name_payload: HistoryResponse =
+                read_ok_json(&database, "/v1/history/names/ens/perf-history.eth").await?;
+            assert_eq!(name_payload.data.len(), event_count);
+            assert_eq!(name_payload.page.sort, "chain_position_desc");
+            assert_eq!(
+                history_event_identities(&name_payload)
+                    .first()
+                    .copied(),
+                Some("perf-history:29")
+            );
+            assert_eq!(
+                history_event_identities(&name_payload).last().copied(),
+                Some("perf-history:00")
+            );
+            assert_large_history_route_pagination(
+                &database,
+                "/v1/history/names/ens/perf-history.eth",
+                &name_payload,
+                12,
+            )
+            .await?;
+
+            let resource_uri = format!("/v1/history/resources/{resource_id}");
+            let resource_payload: HistoryResponse =
+                read_ok_json(&database, &resource_uri).await?;
+            assert_eq!(
+                history_event_identities(&resource_payload),
+                history_event_identities(&name_payload)
+            );
+            assert_large_history_route_pagination(&database, &resource_uri, &resource_payload, 12)
+                .await?;
+
+            let address_uri =
+                format!("/v1/history/addresses/{address}?namespace=ens&relation=registrant");
+            let address_payload: HistoryResponse = read_ok_json(&database, &address_uri).await?;
+            assert_eq!(
+                history_event_identities(&address_payload),
+                history_event_identities(&name_payload)
+            );
+            assert_large_history_route_pagination(&database, &address_uri, &address_payload, 12)
+                .await?;
+
+            database.cleanup().await?;
+            Ok(())
+        }
+
         async fn read_json<T: DeserializeOwned>(response: Response) -> Result<T> {
             let bytes = to_bytes(response.into_body(), usize::MAX)
                 .await
