@@ -7,6 +7,8 @@ mod shipped_api {
     pub(crate) mod conformance {
         include!("conformance/harness.rs");
 
+        include!("conformance/capabilities.rs");
+
         include!("conformance/helpers.rs");
 
         include!("conformance/collections.rs");

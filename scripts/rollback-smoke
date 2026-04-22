@@ -13,6 +13,7 @@ Runs the local rollback smoke gate:
   - checked-in migrations twice, proving idempotence after rollback
   - checked-in OpenAPI artifact drift
   - conformance owner OpenAPI smoke guard
+  - focused capability cutover evidence guard
   - local API /healthz readiness
 
 Environment:
@@ -114,6 +115,11 @@ run_conformance_owner_smoke_gate() {
   cargo test "${cargo_args[@]}" --manifest-path tests/conformance/Cargo.toml openapi
 }
 
+run_capability_cutover_evidence_gate() {
+  log "checking capability cutover evidence guard"
+  cargo test "${cargo_args[@]}" --manifest-path tests/conformance/Cargo.toml capability_cutover_evidence
+}
+
 run_migrations() {
   log "$1"
   cargo run "${cargo_args[@]}" -p bigname-worker -- migrate
@@ -162,5 +168,6 @@ run_migrations "applying checked-in migrations"
 run_migrations "re-applying checked-in migrations for rollback idempotence"
 run_openapi_drift_check
 run_conformance_owner_smoke_gate
+run_capability_cutover_evidence_gate
 run_readiness_check
 log "rollback smoke gate passed"
