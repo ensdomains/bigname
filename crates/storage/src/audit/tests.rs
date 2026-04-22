@@ -838,6 +838,10 @@ async fn manifest_drift_audit_computes_live_candidates_without_persistence() -> 
     assert_eq!(audit["counts"]["manifest_code_hash_drift"], 1);
     assert_eq!(audit["counts"]["manifest_proxy_implementation"], 1);
     assert_eq!(audit["counts"]["total"], 2);
+    assert_eq!(
+        ManifestDriftAlertInspection::audit_total_alert_count(&audit)?,
+        2
+    );
 
     let code_alert = &audit["manifest_code_hash_drift_alerts"][0];
     assert_eq!(code_alert["alert_type"], "manifest_code_hash_drift");
@@ -886,6 +890,33 @@ async fn manifest_drift_audit_computes_live_candidates_without_persistence() -> 
         "eip1967.proxy.implementation"
     );
 
+    assert_eq!(after_events, before_events);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn manifest_drift_audit_reports_clean_live_audit_without_persistence() -> Result<()> {
+    let database = TestDatabase::new().await?;
+
+    let before_events = load_normalized_event_total(database.pool()).await?;
+    let audit =
+        ManifestDriftAlertInspection::compute_live_manifest_drift_audit(database.pool()).await?;
+    let after_events = load_normalized_event_total(database.pool()).await?;
+
+    assert_eq!(audit["command"], "manifest-drift audit");
+    assert_eq!(audit["read_only"], true);
+    assert_eq!(audit["persistence"]["writes_normalized_events"], false);
+    assert_eq!(audit["persistence"]["writes_alert_table"], false);
+    assert_eq!(audit["counts"]["manifest_code_hash_drift"], 0);
+    assert_eq!(audit["counts"]["manifest_proxy_implementation"], 0);
+    assert_eq!(audit["counts"]["total"], 0);
+    assert_eq!(
+        ManifestDriftAlertInspection::audit_total_alert_count(&audit)?,
+        0
+    );
+    assert_eq!(audit["manifest_code_hash_drift_alerts"], json!([]));
+    assert_eq!(audit["proxy_implementation_alerts"], json!([]));
     assert_eq!(after_events, before_events);
 
     database.cleanup().await

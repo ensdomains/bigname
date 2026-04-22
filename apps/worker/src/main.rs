@@ -9,9 +9,10 @@ mod record_inventory;
 mod replay;
 mod resolver;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use bigname_storage::DatabaseConfig;
 use clap::{Args, Parser, Subcommand};
+use serde_json::Value;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
@@ -290,6 +291,8 @@ struct ManifestDriftAuditArgs {
     database: DatabaseConfig,
     #[arg(long)]
     json: bool,
+    #[arg(long)]
+    fail_on_alert: bool,
 }
 
 #[derive(Args, Debug)]
@@ -472,6 +475,21 @@ async fn manifest_drift_audit(args: ManifestDriftAuditArgs) -> Result<()> {
             .await?;
 
     println!("{audit}");
+    enforce_manifest_drift_audit_exit_policy(&audit, args.fail_on_alert)?;
+    Ok(())
+}
+
+fn enforce_manifest_drift_audit_exit_policy(audit: &Value, fail_on_alert: bool) -> Result<()> {
+    if !fail_on_alert {
+        return Ok(());
+    }
+
+    let alert_count =
+        bigname_storage::ManifestDriftAlertInspection::audit_total_alert_count(audit)?;
+    if alert_count > 0 {
+        bail!("manifest drift audit found {alert_count} alert candidate(s)");
+    }
+
     Ok(())
 }
 
@@ -1024,10 +1042,60 @@ mod tests {
             Command::ManifestDrift(args) => match args.command {
                 ManifestDriftCommand::Audit(args) => {
                     assert!(args.json);
+                    assert!(!args.fail_on_alert);
                 }
             },
             other => panic!("expected manifest drift command, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn manifest_drift_audit_fail_on_alert_cli_is_available() {
+        let cli = Cli::parse_from([
+            "bigname-worker",
+            "manifest-drift",
+            "audit",
+            "--json",
+            "--fail-on-alert",
+        ]);
+        assert!(cli.writes_machine_json());
+
+        match cli.command {
+            Command::ManifestDrift(args) => match args.command {
+                ManifestDriftCommand::Audit(args) => {
+                    assert!(args.json);
+                    assert!(args.fail_on_alert);
+                }
+            },
+            other => panic!("expected manifest drift command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn manifest_drift_audit_exit_policy_fails_only_when_requested() -> Result<()> {
+        let clean_audit = serde_json::json!({
+            "counts": {
+                "total": 0
+            }
+        });
+        let drift_audit = serde_json::json!({
+            "counts": {
+                "total": 2
+            }
+        });
+
+        enforce_manifest_drift_audit_exit_policy(&clean_audit, true)?;
+        enforce_manifest_drift_audit_exit_policy(&drift_audit, false)?;
+        let error = enforce_manifest_drift_audit_exit_policy(&drift_audit, true)
+            .expect_err("fail-on-alert must fail when audit contains actionable alerts");
+        assert!(
+            error
+                .to_string()
+                .contains("manifest drift audit found 2 alert candidate(s)"),
+            "unexpected error: {error:#}"
+        );
+
+        Ok(())
     }
 
     #[test]

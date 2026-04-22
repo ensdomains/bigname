@@ -84,6 +84,15 @@ impl ManifestDriftAlertInspection {
         self.code_hash_drift_alerts.len() + self.proxy_implementation_alerts.len()
     }
 
+    /// Return the actionable alert total from live manifest-drift audit JSON.
+    pub fn audit_total_alert_count(audit: &Value) -> Result<u64> {
+        audit
+            .get("counts")
+            .and_then(|counts| counts.get("total"))
+            .and_then(Value::as_u64)
+            .context("manifest drift audit JSON is missing counts.total")
+    }
+
     /// Compute live manifest-drift and proxy-implementation audit output from
     /// existing persisted state. This is intentionally operational JSON and
     /// performs no alert persistence or manifest/discovery mutation.
