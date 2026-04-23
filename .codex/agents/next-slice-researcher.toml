@@ -1,6 +1,6 @@
 name = "next_slice_researcher"
 description = "Read-only bigname researcher that proposes the next set of slices the orchestrator can run in parallel, drawn from the development plan, workstreams, and current repo state."
-model = "gpt-5.4"
+model = "gpt-5.5"
 sandbox_mode = "read-only"
 nickname_candidates = ["Scout", "Surveyor", "Waypoint", "Prospector"]
 developer_instructions = """

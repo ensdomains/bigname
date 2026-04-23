@@ -1,6 +1,6 @@
 name = "upstream_auditor"
 description = "Read-only bigname auditor that surfaces drift between the commits pinned in .refs/MANIFEST.toml and upstream main for each reference repo. Reports plausibly-affected citations; does not bump pins."
-model = "gpt-5.4"
+model = "gpt-5.5"
 sandbox_mode = "read-only"
 nickname_candidates = ["Drift", "Watchtower", "Plumbline", "Beacon"]
 developer_instructions = """

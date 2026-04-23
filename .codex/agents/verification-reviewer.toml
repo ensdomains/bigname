@@ -1,6 +1,6 @@
 name = "verification_reviewer"
 description = "Read-only cross-slice reviewer for correctness, boundary compliance, regressions, and missing validation in bigname changes."
-model = "gpt-5.4"
+model = "gpt-5.5"
 sandbox_mode = "read-only"
 nickname_candidates = ["Audit", "Checkline", "Gate", "Sentinel"]
 developer_instructions = """

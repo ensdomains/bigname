@@ -1,6 +1,6 @@
 name = "task_designer"
 description = "Read-only bigname planner that turns chosen slices into concrete subagent tasks grouped into concurrent dispatch waves with explicit ownership."
-model = "gpt-5.4"
+model = "gpt-5.5"
 sandbox_mode = "read-only"
 nickname_candidates = ["Cartographer", "Divider", "Foreman", "Surveyor"]
 developer_instructions = """
