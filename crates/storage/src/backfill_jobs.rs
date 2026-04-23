@@ -526,7 +526,8 @@ pub async fn complete_backfill_job(pool: &PgPool, backfill_job_id: i64) -> Resul
         return Ok(current);
     }
 
-    ensure_all_ranges_reached_end(&mut *transaction, backfill_job_id).await?;
+    let ranges = load_backfill_ranges_for_update(&mut *transaction, backfill_job_id).await?;
+    ensure_ranges_ready_for_job_completion(backfill_job_id, &ranges)?;
 
     sqlx::query(
         r#"
@@ -798,36 +799,6 @@ async fn set_backfill_job_failed(
     decode_backfill_job(row)
 }
 
-async fn ensure_all_ranges_reached_end<'e, E>(executor: E, backfill_job_id: i64) -> Result<()>
-where
-    E: Executor<'e, Database = Postgres>,
-{
-    let count = sqlx::query(
-        r#"
-        SELECT COUNT(*)::BIGINT AS incomplete_count
-        FROM backfill_ranges
-        WHERE backfill_job_id = $1
-          AND checkpoint_block_number <> range_end_block_number
-        "#,
-    )
-    .bind(backfill_job_id)
-    .fetch_one(executor)
-    .await
-    .with_context(|| {
-        format!("failed to count incomplete ranges for backfill job {backfill_job_id}")
-    })?
-    .try_get::<i64, _>("incomplete_count")
-    .context("missing incomplete_count")?;
-
-    if count != 0 {
-        bail!(
-            "backfill job {backfill_job_id} has {count} range checkpoints that have not reached their declared ends"
-        );
-    }
-
-    Ok(())
-}
-
 async fn incomplete_range_count<'e, E>(executor: E, backfill_job_id: i64) -> Result<i64>
 where
     E: Executor<'e, Database = Postgres>,
@@ -922,6 +893,26 @@ where
         .fetch_all(executor)
         .await
         .with_context(|| format!("failed to load ranges for backfill job {backfill_job_id}"))?;
+
+    rows.into_iter().map(decode_backfill_range).collect()
+}
+
+async fn load_backfill_ranges_for_update<'e, E>(
+    executor: E,
+    backfill_job_id: i64,
+) -> Result<Vec<BackfillRange>>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    let select_sql = backfill_range_select_sql(
+        "WHERE backfill_job_id = $1",
+        "ORDER BY range_start_block_number, range_end_block_number FOR UPDATE",
+    );
+    let rows = sqlx::query(&select_sql)
+        .bind(backfill_job_id)
+        .fetch_all(executor)
+        .await
+        .with_context(|| format!("failed to lock ranges for backfill job {backfill_job_id}"))?;
 
     rows.into_iter().map(decode_backfill_range).collect()
 }
@@ -1121,6 +1112,33 @@ fn ensure_lease_matches(range: &BackfillRange, lease_token: &str) -> Result<()> 
             "backfill range {} is not held by lease token {}",
             range.backfill_range_id,
             lease_token
+        );
+    }
+
+    Ok(())
+}
+
+fn ensure_ranges_ready_for_job_completion(
+    backfill_job_id: i64,
+    ranges: &[BackfillRange],
+) -> Result<()> {
+    let incomplete_count = ranges
+        .iter()
+        .filter(|range| range.checkpoint_block_number != range.range_end_block_number)
+        .count();
+    if incomplete_count != 0 {
+        bail!(
+            "backfill job {backfill_job_id} has {incomplete_count} range checkpoints that have not reached their declared ends"
+        );
+    }
+
+    let failed_count = ranges
+        .iter()
+        .filter(|range| range.status == BackfillLifecycleStatus::Failed)
+        .count();
+    if failed_count != 0 {
+        bail!(
+            "backfill job {backfill_job_id} has {failed_count} failed ranges that must be retried before completion"
         );
     }
 

@@ -41,7 +41,6 @@ pub async fn rebuild_children_current(
 }
 
 async fn rebuild_all_parents(pool: &PgPool) -> Result<ChildrenCurrentRebuildSummary> {
-    let deleted_row_count = clear_children_current(pool).await?;
     let sources = load_canonical_declared_child_sources(pool, None).await?;
     let requested_parent_count = sources
         .iter()
@@ -50,6 +49,7 @@ async fn rebuild_all_parents(pool: &PgPool) -> Result<ChildrenCurrentRebuildSumm
         .len();
     let rows = build_children_rows(pool, &sources).await?;
     let upserted_row_count = upsert_children_current_rows(pool, &rows).await?.len();
+    let deleted_row_count = delete_stale_children_current_rows(pool, &rows).await?;
 
     Ok(ChildrenCurrentRebuildSummary {
         requested_parent_count,
@@ -62,18 +62,11 @@ async fn rebuild_one_parent(
     pool: &PgPool,
     parent_logical_name_id: &str,
 ) -> Result<ChildrenCurrentRebuildSummary> {
-    let deleted_row_count = delete_children_current(pool, parent_logical_name_id).await?;
     let sources = load_canonical_declared_child_sources(pool, Some(parent_logical_name_id)).await?;
-    if sources.is_empty() {
-        return Ok(ChildrenCurrentRebuildSummary {
-            requested_parent_count: 1,
-            upserted_row_count: 0,
-            deleted_row_count,
-        });
-    }
-
     let rows = build_children_rows(pool, &sources).await?;
     let upserted_row_count = upsert_children_current_rows(pool, &rows).await?.len();
+    let deleted_row_count =
+        delete_stale_children_current_rows_for_parent(pool, parent_logical_name_id, &rows).await?;
 
     Ok(ChildrenCurrentRebuildSummary {
         requested_parent_count: 1,
@@ -94,6 +87,86 @@ async fn build_children_rows(
     }
 
     Ok(rows)
+}
+
+async fn delete_stale_children_current_rows(
+    pool: &PgPool,
+    rows: &[ChildrenCurrentRow],
+) -> Result<u64> {
+    if rows.is_empty() {
+        return clear_children_current(pool).await;
+    }
+
+    let parent_logical_name_ids = rows
+        .iter()
+        .map(|row| row.parent_logical_name_id.clone())
+        .collect::<Vec<_>>();
+    let child_logical_name_ids = rows
+        .iter()
+        .map(|row| row.child_logical_name_id.clone())
+        .collect::<Vec<_>>();
+
+    sqlx::query(
+        r#"
+        DELETE FROM children_current current
+        WHERE current.surface_class = $1
+          AND NOT EXISTS (
+            SELECT 1
+            FROM UNNEST($2::TEXT[], $3::TEXT[]) AS replacement(
+                parent_logical_name_id,
+                child_logical_name_id
+            )
+            WHERE replacement.parent_logical_name_id = current.parent_logical_name_id
+              AND replacement.child_logical_name_id = current.child_logical_name_id
+          )
+        "#,
+    )
+    .bind(DECLARED_SURFACE_CLASS)
+    .bind(&parent_logical_name_ids)
+    .bind(&child_logical_name_ids)
+    .execute(pool)
+    .await
+    .context("failed to delete stale children_current rows after rebuild")
+    .map(|result| result.rows_affected())
+}
+
+async fn delete_stale_children_current_rows_for_parent(
+    pool: &PgPool,
+    parent_logical_name_id: &str,
+    rows: &[ChildrenCurrentRow],
+) -> Result<u64> {
+    if rows.is_empty() {
+        return delete_children_current(pool, parent_logical_name_id).await;
+    }
+
+    let child_logical_name_ids = rows
+        .iter()
+        .map(|row| row.child_logical_name_id.clone())
+        .collect::<Vec<_>>();
+
+    sqlx::query(
+        r#"
+        DELETE FROM children_current current
+        WHERE current.parent_logical_name_id = $1
+          AND current.surface_class = $2
+          AND NOT EXISTS (
+            SELECT 1
+            FROM UNNEST($3::TEXT[]) AS replacement(child_logical_name_id)
+            WHERE replacement.child_logical_name_id = current.child_logical_name_id
+          )
+        "#,
+    )
+    .bind(parent_logical_name_id)
+    .bind(DECLARED_SURFACE_CLASS)
+    .bind(&child_logical_name_ids)
+    .execute(pool)
+    .await
+    .with_context(|| {
+        format!(
+            "failed to delete stale children_current rows for parent_logical_name_id {parent_logical_name_id}"
+        )
+    })
+    .map(|result| result.rows_affected())
 }
 
 async fn build_children_row(
@@ -491,10 +564,89 @@ mod tests {
         let second = rebuild_children_current(database.pool(), None).await?;
         assert_eq!(second.requested_parent_count, 1);
         assert_eq!(second.upserted_row_count, 1);
-        assert_eq!(second.deleted_row_count, 1);
+        assert_eq!(second.deleted_row_count, 0);
 
         let second_rows = load_children_current(database.pool(), parent).await?;
         assert_eq!(first_rows, second_rows);
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn keyed_rebuild_keeps_visible_rows_when_rebuild_sources_fail() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let parent = "ens:parent.eth";
+        let child = "ens:alice.parent.eth";
+
+        seed_name_surfaces(
+            database.pool(),
+            &[
+                name_surface(parent, "parent.eth", "node:parent.eth", 50),
+                name_surface(child, "alice.parent.eth", "node:alice.parent.eth", 51),
+            ],
+        )
+        .await?;
+        upsert_children_current_rows(
+            database.pool(),
+            &[ChildrenCurrentRow {
+                parent_logical_name_id: parent.to_owned(),
+                child_logical_name_id: child.to_owned(),
+                surface_class: DECLARED_SURFACE_CLASS.to_owned(),
+                namespace: "ens".to_owned(),
+                canonical_display_name: "alice.parent.eth".to_owned(),
+                normalized_name: "alice.parent.eth".to_owned(),
+                namehash: "node:alice.parent.eth".to_owned(),
+                provenance: json!({
+                    "normalized_event_ids": [1],
+                    "raw_fact_refs": [],
+                    "manifest_versions": [],
+                    "execution_trace_id": Value::Null,
+                    "derivation_kind": CHILDREN_CURRENT_DERIVATION_KIND,
+                }),
+                chain_positions: json!({
+                    "ethereum": {
+                        "chain_id": "ethereum-mainnet",
+                        "block_number": 1,
+                        "block_hash": "0xstale",
+                        "timestamp": "2026-04-17T00:00:01Z"
+                    }
+                }),
+                canonicality_summary: json!({
+                    "status": "finalized",
+                    "chains": {"ethereum-mainnet": "finalized"}
+                }),
+                manifest_version: 1,
+                last_recomputed_at: timestamp(1_717_172_001),
+            }],
+        )
+        .await?;
+        seed_subregistry_events(
+            database.pool(),
+            &[subregistry_event(
+                "ens",
+                "alice-active",
+                "node:parent.eth",
+                "node:alice.parent.eth",
+                110,
+                0,
+                false,
+                true,
+            )],
+        )
+        .await?;
+
+        let error = rebuild_children_current(database.pool(), Some(parent))
+            .await
+            .expect_err("rebuild should fail when the source block is missing");
+        assert!(
+            error
+                .to_string()
+                .contains("missing raw block for child source alice-active")
+        );
+
+        let rows = load_children_current(database.pool(), parent).await?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].child_logical_name_id, child);
 
         database.cleanup().await
     }

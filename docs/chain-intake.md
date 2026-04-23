@@ -26,6 +26,8 @@ Initial truth-core intake covers durable replay facts and cache metadata for:
 - block-anchored call snapshots used by verified execution or enrichment
 - optional cache metadata or digests for large/full block, transaction, or receipt bodies fetched outside the hot replay set; hash-addressed cold pointers are required only for payload classes explicitly declared durable
 
+Exact block-anchored `raw_call_snapshots` remain intake-owned raw facts even when verified execution supplied the candidate request/response pair. The admitted handoff is narrow: execution may hand off only snapshots anchored to the resolved requested chain position and only for a persistence path that already admits those snapshots. That handoff does not create a general execution-owned raw-fact write surface.
+
 Out of scope for the initial intake contract:
 
 - mempool or pending-transaction indexing
@@ -319,7 +321,7 @@ That transaction writes:
 - lineage rows for the admitted block
 - hot raw block, transaction, receipt, and log facts needed for selected replay contracts
 - optional cache metadata or digests for non-critical full block-scoped payloads when the selected retention contract keeps them
-- any block-scoped call snapshots captured in intake
+- any block-scoped call snapshots captured through that intake-owned raw-fact handoff
 - normalized events emitted from those facts
 - invalidation signals required by downstream workers
 

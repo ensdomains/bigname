@@ -1088,7 +1088,7 @@ async fn get_name_children_returns_declared_rows_sorted_with_declared_only_cover
     );
     assert_eq!(payload.coverage.unsupported_reason, None);
     assert_eq!(payload.page.sort, "display_name_asc");
-    assert_eq!(payload.page.page_size, 2);
+    assert_eq!(payload.page.page_size, 50);
     assert_eq!(payload.consistency, "finalized");
     assert_eq!(
         payload.last_updated,
@@ -1196,12 +1196,132 @@ async fn get_name_children_returns_declared_rows_sorted_with_declared_only_cover
         &replay_page_payload.data,
         &replay_page_payload.page,
         "display_name_asc",
-        2,
+        50,
         1,
     );
     assert_children_collection_metadata_eq(&payload, &first_page_payload);
     assert_children_collection_metadata_eq(&payload, &second_page_payload);
     assert_children_collection_metadata_eq(&payload, &replay_page_payload);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_name_children_defaults_to_first_page_of_fifty_rows() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let parent_logical_name_id = "ens:default-limit.eth";
+    let mut surfaces = vec![collection_name_surface(
+        parent_logical_name_id,
+        "default-limit.eth",
+        "node:default-limit.eth",
+        10,
+    )];
+    let mut child_rows = Vec::new();
+
+    for index in 0..55 {
+        let display_name = format!("child{index:02}.default-limit.eth");
+        let logical_name_id = format!("ens:{display_name}");
+        let namehash = format!("node:{display_name}");
+        let block_number = 11 + i64::from(index);
+
+        surfaces.push(collection_name_surface(
+            &logical_name_id,
+            &display_name,
+            &namehash,
+            block_number,
+        ));
+        child_rows.push(declared_child_row(
+            parent_logical_name_id,
+            &logical_name_id,
+            &display_name,
+            &namehash,
+            400 + i64::from(index),
+            block_number,
+        ));
+    }
+
+    bigname_storage::upsert_name_surfaces(&database.pool, &surfaces).await?;
+    bigname_storage::upsert_children_current_rows(&database.pool, &child_rows).await?;
+
+    let first_page_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/names/ens/default-limit.eth/children")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("default children pagination request failed")?;
+
+    assert_eq!(first_page_response.status(), StatusCode::OK);
+
+    let first_page_payload: ChildrenResponse = read_json(first_page_response).await?;
+    assert_eq!(first_page_payload.page.page_size, 50);
+    assert_eq!(first_page_payload.data.len(), 50);
+    assert_eq!(first_page_payload.page.cursor, None);
+    assert!(
+        first_page_payload.page.next_cursor.is_some(),
+        "default children pagination must include a next cursor when more than 50 rows exist"
+    );
+    assert_eq!(
+        first_page_payload
+            .data
+            .first()
+            .and_then(|row| row.get("logical_name_id"))
+            .and_then(Value::as_str),
+        Some("ens:child00.default-limit.eth")
+    );
+    assert_eq!(
+        first_page_payload
+            .data
+            .last()
+            .and_then(|row| row.get("logical_name_id"))
+            .and_then(Value::as_str),
+        Some("ens:child49.default-limit.eth")
+    );
+
+    let cursor = first_page_payload
+        .page
+        .next_cursor
+        .clone()
+        .expect("default children pagination must return next_cursor");
+    let second_page_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/names/ens/default-limit.eth/children?cursor={cursor}"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("second children pagination request failed")?;
+
+    assert_eq!(second_page_response.status(), StatusCode::OK);
+
+    let second_page_payload: ChildrenResponse = read_json(second_page_response).await?;
+    assert_eq!(second_page_payload.page.page_size, 50);
+    assert_eq!(second_page_payload.data.len(), 5);
+    assert_eq!(second_page_payload.page.cursor.as_deref(), Some(cursor.as_str()));
+    assert_eq!(second_page_payload.page.next_cursor, None);
+    assert_eq!(
+        second_page_payload
+            .data
+            .first()
+            .and_then(|row| row.get("logical_name_id"))
+            .and_then(Value::as_str),
+        Some("ens:child50.default-limit.eth")
+    );
+    assert_eq!(
+        second_page_payload
+            .data
+            .last()
+            .and_then(|row| row.get("logical_name_id"))
+            .and_then(Value::as_str),
+        Some("ens:child54.default-limit.eth")
+    );
+    assert_children_collection_metadata_eq(&first_page_payload, &second_page_payload);
 
     database.cleanup().await?;
     Ok(())
@@ -1438,7 +1558,7 @@ async fn get_name_children_returns_ensv2_declared_children_without_widening_rout
         ]
     );
     assert_eq!(payload.page.sort, "display_name_asc");
-    assert_eq!(payload.page.page_size, 2);
+    assert_eq!(payload.page.page_size, 50);
     assert_eq!(payload.consistency, "finalized");
     assert_eq!(
         payload.last_updated,
@@ -1954,7 +2074,7 @@ async fn get_address_names_returns_surface_first_rows_sorted_with_stable_relatio
         "surface_current_relations"
     );
     assert_eq!(payload.page.sort, "display_name_asc");
-    assert_eq!(payload.page.page_size, 2);
+    assert_eq!(payload.page.page_size, 50);
     assert_eq!(payload.consistency, "finalized");
 
     let logical_name_ids = payload
@@ -2031,7 +2151,7 @@ async fn get_address_names_returns_surface_first_rows_sorted_with_stable_relatio
         &replay_page_payload.data,
         &replay_page_payload.page,
         "display_name_asc",
-        2,
+        50,
         1,
     );
     assert_address_names_collection_metadata_eq(&payload, &first_page_payload);
@@ -3308,7 +3428,7 @@ async fn get_address_names_include_role_summary_paginates_with_batched_expansion
         &replay_page_payload.data,
         &replay_page_payload.page,
         "display_name_asc",
-        2,
+        50,
         1,
     );
     assert_eq!(
@@ -4062,7 +4182,7 @@ async fn get_resource_permissions_keyset_pagination_preserves_full_filter_summar
         &replay_page_payload.data,
         &replay_page_payload.page,
         "subject_scope_asc",
-        3,
+        50,
         2,
     );
     assert_resource_permissions_collection_metadata_eq(&base_payload, &first_page_payload);

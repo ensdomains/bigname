@@ -4,18 +4,21 @@ use std::collections::BTreeSet;
 
 use anyhow::{Context, Result, bail};
 use bigname_storage::{
-    ExecutionCacheKey, ExecutionOutcome, ExecutionTrace, RawCallSnapshot,
-    load_primary_name_current, upsert_execution_outcome_in_transaction,
+    ExecutionCacheKey, ExecutionOutcome, ExecutionTrace, NameCurrentRow, RawCallSnapshot,
+    RecordInventoryCurrentRow, SurfaceBindingKind, load_primary_name_current,
+    upsert_execution_outcome_in_transaction,
     upsert_execution_trace_in_transaction, upsert_raw_call_snapshots_in_transaction,
 };
 use serde_json::{Map, Value};
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow};
 use uuid::Uuid;
 
 #[cfg(test)]
 use bigname_storage::{
-    PrimaryNameClaimStatus, PrimaryNameCurrentRow, upsert_execution_outcome,
-    upsert_execution_trace, upsert_primary_name_current_rows,
+    NameSurface, PrimaryNameClaimStatus, PrimaryNameCurrentRow, Resource, SurfaceBinding,
+    TokenLineage, upsert_execution_outcome, upsert_execution_trace, upsert_name_current_rows,
+    upsert_name_surfaces, upsert_primary_name_current_rows, upsert_record_inventory_current_rows,
+    upsert_resources, upsert_surface_bindings, upsert_token_lineages,
 };
 
 pub use bigname_storage::{
@@ -94,6 +97,18 @@ pub const fn bootstrap_status() -> &'static str {
     "ens-direct-and-basenames-transport-verified-resolution-producer-ready"
 }
 
+async fn hand_off_admitted_raw_call_snapshots_to_intake_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    raw_call_snapshots: &[RawCallSnapshot],
+) -> Result<()> {
+    if raw_call_snapshots.is_empty() {
+        return Ok(());
+    }
+
+    upsert_raw_call_snapshots_in_transaction(transaction, raw_call_snapshots).await?;
+    Ok(())
+}
+
 /// Persist one exact-name ENS verified-resolution supported-path result and return
 /// the storage identity the route layer can load back.
 pub async fn persist_ens_exact_name_verified_resolution_direct(
@@ -107,12 +122,24 @@ pub async fn persist_ens_exact_name_verified_resolution_direct(
         .await
         .context("failed to open transaction for ENS verified-resolution direct persistence")?;
 
-    if !request.raw_call_snapshots.is_empty() {
-        upsert_raw_call_snapshots_in_transaction(&mut transaction, &request.raw_call_snapshots)
-            .await?;
+    let trace = upsert_execution_trace_in_transaction(&mut transaction, &request.trace).await?;
+    if let Err(revalidation_error) =
+        revalidate_supported_resolution_persistence_from_storage(&mut transaction, request).await
+    {
+        transaction.commit().await.context(
+            "failed to commit ENS verified-resolution direct trace-only persistence after storage revalidation failure",
+        )?;
+        return Err(revalidation_error.context(
+            "ENS verified-resolution direct supported outcome persistence failed closed after storage revalidation",
+        ));
     }
 
-    let trace = upsert_execution_trace_in_transaction(&mut transaction, &request.trace).await?;
+    hand_off_admitted_raw_call_snapshots_to_intake_in_transaction(
+        &mut transaction,
+        &request.raw_call_snapshots,
+    )
+    .await?;
+
     let outcome =
         upsert_execution_outcome_in_transaction(&mut transaction, &request.outcome).await?;
 
@@ -154,12 +181,18 @@ pub async fn persist_basenames_exact_name_verified_resolution_transport_direct(
         "failed to open transaction for Basenames verified-resolution transport-direct persistence",
     )?;
 
-    if !request.raw_call_snapshots.is_empty() {
-        upsert_raw_call_snapshots_in_transaction(&mut transaction, &request.raw_call_snapshots)
-            .await?;
+    let trace = upsert_execution_trace_in_transaction(&mut transaction, &request.trace).await?;
+    if let Err(revalidation_error) =
+        revalidate_supported_resolution_persistence_from_storage(&mut transaction, request).await
+    {
+        transaction.commit().await.context(
+            "failed to commit Basenames verified-resolution transport-direct trace-only persistence after storage revalidation failure",
+        )?;
+        return Err(revalidation_error.context(
+            "Basenames verified-resolution transport-direct supported outcome persistence failed closed after storage revalidation",
+        ));
     }
 
-    let trace = upsert_execution_trace_in_transaction(&mut transaction, &request.trace).await?;
     let outcome =
         upsert_execution_outcome_in_transaction(&mut transaction, &request.outcome).await?;
 
@@ -342,6 +375,36 @@ struct RequestedChainPosition {
     chain_id: String,
     block_number: i64,
     block_hash: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ProjectionChainPosition {
+    chain_id: String,
+    block_number: i64,
+    block_hash: String,
+    timestamp: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+struct ManifestVersionIdentity {
+    source_manifest_id: Option<i64>,
+    source_family: Option<String>,
+    manifest_version: i64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StorageSupportedResolutionPathClass {
+    Direct,
+    AliasOnly,
+    WildcardDerived,
+    BasenamesTransportDirect,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct StorageSupportedResolutionBoundary {
+    path_class: StorageSupportedResolutionPathClass,
+    topology_version_boundary: Value,
+    record_version_boundary: Value,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -679,6 +742,1450 @@ fn validate_basenames_transport_direct_outcome(
     }
 
     Ok(())
+}
+
+async fn revalidate_supported_resolution_persistence_from_storage(
+    transaction: &mut Transaction<'_, Postgres>,
+    request: &PersistEnsExactNameVerifiedResolutionRequest,
+) -> Result<()> {
+    let requested_selectors = extract_requested_selectors(&request.trace)?;
+    let queries = extract_supported_verified_queries(&request.outcome)?;
+    let logical_name_id = format!("{}:{}", request.trace.namespace, requested_selectors.surface);
+    let context = match request.trace.namespace.as_str() {
+        ENS_NAMESPACE => "ENS verified-resolution storage revalidation",
+        BASENAMES_NAMESPACE => "Basenames verified-resolution storage revalidation",
+        other => bail!("{other} verified-resolution storage revalidation is unsupported"),
+    };
+
+    let row = load_name_current_for_revalidation(transaction, &logical_name_id)
+        .await?
+        .with_context(|| {
+            format!(
+                "{context} requires name_current row for logical_name_id {logical_name_id}"
+            )
+        })?;
+    let record_inventory_row =
+        load_supported_record_inventory_current_for_revalidation(transaction, &row)
+            .await
+            .with_context(|| {
+                format!(
+                    "{context} failed to load supported record_inventory_current for logical_name_id {logical_name_id}"
+                )
+            })?;
+
+    let stored_manifest_versions = normalize_manifest_versions_for_revalidation(
+        row.provenance
+            .as_object()
+            .and_then(|object| object.get("manifest_versions"))
+            .with_context(|| {
+                format!("{context} name_current provenance must include manifest_versions")
+            })?,
+        &format!("{context} name_current provenance.manifest_versions"),
+    )?;
+    let outcome_manifest_versions = normalize_manifest_versions_for_revalidation(
+        &request.outcome.cache_key.manifest_versions,
+        &format!("{context} cache_key.manifest_versions"),
+    )?;
+    if stored_manifest_versions != outcome_manifest_versions {
+        bail!(
+            "{context} cache_key.manifest_versions must match name_current provenance.manifest_versions"
+        );
+    }
+
+    let stored_requested_positions =
+        build_requested_chain_positions_from_projection(&row.chain_positions)?;
+    let outcome_requested_positions = normalize_requested_chain_positions(
+        Some(&request.outcome.cache_key.requested_chain_positions),
+        &format!("{context} cache_key.requested_chain_positions"),
+    )?;
+    if stored_requested_positions != outcome_requested_positions {
+        bail!(
+            "{context} cache_key.requested_chain_positions must match projected chain_positions for logical_name_id {logical_name_id}"
+        );
+    }
+
+    let topology = build_resolution_topology_for_revalidation(&row, record_inventory_row.as_ref())?;
+    let support_boundary =
+        resolution_verified_support_boundary_from_storage(&row, record_inventory_row.as_ref())?
+            .with_context(|| {
+                format!(
+                    "{context} could not re-establish a supported mixed-route topology boundary for logical_name_id {logical_name_id}"
+                )
+            })?;
+
+    ensure_storage_supported_boundary_matches_request(
+        request,
+        &requested_selectors,
+        &topology,
+        &support_boundary,
+        context,
+    )?;
+    ensure_storage_selector_families_supported(
+        record_inventory_row.as_ref(),
+        &queries,
+        &request.outcome.cache_key.request_key,
+        context,
+    )?;
+
+    Ok(())
+}
+
+async fn load_supported_record_inventory_current_for_revalidation(
+    transaction: &mut Transaction<'_, Postgres>,
+    row: &NameCurrentRow,
+) -> Result<Option<RecordInventoryCurrentRow>> {
+    let Some((resource_id, record_version_boundary)) =
+        record_inventory_lookup_key_for_revalidation(row)?
+    else {
+        return Ok(None);
+    };
+
+    if let Some(record_inventory_row) =
+        load_record_inventory_current_for_revalidation(
+            transaction,
+            resource_id,
+            &record_version_boundary,
+        )
+        .await?
+    {
+        return Ok(Some(record_inventory_row));
+    }
+
+    if record_version_boundary_has_pointer(&record_version_boundary) {
+        return Ok(None);
+    }
+
+    let Some(persisted_boundary) =
+        find_supported_record_inventory_boundary_for_revalidation(
+            transaction,
+            resource_id,
+            &record_version_boundary,
+        )
+        .await?
+    else {
+        return Ok(None);
+    };
+
+    load_record_inventory_current_for_revalidation(transaction, resource_id, &persisted_boundary)
+        .await?
+        .with_context(|| {
+            format!(
+                "matched record_inventory_current boundary for resource_id {resource_id} but the projection row was not loadable"
+            )
+        })
+        .map(Some)
+}
+
+fn record_inventory_lookup_key_for_revalidation(
+    row: &NameCurrentRow,
+) -> Result<Option<(Uuid, Value)>> {
+    if let Some(lookup) = projected_record_inventory_lookup_key_for_revalidation(row)? {
+        return Ok(Some(lookup));
+    }
+
+    let Some(record_version_boundary) =
+        build_supported_resolution_declared_boundary_for_revalidation(row)
+    else {
+        return Ok(None);
+    };
+    let resource_id = row
+        .resource_id
+        .with_context(|| "supported resolution revalidation requires resource_id".to_owned())?;
+    Ok(Some((resource_id, record_version_boundary)))
+}
+
+fn projected_record_inventory_lookup_key_for_revalidation(
+    row: &NameCurrentRow,
+) -> Result<Option<(Uuid, Value)>> {
+    let Some(projected_topology) = projected_resolution_topology_for_revalidation(&row.declared_summary)
+    else {
+        return Ok(None);
+    };
+
+    let version_boundaries = json_field(&projected_topology, "version_boundaries").with_context(
+        || {
+            format!(
+                "projected topology for logical_name_id {} must include version_boundaries",
+                row.logical_name_id
+            )
+        },
+    )?;
+    let record_version_boundary = json_field(version_boundaries, "record_version_boundary")
+        .cloned()
+        .with_context(|| {
+            format!(
+                "projected topology for logical_name_id {} must include version_boundaries.record_version_boundary",
+                row.logical_name_id
+            )
+        })?;
+    let resource_id = json_field(&record_version_boundary, "resource_id")
+        .and_then(Value::as_str)
+        .with_context(|| {
+            format!(
+                "projected topology record_version_boundary for logical_name_id {} must include resource_id",
+                row.logical_name_id
+            )
+        })?;
+    let resource_id = Uuid::parse_str(resource_id).with_context(|| {
+        format!(
+            "projected topology record_version_boundary for logical_name_id {} must include a valid UUID resource_id",
+            row.logical_name_id
+        )
+    })?;
+
+    Ok(Some((resource_id, record_version_boundary)))
+}
+
+fn build_supported_resolution_declared_boundary_for_revalidation(
+    row: &NameCurrentRow,
+) -> Option<Value> {
+    let binding_supported = match row.namespace.as_str() {
+        ENS_NAMESPACE => matches!(
+            row.binding_kind,
+            Some(SurfaceBindingKind::DeclaredRegistryPath | SurfaceBindingKind::ResolverAliasPath)
+        ),
+        BASENAMES_NAMESPACE => row.binding_kind == Some(SurfaceBindingKind::DeclaredRegistryPath),
+        _ => false,
+    };
+    if !binding_supported || row.resource_id.is_none() {
+        return None;
+    }
+
+    let chain_position = build_resolution_boundary_chain_position_for_revalidation(row)?;
+    match row.namespace.as_str() {
+        ENS_NAMESPACE if chain_position.chain_id == ETHEREUM_MAINNET_CHAIN_ID => {}
+        BASENAMES_NAMESPACE if chain_position.chain_id == BASE_MAINNET_CHAIN_ID => {}
+        _ => return None,
+    }
+
+    Some(build_resolution_version_boundary_for_revalidation(
+        row,
+        &chain_position,
+    ))
+}
+
+fn build_resolution_boundary_chain_position_for_revalidation(
+    row: &NameCurrentRow,
+) -> Option<ProjectionChainPosition> {
+    let chain_positions = row.chain_positions.as_object()?;
+    if row.namespace == BASENAMES_NAMESPACE
+        && let Some(position) = chain_positions
+            .values()
+            .filter_map(projection_chain_position_from_value)
+            .find(|position| position.chain_id == BASE_MAINNET_CHAIN_ID)
+    {
+        return Some(position);
+    }
+
+    chain_positions
+        .get("ethereum")
+        .and_then(projection_chain_position_from_value)
+        .or_else(|| {
+            let mut parsed = chain_positions
+                .values()
+                .filter_map(projection_chain_position_from_value);
+            let first = parsed.next()?;
+            parsed.next().is_none().then_some(first)
+        })
+}
+
+fn build_resolution_version_boundary_for_revalidation(
+    row: &NameCurrentRow,
+    chain_position: &ProjectionChainPosition,
+) -> Value {
+    let mut boundary = Map::new();
+    boundary.insert(
+        "logical_name_id".to_owned(),
+        Value::String(row.logical_name_id.clone()),
+    );
+    boundary.insert(
+        "resource_id".to_owned(),
+        row.resource_id
+            .map(|value| Value::String(value.to_string()))
+            .unwrap_or(Value::Null),
+    );
+    boundary.insert("normalized_event_id".to_owned(), Value::Null);
+    boundary.insert("event_kind".to_owned(), Value::Null);
+    boundary.insert(
+        "chain_position".to_owned(),
+        Value::Object(chain_position_value(chain_position)),
+    );
+    Value::Object(boundary)
+}
+
+fn chain_position_value(position: &ProjectionChainPosition) -> Map<String, Value> {
+    let mut value = Map::new();
+    value.insert(
+        "chain_id".to_owned(),
+        Value::String(position.chain_id.clone()),
+    );
+    value.insert(
+        "block_number".to_owned(),
+        Value::Number(position.block_number.into()),
+    );
+    value.insert(
+        "block_hash".to_owned(),
+        Value::String(position.block_hash.clone()),
+    );
+    value.insert(
+        "timestamp".to_owned(),
+        Value::String(position.timestamp.clone()),
+    );
+    value
+}
+
+fn normalize_requested_chain_positions(
+    value: Option<&Value>,
+    context: &str,
+) -> Result<Vec<RequestedChainPosition>> {
+    let mut positions = required_chain_positions(value, context)?;
+    positions.sort_by(|left, right| {
+        left.chain_id
+            .cmp(&right.chain_id)
+            .then(left.block_number.cmp(&right.block_number))
+            .then(left.block_hash.cmp(&right.block_hash))
+    });
+    Ok(positions)
+}
+
+fn build_requested_chain_positions_from_projection(
+    chain_positions: &Value,
+) -> Result<Vec<RequestedChainPosition>> {
+    let chain_positions = chain_positions
+        .as_object()
+        .context("projected chain_positions must be a JSON object")?;
+    let mut positions = chain_positions
+        .values()
+        .filter_map(projection_chain_position_from_value)
+        .map(|position| RequestedChainPosition {
+            chain_id: position.chain_id,
+            block_number: position.block_number,
+            block_hash: position.block_hash,
+        })
+        .collect::<Vec<_>>();
+
+    if positions.is_empty() {
+        bail!("projected chain_positions must include at least one chain position");
+    }
+
+    positions.sort_by(|left, right| {
+        left.chain_id
+            .cmp(&right.chain_id)
+            .then(left.block_number.cmp(&right.block_number))
+            .then(left.block_hash.cmp(&right.block_hash))
+    });
+    Ok(positions)
+}
+
+fn projection_chain_position_from_value(value: &Value) -> Option<ProjectionChainPosition> {
+    Some(ProjectionChainPosition {
+        chain_id: json_string_field(json_field(value, "chain_id"))?,
+        block_number: json_field(value, "block_number")?.as_i64()?,
+        block_hash: json_string_field(json_field(value, "block_hash"))?,
+        timestamp: json_string_field(json_field(value, "timestamp"))?,
+    })
+}
+
+fn normalize_manifest_versions_for_revalidation(value: &Value, context: &str) -> Result<Value> {
+    let items = value
+        .as_array()
+        .with_context(|| format!("{context} must be a JSON array"))?;
+    if items.is_empty() {
+        bail!("{context} must not be empty");
+    }
+
+    let mut versions = Vec::with_capacity(items.len());
+    for (index, item) in items.iter().enumerate() {
+        let object = item
+            .as_object()
+            .with_context(|| format!("{context}[{index}] must be a JSON object"))?;
+        let source_manifest_id = match object.get("source_manifest_id") {
+            None | Some(Value::Null) => None,
+            Some(value) => Some(
+                value
+                    .as_i64()
+                    .filter(|value| *value > 0)
+                    .with_context(|| {
+                        format!(
+                            "{context}[{index}].source_manifest_id must be null or a positive integer"
+                        )
+                    })?,
+            ),
+        };
+        let source_family = match object.get("source_family") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(value)) if !value.trim().is_empty() => Some(value.clone()),
+            Some(_) => bail!("{context}[{index}].source_family must be null or a non-empty string"),
+        };
+        if source_manifest_id.is_none() && source_family.is_none() {
+            bail!(
+                "{context}[{index}] must include source_manifest_id or source_family"
+            );
+        }
+        let manifest_version = object
+            .get("manifest_version")
+            .and_then(Value::as_i64)
+            .filter(|value| *value > 0)
+            .with_context(|| {
+                format!("{context}[{index}].manifest_version must be a positive integer")
+            })?;
+        versions.push(ManifestVersionIdentity {
+            source_manifest_id,
+            source_family,
+            manifest_version,
+        });
+    }
+
+    versions.sort();
+    versions.dedup();
+
+    Ok(Value::Array(
+        versions
+            .into_iter()
+            .map(|version| {
+                let mut object = Map::new();
+                if let Some(source_manifest_id) = version.source_manifest_id {
+                    object.insert(
+                        "source_manifest_id".to_owned(),
+                        Value::Number(source_manifest_id.into()),
+                    );
+                }
+                if let Some(source_family) = version.source_family {
+                    object.insert("source_family".to_owned(), Value::String(source_family));
+                }
+                object.insert(
+                    "manifest_version".to_owned(),
+                    Value::Number(version.manifest_version.into()),
+                );
+                Value::Object(object)
+            })
+            .collect(),
+    ))
+}
+
+fn build_resolution_topology_for_revalidation(
+    row: &NameCurrentRow,
+    record_inventory_row: Option<&RecordInventoryCurrentRow>,
+) -> Result<Value> {
+    if let Some(projected_topology) = projected_resolution_topology_for_revalidation(&row.declared_summary)
+    {
+        return Ok(projected_topology);
+    }
+
+    build_legacy_resolution_topology_for_revalidation(row, record_inventory_row)
+}
+
+fn build_legacy_resolution_topology_for_revalidation(
+    row: &NameCurrentRow,
+    record_inventory_row: Option<&RecordInventoryCurrentRow>,
+) -> Result<Value> {
+    if !matches!(row.namespace.as_str(), ENS_NAMESPACE | BASENAMES_NAMESPACE)
+        || row.binding_kind != Some(SurfaceBindingKind::DeclaredRegistryPath)
+        || row.resource_id.is_none()
+    {
+        bail!("declared resolution topology is not yet projected");
+    }
+
+    let resolver_summary = json_field(&row.declared_summary, "resolver")
+        .filter(|value| value.is_object())
+        .filter(|value| !summary_is_unsupported(Some(value)))
+        .with_context(|| "declared resolution topology is not yet projected".to_owned())?;
+
+    let resolver_chain_id = json_string_field(json_field(resolver_summary, "chain_id"));
+    let resolver_address = json_string_field(json_field(resolver_summary, "address"));
+    if resolver_chain_id.is_some() != resolver_address.is_some() {
+        bail!("declared resolution topology is not yet projected");
+    }
+
+    let record_version_boundary =
+        resolution_record_version_boundary_for_revalidation(row, record_inventory_row)
+            .with_context(|| "declared resolution topology is not yet projected".to_owned())?;
+
+    let registry_ref = build_resolution_name_ref_for_revalidation(row);
+    let resolver_hop = build_resolution_resolver_hop_for_revalidation(
+        row,
+        resolver_chain_id,
+        resolver_address,
+        json_string_field(json_field(resolver_summary, "latest_event_kind")),
+    );
+
+    let mut version_boundaries = Map::new();
+    version_boundaries.insert(
+        "topology_version_boundary".to_owned(),
+        record_version_boundary.clone(),
+    );
+    version_boundaries.insert(
+        "record_version_boundary".to_owned(),
+        record_version_boundary,
+    );
+
+    let mut topology = Map::new();
+    topology.insert(
+        "registry_path".to_owned(),
+        Value::Array(vec![registry_ref]),
+    );
+    topology.insert("subregistry_path".to_owned(), Value::Array(Vec::new()));
+    topology.insert(
+        "resolver_path".to_owned(),
+        Value::Array(vec![resolver_hop]),
+    );
+    topology.insert(
+        "wildcard".to_owned(),
+        Value::Object(default_wildcard_detail()),
+    );
+    topology.insert("alias".to_owned(), Value::Object(default_alias_detail()));
+    topology.insert(
+        "version_boundaries".to_owned(),
+        Value::Object(version_boundaries),
+    );
+    topology.insert(
+        "transport".to_owned(),
+        Value::Object(build_resolution_transport_for_revalidation(row)),
+    );
+    Ok(Value::Object(topology))
+}
+
+fn build_resolution_name_ref_for_revalidation(row: &NameCurrentRow) -> Value {
+    let mut name_ref = Map::new();
+    name_ref.insert(
+        "logical_name_id".to_owned(),
+        Value::String(row.logical_name_id.clone()),
+    );
+    name_ref.insert("namespace".to_owned(), Value::String(row.namespace.clone()));
+    name_ref.insert(
+        "normalized_name".to_owned(),
+        Value::String(row.normalized_name.clone()),
+    );
+    name_ref.insert(
+        "canonical_display_name".to_owned(),
+        Value::String(row.canonical_display_name.clone()),
+    );
+    name_ref.insert("namehash".to_owned(), Value::String(row.namehash.clone()));
+    name_ref.insert(
+        "resource_id".to_owned(),
+        row.resource_id
+            .map(|value| Value::String(value.to_string()))
+            .unwrap_or(Value::Null),
+    );
+    name_ref.insert(
+        "binding_kind".to_owned(),
+        row.binding_kind
+            .map(|value| Value::String(value.as_str().to_owned()))
+            .unwrap_or(Value::Null),
+    );
+    Value::Object(name_ref)
+}
+
+fn build_resolution_resolver_hop_for_revalidation(
+    row: &NameCurrentRow,
+    chain_id: Option<String>,
+    address: Option<String>,
+    latest_event_kind: Option<String>,
+) -> Value {
+    let mut hop = Map::new();
+    hop.insert(
+        "logical_name_id".to_owned(),
+        Value::String(row.logical_name_id.clone()),
+    );
+    hop.insert("namespace".to_owned(), Value::String(row.namespace.clone()));
+    hop.insert(
+        "normalized_name".to_owned(),
+        Value::String(row.normalized_name.clone()),
+    );
+    hop.insert(
+        "canonical_display_name".to_owned(),
+        Value::String(row.canonical_display_name.clone()),
+    );
+    hop.insert(
+        "resource_id".to_owned(),
+        row.resource_id
+            .map(|value| Value::String(value.to_string()))
+            .unwrap_or(Value::Null),
+    );
+    hop.insert(
+        "chain_id".to_owned(),
+        chain_id.map(Value::String).unwrap_or(Value::Null),
+    );
+    hop.insert(
+        "address".to_owned(),
+        address.map(Value::String).unwrap_or(Value::Null),
+    );
+    hop.insert(
+        "latest_event_kind".to_owned(),
+        latest_event_kind.map(Value::String).unwrap_or(Value::Null),
+    );
+    Value::Object(hop)
+}
+
+fn build_resolution_transport_for_revalidation(row: &NameCurrentRow) -> Map<String, Value> {
+    let mut transport = Map::new();
+    if row.namespace == BASENAMES_NAMESPACE {
+        transport.insert(
+            "source_chain_id".to_owned(),
+            Value::String(BASE_MAINNET_CHAIN_ID.to_owned()),
+        );
+        transport.insert(
+            "target_chain_id".to_owned(),
+            Value::String(ETHEREUM_MAINNET_CHAIN_ID.to_owned()),
+        );
+        transport.insert(
+            "contract_address".to_owned(),
+            Value::String(BASENAMES_L1_RESOLVER_ADDRESS.to_owned()),
+        );
+        transport.insert("latest_event_kind".to_owned(), Value::Null);
+        return transport;
+    }
+
+    transport.insert("source_chain_id".to_owned(), Value::Null);
+    transport.insert("target_chain_id".to_owned(), Value::Null);
+    transport.insert("contract_address".to_owned(), Value::Null);
+    transport.insert("latest_event_kind".to_owned(), Value::Null);
+    transport
+}
+
+fn resolution_record_version_boundary_for_revalidation(
+    row: &NameCurrentRow,
+    record_inventory_row: Option<&RecordInventoryCurrentRow>,
+) -> Option<Value> {
+    record_inventory_row
+        .map(|row| row.record_version_boundary.clone())
+        .or_else(|| build_supported_resolution_declared_boundary_for_revalidation(row))
+}
+
+fn projected_resolution_topology_for_revalidation(summary: &Value) -> Option<Value> {
+    json_field(summary, "topology")
+        .filter(|value| value.is_object())
+        .cloned()
+}
+
+fn resolution_verified_support_boundary_from_storage(
+    row: &NameCurrentRow,
+    record_inventory_row: Option<&RecordInventoryCurrentRow>,
+) -> Result<Option<StorageSupportedResolutionBoundary>> {
+    if !matches!(row.namespace.as_str(), ENS_NAMESPACE | BASENAMES_NAMESPACE) {
+        return Ok(None);
+    }
+
+    if let Some(projected_topology) = projected_resolution_topology_for_revalidation(&row.declared_summary) {
+        if row.namespace == BASENAMES_NAMESPACE && !row_has_basenames_supported_chain_positions_for_revalidation(row)
+        {
+            return Ok(None);
+        }
+        let path_class = classify_supported_resolution_topology_from_storage(
+            &row.namespace,
+            &row.logical_name_id,
+            &projected_topology,
+        )?;
+        let version_boundaries = json_field(&projected_topology, "version_boundaries")
+            .with_context(|| "projected topology must include version_boundaries".to_owned())?;
+        let topology_version_boundary = json_field(version_boundaries, "topology_version_boundary")
+            .cloned()
+            .with_context(|| {
+                "projected topology must include version_boundaries.topology_version_boundary"
+                    .to_owned()
+            })?;
+        let record_version_boundary = json_field(version_boundaries, "record_version_boundary")
+            .cloned()
+            .with_context(|| {
+                "projected topology must include version_boundaries.record_version_boundary"
+                    .to_owned()
+            })?;
+        return Ok(Some(StorageSupportedResolutionBoundary {
+            path_class,
+            topology_version_boundary,
+            record_version_boundary,
+        }));
+    }
+
+    let Some(topology_version_boundary) = (match row.namespace.as_str() {
+        ENS_NAMESPACE => build_supported_resolution_declared_boundary_for_revalidation(row),
+        BASENAMES_NAMESPACE => None,
+        _ => None,
+    }) else {
+        return Ok(None);
+    };
+    let record_version_boundary =
+        resolution_record_version_boundary_for_revalidation(row, record_inventory_row)
+            .unwrap_or_else(|| topology_version_boundary.clone());
+    let path_class = match row.binding_kind {
+        Some(SurfaceBindingKind::ResolverAliasPath) => {
+            StorageSupportedResolutionPathClass::AliasOnly
+        }
+        _ => StorageSupportedResolutionPathClass::Direct,
+    };
+
+    Ok(Some(StorageSupportedResolutionBoundary {
+        path_class,
+        topology_version_boundary,
+        record_version_boundary,
+    }))
+}
+
+fn classify_supported_resolution_topology_from_storage(
+    namespace: &str,
+    logical_name_id: &str,
+    topology: &Value,
+) -> Result<StorageSupportedResolutionPathClass> {
+    if summary_is_unsupported(Some(topology)) {
+        bail!("projected topology is unsupported");
+    }
+
+    let resolver_logical_name_id = resolution_topology_resolver_logical_name_id(topology)
+        .with_context(|| "projected topology must include resolver_path[0].logical_name_id".to_owned())?;
+    let alias_present = resolution_topology_alias_is_present(topology)?;
+    let wildcard_source_logical_name_id = resolution_topology_wildcard_state(topology)?;
+    let transport_is_null = resolution_topology_transport_is_null(topology);
+
+    if namespace == BASENAMES_NAMESPACE {
+        if transport_is_null {
+            bail!("projected Basenames topology must include supported transport detail");
+        }
+        if !resolution_topology_subregistry_path_is_empty(topology) {
+            bail!("projected Basenames topology must keep subregistry_path empty");
+        }
+        if resolver_logical_name_id != logical_name_id {
+            bail!("projected Basenames topology must anchor resolver_path[0] to the request name");
+        }
+        if alias_present {
+            bail!("projected Basenames topology must keep alias detail empty");
+        }
+        if wildcard_source_logical_name_id.is_some() {
+            bail!("projected Basenames topology must keep wildcard detail empty");
+        }
+        if !resolution_topology_transport_matches_basenames_supported_class(topology) {
+            bail!("projected Basenames topology transport is outside the supported class");
+        }
+        return Ok(StorageSupportedResolutionPathClass::BasenamesTransportDirect);
+    }
+
+    if !transport_is_null {
+        bail!("projected ENS topology must keep transport detail null");
+    }
+
+    if let Some(wildcard_source_logical_name_id) = wildcard_source_logical_name_id {
+        if alias_present || !resolution_topology_subregistry_path_is_empty(topology) {
+            bail!(
+                "projected wildcard-derived ENS topology must keep alias detail empty and subregistry_path empty"
+            );
+        }
+        if resolver_logical_name_id != wildcard_source_logical_name_id {
+            bail!(
+                "projected wildcard-derived ENS topology must anchor resolver_path[0] to wildcard.source.logical_name_id"
+            );
+        }
+        return Ok(StorageSupportedResolutionPathClass::WildcardDerived);
+    }
+
+    if resolver_logical_name_id != logical_name_id {
+        bail!("projected ENS topology must anchor resolver_path[0] to the request name");
+    }
+
+    if alias_present {
+        Ok(StorageSupportedResolutionPathClass::AliasOnly)
+    } else {
+        Ok(StorageSupportedResolutionPathClass::Direct)
+    }
+}
+
+fn resolution_topology_resolver_logical_name_id(topology: &Value) -> Option<String> {
+    json_field(topology, "resolver_path")
+        .and_then(Value::as_array)
+        .and_then(|resolver_path| resolver_path.first())
+        .and_then(|hop| json_string_field(json_field(hop, "logical_name_id")))
+}
+
+fn resolution_topology_alias_is_present(topology: &Value) -> Result<bool> {
+    let alias = json_field(topology, "alias").with_context(|| "projected topology must include alias".to_owned())?;
+    let final_target_present = !matches!(json_field(alias, "final_target"), None | Some(Value::Null));
+    let hops = json_field(alias, "hops")
+        .and_then(Value::as_array)
+        .with_context(|| "projected topology alias must include hops".to_owned())?;
+    let hops_present = !hops.is_empty();
+    if final_target_present != hops_present {
+        bail!("projected topology alias must set final_target and non-empty hops together");
+    }
+    Ok(final_target_present)
+}
+
+fn resolution_topology_wildcard_state(topology: &Value) -> Result<Option<String>> {
+    let wildcard = json_field(topology, "wildcard")
+        .with_context(|| "projected topology must include wildcard".to_owned())?;
+    let matched_labels = json_field(wildcard, "matched_labels")
+        .and_then(Value::as_array)
+        .with_context(|| "projected topology wildcard must include matched_labels".to_owned())?;
+    let source = json_field(wildcard, "source");
+
+    match source {
+        None | Some(Value::Null) => {
+            if matched_labels.is_empty() {
+                Ok(None)
+            } else {
+                bail!("projected topology wildcard with null source must keep matched_labels empty")
+            }
+        }
+        Some(_) if matched_labels.is_empty() => {
+            bail!("projected topology wildcard must keep matched_labels non-empty when source is present")
+        }
+        Some(source) => Ok(Some(
+            json_string_field(json_field(source, "logical_name_id")).with_context(|| {
+                "projected topology wildcard source must include logical_name_id".to_owned()
+            })?,
+        )),
+    }
+}
+
+fn resolution_topology_subregistry_path_is_empty(topology: &Value) -> bool {
+    json_field(topology, "subregistry_path")
+        .and_then(Value::as_array)
+        .is_some_and(Vec::is_empty)
+}
+
+fn resolution_topology_transport_is_null(topology: &Value) -> bool {
+    let Some(transport) = json_field(topology, "transport") else {
+        return true;
+    };
+
+    for field_name in [
+        "source_chain_id",
+        "target_chain_id",
+        "contract_address",
+        "latest_event_kind",
+    ] {
+        if !matches!(json_field(transport, field_name), None | Some(Value::Null)) {
+            return false;
+        }
+    }
+
+    true
+}
+
+fn resolution_topology_transport_matches_basenames_supported_class(topology: &Value) -> bool {
+    let Some(transport) = json_field(topology, "transport").and_then(Value::as_object) else {
+        return false;
+    };
+    if transport.iter().any(|(field_name, value)| {
+        !matches!(
+            field_name.as_str(),
+            "source_chain_id" | "target_chain_id" | "contract_address" | "latest_event_kind"
+        ) && !value.is_null()
+    }) {
+        return false;
+    }
+    json_string_field(transport.get("source_chain_id"))
+        .is_some_and(|value| value == BASE_MAINNET_CHAIN_ID)
+        && json_string_field(transport.get("target_chain_id"))
+            .is_some_and(|value| value == ETHEREUM_MAINNET_CHAIN_ID)
+        && json_string_field(transport.get("contract_address"))
+            .is_some_and(|value| value.eq_ignore_ascii_case(BASENAMES_L1_RESOLVER_ADDRESS))
+}
+
+fn row_has_basenames_supported_chain_positions_for_revalidation(row: &NameCurrentRow) -> bool {
+    let Some(chain_positions) = row.chain_positions.as_object() else {
+        return false;
+    };
+
+    let mut saw_base = false;
+    let mut saw_ethereum = false;
+    for position in chain_positions.values() {
+        match projection_chain_position_from_value(position).map(|position| position.chain_id) {
+            Some(chain_id) if chain_id == BASE_MAINNET_CHAIN_ID => saw_base = true,
+            Some(chain_id) if chain_id == ETHEREUM_MAINNET_CHAIN_ID => saw_ethereum = true,
+            Some(_) | None => {}
+        }
+    }
+
+    saw_base && saw_ethereum
+}
+
+fn ensure_storage_supported_boundary_matches_request(
+    request: &PersistEnsExactNameVerifiedResolutionRequest,
+    requested_selectors: &RequestedSelectorSet,
+    topology: &Value,
+    support_boundary: &StorageSupportedResolutionBoundary,
+    context: &str,
+) -> Result<()> {
+    let expected_path_class = match request.trace.namespace.as_str() {
+        ENS_NAMESPACE => match classify_supported_resolution_path(
+            requested_selectors.binding_kind.as_deref(),
+            request.trace.execution_trace_id,
+        )? {
+            SupportedResolutionPathClass::Direct => StorageSupportedResolutionPathClass::Direct,
+            SupportedResolutionPathClass::AliasOnly => {
+                StorageSupportedResolutionPathClass::AliasOnly
+            }
+            SupportedResolutionPathClass::WildcardDerived => {
+                StorageSupportedResolutionPathClass::WildcardDerived
+            }
+        },
+        BASENAMES_NAMESPACE => StorageSupportedResolutionPathClass::BasenamesTransportDirect,
+        other => bail!("{context} does not support namespace {other}"),
+    };
+    if support_boundary.path_class != expected_path_class {
+        bail!("{context} stored supported path class does not match the request trace");
+    }
+    if support_boundary.topology_version_boundary != request.outcome.cache_key.topology_version_boundary
+    {
+        bail!(
+            "{context} cache_key.topology_version_boundary must match the stored mixed-route topology boundary"
+        );
+    }
+    if support_boundary.record_version_boundary != request.outcome.cache_key.record_version_boundary
+    {
+        bail!(
+            "{context} cache_key.record_version_boundary must match the stored mixed-route record boundary"
+        );
+    }
+
+    let stored_alias = normalize_alias_detail(json_field(topology, "alias"), &request.trace.namespace)?;
+    let request_alias = normalize_alias_detail(
+        persisted_trace_detail_object(&request.trace, "alias").as_ref(),
+        &request.trace.namespace,
+    )?;
+    if stored_alias != request_alias {
+        bail!("{context} stored alias topology does not match the request trace");
+    }
+
+    let stored_wildcard =
+        normalize_wildcard_detail(json_field(topology, "wildcard"), &request.trace.namespace)?;
+    let request_wildcard = normalize_wildcard_detail(
+        persisted_trace_detail_object(&request.trace, "wildcard").as_ref(),
+        &request.trace.namespace,
+    )?;
+    if stored_wildcard != request_wildcard {
+        bail!("{context} stored wildcard topology does not match the request trace");
+    }
+
+    let stored_transport = normalize_transport_detail(json_field(topology, "transport"))?;
+    let request_transport =
+        normalize_transport_detail(persisted_trace_detail_object(&request.trace, "transport").as_ref())?;
+    if stored_transport != request_transport {
+        bail!("{context} stored transport topology does not match the request trace");
+    }
+
+    Ok(())
+}
+
+fn normalize_alias_detail(value: Option<&Value>, namespace: &str) -> Result<Value> {
+    let Some(alias) = value else {
+        return Ok(Value::Object(default_alias_detail()));
+    };
+    let alias = alias
+        .as_object()
+        .with_context(|| "alias detail must be a JSON object".to_owned())?;
+    let mut normalized = default_alias_detail();
+
+    let final_target = match alias.get("final_target") {
+        None | Some(Value::Null) => Value::Null,
+        Some(value) => {
+            validate_verified_primary_name_ref(Some(value), "alias.final_target", namespace)?;
+            value.clone()
+        }
+    };
+    let hops = alias
+        .get("hops")
+        .and_then(Value::as_array)
+        .with_context(|| "alias.hops must be a JSON array".to_owned())?;
+    for (index, hop) in hops.iter().enumerate() {
+        validate_verified_primary_name_ref(Some(hop), &format!("alias.hops[{index}]"), namespace)?;
+    }
+    if final_target.is_null() != hops.is_empty() {
+        bail!("alias detail must set final_target and non-empty hops together");
+    }
+    normalized.insert("final_target".to_owned(), final_target);
+    normalized.insert("hops".to_owned(), Value::Array(hops.clone()));
+    Ok(Value::Object(normalized))
+}
+
+fn normalize_wildcard_detail(value: Option<&Value>, namespace: &str) -> Result<Value> {
+    let Some(wildcard) = value else {
+        return Ok(Value::Object(default_wildcard_detail()));
+    };
+    let wildcard = wildcard
+        .as_object()
+        .with_context(|| "wildcard detail must be a JSON object".to_owned())?;
+    let mut normalized = default_wildcard_detail();
+
+    let source = match wildcard.get("source") {
+        None | Some(Value::Null) => Value::Null,
+        Some(value) => {
+            validate_verified_primary_name_ref(Some(value), "wildcard.source", namespace)?;
+            value.clone()
+        }
+    };
+    let matched_labels = wildcard
+        .get("matched_labels")
+        .and_then(Value::as_array)
+        .with_context(|| "wildcard.matched_labels must be a JSON array".to_owned())?;
+    if source.is_null() && !matched_labels.is_empty() {
+        bail!("wildcard detail must keep matched_labels empty when source is null");
+    }
+    if !source.is_null() && matched_labels.is_empty() {
+        bail!("wildcard detail must keep matched_labels non-empty when source is present");
+    }
+    normalized.insert("source".to_owned(), source);
+    normalized.insert(
+        "matched_labels".to_owned(),
+        Value::Array(matched_labels.clone()),
+    );
+    Ok(Value::Object(normalized))
+}
+
+fn normalize_transport_detail(value: Option<&Value>) -> Result<Value> {
+    let Some(transport) = value else {
+        return Ok(Value::Object(default_transport_detail()));
+    };
+    let transport = transport
+        .as_object()
+        .with_context(|| "transport detail must be a JSON object".to_owned())?;
+    let mut normalized = default_transport_detail();
+    for field_name in [
+        "source_chain_id",
+        "target_chain_id",
+        "contract_address",
+        "latest_event_kind",
+    ] {
+        let value = match transport.get(field_name) {
+            None | Some(Value::Null) => Value::Null,
+            Some(Value::String(value)) if !value.trim().is_empty() => Value::String(value.clone()),
+            Some(_) => bail!("transport detail field {field_name} must be null or a non-empty string"),
+        };
+        normalized.insert(field_name.to_owned(), value);
+    }
+    Ok(Value::Object(normalized))
+}
+
+fn default_alias_detail() -> Map<String, Value> {
+    let mut alias = Map::new();
+    alias.insert("final_target".to_owned(), Value::Null);
+    alias.insert("hops".to_owned(), Value::Array(Vec::new()));
+    alias
+}
+
+fn default_wildcard_detail() -> Map<String, Value> {
+    let mut wildcard = Map::new();
+    wildcard.insert("source".to_owned(), Value::Null);
+    wildcard.insert("matched_labels".to_owned(), Value::Array(Vec::new()));
+    wildcard
+}
+
+fn default_transport_detail() -> Map<String, Value> {
+    let mut transport = Map::new();
+    transport.insert("source_chain_id".to_owned(), Value::Null);
+    transport.insert("target_chain_id".to_owned(), Value::Null);
+    transport.insert("contract_address".to_owned(), Value::Null);
+    transport.insert("latest_event_kind".to_owned(), Value::Null);
+    transport
+}
+
+fn ensure_storage_selector_families_supported(
+    record_inventory_row: Option<&RecordInventoryCurrentRow>,
+    queries: &[VerifiedQuerySummary],
+    request_key: &str,
+    context: &str,
+) -> Result<()> {
+    let record_inventory_row = record_inventory_row.with_context(|| {
+        format!(
+            "{context} requires record_inventory_current to revalidate supported selectors for request_key {request_key}"
+        )
+    })?;
+    let unsupported_families = record_inventory_row
+        .unsupported_families
+        .as_array()
+        .with_context(|| format!("{context} record_inventory_current.unsupported_families must be a JSON array"))?;
+    let entries = record_inventory_row
+        .entries
+        .as_array()
+        .with_context(|| format!("{context} record_inventory_current.entries must be a JSON array"))?;
+
+    for query in queries {
+        let (record_family, selector_key) =
+            selector_family_and_key(&query.record_key, &query.selector);
+
+        if unsupported_families.iter().any(|entry| {
+            json_string_field(json_field(entry, "record_family"))
+                .is_some_and(|value| value == record_family)
+        }) {
+            bail!(
+                "{context} record family {record_family} is still unsupported in record_inventory_current for request_key {request_key}"
+            );
+        }
+
+        if entries.iter().any(|entry| {
+            json_string_field(json_field(entry, "record_key"))
+                .is_some_and(|value| value == query.record_key)
+                && json_string_field(json_field(entry, "status"))
+                    .is_some_and(|value| value == "unsupported")
+                && selector_key_matches_inventory(entry, selector_key.as_deref())
+        }) {
+            bail!(
+                "{context} selector {} is still unsupported in record_inventory_current for request_key {request_key}",
+                query.record_key
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn selector_family_and_key(
+    record_key: &str,
+    selector: &SupportedVerifiedRecordKey,
+) -> (String, Option<String>) {
+    match selector {
+        SupportedVerifiedRecordKey::Addr { coin_type } => ("addr".to_owned(), Some(coin_type.clone())),
+        SupportedVerifiedRecordKey::Avatar => ("avatar".to_owned(), None),
+        SupportedVerifiedRecordKey::Contenthash => ("contenthash".to_owned(), None),
+        SupportedVerifiedRecordKey::Text => (
+            "text".to_owned(),
+            record_key
+                .strip_prefix("text:")
+                .map(str::to_owned),
+        ),
+    }
+}
+
+fn selector_key_matches_inventory(entry: &Value, selector_key: Option<&str>) -> bool {
+    match (json_field(entry, "selector_key"), selector_key) {
+        (None | Some(Value::Null), None) => true,
+        (Some(Value::String(left)), Some(right)) => left == right,
+        _ => false,
+    }
+}
+
+async fn find_supported_record_inventory_boundary_for_revalidation(
+    transaction: &mut Transaction<'_, Postgres>,
+    resource_id: Uuid,
+    record_version_boundary: &Value,
+) -> Result<Option<Value>> {
+    let logical_name_id =
+        json_string_field(json_field(record_version_boundary, "logical_name_id")).with_context(
+            || {
+                format!(
+                    "supported record version boundary for resource_id {resource_id} must include logical_name_id"
+                )
+            },
+        )?;
+    let chain_position = json_field(record_version_boundary, "chain_position").with_context(|| {
+        format!(
+            "supported record version boundary for resource_id {resource_id} must include chain_position"
+        )
+    })?;
+    let chain_id = json_string_field(json_field(chain_position, "chain_id")).with_context(|| {
+        format!(
+            "supported record version boundary for resource_id {resource_id} must include chain_position.chain_id"
+        )
+    })?;
+    let block_number = json_field(chain_position, "block_number")
+        .and_then(Value::as_i64)
+        .with_context(|| {
+            format!(
+                "supported record version boundary for resource_id {resource_id} must include chain_position.block_number"
+            )
+        })?;
+    let block_hash = json_string_field(json_field(chain_position, "block_hash")).with_context(|| {
+        format!(
+            "supported record version boundary for resource_id {resource_id} must include chain_position.block_hash"
+        )
+    })?;
+    let timestamp = json_string_field(json_field(chain_position, "timestamp")).with_context(|| {
+        format!(
+            "supported record version boundary for resource_id {resource_id} must include chain_position.timestamp"
+        )
+    })?;
+
+    let boundaries = sqlx::query(
+        r#"
+        SELECT record_version_boundary
+        FROM record_inventory_current
+        WHERE resource_id = $1
+          AND record_version_boundary ->> 'logical_name_id' = $2
+          AND record_version_boundary -> 'chain_position' ->> 'chain_id' = $3
+          AND (record_version_boundary -> 'chain_position' ->> 'block_number')::bigint = $4
+          AND record_version_boundary -> 'chain_position' ->> 'block_hash' = $5
+          AND record_version_boundary -> 'chain_position' ->> 'timestamp' = $6
+        ORDER BY
+          (record_version_boundary ->> 'normalized_event_id') IS NULL ASC,
+          (record_version_boundary ->> 'normalized_event_id')::bigint DESC NULLS LAST
+        LIMIT 2
+        "#,
+    )
+    .bind(resource_id)
+    .bind(logical_name_id)
+    .bind(chain_id)
+    .bind(block_number)
+    .bind(block_hash)
+    .bind(timestamp)
+    .fetch_all(&mut **transaction)
+    .await
+    .with_context(|| {
+        format!(
+            "failed to locate supported record_inventory_current boundary for resource_id {resource_id}"
+        )
+    })?
+    .into_iter()
+    .map(|row| {
+        row.try_get("record_version_boundary").with_context(|| {
+            format!(
+                "supported record_inventory_current lookup for resource_id {resource_id} returned a row without record_version_boundary"
+            )
+        })
+    })
+    .collect::<Result<Vec<Value>, _>>()?;
+
+    let Some(first_boundary) = boundaries.first().cloned() else {
+        return Ok(None);
+    };
+    if let Some(second_boundary) = boundaries.get(1)
+        && (!record_version_boundary_has_pointer(&first_boundary)
+            || record_version_boundary_has_pointer(second_boundary))
+    {
+        bail!(
+            "supported record_inventory_current lookup for resource_id {} found multiple projection rows for the same boundary anchor",
+            resource_id
+        );
+    }
+
+    Ok(Some(first_boundary))
+}
+
+fn record_version_boundary_has_pointer(record_version_boundary: &Value) -> bool {
+    !matches!(
+        json_field(record_version_boundary, "normalized_event_id"),
+        None | Some(Value::Null)
+    ) && !matches!(
+        json_field(record_version_boundary, "event_kind"),
+        None | Some(Value::Null)
+    )
+}
+
+async fn load_name_current_for_revalidation(
+    transaction: &mut Transaction<'_, Postgres>,
+    logical_name_id: &str,
+) -> Result<Option<NameCurrentRow>> {
+    let row = sqlx::query(
+        r#"
+        SELECT
+            nc.logical_name_id,
+            nc.namespace,
+            nc.canonical_display_name,
+            nc.normalized_name,
+            nc.namehash,
+            nc.surface_binding_id,
+            nc.resource_id,
+            nc.token_lineage_id,
+            nc.binding_kind,
+            nc.declared_summary,
+            nc.provenance,
+            nc.coverage,
+            nc.chain_positions,
+            nc.canonicality_summary,
+            nc.manifest_version,
+            nc.last_recomputed_at
+        FROM name_current nc
+        JOIN name_surfaces surface
+          ON surface.logical_name_id = nc.logical_name_id
+        LEFT JOIN resources resource
+          ON resource.resource_id = nc.resource_id
+        LEFT JOIN surface_bindings binding
+          ON binding.surface_binding_id = nc.surface_binding_id
+        LEFT JOIN token_lineages token_lineage
+          ON token_lineage.token_lineage_id = nc.token_lineage_id
+        WHERE nc.logical_name_id = $1
+          AND surface.canonicality_state IN (
+              'canonical'::canonicality_state,
+              'safe'::canonicality_state,
+              'finalized'::canonicality_state
+          )
+          AND (
+              nc.surface_binding_id IS NULL
+              OR (
+                  resource.canonicality_state IN (
+                      'canonical'::canonicality_state,
+                      'safe'::canonicality_state,
+                      'finalized'::canonicality_state
+                  )
+                  AND binding.canonicality_state IN (
+                      'canonical'::canonicality_state,
+                      'safe'::canonicality_state,
+                      'finalized'::canonicality_state
+                  )
+                  AND (
+                      nc.token_lineage_id IS NULL
+                      OR token_lineage.canonicality_state IN (
+                          'canonical'::canonicality_state,
+                          'safe'::canonicality_state,
+                          'finalized'::canonicality_state
+                      )
+                  )
+              )
+          )
+        "#,
+    )
+    .bind(logical_name_id)
+    .fetch_optional(&mut **transaction)
+    .await
+    .with_context(|| {
+        format!("failed to load name_current row for logical_name_id {logical_name_id}")
+    })?;
+
+    row.map(decode_name_current_row_for_revalidation).transpose()
+}
+
+fn decode_name_current_row_for_revalidation(row: PgRow) -> Result<NameCurrentRow> {
+    Ok(NameCurrentRow {
+        logical_name_id: row
+            .try_get("logical_name_id")
+            .context("missing logical_name_id")?,
+        namespace: row.try_get("namespace").context("missing namespace")?,
+        canonical_display_name: row
+            .try_get("canonical_display_name")
+            .context("missing canonical_display_name")?,
+        normalized_name: row
+            .try_get("normalized_name")
+            .context("missing normalized_name")?,
+        namehash: row.try_get("namehash").context("missing namehash")?,
+        surface_binding_id: row
+            .try_get("surface_binding_id")
+            .context("missing surface_binding_id")?,
+        resource_id: row.try_get("resource_id").context("missing resource_id")?,
+        token_lineage_id: row
+            .try_get("token_lineage_id")
+            .context("missing token_lineage_id")?,
+        binding_kind: row
+            .try_get::<Option<String>, _>("binding_kind")
+            .context("missing binding_kind")?
+            .map(|value| parse_surface_binding_kind_for_revalidation(&value))
+            .transpose()?,
+        declared_summary: row
+            .try_get("declared_summary")
+            .context("missing declared_summary")?,
+        provenance: row.try_get("provenance").context("missing provenance")?,
+        coverage: row.try_get("coverage").context("missing coverage")?,
+        chain_positions: row
+            .try_get("chain_positions")
+            .context("missing chain_positions")?,
+        canonicality_summary: row
+            .try_get("canonicality_summary")
+            .context("missing canonicality_summary")?,
+        manifest_version: row
+            .try_get("manifest_version")
+            .context("missing manifest_version")?,
+        last_recomputed_at: row
+            .try_get("last_recomputed_at")
+            .context("missing last_recomputed_at")?,
+    })
+}
+
+fn parse_surface_binding_kind_for_revalidation(value: &str) -> Result<SurfaceBindingKind> {
+    match value {
+        "declared_registry_path" => Ok(SurfaceBindingKind::DeclaredRegistryPath),
+        "linked_subregistry_path" => Ok(SurfaceBindingKind::LinkedSubregistryPath),
+        "resolver_alias_path" => Ok(SurfaceBindingKind::ResolverAliasPath),
+        "observed_wildcard_path" => Ok(SurfaceBindingKind::ObservedWildcardPath),
+        "migration_rebind" => Ok(SurfaceBindingKind::MigrationRebind),
+        "observed_only" => Ok(SurfaceBindingKind::ObservedOnly),
+        _ => bail!("unknown surface binding kind {value}"),
+    }
+}
+
+async fn load_record_inventory_current_for_revalidation(
+    transaction: &mut Transaction<'_, Postgres>,
+    resource_id: Uuid,
+    record_version_boundary: &Value,
+) -> Result<Option<RecordInventoryCurrentRow>> {
+    let record_version_boundary_key = serde_json::to_string(record_version_boundary)
+        .context("failed to serialize revalidation record_version_boundary")?;
+
+    let row = sqlx::query(
+        r#"
+        SELECT
+            ric.resource_id,
+            ric.record_version_boundary,
+            ric.enumeration_basis,
+            ric.selectors,
+            ric.explicit_gaps,
+            ric.unsupported_families,
+            ric.last_change,
+            ric.entries,
+            ric.provenance,
+            ric.coverage,
+            ric.chain_positions,
+            ric.canonicality_summary,
+            ric.manifest_version,
+            ric.last_recomputed_at
+        FROM record_inventory_current ric
+        JOIN resources resource
+          ON resource.resource_id = ric.resource_id
+        WHERE ric.resource_id = $1
+          AND ric.record_version_boundary = $2::JSONB
+          AND resource.canonicality_state IN (
+              'canonical'::canonicality_state,
+              'safe'::canonicality_state,
+              'finalized'::canonicality_state
+          )
+        "#,
+    )
+    .bind(resource_id)
+    .bind(record_version_boundary_key)
+    .fetch_optional(&mut **transaction)
+    .await
+    .with_context(|| {
+        format!("failed to load record_inventory_current row for resource_id {resource_id}")
+    })?;
+
+    row.map(decode_record_inventory_current_row_for_revalidation)
+        .transpose()
+}
+
+fn decode_record_inventory_current_row_for_revalidation(
+    row: PgRow,
+) -> Result<RecordInventoryCurrentRow> {
+    Ok(RecordInventoryCurrentRow {
+        resource_id: row.try_get("resource_id").context("missing resource_id")?,
+        record_version_boundary: row
+            .try_get("record_version_boundary")
+            .context("missing record_version_boundary")?,
+        enumeration_basis: row
+            .try_get("enumeration_basis")
+            .context("missing enumeration_basis")?,
+        selectors: row.try_get("selectors").context("missing selectors")?,
+        explicit_gaps: row
+            .try_get("explicit_gaps")
+            .context("missing explicit_gaps")?,
+        unsupported_families: row
+            .try_get("unsupported_families")
+            .context("missing unsupported_families")?,
+        last_change: row.try_get("last_change").context("missing last_change")?,
+        entries: row.try_get("entries").context("missing entries")?,
+        provenance: row.try_get("provenance").context("missing provenance")?,
+        coverage: row.try_get("coverage").context("missing coverage")?,
+        chain_positions: row
+            .try_get("chain_positions")
+            .context("missing chain_positions")?,
+        canonicality_summary: row
+            .try_get("canonicality_summary")
+            .context("missing canonicality_summary")?,
+        manifest_version: row
+            .try_get("manifest_version")
+            .context("missing manifest_version")?,
+        last_recomputed_at: row
+            .try_get("last_recomputed_at")
+            .context("missing last_recomputed_at")?,
+    })
+}
+
+fn summary_is_unsupported(section: Option<&Value>) -> bool {
+    matches!(json_string_field(section.and_then(|value| json_field(value, "status"))).as_deref(), Some("unsupported"))
+        && json_string_field(section.and_then(|value| json_field(value, "unsupported_reason")))
+            .is_some()
+}
+
+fn json_field<'a>(value: &'a Value, field_name: &str) -> Option<&'a Value> {
+    value.as_object()?.get(field_name)
+}
+
+fn json_string_field(value: Option<&Value>) -> Option<String> {
+    value?.as_str().map(str::to_owned)
 }
 
 fn extract_verified_primary_tuple(trace: &ExecutionTrace) -> Result<VerifiedPrimaryNameTuple> {
@@ -2698,6 +4205,7 @@ mod tests {
         postgres::{PgConnectOptions, PgPoolOptions},
         types::time::OffsetDateTime,
     };
+    use tokio::time::{Duration, timeout};
 
     use super::*;
     use bigname_storage::{MIGRATOR, default_database_url};
@@ -2712,6 +4220,10 @@ mod tests {
 
     impl TestDatabase {
         async fn new() -> Result<Self> {
+            Self::new_with_max_connections(5).await
+        }
+
+        async fn new_with_max_connections(max_connections: u32) -> Result<Self> {
             let database_url = std::env::var("BIGNAME_DATABASE_URL")
                 .or_else(|_| std::env::var("DATABASE_URL"))
                 .unwrap_or_else(|_| default_database_url().to_owned());
@@ -2741,7 +4253,7 @@ mod tests {
                 .with_context(|| format!("failed to create test database {database_name}"))?;
 
             let pool = PgPoolOptions::new()
-                .max_connections(5)
+                .max_connections(max_connections)
                 .connect_with(base_options.database(&database_name))
                 .await
                 .context("failed to connect execution test pool")?;
@@ -2889,6 +4401,558 @@ mod tests {
             "resource_id": resource_id.to_string(),
             "binding_kind": RESOLVER_ALIAS_PATH_BINDING_KIND
         })
+    }
+
+    fn boundary_resource_id(boundary: &Value) -> Uuid {
+        let resource_id = boundary
+            .get("resource_id")
+            .and_then(Value::as_str)
+            .expect("version boundary must include resource_id");
+        Uuid::parse_str(resource_id).expect("version boundary resource_id must be a UUID")
+    }
+
+    fn first_boundary_manifest_version(manifest_versions: &Value) -> i64 {
+        manifest_versions
+            .as_array()
+            .and_then(|items| items.first())
+            .and_then(Value::as_object)
+            .and_then(|item| item.get("manifest_version"))
+            .and_then(Value::as_i64)
+            .unwrap_or(1)
+    }
+
+    fn projection_chain_positions_for_request(
+        request: &PersistEnsExactNameVerifiedResolutionRequest,
+    ) -> Value {
+        let boundary_timestamps = [
+            request.outcome.cache_key.topology_version_boundary.get("chain_position"),
+            request.outcome.cache_key.record_version_boundary.get("chain_position"),
+        ];
+        let positions = request
+            .outcome
+            .cache_key
+            .requested_chain_positions
+            .as_array()
+            .expect("requested_chain_positions must be an array");
+        let mut chain_positions = Map::new();
+        for position in positions {
+            let chain_id = position
+                .get("chain_id")
+                .and_then(Value::as_str)
+                .expect("requested chain position must include chain_id");
+            let block_number = position
+                .get("block_number")
+                .and_then(Value::as_i64)
+                .expect("requested chain position must include block_number");
+            let block_hash = position
+                .get("block_hash")
+                .and_then(Value::as_str)
+                .expect("requested chain position must include block_hash");
+            let timestamp = boundary_timestamps
+                .iter()
+                .flatten()
+                .find(|candidate| {
+                    candidate
+                        .get("chain_id")
+                        .and_then(Value::as_str)
+                        .is_some_and(|value| value == chain_id)
+                        && candidate
+                            .get("block_hash")
+                            .and_then(Value::as_str)
+                            .is_some_and(|value| value == block_hash)
+                        && candidate
+                            .get("block_number")
+                            .and_then(Value::as_i64)
+                            .is_some_and(|value| value == block_number)
+                })
+                .and_then(|candidate| candidate.get("timestamp"))
+                .and_then(Value::as_str)
+                .unwrap_or("2026-04-23T00:00:00Z");
+            let key = match chain_id {
+                ETHEREUM_MAINNET_CHAIN_ID => "ethereum",
+                BASE_MAINNET_CHAIN_ID => "base",
+                other => other,
+            };
+            chain_positions.insert(
+                key.to_owned(),
+                json!({
+                    "chain_id": chain_id,
+                    "block_number": block_number,
+                    "block_hash": block_hash,
+                    "timestamp": timestamp
+                }),
+            );
+        }
+        Value::Object(chain_positions)
+    }
+
+    fn name_ref_for_request(
+        request: &PersistEnsExactNameVerifiedResolutionRequest,
+        resource_id: Uuid,
+        binding_kind: SurfaceBindingKind,
+    ) -> Value {
+        let requested_selectors =
+            extract_requested_selectors(&request.trace).expect("request selectors must parse");
+        json!({
+            "logical_name_id": format!("{}:{}", request.trace.namespace, requested_selectors.surface),
+            "namespace": request.trace.namespace,
+            "normalized_name": requested_selectors.surface,
+            "canonical_display_name": requested_selectors.surface,
+            "namehash": format!("namehash:{}", requested_selectors.surface),
+            "resource_id": resource_id.to_string(),
+            "binding_kind": binding_kind.as_str()
+        })
+    }
+
+    fn resolver_path_for_request(
+        request: &PersistEnsExactNameVerifiedResolutionRequest,
+        resource_id: Uuid,
+        binding_kind: SurfaceBindingKind,
+        resolver_chain_id: &str,
+        resolver_address: &str,
+    ) -> Value {
+        let wildcard = persisted_trace_detail_object(&request.trace, "wildcard");
+        let hop = wildcard
+            .as_ref()
+            .and_then(|detail| detail.get("source"))
+            .cloned()
+            .unwrap_or_else(|| name_ref_for_request(request, resource_id, binding_kind));
+        let mut hop = hop
+            .as_object()
+            .cloned()
+            .expect("resolver_path hop must be an object");
+        hop.insert("chain_id".to_owned(), json!(resolver_chain_id));
+        hop.insert("address".to_owned(), json!(resolver_address));
+        hop.insert("latest_event_kind".to_owned(), Value::Null);
+        Value::Array(vec![Value::Object(hop)])
+    }
+
+    fn projected_topology_for_request(
+        request: &PersistEnsExactNameVerifiedResolutionRequest,
+        resource_id: Uuid,
+        binding_kind: SurfaceBindingKind,
+        resolver_chain_id: &str,
+        resolver_address: &str,
+    ) -> Value {
+        let alias = super::normalize_alias_detail(
+            persisted_trace_detail_object(&request.trace, "alias").as_ref(),
+            &request.trace.namespace,
+        )
+        .expect("request alias detail must normalize");
+        let wildcard = super::normalize_wildcard_detail(
+            persisted_trace_detail_object(&request.trace, "wildcard").as_ref(),
+            &request.trace.namespace,
+        )
+        .expect("request wildcard detail must normalize");
+        let transport = super::normalize_transport_detail(
+            persisted_trace_detail_object(&request.trace, "transport").as_ref(),
+        )
+        .expect("request transport detail must normalize");
+
+        json!({
+            "registry_path": [name_ref_for_request(request, resource_id, binding_kind)],
+            "subregistry_path": [],
+            "resolver_path": resolver_path_for_request(
+                request,
+                resource_id,
+                binding_kind,
+                resolver_chain_id,
+                resolver_address,
+            ),
+            "wildcard": wildcard,
+            "alias": alias,
+            "version_boundaries": {
+                "topology_version_boundary": request.outcome.cache_key.topology_version_boundary.clone(),
+                "record_version_boundary": request.outcome.cache_key.record_version_boundary.clone(),
+            },
+            "transport": transport,
+        })
+    }
+
+    fn binding_kind_for_request(
+        request: &PersistEnsExactNameVerifiedResolutionRequest,
+    ) -> SurfaceBindingKind {
+        let requested_selectors =
+            extract_requested_selectors(&request.trace).expect("request selectors must parse");
+        match requested_selectors.binding_kind.as_deref() {
+            None | Some(DECLARED_REGISTRY_PATH_BINDING_KIND) => SurfaceBindingKind::DeclaredRegistryPath,
+            Some(RESOLVER_ALIAS_PATH_BINDING_KIND) => SurfaceBindingKind::ResolverAliasPath,
+            Some(OBSERVED_WILDCARD_PATH_BINDING_KIND) => SurfaceBindingKind::ObservedWildcardPath,
+            Some(other) => panic!("unsupported binding_kind fixture {other}"),
+        }
+    }
+
+    fn resolver_address_for_request(request: &PersistEnsExactNameVerifiedResolutionRequest) -> String {
+        request
+            .trace
+            .request_metadata
+            .get("transport")
+            .and_then(|transport| transport.get("contract_address"))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .or_else(|| {
+                request
+                    .trace
+                    .steps
+                    .iter()
+                    .find_map(|step| step.step_payload.get("resolver"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| match request.trace.namespace.as_str() {
+                ENS_NAMESPACE => "0x0000000000000000000000000000000000000abc".to_owned(),
+                BASENAMES_NAMESPACE => "0x0000000000000000000000000000000000000b60".to_owned(),
+                other => panic!("unsupported namespace fixture {other}"),
+            })
+    }
+
+    fn resolver_chain_id_for_request(request: &PersistEnsExactNameVerifiedResolutionRequest) -> String {
+        match request.trace.namespace.as_str() {
+            ENS_NAMESPACE => ETHEREUM_MAINNET_CHAIN_ID.to_owned(),
+            BASENAMES_NAMESPACE => BASE_MAINNET_CHAIN_ID.to_owned(),
+            other => panic!("unsupported namespace fixture {other}"),
+        }
+    }
+
+    fn token_lineage_for_request(token_lineage_id: Uuid, chain_id: &str) -> TokenLineage {
+        TokenLineage {
+            token_lineage_id,
+            chain_id: chain_id.to_owned(),
+            block_hash: "0xtrace-support".to_owned(),
+            block_number: 21_000_000,
+            provenance: json!({"source": "execution_test", "anchor": "token_lineage"}),
+            canonicality_state: CanonicalityState::Finalized,
+        }
+    }
+
+    fn resource_for_request(
+        resource_id: Uuid,
+        token_lineage_id: Uuid,
+        chain_id: &str,
+    ) -> Resource {
+        Resource {
+            resource_id,
+            token_lineage_id: Some(token_lineage_id),
+            chain_id: chain_id.to_owned(),
+            block_hash: "0xtrace-support".to_owned(),
+            block_number: 21_000_000,
+            provenance: json!({"source": "execution_test", "anchor": "resource"}),
+            canonicality_state: CanonicalityState::Finalized,
+        }
+    }
+
+    fn name_surface_for_request(
+        request: &PersistEnsExactNameVerifiedResolutionRequest,
+        chain_id: &str,
+    ) -> NameSurface {
+        let requested_selectors =
+            extract_requested_selectors(&request.trace).expect("request selectors must parse");
+        NameSurface {
+            logical_name_id: format!("{}:{}", request.trace.namespace, requested_selectors.surface),
+            namespace: request.trace.namespace.clone(),
+            input_name: requested_selectors.surface.clone(),
+            canonical_display_name: requested_selectors.surface.clone(),
+            normalized_name: requested_selectors.surface.clone(),
+            dns_encoded_name: requested_selectors.surface.as_bytes().to_vec(),
+            namehash: format!("namehash:{}", requested_selectors.surface),
+            labelhashes: vec![format!("labelhash:{}", requested_selectors.surface)],
+            normalizer_version: "uts46-v1".to_owned(),
+            normalization_warnings: json!([]),
+            normalization_errors: json!([]),
+            chain_id: chain_id.to_owned(),
+            block_hash: "0xtrace-support".to_owned(),
+            block_number: 21_000_000,
+            provenance: json!({"source": "execution_test", "anchor": "surface"}),
+            canonicality_state: CanonicalityState::Finalized,
+        }
+    }
+
+    fn surface_binding_for_request(
+        request: &PersistEnsExactNameVerifiedResolutionRequest,
+        surface_binding_id: Uuid,
+        resource_id: Uuid,
+        binding_kind: SurfaceBindingKind,
+        chain_id: &str,
+    ) -> SurfaceBinding {
+        let requested_selectors =
+            extract_requested_selectors(&request.trace).expect("request selectors must parse");
+        SurfaceBinding {
+            surface_binding_id,
+            logical_name_id: format!("{}:{}", request.trace.namespace, requested_selectors.surface),
+            resource_id,
+            binding_kind,
+            active_from: timestamp(1_717_171_700),
+            active_to: None,
+            chain_id: chain_id.to_owned(),
+            block_hash: "0xtrace-support".to_owned(),
+            block_number: 21_000_000,
+            provenance: json!({"source": "execution_test", "anchor": "binding"}),
+            canonicality_state: CanonicalityState::Finalized,
+        }
+    }
+
+    fn supported_resolution_name_current_row(
+        request: &PersistEnsExactNameVerifiedResolutionRequest,
+        resource_id: Uuid,
+        token_lineage_id: Uuid,
+        surface_binding_id: Uuid,
+    ) -> NameCurrentRow {
+        let requested_selectors =
+            extract_requested_selectors(&request.trace).expect("request selectors must parse");
+        let binding_kind = binding_kind_for_request(request);
+        let resolver_chain_id = resolver_chain_id_for_request(request);
+        let resolver_address = resolver_address_for_request(request);
+        NameCurrentRow {
+            logical_name_id: format!("{}:{}", request.trace.namespace, requested_selectors.surface),
+            namespace: request.trace.namespace.clone(),
+            canonical_display_name: requested_selectors.surface.clone(),
+            normalized_name: requested_selectors.surface.clone(),
+            namehash: format!("namehash:{}", requested_selectors.surface),
+            surface_binding_id: Some(surface_binding_id),
+            resource_id: Some(resource_id),
+            token_lineage_id: Some(token_lineage_id),
+            binding_kind: Some(binding_kind),
+            declared_summary: json!({
+                "registration": {
+                    "status": "active",
+                    "authority_kind": "registrar"
+                },
+                "resolver": {
+                    "chain_id": resolver_chain_id,
+                    "address": resolver_address,
+                    "latest_event_kind": "ResolverChanged"
+                },
+                "topology": projected_topology_for_request(
+                    request,
+                    resource_id,
+                    binding_kind,
+                    &resolver_chain_id_for_request(request),
+                    &resolver_address_for_request(request),
+                )
+            }),
+            provenance: json!({
+                "normalized_event_ids": [101, 102],
+                "raw_fact_refs": [{
+                    "kind": "log",
+                    "chain_id": resolver_chain_id_for_request(request),
+                    "block_hash": "0xtrace-support"
+                }],
+                "manifest_versions": request.outcome.cache_key.manifest_versions.clone(),
+                "execution_trace_id": null,
+                "derivation_kind": "projection_apply"
+            }),
+            coverage: json!({
+                "status": "full",
+                "exhaustiveness": "authoritative",
+                "source_classes_considered": [format!("{}_supported_resolution", request.trace.namespace)],
+                "unsupported_reason": null,
+                "enumeration_basis": "exact_name"
+            }),
+            chain_positions: projection_chain_positions_for_request(request),
+            canonicality_summary: {
+                let mut chains = Map::new();
+                for position in projection_chain_positions_for_request(request)
+                    .as_object()
+                    .expect("chain positions must be object")
+                    .values()
+                {
+                    if let Some(chain_id) = position.get("chain_id").and_then(Value::as_str) {
+                        chains.insert(chain_id.to_owned(), Value::String("finalized".to_owned()));
+                    }
+                }
+                json!({
+                    "status": "finalized",
+                    "chains": Value::Object(chains)
+                })
+            },
+            manifest_version: first_boundary_manifest_version(&request.outcome.cache_key.manifest_versions),
+            last_recomputed_at: timestamp(1_717_171_717),
+        }
+    }
+
+    fn record_inventory_selector_entry(
+        query: &VerifiedQuerySummary,
+        cacheable: bool,
+    ) -> Value {
+        let (record_family, selector_key) = selector_family_and_key(&query.record_key, &query.selector);
+        json!({
+            "record_key": query.record_key,
+            "record_family": record_family,
+            "selector_key": selector_key,
+            "cacheable": cacheable
+        })
+    }
+
+    fn record_inventory_entry(query: &VerifiedQuerySummary) -> Value {
+        let (record_family, selector_key) = selector_family_and_key(&query.record_key, &query.selector);
+        let mut entry = json!({
+            "record_key": query.record_key,
+            "record_family": record_family,
+            "selector_key": selector_key,
+            "status": match query.status {
+                VerifiedQueryStatus::Success => "success",
+                VerifiedQueryStatus::NotFound => "not_found",
+                VerifiedQueryStatus::ExecutionFailed => "unsupported",
+            }
+        });
+        match query.status {
+            VerifiedQueryStatus::Success => {
+                let value = match &query.selector {
+                    SupportedVerifiedRecordKey::Addr { coin_type } => {
+                        json!({
+                            "coin_type": coin_type,
+                            "value": query.value.as_deref().expect("success query must include value")
+                        })
+                    }
+                    SupportedVerifiedRecordKey::Avatar
+                    | SupportedVerifiedRecordKey::Contenthash
+                    | SupportedVerifiedRecordKey::Text => json!({
+                        "value": query.value.as_deref().expect("success query must include value")
+                    }),
+                };
+                entry
+                    .as_object_mut()
+                    .expect("entry must be object")
+                    .insert("value".to_owned(), value);
+            }
+            VerifiedQueryStatus::NotFound => {}
+            VerifiedQueryStatus::ExecutionFailed => {
+                entry
+                    .as_object_mut()
+                    .expect("entry must be object")
+                    .insert(
+                        "unsupported_reason".to_owned(),
+                        json!("value_not_retained_in_normalized_events"),
+                    );
+            }
+        }
+        entry
+    }
+
+    fn supported_record_inventory_row_for_request(
+        request: &PersistEnsExactNameVerifiedResolutionRequest,
+        resource_id: Uuid,
+    ) -> RecordInventoryCurrentRow {
+        let mut queries =
+            extract_supported_verified_queries(&request.outcome).expect("queries must parse");
+        queries.sort_by(|left, right| left.record_key.cmp(&right.record_key));
+        let selectors = queries
+            .iter()
+            .map(|query| {
+                record_inventory_selector_entry(
+                    query,
+                    query.status != VerifiedQueryStatus::ExecutionFailed,
+                )
+            })
+            .collect::<Vec<_>>();
+        let entries = queries
+            .iter()
+            .filter(|query| query.status != VerifiedQueryStatus::ExecutionFailed)
+            .map(record_inventory_entry)
+            .collect::<Vec<_>>();
+        let chain_id = request.outcome.cache_key.record_version_boundary["chain_position"]["chain_id"]
+            .as_str()
+            .unwrap_or(ETHEREUM_MAINNET_CHAIN_ID)
+            .to_owned();
+        let mut chain_positions = Map::new();
+        chain_positions.insert(
+            chain_id.clone(),
+            request.outcome.cache_key.record_version_boundary["chain_position"].clone(),
+        );
+        let mut canonicality_chains = Map::new();
+        canonicality_chains.insert(chain_id, Value::String("finalized".to_owned()));
+
+        RecordInventoryCurrentRow {
+            resource_id,
+            record_version_boundary: request.outcome.cache_key.record_version_boundary.clone(),
+            enumeration_basis: json!({
+                "observed_selectors": true,
+                "capability_declared_families": true,
+                "globally_enumerable": false
+            }),
+            selectors: Value::Array(selectors),
+            explicit_gaps: json!([]),
+            unsupported_families: json!([]),
+            last_change: Some(json!({
+                "normalized_event_id": 1200,
+                "event_kind": "RecordsChanged",
+                "chain_position": request.outcome.cache_key.record_version_boundary["chain_position"].clone()
+            })),
+            entries: Value::Array(entries),
+            provenance: json!({
+                "normalized_event_ids": [1200],
+                "derivation_kind": "record_inventory_current_rebuild"
+            }),
+            coverage: json!({
+                "status": "full",
+                "exhaustiveness": "authoritative",
+                "enumeration_basis": "declared_record_inventory"
+            }),
+            chain_positions: Value::Object(chain_positions),
+            canonicality_summary: json!({
+                "status": "finalized",
+                "chains": Value::Object(canonicality_chains)
+            }),
+            manifest_version: first_boundary_manifest_version(&request.outcome.cache_key.manifest_versions),
+            last_recomputed_at: timestamp(1_717_171_719),
+        }
+    }
+
+    async fn seed_supported_resolution_storage(
+        database: &TestDatabase,
+        request: &PersistEnsExactNameVerifiedResolutionRequest,
+    ) -> Result<()> {
+        let resource_id = boundary_resource_id(&request.outcome.cache_key.record_version_boundary);
+        let token_lineage_id = Uuid::from_u128(resource_id.as_u128() + 1);
+        let surface_binding_id = Uuid::from_u128(resource_id.as_u128() + 2);
+        let primary_chain_id = request
+            .outcome
+            .cache_key
+            .record_version_boundary
+            .get("chain_position")
+            .and_then(|chain_position| chain_position.get("chain_id"))
+            .and_then(Value::as_str)
+            .unwrap_or(ETHEREUM_MAINNET_CHAIN_ID);
+        let binding_kind = binding_kind_for_request(request);
+
+        upsert_token_lineages(database.pool(), &[token_lineage_for_request(token_lineage_id, primary_chain_id)]).await?;
+        upsert_resources(
+            database.pool(),
+            &[resource_for_request(resource_id, token_lineage_id, primary_chain_id)],
+        )
+        .await?;
+        upsert_name_surfaces(
+            database.pool(),
+            &[name_surface_for_request(request, primary_chain_id)],
+        )
+        .await?;
+        upsert_surface_bindings(
+            database.pool(),
+            &[surface_binding_for_request(
+                request,
+                surface_binding_id,
+                resource_id,
+                binding_kind,
+                primary_chain_id,
+            )],
+        )
+        .await?;
+        upsert_name_current_rows(
+            database.pool(),
+            &[supported_resolution_name_current_row(
+                request,
+                resource_id,
+                token_lineage_id,
+                surface_binding_id,
+            )],
+        )
+        .await?;
+        upsert_record_inventory_current_rows(
+            database.pool(),
+            &[supported_record_inventory_row_for_request(request, resource_id)],
+        )
+        .await?;
+        Ok(())
     }
 
     fn basenames_transport_direct_request() -> PersistEnsExactNameVerifiedResolutionRequest {
@@ -3587,6 +5651,7 @@ mod tests {
     async fn persists_successful_direct_path_and_reads_back_storage_identity() -> Result<()> {
         let database = TestDatabase::new().await?;
         let request = success_request();
+        seed_supported_resolution_storage(&database, &request).await?;
 
         let persisted =
             persist_ens_exact_name_verified_resolution_direct(database.pool(), &request).await?;
@@ -3633,9 +5698,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn persists_successful_direct_path_with_one_pool_connection() -> Result<()> {
+        let database = TestDatabase::new_with_max_connections(1).await?;
+        let request = success_request();
+        seed_supported_resolution_storage(&database, &request).await?;
+
+        let persisted = timeout(
+            Duration::from_secs(5),
+            persist_ens_exact_name_verified_resolution_direct(database.pool(), &request),
+        )
+        .await
+        .expect("direct-path persistence should not block waiting for a second pool checkout")?;
+        assert_eq!(
+            persisted,
+            PersistedVerifiedResolutionIdentity {
+                execution_trace_id: request.trace.execution_trace_id,
+                cache_key: request.outcome.cache_key.clone(),
+            }
+        );
+        assert_eq!(
+            load_execution_trace(database.pool(), persisted.execution_trace_id).await?,
+            Some(request.trace.clone())
+        );
+        assert_eq!(
+            load_execution_outcome(database.pool(), &persisted.cache_key).await?,
+            Some(request.outcome.clone())
+        );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
     async fn persists_avatar_success_direct_path_and_reads_back_storage_identity() -> Result<()> {
         let database = TestDatabase::new().await?;
         let request = avatar_success_request();
+        seed_supported_resolution_storage(&database, &request).await?;
 
         let persisted =
             persist_ens_exact_name_verified_resolution_direct(database.pool(), &request).await?;
@@ -3664,6 +5761,7 @@ mod tests {
     async fn persists_multi_selector_direct_path_with_ordered_mixed_results() -> Result<()> {
         let database = TestDatabase::new().await?;
         let request = multi_selector_request();
+        seed_supported_resolution_storage(&database, &request).await?;
 
         let persisted =
             persist_ens_exact_name_verified_resolution_direct(database.pool(), &request).await?;
@@ -3710,6 +5808,7 @@ mod tests {
     -> Result<()> {
         let database = TestDatabase::new().await?;
         let request = avatar_mixed_selector_request();
+        seed_supported_resolution_storage(&database, &request).await?;
 
         let persisted =
             persist_ens_exact_name_verified_resolution_direct(database.pool(), &request).await?;
@@ -3751,6 +5850,7 @@ mod tests {
     async fn persists_execution_failed_direct_path_without_raw_call_snapshots() -> Result<()> {
         let database = TestDatabase::new().await?;
         let request = execution_failed_request();
+        seed_supported_resolution_storage(&database, &request).await?;
 
         let persisted =
             persist_ens_exact_name_verified_resolution_direct(database.pool(), &request).await?;
@@ -3787,6 +5887,7 @@ mod tests {
     async fn persists_contenthash_success_direct_path() -> Result<()> {
         let database = TestDatabase::new().await?;
         let request = contenthash_success_request();
+        seed_supported_resolution_storage(&database, &request).await?;
 
         let persisted =
             persist_ens_exact_name_verified_resolution_direct(database.pool(), &request).await?;
@@ -3815,6 +5916,7 @@ mod tests {
     async fn persists_contenthash_not_found_direct_path() -> Result<()> {
         let database = TestDatabase::new().await?;
         let request = contenthash_not_found_request();
+        seed_supported_resolution_storage(&database, &request).await?;
 
         let persisted =
             persist_ens_exact_name_verified_resolution_direct(database.pool(), &request).await?;
@@ -3837,6 +5939,7 @@ mod tests {
     -> Result<()> {
         let database = TestDatabase::new().await?;
         let request = contenthash_execution_failed_request();
+        seed_supported_resolution_storage(&database, &request).await?;
 
         let persisted =
             persist_ens_exact_name_verified_resolution_direct(database.pool(), &request).await?;
@@ -3874,6 +5977,7 @@ mod tests {
     -> Result<()> {
         let database = TestDatabase::new().await?;
         let request = contenthash_mixed_selector_request();
+        seed_supported_resolution_storage(&database, &request).await?;
 
         let persisted =
             persist_ens_exact_name_verified_resolution_direct(database.pool(), &request).await?;
@@ -3915,6 +6019,7 @@ mod tests {
     async fn persists_exact_surface_alias_only_path_with_resolver_alias_binding() -> Result<()> {
         let database = TestDatabase::new().await?;
         let request = alias_only_text_request();
+        seed_supported_resolution_storage(&database, &request).await?;
 
         let persisted =
             persist_ens_exact_name_verified_resolution_direct(database.pool(), &request).await?;
@@ -3944,6 +6049,7 @@ mod tests {
     -> Result<()> {
         let database = TestDatabase::new().await?;
         let request = alias_only_avatar_request();
+        seed_supported_resolution_storage(&database, &request).await?;
 
         let persisted =
             persist_ens_exact_name_verified_resolution_direct(database.pool(), &request).await?;
@@ -3972,6 +6078,7 @@ mod tests {
     async fn rolls_back_raw_calls_and_trace_when_outcome_write_fails() -> Result<()> {
         let database = TestDatabase::new().await?;
         let request = success_request();
+        seed_supported_resolution_storage(&database, &request).await?;
 
         let mut conflicting_trace = request.trace.clone();
         conflicting_trace.execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000016);
@@ -4025,6 +6132,44 @@ mod tests {
             load_execution_outcome(database.pool(), &request.outcome.cache_key).await?,
             Some(conflicting_outcome),
             "the pre-existing conflicting outcome must remain untouched"
+        );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn persists_trace_only_when_storage_revalidation_fails_closed() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let request = success_request();
+
+        let error = persist_ens_exact_name_verified_resolution_direct(database.pool(), &request)
+            .await
+            .expect_err("missing projection inputs must fail during storage revalidation");
+        assert!(
+            error
+                .to_string()
+                .contains("supported outcome persistence failed closed after storage revalidation"),
+            "unexpected error: {error:#}"
+        );
+        assert_eq!(
+            load_execution_trace(database.pool(), request.trace.execution_trace_id).await?,
+            Some(request.trace.clone())
+        );
+        assert!(
+            load_execution_outcome(database.pool(), &request.outcome.cache_key)
+                .await?
+                .is_none(),
+            "revalidation failure must not persist outcome rows"
+        );
+        assert!(
+            load_raw_call_snapshots_by_block_hash(
+                database.pool(),
+                ETHEREUM_MAINNET_CHAIN_ID,
+                "0xabc123",
+            )
+            .await?
+            .is_empty(),
+            "revalidation failure must not persist raw call snapshots"
         );
 
         database.cleanup().await
@@ -4161,6 +6306,7 @@ mod tests {
         request.outcome.execution_trace_id = request.trace.execution_trace_id;
         request.outcome.cache_key.request_key = request_key;
         request.outcome.outcome_payload = request.trace.final_payload.clone();
+        seed_supported_resolution_storage(&database, &request).await?;
 
         let persisted =
             persist_ens_exact_name_verified_resolution_direct(database.pool(), &request).await?;
@@ -4398,6 +6544,7 @@ mod tests {
             .trace
             .finished_at
             .expect("wildcard-derived test trace must finish");
+        seed_supported_resolution_storage(&database, &request).await?;
 
         let persisted =
             persist_ens_exact_name_verified_resolution_direct(database.pool(), &request).await?;
@@ -4464,6 +6611,7 @@ mod tests {
     async fn persists_basenames_transport_assisted_direct_path() -> Result<()> {
         let database = TestDatabase::new().await?;
         let request = basenames_transport_direct_request();
+        seed_supported_resolution_storage(&database, &request).await?;
 
         let persisted = persist_basenames_exact_name_verified_resolution_transport_direct(
             database.pool(),
@@ -4487,6 +6635,42 @@ mod tests {
             .await?
             .expect("execution outcome must exist after Basenames transport persistence");
         assert_eq!(loaded_outcome, request.outcome);
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn persists_basenames_transport_direct_with_one_pool_connection() -> Result<()> {
+        let database = TestDatabase::new_with_max_connections(1).await?;
+        let request = basenames_transport_direct_request();
+        seed_supported_resolution_storage(&database, &request).await?;
+
+        let persisted = timeout(
+            Duration::from_secs(5),
+            persist_basenames_exact_name_verified_resolution_transport_direct(
+                database.pool(),
+                &request,
+            ),
+        )
+        .await
+        .expect(
+            "Basenames transport-direct persistence should not block waiting for a second pool checkout",
+        )?;
+        assert_eq!(
+            persisted,
+            PersistedVerifiedResolutionIdentity {
+                execution_trace_id: request.trace.execution_trace_id,
+                cache_key: request.outcome.cache_key.clone(),
+            }
+        );
+        assert_eq!(
+            load_execution_trace(database.pool(), persisted.execution_trace_id).await?,
+            Some(request.trace.clone())
+        );
+        assert_eq!(
+            load_execution_outcome(database.pool(), &persisted.cache_key).await?,
+            Some(request.outcome.clone())
+        );
 
         database.cleanup().await
     }

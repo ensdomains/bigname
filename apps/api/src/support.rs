@@ -252,23 +252,9 @@ fn parse_pagination(cursor: Option<&str>, page_size: Option<u64>) -> ApiResult<P
 fn paginate_window<T>(
     items: &[T],
     request: &PaginationRequest,
-    unpaged_page_size: u64,
     spec: &CursorSpec,
     item_cursor_fields: impl Fn(&T) -> BTreeMap<String, String>,
 ) -> ApiResult<PaginationWindow> {
-    if !request.active {
-        return Ok(PaginationWindow {
-            start: 0,
-            end: items.len(),
-            page: HistoryPageResponse {
-                cursor: None,
-                next_cursor: None,
-                page_size: unpaged_page_size,
-                sort: spec.sort.to_owned(),
-            },
-        });
-    }
-
     let start = match request.cursor.as_deref() {
         None => 0,
         Some(cursor) => {
@@ -303,28 +289,15 @@ fn paginate_window<T>(
 }
 
 fn storage_page_size(request: &PaginationRequest) -> u64 {
-    if request.active {
-        request.page_size
-    } else {
-        (i64::MAX as u64) - 1
-    }
+    let _ = request.active;
+    request.page_size
 }
 
 fn page_response_from_storage_cursor(
     request: &PaginationRequest,
-    unpaged_page_size: u64,
     spec: &CursorSpec,
     next_cursor_item: Option<BTreeMap<String, String>>,
 ) -> HistoryPageResponse {
-    if !request.active {
-        return HistoryPageResponse {
-            cursor: None,
-            next_cursor: None,
-            page_size: unpaged_page_size,
-            sort: spec.sort.to_owned(),
-        };
-    }
-
     HistoryPageResponse {
         cursor: request.cursor.clone(),
         next_cursor: next_cursor_item.map(|item| encode_cursor(&spec.envelope(item))),

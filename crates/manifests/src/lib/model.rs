@@ -11,6 +11,8 @@ use serde::{
 };
 use uuid::Uuid;
 
+use crate::REACHABLE_FROM_ROOT_ADMISSION;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ManifestRepository {
     pub(crate) root: PathBuf,
@@ -429,6 +431,7 @@ pub struct ManifestContract {
 pub struct DiscoveryRule {
     pub edge_kind: String,
     pub from_role: String,
+    #[serde(deserialize_with = "deserialize_authored_discovery_rule_admission")]
     pub admission: String,
 }
 
@@ -546,4 +549,20 @@ where
     }
 
     deserializer.deserialize_option(OptionalStartBlockVisitor)
+}
+
+fn deserialize_authored_discovery_rule_admission<'de, D>(
+    deserializer: D,
+) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let admission = String::deserialize(deserializer)?;
+    if admission == REACHABLE_FROM_ROOT_ADMISSION {
+        Ok(admission)
+    } else {
+        Err(de::Error::custom(format!(
+            "unsupported authored discovery_rules[].admission \"{admission}\"; expected \"{REACHABLE_FROM_ROOT_ADMISSION}\""
+        )))
+    }
 }

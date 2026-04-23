@@ -158,6 +158,8 @@ pub(crate) async fn reconcile_manifest_source_graph(
         MANIFEST_SUCCESSOR_DISCOVERY_SOURCE,
     )
     .await?;
+    cleared_edge_count +=
+        deactivate_discovery_edges_without_active_source_manifest(executor).await?;
 
     reconcile_active_contract_instance_addresses(executor).await?;
 
@@ -497,6 +499,29 @@ async fn reconcile_managed_edges(
     }
 
     Ok(cleared_edge_count)
+}
+
+async fn deactivate_discovery_edges_without_active_source_manifest(
+    executor: &mut sqlx::postgres::PgConnection,
+) -> Result<usize> {
+    let result = sqlx::query(
+        r#"
+        UPDATE discovery_edges de
+        SET deactivated_at = now()
+        WHERE de.deactivated_at IS NULL
+          AND NOT EXISTS (
+              SELECT 1
+              FROM manifest_versions mv
+              WHERE mv.manifest_id = de.source_manifest_id
+                AND mv.rollout_status = 'active'
+          )
+        "#,
+    )
+    .execute(&mut *executor)
+    .await
+    .context("failed to deactivate discovery edges without an active source manifest")?;
+
+    Ok(result.rows_affected() as usize)
 }
 
 pub(crate) async fn reconcile_active_contract_instance_addresses(

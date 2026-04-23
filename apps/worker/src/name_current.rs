@@ -178,18 +178,21 @@ pub async fn rebuild_name_current(
 
 async fn rebuild_all_name_current(pool: &PgPool) -> Result<NameCurrentRebuildSummary> {
     let names = load_canonical_name_surfaces(pool).await?;
-    let _ = clear_name_current(pool).await?;
-
     let mut rows = Vec::with_capacity(names.len());
     for name in &names {
         rows.push(build_name_current_row(pool, name).await?);
     }
 
     let upserted_row_count = upsert_name_current_rows(pool, &rows).await?.len();
+    let logical_name_ids = rows
+        .iter()
+        .map(|row| row.logical_name_id.clone())
+        .collect::<Vec<_>>();
+    let deleted_row_count = delete_stale_name_current_rows(pool, &logical_name_ids).await?;
     Ok(NameCurrentRebuildSummary {
         requested_name_count: names.len(),
         upserted_row_count,
-        deleted_row_count: 0,
+        deleted_row_count,
     })
 }
 
@@ -197,8 +200,8 @@ async fn rebuild_one_name_current(
     pool: &PgPool,
     logical_name_id: &str,
 ) -> Result<NameCurrentRebuildSummary> {
-    let deleted_row_count = delete_name_current(pool, logical_name_id).await?;
     let Some(name) = load_canonical_name_surface(pool, logical_name_id).await? else {
+        let deleted_row_count = delete_name_current(pool, logical_name_id).await?;
         return Ok(NameCurrentRebuildSummary {
             requested_name_count: 1,
             upserted_row_count: 0,
@@ -211,8 +214,30 @@ async fn rebuild_one_name_current(
     Ok(NameCurrentRebuildSummary {
         requested_name_count: 1,
         upserted_row_count,
-        deleted_row_count,
+        deleted_row_count: 0,
     })
+}
+
+async fn delete_stale_name_current_rows(pool: &PgPool, logical_name_ids: &[String]) -> Result<u64> {
+    if logical_name_ids.is_empty() {
+        return clear_name_current(pool).await;
+    }
+
+    sqlx::query(
+        r#"
+        DELETE FROM name_current current
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM UNNEST($1::TEXT[]) AS replacement(logical_name_id)
+            WHERE replacement.logical_name_id = current.logical_name_id
+        )
+        "#,
+    )
+    .bind(logical_name_ids)
+    .execute(pool)
+    .await
+    .context("failed to delete stale name_current rows after rebuild")
+    .map(|result| result.rows_affected())
 }
 
 async fn build_name_current_row(pool: &PgPool, name: &NameSurfaceSeed) -> Result<NameCurrentRow> {
@@ -1314,8 +1339,9 @@ mod tests {
     use anyhow::Result;
     use bigname_storage::{
         NameSurface, NormalizedEvent, RawBlock, Resource, SurfaceBinding, TokenLineage,
-        default_database_url, load_name_current, upsert_name_surfaces, upsert_normalized_events,
-        upsert_raw_blocks, upsert_resources, upsert_surface_bindings, upsert_token_lineages,
+        default_database_url, load_name_current, upsert_name_current_rows, upsert_name_surfaces,
+        upsert_normalized_events, upsert_raw_blocks, upsert_resources, upsert_surface_bindings,
+        upsert_token_lineages,
     };
 
     use super::*;
@@ -3199,6 +3225,86 @@ mod tests {
             .context("second rebuild row must exist")?;
 
         assert_eq!(first_row, second_row);
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn keyed_rebuild_keeps_visible_row_when_projection_build_fails() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let binding = IdentityBinding::new("ens:alice.eth", "alice.eth", 0x8100, 0x8200, 0x8300);
+
+        seed_raw_blocks(
+            database.pool(),
+            &[raw_block("ethereum-mainnet", "0xgrant", 401, 1_717_172_001)],
+        )
+        .await?;
+        seed_identity(database.pool(), &binding, "0xgrant", 401, 1_717_172_001).await?;
+        upsert_name_current_rows(
+            database.pool(),
+            &[NameCurrentRow {
+                logical_name_id: binding.logical_name_id.clone(),
+                namespace: "ens".to_owned(),
+                canonical_display_name: "alice.eth".to_owned(),
+                normalized_name: "alice.eth".to_owned(),
+                namehash: "node:alice.eth".to_owned(),
+                surface_binding_id: None,
+                resource_id: None,
+                token_lineage_id: None,
+                binding_kind: None,
+                declared_summary: json!({"status": "stale"}),
+                provenance: json!({"derivation_kind": NAME_CURRENT_DERIVATION_KIND}),
+                coverage: json!({"status": "supported"}),
+                chain_positions: json!({}),
+                canonicality_summary: json!({
+                    "status": "finalized",
+                    "chains": {"ethereum-mainnet": "finalized"}
+                }),
+                manifest_version: 1,
+                last_recomputed_at: timestamp(1_717_172_001),
+            }],
+        )
+        .await?;
+        seed_events(
+            database.pool(),
+            &[NormalizedEvent {
+                event_identity: "resolver-missing-chain".to_owned(),
+                namespace: "ens".to_owned(),
+                logical_name_id: Some(binding.logical_name_id.clone()),
+                resource_id: Some(binding.resource_id),
+                event_kind: EVENT_KIND_RESOLVER_CHANGED.to_owned(),
+                source_family: "ens_v1_registry_l1".to_owned(),
+                manifest_version: 1,
+                source_manifest_id: None,
+                chain_id: None,
+                block_number: Some(402),
+                block_hash: Some("0xresolver".to_owned()),
+                transaction_hash: Some("0xtxresolver".to_owned()),
+                log_index: Some(0),
+                raw_fact_ref: json!({
+                    "kind": "raw_log",
+                    "block_hash": "0xresolver",
+                    "log_index": 0
+                }),
+                derivation_kind: ENS_V1_AUTHORITY_DERIVATION_KIND.to_owned(),
+                canonicality_state: CanonicalityState::Finalized,
+                before_state: json!({}),
+                after_state: json!({
+                    "resolver": "0x0000000000000000000000000000000000000def"
+                }),
+            }],
+        )
+        .await?;
+
+        let error = rebuild_name_current(database.pool(), Some(&binding.logical_name_id))
+            .await
+            .expect_err("rebuild should fail when a resolver event is missing chain_id");
+        assert!(error.to_string().contains("ResolverChanged event"));
+
+        let row = load_name_current(database.pool(), &binding.logical_name_id)
+            .await?
+            .context("stale visible row should still exist after failed rebuild")?;
+        assert_eq!(row.declared_summary["status"], json!("stale"));
 
         database.cleanup().await
     }

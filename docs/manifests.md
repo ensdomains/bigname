@@ -53,6 +53,10 @@ first historical block for that manifest-declared target. Omitted
 must preserve that unknown state rather than inferring block zero, the current
 job range start, the manifest version activation height, or any other fallback.
 
+For `[[contracts]]`, `proxy_kind` is required on every entry. `proxy_kind = "none"` must omit `implementation`; any non-`none` `proxy_kind` must include `implementation` as the current implementation address for that manifest version.
+
+For `[[discovery_rules]]`, the currently shipped schema freezes `admission` to one authorable literal: `reachable_from_root`. That literal means the discovered edge is authoritative only while its `from_role` endpoint remains reachable from an active manifest root under an allowed rule. Internal persistence admissions such as `manifest_declared` and `manifest_successor` are storage/discovery labels, not legal `[[discovery_rules]]` literals.
+
 ### `rollout_status`
 
 - `draft`
@@ -229,7 +233,8 @@ Rules:
 - `[[roots]]` seed canonical graph expansion and watch-plan expansion, but otherwise follow the same identity and continuity rules as `[[contracts]]`
 - reusing the same declared address on the same chain across manifest versions, including after an inactive gap, carries forward the existing `contract_instance_id` and records a new non-overlapping active range
 - changing a root or contract entry's own declared address closes the prior instance active range and admits a new `contract_instance_id`; any continuity to the predecessor is expressed by a `migration` edge, not by ID reuse
-- when `proxy_kind != "none"`, the proxy address and the `implementation` address refer to separate contract instances linked by a time-ranged proxy / implementation edge
+- when `proxy_kind = "none"`, the declared address resolves directly to the admitted contract instance for that role and `implementation` must be omitted
+- when `proxy_kind != "none"`, `implementation` must be present and the proxy address plus the `implementation` address refer to separate contract instances linked by a time-ranged proxy / implementation edge
 - changing only `implementation` keeps the proxy's `contract_instance_id`; reuse the prior implementation instance if that implementation address reappears, otherwise mint a new implementation instance
 
 Contract addresses remain stored as time-ranged attributes for raw-fact matching and watch-plan expansion.

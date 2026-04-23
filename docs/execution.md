@@ -39,7 +39,7 @@ Verified resolution follows this sequence:
 3. resolve resolver selection, alias rewrites, and wildcard traversal
 4. execute onchain calls
 5. follow CCIP-Read when allowed by the manifest and resolver family
-6. persist the execution trace and final answer
+6. hand off any admitted exact block-anchored call snapshots to intake-owned raw facts and persist the execution trace and final answer
 
 For the namespace-inferred convenience route `GET /v1/resolve/{name}`, inference happens before step 1 and produces the canonical `{namespace, name}` tuple used by the rest of the flow:
 
@@ -64,6 +64,9 @@ Rules:
 - execution returns one `verified_queries` result object per requested selector and uses the shared `ResultStatus` vocabulary
 - execution entrypoint selection is attributable to the manifest-declared `source_family` and `role`; it is not implied by registry-family presence alone
 - wildcard traversal and alias rewriting must be explicit in the trace
+- admitted exact block-anchored `raw_call_snapshots` stay intake-owned raw facts keyed by the exact requested chain position; execution may supply them only as a narrow persistence handoff for support classes that explicitly admit them, and they do not become execution-owned trace rows
+- before persisting a selector-local verified result as a supported outcome eligible for cache reuse or public explain, execution must reload from storage the manifest versions for the request, the same declared topology snapshot the mixed route would serve for the same request and chain positions, and any resolver-profile admission state already required by the participating resolver-local fact families; the namespace support class is derived from those stored inputs rather than from transient trace shape alone
+- if that stored revalidation cannot re-establish one frozen supported class, execution may persist audit trace material but must fail closed on supported-outcome persistence
 - namespace inference and verified support are separate gates: inferred `namespace=basenames` requests never retry as `namespace=ens` outside the Basenames exact-surface transport-assisted direct-path support class
 - unsupported record families stay explicit as `status=unsupported`; they do not silently degrade to declared cache values
 - supported selector requests that cannot produce a trustworthy answer return `status=execution_failed` with a typed `failure_reason`
@@ -142,6 +145,8 @@ Each step records:
 - output digest
 - latency
 - canonicality dependency
+
+Admitted exact block-anchored `raw_call_snapshots` are not part of this trace schema. They remain intake-owned raw facts keyed by exact block identity even when a verified-resolution persistence path hands them off alongside the trace.
 
 Execution traces and execution steps are durable audit artifacts. Reorg-driven cache invalidation must not delete `execution_traces`, `execution_steps`, object-store attachments, or the trace-local step list; it only changes whether a persisted verified outcome can be reused as a cache hit.
 

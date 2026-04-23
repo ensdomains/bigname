@@ -537,6 +537,94 @@ async fn get_primary_names_reads_declared_claim_provenance_for_exact_tuple() -> 
 }
 
 #[tokio::test]
+async fn get_primary_names_promote_declared_claim_provenance_to_top_level_route_summary()
+-> Result<()> {
+    let database = TestDatabase::new(false).await?;
+    database.create_primary_names_current_table().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+
+    database
+        .insert_primary_name_current_claim_row_with_provenance(
+            address,
+            "ens",
+            "60",
+            PrimaryNameClaimStatus::Success,
+            None,
+            json!({
+                "normalized_event_ids": [101, 102],
+                "raw_fact_refs": [{
+                    "kind": "raw_log",
+                    "block_number": 101,
+                }],
+                "manifest_versions": [{
+                    "manifest_version": 7,
+                    "source_family": "ens_v1_reverse_l1",
+                    "source_manifest_id": null,
+                }],
+                "derivation_kind": "primary_name_projection_rebuild",
+                "verified_primary_name_lookup": {
+                    "address": address,
+                    "namespace": "ens",
+                    "coin_type": "60",
+                },
+            }),
+        )
+        .await?;
+    database
+        .insert_primary_name_current_normalized_claim_name(address, "ens", "60", Some("alice.eth"))
+        .await?;
+
+    let declared_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/primary-names/{address}?namespace=ens&coin_type=60&mode=declared"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("declared primary-name top-level provenance request failed")?;
+    let both_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/primary-names/{address}?namespace=ens&coin_type=60&mode=both"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("mixed primary-name top-level provenance request failed")?;
+
+    assert_eq!(declared_response.status(), StatusCode::OK);
+    assert_eq!(both_response.status(), StatusCode::OK);
+
+    let declared_payload: PrimaryNameResponse = read_json(declared_response).await?;
+    let both_payload: PrimaryNameResponse = read_json(both_response).await?;
+    let expected_provenance = json!({
+        "normalized_event_ids": ["101", "102"],
+        "raw_fact_refs": [{
+            "kind": "raw_log",
+            "block_number": 101,
+        }],
+        "manifest_versions": [{
+            "manifest_version": 7,
+            "source_family": "ens_v1_reverse_l1",
+            "source_manifest_id": null,
+        }],
+        "execution_trace_id": null,
+        "derivation_kind": "primary_name_projection_rebuild",
+    });
+
+    assert_eq!(declared_payload.provenance, expected_provenance);
+    assert_eq!(both_payload.provenance, expected_provenance);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn get_primary_names_reads_raw_claim_name_for_invalid_name_exact_tuple() -> Result<()> {
     let database = TestDatabase::new(false).await?;
     database.create_primary_names_current_table().await?;

@@ -470,11 +470,14 @@ pub(crate) async fn reconcile_fetched_heads(
     let head_change_set = head_change_set(task, heads, &canonical);
 
     if canonical.status == CanonicalReconciliationStatus::ReorgReconciled {
-        if let Some(current_canonical_hash) = task.checkpoint.canonical_block_hash.as_deref()
-            && load_raw_block(pool, &task.chain, current_canonical_hash)
-                .await?
-                .is_some()
-        {
+        if let Some(current_canonical_hash) = task.checkpoint.canonical_block_hash.as_deref() {
+            ensure_losing_branch_raw_blocks_exist(
+                pool,
+                &task.chain,
+                current_canonical_hash,
+                canonical.raw_orphan_stop_before_hash.as_deref(),
+            )
+            .await?;
             mark_raw_block_facts_range_orphaned(
                 pool,
                 &task.chain,
@@ -1115,6 +1118,58 @@ pub(crate) async fn sync_adapter_state_from_scoped_persisted_raw_payloads(
     )
     .await?;
     log_block_derived_normalized_event_summary(chain, &normalized_event_summary);
+
+    Ok(())
+}
+
+async fn ensure_losing_branch_raw_blocks_exist(
+    pool: &sqlx::PgPool,
+    chain: &str,
+    from_hash: &str,
+    stop_before_hash: Option<&str>,
+) -> Result<()> {
+    if stop_before_hash == Some(from_hash) {
+        return Ok(());
+    }
+
+    let mut missing_raw_blocks = Vec::<RawBlock>::new();
+    let mut cursor_hash = Some(from_hash.to_owned());
+
+    while let Some(block_hash) = cursor_hash {
+        if Some(block_hash.as_str()) == stop_before_hash {
+            break;
+        }
+
+        if let Some(raw_block) = load_raw_block(pool, chain, &block_hash).await? {
+            cursor_hash = raw_block.parent_hash.clone();
+            continue;
+        }
+
+        let lineage_block = load_chain_lineage_block(pool, chain, &block_hash)
+            .await?
+            .with_context(|| {
+                format!(
+                    "missing stored lineage row for chain {chain} block {block_hash} while materializing losing-branch raw blocks"
+                )
+            })?;
+        cursor_hash = lineage_block.parent_hash.clone();
+        missing_raw_blocks.push(RawBlock {
+            chain_id: lineage_block.chain_id,
+            block_hash: lineage_block.block_hash,
+            parent_hash: lineage_block.parent_hash,
+            block_number: lineage_block.block_number,
+            block_timestamp: lineage_block.block_timestamp,
+            logs_bloom: lineage_block.logs_bloom,
+            transactions_root: lineage_block.transactions_root,
+            receipts_root: lineage_block.receipts_root,
+            state_root: lineage_block.state_root,
+            canonicality_state: CanonicalityState::Orphaned,
+        });
+    }
+
+    if !missing_raw_blocks.is_empty() {
+        upsert_raw_blocks(pool, &missing_raw_blocks).await?;
+    }
 
     Ok(())
 }

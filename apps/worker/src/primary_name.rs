@@ -75,7 +75,6 @@ pub async fn rebuild_primary_names_current(
 async fn rebuild_all_primary_names(pool: &PgPool) -> Result<PrimaryNamesCurrentRebuildSummary> {
     let tuples = load_reverse_claim_tuples(pool).await?;
     let claim_observations = load_latest_name_claim_observations(pool).await?;
-    let deleted_row_count = clear_primary_names_current(pool).await?;
     let projections = tuples
         .iter()
         .map(|tuple| {
@@ -90,6 +89,7 @@ async fn rebuild_all_primary_names(pool: &PgPool) -> Result<PrimaryNamesCurrentR
     let upserted_row_count = upsert_primary_name_current_snapshots(pool, &projections)
         .await?
         .len();
+    let deleted_row_count = delete_stale_primary_name_current_rows(pool, &projections).await?;
     let status_counts = count_statuses(&rows);
 
     Ok(PrimaryNamesCurrentRebuildSummary {
@@ -113,10 +113,6 @@ async fn rebuild_one_primary_name(
         namespace: namespace.to_owned(),
         coin_type: coin_type.to_owned(),
     };
-    let deleted_row_count =
-        delete_primary_name_current(pool, &target.address, &target.namespace, &target.coin_type)
-            .await?;
-
     let projected_row = match load_reverse_claim_tuple(pool, &target).await? {
         Some(tuple) => {
             let claim_observation = load_latest_name_claim_observation(pool, &target).await?;
@@ -132,6 +128,13 @@ async fn rebuild_one_primary_name(
         }
         None => 0,
     };
+    let deleted_row_count = match projected_row.as_ref() {
+        Some(_) => 0,
+        None => {
+            delete_primary_name_current(pool, &target.address, &target.namespace, &target.coin_type)
+                .await?
+        }
+    };
     let projected_rows = projected_row
         .iter()
         .map(|projection| projection.row.clone())
@@ -146,6 +149,52 @@ async fn rebuild_one_primary_name(
         not_found_row_count: status_counts.not_found_row_count,
         invalid_name_row_count: status_counts.invalid_name_row_count,
     })
+}
+
+async fn delete_stale_primary_name_current_rows(
+    pool: &PgPool,
+    projections: &[PrimaryNameCurrentSnapshot],
+) -> Result<u64> {
+    if projections.is_empty() {
+        return clear_primary_names_current(pool).await;
+    }
+
+    let addresses = projections
+        .iter()
+        .map(|projection| projection.row.address.clone())
+        .collect::<Vec<_>>();
+    let namespaces = projections
+        .iter()
+        .map(|projection| projection.row.namespace.clone())
+        .collect::<Vec<_>>();
+    let coin_types = projections
+        .iter()
+        .map(|projection| projection.row.coin_type.clone())
+        .collect::<Vec<_>>();
+
+    sqlx::query(
+        r#"
+        DELETE FROM primary_names_current current
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM UNNEST($1::TEXT[], $2::TEXT[], $3::TEXT[]) AS replacement(
+                address,
+                namespace,
+                coin_type
+            )
+            WHERE replacement.address = current.address
+              AND replacement.namespace = current.namespace
+              AND replacement.coin_type = current.coin_type
+        )
+        "#,
+    )
+    .bind(&addresses)
+    .bind(&namespaces)
+    .bind(&coin_types)
+    .execute(pool)
+    .await
+    .context("failed to delete stale primary_names_current rows after rebuild")
+    .map(|result| result.rows_affected())
 }
 
 async fn load_reverse_claim_tuples(pool: &PgPool) -> Result<Vec<ReverseClaimTuple>> {

@@ -120,7 +120,6 @@ pub async fn rebuild_address_names_current(
 
 async fn rebuild_all_addresses(pool: &PgPool) -> Result<AddressNamesCurrentRebuildSummary> {
     let bindings = load_current_bindings(pool).await?;
-    let deleted_row_count = clear_address_names_current(pool).await?;
     let rows = build_rows(pool, &bindings, None).await?;
     let requested_address_count = rows
         .iter()
@@ -128,6 +127,7 @@ async fn rebuild_all_addresses(pool: &PgPool) -> Result<AddressNamesCurrentRebui
         .collect::<BTreeSet<_>>()
         .len();
     let upserted_row_count = upsert_address_names_current_rows(pool, &rows).await?.len();
+    let deleted_row_count = delete_stale_address_names_current_rows(pool, &rows).await?;
 
     Ok(AddressNamesCurrentRebuildSummary {
         requested_address_count,
@@ -142,9 +142,11 @@ async fn rebuild_one_address(
 ) -> Result<AddressNamesCurrentRebuildSummary> {
     let normalized_address = normalize_address(address);
     let bindings = load_current_bindings(pool).await?;
-    let deleted_row_count = delete_address_names_current(pool, &normalized_address).await?;
     let rows = build_rows(pool, &bindings, Some(normalized_address.as_str())).await?;
     let upserted_row_count = upsert_address_names_current_rows(pool, &rows).await?.len();
+    let deleted_row_count =
+        delete_stale_address_names_current_rows_for_address(pool, &normalized_address, &rows)
+            .await?;
 
     Ok(AddressNamesCurrentRebuildSummary {
         requested_address_count: 1,
@@ -178,6 +180,93 @@ async fn build_rows(
     }
 
     Ok(rows)
+}
+
+async fn delete_stale_address_names_current_rows(
+    pool: &PgPool,
+    rows: &[AddressNameCurrentRow],
+) -> Result<u64> {
+    if rows.is_empty() {
+        return clear_address_names_current(pool).await;
+    }
+
+    let addresses = rows
+        .iter()
+        .map(|row| row.address.clone())
+        .collect::<Vec<_>>();
+    let logical_name_ids = rows
+        .iter()
+        .map(|row| row.logical_name_id.clone())
+        .collect::<Vec<_>>();
+    let relations = rows
+        .iter()
+        .map(|row| row.relation.as_str().to_owned())
+        .collect::<Vec<_>>();
+
+    sqlx::query(
+        r#"
+        DELETE FROM address_names_current current
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM UNNEST($1::TEXT[], $2::TEXT[], $3::TEXT[]) AS replacement(
+                address,
+                logical_name_id,
+                relation
+            )
+            WHERE replacement.address = current.address
+              AND replacement.logical_name_id = current.logical_name_id
+              AND replacement.relation = current.relation
+        )
+        "#,
+    )
+    .bind(&addresses)
+    .bind(&logical_name_ids)
+    .bind(&relations)
+    .execute(pool)
+    .await
+    .context("failed to delete stale address_names_current rows after rebuild")
+    .map(|result| result.rows_affected())
+}
+
+async fn delete_stale_address_names_current_rows_for_address(
+    pool: &PgPool,
+    address: &str,
+    rows: &[AddressNameCurrentRow],
+) -> Result<u64> {
+    if rows.is_empty() {
+        return delete_address_names_current(pool, address).await;
+    }
+
+    let logical_name_ids = rows
+        .iter()
+        .map(|row| row.logical_name_id.clone())
+        .collect::<Vec<_>>();
+    let relations = rows
+        .iter()
+        .map(|row| row.relation.as_str().to_owned())
+        .collect::<Vec<_>>();
+
+    sqlx::query(
+        r#"
+        DELETE FROM address_names_current current
+        WHERE current.address = $1
+          AND NOT EXISTS (
+            SELECT 1
+            FROM UNNEST($2::TEXT[], $3::TEXT[]) AS replacement(logical_name_id, relation)
+            WHERE replacement.logical_name_id = current.logical_name_id
+              AND replacement.relation = current.relation
+          )
+        "#,
+    )
+    .bind(address)
+    .bind(&logical_name_ids)
+    .bind(&relations)
+    .execute(pool)
+    .await
+    .with_context(|| {
+        format!("failed to delete stale address_names_current rows for address {address}")
+    })
+    .map(|result| result.rows_affected())
 }
 
 fn build_relation_rows(

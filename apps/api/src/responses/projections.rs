@@ -532,7 +532,20 @@ fn build_record_cache_entries(
                         == Some(true)
                 })
                 .filter_map(|selector| string_field(provenance_field(selector, "record_key")))
-                .filter_map(|record_key| entry_lookup.get(&record_key).cloned())
+                .filter_map(|record_key| {
+                    parse_resolution_record_key(&record_key).map(|record| {
+                        entry_lookup
+                            .get(&record_key)
+                            .cloned()
+                            .unwrap_or_else(|| {
+                                build_missing_record_cache_entry(
+                                    &record,
+                                    &unsupported_family_lookup,
+                                    &cacheable_selector_lookup,
+                                )
+                            })
+                    })
+                })
                 .collect(),
         );
     }

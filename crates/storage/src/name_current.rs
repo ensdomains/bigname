@@ -8,6 +8,37 @@ use uuid::Uuid;
 
 use crate::SurfaceBindingKind;
 
+const DEFAULT_NAME_CURRENT_READ_FILTER: &str = r#"
+  AND surface.canonicality_state IN (
+      'canonical'::canonicality_state,
+      'safe'::canonicality_state,
+      'finalized'::canonicality_state
+  )
+  AND (
+      nc.surface_binding_id IS NULL
+      OR (
+          resource.canonicality_state IN (
+              'canonical'::canonicality_state,
+              'safe'::canonicality_state,
+              'finalized'::canonicality_state
+          )
+          AND binding.canonicality_state IN (
+              'canonical'::canonicality_state,
+              'safe'::canonicality_state,
+              'finalized'::canonicality_state
+          )
+          AND (
+              nc.token_lineage_id IS NULL
+              OR token_lineage.canonicality_state IN (
+                  'canonical'::canonicality_state,
+                  'safe'::canonicality_state,
+                  'finalized'::canonicality_state
+              )
+          )
+      )
+  )
+"#;
+
 /// Persisted current exact-name projection row served by API reads.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NameCurrentRow {
@@ -48,29 +79,38 @@ pub async fn load_name_current(
     pool: &PgPool,
     logical_name_id: &str,
 ) -> Result<Option<NameCurrentRow>> {
-    let row = sqlx::query(
+    let row = sqlx::query(&format!(
         r#"
         SELECT
-            logical_name_id,
-            namespace,
-            canonical_display_name,
-            normalized_name,
-            namehash,
-            surface_binding_id,
-            resource_id,
-            token_lineage_id,
-            binding_kind,
-            declared_summary,
-            provenance,
-            coverage,
-            chain_positions,
-            canonicality_summary,
-            manifest_version,
-            last_recomputed_at
-        FROM name_current
-        WHERE logical_name_id = $1
+            nc.logical_name_id,
+            nc.namespace,
+            nc.canonical_display_name,
+            nc.normalized_name,
+            nc.namehash,
+            nc.surface_binding_id,
+            nc.resource_id,
+            nc.token_lineage_id,
+            nc.binding_kind,
+            nc.declared_summary,
+            nc.provenance,
+            nc.coverage,
+            nc.chain_positions,
+            nc.canonicality_summary,
+            nc.manifest_version,
+            nc.last_recomputed_at
+        FROM name_current nc
+        JOIN name_surfaces surface
+          ON surface.logical_name_id = nc.logical_name_id
+        LEFT JOIN resources resource
+          ON resource.resource_id = nc.resource_id
+        LEFT JOIN surface_bindings binding
+          ON binding.surface_binding_id = nc.surface_binding_id
+        LEFT JOIN token_lineages token_lineage
+          ON token_lineage.token_lineage_id = nc.token_lineage_id
+        WHERE nc.logical_name_id = $1
+        {DEFAULT_NAME_CURRENT_READ_FILTER}
         "#,
-    )
+    ))
     .bind(logical_name_id)
     .fetch_optional(pool)
     .await
@@ -95,30 +135,39 @@ pub async fn load_name_current_by_logical_name_ids(
         return Ok(BTreeMap::new());
     }
 
-    let rows = sqlx::query(
+    let rows = sqlx::query(&format!(
         r#"
         SELECT
-            logical_name_id,
-            namespace,
-            canonical_display_name,
-            normalized_name,
-            namehash,
-            surface_binding_id,
-            resource_id,
-            token_lineage_id,
-            binding_kind,
-            declared_summary,
-            provenance,
-            coverage,
-            chain_positions,
-            canonicality_summary,
-            manifest_version,
-            last_recomputed_at
-        FROM name_current
-        WHERE logical_name_id = ANY($1::TEXT[])
-        ORDER BY logical_name_id
+            nc.logical_name_id,
+            nc.namespace,
+            nc.canonical_display_name,
+            nc.normalized_name,
+            nc.namehash,
+            nc.surface_binding_id,
+            nc.resource_id,
+            nc.token_lineage_id,
+            nc.binding_kind,
+            nc.declared_summary,
+            nc.provenance,
+            nc.coverage,
+            nc.chain_positions,
+            nc.canonicality_summary,
+            nc.manifest_version,
+            nc.last_recomputed_at
+        FROM name_current nc
+        JOIN name_surfaces surface
+          ON surface.logical_name_id = nc.logical_name_id
+        LEFT JOIN resources resource
+          ON resource.resource_id = nc.resource_id
+        LEFT JOIN surface_bindings binding
+          ON binding.surface_binding_id = nc.surface_binding_id
+        LEFT JOIN token_lineages token_lineage
+          ON token_lineage.token_lineage_id = nc.token_lineage_id
+        WHERE nc.logical_name_id = ANY($1::TEXT[])
+        {DEFAULT_NAME_CURRENT_READ_FILTER}
+        ORDER BY nc.logical_name_id
         "#,
-    )
+    ))
     .bind(logical_name_ids)
     .fetch_all(pool)
     .await
@@ -666,6 +715,20 @@ mod tests {
         Ok(())
     }
 
+    async fn orphan_resource(database: &TestDatabase, resource_id: Uuid) -> Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE resources
+            SET canonicality_state = 'orphaned'::canonicality_state
+            WHERE resource_id = $1
+            "#,
+        )
+        .bind(resource_id)
+        .execute(database.pool())
+        .await?;
+        Ok(())
+    }
+
     fn name_current_row(
         logical_name_id: &str,
         surface_binding_id: Uuid,
@@ -822,6 +885,57 @@ mod tests {
         assert!(!loaded.contains_key("ens:missing.eth"));
         assert_eq!(
             NameCurrentRow::load_by_logical_name_ids(database.pool(), &requested).await?,
+            loaded
+        );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn name_current_excludes_rows_with_orphaned_backing_resources() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let logical_name_id = "ens:alice.eth";
+        let token_lineage_id = Uuid::from_u128(0xb100);
+        let resource_id = Uuid::from_u128(0xb200);
+        let surface_binding_id = Uuid::from_u128(0xb300);
+
+        seed_binding_references(
+            &database,
+            logical_name_id,
+            "alice.eth",
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+        upsert_name_current_rows(
+            database.pool(),
+            &[name_current_row(
+                logical_name_id,
+                surface_binding_id,
+                resource_id,
+                token_lineage_id,
+            )],
+        )
+        .await?;
+
+        orphan_resource(&database, resource_id).await?;
+
+        assert_eq!(
+            load_name_current(database.pool(), logical_name_id).await?,
+            None
+        );
+
+        let loaded =
+            load_name_current_by_logical_name_ids(database.pool(), &[logical_name_id.to_owned()])
+                .await?;
+        assert!(loaded.is_empty());
+        assert_eq!(
+            NameCurrentRow::load_by_logical_name_ids(
+                database.pool(),
+                &[logical_name_id.to_owned()]
+            )
+            .await?,
             loaded
         );
 

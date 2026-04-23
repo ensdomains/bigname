@@ -9,6 +9,14 @@ use sqlx::types::time::OffsetDateTime;
 use sqlx::{PgPool, Postgres, QueryBuilder, Row, postgres::PgRow};
 use uuid::Uuid;
 
+const DEFAULT_RECORD_INVENTORY_CURRENT_READ_FILTER: &str = r#"
+  AND resource.canonicality_state IN (
+      'canonical'::canonicality_state,
+      'safe'::canonicality_state,
+      'finalized'::canonicality_state
+  )
+"#;
+
 const POSTGRES_MAX_BIND_PARAMETERS: usize = 65_535;
 const RECORD_INVENTORY_CURRENT_UPSERT_COLUMN_COUNT: usize = 15;
 const RECORD_INVENTORY_CURRENT_UPSERT_MAX_ROWS: usize =
@@ -49,28 +57,31 @@ pub async fn load_record_inventory_current(
         )
     })?;
 
-    let row = sqlx::query(
+    let row = sqlx::query(&format!(
         r#"
         SELECT
-            resource_id,
-            record_version_boundary,
-            enumeration_basis,
-            selectors,
-            explicit_gaps,
-            unsupported_families,
-            last_change,
-            entries,
-            provenance,
-            coverage,
-            chain_positions,
-            canonicality_summary,
-            manifest_version,
-            last_recomputed_at
-        FROM record_inventory_current
-        WHERE resource_id = $1
-          AND record_version_boundary_key = $2
+            ric.resource_id,
+            ric.record_version_boundary,
+            ric.enumeration_basis,
+            ric.selectors,
+            ric.explicit_gaps,
+            ric.unsupported_families,
+            ric.last_change,
+            ric.entries,
+            ric.provenance,
+            ric.coverage,
+            ric.chain_positions,
+            ric.canonicality_summary,
+            ric.manifest_version,
+            ric.last_recomputed_at
+        FROM record_inventory_current ric
+        JOIN resources resource
+          ON resource.resource_id = ric.resource_id
+        WHERE ric.resource_id = $1
+          AND ric.record_version_boundary_key = $2
+        {DEFAULT_RECORD_INVENTORY_CURRENT_READ_FILTER}
         "#,
-    )
+    ))
     .bind(resource_id)
     .bind(&record_version_boundary_key)
     .fetch_optional(pool)
@@ -1182,6 +1193,20 @@ mod tests {
         Ok(())
     }
 
+    async fn orphan_resource(database: &TestDatabase, resource_id: Uuid) -> Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE resources
+            SET canonicality_state = 'orphaned'::canonicality_state
+            WHERE resource_id = $1
+            "#,
+        )
+        .bind(resource_id)
+        .execute(database.pool())
+        .await?;
+        Ok(())
+    }
+
     fn record_version_boundary(
         resource_id: Uuid,
         logical_name_id: &str,
@@ -1456,6 +1481,39 @@ mod tests {
             )
             .await?,
             Some(replacement)
+        );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn record_inventory_current_excludes_orphaned_resources() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let resource_id = Uuid::from_u128(0x7108);
+        seed_resources(&database, &[resource_id]).await?;
+
+        let expected = record_inventory_current_row(
+            resource_id,
+            "ens:alice.eth",
+            Some(911),
+            Some("RecordsChanged"),
+            21_500_011,
+            "0xrecordinventoryk",
+            4,
+        );
+        upsert_record_inventory_current_rows(database.pool(), std::slice::from_ref(&expected))
+            .await?;
+
+        orphan_resource(&database, resource_id).await?;
+
+        assert_eq!(
+            load_record_inventory_current(
+                database.pool(),
+                resource_id,
+                &expected.record_version_boundary,
+            )
+            .await?,
+            None
         );
 
         database.cleanup().await

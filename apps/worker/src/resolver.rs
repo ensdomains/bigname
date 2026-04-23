@@ -230,7 +230,6 @@ pub async fn rebuild_resolver_current(
 async fn rebuild_all_resolvers(pool: &PgPool) -> Result<ResolverCurrentRebuildSummary> {
     let profile_gate = ResolverProfileGate::load(pool).await?;
     let targets = load_target_resolvers(pool).await?;
-    let deleted_row_count = clear_resolver_current(pool).await?;
 
     let mut rows = Vec::with_capacity(targets.len());
     for target in &targets {
@@ -240,6 +239,7 @@ async fn rebuild_all_resolvers(pool: &PgPool) -> Result<ResolverCurrentRebuildSu
     }
 
     let upserted_row_count = upsert_resolver_current_rows(pool, &rows).await?.len();
+    let deleted_row_count = delete_stale_resolver_current_rows(pool, &rows).await?;
     Ok(ResolverCurrentRebuildSummary {
         requested_resolver_count: targets.len(),
         upserted_row_count,
@@ -257,10 +257,9 @@ async fn rebuild_one_resolver(
         chain_id: chain_id.to_owned(),
         resolver_address: normalize_resolver_address(resolver_address),
     };
-    let deleted_row_count =
-        delete_resolver_current(pool, &target.chain_id, &target.resolver_address).await?;
-
     let Some(row) = build_resolver_current_row(pool, &profile_gate, &target).await? else {
+        let deleted_row_count =
+            delete_resolver_current(pool, &target.chain_id, &target.resolver_address).await?;
         return Ok(ResolverCurrentRebuildSummary {
             requested_resolver_count: 1,
             upserted_row_count: 0,
@@ -272,8 +271,44 @@ async fn rebuild_one_resolver(
     Ok(ResolverCurrentRebuildSummary {
         requested_resolver_count: 1,
         upserted_row_count,
-        deleted_row_count,
+        deleted_row_count: 0,
     })
+}
+
+async fn delete_stale_resolver_current_rows(
+    pool: &PgPool,
+    rows: &[ResolverCurrentRow],
+) -> Result<u64> {
+    if rows.is_empty() {
+        return clear_resolver_current(pool).await;
+    }
+
+    let chain_ids = rows
+        .iter()
+        .map(|row| row.chain_id.clone())
+        .collect::<Vec<_>>();
+    let resolver_addresses = rows
+        .iter()
+        .map(|row| row.resolver_address.clone())
+        .collect::<Vec<_>>();
+
+    sqlx::query(
+        r#"
+        DELETE FROM resolver_current current
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM UNNEST($1::TEXT[], $2::TEXT[]) AS replacement(chain_id, resolver_address)
+            WHERE replacement.chain_id = current.chain_id
+              AND replacement.resolver_address = current.resolver_address
+        )
+        "#,
+    )
+    .bind(&chain_ids)
+    .bind(&resolver_addresses)
+    .execute(pool)
+    .await
+    .context("failed to delete stale resolver_current rows after rebuild")
+    .map(|result| result.rows_affected())
 }
 
 async fn build_resolver_current_row(

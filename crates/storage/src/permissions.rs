@@ -6,6 +6,14 @@ use sqlx::types::time::OffsetDateTime;
 use sqlx::{PgPool, Postgres, QueryBuilder, Row, postgres::PgRow};
 use uuid::Uuid;
 
+const DEFAULT_PERMISSIONS_CURRENT_READ_FILTER: &str = r#"
+  AND resource.canonicality_state IN (
+      'canonical'::canonicality_state,
+      'safe'::canonicality_state,
+      'finalized'::canonicality_state
+  )
+"#;
+
 /// Persisted current effective permission row for one resource-anchored subject and scope.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PermissionsCurrentRow {
@@ -201,23 +209,25 @@ pub async fn load_permissions_current(
     let mut builder = QueryBuilder::<Postgres>::new(
         r#"
         SELECT
-            resource_id,
-            subject,
-            scope,
-            scope_kind,
-            scope_detail,
-            effective_powers,
-            grant_source,
-            revocation_source,
-            inheritance_path,
-            transfer_behavior,
-            provenance,
-            coverage,
-            chain_positions,
-            canonicality_summary,
-            manifest_version,
-            last_recomputed_at
-        FROM permissions_current
+            pc.resource_id,
+            pc.subject,
+            pc.scope,
+            pc.scope_kind,
+            pc.scope_detail,
+            pc.effective_powers,
+            pc.grant_source,
+            pc.revocation_source,
+            pc.inheritance_path,
+            pc.transfer_behavior,
+            pc.provenance,
+            pc.coverage,
+            pc.chain_positions,
+            pc.canonicality_summary,
+            pc.manifest_version,
+            pc.last_recomputed_at
+        FROM permissions_current pc
+        JOIN resources resource
+          ON resource.resource_id = pc.resource_id
         WHERE "#,
     );
     push_permissions_current_filters(
@@ -227,7 +237,7 @@ pub async fn load_permissions_current(
         scope_storage_key.as_deref(),
     );
 
-    builder.push(" ORDER BY subject ASC, scope ASC");
+    builder.push(" ORDER BY pc.subject ASC, pc.scope ASC");
 
     let rows = builder.build().fetch_all(pool).await.with_context(|| {
         format!("failed to load permissions_current rows for resource_id {resource_id}")
@@ -248,12 +258,14 @@ async fn load_permissions_current_full_filter_summary(
         r#"
         SELECT
             COUNT(*)::BIGINT AS row_count,
-            COALESCE(jsonb_agg(provenance ORDER BY subject ASC, scope ASC), '[]'::jsonb) AS provenance,
-            (jsonb_agg(coverage ORDER BY subject ASC, scope ASC)->0) AS coverage,
-            COALESCE(jsonb_agg(chain_positions ORDER BY subject ASC, scope ASC), '[]'::jsonb) AS chain_positions,
-            COALESCE(jsonb_agg(canonicality_summary ORDER BY subject ASC, scope ASC), '[]'::jsonb) AS canonicality_summaries,
-            MAX(last_recomputed_at) AS last_recomputed_at
-        FROM permissions_current
+            COALESCE(jsonb_agg(pc.provenance ORDER BY pc.subject ASC, pc.scope ASC), '[]'::jsonb) AS provenance,
+            (jsonb_agg(pc.coverage ORDER BY pc.subject ASC, pc.scope ASC)->0) AS coverage,
+            COALESCE(jsonb_agg(pc.chain_positions ORDER BY pc.subject ASC, pc.scope ASC), '[]'::jsonb) AS chain_positions,
+            COALESCE(jsonb_agg(pc.canonicality_summary ORDER BY pc.subject ASC, pc.scope ASC), '[]'::jsonb) AS canonicality_summaries,
+            MAX(pc.last_recomputed_at) AS last_recomputed_at
+        FROM permissions_current pc
+        JOIN resources resource
+          ON resource.resource_id = pc.resource_id
         WHERE "#,
     );
     push_permissions_current_filters(&mut builder, resource_id, subject, scope_storage_key);
@@ -283,23 +295,25 @@ pub async fn load_permissions_current_page(
         let mut page_builder = QueryBuilder::<Postgres>::new(
             r#"
             SELECT
-                resource_id,
-                subject,
-                scope,
-                scope_kind,
-                scope_detail,
-                effective_powers,
-                grant_source,
-                revocation_source,
-                inheritance_path,
-                transfer_behavior,
-                provenance,
-                coverage,
-                chain_positions,
-                canonicality_summary,
-                manifest_version,
-                last_recomputed_at
-            FROM permissions_current
+                pc.resource_id,
+                pc.subject,
+                pc.scope,
+                pc.scope_kind,
+                pc.scope_detail,
+                pc.effective_powers,
+                pc.grant_source,
+                pc.revocation_source,
+                pc.inheritance_path,
+                pc.transfer_behavior,
+                pc.provenance,
+                pc.coverage,
+                pc.chain_positions,
+                pc.canonicality_summary,
+                pc.manifest_version,
+                pc.last_recomputed_at
+            FROM permissions_current pc
+            JOIN resources resource
+              ON resource.resource_id = pc.resource_id
             WHERE "#,
         );
         push_permissions_current_filters(
@@ -309,7 +323,7 @@ pub async fn load_permissions_current_page(
             scope_storage_key.as_deref(),
         );
         push_permissions_current_keyset_cursor(&mut page_builder, cursor);
-        page_builder.push(" ORDER BY subject ASC, scope ASC LIMIT ");
+        page_builder.push(" ORDER BY pc.subject ASC, pc.scope ASC LIMIT ");
         page_builder.push_bind(limit);
 
         page_builder
@@ -366,24 +380,26 @@ pub async fn load_permissions_current_by_resource_ids(
     let mut builder = QueryBuilder::<Postgres>::new(
         r#"
         SELECT
-            resource_id,
-            subject,
-            scope,
-            scope_kind,
-            scope_detail,
-            effective_powers,
-            grant_source,
-            revocation_source,
-            inheritance_path,
-            transfer_behavior,
-            provenance,
-            coverage,
-            chain_positions,
-            canonicality_summary,
-            manifest_version,
-            last_recomputed_at
-        FROM permissions_current
-        WHERE resource_id IN ("#,
+            pc.resource_id,
+            pc.subject,
+            pc.scope,
+            pc.scope_kind,
+            pc.scope_detail,
+            pc.effective_powers,
+            pc.grant_source,
+            pc.revocation_source,
+            pc.inheritance_path,
+            pc.transfer_behavior,
+            pc.provenance,
+            pc.coverage,
+            pc.chain_positions,
+            pc.canonicality_summary,
+            pc.manifest_version,
+            pc.last_recomputed_at
+        FROM permissions_current pc
+        JOIN resources resource
+          ON resource.resource_id = pc.resource_id
+        WHERE pc.resource_id IN ("#,
     );
     {
         let mut separated = builder.separated(", ");
@@ -392,7 +408,8 @@ pub async fn load_permissions_current_by_resource_ids(
         }
         separated.push_unseparated(")");
     }
-    builder.push(" ORDER BY resource_id ASC, subject ASC, scope ASC");
+    builder.push(DEFAULT_PERMISSIONS_CURRENT_READ_FILTER);
+    builder.push(" ORDER BY pc.resource_id ASC, pc.subject ASC, pc.scope ASC");
 
     let rows = builder.build().fetch_all(pool).await.with_context(|| {
         format!(
@@ -423,26 +440,33 @@ pub async fn load_permissions_current_for_resolver_scope(
     let rows = sqlx::query(
         r#"
         SELECT
-            resource_id,
-            subject,
-            scope,
-            scope_kind,
-            scope_detail,
-            effective_powers,
-            grant_source,
-            revocation_source,
-            inheritance_path,
-            transfer_behavior,
-            provenance,
-            coverage,
-            chain_positions,
-            canonicality_summary,
-            manifest_version,
-            last_recomputed_at
-        FROM permissions_current
-        WHERE scope = $1
-          AND scope_kind = 'resolver'
-        ORDER BY subject ASC, resource_id ASC, manifest_version ASC
+            pc.resource_id,
+            pc.subject,
+            pc.scope,
+            pc.scope_kind,
+            pc.scope_detail,
+            pc.effective_powers,
+            pc.grant_source,
+            pc.revocation_source,
+            pc.inheritance_path,
+            pc.transfer_behavior,
+            pc.provenance,
+            pc.coverage,
+            pc.chain_positions,
+            pc.canonicality_summary,
+            pc.manifest_version,
+            pc.last_recomputed_at
+        FROM permissions_current pc
+        JOIN resources resource
+          ON resource.resource_id = pc.resource_id
+        WHERE pc.scope = $1
+          AND pc.scope_kind = 'resolver'
+          AND resource.canonicality_state IN (
+              'canonical'::canonicality_state,
+              'safe'::canonicality_state,
+              'finalized'::canonicality_state
+          )
+        ORDER BY pc.subject ASC, pc.resource_id ASC, pc.manifest_version ASC
         "#,
     )
     .bind(scope)
@@ -466,14 +490,21 @@ pub async fn load_permissions_current_resolver_targets(
     let rows = sqlx::query(
         r#"
         SELECT DISTINCT
-            scope_detail->>'chain_id' AS chain_id,
-            LOWER(scope_detail->>'resolver_address') AS resolver_address
-        FROM permissions_current
-        WHERE scope_kind = 'resolver'
-          AND scope_detail->>'chain_id' IS NOT NULL
-          AND scope_detail->>'chain_id' <> ''
-          AND scope_detail->>'resolver_address' IS NOT NULL
-          AND scope_detail->>'resolver_address' <> ''
+            pc.scope_detail->>'chain_id' AS chain_id,
+            LOWER(pc.scope_detail->>'resolver_address') AS resolver_address
+        FROM permissions_current pc
+        JOIN resources resource
+          ON resource.resource_id = pc.resource_id
+        WHERE pc.scope_kind = 'resolver'
+          AND pc.scope_detail->>'chain_id' IS NOT NULL
+          AND pc.scope_detail->>'chain_id' <> ''
+          AND pc.scope_detail->>'resolver_address' IS NOT NULL
+          AND pc.scope_detail->>'resolver_address' <> ''
+          AND resource.canonicality_state IN (
+              'canonical'::canonicality_state,
+              'safe'::canonicality_state,
+              'finalized'::canonicality_state
+          )
         ORDER BY chain_id, resolver_address
         "#,
     )
@@ -785,18 +816,20 @@ fn push_permissions_current_filters<'a>(
     subject: Option<&'a str>,
     scope_storage_key: Option<&'a str>,
 ) {
-    builder.push("resource_id = ");
+    builder.push("pc.resource_id = ");
     builder.push_bind(resource_id);
 
     if let Some(subject) = subject {
-        builder.push(" AND subject = ");
+        builder.push(" AND pc.subject = ");
         builder.push_bind(subject);
     }
 
     if let Some(scope_storage_key) = scope_storage_key {
-        builder.push(" AND scope = ");
+        builder.push(" AND pc.scope = ");
         builder.push_bind(scope_storage_key);
     }
+
+    builder.push(DEFAULT_PERMISSIONS_CURRENT_READ_FILTER);
 }
 
 fn push_permissions_current_keyset_cursor<'a>(
@@ -804,7 +837,7 @@ fn push_permissions_current_keyset_cursor<'a>(
     cursor: Option<&'a PermissionsCurrentKeysetCursor>,
 ) {
     if let Some(cursor) = cursor {
-        builder.push(" AND (subject, scope) > (");
+        builder.push(" AND (pc.subject, pc.scope) > (");
         builder.push_bind(&cursor.subject);
         builder.push(", ");
         builder.push_bind(&cursor.scope);
@@ -951,6 +984,20 @@ mod tests {
             })
             .collect::<Vec<_>>();
         upsert_resources(database.pool(), &resources).await?;
+        Ok(())
+    }
+
+    async fn orphan_resource(database: &TestDatabase, resource_id: Uuid) -> Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE resources
+            SET canonicality_state = 'orphaned'::canonicality_state
+            WHERE resource_id = $1
+            "#,
+        )
+        .bind(resource_id)
+        .execute(database.pool())
+        .await?;
         Ok(())
     }
 
@@ -1212,6 +1259,70 @@ mod tests {
         assert_eq!(clear_permissions_current(database.pool()).await?, 1);
         assert!(
             load_permissions_current(database.pool(), second_resource_id, None, None)
+                .await?
+                .is_empty()
+        );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn permissions_current_excludes_orphaned_resources_across_readers() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let resource_id = Uuid::from_u128(0x6480);
+        seed_resources(&database, &[resource_id]).await?;
+
+        let resolver_row = permissions_current_row(
+            resource_id,
+            "0x0000000000000000000000000000000000000abc",
+            PermissionScope::Resolver {
+                chain_id: "ethereum-mainnet".to_owned(),
+                resolver_address: "0x0000000000000000000000000000000000000def".to_owned(),
+            },
+            3,
+        );
+        upsert_permissions_current_rows(database.pool(), std::slice::from_ref(&resolver_row))
+            .await?;
+
+        orphan_resource(&database, resource_id).await?;
+
+        assert!(
+            load_permissions_current(database.pool(), resource_id, None, None)
+                .await?
+                .is_empty()
+        );
+
+        let page =
+            load_permissions_current_page(database.pool(), resource_id, None, None, None, 10)
+                .await?;
+        assert!(page.rows.is_empty());
+        assert_eq!(page.summary.row_count, 0);
+        assert!(page.summary.provenance.is_empty());
+        assert_eq!(page.summary.coverage, None);
+        assert!(page.summary.chain_positions.is_empty());
+        assert!(page.summary.canonicality_summaries.is_empty());
+        assert_eq!(page.summary.last_recomputed_at, None);
+
+        let grouped =
+            load_permissions_current_by_resource_ids(database.pool(), &[resource_id]).await?;
+        assert!(
+            grouped
+                .get(&resource_id)
+                .expect("requested resource id must be present in grouped output")
+                .is_empty()
+        );
+
+        assert!(
+            load_permissions_current_for_resolver_scope(
+                database.pool(),
+                "ethereum-mainnet",
+                "0x0000000000000000000000000000000000000def",
+            )
+            .await?
+            .is_empty()
+        );
+        assert!(
+            load_permissions_current_resolver_targets(database.pool())
                 .await?
                 .is_empty()
         );

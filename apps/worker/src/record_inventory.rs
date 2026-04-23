@@ -206,7 +206,6 @@ pub async fn rebuild_record_inventory_current(
 async fn rebuild_all_resources(pool: &PgPool) -> Result<RecordInventoryCurrentRebuildSummary> {
     let profile_gate = ResolverProfileGate::load(pool).await?;
     let resource_ids = load_target_resource_ids(pool).await?;
-    let deleted_row_count = clear_record_inventory_current(pool).await?;
 
     let mut rows = Vec::with_capacity(resource_ids.len());
     for resource_id in &resource_ids {
@@ -218,6 +217,7 @@ async fn rebuild_all_resources(pool: &PgPool) -> Result<RecordInventoryCurrentRe
     let upserted_row_count = upsert_record_inventory_current_rows(pool, &rows)
         .await?
         .len();
+    let deleted_row_count = delete_stale_record_inventory_current_rows(pool, &rows).await?;
     Ok(RecordInventoryCurrentRebuildSummary {
         requested_resource_count: resource_ids.len(),
         upserted_row_count,
@@ -232,9 +232,9 @@ async fn rebuild_one_resource(
     let profile_gate = ResolverProfileGate::load(pool).await?;
     let resource_id = Uuid::parse_str(resource_id)
         .with_context(|| format!("resource_id must be a UUID: {resource_id}"))?;
-    let deleted_row_count = delete_record_inventory_rows_for_resource(pool, resource_id).await?;
-
     let Some(row) = build_row(pool, &profile_gate, resource_id).await? else {
+        let deleted_row_count =
+            delete_record_inventory_rows_for_resource(pool, resource_id).await?;
         return Ok(RecordInventoryCurrentRebuildSummary {
             requested_resource_count: 1,
             upserted_row_count: 0,
@@ -242,9 +242,11 @@ async fn rebuild_one_resource(
         });
     };
 
-    let upserted_row_count = upsert_record_inventory_current_rows(pool, &[row])
+    let upserted_row_count = upsert_record_inventory_current_rows(pool, std::slice::from_ref(&row))
         .await?
         .len();
+    let deleted_row_count =
+        delete_stale_record_inventory_current_rows_for_resource(pool, resource_id, &row).await?;
     Ok(RecordInventoryCurrentRebuildSummary {
         requested_resource_count: 1,
         upserted_row_count,
@@ -267,6 +269,72 @@ async fn delete_record_inventory_rows_for_resource(
     .await
     .with_context(|| {
         format!("failed to delete record_inventory_current rows for resource_id {resource_id}")
+    })
+    .map(|result| result.rows_affected())
+}
+
+async fn delete_stale_record_inventory_current_rows(
+    pool: &PgPool,
+    rows: &[RecordInventoryCurrentRow],
+) -> Result<u64> {
+    if rows.is_empty() {
+        return clear_record_inventory_current(pool).await;
+    }
+
+    let resource_ids = rows.iter().map(|row| row.resource_id).collect::<Vec<_>>();
+    let record_version_boundaries = rows
+        .iter()
+        .map(|row| {
+            serde_json::to_string(&row.record_version_boundary)
+                .context("failed to serialize record_inventory_current boundary for cleanup")
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    sqlx::query(
+        r#"
+        DELETE FROM record_inventory_current current
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM UNNEST($1::UUID[], $2::TEXT[]) AS replacement(
+                resource_id,
+                record_version_boundary
+            )
+            WHERE replacement.resource_id = current.resource_id
+              AND replacement.record_version_boundary::JSONB = current.record_version_boundary
+        )
+        "#,
+    )
+    .bind(&resource_ids)
+    .bind(&record_version_boundaries)
+    .execute(pool)
+    .await
+    .context("failed to delete stale record_inventory_current rows after rebuild")
+    .map(|result| result.rows_affected())
+}
+
+async fn delete_stale_record_inventory_current_rows_for_resource(
+    pool: &PgPool,
+    resource_id: Uuid,
+    row: &RecordInventoryCurrentRow,
+) -> Result<u64> {
+    let record_version_boundary = serde_json::to_string(&row.record_version_boundary)
+        .context("failed to serialize record_inventory_current boundary for cleanup")?;
+
+    sqlx::query(
+        r#"
+        DELETE FROM record_inventory_current current
+        WHERE current.resource_id = $1
+          AND current.record_version_boundary <> $2::JSONB
+        "#,
+    )
+    .bind(resource_id)
+    .bind(record_version_boundary)
+    .execute(pool)
+    .await
+    .with_context(|| {
+        format!(
+            "failed to delete stale record_inventory_current rows for resource_id {resource_id}"
+        )
     })
     .map(|result| result.rows_affected())
 }
@@ -1261,7 +1329,7 @@ mod tests {
                 .await?;
         assert_eq!(summary.requested_resource_count, 1);
         assert_eq!(summary.upserted_row_count, 1);
-        assert_eq!(summary.deleted_row_count, 1);
+        assert_eq!(summary.deleted_row_count, 0);
 
         let row_a = load_record_inventory_current(
             database.pool(),
@@ -1322,6 +1390,78 @@ mod tests {
                 "cacheable": true,
             }])
         );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn keyed_rebuild_keeps_visible_rows_when_projection_build_fails() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let resource_id = Uuid::from_u128(0x9450);
+        let boundary = record_version_boundary(
+            "ens:alice.eth",
+            resource_id,
+            Some(99),
+            Some(EVENT_KIND_RECORD_VERSION_CHANGED),
+            900,
+            "0xstale-boundary",
+            1_776_200_900,
+            "ethereum-mainnet",
+        );
+
+        seed_resources(database.pool(), &[resource_id]).await?;
+        upsert_record_inventory_current_rows(
+            database.pool(),
+            &[RecordInventoryCurrentRow {
+                resource_id,
+                record_version_boundary: boundary.clone(),
+                enumeration_basis: json!({
+                    "observed_selectors": true,
+                    "capability_declared_families": true,
+                    "globally_enumerable": true,
+                }),
+                selectors: json!([]),
+                explicit_gaps: json!([]),
+                unsupported_families: json!([]),
+                last_change: None,
+                entries: json!([]),
+                provenance: json!({"derivation_kind": RECORD_INVENTORY_CURRENT_DERIVATION_KIND}),
+                coverage: json!({"enumeration_basis": RECORD_INVENTORY_ENUMERATION_BASIS}),
+                chain_positions: json!({}),
+                canonicality_summary: json!({"status": "finalized", "chains": {}}),
+                manifest_version: 1,
+                last_recomputed_at: OffsetDateTime::from_unix_timestamp(1_776_200_001)
+                    .expect("test timestamp must be valid"),
+            }],
+        )
+        .await?;
+        seed_events(
+            database.pool(),
+            &[record_version_changed_event(
+                "missing-block-boundary",
+                "ens:alice.eth",
+                resource_id,
+                100,
+                1100,
+                0,
+            )],
+        )
+        .await?;
+
+        let error =
+            rebuild_record_inventory_current(database.pool(), Some(&resource_id.to_string()))
+                .await
+                .expect_err("rebuild should fail when the record boundary block is missing");
+        assert!(
+            error
+                .to_string()
+                .contains("record event must have a raw_blocks timestamp for chain_position")
+        );
+
+        let row = load_record_inventory_current(database.pool(), resource_id, &boundary)
+            .await?
+            .context("stale visible row should still exist after failed rebuild")?;
+        assert_eq!(row.record_version_boundary, boundary);
 
         database.cleanup().await
     }

@@ -456,6 +456,8 @@ async fn plan_manifest_entries(
     }
 
     for contract in &loaded_manifest.manifest.contracts {
+        validate_manifest_contract_proxy_shape(loaded_manifest, contract)?;
+
         let key = DeclarationKey {
             declaration_kind: DECLARATION_KIND_CONTRACT.to_owned(),
             declaration_name: contract.role.clone(),
@@ -526,6 +528,30 @@ async fn plan_manifest_entries(
     }
 
     Ok(planned_entries)
+}
+
+fn validate_manifest_contract_proxy_shape(
+    loaded_manifest: &LoadedManifest,
+    contract: &crate::ManifestContract,
+) -> Result<()> {
+    match (
+        contract.proxy_kind.as_str(),
+        contract.implementation.as_ref(),
+    ) {
+        ("none", Some(_)) => bail!(
+            "manifest contract role {} in {} cannot declare implementation when proxy_kind = \"none\"",
+            contract.role,
+            loaded_manifest.path.display()
+        ),
+        ("none", None) => Ok(()),
+        (_, Some(_)) => Ok(()),
+        (proxy_kind, None) => bail!(
+            "manifest contract role {} in {} must declare implementation when proxy_kind = \"{}\"",
+            contract.role,
+            loaded_manifest.path.display(),
+            proxy_kind
+        ),
+    }
 }
 
 async fn resolve_manifest_entry_contract_instance_id(

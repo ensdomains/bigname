@@ -358,3 +358,75 @@ async fn backfill_job_failure_records_metadata_without_rewinding_checkpoint() ->
 
     database.cleanup().await
 }
+
+#[tokio::test]
+async fn complete_backfill_job_preserves_failed_range_lifecycle_at_range_end() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let mut request = backfill_job_create("job-failed-complete-guard");
+    request.ranges = Vec::new();
+    let created = create_backfill_job(database.pool(), &request).await?;
+
+    let reserved = reserve_backfill_range(
+        database.pool(),
+        created.job.backfill_job_id,
+        "worker-a",
+        "lease-end-fail",
+        lease_deadline(),
+    )
+    .await?
+    .expect("range must be reservable");
+    advance_backfill_range(
+        database.pool(),
+        reserved.backfill_range_id,
+        "lease-end-fail",
+        request.range_end_block_number,
+    )
+    .await?;
+
+    let failure_metadata = json!({ "block": request.range_end_block_number, "attempt": 1 });
+    let failed = fail_backfill_range(
+        database.pool(),
+        reserved.backfill_range_id,
+        "lease-end-fail",
+        "rpc timeout",
+        failure_metadata.clone(),
+    )
+    .await?;
+    assert_eq!(failed.status, BackfillLifecycleStatus::Failed);
+    assert_eq!(
+        failed.checkpoint_block_number,
+        request.range_end_block_number
+    );
+
+    let error = complete_backfill_job(database.pool(), created.job.backfill_job_id)
+        .await
+        .expect_err("job completion must not overwrite failed ranges at declared end");
+    assert!(
+        error.to_string().contains("failed ranges"),
+        "unexpected error: {error:#}"
+    );
+
+    let job = load_backfill_job(database.pool(), created.job.backfill_job_id)
+        .await?
+        .expect("job must still exist");
+    assert_eq!(job.status, BackfillLifecycleStatus::Failed);
+    assert_eq!(job.failure_reason.as_deref(), Some("rpc timeout"));
+    assert_eq!(job.failure_metadata, failure_metadata);
+    assert!(job.completed_at.is_none());
+
+    let ranges = load_backfill_ranges(database.pool(), created.job.backfill_job_id).await?;
+    assert_eq!(ranges.len(), 1);
+    assert_eq!(ranges[0].status, BackfillLifecycleStatus::Failed);
+    assert_eq!(
+        ranges[0].checkpoint_block_number,
+        request.range_end_block_number
+    );
+    assert_eq!(ranges[0].failure_reason.as_deref(), Some("rpc timeout"));
+    assert_eq!(
+        ranges[0].failure_metadata,
+        json!({ "block": request.range_end_block_number, "attempt": 1 })
+    );
+    assert!(ranges[0].completed_at.is_none());
+
+    database.cleanup().await
+}

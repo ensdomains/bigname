@@ -121,6 +121,14 @@ pub async fn persist_discovery_observation(
     pool: &PgPool,
     observation: &DiscoveryObservation,
 ) -> Result<DiscoveryPersistenceSummary> {
+    if is_zero_address(&observation.to_address) {
+        return Ok(DiscoveryPersistenceSummary {
+            admitted_edge_count: 0,
+            inserted_edge_count: 0,
+            admitted_edges: Vec::new(),
+        });
+    }
+
     let admission_state = load_discovery_admission_state(pool).await?;
     let admitted_candidates = admission_state.admit_candidate(&observation.candidate());
     let mut inserted_edge_count = 0;

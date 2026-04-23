@@ -5889,6 +5889,45 @@ async fn get_resolution_declared_records_narrow_record_cache_in_request_order() 
     Ok(())
 }
 
+#[test]
+fn get_resolution_declared_default_record_cache_keeps_missing_cacheable_selectors_explicit() {
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0x2210);
+    let mut inventory_row = worker_record_inventory_current_row(logical_name_id, resource_id);
+    let record_version_boundary = inventory_row.record_version_boundary.clone();
+    inventory_row.entries = json!([
+        {
+            "record_key": "addr:60",
+            "record_family": "addr",
+            "selector_key": "60",
+            "status": "unsupported",
+            "unsupported_reason": "value_not_retained_in_normalized_events",
+        }
+    ]);
+    assert_eq!(
+        build_record_cache_section(Some(&inventory_row), &[], "unused"),
+        json!({
+            "record_version_boundary": record_version_boundary,
+            "entries": [
+                {
+                    "record_key": "addr:60",
+                    "record_family": "addr",
+                    "selector_key": "60",
+                    "status": "unsupported",
+                    "unsupported_reason": "value_not_retained_in_normalized_events",
+                },
+                {
+                    "record_key": "text",
+                    "record_family": "text",
+                    "selector_key": null,
+                    "status": "unsupported",
+                    "unsupported_reason": "value_not_retained_in_normalized_events",
+                }
+            ]
+        })
+    );
+}
+
 fn record_identity(value: &Value) -> Value {
     json!({
         "record_key": value.get("record_key").cloned().unwrap_or(Value::Null),

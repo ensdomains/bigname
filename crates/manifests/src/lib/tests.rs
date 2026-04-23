@@ -1181,6 +1181,41 @@ fn rejects_negative_start_block_values() -> Result<()> {
 }
 
 #[test]
+fn rejects_unsupported_authored_discovery_rule_admission_literals() -> Result<()> {
+    let test_dir = TestDir::new()?;
+    test_dir.write_manifest(
+        "ens",
+        "ens_v2_registry_l1",
+        "v1",
+        &manifest_contents(
+            "active",
+            "0x0000000000000000000000000000000000000001",
+            "0x0000000000000000000000000000000000000002",
+            Some("0x0000000000000000000000000000000000000003"),
+        )
+        .replacen(
+            "admission = \"reachable_from_root\"",
+            "admission = \"manifest_declared\"",
+            1,
+        ),
+    )?;
+
+    let error = load_repository(&test_dir.path)
+        .expect_err("unsupported discovery_rules[].admission must fail manifest parsing");
+    assert!(
+        error.to_string().contains("failed to parse manifest TOML"),
+        "unexpected error: {error:#}"
+    );
+    assert!(
+        format!("{error:#}")
+            .contains("unsupported authored discovery_rules[].admission \"manifest_declared\""),
+        "unexpected error: {error:#}"
+    );
+
+    Ok(())
+}
+
+#[test]
 fn rejects_namespace_mismatch() -> Result<()> {
     let test_dir = TestDir::new()?;
     let path = test_dir.write_manifest(
@@ -3006,6 +3041,176 @@ async fn reuses_contract_instance_ids_across_inactive_gaps() -> Result<()> {
         );
 
     database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn removing_manifest_deactivates_active_discovery_edges_from_that_source() -> Result<()> {
+    let test_dir = TestDir::new()?;
+    let database = TestDatabase::new().await?;
+
+    test_dir.write_manifest(
+        "ens",
+        "ens_v1_registry_l1",
+        "v1",
+        &registry_manifest_contents("active"),
+    )?;
+    sync_repository(database.pool(), &load_repository(&test_dir.path)?).await?;
+
+    let persistence_summary = persist_discovery_observation(
+        database.pool(),
+        &DiscoveryObservation {
+            chain: "ethereum-mainnet".to_owned(),
+            from_address: "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E".to_owned(),
+            to_address: "0x00000000000000000000000000000000000000CC".to_owned(),
+            edge_kind: "subregistry".to_owned(),
+            discovery_source: "manifest-removal-cleanup-test".to_owned(),
+            active_from_block_number: Some(123),
+            active_from_block_hash: Some(
+                "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+            ),
+            active_to_block_number: None,
+            active_to_block_hash: None,
+            provenance: serde_json::json!({
+                "provider": "unit-test",
+                "kind": "subregistry",
+            }),
+        },
+    )
+    .await?;
+    let child_contract_instance_id = persistence_summary.admitted_edges[0]
+        .to_contract_instance_id
+        .expect("persisted discovery edge must admit a target contract instance");
+
+    assert_eq!(
+        query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM discovery_edges WHERE deactivated_at IS NULL"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        1
+    );
+
+    let empty_dir = TestDir::new()?;
+    let summary = sync_repository(database.pool(), &load_repository(&empty_dir.path)?).await?;
+    assert_eq!(summary.removed_manifest_count, 1);
+    assert_eq!(summary.cleared_discovery_edge_count, 1);
+    assert_eq!(
+        query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM discovery_edges WHERE deactivated_at IS NULL"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        0
+    );
+    assert_eq!(
+        query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM contract_instance_addresses WHERE contract_instance_id = $1 AND deactivated_at IS NULL"
+        )
+        .bind(child_contract_instance_id)
+        .fetch_one(database.pool())
+        .await?,
+        0
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn persist_discovery_observation_ignores_zero_address_targets() -> Result<()> {
+    let test_dir = TestDir::new()?;
+    let database = TestDatabase::new().await?;
+
+    test_dir.write_manifest(
+        "ens",
+        "ens_v1_registry_l1",
+        "v1",
+        &registry_manifest_contents("active"),
+    )?;
+    sync_repository(database.pool(), &load_repository(&test_dir.path)?).await?;
+
+    let summary = persist_discovery_observation(
+        database.pool(),
+        &DiscoveryObservation {
+            chain: "ethereum-mainnet".to_owned(),
+            from_address: "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E".to_owned(),
+            to_address: ZERO_ADDRESS.to_owned(),
+            edge_kind: "subregistry".to_owned(),
+            discovery_source: "zero-address-discovery-test".to_owned(),
+            active_from_block_number: Some(123),
+            active_from_block_hash: Some(
+                "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+            ),
+            active_to_block_number: None,
+            active_to_block_hash: None,
+            provenance: serde_json::json!({
+                "provider": "unit-test",
+                "kind": "subregistry",
+            }),
+        },
+    )
+    .await?;
+
+    assert_eq!(summary.admitted_edge_count, 0);
+    assert_eq!(summary.inserted_edge_count, 0);
+    assert!(summary.admitted_edges.is_empty());
+    assert_eq!(
+        query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM discovery_edges WHERE deactivated_at IS NULL"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        0
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn sync_repository_rejects_invalid_proxy_shape_declarations() -> Result<()> {
+    let cases = [
+        (
+            "proxy_kind_none_with_implementation",
+            manifest_contents(
+                "active",
+                "0x0000000000000000000000000000000000000001",
+                "0x00000000000000000000000000000000000000AA",
+                Some("0x00000000000000000000000000000000000000DD"),
+            )
+            .replacen("proxy_kind = \"erc1967\"", "proxy_kind = \"none\"", 1),
+            "cannot declare implementation when proxy_kind = \"none\"",
+        ),
+        (
+            "proxied_contract_without_implementation",
+            manifest_contents(
+                "active",
+                "0x0000000000000000000000000000000000000001",
+                "0x00000000000000000000000000000000000000AA",
+                None,
+            ),
+            "must declare implementation when proxy_kind = \"erc1967\"",
+        ),
+    ];
+
+    for (version_tag, contents, expected_error) in cases {
+        let test_dir = TestDir::new()?;
+        let database = TestDatabase::new().await?;
+        test_dir.write_manifest("ens", "ens_v2_registry_l1", version_tag, &contents)?;
+
+        let repository = load_repository(&test_dir.path)?;
+        let error = sync_repository(database.pool(), &repository)
+            .await
+            .expect_err("invalid proxy shape must fail manifest sync");
+        assert!(
+            error.to_string().contains(expected_error),
+            "unexpected sync error for {version_tag}: {error:#}"
+        );
+
+        database.cleanup().await?;
+    }
+
     Ok(())
 }
 

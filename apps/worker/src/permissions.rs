@@ -76,9 +76,9 @@ pub async fn rebuild_permissions_current(
 
 async fn rebuild_all_resources(pool: &PgPool) -> Result<PermissionsCurrentRebuildSummary> {
     let resource_ids = load_target_resource_ids(pool).await?;
-    let deleted_row_count = clear_permissions_current(pool).await?;
     let rows = build_rows(pool, &resource_ids).await?;
     let upserted_row_count = upsert_permissions_current_rows(pool, &rows).await?.len();
+    let deleted_row_count = delete_stale_permissions_current_rows(pool, &rows).await?;
 
     Ok(PermissionsCurrentRebuildSummary {
         requested_resource_count: resource_ids.len(),
@@ -93,9 +93,10 @@ async fn rebuild_one_resource(
 ) -> Result<PermissionsCurrentRebuildSummary> {
     let resource_id = Uuid::parse_str(resource_id)
         .with_context(|| format!("resource_id must be a UUID: {resource_id}"))?;
-    let deleted_row_count = delete_permissions_current(pool, resource_id).await?;
     let rows = build_rows(pool, &[resource_id]).await?;
     let upserted_row_count = upsert_permissions_current_rows(pool, &rows).await?.len();
+    let deleted_row_count =
+        delete_stale_permissions_current_rows_for_resource(pool, resource_id, &rows).await?;
 
     Ok(PermissionsCurrentRebuildSummary {
         requested_resource_count: 1,
@@ -113,6 +114,90 @@ async fn build_rows(pool: &PgPool, resource_ids: &[Uuid]) -> Result<Vec<Permissi
     }
 
     Ok(rows)
+}
+
+async fn delete_stale_permissions_current_rows(
+    pool: &PgPool,
+    rows: &[PermissionsCurrentRow],
+) -> Result<u64> {
+    if rows.is_empty() {
+        return clear_permissions_current(pool).await;
+    }
+
+    let resource_ids = rows.iter().map(|row| row.resource_id).collect::<Vec<_>>();
+    let subjects = rows
+        .iter()
+        .map(|row| row.subject.clone())
+        .collect::<Vec<_>>();
+    let scopes = rows
+        .iter()
+        .map(|row| row.scope.storage_key())
+        .collect::<Vec<_>>();
+
+    sqlx::query(
+        r#"
+        DELETE FROM permissions_current current
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM UNNEST($1::UUID[], $2::TEXT[], $3::TEXT[]) AS replacement(
+                resource_id,
+                subject,
+                scope
+            )
+            WHERE replacement.resource_id = current.resource_id
+              AND replacement.subject = current.subject
+              AND replacement.scope = current.scope
+        )
+        "#,
+    )
+    .bind(&resource_ids)
+    .bind(&subjects)
+    .bind(&scopes)
+    .execute(pool)
+    .await
+    .context("failed to delete stale permissions_current rows after rebuild")
+    .map(|result| result.rows_affected())
+}
+
+async fn delete_stale_permissions_current_rows_for_resource(
+    pool: &PgPool,
+    resource_id: Uuid,
+    rows: &[PermissionsCurrentRow],
+) -> Result<u64> {
+    if rows.is_empty() {
+        return delete_permissions_current(pool, resource_id).await;
+    }
+
+    let subjects = rows
+        .iter()
+        .map(|row| row.subject.clone())
+        .collect::<Vec<_>>();
+    let scopes = rows
+        .iter()
+        .map(|row| row.scope.storage_key())
+        .collect::<Vec<_>>();
+
+    sqlx::query(
+        r#"
+        DELETE FROM permissions_current current
+        WHERE current.resource_id = $1
+          AND NOT EXISTS (
+            SELECT 1
+            FROM UNNEST($2::TEXT[], $3::TEXT[]) AS replacement(subject, scope)
+            WHERE replacement.subject = current.subject
+              AND replacement.scope = current.scope
+          )
+        "#,
+    )
+    .bind(resource_id)
+    .bind(&subjects)
+    .bind(&scopes)
+    .execute(pool)
+    .await
+    .with_context(|| {
+        format!("failed to delete stale permissions_current rows for resource_id {resource_id}")
+    })
+    .map(|result| result.rows_affected())
 }
 
 fn project_rows(resource_id: Uuid, events: &[RelevantEvent]) -> Result<Vec<PermissionsCurrentRow>> {
@@ -950,6 +1035,77 @@ mod tests {
             rows[0].chain_positions["base-mainnet"]["block_number"],
             json!(141)
         );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn keyed_rebuild_keeps_visible_rows_when_projection_build_fails() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let resource_id = Uuid::from_u128(0x73c0);
+        let subject = "0x0000000000000000000000000000000000000abc";
+
+        seed_resources(database.pool(), &[resource_id]).await?;
+        upsert_permissions_current_rows(
+            database.pool(),
+            &[PermissionsCurrentRow {
+                resource_id,
+                subject: subject.to_owned(),
+                scope: PermissionScope::Resource,
+                effective_powers: json!(["set_records"]),
+                grant_source: json!({}),
+                revocation_source: None,
+                inheritance_path: json!([]),
+                transfer_behavior: json!({}),
+                provenance: json!({"derivation_kind": PERMISSIONS_CURRENT_DERIVATION_KIND}),
+                coverage: json!({"enumeration_basis": PERMISSIONS_ENUMERATION_BASIS}),
+                chain_positions: json!({}),
+                canonicality_summary: json!({"status": "finalized", "chains": {}}),
+                manifest_version: 1,
+                last_recomputed_at: timestamp(1_776_100_001),
+            }],
+        )
+        .await?;
+
+        let mut malformed = permission_event(
+            "malformed-scope",
+            resource_id,
+            subject,
+            json!({"kind": "resource"}),
+            json!(["set_records"]),
+            Some(json!({"kind": "normalized_event", "normalized_event_id": 1})),
+            None,
+            150,
+            0,
+        );
+        malformed.after_state = json!({
+            "subject": subject,
+            "effective_powers": ["set_records"],
+            "grant_source": {"kind": "normalized_event", "normalized_event_id": 1},
+            "revocation_source": Value::Null,
+            "inheritance_path": [{
+                "kind": "resource_authority",
+                "resource_id": resource_id
+            }],
+            "transfer_behavior": {
+                "kind": "resource_rebound"
+            }
+        });
+        seed_permission_events(database.pool(), &[malformed]).await?;
+
+        let error = rebuild_permissions_current(database.pool(), Some(&resource_id.to_string()))
+            .await
+            .expect_err("rebuild should fail when permission scope is missing");
+        assert!(
+            error
+                .to_string()
+                .contains("PermissionChanged after_state.scope must be an object")
+        );
+
+        let rows = load_permissions_current(database.pool(), resource_id, None, None).await?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].subject, subject);
+        assert_eq!(rows[0].scope, PermissionScope::Resource);
 
         database.cleanup().await
     }

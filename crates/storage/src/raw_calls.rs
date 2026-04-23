@@ -19,6 +19,9 @@ pub struct RawCallSnapshot {
 
 /// Insert missing raw call snapshots or refresh canonicality for already
 /// observed block-scoped call snapshots.
+///
+/// `raw_call_snapshots` remain intake-owned raw facts even when another
+/// workstream supplies an admitted exact-block handoff candidate.
 pub async fn upsert_raw_call_snapshots(
     pool: &PgPool,
     snapshots: &[RawCallSnapshot],
@@ -45,6 +48,10 @@ pub async fn upsert_raw_call_snapshots(
 /// Insert missing raw call snapshots or refresh canonicality inside an
 /// existing transaction so intake can persist them in the same block admission
 /// unit as other raw facts.
+///
+/// Callers outside intake should treat this as the narrow storage boundary for
+/// an already admitted exact-block handoff rather than as an execution-owned
+/// persistence surface.
 pub async fn upsert_raw_call_snapshots_in_transaction(
     transaction: &mut sqlx::Transaction<'_, Postgres>,
     snapshots: &[RawCallSnapshot],

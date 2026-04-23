@@ -125,7 +125,7 @@ fn build_primary_name_response(
         data,
         declared_state,
         verified_state,
-        provenance: primary_name_route_provenance(lookup_state.persisted_verified.as_ref()),
+        provenance: primary_name_route_provenance(lookup_state),
         coverage: primary_name_route_coverage(&namespace, lookup_state),
         chain_positions: empty_object(),
         consistency: "head".to_owned(),
@@ -228,12 +228,41 @@ fn primary_name_bootstrap_provenance() -> JsonValue {
     })
 }
 
-fn primary_name_route_provenance(
-    persisted_verified: Option<&PersistedPrimaryNameVerifiedReadback>,
-) -> JsonValue {
+fn primary_name_declared_route_provenance(row: &PrimaryNameCurrentRow) -> JsonValue {
     let mut provenance = primary_name_bootstrap_provenance();
+    insert_value_field(
+        &mut provenance,
+        "normalized_event_ids",
+        array_value_strings(provenance_field(&row.claim_provenance, "normalized_event_ids")),
+    );
+    insert_value_field(
+        &mut provenance,
+        "raw_fact_refs",
+        array_or_empty(provenance_field(&row.claim_provenance, "raw_fact_refs")),
+    );
+    insert_value_field(
+        &mut provenance,
+        "manifest_versions",
+        array_or_empty(provenance_field(&row.claim_provenance, "manifest_versions")),
+    );
+    insert_string_field(
+        &mut provenance,
+        "derivation_kind",
+        string_field(provenance_field(&row.claim_provenance, "derivation_kind"))
+            .unwrap_or_else(|| "primary_name_route_bootstrap".to_owned()),
+    );
+    provenance
+}
 
-    if let Some(persisted_verified) = persisted_verified {
+fn primary_name_route_provenance(lookup_state: &PrimaryNameLookupState) -> JsonValue {
+    let mut provenance = match &lookup_state.tuple_state {
+        PrimaryNameTupleState::TuplePresent(row) => primary_name_declared_route_provenance(row),
+        PrimaryNameTupleState::ProjectionUnavailable | PrimaryNameTupleState::TupleMissing => {
+            primary_name_bootstrap_provenance()
+        }
+    };
+
+    if let Some(persisted_verified) = lookup_state.persisted_verified.as_ref() {
         insert_value_field(
             &mut provenance,
             "manifest_versions",

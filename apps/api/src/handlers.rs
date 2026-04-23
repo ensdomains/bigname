@@ -661,7 +661,6 @@ async fn address_names(
     })?;
     let page = page_response_from_storage_cursor(
         &pagination,
-        storage_page.summary.grouped_entry_count,
         &cursor_spec,
         storage_page
             .next_cursor
@@ -760,7 +759,6 @@ async fn name_children(
     })?;
     let page = page_response_from_storage_cursor(
         &pagination,
-        u64::try_from(storage_page.summary.child_count).unwrap_or_default(),
         &cursor_spec,
         storage_page.next_cursor.as_ref().map(children_cursor_item),
     );
@@ -819,7 +817,6 @@ async fn address_history(
     let page = paginate_window(
         &rows,
         &pagination,
-        DEFAULT_PAGE_SIZE,
         &CursorSpec {
             route: "/v1/history/addresses/{address}",
             anchor: normalized_address.clone(),
@@ -895,7 +892,6 @@ async fn name_history(
     let page = paginate_window(
         &rows,
         &pagination,
-        DEFAULT_PAGE_SIZE,
         &CursorSpec {
             route: "/v1/history/names/{namespace}/{name}",
             anchor: logical_name_id,
@@ -966,7 +962,6 @@ async fn resource_history(
     let page = paginate_window(
         &rows,
         &pagination,
-        DEFAULT_PAGE_SIZE,
         &CursorSpec {
             route: "/v1/history/resources/{resource_id}",
             anchor: resource_id.to_string(),
@@ -1047,7 +1042,6 @@ async fn resource_permissions(
     })?;
     let page = page_response_from_storage_cursor(
         &pagination,
-        u64::try_from(storage_page.summary.row_count).unwrap_or_default(),
         &cursor_spec,
         storage_page
             .next_cursor
