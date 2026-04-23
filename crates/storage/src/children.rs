@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
 use sqlx::types::time::OffsetDateTime;
-use sqlx::{PgPool, Row, postgres::PgRow};
+use sqlx::{PgPool, Postgres, QueryBuilder, Row, postgres::PgRow};
 
 const DECLARED_SURFACE_CLASS: &str = "declared";
 const SUBREGISTRY_EVENT_KIND: &str = "SubregistryChanged";
@@ -45,6 +45,41 @@ pub struct ChildrenCurrentRow {
     pub last_recomputed_at: OffsetDateTime,
 }
 
+/// Storage-local keyset cursor for declared direct child collection reads.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ChildrenCurrentKeysetCursor {
+    pub canonical_display_name: String,
+    pub child_logical_name_id: String,
+}
+
+impl From<&ChildrenCurrentRow> for ChildrenCurrentKeysetCursor {
+    fn from(row: &ChildrenCurrentRow) -> Self {
+        Self {
+            canonical_display_name: row.canonical_display_name.clone(),
+            child_logical_name_id: row.child_logical_name_id.clone(),
+        }
+    }
+}
+
+/// Compact metadata for the full declared direct child filter.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ChildrenCurrentSummary {
+    pub parent_logical_name_id: String,
+    pub child_count: i64,
+    pub provenance_inputs: Vec<Value>,
+    pub chain_positions: Vec<Value>,
+    pub canonicality_summaries: Vec<Value>,
+    pub last_recomputed_at: Option<OffsetDateTime>,
+}
+
+/// Bounded declared direct child page plus full-filter summary metadata.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ChildrenCurrentPage {
+    pub rows: Vec<ChildrenCurrentRow>,
+    pub next_cursor: Option<ChildrenCurrentKeysetCursor>,
+    pub summary: ChildrenCurrentSummary,
+}
+
 /// Canonical declared-child subregistry event seed for rebuilding declared child rows.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeclaredChildEventSource {
@@ -84,6 +119,179 @@ pub async fn load_children_current_including_noncanonical(
     parent_logical_name_id: &str,
 ) -> Result<Vec<ChildrenCurrentRow>> {
     load_children_current_internal(pool, parent_logical_name_id, true).await
+}
+
+/// Load one bounded declared direct-child page from the default canonical read set.
+pub async fn load_children_current_page(
+    pool: &PgPool,
+    parent_logical_name_id: &str,
+    cursor: Option<&ChildrenCurrentKeysetCursor>,
+    page_size: u64,
+) -> Result<ChildrenCurrentPage> {
+    let limit = children_current_page_limit(page_size)?;
+    let page_size =
+        usize::try_from(page_size).context("children_current page_size does not fit in usize")?;
+
+    let mut builder = QueryBuilder::<Postgres>::new(
+        r#"
+        SELECT
+            cc.parent_logical_name_id,
+            cc.child_logical_name_id,
+            cc.surface_class,
+            cc.namespace,
+            cc.canonical_display_name,
+            cc.normalized_name,
+            cc.namehash,
+            cc.provenance,
+            cc.chain_positions,
+            cc.canonicality_summary,
+            cc.manifest_version,
+            cc.last_recomputed_at
+        FROM children_current cc
+        JOIN name_surfaces parent
+          ON parent.logical_name_id = cc.parent_logical_name_id
+        JOIN name_surfaces child
+          ON child.logical_name_id = cc.child_logical_name_id
+        WHERE cc.parent_logical_name_id =
+        "#,
+    );
+    builder.push_bind(parent_logical_name_id);
+    builder.push(" AND cc.surface_class = ");
+    builder.push_bind(DECLARED_SURFACE_CLASS);
+    builder.push(DEFAULT_CHILDREN_CURRENT_READ_FILTER);
+
+    if let Some(cursor) = cursor {
+        builder.push(
+            r#"
+            AND (
+                cc.canonical_display_name,
+                cc.child_logical_name_id
+            ) > (
+            "#,
+        );
+        builder.push_bind(&cursor.canonical_display_name);
+        builder.push(", ");
+        builder.push_bind(&cursor.child_logical_name_id);
+        builder.push(")");
+    }
+
+    builder.push(
+        r#"
+        ORDER BY
+            cc.canonical_display_name ASC,
+            cc.child_logical_name_id ASC
+        LIMIT
+        "#,
+    );
+    builder.push_bind(limit);
+
+    let mut rows = builder
+        .build()
+        .fetch_all(pool)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to load children_current page for parent_logical_name_id {parent_logical_name_id}"
+            )
+        })?
+        .into_iter()
+        .map(decode_children_current_row)
+        .collect::<Result<Vec<_>>>()?;
+
+    let has_next_page = rows.len() > page_size;
+    if has_next_page {
+        rows.truncate(page_size);
+    }
+    let next_cursor = has_next_page
+        .then(|| rows.last().map(ChildrenCurrentKeysetCursor::from))
+        .flatten();
+
+    let summary = load_children_current_summary(pool, parent_logical_name_id).await?;
+
+    Ok(ChildrenCurrentPage {
+        rows,
+        next_cursor,
+        summary,
+    })
+}
+
+/// Load compact declared direct-child summaries for parent collection keys in input order.
+pub async fn load_children_current_summaries(
+    pool: &PgPool,
+    parent_logical_name_ids: &[String],
+) -> Result<Vec<ChildrenCurrentSummary>> {
+    if parent_logical_name_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let rows = sqlx::query(
+        r#"
+        WITH requested AS (
+            SELECT
+                input.parent_logical_name_id,
+                input.ordinal
+            FROM UNNEST($1::TEXT[]) WITH ORDINALITY AS input(parent_logical_name_id, ordinal)
+        )
+        SELECT
+            requested.parent_logical_name_id,
+            COUNT(child.logical_name_id)::BIGINT AS child_count,
+            COALESCE(
+                jsonb_agg(
+                    cc.provenance
+                    ORDER BY cc.canonical_display_name ASC, cc.child_logical_name_id ASC
+                ) FILTER (WHERE child.logical_name_id IS NOT NULL),
+                '[]'::jsonb
+            ) AS provenance_inputs,
+            COALESCE(
+                jsonb_agg(
+                    cc.chain_positions
+                    ORDER BY cc.canonical_display_name ASC, cc.child_logical_name_id ASC
+                ) FILTER (WHERE child.logical_name_id IS NOT NULL),
+                '[]'::jsonb
+            ) AS chain_positions,
+            COALESCE(
+                jsonb_agg(
+                    cc.canonicality_summary
+                    ORDER BY cc.canonical_display_name ASC, cc.child_logical_name_id ASC
+                ) FILTER (WHERE child.logical_name_id IS NOT NULL),
+                '[]'::jsonb
+            ) AS canonicality_summaries,
+            MAX(cc.last_recomputed_at) FILTER (WHERE child.logical_name_id IS NOT NULL)
+                AS last_recomputed_at
+        FROM requested
+        LEFT JOIN name_surfaces parent
+          ON parent.logical_name_id = requested.parent_logical_name_id
+         AND parent.canonicality_state IN (
+                'canonical'::canonicality_state,
+                'safe'::canonicality_state,
+                'finalized'::canonicality_state
+         )
+        LEFT JOIN children_current cc
+          ON cc.parent_logical_name_id = requested.parent_logical_name_id
+         AND cc.surface_class = $2
+         AND parent.logical_name_id IS NOT NULL
+        LEFT JOIN name_surfaces child
+          ON child.logical_name_id = cc.child_logical_name_id
+         AND child.canonicality_state IN (
+                'canonical'::canonicality_state,
+                'safe'::canonicality_state,
+                'finalized'::canonicality_state
+         )
+        GROUP BY
+            requested.ordinal,
+            requested.parent_logical_name_id
+        ORDER BY requested.ordinal ASC
+        "#,
+    )
+    .bind(parent_logical_name_ids)
+    .bind(DECLARED_SURFACE_CLASS)
+    .fetch_all(pool)
+    .await
+    .context("failed to load children_current summaries")?;
+
+    rows.into_iter()
+        .map(decode_children_current_summary)
+        .collect()
 }
 
 /// Insert or replace current declared child rows for one or more parents.
@@ -656,6 +864,22 @@ async fn load_children_current_internal(
     rows.into_iter().map(decode_children_current_row).collect()
 }
 
+async fn load_children_current_summary(
+    pool: &PgPool,
+    parent_logical_name_id: &str,
+) -> Result<ChildrenCurrentSummary> {
+    let parent_logical_name_ids = [parent_logical_name_id.to_owned()];
+    let summaries = load_children_current_summaries(pool, &parent_logical_name_ids).await?;
+    summaries
+        .into_iter()
+        .next()
+        .with_context(|| {
+            format!(
+                "failed to load children_current summary for parent_logical_name_id {parent_logical_name_id}"
+            )
+        })
+}
+
 async fn upsert_children_current_row(
     executor: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     row: &ChildrenCurrentRow,
@@ -892,6 +1116,42 @@ fn decode_children_current_row(row: PgRow) -> Result<ChildrenCurrentRow> {
             .try_get("last_recomputed_at")
             .context("missing last_recomputed_at")?,
     })
+}
+
+fn decode_children_current_summary(row: PgRow) -> Result<ChildrenCurrentSummary> {
+    Ok(ChildrenCurrentSummary {
+        parent_logical_name_id: row
+            .try_get("parent_logical_name_id")
+            .context("missing parent_logical_name_id")?,
+        child_count: row.try_get("child_count").context("missing child_count")?,
+        provenance_inputs: json_array_field(&row, "provenance_inputs")?,
+        chain_positions: json_array_field(&row, "chain_positions")?,
+        canonicality_summaries: json_array_field(&row, "canonicality_summaries")?,
+        last_recomputed_at: row
+            .try_get("last_recomputed_at")
+            .context("missing last_recomputed_at")?,
+    })
+}
+
+fn children_current_page_limit(page_size: u64) -> Result<i64> {
+    if page_size == 0 {
+        bail!("children_current page_size must be positive");
+    }
+    let limit = page_size
+        .checked_add(1)
+        .filter(|limit| *limit <= i64::MAX as u64)
+        .context("children_current page_size is too large")?;
+    Ok(limit as i64)
+}
+
+fn json_array_field(row: &PgRow, field_name: &str) -> Result<Vec<Value>> {
+    let value: Value = row
+        .try_get(field_name)
+        .with_context(|| format!("children_current summary row missing {field_name}"))?;
+    match value {
+        Value::Array(values) => Ok(values),
+        _ => bail!("children_current summary field {field_name} must be a JSON array"),
+    }
 }
 
 fn decode_declared_child_event_source(row: PgRow) -> Result<DeclaredChildEventSource> {
@@ -1439,6 +1699,275 @@ mod tests {
             load_children_current(database.pool(), parent_logical_name_id).await?,
             vec![alice, bob]
         );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn children_current_page_uses_keyset_cursor_and_full_filter_summary() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let parent_logical_name_id = "ens:parent.eth";
+
+        upsert_name_surfaces(
+            database.pool(),
+            &[
+                name_surface(
+                    parent_logical_name_id,
+                    "parent.eth",
+                    "node:parent.eth",
+                    30,
+                    CanonicalityState::Finalized,
+                ),
+                name_surface(
+                    "ens:alice.parent.eth",
+                    "alice.parent.eth",
+                    "node:alice.parent.eth",
+                    31,
+                    CanonicalityState::Finalized,
+                ),
+                name_surface(
+                    "ens:bob.parent.eth",
+                    "bob.parent.eth",
+                    "node:bob.parent.eth",
+                    32,
+                    CanonicalityState::Finalized,
+                ),
+                name_surface(
+                    "ens:carla.parent.eth",
+                    "carla.parent.eth",
+                    "node:carla.parent.eth",
+                    33,
+                    CanonicalityState::Finalized,
+                ),
+                name_surface(
+                    "ens:zara.parent.eth",
+                    "zara.parent.eth",
+                    "node:zara.parent.eth",
+                    34,
+                    CanonicalityState::Observed,
+                ),
+            ],
+        )
+        .await?;
+
+        let alice = children_current_row(
+            parent_logical_name_id,
+            "ens:alice.parent.eth",
+            "alice.parent.eth",
+            "node:alice.parent.eth",
+            31,
+        );
+        let bob = children_current_row(
+            parent_logical_name_id,
+            "ens:bob.parent.eth",
+            "bob.parent.eth",
+            "node:bob.parent.eth",
+            32,
+        );
+        let carla = children_current_row(
+            parent_logical_name_id,
+            "ens:carla.parent.eth",
+            "carla.parent.eth",
+            "node:carla.parent.eth",
+            33,
+        );
+        let zara_observed = children_current_row(
+            parent_logical_name_id,
+            "ens:zara.parent.eth",
+            "zara.parent.eth",
+            "node:zara.parent.eth",
+            34,
+        );
+        upsert_children_current_rows(
+            database.pool(),
+            &[carla.clone(), zara_observed, bob.clone(), alice.clone()],
+        )
+        .await?;
+
+        let first_page =
+            load_children_current_page(database.pool(), parent_logical_name_id, None, 2).await?;
+        assert_eq!(first_page.rows, vec![alice.clone(), bob.clone()]);
+        assert_eq!(
+            first_page.next_cursor,
+            Some(ChildrenCurrentKeysetCursor::from(&bob))
+        );
+        assert_eq!(
+            first_page.summary.parent_logical_name_id,
+            parent_logical_name_id
+        );
+        assert_eq!(first_page.summary.child_count, 3);
+        assert_eq!(
+            first_page.summary.provenance_inputs,
+            vec![
+                alice.provenance.clone(),
+                bob.provenance.clone(),
+                carla.provenance.clone()
+            ]
+        );
+        assert_eq!(
+            first_page.summary.chain_positions,
+            vec![
+                alice.chain_positions.clone(),
+                bob.chain_positions.clone(),
+                carla.chain_positions.clone()
+            ]
+        );
+        assert_eq!(
+            first_page.summary.canonicality_summaries,
+            vec![
+                alice.canonicality_summary.clone(),
+                bob.canonicality_summary.clone(),
+                carla.canonicality_summary.clone()
+            ]
+        );
+        assert_eq!(
+            first_page.summary.last_recomputed_at,
+            Some(carla.last_recomputed_at)
+        );
+
+        let cursor = ChildrenCurrentKeysetCursor {
+            canonical_display_name: bob.canonical_display_name.clone(),
+            child_logical_name_id: bob.child_logical_name_id.clone(),
+        };
+        let second_page =
+            load_children_current_page(database.pool(), parent_logical_name_id, Some(&cursor), 2)
+                .await?;
+        assert_eq!(second_page.rows, vec![carla.clone()]);
+        assert_eq!(second_page.next_cursor, None);
+        assert_eq!(second_page.summary, first_page.summary);
+        assert_eq!(
+            load_children_current(database.pool(), parent_logical_name_id).await?,
+            vec![alice, bob, carla]
+        );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn children_current_batch_summaries_preserve_order_and_zero_counts() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let parent_a = "ens:alpha.eth";
+        let parent_b = "ens:beta.eth";
+        let missing_parent = "ens:missing.eth";
+
+        upsert_name_surfaces(
+            database.pool(),
+            &[
+                name_surface(
+                    parent_a,
+                    "alpha.eth",
+                    "node:alpha.eth",
+                    40,
+                    CanonicalityState::Finalized,
+                ),
+                name_surface(
+                    parent_b,
+                    "beta.eth",
+                    "node:beta.eth",
+                    41,
+                    CanonicalityState::Finalized,
+                ),
+                name_surface(
+                    "ens:one.alpha.eth",
+                    "one.alpha.eth",
+                    "node:one.alpha.eth",
+                    42,
+                    CanonicalityState::Finalized,
+                ),
+                name_surface(
+                    "ens:two.alpha.eth",
+                    "two.alpha.eth",
+                    "node:two.alpha.eth",
+                    43,
+                    CanonicalityState::Finalized,
+                ),
+                name_surface(
+                    "ens:draft.beta.eth",
+                    "draft.beta.eth",
+                    "node:draft.beta.eth",
+                    44,
+                    CanonicalityState::Observed,
+                ),
+            ],
+        )
+        .await?;
+
+        let alpha_one = children_current_row(
+            parent_a,
+            "ens:one.alpha.eth",
+            "one.alpha.eth",
+            "node:one.alpha.eth",
+            42,
+        );
+        let alpha_two = children_current_row(
+            parent_a,
+            "ens:two.alpha.eth",
+            "two.alpha.eth",
+            "node:two.alpha.eth",
+            43,
+        );
+        let beta_observed = children_current_row(
+            parent_b,
+            "ens:draft.beta.eth",
+            "draft.beta.eth",
+            "node:draft.beta.eth",
+            44,
+        );
+        upsert_children_current_rows(
+            database.pool(),
+            &[alpha_two.clone(), beta_observed, alpha_one.clone()],
+        )
+        .await?;
+
+        let summaries = load_children_current_summaries(
+            database.pool(),
+            &[
+                parent_b.to_owned(),
+                parent_a.to_owned(),
+                missing_parent.to_owned(),
+            ],
+        )
+        .await?;
+
+        assert_eq!(summaries.len(), 3);
+        assert_eq!(summaries[0].parent_logical_name_id, parent_b);
+        assert_eq!(summaries[0].child_count, 0);
+        assert!(summaries[0].provenance_inputs.is_empty());
+        assert!(summaries[0].chain_positions.is_empty());
+        assert!(summaries[0].canonicality_summaries.is_empty());
+        assert_eq!(summaries[0].last_recomputed_at, None);
+
+        assert_eq!(summaries[1].parent_logical_name_id, parent_a);
+        assert_eq!(summaries[1].child_count, 2);
+        assert_eq!(
+            summaries[1].provenance_inputs,
+            vec![alpha_one.provenance.clone(), alpha_two.provenance.clone()]
+        );
+        assert_eq!(
+            summaries[1].chain_positions,
+            vec![
+                alpha_one.chain_positions.clone(),
+                alpha_two.chain_positions.clone()
+            ]
+        );
+        assert_eq!(
+            summaries[1].canonicality_summaries,
+            vec![
+                alpha_one.canonicality_summary.clone(),
+                alpha_two.canonicality_summary.clone()
+            ]
+        );
+        assert_eq!(
+            summaries[1].last_recomputed_at,
+            Some(alpha_two.last_recomputed_at)
+        );
+
+        assert_eq!(summaries[2].parent_logical_name_id, missing_parent);
+        assert_eq!(summaries[2].child_count, 0);
+        assert!(summaries[2].provenance_inputs.is_empty());
+        assert!(summaries[2].chain_positions.is_empty());
+        assert!(summaries[2].canonicality_summaries.is_empty());
+        assert_eq!(summaries[2].last_recomputed_at, None);
 
         database.cleanup().await
     }

@@ -146,39 +146,6 @@ fn build_resolver_response(row: ResolverCurrentRow) -> ResolverResponse {
     }
 }
 
-fn build_children_response(
-    rows: &[ChildrenCurrentRow],
-    page_rows: &[ChildrenCurrentRow],
-    include_counts: bool,
-    page: HistoryPageResponse,
-) -> ChildrenResponse {
-    let last_updated = rows
-        .iter()
-        .map(|row| row.last_recomputed_at)
-        .max()
-        .map(format_timestamp)
-        .unwrap_or_else(|| format_timestamp(OffsetDateTime::now_utc()));
-
-    ChildrenResponse {
-        data: page_rows.iter().map(build_child_item).collect(),
-        declared_state: build_children_declared_state(rows.len(), include_counts),
-        verified_state: None,
-        provenance: build_children_provenance(rows),
-        coverage: CoverageResponse {
-            status: "full".to_owned(),
-            exhaustiveness: "authoritative".to_owned(),
-            source_classes_considered: vec!["declared".to_owned()],
-            enumeration_basis: "declared_direct_children".to_owned(),
-            unsupported_reason: None,
-        },
-        chain_positions: build_children_chain_positions(rows),
-        page,
-        consistency: collection_consistency(rows.iter().map(|row| &row.canonicality_summary))
-            .to_owned(),
-        last_updated,
-    }
-}
-
 fn primary_name_claim_result(lookup_state: &PrimaryNameLookupState) -> JsonValue {
     match &lookup_state.tuple_state {
         PrimaryNameTupleState::ProjectionUnavailable => primary_name_unsupported_result(

@@ -27,9 +27,11 @@ use sqlx::{PgPool, postgres::PgPoolOptions};
 use tracing::info;
 
 pub use address_names::{
-    AddressNameCurrentEntry, AddressNameCurrentRow, AddressNameRelation, AddressNamesCurrentDedupe,
-    clear_address_names_current, collapse_address_name_current_rows, delete_address_names_current,
-    load_address_names_current, load_address_names_current_including_noncanonical,
+    AddressNameCurrentEntry, AddressNameCurrentRow, AddressNameRelation, AddressNamesCurrentCursor,
+    AddressNamesCurrentDedupe, AddressNamesCurrentPage, AddressNamesCurrentProvenanceSummary,
+    AddressNamesCurrentSummary, clear_address_names_current, collapse_address_name_current_rows,
+    delete_address_names_current, load_address_names_current,
+    load_address_names_current_including_noncanonical, load_address_names_current_page,
     upsert_address_names_current_rows,
 };
 pub use audit::{
@@ -50,10 +52,11 @@ pub use checkpoints::{
     sync_chain_checkpoints,
 };
 pub use children::{
-    ChildrenCurrentRow, DeclaredChildEventSource, clear_children_current, delete_children_current,
+    ChildrenCurrentKeysetCursor, ChildrenCurrentPage, ChildrenCurrentRow, ChildrenCurrentSummary,
+    DeclaredChildEventSource, clear_children_current, delete_children_current,
     load_canonical_declared_child_sources, load_canonical_ens_v1_declared_child_sources,
     load_children_current, load_children_current_including_noncanonical,
-    upsert_children_current_rows,
+    load_children_current_page, load_children_current_summaries, upsert_children_current_rows,
 };
 pub use execution::{
     ExecutionBoundaryInvalidation, ExecutionCacheKey, ExecutionManifestInvalidation,
@@ -92,15 +95,17 @@ pub use lineage::{
 };
 pub use name_current::{
     NameCurrentRow, clear_name_current, delete_name_current, load_name_current,
-    upsert_name_current_rows,
+    load_name_current_by_logical_name_ids, upsert_name_current_rows,
 };
 pub use normalized_events::{
     NormalizedEvent, load_normalized_event_counts_by_kind, load_normalized_events_by_namespace,
     mark_block_derived_normalized_events_range_orphaned, upsert_normalized_events,
 };
 pub use permissions::{
-    PermissionScope, PermissionsCurrentRow, clear_permissions_current, delete_permissions_current,
-    load_permissions_current, load_permissions_current_for_resolver_scope,
+    PermissionScope, PermissionsCurrentFullFilterSummary, PermissionsCurrentKeysetCursor,
+    PermissionsCurrentPage, PermissionsCurrentRow, clear_permissions_current,
+    delete_permissions_current, load_permissions_current, load_permissions_current_by_resource_ids,
+    load_permissions_current_for_resolver_scope, load_permissions_current_page,
     load_permissions_current_resolver_targets, upsert_permissions_current_rows,
 };
 pub use primary_name::{

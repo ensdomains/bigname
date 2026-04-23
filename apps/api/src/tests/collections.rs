@@ -257,7 +257,9 @@ async fn resolver_overview_dynamic_resolver_profile_non_graduation_requires_reso
     let missing_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri(format!("/v1/resolvers/{chain_id}/{dynamic_resolver_address}"))
+                .uri(format!(
+                    "/v1/resolvers/{chain_id}/{dynamic_resolver_address}"
+                ))
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -282,7 +284,9 @@ async fn resolver_overview_dynamic_resolver_profile_non_graduation_requires_reso
     let projected_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri(format!("/v1/resolvers/{chain_id}/{dynamic_resolver_address}"))
+                .uri(format!(
+                    "/v1/resolvers/{chain_id}/{dynamic_resolver_address}"
+                ))
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -300,9 +304,7 @@ async fn resolver_overview_dynamic_resolver_profile_non_graduation_requires_reso
         })
     );
     assert_eq!(
-        projected_payload
-            .declared_state
-            .pointer("/bindings/status"),
+        projected_payload.declared_state.pointer("/bindings/status"),
         Some(&json!("supported"))
     );
 
@@ -390,7 +392,9 @@ async fn resolver_overview_dynamic_resolver_pending_profile_returns_explicit_uns
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri(format!("/v1/resolvers/{chain_id}/{dynamic_resolver_address}"))
+                .uri(format!(
+                    "/v1/resolvers/{chain_id}/{dynamic_resolver_address}"
+                ))
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -629,7 +633,9 @@ async fn resolver_overview_dynamic_resolver_l2resolver_profile_reads_supported_b
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri(format!("/v1/resolvers/{chain_id}/{dynamic_resolver_address}"))
+                .uri(format!(
+                    "/v1/resolvers/{chain_id}/{dynamic_resolver_address}"
+                ))
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -669,9 +675,11 @@ async fn resolver_overview_dynamic_resolver_l2resolver_profile_reads_supported_b
             payload.declared_state[section_name]["status"],
             json!("supported")
         );
-        assert!(payload.declared_state[section_name]
-            .get("unsupported_reason")
-            .is_none());
+        assert!(
+            payload.declared_state[section_name]
+                .get("unsupported_reason")
+                .is_none()
+        );
     }
     assert_eq!(payload.declared_state["bindings"]["count"], json!(1));
     assert_eq!(payload.declared_state["aliases"]["count"], json!(0));
@@ -683,10 +691,7 @@ async fn resolver_overview_dynamic_resolver_l2resolver_profile_reads_supported_b
             "ResolverChanged": 1,
         })
     );
-    assert_eq!(
-        payload.coverage["unsupported_reason"],
-        Value::Null
-    );
+    assert_eq!(payload.coverage["unsupported_reason"], Value::Null);
     assert_eq!(payload.verified_state, None);
 
     database.cleanup().await?;
@@ -700,10 +705,7 @@ async fn resolver_overview_dynamic_resolver_pending_and_unsupported_basenames_pr
     let chain_id = "base-mainnet";
     let cases = [
         ("pending", "0x0000000000000000000000000000000000000b61"),
-        (
-            "unsupported",
-            "0x0000000000000000000000000000000000000b62",
-        ),
+        ("unsupported", "0x0000000000000000000000000000000000000b62"),
     ];
 
     let rows = cases
@@ -718,7 +720,9 @@ async fn resolver_overview_dynamic_resolver_pending_and_unsupported_basenames_pr
         let response = app_router(database.app_state())
             .oneshot(
                 Request::builder()
-                    .uri(format!("/v1/resolvers/{chain_id}/{dynamic_resolver_address}"))
+                    .uri(format!(
+                        "/v1/resolvers/{chain_id}/{dynamic_resolver_address}"
+                    ))
                     .body(Body::empty())
                     .expect("request must build"),
             )
@@ -1195,6 +1199,123 @@ async fn get_name_children_returns_declared_rows_sorted_with_declared_only_cover
         2,
         1,
     );
+    assert_children_collection_metadata_eq(&payload, &first_page_payload);
+    assert_children_collection_metadata_eq(&payload, &second_page_payload);
+    assert_children_collection_metadata_eq(&payload, &replay_page_payload);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_name_children_rejects_malformed_wrong_route_filter_and_stale_cursors() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+
+    bigname_storage::upsert_name_surfaces(
+        &database.pool,
+        &[
+            collection_name_surface(
+                "ens:cursor-parent.eth",
+                "cursor-parent.eth",
+                "node:cursor-parent.eth",
+                121,
+            ),
+            collection_name_surface(
+                "ens:alpha.cursor-parent.eth",
+                "alpha.cursor-parent.eth",
+                "node:alpha.cursor-parent.eth",
+                122,
+            ),
+            collection_name_surface(
+                "ens:beta.cursor-parent.eth",
+                "beta.cursor-parent.eth",
+                "node:beta.cursor-parent.eth",
+                123,
+            ),
+        ],
+    )
+    .await?;
+    bigname_storage::upsert_children_current_rows(
+        &database.pool,
+        &[
+            declared_child_row(
+                "ens:cursor-parent.eth",
+                "ens:alpha.cursor-parent.eth",
+                "alpha.cursor-parent.eth",
+                "node:alpha.cursor-parent.eth",
+                1201,
+                122,
+            ),
+            declared_child_row(
+                "ens:cursor-parent.eth",
+                "ens:beta.cursor-parent.eth",
+                "beta.cursor-parent.eth",
+                "node:beta.cursor-parent.eth",
+                1202,
+                123,
+            ),
+        ],
+    )
+    .await?;
+
+    let first_page_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/names/ens/cursor-parent.eth/children?page_size=1")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("children cursor seed request failed")?;
+    assert_eq!(first_page_response.status(), StatusCode::OK);
+    let first_page_payload: ChildrenResponse = read_json(first_page_response).await?;
+    let cursor = first_page_payload
+        .page
+        .next_cursor
+        .clone()
+        .expect("children first page must include next_cursor");
+
+    assert_invalid_cursor_request(
+        database.app_state(),
+        "/v1/names/ens/cursor-parent.eth/children?page_size=1&cursor=not-a-cursor",
+    )
+    .await?;
+
+    let wrong_route_cursor = rewrite_cursor(&cursor, |envelope| {
+        envelope.route = "/v1/addresses/{address}/names".to_owned();
+    });
+    assert_invalid_cursor_request(
+        database.app_state(),
+        format!("/v1/names/ens/cursor-parent.eth/children?page_size=1&cursor={wrong_route_cursor}"),
+    )
+    .await?;
+
+    let filter_cursor = rewrite_cursor(&cursor, |envelope| {
+        envelope
+            .filters
+            .insert("namespace".to_owned(), "ens".to_owned());
+    });
+    assert_invalid_cursor_request(
+        database.app_state(),
+        format!("/v1/names/ens/cursor-parent.eth/children?page_size=1&cursor={filter_cursor}"),
+    )
+    .await?;
+
+    let stale_cursor = rewrite_cursor(&cursor, |envelope| {
+        envelope.item.insert(
+            "canonical_display_name".to_owned(),
+            "missing.cursor-parent.eth".to_owned(),
+        );
+        envelope.item.insert(
+            "child_logical_name_id".to_owned(),
+            "ens:missing.cursor-parent.eth".to_owned(),
+        );
+    });
+    assert_invalid_cursor_request(
+        database.app_state(),
+        format!("/v1/names/ens/cursor-parent.eth/children?page_size=1&cursor={stale_cursor}"),
+    )
+    .await?;
 
     database.cleanup().await?;
     Ok(())
@@ -1913,6 +2034,169 @@ async fn get_address_names_returns_surface_first_rows_sorted_with_stable_relatio
         2,
         1,
     );
+    assert_address_names_collection_metadata_eq(&payload, &first_page_payload);
+    assert_address_names_collection_metadata_eq(&payload, &second_page_payload);
+    assert_address_names_collection_metadata_eq(&payload, &replay_page_payload);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_address_names_rejects_malformed_wrong_route_filter_and_stale_cursors() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000c01";
+    let alpha_resource_id = Uuid::from_u128(0xb101);
+    let beta_resource_id = Uuid::from_u128(0xb102);
+    let alpha_surface_binding_id = Uuid::from_u128(0xb111);
+    let beta_surface_binding_id = Uuid::from_u128(0xb112);
+
+    bigname_storage::upsert_raw_blocks(
+        &database.pool,
+        &[
+            raw_block(
+                "ethereum-mainnet",
+                "0xaddress-cursor-alpha",
+                None,
+                131,
+                1_717_173_131,
+            ),
+            raw_block(
+                "ethereum-mainnet",
+                "0xaddress-cursor-beta",
+                None,
+                132,
+                1_717_173_132,
+            ),
+        ],
+    )
+    .await?;
+    bigname_storage::upsert_resources(
+        &database.pool,
+        &[
+            address_name_resource(alpha_resource_id, None, "0xaddress-cursor-alpha", 131),
+            address_name_resource(beta_resource_id, None, "0xaddress-cursor-beta", 132),
+        ],
+    )
+    .await?;
+    bigname_storage::upsert_name_surfaces(
+        &database.pool,
+        &[
+            collection_name_surface("ens:cursor-alpha.eth", "cursor-alpha.eth", "node:ca", 131),
+            collection_name_surface("ens:cursor-beta.eth", "cursor-beta.eth", "node:cb", 132),
+        ],
+    )
+    .await?;
+    bigname_storage::upsert_surface_bindings(
+        &database.pool,
+        &[
+            address_name_surface_binding(
+                alpha_surface_binding_id,
+                "ens:cursor-alpha.eth",
+                alpha_resource_id,
+                "0xaddress-cursor-alpha",
+                131,
+                1_717_173_131,
+            ),
+            address_name_surface_binding(
+                beta_surface_binding_id,
+                "ens:cursor-beta.eth",
+                beta_resource_id,
+                "0xaddress-cursor-beta",
+                132,
+                1_717_173_132,
+            ),
+        ],
+    )
+    .await?;
+    bigname_storage::upsert_address_names_current_rows(
+        &database.pool,
+        &[
+            address_name_current_row(
+                address,
+                "ens:cursor-alpha.eth",
+                bigname_storage::AddressNameRelation::Registrant,
+                "cursor-alpha.eth",
+                "cursor-alpha.eth",
+                "node:ca",
+                alpha_surface_binding_id,
+                alpha_resource_id,
+                None,
+                131,
+            ),
+            address_name_current_row(
+                address,
+                "ens:cursor-beta.eth",
+                bigname_storage::AddressNameRelation::Registrant,
+                "cursor-beta.eth",
+                "cursor-beta.eth",
+                "node:cb",
+                beta_surface_binding_id,
+                beta_resource_id,
+                None,
+                132,
+            ),
+        ],
+    )
+    .await?;
+
+    let first_page_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/addresses/{address}/names?page_size=1"))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("address names cursor seed request failed")?;
+    assert_eq!(first_page_response.status(), StatusCode::OK);
+    let first_page_payload: AddressNamesResponse = read_json(first_page_response).await?;
+    let cursor = first_page_payload
+        .page
+        .next_cursor
+        .clone()
+        .expect("address names first page must include next_cursor");
+
+    assert_invalid_cursor_request(
+        database.app_state(),
+        format!("/v1/addresses/{address}/names?page_size=1&cursor=not-a-cursor"),
+    )
+    .await?;
+
+    let wrong_route_cursor = rewrite_cursor(&cursor, |envelope| {
+        envelope.route = "/v1/names/{namespace}/{name}/children".to_owned();
+    });
+    assert_invalid_cursor_request(
+        database.app_state(),
+        format!("/v1/addresses/{address}/names?page_size=1&cursor={wrong_route_cursor}"),
+    )
+    .await?;
+
+    assert_invalid_cursor_request(
+        database.app_state(),
+        format!("/v1/addresses/{address}/names?namespace=ens&page_size=1&cursor={cursor}"),
+    )
+    .await?;
+
+    let stale_cursor = rewrite_cursor(&cursor, |envelope| {
+        envelope.item.insert(
+            "canonical_display_name".to_owned(),
+            "missing-cursor.eth".to_owned(),
+        );
+        envelope.item.insert(
+            "logical_name_id".to_owned(),
+            "ens:missing-cursor.eth".to_owned(),
+        );
+        envelope.item.insert(
+            "resource_id".to_owned(),
+            Uuid::from_u128(0xb1ff).to_string(),
+        );
+    });
+    assert_invalid_cursor_request(
+        database.app_state(),
+        format!("/v1/addresses/{address}/names?page_size=1&cursor={stale_cursor}"),
+    )
+    .await?;
 
     database.cleanup().await?;
     Ok(())
@@ -2784,6 +3068,309 @@ async fn get_address_names_include_role_summary_adds_projection_backed_expansion
 }
 
 #[tokio::test]
+async fn get_address_names_include_role_summary_paginates_with_batched_expansions() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000bee";
+    let alpha_resource_id = Uuid::from_u128(0x8a00);
+    let alpha_surface_binding_id = Uuid::from_u128(0x8a01);
+    let beta_resource_id = Uuid::from_u128(0x8b00);
+    let beta_surface_binding_id = Uuid::from_u128(0x8b01);
+    let alpha_subject = "0x0000000000000000000000000000000000000a11";
+    let beta_subject = "0x0000000000000000000000000000000000000b22";
+
+    bigname_storage::upsert_raw_blocks(
+        &database.pool,
+        &[
+            raw_block("ethereum-mainnet", "0xrole-alpha", None, 91, 1_717_173_091),
+            raw_block("ethereum-mainnet", "0xrole-beta", None, 92, 1_717_173_092),
+        ],
+    )
+    .await?;
+    bigname_storage::upsert_resources(
+        &database.pool,
+        &[
+            address_name_resource(alpha_resource_id, None, "0xrole-alpha", 91),
+            address_name_resource(beta_resource_id, None, "0xrole-beta", 92),
+        ],
+    )
+    .await?;
+    bigname_storage::upsert_name_surfaces(
+        &database.pool,
+        &[
+            collection_name_surface("ens:alpha.eth", "alpha.eth", "node:alpha.eth", 91),
+            collection_name_surface("ens:beta.eth", "beta.eth", "node:beta.eth", 92),
+            collection_name_surface(
+                "ens:one.alpha.eth",
+                "one.alpha.eth",
+                "node:one.alpha.eth",
+                93,
+            ),
+        ],
+    )
+    .await?;
+    bigname_storage::upsert_surface_bindings(
+        &database.pool,
+        &[
+            address_name_surface_binding(
+                alpha_surface_binding_id,
+                "ens:alpha.eth",
+                alpha_resource_id,
+                "0xrole-alpha",
+                91,
+                1_717_173_091,
+            ),
+            address_name_surface_binding(
+                beta_surface_binding_id,
+                "ens:beta.eth",
+                beta_resource_id,
+                "0xrole-beta",
+                92,
+                1_717_173_092,
+            ),
+        ],
+    )
+    .await?;
+    bigname_storage::upsert_address_names_current_rows(
+        &database.pool,
+        &[
+            address_name_current_row(
+                address,
+                "ens:beta.eth",
+                bigname_storage::AddressNameRelation::Registrant,
+                "beta.eth",
+                "beta.eth",
+                "node:beta.eth",
+                beta_surface_binding_id,
+                beta_resource_id,
+                None,
+                92,
+            ),
+            address_name_current_row(
+                address,
+                "ens:alpha.eth",
+                bigname_storage::AddressNameRelation::Registrant,
+                "alpha.eth",
+                "alpha.eth",
+                "node:alpha.eth",
+                alpha_surface_binding_id,
+                alpha_resource_id,
+                None,
+                91,
+            ),
+        ],
+    )
+    .await?;
+    database
+        .insert_name_current_row(address_name_name_current_row(
+            "ens:alpha.eth",
+            "alpha.eth",
+            "alpha.eth",
+            "node:alpha.eth",
+            alpha_surface_binding_id,
+            alpha_resource_id,
+            None,
+            94,
+            json!({
+                "control": {
+                    "status": "active",
+                    "expiry": "2026-10-01T00:00:00Z",
+                },
+                "record_inventory": {
+                    "status": "supported",
+                    "count": 1,
+                },
+            }),
+        ))
+        .await?;
+    database
+        .insert_name_current_row(address_name_name_current_row(
+            "ens:beta.eth",
+            "beta.eth",
+            "beta.eth",
+            "node:beta.eth",
+            beta_surface_binding_id,
+            beta_resource_id,
+            None,
+            95,
+            json!({
+                "control": {
+                    "status": "wrapped",
+                    "expiry": "2026-11-01T00:00:00Z",
+                },
+                "record_inventory": {
+                    "status": "supported",
+                    "count": 2,
+                },
+            }),
+        ))
+        .await?;
+    bigname_storage::upsert_children_current_rows(
+        &database.pool,
+        &[declared_child_row(
+            "ens:alpha.eth",
+            "ens:one.alpha.eth",
+            "one.alpha.eth",
+            "node:one.alpha.eth",
+            901,
+            93,
+        )],
+    )
+    .await?;
+    bigname_storage::upsert_permissions_current_rows(
+        &database.pool,
+        &[
+            permission_current_row(
+                alpha_resource_id,
+                alpha_subject,
+                PermissionScope::Resource,
+                15,
+                96,
+            ),
+            permission_current_row(
+                beta_resource_id,
+                beta_subject,
+                PermissionScope::Registry,
+                16,
+                97,
+            ),
+        ],
+    )
+    .await?;
+
+    let base_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/addresses/{address}/names?include=role_summary"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("role summary base request failed")?;
+    assert_eq!(base_response.status(), StatusCode::OK);
+    let base_payload: AddressNamesResponse = read_json(base_response).await?;
+
+    let first_page_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/addresses/{address}/names?include=role_summary&page_size=1"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("role summary first page request failed")?;
+    assert_eq!(first_page_response.status(), StatusCode::OK);
+    let first_page_payload: AddressNamesResponse = read_json(first_page_response).await?;
+    let cursor = first_page_payload
+        .page
+        .next_cursor
+        .clone()
+        .expect("role summary first page must include next_cursor");
+
+    let second_page_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/addresses/{address}/names?include=role_summary&page_size=1&cursor={cursor}"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("role summary second page request failed")?;
+    assert_eq!(second_page_response.status(), StatusCode::OK);
+    let second_page_payload: AddressNamesResponse = read_json(second_page_response).await?;
+
+    let replay_page_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/addresses/{address}/names?include=role_summary&page_size=1&cursor={cursor}"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("role summary replay page request failed")?;
+    assert_eq!(replay_page_response.status(), StatusCode::OK);
+    let replay_page_payload: AddressNamesResponse = read_json(replay_page_response).await?;
+
+    assert_replay_stable_pagination(
+        &base_payload.data,
+        &base_payload.page,
+        &first_page_payload.data,
+        &first_page_payload.page,
+        &second_page_payload.data,
+        &second_page_payload.page,
+        &replay_page_payload.data,
+        &replay_page_payload.page,
+        "display_name_asc",
+        2,
+        1,
+    );
+    assert_eq!(
+        first_page_payload.data[0].get("subname_count"),
+        Some(&json!(1))
+    );
+    assert_eq!(
+        first_page_payload.data[0].get("record_count"),
+        Some(&json!(1))
+    );
+    assert_eq!(
+        first_page_payload.data[0].get("status"),
+        Some(&json!("active"))
+    );
+    assert_eq!(
+        first_page_payload.data[0].get("role_summary"),
+        Some(&json!({
+            "subjects": [{
+                "subject": alpha_subject,
+                "scopes": [{
+                    "scope": {
+                        "kind": "resource",
+                        "detail": {},
+                    },
+                    "effective_powers": ["set_resolver", "set_records"],
+                }],
+            }]
+        }))
+    );
+    assert_eq!(
+        second_page_payload.data[0].get("subname_count"),
+        Some(&json!(0))
+    );
+    assert_eq!(
+        second_page_payload.data[0].get("record_count"),
+        Some(&json!(2))
+    );
+    assert_eq!(
+        second_page_payload.data[0].get("status"),
+        Some(&json!("wrapped"))
+    );
+    assert_eq!(
+        second_page_payload.data[0].get("role_summary"),
+        Some(&json!({
+            "subjects": [{
+                "subject": beta_subject,
+                "scopes": [{
+                    "scope": {
+                        "kind": "registry",
+                        "detail": {},
+                    },
+                    "effective_powers": ["set_resolver", "create_subnames"],
+                }],
+            }]
+        }))
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn get_address_names_include_role_summary_reads_ensv2_projection_outputs_with_exact_name_support()
 -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
@@ -3362,6 +3949,216 @@ async fn get_address_names_rejects_unknown_include_values() -> Result<()> {
         payload.error.message,
         "include must contain only role_summary"
     );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_resource_permissions_keyset_pagination_preserves_full_filter_summary() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let resource_id = Uuid::from_u128(0xa390);
+    let first_subject = "0x0000000000000000000000000000000000000a01";
+    let second_subject = "0x0000000000000000000000000000000000000b02";
+
+    bigname_storage::upsert_resources(&database.pool, &[resource(resource_id)]).await?;
+    bigname_storage::upsert_permissions_current_rows(
+        &database.pool,
+        &[
+            permission_current_row(
+                resource_id,
+                first_subject,
+                PermissionScope::Resolver {
+                    chain_id: "ethereum-mainnet".to_owned(),
+                    resolver_address: "0x0000000000000000000000000000000000000aaa".to_owned(),
+                },
+                12,
+                81,
+            ),
+            permission_current_row(
+                resource_id,
+                first_subject,
+                PermissionScope::Resource,
+                13,
+                82,
+            ),
+            permission_current_row(
+                resource_id,
+                second_subject,
+                PermissionScope::Registry,
+                14,
+                83,
+            ),
+        ],
+    )
+    .await?;
+
+    let base_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/resources/{resource_id}/permissions"))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("resource permissions request failed")?;
+    assert_eq!(base_response.status(), StatusCode::OK);
+    let base_payload: ResourcePermissionsResponse = read_json(base_response).await?;
+
+    let first_page_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/resources/{resource_id}/permissions?page_size=2"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("resource permissions first page request failed")?;
+    assert_eq!(first_page_response.status(), StatusCode::OK);
+    let first_page_payload: ResourcePermissionsResponse = read_json(first_page_response).await?;
+    let cursor = first_page_payload
+        .page
+        .next_cursor
+        .clone()
+        .expect("resource permissions first page must include next_cursor");
+
+    let second_page_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/resources/{resource_id}/permissions?page_size=2&cursor={cursor}"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("resource permissions second page request failed")?;
+    assert_eq!(second_page_response.status(), StatusCode::OK);
+    let second_page_payload: ResourcePermissionsResponse = read_json(second_page_response).await?;
+
+    let replay_page_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/resources/{resource_id}/permissions?page_size=2&cursor={cursor}"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("resource permissions replay page request failed")?;
+    assert_eq!(replay_page_response.status(), StatusCode::OK);
+    let replay_page_payload: ResourcePermissionsResponse = read_json(replay_page_response).await?;
+
+    assert_replay_stable_pagination(
+        &base_payload.data,
+        &base_payload.page,
+        &first_page_payload.data,
+        &first_page_payload.page,
+        &second_page_payload.data,
+        &second_page_payload.page,
+        &replay_page_payload.data,
+        &replay_page_payload.page,
+        "subject_scope_asc",
+        3,
+        2,
+    );
+    assert_resource_permissions_collection_metadata_eq(&base_payload, &first_page_payload);
+    assert_resource_permissions_collection_metadata_eq(&base_payload, &second_page_payload);
+    assert_resource_permissions_collection_metadata_eq(&base_payload, &replay_page_payload);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_resource_permissions_rejects_malformed_wrong_route_filter_and_stale_cursors()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let resource_id = Uuid::from_u128(0xb290);
+    let first_subject = "0x0000000000000000000000000000000000000c11";
+    let second_subject = "0x0000000000000000000000000000000000000c22";
+
+    bigname_storage::upsert_resources(&database.pool, &[resource(resource_id)]).await?;
+    bigname_storage::upsert_permissions_current_rows(
+        &database.pool,
+        &[
+            permission_current_row(
+                resource_id,
+                first_subject,
+                PermissionScope::Resource,
+                17,
+                111,
+            ),
+            permission_current_row(
+                resource_id,
+                second_subject,
+                PermissionScope::Registry,
+                18,
+                112,
+            ),
+        ],
+    )
+    .await?;
+
+    let first_page_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/resources/{resource_id}/permissions?page_size=1"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("resource permissions cursor seed request failed")?;
+    assert_eq!(first_page_response.status(), StatusCode::OK);
+    let first_page_payload: ResourcePermissionsResponse = read_json(first_page_response).await?;
+    let cursor = first_page_payload
+        .page
+        .next_cursor
+        .clone()
+        .expect("resource permissions first page must include next_cursor");
+
+    assert_invalid_cursor_request(
+        database.app_state(),
+        format!("/v1/resources/{resource_id}/permissions?page_size=1&cursor=not-a-cursor"),
+    )
+    .await?;
+
+    let wrong_route_cursor = rewrite_cursor(&cursor, |envelope| {
+        envelope.route = "/v1/addresses/{address}/names".to_owned();
+    });
+    assert_invalid_cursor_request(
+        database.app_state(),
+        format!("/v1/resources/{resource_id}/permissions?page_size=1&cursor={wrong_route_cursor}"),
+    )
+    .await?;
+
+    assert_invalid_cursor_request(
+        database.app_state(),
+        format!(
+            "/v1/resources/{resource_id}/permissions?subject={first_subject}&page_size=1&cursor={cursor}"
+        ),
+    )
+    .await?;
+
+    let stale_cursor = rewrite_cursor(&cursor, |envelope| {
+        envelope.item.insert(
+            "subject".to_owned(),
+            "0x0000000000000000000000000000000000000bad".to_owned(),
+        );
+        envelope
+            .item
+            .insert("scope".to_owned(), "resource".to_owned());
+    });
+    assert_invalid_cursor_request(
+        database.app_state(),
+        format!("/v1/resources/{resource_id}/permissions?page_size=1&cursor={stale_cursor}"),
+    )
+    .await?;
 
     database.cleanup().await?;
     Ok(())

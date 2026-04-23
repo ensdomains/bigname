@@ -1,7 +1,14 @@
+use std::collections::BTreeSet;
+
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
 use sqlx::types::time::OffsetDateTime;
-use sqlx::{PgPool, Row, postgres::PgRow};
+use sqlx::{PgPool, Postgres, QueryBuilder, Row, postgres::PgRow};
+
+const POSTGRES_MAX_BIND_PARAMETERS: usize = 65_535;
+const RESOLVER_CURRENT_UPSERT_BIND_COLUMNS: usize = 9;
+const RESOLVER_CURRENT_MAX_ROWS_PER_CHUNK: usize =
+    POSTGRES_MAX_BIND_PARAMETERS / RESOLVER_CURRENT_UPSERT_BIND_COLUMNS;
 
 /// Persisted resolver-overview projection row keyed by resolver target.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -63,15 +70,25 @@ pub async fn upsert_resolver_current_rows(
         return Ok(Vec::new());
     }
 
+    let prepared_rows = rows
+        .iter()
+        .map(prepare_resolver_current_row)
+        .collect::<Result<Vec<_>>>()?;
+
     let mut transaction = pool
         .begin()
         .await
         .context("failed to open transaction for resolver_current upsert")?;
 
     let mut snapshots = Vec::with_capacity(rows.len());
-    for row in rows {
-        validate_resolver_current_row(row)?;
-        snapshots.push(upsert_resolver_current_row(&mut transaction, row).await?);
+    let mut chunk_start = 0;
+    while chunk_start < prepared_rows.len() {
+        let chunk_end = resolver_current_chunk_end(&prepared_rows, chunk_start);
+        snapshots.extend(
+            upsert_resolver_current_batch(&mut transaction, &prepared_rows[chunk_start..chunk_end])
+                .await?,
+        );
+        chunk_start = chunk_end;
     }
 
     transaction
@@ -117,23 +134,111 @@ pub async fn clear_resolver_current(pool: &PgPool) -> Result<u64> {
         .map(|result| result.rows_affected())
 }
 
-async fn upsert_resolver_current_row(
-    executor: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    row: &ResolverCurrentRow,
-) -> Result<ResolverCurrentRow> {
-    let declared_summary = serde_json::to_string(&row.declared_summary)
-        .context("failed to serialize resolver_current declared_summary")?;
-    let provenance = serde_json::to_string(&row.provenance)
-        .context("failed to serialize resolver_current provenance")?;
-    let coverage = serde_json::to_string(&row.coverage)
-        .context("failed to serialize resolver_current coverage")?;
-    let chain_positions = serde_json::to_string(&row.chain_positions)
-        .context("failed to serialize resolver_current chain_positions")?;
-    let canonicality_summary = serde_json::to_string(&row.canonicality_summary)
-        .context("failed to serialize resolver_current canonicality_summary")?;
+#[derive(Debug)]
+struct PreparedResolverCurrentRow {
+    chain_id: String,
+    resolver_address: String,
+    declared_summary: String,
+    provenance: String,
+    coverage: String,
+    chain_positions: String,
+    canonicality_summary: String,
+    manifest_version: i64,
+    last_recomputed_at: OffsetDateTime,
+}
 
-    let snapshot = sqlx::query(
+fn prepare_resolver_current_row(row: &ResolverCurrentRow) -> Result<PreparedResolverCurrentRow> {
+    validate_resolver_current_row(row)?;
+
+    Ok(PreparedResolverCurrentRow {
+        chain_id: row.chain_id.clone(),
+        resolver_address: normalize_resolver_address(&row.resolver_address),
+        declared_summary: serde_json::to_string(&row.declared_summary)
+            .context("failed to serialize resolver_current declared_summary")?,
+        provenance: serde_json::to_string(&row.provenance)
+            .context("failed to serialize resolver_current provenance")?,
+        coverage: serde_json::to_string(&row.coverage)
+            .context("failed to serialize resolver_current coverage")?,
+        chain_positions: serde_json::to_string(&row.chain_positions)
+            .context("failed to serialize resolver_current chain_positions")?,
+        canonicality_summary: serde_json::to_string(&row.canonicality_summary)
+            .context("failed to serialize resolver_current canonicality_summary")?,
+        manifest_version: row.manifest_version,
+        last_recomputed_at: row.last_recomputed_at,
+    })
+}
+
+fn resolver_current_chunk_end(rows: &[PreparedResolverCurrentRow], start: usize) -> usize {
+    let limit = rows.len().min(start + RESOLVER_CURRENT_MAX_ROWS_PER_CHUNK);
+    let mut seen_keys = BTreeSet::new();
+    let mut end = start;
+
+    while end < limit {
+        let row = &rows[end];
+        let key = (row.chain_id.as_str(), row.resolver_address.as_str());
+        if !seen_keys.insert(key) {
+            break;
+        }
+        end += 1;
+    }
+
+    end.max(start + 1)
+}
+
+async fn upsert_resolver_current_batch(
+    executor: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    rows: &[PreparedResolverCurrentRow],
+) -> Result<Vec<ResolverCurrentRow>> {
+    let expected_len = rows.len();
+    let mut builder = QueryBuilder::<Postgres>::new(
         r#"
+        WITH input_rows (
+            input_index,
+            chain_id,
+            resolver_address,
+            declared_summary,
+            provenance,
+            coverage,
+            chain_positions,
+            canonicality_summary,
+            manifest_version,
+            last_recomputed_at
+        ) AS (
+            VALUES
+        "#,
+    );
+
+    for (input_index, row) in rows.iter().enumerate() {
+        if input_index > 0 {
+            builder.push(", ");
+        }
+        builder.push("(");
+        builder.push(input_index.to_string());
+        builder.push("::BIGINT, ");
+        builder.push_bind(row.chain_id.as_str());
+        builder.push(", ");
+        builder.push_bind(row.resolver_address.as_str());
+        builder.push(", ");
+        builder.push_bind(row.declared_summary.as_str());
+        builder.push("::jsonb, ");
+        builder.push_bind(row.provenance.as_str());
+        builder.push("::jsonb, ");
+        builder.push_bind(row.coverage.as_str());
+        builder.push("::jsonb, ");
+        builder.push_bind(row.chain_positions.as_str());
+        builder.push("::jsonb, ");
+        builder.push_bind(row.canonicality_summary.as_str());
+        builder.push("::jsonb, ");
+        builder.push_bind(row.manifest_version);
+        builder.push(", ");
+        builder.push_bind(row.last_recomputed_at);
+        builder.push(")");
+    }
+
+    builder.push(
+        r#"
+        ),
+        upserted AS (
         INSERT INTO resolver_current (
             chain_id,
             resolver_address,
@@ -145,17 +250,17 @@ async fn upsert_resolver_current_row(
             manifest_version,
             last_recomputed_at
         )
-        VALUES (
-            $1,
-            $2,
-            $3::jsonb,
-            $4::jsonb,
-            $5::jsonb,
-            $6::jsonb,
-            $7::jsonb,
-            $8,
-            $9
-        )
+        SELECT
+            chain_id,
+            resolver_address,
+            declared_summary,
+            provenance,
+            coverage,
+            chain_positions,
+            canonicality_summary,
+            manifest_version,
+            last_recomputed_at
+        FROM input_rows
         ON CONFLICT (chain_id, resolver_address) DO UPDATE
         SET
             declared_summary = EXCLUDED.declared_summary,
@@ -175,27 +280,72 @@ async fn upsert_resolver_current_row(
             canonicality_summary,
             manifest_version,
             last_recomputed_at
-        "#,
-    )
-    .bind(&row.chain_id)
-    .bind(normalize_resolver_address(&row.resolver_address))
-    .bind(declared_summary)
-    .bind(provenance)
-    .bind(coverage)
-    .bind(chain_positions)
-    .bind(canonicality_summary)
-    .bind(row.manifest_version)
-    .bind(row.last_recomputed_at)
-    .fetch_one(&mut **executor)
-    .await
-    .with_context(|| {
-        format!(
-            "failed to upsert resolver_current row for chain_id {} resolver_address {}",
-            row.chain_id, row.resolver_address
         )
-    })?;
+        SELECT
+            input_rows.input_index,
+            upserted.chain_id,
+            upserted.resolver_address,
+            upserted.declared_summary,
+            upserted.provenance,
+            upserted.coverage,
+            upserted.chain_positions,
+            upserted.canonicality_summary,
+            upserted.manifest_version,
+            upserted.last_recomputed_at
+        FROM upserted
+        INNER JOIN input_rows
+          ON input_rows.chain_id = upserted.chain_id
+         AND input_rows.resolver_address = upserted.resolver_address
+        "#,
+    );
 
-    decode_resolver_current_row(snapshot)
+    let returned_rows = builder
+        .build()
+        .fetch_all(&mut **executor)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to upsert resolver_current batch containing {} rows",
+                rows.len()
+            )
+        })?;
+
+    decode_resolver_current_batch(returned_rows, expected_len)
+}
+
+fn decode_resolver_current_batch(
+    rows: Vec<PgRow>,
+    expected_len: usize,
+) -> Result<Vec<ResolverCurrentRow>> {
+    let mut snapshots = vec![None; expected_len];
+    for row in rows {
+        let input_index = row
+            .try_get::<i64, _>("input_index")
+            .context("missing resolver_current input_index")?;
+        let input_index =
+            usize::try_from(input_index).context("resolver_current input_index is negative")?;
+        if input_index >= expected_len {
+            bail!(
+                "resolver_current batch returned input_index {} beyond expected row count {}",
+                input_index,
+                expected_len
+            );
+        }
+        let snapshot = decode_resolver_current_row(row)?;
+        if snapshots[input_index].replace(snapshot).is_some() {
+            bail!("resolver_current batch returned duplicate input_index {input_index}");
+        }
+    }
+
+    snapshots
+        .into_iter()
+        .enumerate()
+        .map(|(input_index, snapshot)| {
+            snapshot.with_context(|| {
+                format!("resolver_current batch did not return input_index {input_index}")
+            })
+        })
+        .collect()
 }
 
 fn validate_resolver_current_row(row: &ResolverCurrentRow) -> Result<()> {
@@ -492,6 +642,110 @@ mod tests {
             )
             .await?,
             Some(normalized_replacement)
+        );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn resolver_current_bulk_upsert_preserves_order_with_duplicate_keys() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let first = resolver_current_row(
+            "ethereum-mainnet",
+            "0x0000000000000000000000000000000000000ABC",
+            5,
+        );
+        let other = resolver_current_row(
+            "ethereum-mainnet",
+            "0x0000000000000000000000000000000000000def",
+            6,
+        );
+        let mut replacement = first.clone();
+        replacement.resolver_address = replacement.resolver_address.to_ascii_lowercase();
+        replacement.declared_summary = json!({
+            "bindings": {
+                "count": 8,
+                "status": "supported"
+            },
+            "aliases": {
+                "count": 3,
+                "status": "supported"
+            }
+        });
+        replacement.manifest_version = 7;
+        replacement.last_recomputed_at = timestamp(1_776_001_200);
+
+        let snapshots = upsert_resolver_current_rows(
+            database.pool(),
+            &[first.clone(), other.clone(), replacement.clone()],
+        )
+        .await?;
+
+        let mut normalized_first = first.clone();
+        normalized_first.resolver_address = first.resolver_address.to_ascii_lowercase();
+        let mut normalized_other = other.clone();
+        normalized_other.resolver_address = other.resolver_address.to_ascii_lowercase();
+        assert_eq!(
+            snapshots,
+            vec![
+                normalized_first,
+                normalized_other.clone(),
+                replacement.clone()
+            ]
+        );
+        assert_eq!(
+            load_resolver_current(
+                database.pool(),
+                "ethereum-mainnet",
+                "0x0000000000000000000000000000000000000ABC",
+            )
+            .await?,
+            Some(replacement)
+        );
+        assert_eq!(
+            load_resolver_current(
+                database.pool(),
+                "ethereum-mainnet",
+                "0x0000000000000000000000000000000000000def",
+            )
+            .await?,
+            Some(normalized_other)
+        );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn resolver_current_bulk_upsert_rejects_invalid_slice_without_partial_write() -> Result<()>
+    {
+        let database = TestDatabase::new().await?;
+        let valid = resolver_current_row(
+            "ethereum-mainnet",
+            "0x0000000000000000000000000000000000000aaa",
+            5,
+        );
+        let mut invalid = resolver_current_row(
+            "ethereum-mainnet",
+            "0x0000000000000000000000000000000000000bbb",
+            0,
+        );
+        invalid.manifest_version = 0;
+
+        let error = upsert_resolver_current_rows(database.pool(), &[valid.clone(), invalid])
+            .await
+            .expect_err("invalid resolver_current input should fail");
+        assert!(
+            format!("{error:#}").contains("non-positive manifest_version 0"),
+            "unexpected error: {error:#}"
+        );
+        assert_eq!(
+            load_resolver_current(
+                database.pool(),
+                "ethereum-mainnet",
+                "0x0000000000000000000000000000000000000aaa",
+            )
+            .await?,
+            None
         );
 
         database.cleanup().await

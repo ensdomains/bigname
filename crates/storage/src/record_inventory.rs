@@ -1,10 +1,18 @@
-use std::{collections::BTreeSet, fmt::Write as _};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt::Write as _,
+};
 
 use anyhow::{Context, Result, bail};
 use serde_json::{Map, Value};
 use sqlx::types::time::OffsetDateTime;
-use sqlx::{PgPool, Row, postgres::PgRow};
+use sqlx::{PgPool, Postgres, QueryBuilder, Row, postgres::PgRow};
 use uuid::Uuid;
+
+const POSTGRES_MAX_BIND_PARAMETERS: usize = 65_535;
+const RECORD_INVENTORY_CURRENT_UPSERT_COLUMN_COUNT: usize = 15;
+const RECORD_INVENTORY_CURRENT_UPSERT_MAX_ROWS: usize =
+    (POSTGRES_MAX_BIND_PARAMETERS - 1) / RECORD_INVENTORY_CURRENT_UPSERT_COLUMN_COUNT;
 
 /// Persisted record-inventory and cache projection row keyed by resource and version boundary.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -83,15 +91,36 @@ pub async fn upsert_record_inventory_current_rows(
         return Ok(Vec::new());
     }
 
+    let prepared_rows = prepare_record_inventory_current_upsert_rows(rows)?;
     let mut transaction = pool
         .begin()
         .await
         .context("failed to open transaction for record_inventory_current upsert")?;
 
-    let mut snapshots = Vec::with_capacity(rows.len());
-    for row in rows {
-        validate_record_inventory_current_row(row)?;
-        snapshots.push(upsert_record_inventory_current_row(&mut transaction, row).await?);
+    let mut snapshots = Vec::with_capacity(prepared_rows.len());
+    let mut batch = Vec::with_capacity(
+        prepared_rows
+            .len()
+            .min(RECORD_INVENTORY_CURRENT_UPSERT_MAX_ROWS),
+    );
+    let mut batch_keys = BTreeSet::new();
+
+    for row in &prepared_rows {
+        let key = row.storage_key();
+        if batch.len() == RECORD_INVENTORY_CURRENT_UPSERT_MAX_ROWS || batch_keys.contains(&key) {
+            snapshots
+                .extend(upsert_record_inventory_current_row_batch(&mut transaction, &batch).await?);
+            batch.clear();
+            batch_keys.clear();
+        }
+
+        batch_keys.insert(key);
+        batch.push(row);
+    }
+
+    if !batch.is_empty() {
+        snapshots
+            .extend(upsert_record_inventory_current_row_batch(&mut transaction, &batch).await?);
     }
 
     transaction
@@ -144,12 +173,55 @@ pub async fn clear_record_inventory_current(pool: &PgPool) -> Result<u64> {
         .map(|result| result.rows_affected())
 }
 
-async fn upsert_record_inventory_current_row(
-    executor: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+#[derive(Clone, Debug)]
+struct RecordInventoryCurrentUpsertRow {
+    input_index: usize,
+    resource_id: Uuid,
+    record_version_boundary_key: String,
+    record_version_boundary: String,
+    enumeration_basis: String,
+    selectors: String,
+    explicit_gaps: String,
+    unsupported_families: String,
+    last_change: Option<String>,
+    entries: String,
+    provenance: String,
+    coverage: String,
+    chain_positions: String,
+    canonicality_summary: String,
+    manifest_version: i64,
+    last_recomputed_at: OffsetDateTime,
+}
+
+impl RecordInventoryCurrentUpsertRow {
+    fn storage_key(&self) -> (Uuid, String) {
+        (self.resource_id, self.record_version_boundary_key.clone())
+    }
+}
+
+fn prepare_record_inventory_current_upsert_rows(
+    rows: &[RecordInventoryCurrentRow],
+) -> Result<Vec<RecordInventoryCurrentUpsertRow>> {
+    rows.iter()
+        .enumerate()
+        .map(|(input_index, row)| prepare_record_inventory_current_upsert_row(input_index, row))
+        .collect()
+}
+
+fn prepare_record_inventory_current_upsert_row(
+    input_index: usize,
     row: &RecordInventoryCurrentRow,
-) -> Result<RecordInventoryCurrentRow> {
+) -> Result<RecordInventoryCurrentUpsertRow> {
+    validate_record_inventory_current_row(row)?;
+
     let record_version_boundary_key =
-        record_version_boundary_storage_key(&row.record_version_boundary, row.resource_id)?;
+        record_version_boundary_storage_key(&row.record_version_boundary, row.resource_id)
+            .with_context(|| {
+                format!(
+                    "failed to derive record_inventory_current boundary key for resource_id {}",
+                    row.resource_id
+                )
+            })?;
     let record_version_boundary = serde_json::to_string(&row.record_version_boundary)
         .context("failed to serialize record_inventory_current record_version_boundary")?;
     let enumeration_basis = serde_json::to_string(&row.enumeration_basis)
@@ -177,7 +249,31 @@ async fn upsert_record_inventory_current_row(
     let canonicality_summary = serde_json::to_string(&row.canonicality_summary)
         .context("failed to serialize record_inventory_current canonicality_summary")?;
 
-    let snapshot = sqlx::query(
+    Ok(RecordInventoryCurrentUpsertRow {
+        input_index,
+        resource_id: row.resource_id,
+        record_version_boundary_key,
+        record_version_boundary,
+        enumeration_basis,
+        selectors,
+        explicit_gaps,
+        unsupported_families,
+        last_change,
+        entries,
+        provenance,
+        coverage,
+        chain_positions,
+        canonicality_summary,
+        manifest_version: row.manifest_version,
+        last_recomputed_at: row.last_recomputed_at,
+    })
+}
+
+async fn upsert_record_inventory_current_row_batch(
+    executor: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    rows: &[&RecordInventoryCurrentUpsertRow],
+) -> Result<Vec<RecordInventoryCurrentRow>> {
+    let mut builder = QueryBuilder::<Postgres>::new(
         r#"
         INSERT INTO record_inventory_current (
             resource_id,
@@ -196,23 +292,45 @@ async fn upsert_record_inventory_current_row(
             manifest_version,
             last_recomputed_at
         )
-        VALUES (
-            $1,
-            $2,
-            $3::jsonb,
-            $4::jsonb,
-            $5::jsonb,
-            $6::jsonb,
-            $7::jsonb,
-            $8::jsonb,
-            $9::jsonb,
-            $10::jsonb,
-            $11::jsonb,
-            $12::jsonb,
-            $13::jsonb,
-            $14,
-            $15
-        )
+        "#,
+    );
+
+    builder.push_values(rows.iter().copied(), |mut values, row| {
+        values.push_bind(row.resource_id);
+        values.push_bind(&row.record_version_boundary_key);
+        values
+            .push_bind(&row.record_version_boundary)
+            .push_unseparated("::jsonb");
+        values
+            .push_bind(&row.enumeration_basis)
+            .push_unseparated("::jsonb");
+        values.push_bind(&row.selectors).push_unseparated("::jsonb");
+        values
+            .push_bind(&row.explicit_gaps)
+            .push_unseparated("::jsonb");
+        values
+            .push_bind(&row.unsupported_families)
+            .push_unseparated("::jsonb");
+        values
+            .push_bind(row.last_change.as_deref())
+            .push_unseparated("::jsonb");
+        values.push_bind(&row.entries).push_unseparated("::jsonb");
+        values
+            .push_bind(&row.provenance)
+            .push_unseparated("::jsonb");
+        values.push_bind(&row.coverage).push_unseparated("::jsonb");
+        values
+            .push_bind(&row.chain_positions)
+            .push_unseparated("::jsonb");
+        values
+            .push_bind(&row.canonicality_summary)
+            .push_unseparated("::jsonb");
+        values.push_bind(row.manifest_version);
+        values.push_bind(row.last_recomputed_at);
+    });
+
+    builder.push(
+        r#"
         ON CONFLICT (resource_id, record_version_boundary_key) DO UPDATE
         SET
             record_version_boundary = EXCLUDED.record_version_boundary,
@@ -230,6 +348,7 @@ async fn upsert_record_inventory_current_row(
             last_recomputed_at = EXCLUDED.last_recomputed_at
         RETURNING
             resource_id,
+            record_version_boundary_key,
             record_version_boundary,
             enumeration_basis,
             selectors,
@@ -244,32 +363,67 @@ async fn upsert_record_inventory_current_row(
             manifest_version,
             last_recomputed_at
         "#,
-    )
-    .bind(row.resource_id)
-    .bind(record_version_boundary_key)
-    .bind(record_version_boundary)
-    .bind(enumeration_basis)
-    .bind(selectors)
-    .bind(explicit_gaps)
-    .bind(unsupported_families)
-    .bind(last_change)
-    .bind(entries)
-    .bind(provenance)
-    .bind(coverage)
-    .bind(chain_positions)
-    .bind(canonicality_summary)
-    .bind(row.manifest_version)
-    .bind(row.last_recomputed_at)
-    .fetch_one(&mut **executor)
+    );
+
+    let returned_rows = builder
+        .build()
+        .fetch_all(&mut **executor)
     .await
     .with_context(|| {
+        let first_input_index = rows.first().map(|row| row.input_index).unwrap_or_default();
+        let last_input_index = rows.last().map(|row| row.input_index).unwrap_or(first_input_index);
         format!(
-            "failed to upsert record_inventory_current row for resource_id {}",
-            row.resource_id
+            "failed to upsert record_inventory_current rows for input indexes {first_input_index}..={last_input_index}"
         )
     })?;
 
-    decode_record_inventory_current_row(snapshot)
+    remap_record_inventory_current_snapshots(rows, returned_rows)
+}
+
+fn remap_record_inventory_current_snapshots(
+    rows: &[&RecordInventoryCurrentUpsertRow],
+    returned_rows: Vec<PgRow>,
+) -> Result<Vec<RecordInventoryCurrentRow>> {
+    if returned_rows.len() != rows.len() {
+        bail!(
+            "record_inventory_current upsert returned {} snapshots for {} input rows",
+            returned_rows.len(),
+            rows.len()
+        );
+    }
+
+    let mut snapshots_by_key = BTreeMap::new();
+    for returned_row in returned_rows {
+        let snapshot = decode_record_inventory_current_row(returned_row)?;
+        let key = (
+            snapshot.resource_id,
+            record_version_boundary_storage_key(
+                &snapshot.record_version_boundary,
+                snapshot.resource_id,
+            )?,
+        );
+        if snapshots_by_key.insert(key, snapshot).is_some() {
+            bail!("record_inventory_current upsert returned duplicate snapshots for one key");
+        }
+    }
+
+    let mut snapshots = Vec::with_capacity(rows.len());
+    for row in rows {
+        let key = row.storage_key();
+        let snapshot = snapshots_by_key.remove(&key).with_context(|| {
+            format!(
+                "record_inventory_current upsert did not return snapshot for resource_id {}",
+                row.resource_id
+            )
+        })?;
+        snapshots.push(snapshot);
+    }
+
+    if !snapshots_by_key.is_empty() {
+        bail!("record_inventory_current upsert returned snapshots for unexpected keys");
+    }
+
+    Ok(snapshots)
 }
 
 fn validate_record_inventory_current_row(row: &RecordInventoryCurrentRow) -> Result<()> {
@@ -1332,8 +1486,10 @@ mod tests {
             4,
         );
 
-        upsert_record_inventory_current_rows(database.pool(), &[first.clone(), second.clone()])
-            .await?;
+        let inserted =
+            upsert_record_inventory_current_rows(database.pool(), &[first.clone(), second.clone()])
+                .await?;
+        assert_eq!(inserted, vec![first.clone(), second.clone()]);
 
         assert_eq!(
             delete_record_inventory_current(
@@ -1372,6 +1528,48 @@ mod tests {
             )
             .await?,
             None
+        );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn record_inventory_current_bulk_upsert_preserves_duplicate_input_order() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let resource_id = Uuid::from_u128(0x7109);
+        seed_resources(&database, &[resource_id]).await?;
+
+        let first = record_inventory_current_row(
+            resource_id,
+            "ens:alice.eth",
+            Some(910),
+            Some("RecordsChanged"),
+            21_500_012,
+            "0xrecordinventoryl",
+            4,
+        );
+        let mut replacement = first.clone();
+        replacement.coverage = json!({
+            "status": "partial",
+            "unsupported_reason": "inventory_rebuild_in_progress"
+        });
+        replacement.manifest_version = 5;
+        replacement.last_recomputed_at = timestamp(1_776_100_600);
+
+        let inserted = upsert_record_inventory_current_rows(
+            database.pool(),
+            &[first.clone(), replacement.clone()],
+        )
+        .await?;
+        assert_eq!(inserted, vec![first, replacement.clone()]);
+        assert_eq!(
+            load_record_inventory_current(
+                database.pool(),
+                resource_id,
+                &replacement.record_version_boundary,
+            )
+            .await?,
+            Some(replacement)
         );
 
         database.cleanup().await

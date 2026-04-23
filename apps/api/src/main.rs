@@ -24,12 +24,11 @@ use bigname_storage::{
     HistoryScope, NameCurrentRow, PermissionScope, PermissionsCurrentRow, PrimaryNameClaimStatus,
     PrimaryNameCurrentRow, RecordInventoryCurrentRow, ResolverCurrentRow, SurfaceBindingKind,
     VERIFIED_PRIMARY_NAME_INVALIDATION_KEY, VERIFIED_PRIMARY_NAME_LOOKUP_KEY,
-    VERIFIED_PRIMARY_NAME_REQUEST_TYPE, collapse_address_name_current_rows, load_address_history,
-    load_address_names_current, load_children_current, load_execution_outcome,
+    VERIFIED_PRIMARY_NAME_REQUEST_TYPE, load_address_history, load_execution_outcome,
     load_execution_trace, load_name_current, load_name_history, load_name_surface,
-    load_permissions_current, load_primary_name_current_snapshot, load_record_inventory_current,
-    load_resolver_current, load_resource, load_resource_history,
-    load_surface_bindings_by_logical_name_id, load_surface_bindings_by_resource_id,
+    load_primary_name_current_snapshot, load_record_inventory_current, load_resolver_current,
+    load_resource, load_resource_history, load_surface_bindings_by_logical_name_id,
+    load_surface_bindings_by_resource_id,
 };
 use clap::{Args, Parser, Subcommand};
 use serde::{Deserialize, Serialize};

@@ -18,27 +18,27 @@ impl AddressNamesResponseSupplement {
             .extend(rows.iter().map(|row| row.last_recomputed_at));
     }
 
-    fn push_children(&mut self, rows: &[ChildrenCurrentRow]) {
+    fn push_children_summary(&mut self, summary: &bigname_storage::ChildrenCurrentSummary) {
         self.provenances
-            .extend(rows.iter().map(|row| row.provenance.clone()));
+            .extend(summary.provenance_inputs.iter().cloned());
         self.chain_positions
-            .extend(rows.iter().map(|row| row.chain_positions.clone()));
+            .extend(summary.chain_positions.iter().cloned());
         self.canonicality_summaries
-            .extend(rows.iter().map(|row| row.canonicality_summary.clone()));
+            .extend(summary.canonicality_summaries.iter().cloned());
         self.last_recomputed_at
-            .extend(rows.iter().map(|row| row.last_recomputed_at));
+            .extend(summary.last_recomputed_at.iter().copied());
     }
 }
 
-fn build_address_names_response(
-    entries: &[AddressNameCurrentEntry],
+fn build_address_names_response_from_summary(
+    summary: &bigname_storage::AddressNamesCurrentSummary,
     data: Vec<JsonValue>,
     supplement: AddressNamesResponseSupplement,
     page: HistoryPageResponse,
 ) -> AddressNamesResponse {
-    let last_updated = entries
-        .iter()
-        .map(|entry| entry.last_recomputed_at)
+    let last_updated = summary
+        .last_recomputed_at
+        .into_iter()
         .chain(supplement.last_recomputed_at.iter().copied())
         .max()
         .map(format_timestamp)
@@ -48,7 +48,7 @@ fn build_address_names_response(
         data,
         declared_state: empty_object(),
         verified_state: None,
-        provenance: build_address_names_provenance(entries, &supplement),
+        provenance: build_address_names_provenance_from_summary(summary, &supplement),
         coverage: CoverageResponse {
             status: "full".to_owned(),
             exhaustiveness: "authoritative".to_owned(),
@@ -56,15 +56,14 @@ fn build_address_names_response(
             enumeration_basis: "surface_current_relations".to_owned(),
             unsupported_reason: None,
         },
-        chain_positions: build_address_names_chain_positions(entries, &supplement),
+        chain_positions: build_chain_positions_from_values(
+            std::iter::once(&summary.chain_positions).chain(supplement.chain_positions.iter()),
+        ),
         page,
-        consistency: collection_consistency(
-            entries
-                .iter()
-                .map(|entry| &entry.canonicality_summary)
-                .chain(supplement.canonicality_summaries.iter()),
-        )
-        .to_owned(),
+        consistency: summary_consistency(
+            &summary.consistency,
+            supplement.canonicality_summaries.iter(),
+        ),
         last_updated,
     }
 }
@@ -95,15 +94,13 @@ fn build_history_response(
     }
 }
 
-fn build_resource_permissions_response(
-    rows: &[PermissionsCurrentRow],
+fn build_resource_permissions_response_from_summary(
+    summary: &bigname_storage::PermissionsCurrentFullFilterSummary,
     page_rows: &[PermissionsCurrentRow],
     page: HistoryPageResponse,
 ) -> ResourcePermissionsResponse {
-    let last_updated = rows
-        .iter()
-        .map(|row| row.last_recomputed_at)
-        .max()
+    let last_updated = summary
+        .last_recomputed_at
         .map(format_timestamp)
         .unwrap_or_else(|| format_timestamp(OffsetDateTime::now_utc()));
 
@@ -111,12 +108,44 @@ fn build_resource_permissions_response(
         data: page_rows.iter().map(build_permission_item).collect(),
         declared_state: empty_object(),
         verified_state: None,
-        provenance: build_permissions_provenance(rows),
-        coverage: build_permissions_coverage(rows),
-        chain_positions: build_permissions_chain_positions(rows),
+        provenance: build_collection_provenance_from_inputs(&summary.provenance, "declared"),
+        coverage: build_permissions_coverage_from_sample(summary.coverage.as_ref()),
+        chain_positions: build_chain_positions_from_values(summary.chain_positions.iter()),
         page,
-        consistency: collection_consistency(rows.iter().map(|row| &row.canonicality_summary))
-            .to_owned(),
+        consistency: collection_consistency(summary.canonicality_summaries.iter()).to_owned(),
+        last_updated,
+    }
+}
+
+fn build_children_response_from_summary(
+    summary: &bigname_storage::ChildrenCurrentSummary,
+    page_rows: &[ChildrenCurrentRow],
+    include_counts: bool,
+    page: HistoryPageResponse,
+) -> ChildrenResponse {
+    let last_updated = summary
+        .last_recomputed_at
+        .map(format_timestamp)
+        .unwrap_or_else(|| format_timestamp(OffsetDateTime::now_utc()));
+
+    ChildrenResponse {
+        data: page_rows.iter().map(build_child_item).collect(),
+        declared_state: build_children_declared_state_from_count(
+            u64::try_from(summary.child_count).unwrap_or_default(),
+            include_counts,
+        ),
+        verified_state: None,
+        provenance: build_collection_provenance_from_inputs(&summary.provenance_inputs, "declared"),
+        coverage: CoverageResponse {
+            status: "full".to_owned(),
+            exhaustiveness: "authoritative".to_owned(),
+            source_classes_considered: vec!["declared".to_owned()],
+            enumeration_basis: "declared_direct_children".to_owned(),
+            unsupported_reason: None,
+        },
+        chain_positions: build_chain_positions_from_values(summary.chain_positions.iter()),
+        page,
+        consistency: collection_consistency(summary.canonicality_summaries.iter()).to_owned(),
         last_updated,
     }
 }
@@ -200,7 +229,7 @@ fn build_address_name_item_with_role_summary(
     entry: &AddressNameCurrentEntry,
     name_row: Option<&NameCurrentRow>,
     permissions: &[PermissionsCurrentRow],
-    children: &[ChildrenCurrentRow],
+    child_count: u64,
 ) -> JsonValue {
     let mut value = build_address_name_item(entry);
     let facts = name_row
@@ -215,7 +244,7 @@ fn build_address_name_item_with_role_summary(
     insert_value_field(
         &mut value,
         "subname_count",
-        JsonValue::Number((children.len() as u64).into()),
+        JsonValue::Number(child_count.into()),
     );
     insert_value_field(&mut value, "record_count", facts.record_count);
     insert_value_field(&mut value, "status", facts.status);
@@ -223,70 +252,70 @@ fn build_address_name_item_with_role_summary(
     value
 }
 
-fn build_children_declared_state(child_count: usize, include_counts: bool) -> JsonValue {
+fn build_children_declared_state_from_count(child_count: u64, include_counts: bool) -> JsonValue {
     let mut declared_state = empty_object();
     if include_counts {
         insert_value_field(
             &mut declared_state,
             "subname_count",
-            JsonValue::Number((child_count as u64).into()),
+            JsonValue::Number(child_count.into()),
         );
     }
     declared_state
 }
 
-fn build_children_provenance(rows: &[ChildrenCurrentRow]) -> JsonValue {
-    let mut value = empty_object();
-    insert_value_field(
-        &mut value,
-        "normalized_event_ids",
-        JsonValue::Array(
-            collect_children_provenance_values(rows, "normalized_event_ids")
-                .into_iter()
-                .filter_map(|value| value_to_string(&value).map(JsonValue::String))
-                .collect(),
-        ),
-    );
-    insert_value_field(
-        &mut value,
-        "raw_fact_refs",
-        JsonValue::Array(collect_children_provenance_values(rows, "raw_fact_refs")),
-    );
-    insert_value_field(
-        &mut value,
-        "manifest_versions",
-        JsonValue::Array(collect_children_provenance_values(
-            rows,
-            "manifest_versions",
-        )),
-    );
-    insert_value_field(&mut value, "execution_trace_id", JsonValue::Null);
-    insert_string_field(
-        &mut value,
-        "derivation_kind",
-        rows.iter()
-            .filter_map(|row| string_field(provenance_field(&row.provenance, "derivation_kind")))
-            .next()
-            .unwrap_or_else(|| "declared".to_owned()),
-    );
-    value
-}
-
-fn build_address_names_provenance(
-    entries: &[AddressNameCurrentEntry],
+fn build_address_names_provenance_from_summary(
+    summary: &bigname_storage::AddressNamesCurrentSummary,
     supplement: &AddressNamesResponseSupplement,
 ) -> JsonValue {
-    let provenances = entries
-        .iter()
-        .map(|entry| &entry.provenance)
+    let mut summary_provenance = empty_object();
+    insert_value_field(
+        &mut summary_provenance,
+        "normalized_event_ids",
+        summary.provenance.normalized_event_ids.clone(),
+    );
+    insert_value_field(
+        &mut summary_provenance,
+        "raw_fact_refs",
+        summary.provenance.raw_fact_refs.clone(),
+    );
+    insert_value_field(
+        &mut summary_provenance,
+        "manifest_versions",
+        summary.provenance.manifest_versions.clone(),
+    );
+    if let Some(derivation_kind) = summary.provenance.derivation_kind.as_ref() {
+        insert_string_field(
+            &mut summary_provenance,
+            "derivation_kind",
+            derivation_kind.clone(),
+        );
+    }
+
+    let provenances = std::iter::once(&summary_provenance)
         .chain(supplement.provenances.iter())
         .collect::<Vec<_>>();
+    build_collection_provenance_from_refs(&provenances, "declared")
+}
+
+fn build_collection_provenance_from_inputs(
+    provenances: &[JsonValue],
+    default_derivation_kind: &str,
+) -> JsonValue {
+    let provenances = provenances.iter().collect::<Vec<_>>();
+    build_collection_provenance_from_refs(&provenances, default_derivation_kind)
+}
+
+fn build_collection_provenance_from_refs(
+    provenances: &[&JsonValue],
+    default_derivation_kind: &str,
+) -> JsonValue {
     let mut value = empty_object();
     insert_value_field(
         &mut value,
         "normalized_event_ids",
         JsonValue::Array(
-            collect_collection_provenance_values(&provenances, "normalized_event_ids")
+            collect_collection_provenance_values(provenances, "normalized_event_ids")
                 .into_iter()
                 .filter_map(|value| value_to_string(&value).map(JsonValue::String))
                 .collect(),
@@ -296,7 +325,7 @@ fn build_address_names_provenance(
         &mut value,
         "raw_fact_refs",
         JsonValue::Array(collect_collection_provenance_values(
-            &provenances,
+            provenances,
             "raw_fact_refs",
         )),
     );
@@ -304,7 +333,7 @@ fn build_address_names_provenance(
         &mut value,
         "manifest_versions",
         JsonValue::Array(collect_collection_provenance_values(
-            &provenances,
+            provenances,
             "manifest_versions",
         )),
     );
@@ -316,24 +345,9 @@ fn build_address_names_provenance(
             .iter()
             .filter_map(|provenance| string_field(provenance_field(provenance, "derivation_kind")))
             .next()
-            .unwrap_or_else(|| "declared".to_owned()),
+            .unwrap_or_else(|| default_derivation_kind.to_owned()),
     );
     value
-}
-
-fn collect_children_provenance_values(rows: &[ChildrenCurrentRow], key: &str) -> Vec<JsonValue> {
-    let mut deduped = Vec::new();
-    for row in rows {
-        let Some(JsonValue::Array(values)) = provenance_field(&row.provenance, key) else {
-            continue;
-        };
-        for value in values {
-            if !deduped.contains(value) {
-                deduped.push(value.clone());
-            }
-        }
-    }
-    deduped
 }
 
 fn collect_collection_provenance_values(provenances: &[&JsonValue], key: &str) -> Vec<JsonValue> {
@@ -351,52 +365,9 @@ fn collect_collection_provenance_values(provenances: &[&JsonValue], key: &str) -
     deduped
 }
 
-fn collect_permissions_provenance_values(
-    rows: &[PermissionsCurrentRow],
-    key: &str,
-) -> Vec<JsonValue> {
-    let mut deduped = Vec::new();
-    for row in rows {
-        let Some(JsonValue::Array(values)) = provenance_field(&row.provenance, key) else {
-            continue;
-        };
-        for value in values {
-            if !deduped.contains(value) {
-                deduped.push(value.clone());
-            }
-        }
-    }
-    deduped
-}
-
-fn build_children_chain_positions(rows: &[ChildrenCurrentRow]) -> JsonValue {
+fn build_chain_positions_from_values<'a>(values: impl Iterator<Item = &'a JsonValue>) -> JsonValue {
     let mut chain_positions = BTreeMap::<String, ChainPositionResponse>::new();
-    for row in rows {
-        let Some(position_values) = row.chain_positions.as_object() else {
-            continue;
-        };
-
-        for (slot, position_value) in position_values {
-            let Some(candidate) = chain_position_from_value(position_value) else {
-                continue;
-            };
-            merge_chain_position(&mut chain_positions, slot.clone(), candidate);
-        }
-    }
-
-    serde_json::to_value(chain_positions).expect("children chain positions must serialize")
-}
-
-fn build_address_names_chain_positions(
-    entries: &[AddressNameCurrentEntry],
-    supplement: &AddressNamesResponseSupplement,
-) -> JsonValue {
-    let mut chain_positions = BTreeMap::<String, ChainPositionResponse>::new();
-    for position_value in entries
-        .iter()
-        .map(|entry| &entry.chain_positions)
-        .chain(supplement.chain_positions.iter())
-    {
+    for position_value in values {
         let Some(position_values) = position_value.as_object() else {
             continue;
         };
@@ -412,64 +383,7 @@ fn build_address_names_chain_positions(
     serde_json::to_value(chain_positions).expect("address names chain positions must serialize")
 }
 
-fn build_permissions_chain_positions(rows: &[PermissionsCurrentRow]) -> JsonValue {
-    let mut chain_positions = BTreeMap::<String, ChainPositionResponse>::new();
-    for row in rows {
-        let Some(position_values) = row.chain_positions.as_object() else {
-            continue;
-        };
-
-        for (slot, position_value) in position_values {
-            let Some(candidate) = chain_position_from_value(position_value) else {
-                continue;
-            };
-            merge_chain_position(&mut chain_positions, slot.clone(), candidate);
-        }
-    }
-
-    serde_json::to_value(chain_positions).expect("permissions chain positions must serialize")
-}
-
-fn build_permissions_provenance(rows: &[PermissionsCurrentRow]) -> JsonValue {
-    let mut value = empty_object();
-    insert_value_field(
-        &mut value,
-        "normalized_event_ids",
-        JsonValue::Array(
-            collect_permissions_provenance_values(rows, "normalized_event_ids")
-                .into_iter()
-                .filter_map(|value| value_to_string(&value).map(JsonValue::String))
-                .collect(),
-        ),
-    );
-    insert_value_field(
-        &mut value,
-        "raw_fact_refs",
-        JsonValue::Array(collect_permissions_provenance_values(rows, "raw_fact_refs")),
-    );
-    insert_value_field(
-        &mut value,
-        "manifest_versions",
-        JsonValue::Array(collect_permissions_provenance_values(
-            rows,
-            "manifest_versions",
-        )),
-    );
-    insert_value_field(&mut value, "execution_trace_id", JsonValue::Null);
-    insert_string_field(
-        &mut value,
-        "derivation_kind",
-        rows.iter()
-            .filter_map(|row| string_field(provenance_field(&row.provenance, "derivation_kind")))
-            .next()
-            .unwrap_or_else(|| "declared".to_owned()),
-    );
-    value
-}
-
-fn build_permissions_coverage(rows: &[PermissionsCurrentRow]) -> CoverageResponse {
-    let sample = rows.first().map(|row| &row.coverage);
-
+fn build_permissions_coverage_from_sample(sample: Option<&JsonValue>) -> CoverageResponse {
     CoverageResponse {
         status: string_field(sample.and_then(|value| provenance_field(value, "status")))
             .unwrap_or_else(|| "full".to_owned()),
@@ -491,6 +405,15 @@ fn build_permissions_coverage(rows: &[PermissionsCurrentRow]) -> CoverageRespons
             sample.and_then(|value| provenance_field(value, "unsupported_reason")),
         ),
     }
+}
+
+fn summary_consistency<'a>(
+    base_consistency: &str,
+    supplement_summaries: impl Iterator<Item = &'a JsonValue>,
+) -> String {
+    let mut summaries = vec![json!({ "status": base_consistency })];
+    summaries.extend(supplement_summaries.cloned());
+    collection_consistency(summaries.iter()).to_owned()
 }
 
 fn build_permission_scope_value(scope: &PermissionScope) -> JsonValue {

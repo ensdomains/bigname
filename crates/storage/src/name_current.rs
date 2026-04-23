@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
 use sqlx::types::time::OffsetDateTime;
@@ -25,6 +27,20 @@ pub struct NameCurrentRow {
     pub canonicality_summary: Value,
     pub manifest_version: i64,
     pub last_recomputed_at: OffsetDateTime,
+}
+
+impl NameCurrentRow {
+    /// Load current exact-name projection rows keyed by logical name identity.
+    ///
+    /// Missing rows are omitted. Duplicate requested ids collapse into one map entry, and map
+    /// iteration is sorted by `logical_name_id`; callers that need page order should iterate the
+    /// original page and look up rows in the returned map.
+    pub async fn load_by_logical_name_ids(
+        pool: &PgPool,
+        logical_name_ids: &[String],
+    ) -> Result<BTreeMap<String, NameCurrentRow>> {
+        load_name_current_by_logical_name_ids(pool, logical_name_ids).await
+    }
 }
 
 /// Load one current exact-name projection row by deterministic logical name identity.
@@ -63,6 +79,62 @@ pub async fn load_name_current(
     })?;
 
     row.map(decode_name_current_row).transpose()
+}
+
+/// Load current exact-name projection rows for a set of logical name identities.
+///
+/// The returned map is keyed by `logical_name_id`, so duplicate requested ids collapse into one
+/// found row and missing rows are omitted. Iteration order is deterministic `BTreeMap` key order;
+/// callers that need request or page order should iterate their original ids and look up into the
+/// map.
+pub async fn load_name_current_by_logical_name_ids(
+    pool: &PgPool,
+    logical_name_ids: &[String],
+) -> Result<BTreeMap<String, NameCurrentRow>> {
+    if logical_name_ids.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            logical_name_id,
+            namespace,
+            canonical_display_name,
+            normalized_name,
+            namehash,
+            surface_binding_id,
+            resource_id,
+            token_lineage_id,
+            binding_kind,
+            declared_summary,
+            provenance,
+            coverage,
+            chain_positions,
+            canonicality_summary,
+            manifest_version,
+            last_recomputed_at
+        FROM name_current
+        WHERE logical_name_id = ANY($1::TEXT[])
+        ORDER BY logical_name_id
+        "#,
+    )
+    .bind(logical_name_ids)
+    .fetch_all(pool)
+    .await
+    .with_context(|| {
+        format!(
+            "failed to load name_current rows for {} logical_name_id values",
+            logical_name_ids.len()
+        )
+    })?;
+
+    rows.into_iter()
+        .map(|row| {
+            let row = decode_name_current_row(row)?;
+            Ok((row.logical_name_id.clone(), row))
+        })
+        .collect()
 }
 
 /// Insert or replace projection rows for exact-name current reads.
@@ -682,6 +754,76 @@ mod tests {
 
         let loaded = load_name_current(database.pool(), logical_name_id).await?;
         assert_eq!(loaded, Some(expected));
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn name_current_batch_loads_found_rows_by_logical_name_id() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let alice_logical_name_id = "ens:alice.eth";
+        let bob_logical_name_id = "ens:bob.eth";
+
+        seed_binding_references(
+            &database,
+            alice_logical_name_id,
+            "alice.eth",
+            Uuid::from_u128(0x9200),
+            Uuid::from_u128(0x9100),
+            Uuid::from_u128(0x9300),
+        )
+        .await?;
+        seed_binding_references(
+            &database,
+            bob_logical_name_id,
+            "bob.eth",
+            Uuid::from_u128(0xa200),
+            Uuid::from_u128(0xa100),
+            Uuid::from_u128(0xa300),
+        )
+        .await?;
+
+        let alice = name_current_row(
+            alice_logical_name_id,
+            Uuid::from_u128(0x9300),
+            Uuid::from_u128(0x9200),
+            Uuid::from_u128(0x9100),
+        );
+        let mut bob = name_current_row(
+            bob_logical_name_id,
+            Uuid::from_u128(0xa300),
+            Uuid::from_u128(0xa200),
+            Uuid::from_u128(0xa100),
+        );
+        bob.canonical_display_name = "bob.eth".to_owned();
+        bob.normalized_name = "bob.eth".to_owned();
+        bob.namehash = "namehash:bob.eth".to_owned();
+
+        upsert_name_current_rows(database.pool(), &[alice.clone(), bob.clone()]).await?;
+
+        let requested = vec![
+            bob_logical_name_id.to_owned(),
+            "ens:missing.eth".to_owned(),
+            alice_logical_name_id.to_owned(),
+            bob_logical_name_id.to_owned(),
+        ];
+        let loaded = load_name_current_by_logical_name_ids(database.pool(), &requested).await?;
+
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(
+            loaded.keys().cloned().collect::<Vec<_>>(),
+            vec![
+                alice_logical_name_id.to_owned(),
+                bob_logical_name_id.to_owned()
+            ]
+        );
+        assert_eq!(loaded.get(alice_logical_name_id), Some(&alice));
+        assert_eq!(loaded.get(bob_logical_name_id), Some(&bob));
+        assert!(!loaded.contains_key("ens:missing.eth"));
+        assert_eq!(
+            NameCurrentRow::load_by_logical_name_ids(database.pool(), &requested).await?,
+            loaded
+        );
 
         database.cleanup().await
     }

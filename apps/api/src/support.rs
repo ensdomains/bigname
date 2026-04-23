@@ -302,6 +302,273 @@ fn paginate_window<T>(
     })
 }
 
+fn storage_page_size(request: &PaginationRequest) -> u64 {
+    if request.active {
+        request.page_size
+    } else {
+        (i64::MAX as u64) - 1
+    }
+}
+
+fn page_response_from_storage_cursor(
+    request: &PaginationRequest,
+    unpaged_page_size: u64,
+    spec: &CursorSpec,
+    next_cursor_item: Option<BTreeMap<String, String>>,
+) -> HistoryPageResponse {
+    if !request.active {
+        return HistoryPageResponse {
+            cursor: None,
+            next_cursor: None,
+            page_size: unpaged_page_size,
+            sort: spec.sort.to_owned(),
+        };
+    }
+
+    HistoryPageResponse {
+        cursor: request.cursor.clone(),
+        next_cursor: next_cursor_item.map(|item| encode_cursor(&spec.envelope(item))),
+        page_size: request.page_size,
+        sort: spec.sort.to_owned(),
+    }
+}
+
+fn address_names_storage_cursor(
+    request: &PaginationRequest,
+    spec: &CursorSpec,
+) -> ApiResult<Option<bigname_storage::AddressNamesCurrentCursor>> {
+    let Some(item) = decoded_cursor_item(request, spec)? else {
+        return Ok(None);
+    };
+
+    require_cursor_item_fields(
+        &item,
+        &["canonical_display_name", "logical_name_id", "resource_id"],
+    )?;
+    let resource_id = Uuid::parse_str(required_cursor_item_field(&item, "resource_id")?)
+        .map_err(|_| invalid_cursor_error())?;
+
+    Ok(Some(bigname_storage::AddressNamesCurrentCursor {
+        canonical_display_name: required_cursor_item_field(&item, "canonical_display_name")?
+            .to_owned(),
+        logical_name_id: required_cursor_item_field(&item, "logical_name_id")?.to_owned(),
+        resource_id,
+    }))
+}
+
+fn children_storage_cursor(
+    request: &PaginationRequest,
+    spec: &CursorSpec,
+) -> ApiResult<Option<bigname_storage::ChildrenCurrentKeysetCursor>> {
+    let Some(item) = decoded_cursor_item(request, spec)? else {
+        return Ok(None);
+    };
+
+    require_cursor_item_fields(&item, &["canonical_display_name", "child_logical_name_id"])?;
+    Ok(Some(bigname_storage::ChildrenCurrentKeysetCursor {
+        canonical_display_name: required_cursor_item_field(&item, "canonical_display_name")?
+            .to_owned(),
+        child_logical_name_id: required_cursor_item_field(&item, "child_logical_name_id")?
+            .to_owned(),
+    }))
+}
+
+fn permissions_storage_cursor(
+    request: &PaginationRequest,
+    spec: &CursorSpec,
+) -> ApiResult<Option<bigname_storage::PermissionsCurrentKeysetCursor>> {
+    let Some(item) = decoded_cursor_item(request, spec)? else {
+        return Ok(None);
+    };
+
+    require_cursor_item_fields(&item, &["subject", "scope"])?;
+    Ok(Some(bigname_storage::PermissionsCurrentKeysetCursor {
+        subject: required_cursor_item_field(&item, "subject")?.to_owned(),
+        scope: required_cursor_item_field(&item, "scope")?.to_owned(),
+    }))
+}
+
+fn address_names_cursor_item(
+    cursor: &bigname_storage::AddressNamesCurrentCursor,
+) -> BTreeMap<String, String> {
+    let mut item = BTreeMap::new();
+    item.insert(
+        "canonical_display_name".to_owned(),
+        cursor.canonical_display_name.clone(),
+    );
+    item.insert("logical_name_id".to_owned(), cursor.logical_name_id.clone());
+    item.insert("resource_id".to_owned(), cursor.resource_id.to_string());
+    item
+}
+
+fn children_cursor_item(
+    cursor: &bigname_storage::ChildrenCurrentKeysetCursor,
+) -> BTreeMap<String, String> {
+    let mut item = BTreeMap::new();
+    item.insert(
+        "canonical_display_name".to_owned(),
+        cursor.canonical_display_name.clone(),
+    );
+    item.insert(
+        "child_logical_name_id".to_owned(),
+        cursor.child_logical_name_id.clone(),
+    );
+    item
+}
+
+fn permissions_cursor_item(
+    cursor: &bigname_storage::PermissionsCurrentKeysetCursor,
+) -> BTreeMap<String, String> {
+    let mut item = BTreeMap::new();
+    item.insert("subject".to_owned(), cursor.subject.clone());
+    item.insert("scope".to_owned(), cursor.scope.clone());
+    item
+}
+
+async fn ensure_children_cursor_exists(
+    pool: &PgPool,
+    parent_logical_name_id: &str,
+    cursor: &bigname_storage::ChildrenCurrentKeysetCursor,
+) -> ApiResult<()> {
+    let exists = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM children_current cc
+            JOIN name_surfaces parent
+              ON parent.logical_name_id = cc.parent_logical_name_id
+            JOIN name_surfaces child
+              ON child.logical_name_id = cc.child_logical_name_id
+            WHERE cc.parent_logical_name_id = $1
+              AND cc.surface_class = 'declared'
+              AND cc.canonical_display_name = $2
+              AND cc.child_logical_name_id = $3
+              AND parent.canonicality_state IN (
+                    'canonical'::canonicality_state,
+                    'safe'::canonicality_state,
+                    'finalized'::canonicality_state
+              )
+              AND child.canonicality_state IN (
+                    'canonical'::canonicality_state,
+                    'safe'::canonicality_state,
+                    'finalized'::canonicality_state
+              )
+        )
+        "#,
+    )
+    .bind(parent_logical_name_id)
+    .bind(&cursor.canonical_display_name)
+    .bind(&cursor.child_logical_name_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|load_error| {
+        error!(
+            service = "api",
+            parent_logical_name_id = %parent_logical_name_id,
+            cursor = ?cursor,
+            error = ?load_error,
+            "failed to validate children_current pagination cursor"
+        );
+        ApiError::internal_error(format!(
+            "failed to load child collection for logical name {parent_logical_name_id}"
+        ))
+    })?;
+
+    if exists {
+        Ok(())
+    } else {
+        Err(invalid_cursor_error())
+    }
+}
+
+async fn ensure_permissions_cursor_exists(
+    pool: &PgPool,
+    resource_id: Uuid,
+    subject: Option<&str>,
+    scope: Option<&PermissionScope>,
+    cursor: &bigname_storage::PermissionsCurrentKeysetCursor,
+) -> ApiResult<()> {
+    let scope_storage_key = scope.map(PermissionScope::storage_key);
+    let exists = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM permissions_current
+            WHERE resource_id = $1
+              AND ($2::TEXT IS NULL OR subject = $2)
+              AND ($3::TEXT IS NULL OR scope = $3)
+              AND subject = $4
+              AND scope = $5
+        )
+        "#,
+    )
+    .bind(resource_id)
+    .bind(subject)
+    .bind(scope_storage_key.as_deref())
+    .bind(&cursor.subject)
+    .bind(&cursor.scope)
+    .fetch_one(pool)
+    .await
+    .map_err(|load_error| {
+        error!(
+            service = "api",
+            resource_id = %resource_id,
+            subject = ?subject,
+            scope = ?scope_storage_key,
+            cursor = ?cursor,
+            error = ?load_error,
+            "failed to validate permissions_current pagination cursor"
+        );
+        ApiError::internal_error(format!(
+            "failed to load permissions for resource {resource_id}"
+        ))
+    })?;
+
+    if exists {
+        Ok(())
+    } else {
+        Err(invalid_cursor_error())
+    }
+}
+
+fn decoded_cursor_item(
+    request: &PaginationRequest,
+    spec: &CursorSpec,
+) -> ApiResult<Option<BTreeMap<String, String>>> {
+    let Some(cursor) = request.cursor.as_deref() else {
+        return Ok(None);
+    };
+
+    let decoded = decode_cursor(cursor)?;
+    validate_cursor(spec, &decoded)?;
+    Ok(Some(decoded.item))
+}
+
+fn required_cursor_item_field<'a>(
+    item: &'a BTreeMap<String, String>,
+    field: &str,
+) -> ApiResult<&'a str> {
+    item.get(field)
+        .map(String::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(invalid_cursor_error)
+}
+
+fn require_cursor_item_fields(
+    item: &BTreeMap<String, String>,
+    expected_fields: &[&str],
+) -> ApiResult<()> {
+    if item.len() != expected_fields.len()
+        || expected_fields
+            .iter()
+            .any(|field| !item.contains_key(*field))
+    {
+        return Err(invalid_cursor_error());
+    }
+
+    Ok(())
+}
+
 fn invalid_cursor_error() -> ApiError {
     ApiError {
         status: StatusCode::BAD_REQUEST,
@@ -364,37 +631,6 @@ fn decode_hex_nibble(value: u8) -> Option<u8> {
         b'A'..=b'F' => Some(value - b'A' + 10),
         _ => None,
     }
-}
-
-fn address_name_cursor_fields(entry: &AddressNameCurrentEntry) -> BTreeMap<String, String> {
-    let mut item = BTreeMap::new();
-    item.insert(
-        "canonical_display_name".to_owned(),
-        entry.canonical_display_name.clone(),
-    );
-    item.insert("logical_name_id".to_owned(), entry.logical_name_id.clone());
-    item.insert("resource_id".to_owned(), entry.resource_id.to_string());
-    item
-}
-
-fn child_cursor_fields(row: &ChildrenCurrentRow) -> BTreeMap<String, String> {
-    let mut item = BTreeMap::new();
-    item.insert(
-        "canonical_display_name".to_owned(),
-        row.canonical_display_name.clone(),
-    );
-    item.insert(
-        "child_logical_name_id".to_owned(),
-        row.child_logical_name_id.clone(),
-    );
-    item
-}
-
-fn permission_cursor_fields(row: &PermissionsCurrentRow) -> BTreeMap<String, String> {
-    let mut item = BTreeMap::new();
-    item.insert("subject".to_owned(), row.subject.clone());
-    item.insert("scope".to_owned(), row.scope.storage_key());
-    item
 }
 
 fn history_cursor_fields(row: &HistoryEvent) -> BTreeMap<String, String> {

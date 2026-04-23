@@ -1924,6 +1924,37 @@ async fn read_json<T: DeserializeOwned>(response: Response) -> Result<T> {
     serde_json::from_slice(&bytes).context("failed to decode API response JSON")
 }
 
+fn rewrite_cursor(cursor: &str, rewrite: impl FnOnce(&mut CursorEnvelope)) -> String {
+    let decoded = decode_hex(cursor).expect("pagination cursor must be valid hex");
+    let mut envelope: CursorEnvelope =
+        serde_json::from_slice(&decoded).expect("pagination cursor must decode as JSON");
+    rewrite(&mut envelope);
+    encode_cursor(&envelope)
+}
+
+async fn assert_invalid_cursor_request(state: AppState, uri: impl Into<String>) -> Result<()> {
+    let uri = uri.into();
+    let response = app_router(state)
+        .oneshot(
+            Request::builder()
+                .uri(uri.as_str())
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .with_context(|| format!("invalid cursor request failed for {uri}"))?;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let payload: ErrorResponse = read_json(response).await?;
+    assert_eq!(payload.error.code, "invalid_input");
+    assert_eq!(
+        payload.error.message,
+        "cursor must be a valid pagination cursor"
+    );
+    assert!(payload.error.details.is_empty());
+    Ok(())
+}
+
 fn timestamp(seconds: i64) -> OffsetDateTime {
     OffsetDateTime::from_unix_timestamp(seconds).expect("test timestamp must be valid")
 }
@@ -2475,6 +2506,42 @@ fn assert_replay_stable_pagination(
     assert_eq!(replay_page.cursor.as_deref(), Some(applied_cursor.as_str()));
     assert_eq!(replay_page, second_page);
     assert_eq!(replay_rows, second_rows);
+}
+
+fn assert_children_collection_metadata_eq(base: &ChildrenResponse, candidate: &ChildrenResponse) {
+    assert_eq!(candidate.declared_state, base.declared_state);
+    assert_eq!(candidate.verified_state, base.verified_state);
+    assert_eq!(candidate.provenance, base.provenance);
+    assert_eq!(candidate.coverage, base.coverage);
+    assert_eq!(candidate.chain_positions, base.chain_positions);
+    assert_eq!(candidate.consistency, base.consistency);
+    assert_eq!(candidate.last_updated, base.last_updated);
+}
+
+fn assert_address_names_collection_metadata_eq(
+    base: &AddressNamesResponse,
+    candidate: &AddressNamesResponse,
+) {
+    assert_eq!(candidate.declared_state, base.declared_state);
+    assert_eq!(candidate.verified_state, base.verified_state);
+    assert_eq!(candidate.provenance, base.provenance);
+    assert_eq!(candidate.coverage, base.coverage);
+    assert_eq!(candidate.chain_positions, base.chain_positions);
+    assert_eq!(candidate.consistency, base.consistency);
+    assert_eq!(candidate.last_updated, base.last_updated);
+}
+
+fn assert_resource_permissions_collection_metadata_eq(
+    base: &ResourcePermissionsResponse,
+    candidate: &ResourcePermissionsResponse,
+) {
+    assert_eq!(candidate.declared_state, base.declared_state);
+    assert_eq!(candidate.verified_state, base.verified_state);
+    assert_eq!(candidate.provenance, base.provenance);
+    assert_eq!(candidate.coverage, base.coverage);
+    assert_eq!(candidate.chain_positions, base.chain_positions);
+    assert_eq!(candidate.consistency, base.consistency);
+    assert_eq!(candidate.last_updated, base.last_updated);
 }
 
 fn resolver_current_row(chain_id: &str, resolver_address: &str) -> ResolverCurrentRow {

@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use sqlx::types::time::OffsetDateTime;
@@ -21,6 +23,32 @@ pub struct PermissionsCurrentRow {
     pub canonicality_summary: Value,
     pub manifest_version: i64,
     pub last_recomputed_at: OffsetDateTime,
+}
+
+/// Keyset cursor fields for the frozen subject/scope permissions order.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PermissionsCurrentKeysetCursor {
+    pub subject: String,
+    pub scope: String,
+}
+
+/// Compact summary over the full filtered permissions collection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PermissionsCurrentFullFilterSummary {
+    pub row_count: i64,
+    pub provenance: Vec<Value>,
+    pub coverage: Option<Value>,
+    pub chain_positions: Vec<Value>,
+    pub canonicality_summaries: Vec<Value>,
+    pub last_recomputed_at: Option<OffsetDateTime>,
+}
+
+/// Bounded keyset page plus full-filter summary data for permissions reads.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PermissionsCurrentPage {
+    pub rows: Vec<PermissionsCurrentRow>,
+    pub next_cursor: Option<PermissionsCurrentKeysetCursor>,
+    pub summary: PermissionsCurrentFullFilterSummary,
 }
 
 /// Stable storage representation for permission scope keys.
@@ -153,6 +181,15 @@ impl PermissionScope {
     }
 }
 
+impl From<&PermissionsCurrentRow> for PermissionsCurrentKeysetCursor {
+    fn from(row: &PermissionsCurrentRow) -> Self {
+        Self {
+            subject: row.subject.clone(),
+            scope: row.scope.storage_key(),
+        }
+    }
+}
+
 /// Load resource-centric permission rows with optional exact subject and scope filters.
 pub async fn load_permissions_current(
     pool: &PgPool,
@@ -160,6 +197,7 @@ pub async fn load_permissions_current(
     subject: Option<&str>,
     scope: Option<&PermissionScope>,
 ) -> Result<Vec<PermissionsCurrentRow>> {
+    let scope_storage_key = scope.map(PermissionScope::storage_key);
     let mut builder = QueryBuilder::<Postgres>::new(
         r#"
         SELECT
@@ -180,19 +218,14 @@ pub async fn load_permissions_current(
             manifest_version,
             last_recomputed_at
         FROM permissions_current
-        WHERE resource_id = "#,
+        WHERE "#,
     );
-    builder.push_bind(resource_id);
-
-    if let Some(subject) = subject {
-        builder.push(" AND subject = ");
-        builder.push_bind(subject);
-    }
-
-    if let Some(scope) = scope {
-        builder.push(" AND scope = ");
-        builder.push_bind(scope.storage_key());
-    }
+    push_permissions_current_filters(
+        &mut builder,
+        resource_id,
+        subject,
+        scope_storage_key.as_deref(),
+    );
 
     builder.push(" ORDER BY subject ASC, scope ASC");
 
@@ -203,6 +236,177 @@ pub async fn load_permissions_current(
     rows.into_iter()
         .map(decode_permissions_current_row)
         .collect()
+}
+
+async fn load_permissions_current_full_filter_summary(
+    pool: &PgPool,
+    resource_id: Uuid,
+    subject: Option<&str>,
+    scope_storage_key: Option<&str>,
+) -> Result<PermissionsCurrentFullFilterSummary> {
+    let mut builder = QueryBuilder::<Postgres>::new(
+        r#"
+        SELECT
+            COUNT(*)::BIGINT AS row_count,
+            COALESCE(jsonb_agg(provenance ORDER BY subject ASC, scope ASC), '[]'::jsonb) AS provenance,
+            (jsonb_agg(coverage ORDER BY subject ASC, scope ASC)->0) AS coverage,
+            COALESCE(jsonb_agg(chain_positions ORDER BY subject ASC, scope ASC), '[]'::jsonb) AS chain_positions,
+            COALESCE(jsonb_agg(canonicality_summary ORDER BY subject ASC, scope ASC), '[]'::jsonb) AS canonicality_summaries,
+            MAX(last_recomputed_at) AS last_recomputed_at
+        FROM permissions_current
+        WHERE "#,
+    );
+    push_permissions_current_filters(&mut builder, resource_id, subject, scope_storage_key);
+
+    let row = builder.build().fetch_one(pool).await.with_context(|| {
+        format!("failed to summarize permissions_current rows for resource_id {resource_id}")
+    })?;
+
+    decode_permissions_current_full_filter_summary(row)
+}
+
+/// Load one bounded keyset page for a resource's current permission rows.
+pub async fn load_permissions_current_page(
+    pool: &PgPool,
+    resource_id: Uuid,
+    subject: Option<&str>,
+    scope: Option<&PermissionScope>,
+    cursor: Option<&PermissionsCurrentKeysetCursor>,
+    page_size: u64,
+) -> Result<PermissionsCurrentPage> {
+    let limit = permissions_current_page_limit(page_size)?;
+    let page_size_usize =
+        usize::try_from(page_size).context("permissions_current page_size must fit in usize")?;
+    let scope_storage_key = scope.map(PermissionScope::storage_key);
+
+    let page_rows = {
+        let mut page_builder = QueryBuilder::<Postgres>::new(
+            r#"
+            SELECT
+                resource_id,
+                subject,
+                scope,
+                scope_kind,
+                scope_detail,
+                effective_powers,
+                grant_source,
+                revocation_source,
+                inheritance_path,
+                transfer_behavior,
+                provenance,
+                coverage,
+                chain_positions,
+                canonicality_summary,
+                manifest_version,
+                last_recomputed_at
+            FROM permissions_current
+            WHERE "#,
+        );
+        push_permissions_current_filters(
+            &mut page_builder,
+            resource_id,
+            subject,
+            scope_storage_key.as_deref(),
+        );
+        push_permissions_current_keyset_cursor(&mut page_builder, cursor);
+        page_builder.push(" ORDER BY subject ASC, scope ASC LIMIT ");
+        page_builder.push_bind(limit);
+
+        page_builder
+            .build()
+            .fetch_all(pool)
+            .await
+            .with_context(|| {
+                format!("failed to load permissions_current page for resource_id {resource_id}")
+            })?
+    };
+
+    let mut rows = page_rows
+        .into_iter()
+        .map(decode_permissions_current_row)
+        .collect::<Result<Vec<_>>>()?;
+    let has_next_page = rows.len() > page_size_usize;
+    if has_next_page {
+        rows.truncate(page_size_usize);
+    }
+    let next_cursor = has_next_page
+        .then(|| rows.last().map(PermissionsCurrentKeysetCursor::from))
+        .flatten();
+
+    let summary = load_permissions_current_full_filter_summary(
+        pool,
+        resource_id,
+        subject,
+        scope_storage_key.as_deref(),
+    )
+    .await?;
+
+    Ok(PermissionsCurrentPage {
+        rows,
+        next_cursor,
+        summary,
+    })
+}
+
+/// Load current permission rows for many resources, grouped by resource_id.
+pub async fn load_permissions_current_by_resource_ids(
+    pool: &PgPool,
+    resource_ids: &[Uuid],
+) -> Result<BTreeMap<Uuid, Vec<PermissionsCurrentRow>>> {
+    let mut grouped = resource_ids
+        .iter()
+        .copied()
+        .map(|resource_id| (resource_id, Vec::new()))
+        .collect::<BTreeMap<_, _>>();
+
+    if grouped.is_empty() {
+        return Ok(grouped);
+    }
+
+    let mut builder = QueryBuilder::<Postgres>::new(
+        r#"
+        SELECT
+            resource_id,
+            subject,
+            scope,
+            scope_kind,
+            scope_detail,
+            effective_powers,
+            grant_source,
+            revocation_source,
+            inheritance_path,
+            transfer_behavior,
+            provenance,
+            coverage,
+            chain_positions,
+            canonicality_summary,
+            manifest_version,
+            last_recomputed_at
+        FROM permissions_current
+        WHERE resource_id IN ("#,
+    );
+    {
+        let mut separated = builder.separated(", ");
+        for resource_id in grouped.keys() {
+            separated.push_bind(*resource_id);
+        }
+        separated.push_unseparated(")");
+    }
+    builder.push(" ORDER BY resource_id ASC, subject ASC, scope ASC");
+
+    let rows = builder.build().fetch_all(pool).await.with_context(|| {
+        format!(
+            "failed to load permissions_current rows for {} resource_ids",
+            grouped.len()
+        )
+    })?;
+
+    for row in rows {
+        let row = decode_permissions_current_row(row)?;
+        grouped.entry(row.resource_id).or_default().push(row);
+    }
+
+    Ok(grouped)
 }
 
 /// Load persisted resolver-scoped permission rows across all resources.
@@ -557,6 +761,73 @@ fn decode_permissions_current_row(row: PgRow) -> Result<PermissionsCurrentRow> {
         manifest_version: row.try_get("manifest_version")?,
         last_recomputed_at: row.try_get("last_recomputed_at")?,
     })
+}
+
+fn decode_permissions_current_full_filter_summary(
+    row: PgRow,
+) -> Result<PermissionsCurrentFullFilterSummary> {
+    Ok(PermissionsCurrentFullFilterSummary {
+        row_count: row.try_get("row_count")?,
+        provenance: json_array(row.try_get("provenance")?, "provenance")?,
+        coverage: row.try_get("coverage")?,
+        chain_positions: json_array(row.try_get("chain_positions")?, "chain_positions")?,
+        canonicality_summaries: json_array(
+            row.try_get("canonicality_summaries")?,
+            "canonicality_summaries",
+        )?,
+        last_recomputed_at: row.try_get("last_recomputed_at")?,
+    })
+}
+
+fn push_permissions_current_filters<'a>(
+    builder: &mut QueryBuilder<'a, Postgres>,
+    resource_id: Uuid,
+    subject: Option<&'a str>,
+    scope_storage_key: Option<&'a str>,
+) {
+    builder.push("resource_id = ");
+    builder.push_bind(resource_id);
+
+    if let Some(subject) = subject {
+        builder.push(" AND subject = ");
+        builder.push_bind(subject);
+    }
+
+    if let Some(scope_storage_key) = scope_storage_key {
+        builder.push(" AND scope = ");
+        builder.push_bind(scope_storage_key);
+    }
+}
+
+fn push_permissions_current_keyset_cursor<'a>(
+    builder: &mut QueryBuilder<'a, Postgres>,
+    cursor: Option<&'a PermissionsCurrentKeysetCursor>,
+) {
+    if let Some(cursor) = cursor {
+        builder.push(" AND (subject, scope) > (");
+        builder.push_bind(&cursor.subject);
+        builder.push(", ");
+        builder.push_bind(&cursor.scope);
+        builder.push(")");
+    }
+}
+
+fn permissions_current_page_limit(page_size: u64) -> Result<i64> {
+    if page_size == 0 {
+        bail!("permissions_current page_size must be positive");
+    }
+    let limit = page_size
+        .checked_add(1)
+        .filter(|limit| *limit <= i64::MAX as u64)
+        .context("permissions_current page_size is too large")?;
+    Ok(limit as i64)
+}
+
+fn json_array(value: Value, field: &str) -> Result<Vec<Value>> {
+    match value {
+        Value::Array(values) => Ok(values),
+        _ => bail!("permissions_current summary field {field} must be a JSON array"),
+    }
 }
 
 fn json_text_field(value: &Value, field: &str) -> Result<String> {
@@ -944,6 +1215,163 @@ mod tests {
                 .await?
                 .is_empty()
         );
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn permissions_current_keyset_page_uses_subject_scope_cursor_and_full_filter_summary()
+    -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let resource_id = Uuid::from_u128(0x6500);
+        let other_resource_id = Uuid::from_u128(0x6501);
+        seed_resources(&database, &[resource_id, other_resource_id]).await?;
+
+        let subject = "0x0000000000000000000000000000000000000aaa";
+        let resolver_row = permissions_current_row(
+            resource_id,
+            subject,
+            PermissionScope::Resolver {
+                chain_id: "ethereum-mainnet".to_owned(),
+                resolver_address: "0x0000000000000000000000000000000000000def".to_owned(),
+            },
+            3,
+        );
+        let resource_row =
+            permissions_current_row(resource_id, subject, PermissionScope::Resource, 4);
+        let mut later_subject_row = permissions_current_row(
+            resource_id,
+            "0x0000000000000000000000000000000000000bbb",
+            PermissionScope::Resource,
+            5,
+        );
+        later_subject_row.last_recomputed_at = timestamp(1_776_000_222);
+        let other_resource_row =
+            permissions_current_row(other_resource_id, subject, PermissionScope::Resource, 6);
+
+        upsert_permissions_current_rows(
+            database.pool(),
+            &[
+                resource_row.clone(),
+                other_resource_row,
+                later_subject_row.clone(),
+                resolver_row.clone(),
+            ],
+        )
+        .await?;
+
+        let first_page =
+            load_permissions_current_page(database.pool(), resource_id, None, None, None, 1)
+                .await?;
+        assert_eq!(first_page.rows, vec![resolver_row.clone()]);
+        assert_eq!(
+            first_page.next_cursor,
+            Some(PermissionsCurrentKeysetCursor::from(&resolver_row))
+        );
+        assert_eq!(first_page.summary.row_count, 3);
+        assert_eq!(first_page.summary.provenance.len(), 3);
+        assert_eq!(
+            first_page.summary.coverage,
+            Some(resolver_row.coverage.clone())
+        );
+        assert_eq!(first_page.summary.chain_positions.len(), 3);
+        assert_eq!(first_page.summary.canonicality_summaries.len(), 3);
+        assert_eq!(
+            first_page.summary.last_recomputed_at,
+            Some(later_subject_row.last_recomputed_at)
+        );
+
+        let second_page = load_permissions_current_page(
+            database.pool(),
+            resource_id,
+            None,
+            None,
+            first_page.next_cursor.as_ref(),
+            2,
+        )
+        .await?;
+        assert_eq!(
+            second_page.rows,
+            vec![resource_row.clone(), later_subject_row]
+        );
+        assert_eq!(second_page.next_cursor, None);
+        assert_eq!(second_page.summary.row_count, 3);
+
+        let filtered_page = load_permissions_current_page(
+            database.pool(),
+            resource_id,
+            Some(subject),
+            Some(&PermissionScope::Resource),
+            None,
+            10,
+        )
+        .await?;
+        assert_eq!(filtered_page.rows, vec![resource_row]);
+        assert_eq!(filtered_page.next_cursor, None);
+        assert_eq!(filtered_page.summary.row_count, 1);
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn permissions_current_batch_loader_groups_resource_rows_in_subject_scope_order()
+    -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let first_resource_id = Uuid::from_u128(0x6600);
+        let second_resource_id = Uuid::from_u128(0x6601);
+        let empty_resource_id = Uuid::from_u128(0x6602);
+        seed_resources(
+            &database,
+            &[first_resource_id, second_resource_id, empty_resource_id],
+        )
+        .await?;
+
+        let first_later = permissions_current_row(
+            first_resource_id,
+            "0x0000000000000000000000000000000000000bbb",
+            PermissionScope::Resource,
+            3,
+        );
+        let first_earlier = permissions_current_row(
+            first_resource_id,
+            "0x0000000000000000000000000000000000000aaa",
+            PermissionScope::Resource,
+            3,
+        );
+        let second = permissions_current_row(
+            second_resource_id,
+            "0x0000000000000000000000000000000000000ccc",
+            PermissionScope::Resolver {
+                chain_id: "ethereum-mainnet".to_owned(),
+                resolver_address: "0x0000000000000000000000000000000000000def".to_owned(),
+            },
+            3,
+        );
+
+        upsert_permissions_current_rows(
+            database.pool(),
+            &[first_later.clone(), second.clone(), first_earlier.clone()],
+        )
+        .await?;
+
+        let grouped = load_permissions_current_by_resource_ids(
+            database.pool(),
+            &[
+                second_resource_id,
+                first_resource_id,
+                empty_resource_id,
+                first_resource_id,
+            ],
+        )
+        .await?;
+
+        assert_eq!(grouped.len(), 3);
+        assert_eq!(
+            grouped.get(&first_resource_id),
+            Some(&vec![first_earlier, first_later])
+        );
+        assert_eq!(grouped.get(&second_resource_id), Some(&vec![second]));
+        assert_eq!(grouped.get(&empty_resource_id), Some(&Vec::new()));
 
         database.cleanup().await
     }
