@@ -3,23 +3,23 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use bigname_manifests::{
-    load_watched_contracts, reconcile_discovery_observations, DiscoveryObservation,
-    DiscoveryReconciliationSummary, WatchedContractSource,
+    DiscoveryObservation, DiscoveryReconciliationSummary, WatchedContractSource,
+    load_watched_contracts, reconcile_discovery_observations,
 };
 use bigname_storage::{
-    load_name_surface_including_noncanonical, load_resource_including_noncanonical,
+    CanonicalityState, NameSurface, NormalizedEvent, Resource, SurfaceBinding, SurfaceBindingKind,
+    TokenLineage, load_name_surface_including_noncanonical, load_resource_including_noncanonical,
     load_surface_binding_including_noncanonical, load_token_lineage_including_noncanonical,
     upsert_name_surfaces, upsert_normalized_events, upsert_resources, upsert_surface_bindings,
-    upsert_token_lineages, CanonicalityState, NameSurface, NormalizedEvent, Resource,
-    SurfaceBinding, SurfaceBindingKind, TokenLineage,
+    upsert_token_lineages,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha3::{Digest, Keccak256};
 use sqlx::{
-    types::{time::OffsetDateTime, Uuid},
     PgPool, Row,
+    types::{Uuid, time::OffsetDateTime},
 };
 
 const SOURCE_FAMILY_ENS_V2_ROOT_L1: &str = "ens_v2_root_l1";
@@ -2496,12 +2496,16 @@ mod tests {
             "ens-v2-resource:{}:{}:{}",
             "ethereum-sepolia", contract_instance_id, second_resource
         ));
-        assert!(harness
-            .linked_resource_states
-            .contains_key(&first_resource_id));
-        assert!(harness
-            .linked_resource_states
-            .contains_key(&second_resource_id));
+        assert!(
+            harness
+                .linked_resource_states
+                .contains_key(&first_resource_id)
+        );
+        assert!(
+            harness
+                .linked_resource_states
+                .contains_key(&second_resource_id)
+        );
         let closed_binding = harness
             .closed_bindings
             .values()
@@ -2679,9 +2683,10 @@ mod tests {
             .context("new binding should be stored")?;
         assert!(old.active_to.is_some());
         assert!(new.active_to.is_none());
-        assert!(old
-            .active_to
-            .is_some_and(|active_to| active_to <= new.active_from));
+        assert!(
+            old.active_to
+                .is_some_and(|active_to| active_to <= new.active_from)
+        );
 
         database.cleanup().await
     }
@@ -2716,9 +2721,11 @@ mod tests {
             .find(|event| event.event_kind == EVENT_KIND_SUBREGISTRY_CHANGED)
             .context("SubregistryChanged should be emitted")?;
         assert_eq!(event.after_state["to_contract_instance_id"], Value::Null);
-        assert!(!harness
-            .registry_contract_by_address
-            .contains_key("0x00000000000000000000000000000000000000c1"));
+        assert!(
+            !harness
+                .registry_contract_by_address
+                .contains_key("0x00000000000000000000000000000000000000c1")
+        );
 
         Ok(())
     }
@@ -2772,9 +2779,11 @@ mod tests {
             sender: "0x0000000000000000000000000000000000000dad".to_owned(),
             reference: reference(&child_one, child_instance_id, 13, 0),
         })?;
-        assert!(!harness
-            .states_by_registry_token
-            .contains_key(&(child_one.clone(), child_token.clone())));
+        assert!(
+            !harness
+                .states_by_registry_token
+                .contains_key(&(child_one.clone(), child_token.clone()))
+        );
 
         harness.apply(RegistryObservation::SubregistryUpdated {
             token_id: parent_token,
@@ -2805,12 +2814,16 @@ mod tests {
             sender: "0x0000000000000000000000000000000000000dad".to_owned(),
             reference: reference(&child_two, child_instance_id, 16, 0),
         })?;
-        assert!(!harness
-            .states_by_registry_token
-            .contains_key(&(child_one, child_token.clone())));
-        assert!(harness
-            .states_by_registry_token
-            .contains_key(&(child_two, child_token)));
+        assert!(
+            !harness
+                .states_by_registry_token
+                .contains_key(&(child_one, child_token.clone()))
+        );
+        assert!(
+            harness
+                .states_by_registry_token
+                .contains_key(&(child_two, child_token))
+        );
 
         Ok(())
     }

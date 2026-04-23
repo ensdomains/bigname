@@ -1,10 +1,10 @@
 use std::collections::{BTreeMap, HashMap};
 
-use anyhow::{bail, Context, Result};
-use bigname_manifests::{reconcile_discovery_observations, DiscoveryObservation};
-use bigname_storage::{upsert_normalized_events, CanonicalityState, NormalizedEvent};
+use anyhow::{Context, Result, bail};
+use bigname_manifests::{DiscoveryObservation, reconcile_discovery_observations};
+use bigname_storage::{CanonicalityState, NormalizedEvent, upsert_normalized_events};
 use sha3::{Digest, Keccak256};
-use sqlx::{types::Uuid, PgPool, Row};
+use sqlx::{PgPool, Row, types::Uuid};
 
 const ENS_V1_REGISTRY_SOURCE_FAMILY: &str = "ens_v1_registry_l1";
 #[cfg(test)]
@@ -822,19 +822,19 @@ mod tests {
 
     use anyhow::Result;
     use bigname_manifests::{
-        load_repository, load_watched_chain_plan, load_watched_contract_summary,
-        load_watched_contracts, load_watched_source_selector_plan, sync_repository,
-        WatchedChainPlan, WatchedContractSource, WatchedSourceSelector,
+        WatchedChainPlan, WatchedContractSource, WatchedSourceSelector, load_repository,
+        load_watched_chain_plan, load_watched_contract_summary, load_watched_contracts,
+        load_watched_source_selector_plan, sync_repository,
     };
     use bigname_storage::{
-        default_database_url, load_normalized_events_by_namespace, upsert_raw_blocks,
-        upsert_raw_logs, RawBlock, RawLog,
+        RawBlock, RawLog, default_database_url, load_normalized_events_by_namespace,
+        upsert_raw_blocks, upsert_raw_logs,
     };
     use sqlx::{
+        PgPool,
         postgres::{PgConnectOptions, PgPoolOptions},
         query_scalar,
         types::time::OffsetDateTime,
-        PgPool,
     };
 
     use super::*;
@@ -1259,8 +1259,8 @@ discovery_rules = []
     }
 
     #[tokio::test]
-    async fn canonical_new_owner_log_persists_one_active_subregistry_edge_and_expands_watch_plan(
-    ) -> Result<()> {
+    async fn canonical_new_owner_log_persists_one_active_subregistry_edge_and_expands_watch_plan()
+    -> Result<()> {
         let _permit = crate::acquire_test_db_permit().await;
         let test_dir = TestDir::new()?;
         let database = TestDatabase::new().await?;
@@ -1372,8 +1372,8 @@ discovery_rules = []
     }
 
     #[tokio::test]
-    async fn basenames_finalized_new_owner_log_emits_basenames_subregistry_event_idempotently(
-    ) -> Result<()> {
+    async fn basenames_finalized_new_owner_log_emits_basenames_subregistry_event_idempotently()
+    -> Result<()> {
         let _permit = crate::acquire_test_db_permit().await;
         let test_dir = TestDir::new()?;
         let database = TestDatabase::new().await?;
@@ -1492,8 +1492,8 @@ discovery_rules = []
     }
 
     #[tokio::test]
-    async fn canonical_new_resolver_log_persists_resolver_edge_without_profile_support(
-    ) -> Result<()> {
+    async fn canonical_new_resolver_log_persists_resolver_edge_without_profile_support()
+    -> Result<()> {
         let _permit = crate::acquire_test_db_permit().await;
         let test_dir = TestDir::new()?;
         let database = TestDatabase::new().await?;
@@ -1582,11 +1582,13 @@ discovery_rules = []
                 .expect("resolver edge must retain registry source manifest provenance"),
             registry_manifest_id
         );
-        assert!(!discovery_edge
-            .try_get::<serde_json::Value, _>("provenance")?
-            .as_object()
-            .expect("resolver discovery provenance must be an object")
-            .contains_key("propagated_role"));
+        assert!(
+            !discovery_edge
+                .try_get::<serde_json::Value, _>("provenance")?
+                .as_object()
+                .expect("resolver discovery provenance must be an object")
+                .contains_key("propagated_role")
+        );
 
         let normalized_events = load_normalized_events_by_namespace(database.pool(), "ens").await?;
         assert_eq!(normalized_events.len(), 1);
@@ -1739,8 +1741,8 @@ discovery_rules = []
     }
 
     #[tokio::test]
-    async fn basenames_new_resolver_log_admits_resolver_watch_target_without_profile_support(
-    ) -> Result<()> {
+    async fn basenames_new_resolver_log_admits_resolver_watch_target_without_profile_support()
+    -> Result<()> {
         let _permit = crate::acquire_test_db_permit().await;
         let test_dir = TestDir::new()?;
         let database = TestDatabase::new().await?;
@@ -1870,11 +1872,13 @@ discovery_rules = []
                 .expect("resolver edge must retain registry source manifest provenance"),
             registry_manifest_id
         );
-        assert!(!discovery_edge
-            .try_get::<serde_json::Value, _>("provenance")?
-            .as_object()
-            .expect("resolver discovery provenance must be an object")
-            .contains_key("propagated_role"));
+        assert!(
+            !discovery_edge
+                .try_get::<serde_json::Value, _>("provenance")?
+                .as_object()
+                .expect("resolver discovery provenance must be an object")
+                .contains_key("propagated_role")
+        );
         let watched_contracts = load_watched_contracts(database.pool()).await?;
         assert!(watched_contracts.iter().any(|contract| {
             contract.chain == "base-mainnet"
@@ -1905,8 +1909,8 @@ discovery_rules = []
     }
 
     #[tokio::test]
-    async fn zero_resolver_update_closes_resolver_edge_without_closing_subregistry_edge(
-    ) -> Result<()> {
+    async fn zero_resolver_update_closes_resolver_edge_without_closing_subregistry_edge()
+    -> Result<()> {
         let _permit = crate::acquire_test_db_permit().await;
         let test_dir = TestDir::new()?;
         let database = TestDatabase::new().await?;
@@ -2028,8 +2032,8 @@ discovery_rules = []
     }
 
     #[tokio::test]
-    async fn sync_ens_v1_subregistry_discovery_extends_transitively_from_discovered_subregistries(
-    ) -> Result<()> {
+    async fn sync_ens_v1_subregistry_discovery_extends_transitively_from_discovered_subregistries()
+    -> Result<()> {
         let _permit = crate::acquire_test_db_permit().await;
         let test_dir = TestDir::new()?;
         let database = TestDatabase::new().await?;
@@ -2182,8 +2186,8 @@ discovery_rules = []
     }
 
     #[tokio::test]
-    async fn sync_ens_v1_subregistry_discovery_clears_zero_owner_edges_deterministically(
-    ) -> Result<()> {
+    async fn sync_ens_v1_subregistry_discovery_clears_zero_owner_edges_deterministically()
+    -> Result<()> {
         let _permit = crate::acquire_test_db_permit().await;
         let test_dir = TestDir::new()?;
         let database = TestDatabase::new().await?;
@@ -2272,8 +2276,8 @@ discovery_rules = []
     }
 
     #[tokio::test]
-    async fn sync_ens_v1_subregistry_discovery_cascades_descendant_teardown_in_same_sync(
-    ) -> Result<()> {
+    async fn sync_ens_v1_subregistry_discovery_cascades_descendant_teardown_in_same_sync()
+    -> Result<()> {
         let _permit = crate::acquire_test_db_permit().await;
         let test_dir = TestDir::new()?;
         let database = TestDatabase::new().await?;
@@ -2376,8 +2380,8 @@ discovery_rules = []
     }
 
     #[tokio::test]
-    async fn sync_ens_v1_subregistry_discovery_reconciles_reassigned_children_to_one_active_edge(
-    ) -> Result<()> {
+    async fn sync_ens_v1_subregistry_discovery_reconciles_reassigned_children_to_one_active_edge()
+    -> Result<()> {
         let _permit = crate::acquire_test_db_permit().await;
         let test_dir = TestDir::new()?;
         let database = TestDatabase::new().await?;
@@ -2525,9 +2529,11 @@ discovery_rules = []
         assert_eq!(summary.active_edge_count, 0);
         assert_eq!(summary.admitted_edge_count, 0);
         assert_eq!(summary.inserted_edge_count, 0);
-        assert!(load_normalized_events_by_namespace(database.pool(), "ens")
-            .await?
-            .is_empty());
+        assert!(
+            load_normalized_events_by_namespace(database.pool(), "ens")
+                .await?
+                .is_empty()
+        );
 
         let watched_plan = load_watched_chain_plan(database.pool()).await?;
         assert_eq!(
