@@ -11,7 +11,8 @@ use crate::provider::JsonRpcProvider;
 
 use super::{
     BackfillBlockRange, BackfillJobRunConfig, BackfillJobRunOutcome,
-    failure_recording::record_reserved_range_failure, fetching::run_hash_pinned_backfill_range,
+    failure_recording::{ReservedRangeFailure, record_reserved_range_failure},
+    fetching::run_hash_pinned_backfill_range,
 };
 
 const HASH_PINNED_BACKFILL_SCAN_MODE: &str = "hash_pinned_block";
@@ -134,16 +135,16 @@ async fn run_reserved_hash_pinned_backfill_range(
             match run_hash_pinned_backfill_range(pool, source_plan, provider, chunk_range).await {
                 Ok(outcome) => outcome,
                 Err(error) => {
-                    return Err(record_reserved_range_failure(
+                    return Err(record_reserved_range_failure(ReservedRangeFailure {
                         pool,
-                        &active_range,
+                        reserved_range: &active_range,
                         config,
-                        "hash-pinned backfill failed",
-                        Some(block_number),
-                        Some(chunk_range),
-                        "hash_pinned_intake",
+                        failure_reason: "hash-pinned backfill failed",
+                        block_number: Some(block_number),
+                        attempted_range: Some(chunk_range),
+                        phase: "hash_pinned_intake",
                         error,
-                    )
+                    })
                     .await);
                 }
             };
@@ -159,16 +160,16 @@ async fn run_reserved_hash_pinned_backfill_range(
         {
             Ok(range) => range,
             Err(error) => {
-                return Err(record_reserved_range_failure(
+                return Err(record_reserved_range_failure(ReservedRangeFailure {
                     pool,
-                    &active_range,
+                    reserved_range: &active_range,
                     config,
-                    "backfill checkpoint advance failed",
-                    Some(block_number),
-                    Some(chunk_range),
-                    "checkpoint_advance",
+                    failure_reason: "backfill checkpoint advance failed",
+                    block_number: Some(block_number),
+                    attempted_range: Some(chunk_range),
+                    phase: "checkpoint_advance",
                     error,
-                )
+                })
                 .await);
             }
         };
@@ -184,16 +185,16 @@ async fn run_reserved_hash_pinned_backfill_range(
     if let Err(error) =
         complete_backfill_range(pool, active_range.backfill_range_id, &config.lease_token).await
     {
-        return Err(record_reserved_range_failure(
+        return Err(record_reserved_range_failure(ReservedRangeFailure {
             pool,
-            &active_range,
+            reserved_range: &active_range,
             config,
-            "backfill range completion failed",
-            None,
-            None,
-            "range_completion",
+            failure_reason: "backfill range completion failed",
+            block_number: None,
+            attempted_range: None,
+            phase: "range_completion",
             error,
-        )
+        })
         .await);
     }
 

@@ -1558,7 +1558,7 @@ async fn rebuild_projects_supported_basenames_transport_topology_from_frozen_inp
         provenance: json!({"source": "worker_name_current_test", "kind": "surface_binding"}),
         canonicality_state: CanonicalityState::Finalized,
     };
-    upsert_surface_bindings(database.pool(), &[basenames_binding.clone()]).await?;
+    upsert_surface_bindings(database.pool(), std::slice::from_ref(&basenames_binding)).await?;
     insert_basenames_execution_manifest_version(database.pool(), 2, MANIFEST_ROLLOUT_STATUS_ACTIVE)
         .await?;
     seed_events(

@@ -279,9 +279,9 @@ pub fn parse_rfc3339_utc_timestamp(value: &str) -> SnapshotSelectionResult<Offse
 
     validate_date_parts(value, year, month, day)?;
     if hour > 23 || minute > 59 || second > 59 {
-        return Err(SnapshotSelectionError::invalid_input(format!(
+        Err(SnapshotSelectionError::invalid_input(format!(
             "timestamp {value} has invalid time"
-        )));
+        )))
     } else {
         let days = days_from_civil(year, month, day);
         let seconds = days

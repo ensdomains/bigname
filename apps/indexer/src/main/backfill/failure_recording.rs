@@ -6,16 +6,30 @@ use super::{BackfillBlockRange, BackfillJobRunConfig};
 
 const MAX_FAILURE_ERROR_CHARS: usize = 2048;
 
+pub(super) struct ReservedRangeFailure<'a> {
+    pub(super) pool: &'a sqlx::PgPool,
+    pub(super) reserved_range: &'a BackfillRange,
+    pub(super) config: &'a BackfillJobRunConfig,
+    pub(super) failure_reason: &'a str,
+    pub(super) block_number: Option<i64>,
+    pub(super) attempted_range: Option<BackfillBlockRange>,
+    pub(super) phase: &'a str,
+    pub(super) error: anyhow::Error,
+}
+
 pub(super) async fn record_reserved_range_failure(
-    pool: &sqlx::PgPool,
-    reserved_range: &BackfillRange,
-    config: &BackfillJobRunConfig,
-    failure_reason: &str,
-    block_number: Option<i64>,
-    attempted_range: Option<BackfillBlockRange>,
-    phase: &str,
-    error: anyhow::Error,
+    failure: ReservedRangeFailure<'_>,
 ) -> anyhow::Error {
+    let ReservedRangeFailure {
+        pool,
+        reserved_range,
+        config,
+        failure_reason,
+        block_number,
+        attempted_range,
+        phase,
+        error,
+    } = failure;
     let failure_metadata = json!({
         "phase": phase,
         "block_number": block_number,

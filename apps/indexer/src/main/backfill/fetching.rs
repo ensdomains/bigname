@@ -96,7 +96,7 @@ pub(crate) async fn run_hash_pinned_backfill_range(
             &bundle.block,
             CanonicalityState::Observed,
         );
-        ensure_provider_bundle_matches_raw_block(&raw_block, &bundle)?;
+        ensure_provider_bundle_matches_raw_block(&raw_block, bundle)?;
 
         cache_metadata.extend(provider_raw_payload_cache_metadata_to_upserts(
             &watched_chain.chain,

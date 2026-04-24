@@ -51,9 +51,10 @@ pub(super) async fn load_resolution_verified_outcome(
             validate_loaded_resolution_verified_outcome(row, records, &outcome)?;
             Ok(Some(outcome))
         }
-        None => Err(SnapshotSelectionError::stale(format!(
+        None => Err(SnapshotSelectionError::stale(
             "persisted verified resolution output is not available for the selected snapshot"
-        ))),
+                .to_owned(),
+        )),
     }
 }
 
@@ -73,9 +74,10 @@ fn validate_loaded_resolution_verified_outcome(
 
     for record in supported_records {
         if !persisted_queries.contains_key(&record.record_key) {
-            return Err(SnapshotSelectionError::stale(format!(
+            return Err(SnapshotSelectionError::stale(
                 "persisted verified resolution output is not available for the selected snapshot"
-            )));
+                    .to_owned(),
+            ));
         }
     }
 

@@ -20,17 +20,17 @@ pub(crate) fn serialize_optional_jsonb_field(
         .context(context)
 }
 
-pub(crate) fn require_json_object<'a>(
-    value: &'a Value,
+pub(crate) fn require_json_object(
+    value: &Value,
     error: impl FnOnce() -> String,
-) -> Result<&'a Map<String, Value>> {
+) -> Result<&Map<String, Value>> {
     value.as_object().with_context(error)
 }
 
-pub(crate) fn require_json_array<'a>(
-    value: &'a Value,
+pub(crate) fn require_json_array(
+    value: &Value,
     error: impl FnOnce() -> String,
-) -> Result<&'a Vec<Value>> {
+) -> Result<&Vec<Value>> {
     value.as_array().with_context(error)
 }
 
