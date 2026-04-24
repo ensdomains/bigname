@@ -78,10 +78,11 @@ const VERIFIED_RESOLUTION_REQUEST_TYPE: &str = "verified_resolution";
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    init_tracing("bigname-api");
-
     match Cli::parse().command {
-        Command::Serve(args) => serve(args).await,
+        Command::Serve(args) => {
+            init_tracing("bigname-api");
+            serve(args).await
+        }
         Command::PrintOpenapi => {
             print!("{}", render_openapi_document());
             Ok(())
