@@ -1,0 +1,627 @@
+#!/usr/bin/env python3
+"""Check the Phase 0 Rust source file size ratchet."""
+from __future__ import annotations
+
+import argparse
+import ast
+import json
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - only used on older Python.
+    tomllib = None
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_BASELINE = REPO_ROOT / "scripts" / "rust-file-size-baseline.toml"
+DEFAULT_BASELINE_GIT_PATH = "scripts/rust-file-size-baseline.toml"
+
+PRODUCTION_ROOTS = {"apps", "crates"}
+EXCLUDED_CRATES = {"test-support"}
+EXCLUDED_COMPONENTS = {
+    "bench",
+    "benches",
+    "binding",
+    "bindings",
+    "constant",
+    "constants",
+    "fixture",
+    "fixtures",
+    "generated",
+    "testdata",
+    "tests",
+    "typegen",
+}
+EXCLUDED_FILE_STEMS = {
+    "bindings",
+    "constant",
+    "constants",
+    "fixture",
+    "fixtures",
+    "generated",
+    "tests",
+    "typegen",
+}
+EXCLUDED_COMPONENT_KEYWORDS = (
+    "generated",
+    "typegen",
+)
+
+WARNING_LOC = 600
+NEW_FILE_MAX_LOC = 1200
+JUSTIFICATION_REQUIRED_LOC = 900
+WIRING_TARGET_LOC = 300
+WIRING_NEW_FILE_MAX_LOC = 500
+WIRING_FILENAMES = {"lib.rs", "main.rs"}
+
+
+class CheckError(Exception):
+    """Raised for malformed local ratchet data."""
+
+
+def rel(path: Path) -> str:
+    return path.relative_to(REPO_ROOT).as_posix()
+
+
+def display_path(path: Path) -> str:
+    try:
+        return rel(path)
+    except ValueError:
+        return path.as_posix()
+
+
+def run_git_ls_files() -> list[Path] | None:
+    result = subprocess.run(
+        ["git", "ls-files", "*.rs"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    return [REPO_ROOT / line for line in result.stdout.splitlines() if line]
+
+
+def filesystem_rs_files() -> list[Path]:
+    ignored_dirs = {".git", ".refs", "target"}
+    files: list[Path] = []
+    for path in REPO_ROOT.rglob("*.rs"):
+        if any(part in ignored_dirs for part in path.relative_to(REPO_ROOT).parts):
+            continue
+        files.append(path)
+    return files
+
+
+def rust_files() -> list[Path]:
+    files = run_git_ls_files()
+    if files is None:
+        files = filesystem_rs_files()
+    return sorted(files, key=rel)
+
+
+def exclusion_reason(path: Path) -> str | None:
+    parts = path.relative_to(REPO_ROOT).parts
+    if not parts:
+        return "empty path"
+
+    root = parts[0]
+    if root not in PRODUCTION_ROOTS:
+        return "outside apps/ and crates/"
+
+    if root == "crates" and len(parts) > 1 and parts[1] in EXCLUDED_CRATES:
+        return "test support crate"
+
+    if path.name == "build.rs":
+        return "build script"
+
+    lowered_parts = [part.lower() for part in parts]
+    for part in lowered_parts:
+        if part in EXCLUDED_COMPONENTS:
+            return f"excluded path component: {part}"
+        if any(keyword in part for keyword in EXCLUDED_COMPONENT_KEYWORDS):
+            return f"excluded generated-style path component: {part}"
+
+    stem = path.stem.lower()
+    if stem in EXCLUDED_FILE_STEMS:
+        return f"excluded file stem: {stem}"
+
+    return None
+
+
+def is_production_rust(path: Path) -> bool:
+    return exclusion_reason(path) is None
+
+
+def is_wiring_file(path_text: str) -> bool:
+    return Path(path_text).name in WIRING_FILENAMES
+
+
+def line_count(path: Path) -> int:
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        return sum(1 for _ in handle)
+
+
+def strip_toml_comment(line: str) -> str:
+    in_string = False
+    escape = False
+    out: list[str] = []
+    for char in line:
+        if escape:
+            out.append(char)
+            escape = False
+            continue
+        if char == "\\" and in_string:
+            out.append(char)
+            escape = True
+            continue
+        if char == '"':
+            in_string = not in_string
+            out.append(char)
+            continue
+        if char == "#" and not in_string:
+            break
+        out.append(char)
+    return "".join(out).strip()
+
+
+def parse_fallback_value(raw: str) -> Any:
+    raw = raw.strip()
+    if raw in {"true", "false"}:
+        return raw == "true"
+    if raw.startswith('"') or raw.startswith("["):
+        return ast.literal_eval(raw)
+    try:
+        return int(raw)
+    except ValueError:
+        raise CheckError(f"unsupported TOML value: {raw}") from None
+
+
+def load_toml_fallback(source_name: str, text: str) -> dict[str, Any]:
+    data: dict[str, Any] = {}
+    current_table: dict[str, Any] | None = None
+    current_name: str | None = None
+
+    for number, line in enumerate(text.splitlines(), start=1):
+        stripped = strip_toml_comment(line)
+        if not stripped:
+            continue
+        if stripped.startswith("[[") and stripped.endswith("]]"):
+            name = stripped[2:-2].strip()
+            current_table = {}
+            current_name = name
+            data.setdefault(name, []).append(current_table)
+            continue
+        if stripped.startswith("[") and stripped.endswith("]"):
+            name = stripped[1:-1].strip()
+            current_table = {}
+            current_name = name
+            data[name] = current_table
+            continue
+        if "=" not in stripped:
+            raise CheckError(f"{source_name}:{number}: unsupported TOML line")
+        if current_table is None or current_name is None:
+            raise CheckError(f"{source_name}:{number}: key outside TOML table")
+        key, raw_value = stripped.split("=", 1)
+        current_table[key.strip()] = parse_fallback_value(raw_value)
+
+    return data
+
+
+def load_toml_text(source_name: str, text: str) -> dict[str, Any]:
+    if tomllib is not None:
+        return tomllib.loads(text)
+    return load_toml_fallback(source_name, text)
+
+
+def load_toml_path(path: Path) -> dict[str, Any]:
+    return load_toml_text(display_path(path), path.read_text(encoding="utf-8"))
+
+
+def expect_int(
+    source_name: str, settings: dict[str, Any], key: str, expected: int, errors: list[str]
+) -> None:
+    actual = settings.get(key)
+    if actual != expected:
+        errors.append(
+            f"{source_name}: settings.{key} must be {expected}; found {actual!r}"
+        )
+
+
+def expect_string_list(
+    source_name: str,
+    settings: dict[str, Any],
+    key: str,
+    expected: set[str],
+    errors: list[str],
+) -> None:
+    actual = settings.get(key)
+    if not isinstance(actual, list) or set(actual) != expected:
+        errors.append(
+            f"{source_name}: settings.{key} must be {sorted(expected)!r}; found {actual!r}"
+        )
+
+
+def parse_baseline(
+    source_name: str, data: dict[str, Any]
+) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    errors: list[str] = []
+    settings = data.get("settings")
+    if not isinstance(settings, dict):
+        errors.append(f"{source_name}: baseline must include a [settings] table")
+        settings = {}
+
+    expect_int(source_name, settings, "warning_loc", WARNING_LOC, errors)
+    expect_int(source_name, settings, "new_file_max_loc", NEW_FILE_MAX_LOC, errors)
+    expect_int(
+        source_name,
+        settings,
+        "justification_required_loc",
+        JUSTIFICATION_REQUIRED_LOC,
+        errors,
+    )
+    expect_int(source_name, settings, "wiring_target_loc", WIRING_TARGET_LOC, errors)
+    expect_int(
+        source_name,
+        settings,
+        "wiring_new_file_max_loc",
+        WIRING_NEW_FILE_MAX_LOC,
+        errors,
+    )
+    expect_string_list(source_name, settings, "wiring_files", WIRING_FILENAMES, errors)
+
+    entries = data.get("files")
+    if not isinstance(entries, list):
+        errors.append(f"{source_name}: baseline must include [[files]] entries")
+        entries = []
+
+    baseline: dict[str, dict[str, Any]] = {}
+    for index, entry in enumerate(entries, start=1):
+        if not isinstance(entry, dict):
+            errors.append(f"{source_name}: baseline entry {index} must be a table")
+            continue
+
+        path_text = entry.get("path")
+        loc_value = entry.get("loc")
+        justification = entry.get("justification")
+
+        if not isinstance(path_text, str) or not path_text:
+            errors.append(f"{source_name}: baseline entry {index} must include a non-empty path")
+            continue
+        if Path(path_text).is_absolute() or ".." in Path(path_text).parts:
+            errors.append(
+                f"{source_name}: baseline entry {index} has invalid relative path: {path_text}"
+            )
+            continue
+        if path_text in baseline:
+            errors.append(f"{source_name}: duplicate baseline path: {path_text}")
+            continue
+        if not isinstance(loc_value, int) or loc_value < 0:
+            errors.append(
+                f"{source_name}: baseline entry for {path_text} "
+                "must include non-negative integer loc"
+            )
+            continue
+        if loc_value > JUSTIFICATION_REQUIRED_LOC and (
+            not isinstance(justification, str) or not justification.strip()
+        ):
+            errors.append(
+                f"{source_name}: {path_text}: baseline entries above "
+                f"{JUSTIFICATION_REQUIRED_LOC} LOC require justification"
+            )
+
+        baseline[path_text] = entry
+
+    return baseline, errors
+
+
+def load_baseline(path: Path) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    if not path.exists():
+        raise CheckError(f"baseline not found: {display_path(path)}")
+
+    return parse_baseline(display_path(path), load_toml_path(path))
+
+
+def load_baseline_text(
+    source_name: str, text: str
+) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    return parse_baseline(source_name, load_toml_text(source_name, text))
+
+
+def git_ref_exists(ref: str) -> bool:
+    result = subprocess.run(
+        ["git", "cat-file", "-e", f"{ref}^{{commit}}"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def git_ref_has_path(ref: str, git_path: str) -> bool:
+    result = subprocess.run(
+        ["git", "cat-file", "-e", f"{ref}:{git_path}"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def git_show(ref: str, git_path: str) -> str:
+    result = subprocess.run(
+        ["git", "show", f"{ref}:{git_path}"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        message = result.stderr.strip() or result.stdout.strip()
+        raise CheckError(f"could not read {git_path} from {ref}: {message}")
+    return result.stdout
+
+
+def load_baseline_from_ref(
+    ref: str, git_path: str = DEFAULT_BASELINE_GIT_PATH
+) -> tuple[dict[str, dict[str, Any]], list[str]] | None:
+    if not git_ref_exists(ref):
+        raise CheckError(f"base ref not found: {ref}")
+    if not git_ref_has_path(ref, git_path):
+        return None
+    return load_baseline_text(f"{ref}:{git_path}", git_show(ref, git_path))
+
+
+def production_files_with_loc() -> dict[str, int]:
+    files: dict[str, int] = {}
+    for path in rust_files():
+        if not path.exists() or not is_production_rust(path):
+            continue
+        files[rel(path)] = line_count(path)
+    return files
+
+
+def validate_baseline_paths(
+    baseline: dict[str, dict[str, Any]], current: dict[str, int]
+) -> list[str]:
+    errors: list[str] = []
+    for path_text in sorted(baseline):
+        path = REPO_ROOT / path_text
+        reason = exclusion_reason(path)
+        if reason is not None:
+            errors.append(f"{path_text}: baseline path is not production Rust ({reason})")
+        elif path_text not in current:
+            errors.append(f"{path_text}: baseline entry is stale; remove it")
+    return errors
+
+
+def check_current_files(
+    baseline: dict[str, dict[str, Any]], current: dict[str, int]
+) -> tuple[list[str], list[str]]:
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    for path_text, loc_value in sorted(current.items()):
+        entry = baseline.get(path_text)
+        wiring = is_wiring_file(path_text)
+
+        if loc_value > WARNING_LOC:
+            warnings.append(
+                f"{path_text}: {loc_value} LOC exceeds warning threshold {WARNING_LOC}"
+            )
+        if wiring and loc_value > WIRING_TARGET_LOC:
+            warnings.append(
+                f"{path_text}: wiring file is {loc_value} LOC; target is <= {WIRING_TARGET_LOC}"
+            )
+
+        if entry is None:
+            max_loc = WIRING_NEW_FILE_MAX_LOC if wiring else NEW_FILE_MAX_LOC
+            if loc_value > max_loc:
+                errors.append(
+                    f"{path_text}: new production file is {loc_value} LOC; "
+                    f"maximum is {max_loc}"
+                )
+            continue
+
+        baseline_loc = entry["loc"]
+        if loc_value > baseline_loc:
+            errors.append(
+                f"{path_text}: {loc_value} LOC exceeds baseline {baseline_loc}; "
+                "split or shrink the file before updating the ratchet"
+            )
+        elif loc_value < baseline_loc:
+            errors.append(
+                f"{path_text}: baseline records {baseline_loc} LOC but file is now "
+                f"{loc_value}; regenerate the baseline to ratchet it down"
+            )
+
+    return errors, warnings
+
+
+def check_base_allowances(
+    baseline: dict[str, dict[str, Any]],
+    base_baseline: dict[str, dict[str, Any]],
+    current: dict[str, int],
+) -> list[str]:
+    errors: list[str] = []
+    for path_text in sorted(base_baseline):
+        if path_text in current and path_text not in baseline:
+            errors.append(
+                f"{path_text}: candidate baseline omits an existing production file "
+                "from the base baseline; keep the entry so the ratchet can enforce "
+                "future shrinkage"
+            )
+
+    for path_text, entry in sorted(baseline.items()):
+        loc_value = entry["loc"]
+        base_entry = base_baseline.get(path_text)
+        if base_entry is None:
+            max_loc = WIRING_NEW_FILE_MAX_LOC if is_wiring_file(path_text) else NEW_FILE_MAX_LOC
+            if loc_value > max_loc:
+                errors.append(
+                    f"{path_text}: baseline adds a {loc_value} LOC allowance absent "
+                    f"from the base baseline; new production files may not exceed {max_loc}"
+                )
+            continue
+
+        base_loc = base_entry["loc"]
+        if loc_value > base_loc:
+            errors.append(
+                f"{path_text}: baseline allowance increases from base {base_loc} "
+                f"to {loc_value}; baseline increases are not allowed in the same change"
+            )
+    return errors
+
+
+def quote(value: str) -> str:
+    return json.dumps(value)
+
+
+def baseline_justification(path_text: str, loc_value: int) -> str | None:
+    if loc_value <= JUSTIFICATION_REQUIRED_LOC:
+        return None
+    if is_wiring_file(path_text):
+        return (
+            "Phase 0 ratchet baseline for an existing oversized wiring file; "
+            "future changes should move logic behind smaller modules."
+        )
+    return (
+        "Phase 0 ratchet baseline for an existing large production file; "
+        "future changes should split or shrink it."
+    )
+
+
+def print_baseline() -> int:
+    current = production_files_with_loc()
+    print("# Generated by scripts/check-rust-file-size --print-baseline.")
+    print("# Tracks hand-written production Rust files for the Phase 0 size ratchet.")
+    print()
+    print("[settings]")
+    print(f"warning_loc = {WARNING_LOC}")
+    print(f"new_file_max_loc = {NEW_FILE_MAX_LOC}")
+    print(f"justification_required_loc = {JUSTIFICATION_REQUIRED_LOC}")
+    print(f"wiring_target_loc = {WIRING_TARGET_LOC}")
+    print(f"wiring_new_file_max_loc = {WIRING_NEW_FILE_MAX_LOC}")
+    wiring_files = ", ".join(quote(name) for name in sorted(WIRING_FILENAMES))
+    print(f"wiring_files = [{wiring_files}]")
+
+    for path_text, loc_value in sorted(current.items()):
+        print()
+        print("[[files]]")
+        print(f"path = {quote(path_text)}")
+        print(f"loc = {loc_value}")
+        justification = baseline_justification(path_text, loc_value)
+        if justification is not None:
+            print(f"justification = {quote(justification)}")
+
+    return 0
+
+
+def check(
+    baseline_path: Path, base_baseline_path: Path | None = None, base_ref: str | None = None
+) -> int:
+    try:
+        baseline, baseline_errors = load_baseline(baseline_path)
+        base_baseline_result: tuple[dict[str, dict[str, Any]], list[str]] | None = None
+        if base_baseline_path is not None:
+            base_baseline_result = load_baseline(base_baseline_path)
+        elif base_ref is not None:
+            base_baseline_result = load_baseline_from_ref(base_ref)
+    except CheckError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+
+    current = production_files_with_loc()
+    path_errors = validate_baseline_paths(baseline, current)
+    check_errors, check_warnings = check_current_files(baseline, current)
+    errors = baseline_errors + path_errors + check_errors
+    warnings = check_warnings
+
+    base_source = None
+    if base_baseline_path is not None:
+        base_source = display_path(base_baseline_path)
+    elif base_ref is not None:
+        base_source = f"{base_ref}:{DEFAULT_BASELINE_GIT_PATH}"
+
+    if base_baseline_result is None:
+        if base_ref is not None:
+            warnings.append(
+                f"{base_ref} does not contain {DEFAULT_BASELINE_GIT_PATH}; "
+                "skipping base allowance comparison"
+            )
+    else:
+        base_baseline, base_errors = base_baseline_result
+        errors.extend(base_errors)
+        errors.extend(check_base_allowances(baseline, base_baseline, current))
+
+    for warning in warnings:
+        print(f"warning: {warning}", file=sys.stderr)
+
+    if errors:
+        print("Rust file size ratchet failed:", file=sys.stderr)
+        for error in errors:
+            print(f"  - {error}", file=sys.stderr)
+        print(
+            "Regenerate the baseline only for intentional ratchet changes: "
+            "scripts/check-rust-file-size --print-baseline > "
+            "scripts/rust-file-size-baseline.toml",
+            file=sys.stderr,
+        )
+        return 1
+
+    print(
+        f"Rust file size ratchet OK: {len(current)} production files checked "
+        f"against {display_path(baseline_path)}."
+    )
+    if base_source is not None and base_baseline_result is not None:
+        print(f"Base allowance comparison OK: {base_source}.")
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--baseline",
+        type=Path,
+        default=DEFAULT_BASELINE,
+        help="baseline TOML path (default: scripts/rust-file-size-baseline.toml)",
+    )
+    parser.add_argument(
+        "--print-baseline",
+        action="store_true",
+        help="print a baseline generated from the current repository state",
+    )
+    base_group = parser.add_mutually_exclusive_group()
+    base_group.add_argument(
+        "--base-baseline",
+        type=Path,
+        help="base baseline TOML path; candidate allowances may not exceed it",
+    )
+    base_group.add_argument(
+        "--base-ref",
+        help=(
+            "git ref containing scripts/rust-file-size-baseline.toml; "
+            "candidate allowances may not exceed it"
+        ),
+    )
+    args = parser.parse_args()
+
+    if args.print_baseline:
+        return print_baseline()
+
+    baseline_path = args.baseline
+    if not baseline_path.is_absolute():
+        baseline_path = REPO_ROOT / baseline_path
+    base_baseline_path = args.base_baseline
+    if base_baseline_path is not None and not base_baseline_path.is_absolute():
+        base_baseline_path = REPO_ROOT / base_baseline_path
+    return check(baseline_path, base_baseline_path, args.base_ref)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -59,6 +59,18 @@ jobs:
         if: steps.workspace.outputs.present == 'true'
         run: cargo fmt --check
 
+      - name: Rust source size ratchet
+        if: steps.workspace.outputs.present == 'true'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ] && [ -n "$BASE_REF" ]; then
+            git fetch --no-tags --depth=1 origin "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+            ./scripts/check-rust-file-size --base-ref "refs/remotes/origin/${BASE_REF}"
+          else
+            ./scripts/check-rust-file-size
+          fi
+
       - name: cargo clippy
         if: steps.workspace.outputs.present == 'true'
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings

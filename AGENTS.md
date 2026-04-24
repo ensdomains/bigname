@@ -40,6 +40,17 @@ Citation rules:
 - Coordinate migrations carefully.
 - Treat fixture updates as cross-workstream review points.
 
+## Rust File Size
+
+- Hand-written production `.rs` files normally target <=500 LOC.
+- Phase 0 warns for files >600 LOC; later phases may harden this into a required allowlist entry.
+- Baseline entries must match the current file size so shrinkage ratchets down in the same change.
+- Files >900 LOC require explicit baseline justification.
+- Files >1200 LOC are blocked for new hand-written production files unless they are generated code, bindings, typegen, constants, fixtures, or equivalent exceptions.
+- `lib.rs` and `main.rs` are wiring files: target <=300 LOC, with hard review at >500 LOC.
+- Existing legacy offenders are ratcheted down until the allowlist is empty or contains only true exceptions.
+- The CI/script gate lives in `scripts/check-rust-file-size`.
+
 ## Core Skills
 
 - `$change-gate`: classify doc-first vs implementation-only work.
