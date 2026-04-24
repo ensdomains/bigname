@@ -972,7 +972,19 @@ loc = 118
 
 [[files]]
 path = "crates/manifests/src/lib/managed_edges.rs"
-loc = 888
+loc = 10
+
+[[files]]
+path = "crates/manifests/src/lib/managed_edges/active_addresses.rs"
+loc = 371
+
+[[files]]
+path = "crates/manifests/src/lib/managed_edges/children.rs"
+loc = 126
+
+[[files]]
+path = "crates/manifests/src/lib/managed_edges/source_graph.rs"
+loc = 404
 
 [[files]]
 path = "crates/manifests/src/lib/model.rs"
