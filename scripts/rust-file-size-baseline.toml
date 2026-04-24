@@ -78,8 +78,35 @@ loc = 7
 
 [[files]]
 path = "apps/api/src/support.rs"
-loc = 1787
-justification = "Phase 0 ratchet baseline for an existing large production file; future changes should split or shrink it."
+loc = 22
+
+[[files]]
+path = "apps/api/src/support/cursors.rs"
+loc = 398
+
+[[files]]
+path = "apps/api/src/support/history.rs"
+loc = 69
+
+[[files]]
+path = "apps/api/src/support/primary_name_lookup.rs"
+loc = 343
+
+[[files]]
+path = "apps/api/src/support/primary_name_readback.rs"
+loc = 374
+
+[[files]]
+path = "apps/api/src/support/query_parsing.rs"
+loc = 391
+
+[[files]]
+path = "apps/api/src/support/service.rs"
+loc = 36
+
+[[files]]
+path = "apps/api/src/support/snapshots.rs"
+loc = 221
 
 [[files]]
 path = "apps/indexer/src/main.rs"
@@ -95,8 +122,39 @@ loc = 382
 
 [[files]]
 path = "apps/indexer/src/main/reconciliation.rs"
-loc = 1698
-justification = "Phase 0 ratchet baseline for an existing large production file; future changes should split or shrink it."
+loc = 62
+
+[[files]]
+path = "apps/indexer/src/main/reconciliation/adapter_sync.rs"
+loc = 180
+
+[[files]]
+path = "apps/indexer/src/main/reconciliation/canonical.rs"
+loc = 417
+
+[[files]]
+path = "apps/indexer/src/main/reconciliation/lineage.rs"
+loc = 92
+
+[[files]]
+path = "apps/indexer/src/main/reconciliation/logging.rs"
+loc = 39
+
+[[files]]
+path = "apps/indexer/src/main/reconciliation/payload.rs"
+loc = 447
+
+[[files]]
+path = "apps/indexer/src/main/reconciliation/persistence.rs"
+loc = 245
+
+[[files]]
+path = "apps/indexer/src/main/reconciliation/replay.rs"
+loc = 232
+
+[[files]]
+path = "apps/indexer/src/main/reconciliation/types.rs"
+loc = 126
 
 [[files]]
 path = "apps/indexer/src/main/runtime.rs"
@@ -137,7 +195,43 @@ loc = 164
 
 [[files]]
 path = "apps/worker/src/address_names.rs"
-loc = 891
+loc = 22
+
+[[files]]
+path = "apps/worker/src/address_names/cleanup.rs"
+loc = 92
+
+[[files]]
+path = "apps/worker/src/address_names/load.rs"
+loc = 227
+
+[[files]]
+path = "apps/worker/src/address_names/model.rs"
+loc = 61
+
+[[files]]
+path = "apps/worker/src/address_names/positions.rs"
+loc = 162
+
+[[files]]
+path = "apps/worker/src/address_names/projection.rs"
+loc = 127
+
+[[files]]
+path = "apps/worker/src/address_names/rebuild.rs"
+loc = 63
+
+[[files]]
+path = "apps/worker/src/address_names/relations.rs"
+loc = 49
+
+[[files]]
+path = "apps/worker/src/address_names/source_policy.rs"
+loc = 59
+
+[[files]]
+path = "apps/worker/src/address_names/util.rs"
+loc = 93
 
 [[files]]
 path = "apps/worker/src/children.rs"
@@ -361,8 +455,35 @@ loc = 34
 
 [[files]]
 path = "crates/adapters/src/block_derived_normalized_events.rs"
-loc = 1238
-justification = "Phase 0 ratchet baseline for an existing large production file; future changes should split or shrink it."
+loc = 135
+
+[[files]]
+path = "crates/adapters/src/block_derived_normalized_events/decoding.rs"
+loc = 111
+
+[[files]]
+path = "crates/adapters/src/block_derived_normalized_events/event_builders.rs"
+loc = 470
+
+[[files]]
+path = "crates/adapters/src/block_derived_normalized_events/loading.rs"
+loc = 221
+
+[[files]]
+path = "crates/adapters/src/block_derived_normalized_events/persistence.rs"
+loc = 51
+
+[[files]]
+path = "crates/adapters/src/block_derived_normalized_events/preimage_observation.rs"
+loc = 80
+
+[[files]]
+path = "crates/adapters/src/block_derived_normalized_events/source_selection.rs"
+loc = 162
+
+[[files]]
+path = "crates/adapters/src/block_derived_normalized_events/types.rs"
+loc = 74
 
 [[files]]
 path = "crates/adapters/src/ens_v1_reverse_claim.rs"
@@ -616,8 +737,31 @@ loc = 49
 
 [[files]]
 path = "crates/manifests/src/lib/discovery.rs"
-loc = 1095
-justification = "Phase 0 ratchet baseline for an existing large production file; future changes should split or shrink it."
+loc = 21
+
+[[files]]
+path = "crates/manifests/src/lib/discovery/admission.rs"
+loc = 115
+
+[[files]]
+path = "crates/manifests/src/lib/discovery/loading.rs"
+loc = 211
+
+[[files]]
+path = "crates/manifests/src/lib/discovery/persistence.rs"
+loc = 160
+
+[[files]]
+path = "crates/manifests/src/lib/discovery/provenance.rs"
+loc = 46
+
+[[files]]
+path = "crates/manifests/src/lib/discovery/reconciliation.rs"
+loc = 488
+
+[[files]]
+path = "crates/manifests/src/lib/discovery/types.rs"
+loc = 118
 
 [[files]]
 path = "crates/manifests/src/lib/managed_edges.rs"
@@ -737,8 +881,43 @@ loc = 223
 
 [[files]]
 path = "crates/storage/src/backfill_jobs.rs"
-loc = 1330
-justification = "Phase 0 ratchet baseline for an existing large production file; future changes should split or shrink it."
+loc = 22
+
+[[files]]
+path = "crates/storage/src/backfill_jobs/complete.rs"
+loc = 171
+
+[[files]]
+path = "crates/storage/src/backfill_jobs/create.rs"
+loc = 142
+
+[[files]]
+path = "crates/storage/src/backfill_jobs/decode.rs"
+loc = 87
+
+[[files]]
+path = "crates/storage/src/backfill_jobs/fail.rs"
+loc = 180
+
+[[files]]
+path = "crates/storage/src/backfill_jobs/lease.rs"
+loc = 241
+
+[[files]]
+path = "crates/storage/src/backfill_jobs/read.rs"
+loc = 187
+
+[[files]]
+path = "crates/storage/src/backfill_jobs/sql.rs"
+loc = 97
+
+[[files]]
+path = "crates/storage/src/backfill_jobs/types.rs"
+loc = 103
+
+[[files]]
+path = "crates/storage/src/backfill_jobs/validate.rs"
+loc = 189
 
 [[files]]
 path = "crates/storage/src/checkpoints.rs"

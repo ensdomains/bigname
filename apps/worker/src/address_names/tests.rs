@@ -4,16 +4,31 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use bigname_storage::{
-    NameSurface, NormalizedEvent, RawBlock, Resource, SurfaceBinding, TokenLineage,
-    default_database_url, load_address_names_current, upsert_name_surfaces,
-    upsert_normalized_events, upsert_raw_blocks, upsert_resources, upsert_surface_bindings,
-    upsert_token_lineages,
+    AddressNameRelation, CanonicalityState, NameSurface, NormalizedEvent, RawBlock, Resource,
+    SurfaceBinding, SurfaceBindingKind, TokenLineage, default_database_url,
+    load_address_names_current, upsert_name_surfaces, upsert_normalized_events, upsert_raw_blocks,
+    upsert_resources, upsert_surface_bindings, upsert_token_lineages,
 };
-use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+use serde_json::{Value, json};
+use sqlx::{
+    PgPool,
+    postgres::{PgConnectOptions, PgPoolOptions},
+    types::time::OffsetDateTime,
+};
+use uuid::Uuid;
 
-use super::*;
+use super::{
+    constants::{
+        ADDRESS_NAMES_CURRENT_DERIVATION_KIND, ADDRESS_NAMES_ENUMERATION_BASIS,
+        BASENAMES_BASE_REGISTRAR_SOURCE_FAMILY, BASENAMES_BASE_REGISTRY_SOURCE_FAMILY,
+        ENS_V1_AUTHORITY_DERIVATION_KIND, ENS_V1_REGISTRAR_SOURCE_FAMILY,
+        ENS_V1_REGISTRY_SOURCE_FAMILY, ENS_V2_REGISTRY_DERIVATION_KIND,
+        ENS_V2_REGISTRY_SOURCE_FAMILY,
+    },
+    rebuild_address_names_current,
+};
 
 static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
 
