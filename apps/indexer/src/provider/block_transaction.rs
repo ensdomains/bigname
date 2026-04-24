@@ -1,0 +1,389 @@
+use std::collections::BTreeMap;
+
+use anyhow::{Context, Result, bail};
+use bigname_storage::{RawPayloadCacheDigestVerification, verify_raw_payload_cache_digest};
+use serde_json::Value;
+
+use super::{
+    JsonRpcProvider, PROVIDER_BATCH_ITEM_LIMIT, ProviderBlock, ProviderBlockBundle,
+    ProviderBlockSelection, ProviderHeadHashSnapshot, ProviderHeadSnapshot, ProviderResolvedBlock,
+    RAW_PAYLOAD_KIND_FULL_BLOCK,
+    decode::{block_hash_from_value, normalize_hash},
+    logs_receipts::ProviderBlockLogFetch,
+    request::JsonRpcBatchCall,
+};
+
+fn required_fetched_block(
+    blocks: &BTreeMap<String, ProviderBlock>,
+    block_hash: &str,
+) -> Result<ProviderBlock> {
+    blocks
+        .get(block_hash)
+        .cloned()
+        .with_context(|| format!("provider did not return fetched block {block_hash}"))
+}
+
+impl JsonRpcProvider {
+    pub async fn fetch_chain_heads(&self) -> Result<ProviderHeadSnapshot> {
+        let head_hashes = self.fetch_chain_head_hashes().await?;
+        let blocks = self
+            .fetch_blocks_by_hashes([
+                Some(head_hashes.canonical.clone()),
+                head_hashes.safe.clone(),
+                head_hashes.finalized.clone(),
+            ])
+            .await?;
+
+        Ok(ProviderHeadSnapshot {
+            canonical: required_fetched_block(&blocks, &head_hashes.canonical)?,
+            safe: head_hashes
+                .safe
+                .as_deref()
+                .map(|block_hash| required_fetched_block(&blocks, block_hash))
+                .transpose()?,
+            finalized: head_hashes
+                .finalized
+                .as_deref()
+                .map(|block_hash| required_fetched_block(&blocks, block_hash))
+                .transpose()?,
+        })
+    }
+
+    async fn fetch_chain_head_hashes(&self) -> Result<ProviderHeadHashSnapshot> {
+        let canonical = self
+            .fetch_head_hash_by_tag("latest")
+            .await?
+            .context("provider did not return a latest block")?;
+        let safe = self.fetch_head_hash_by_tag("safe").await?;
+        let finalized = self.fetch_head_hash_by_tag("finalized").await?;
+
+        Ok(ProviderHeadHashSnapshot {
+            canonical,
+            safe,
+            finalized,
+        })
+    }
+
+    #[allow(dead_code, reason = "staged provider helper covered by tests")]
+    pub async fn fetch_block_hash_by_number(&self, block_number: i64) -> Result<String> {
+        let block_parameter = ProviderBlockSelection::Number(block_number).json_rpc_parameter()?;
+        let block = self
+            .fetch_block(
+                "eth_getBlockByNumber",
+                vec![block_parameter, Value::Bool(false)],
+            )
+            .await?
+            .with_context(|| format!("provider did not return block number {block_number}"))?;
+
+        if block.block_number != block_number {
+            bail!(
+                "provider returned block {} for requested number {} with mismatched block number {}",
+                block.block_hash,
+                block_number,
+                block.block_number
+            );
+        }
+
+        Ok(block.block_hash)
+    }
+
+    pub async fn fetch_block_hashes_by_numbers(
+        &self,
+        block_numbers: &[i64],
+    ) -> Result<Vec<ProviderResolvedBlock>> {
+        let mut resolved = Vec::with_capacity(block_numbers.len());
+
+        for chunk in block_numbers.chunks(PROVIDER_BATCH_ITEM_LIMIT) {
+            let calls = chunk
+                .iter()
+                .map(|block_number| {
+                    Ok(JsonRpcBatchCall {
+                        method: "eth_getBlockByNumber",
+                        params: vec![
+                            ProviderBlockSelection::Number(*block_number).json_rpc_parameter()?,
+                            Value::Bool(false),
+                        ],
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let results = self.fetch_json_rpc_batch_results(calls).await?;
+
+            for (block_number, result) in chunk.iter().zip(results) {
+                let block = result
+                    .with_context(|| format!("provider did not return block number {block_number}"))
+                    .and_then(ProviderBlock::from_value)?;
+                if block.block_number != *block_number {
+                    bail!(
+                        "provider returned block {} for requested number {} with mismatched block number {}",
+                        block.block_hash,
+                        block_number,
+                        block.block_number
+                    );
+                }
+                resolved.push(ProviderResolvedBlock {
+                    block_number: *block_number,
+                    block_hash: block.block_hash,
+                });
+            }
+        }
+
+        Ok(resolved)
+    }
+
+    pub async fn fetch_block_by_hash(&self, block_hash: &str) -> Result<ProviderBlock> {
+        let block_hash = normalize_hash(block_hash);
+        let block = self
+            .fetch_block(
+                "eth_getBlockByHash",
+                vec![Value::String(block_hash.clone()), Value::Bool(false)],
+            )
+            .await?
+            .with_context(|| format!("provider did not return block {block_hash}"))?;
+
+        if block.block_hash != block_hash {
+            bail!(
+                "provider returned block {} for requested hash {}",
+                block.block_hash,
+                block_hash
+            );
+        }
+
+        Ok(block)
+    }
+
+    pub async fn fetch_block_bundles_by_hashes(
+        &self,
+        resolved_blocks: &[ProviderResolvedBlock],
+    ) -> Result<Vec<ProviderBlockBundle>> {
+        let mut bundles = Vec::with_capacity(resolved_blocks.len());
+
+        // Keep retained payload fetches single-response scoped: cache-fill verifies the stored
+        // digest against the same full block/log/receipt JSON-RPC response body.
+        for chunk in resolved_blocks.chunks(PROVIDER_BATCH_ITEM_LIMIT) {
+            for resolved_block in chunk {
+                let bundle = self
+                    .fetch_block_bundle_by_hash(&resolved_block.block_hash)
+                    .await?;
+                if bundle.block.block_number != resolved_block.block_number {
+                    bail!(
+                        "provider resolved block number {} to hash {}, but hash-scoped fetch returned block number {}",
+                        resolved_block.block_number,
+                        resolved_block.block_hash,
+                        bundle.block.block_number
+                    );
+                }
+                bundles.push(bundle);
+            }
+        }
+
+        Ok(bundles)
+    }
+
+    pub async fn fetch_block_bundles_without_logs_by_hashes(
+        &self,
+        resolved_blocks: &[ProviderResolvedBlock],
+    ) -> Result<Vec<ProviderBlockBundle>> {
+        let mut bundles = Vec::with_capacity(resolved_blocks.len());
+
+        for chunk in resolved_blocks.chunks(PROVIDER_BATCH_ITEM_LIMIT) {
+            for resolved_block in chunk {
+                let bundle = self
+                    .fetch_block_bundle_by_hash_with_log_fetch(
+                        &resolved_block.block_hash,
+                        ProviderBlockLogFetch::Skip,
+                    )
+                    .await?;
+                if bundle.block.block_number != resolved_block.block_number {
+                    bail!(
+                        "provider resolved block number {} to hash {}, but hash-scoped fetch returned block number {}",
+                        resolved_block.block_number,
+                        resolved_block.block_hash,
+                        bundle.block.block_number
+                    );
+                }
+                bundles.push(bundle);
+            }
+        }
+
+        Ok(bundles)
+    }
+
+    pub async fn fetch_block_bundle_by_hash(
+        &self,
+        block_hash: &str,
+    ) -> Result<ProviderBlockBundle> {
+        self.fetch_block_bundle_by_hash_with_log_fetch(block_hash, ProviderBlockLogFetch::Fetch)
+            .await
+    }
+
+    async fn fetch_block_bundle_by_hash_with_log_fetch(
+        &self,
+        block_hash: &str,
+        log_fetch: ProviderBlockLogFetch,
+    ) -> Result<ProviderBlockBundle> {
+        let block_hash = normalize_hash(block_hash);
+        let block_payload = self
+            .fetch_json_rpc_result_with_payload(
+                "eth_getBlockByHash",
+                vec![Value::String(block_hash.clone()), Value::Bool(true)],
+            )
+            .await?
+            .with_cache_metadata(
+                RAW_PAYLOAD_KIND_FULL_BLOCK,
+                "eth_getBlockByHash",
+                "block_hash",
+            );
+        let block_value = block_payload
+            .result
+            .with_context(|| format!("provider did not return block {block_hash}"))?;
+        let mut bundle = ProviderBlockBundle::from_value(block_value)?;
+        bundle.raw_payloads.push(block_payload.cache_metadata);
+
+        if bundle.block.block_hash != block_hash {
+            bail!(
+                "provider returned block {} for requested hash {}",
+                bundle.block.block_hash,
+                block_hash
+            );
+        }
+
+        for transaction in &bundle.transactions {
+            if transaction.block_hash != block_hash {
+                bail!(
+                    "provider returned transaction {} for block {} with mismatched block hash {}",
+                    transaction.transaction_hash,
+                    block_hash,
+                    transaction.block_hash
+                );
+            }
+            if transaction.block_number != bundle.block.block_number {
+                bail!(
+                    "provider returned transaction {} for block {} with mismatched block number {}",
+                    transaction.transaction_hash,
+                    block_hash,
+                    transaction.block_number
+                );
+            }
+        }
+
+        if log_fetch == ProviderBlockLogFetch::Fetch {
+            let logs = self
+                .fetch_logs_by_block_hash(&block_hash, bundle.block.block_number)
+                .await?;
+            bundle.raw_payloads.push(logs.cache_metadata);
+            bundle.logs = logs.logs;
+        }
+
+        let receipts = self
+            .fetch_receipts_by_block_hash(
+                &block_hash,
+                bundle.block.block_number,
+                &bundle.transactions,
+            )
+            .await?;
+        bundle.raw_payloads.extend(receipts.cache_metadata);
+        bundle.receipts = receipts.receipts;
+
+        Ok(bundle)
+    }
+
+    #[allow(dead_code, reason = "staged cache-fill helper covered by tests")]
+    pub async fn cache_fill_full_block_by_hash(
+        &self,
+        pool: &sqlx::PgPool,
+        chain: &str,
+        block_hash: &str,
+        expected_block_number: i64,
+    ) -> Result<ProviderBlock> {
+        if expected_block_number < 0 {
+            bail!("provider cache-fill expected block number cannot be negative");
+        }
+
+        let block_hash = normalize_hash(block_hash);
+        let payload = self
+            .fetch_json_rpc_result_with_payload(
+                "eth_getBlockByHash",
+                vec![Value::String(block_hash.clone()), Value::Bool(true)],
+            )
+            .await?
+            .with_cache_metadata(
+                RAW_PAYLOAD_KIND_FULL_BLOCK,
+                "eth_getBlockByHash",
+                "block_hash",
+            );
+
+        verify_raw_payload_cache_digest(
+            pool,
+            &RawPayloadCacheDigestVerification {
+                chain_id: chain.to_owned(),
+                block_hash: block_hash.clone(),
+                payload_kind: RAW_PAYLOAD_KIND_FULL_BLOCK.to_owned(),
+                digest_algorithm: payload.cache_metadata.digest_algorithm.clone(),
+                candidate_digest: payload.cache_metadata.retained_digest.clone(),
+                payload_size_bytes: payload.cache_metadata.payload_size_bytes,
+            },
+        )
+        .await?;
+
+        let block = ProviderBlock::from_value(
+            payload
+                .result
+                .context("provider cache-fill returned null full block payload")?,
+        )?;
+        if block.block_hash != block_hash {
+            bail!(
+                "provider cache-fill returned block {} for requested hash {}",
+                block.block_hash,
+                block_hash
+            );
+        }
+        if block.block_number != expected_block_number {
+            bail!(
+                "provider cache-fill returned block {} for requested hash {} with block number {}; expected {}",
+                block.block_hash,
+                block_hash,
+                block.block_number,
+                expected_block_number
+            );
+        }
+
+        Ok(block)
+    }
+
+    async fn fetch_head_hash_by_tag(&self, tag: &str) -> Result<Option<String>> {
+        self.fetch_json_rpc_result(
+            "eth_getBlockByNumber",
+            vec![Value::String(tag.to_owned()), Value::Bool(false)],
+        )
+        .await?
+        .map(|value| block_hash_from_value(&value))
+        .transpose()
+    }
+
+    async fn fetch_blocks_by_hashes<I>(&self, hashes: I) -> Result<BTreeMap<String, ProviderBlock>>
+    where
+        I: IntoIterator<Item = Option<String>>,
+    {
+        let mut blocks = BTreeMap::new();
+
+        for block_hash in hashes.into_iter().flatten() {
+            if blocks.contains_key(&block_hash) {
+                continue;
+            }
+
+            blocks.insert(
+                block_hash.clone(),
+                self.fetch_block_by_hash(&block_hash).await?,
+            );
+        }
+
+        Ok(blocks)
+    }
+
+    async fn fetch_block(&self, method: &str, params: Vec<Value>) -> Result<Option<ProviderBlock>> {
+        self.fetch_json_rpc_result(method, params)
+            .await?
+            .map(ProviderBlock::from_value)
+            .transpose()
+    }
+}

@@ -441,65 +441,37 @@ enum AuthorityProfile {
     Ens,
     Basenames,
 }
+mod abi;
+mod apply;
+mod apply_registrar;
+mod apply_registry;
+mod apply_resolver;
+mod apply_wrapper;
+mod event_builders;
+mod event_state;
+mod finalization;
+mod ids;
+mod loading;
+mod materialization;
+mod names;
+mod observation;
+mod permissions;
+mod profiles;
+mod release_events;
+mod resolver_gate;
+mod reverse_claims;
+mod transition;
 
-impl AuthorityProfile {
-    const fn namespace(self) -> &'static str {
-        match self {
-            Self::Ens => "ens",
-            Self::Basenames => "basenames",
-        }
-    }
+pub use self::pipeline::sync_ens_v1_unwrapped_authority;
 
-    const fn registrar_source_family(self) -> &'static str {
-        match self {
-            Self::Ens => SOURCE_FAMILY_ENS_V1_REGISTRAR_L1,
-            Self::Basenames => SOURCE_FAMILY_BASENAMES_BASE_REGISTRAR,
-        }
-    }
+use self::{
+    abi::*, apply::*, apply_registrar::*, apply_registry::*, apply_resolver::*, apply_wrapper::*,
+    event_builders::*, event_state::*, finalization::*, ids::*, loading::*, materialization::*,
+    names::*, observation::*, permissions::*, profiles::*, release_events::*, resolver_gate::*,
+    reverse_claims::*, transition::*,
+};
 
-    const fn registry_source_family(self) -> &'static str {
-        match self {
-            Self::Ens => SOURCE_FAMILY_ENS_V1_REGISTRY_L1,
-            Self::Basenames => SOURCE_FAMILY_BASENAMES_BASE_REGISTRY,
-        }
-    }
-
-    const fn resolver_source_family(self) -> &'static str {
-        match self {
-            Self::Ens => SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
-            Self::Basenames => SOURCE_FAMILY_BASENAMES_BASE_RESOLVER,
-        }
-    }
-
-    const fn wrapper_source_family(self) -> Option<&'static str> {
-        match self {
-            Self::Ens => Some(SOURCE_FAMILY_ENS_V1_WRAPPER_L1),
-            Self::Basenames => None,
-        }
-    }
-
-    fn root_node(self) -> String {
-        match self {
-            Self::Ens => eth_node(),
-            Self::Basenames => base_eth_node(),
-        }
-    }
-
-    fn observe_name(self, label: &str, normalizer_version: &str) -> Result<NameMetadata> {
-        observe_registrar_name_with_version(label, self, normalizer_version)
-    }
-}
-
-fn default_registrar_source_family(namespace: &str) -> &'static str {
-    match namespace {
-        "basenames" => SOURCE_FAMILY_BASENAMES_BASE_REGISTRAR,
-        _ => SOURCE_FAMILY_ENS_V1_REGISTRAR_L1,
-    }
-}
-
-include!("ens_v1_unwrapped_authority/pipeline.rs");
-
-include!("ens_v1_unwrapped_authority/observation.rs");
+mod pipeline;
 
 #[cfg(test)]
 mod tests;

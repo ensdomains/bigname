@@ -105,8 +105,35 @@ justification = "Phase 0 ratchet baseline for an existing large production file;
 
 [[files]]
 path = "apps/indexer/src/provider.rs"
-loc = 1853
-justification = "Phase 0 ratchet baseline for an existing large production file; future changes should split or shrink it."
+loc = 106
+
+[[files]]
+path = "apps/indexer/src/provider/block_transaction.rs"
+loc = 389
+
+[[files]]
+path = "apps/indexer/src/provider/code.rs"
+loc = 144
+
+[[files]]
+path = "apps/indexer/src/provider/decode.rs"
+loc = 354
+
+[[files]]
+path = "apps/indexer/src/provider/logs_receipts.rs"
+loc = 495
+
+[[files]]
+path = "apps/indexer/src/provider/payload_cache.rs"
+loc = 74
+
+[[files]]
+path = "apps/indexer/src/provider/request.rs"
+loc = 225
+
+[[files]]
+path = "apps/indexer/src/provider/types.rs"
+loc = 164
 
 [[files]]
 path = "apps/worker/src/address_names.rs"
@@ -132,8 +159,35 @@ justification = "Phase 0 ratchet baseline for an existing large production file;
 
 [[files]]
 path = "apps/worker/src/inspect.rs"
-loc = 2248
-justification = "Phase 0 ratchet baseline for an existing large production file; future changes should split or shrink it."
+loc = 131
+
+[[files]]
+path = "apps/worker/src/inspect/backfill.rs"
+loc = 125
+
+[[files]]
+path = "apps/worker/src/inspect/canonicality.rs"
+loc = 122
+
+[[files]]
+path = "apps/worker/src/inspect/execution_trace.rs"
+loc = 110
+
+[[files]]
+path = "apps/worker/src/inspect/formatting.rs"
+loc = 43
+
+[[files]]
+path = "apps/worker/src/inspect/manifest_drift.rs"
+loc = 175
+
+[[files]]
+path = "apps/worker/src/inspect/stored_lineage.rs"
+loc = 48
+
+[[files]]
+path = "apps/worker/src/inspect/watch_plan.rs"
+loc = 111
 
 [[files]]
 path = "apps/worker/src/main.rs"
@@ -235,17 +289,91 @@ loc = 815
 
 [[files]]
 path = "crates/adapters/src/ens_v1_unwrapped_authority.rs"
-loc = 505
+loc = 477
+
+[[files]]
+path = "crates/adapters/src/ens_v1_unwrapped_authority/abi.rs"
+loc = 98
+
+[[files]]
+path = "crates/adapters/src/ens_v1_unwrapped_authority/apply.rs"
+loc = 48
+
+[[files]]
+path = "crates/adapters/src/ens_v1_unwrapped_authority/apply_registrar.rs"
+loc = 325
+
+[[files]]
+path = "crates/adapters/src/ens_v1_unwrapped_authority/apply_registry.rs"
+loc = 91
+
+[[files]]
+path = "crates/adapters/src/ens_v1_unwrapped_authority/apply_resolver.rs"
+loc = 172
+
+[[files]]
+path = "crates/adapters/src/ens_v1_unwrapped_authority/apply_wrapper.rs"
+loc = 284
+
+[[files]]
+path = "crates/adapters/src/ens_v1_unwrapped_authority/event_builders.rs"
+loc = 95
+
+[[files]]
+path = "crates/adapters/src/ens_v1_unwrapped_authority/event_state.rs"
+loc = 61
+
+[[files]]
+path = "crates/adapters/src/ens_v1_unwrapped_authority/finalization.rs"
+loc = 217
+
+[[files]]
+path = "crates/adapters/src/ens_v1_unwrapped_authority/ids.rs"
+loc = 115
+
+[[files]]
+path = "crates/adapters/src/ens_v1_unwrapped_authority/loading.rs"
+loc = 332
+
+[[files]]
+path = "crates/adapters/src/ens_v1_unwrapped_authority/materialization.rs"
+loc = 164
+
+[[files]]
+path = "crates/adapters/src/ens_v1_unwrapped_authority/names.rs"
+loc = 156
 
 [[files]]
 path = "crates/adapters/src/ens_v1_unwrapped_authority/observation.rs"
-loc = 1156
-justification = "Phase 0 ratchet baseline for an existing large production file; future changes should split or shrink it."
+loc = 488
+
+[[files]]
+path = "crates/adapters/src/ens_v1_unwrapped_authority/permissions.rs"
+loc = 347
 
 [[files]]
 path = "crates/adapters/src/ens_v1_unwrapped_authority/pipeline.rs"
-loc = 2617
-justification = "Phase 0 ratchet baseline for an existing large production file; future changes should split or shrink it."
+loc = 307
+
+[[files]]
+path = "crates/adapters/src/ens_v1_unwrapped_authority/profiles.rs"
+loc = 73
+
+[[files]]
+path = "crates/adapters/src/ens_v1_unwrapped_authority/release_events.rs"
+loc = 41
+
+[[files]]
+path = "crates/adapters/src/ens_v1_unwrapped_authority/resolver_gate.rs"
+loc = 99
+
+[[files]]
+path = "crates/adapters/src/ens_v1_unwrapped_authority/reverse_claims.rs"
+loc = 221
+
+[[files]]
+path = "crates/adapters/src/ens_v1_unwrapped_authority/transition.rs"
+loc = 222
 
 [[files]]
 path = "crates/adapters/src/ens_v2_permissions.rs"
@@ -392,8 +520,39 @@ justification = "Phase 0 ratchet baseline for an existing large production file;
 
 [[files]]
 path = "crates/storage/src/audit.rs"
-loc = 1828
-justification = "Phase 0 ratchet baseline for an existing large production file; future changes should split or shrink it."
+loc = 31
+
+[[files]]
+path = "crates/storage/src/audit/canonicality.rs"
+loc = 264
+
+[[files]]
+path = "crates/storage/src/audit/decode.rs"
+loc = 108
+
+[[files]]
+path = "crates/storage/src/audit/manifest.rs"
+loc = 389
+
+[[files]]
+path = "crates/storage/src/audit/manifest_json.rs"
+loc = 57
+
+[[files]]
+path = "crates/storage/src/audit/manifest_live.rs"
+loc = 296
+
+[[files]]
+path = "crates/storage/src/audit/manifest_state.rs"
+loc = 284
+
+[[files]]
+path = "crates/storage/src/audit/manifest_validation.rs"
+loc = 296
+
+[[files]]
+path = "crates/storage/src/audit/types.rs"
+loc = 223
 
 [[files]]
 path = "crates/storage/src/backfill_jobs.rs"
