@@ -1035,7 +1035,23 @@ loc = 111
 
 [[files]]
 path = "crates/manifests/src/lib/sync.rs"
-loc = 798
+loc = 188
+
+[[files]]
+path = "crates/manifests/src/lib/sync/address_seeding.rs"
+loc = 114
+
+[[files]]
+path = "crates/manifests/src/lib/sync/contract_resolution.rs"
+loc = 190
+
+[[files]]
+path = "crates/manifests/src/lib/sync/persistence.rs"
+loc = 190
+
+[[files]]
+path = "crates/manifests/src/lib/sync/planning.rs"
+loc = 194
 
 [[files]]
 path = "crates/manifests/src/lib/views.rs"
