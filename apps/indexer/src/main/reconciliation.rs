@@ -34,6 +34,10 @@ use crate::{
         log_ens_v2_registry_resource_surface_sync_summary, log_ens_v2_resolver_sync_summary,
     },
 };
+
+const SOURCE_FAMILY_ENS_V2_ROOT_L1: &str = "ens_v2_root_l1";
+const SOURCE_FAMILY_ENS_V2_REGISTRY_L1: &str = "ens_v2_registry_l1";
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CanonicalReconciliationStatus {
     Initialized,
@@ -1119,7 +1123,26 @@ pub(crate) async fn sync_adapter_state_from_scoped_persisted_raw_payloads(
     .await?;
     log_block_derived_normalized_event_summary(chain, &normalized_event_summary);
 
+    if source_scope_includes_ens_v2_registry(source_scope) {
+        let ens_v2_registry_summary =
+            bigname_adapters::EnsV2RegistryResourceSurfaceSyncSummary::sync_for_block_hashes_with_source_scope(
+                pool,
+                chain,
+                block_hashes,
+                source_scope,
+            )
+            .await?;
+        log_ens_v2_registry_resource_surface_sync_summary(chain, &ens_v2_registry_summary);
+    }
+
     Ok(())
+}
+
+fn source_scope_includes_ens_v2_registry(source_scope: &[(String, String, i64, i64)]) -> bool {
+    source_scope.iter().any(|(source_family, _, _, _)| {
+        source_family == SOURCE_FAMILY_ENS_V2_ROOT_L1
+            || source_family == SOURCE_FAMILY_ENS_V2_REGISTRY_L1
+    })
 }
 
 async fn ensure_losing_branch_raw_blocks_exist(

@@ -9,6 +9,11 @@ use sqlx::types::time::OffsetDateTime;
 use sqlx::{PgPool, Postgres, QueryBuilder, Row, postgres::PgRow};
 use uuid::Uuid;
 
+use crate::snapshot_selection::{
+    ChainPositions, SnapshotProjectionRead, SnapshotSelectionError,
+    ensure_projection_chain_positions_match,
+};
+
 const DEFAULT_RECORD_INVENTORY_CURRENT_READ_FILTER: &str = r#"
   AND resource.canonicality_state IN (
       'canonical'::canonicality_state,
@@ -91,6 +96,37 @@ pub async fn load_record_inventory_current(
     })?;
 
     row.map(decode_record_inventory_current_row).transpose()
+}
+
+/// Load one record-inventory projection row only if it is eligible for the selected snapshot.
+///
+/// A present row with different chain-position context is reported as `stale`
+/// instead of being joined into an exact-name response for another snapshot.
+pub async fn load_record_inventory_current_for_snapshot(
+    pool: &PgPool,
+    resource_id: Uuid,
+    record_version_boundary: &Value,
+    selected_chain_positions: &ChainPositions,
+) -> std::result::Result<SnapshotProjectionRead<RecordInventoryCurrentRow>, SnapshotSelectionError>
+{
+    let row = load_record_inventory_current(pool, resource_id, record_version_boundary)
+        .await
+        .map_err(|error| {
+            SnapshotSelectionError::internal(format!(
+                "failed to load record_inventory_current row for resource_id {resource_id}: {error}"
+            ))
+        })?;
+
+    let Some(row) = row else {
+        return Ok(SnapshotProjectionRead::NotFound);
+    };
+
+    ensure_projection_chain_positions_match(
+        "record_inventory_current",
+        &row.chain_positions,
+        selected_chain_positions,
+    )?;
+    Ok(SnapshotProjectionRead::Found(row))
 }
 
 /// Insert or replace record-inventory projection rows for one or more resource and boundary keys.
@@ -1086,7 +1122,10 @@ mod tests {
     };
 
     use super::*;
-    use crate::{CanonicalityState, Resource, default_database_url, upsert_resources};
+    use crate::{
+        CanonicalityState, ChainPositions, Resource, SnapshotProjectionRead,
+        SnapshotSelectionErrorKind, default_database_url, upsert_resources,
+    };
 
     static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -1415,6 +1454,58 @@ mod tests {
         )
         .await?;
         assert_eq!(loaded, Some(expected));
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn record_inventory_snapshot_read_fails_stale_on_position_mismatch() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let resource_id = Uuid::from_u128(0x7110);
+        seed_resources(&database, &[resource_id]).await?;
+
+        let expected = record_inventory_current_row(
+            resource_id,
+            "ens:alice.eth",
+            Some(921),
+            Some("RecordsChanged"),
+            21_500_021,
+            "0xrecordinventorysnapshot",
+            4,
+        );
+
+        upsert_record_inventory_current_rows(database.pool(), std::slice::from_ref(&expected))
+            .await?;
+
+        let selected = ChainPositions::from_value(&expected.chain_positions)?;
+        assert_eq!(
+            load_record_inventory_current_for_snapshot(
+                database.pool(),
+                resource_id,
+                &expected.record_version_boundary,
+                &selected,
+            )
+            .await?,
+            SnapshotProjectionRead::Found(expected.clone())
+        );
+
+        let stale_selected = ChainPositions::from_value(&json!({
+            "ethereum": {
+                "chain_id": "ethereum-mainnet",
+                "block_number": 21_500_022,
+                "block_hash": "0xrecordinventorynewer",
+                "timestamp": "2026-04-18T00:15:01Z"
+            }
+        }))?;
+        let error = load_record_inventory_current_for_snapshot(
+            database.pool(),
+            resource_id,
+            &expected.record_version_boundary,
+            &stale_selected,
+        )
+        .await
+        .expect_err("mismatched selected snapshot must be stale");
+        assert_eq!(error.kind(), SnapshotSelectionErrorKind::Stale);
 
         database.cleanup().await
     }

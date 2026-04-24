@@ -47,7 +47,7 @@ async fn get_name_returns_current_projection_envelope() -> Result<()> {
 
     let payload: NameResponse = read_json(response).await?;
     assert_eq!(payload.verified_state, None);
-    assert_eq!(payload.consistency, "finalized");
+    assert_eq!(payload.consistency, "head");
     assert_eq!(payload.last_updated, "2024-05-31T16:08:37Z");
 
     let data = payload.data.as_object().expect("data must be an object");
@@ -242,6 +242,69 @@ async fn get_name_returns_current_projection_envelope() -> Result<()> {
             }
         })
     );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn exact_name_routes_reject_invalid_snapshot_selectors_as_invalid_input() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    let valid_positions = encode_query_value(
+        r#"{"ethereum":{"chain_id":"ethereum-mainnet","block_number":21000003,"block_hash":"0xbinding","timestamp":"2026-04-17T00:00:03Z"}}"#,
+    );
+    let duplicate_slot_positions = encode_query_value(
+        r#"{"ethereum":{"chain_id":"ethereum-mainnet","block_number":21000003,"block_hash":"0xbinding","timestamp":"2026-04-17T00:00:03Z"},"ethereum":{"chain_id":"ethereum-mainnet","block_number":21000004,"block_hash":"0xduplicate","timestamp":"2026-04-17T00:00:04Z"}}"#,
+    );
+    let unsupported_slot_positions = encode_query_value(
+        r#"{"polygon":{"chain_id":"ethereum-mainnet","block_number":21000003,"block_hash":"0xbinding","timestamp":"2026-04-17T00:00:03Z"}}"#,
+    );
+    let cases = vec![
+        (
+            "at plus chain_positions",
+            format!("at=2026-04-17T00%3A00%3A03Z&chain_positions={valid_positions}"),
+            "at and chain_positions are mutually exclusive snapshot selectors",
+        ),
+        (
+            "malformed chain_positions",
+            "chain_positions=%7B".to_owned(),
+            "chain_positions must be one JSON object",
+        ),
+        (
+            "duplicate position slot",
+            format!("chain_positions={duplicate_slot_positions}"),
+            "chain_positions repeats position slot ethereum",
+        ),
+        (
+            "unsupported position slot",
+            format!("chain_positions={unsupported_slot_positions}"),
+            "unsupported snapshot position slot polygon",
+        ),
+    ];
+    let routes = [
+        "/v1/names/ens/alice.eth",
+        "/v1/coverage/ens/alice.eth",
+        "/v1/explain/names/ens/alice.eth/surface-binding",
+        "/v1/explain/names/ens/alice.eth/authority-control",
+    ];
+
+    for route in routes {
+        for (label, query, expected_message_fragment) in &cases {
+            let response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("{route}?{query}"))
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .with_context(|| {
+                    format!("{label} exact-name selector request failed for {route}")
+                })?;
+
+            assert_public_invalid_input_response(response, expected_message_fragment).await?;
+        }
+    }
 
     database.cleanup().await?;
     Ok(())

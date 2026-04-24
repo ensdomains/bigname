@@ -17,6 +17,7 @@ This document freezes the external `v1` read contract strongly enough for API, p
 ### Common query parameters
 
 - `at`: point-in-time selector, either an RFC 3339 timestamp or a chain-position token
+- `chain_positions`: explicit point-in-time selector, encoded as one URL query value containing a JSON object with the same per-position object shape as `ChainPositions`
 - `consistency`: `head`, `safe`, or `finalized`
 - `mode`: `declared`, `verified`, or `both`
 - `include`: comma-separated expansions; default is route-specific
@@ -32,6 +33,8 @@ Defaults:
 
 ### Snapshot Selection Rules
 
+Snapshot selection resolves caller input to a concrete `ChainPositions` object before any route-specific read is performed. `chain_positions` query values use route-declared position slot keys and per-position `{chain_id, block_number, block_hash, timestamp}` objects; they are not a second selector vocabulary. The selected object is echoed in the response as `chain_positions`.
+
 | Inputs | Rule |
 | --- | --- |
 | `chain_positions` only | use the supplied positions exactly |
@@ -42,8 +45,11 @@ Defaults:
 Validation rules:
 
 - if `chain_positions` is supplied, every chain required by the route must be present
-- if `chain_positions` is supplied, unsupported chain keys for that route are rejected
-- if `consistency` is supplied with explicit `chain_positions`, the server validates that each supplied position satisfies that consistency floor or returns `conflict`
+- if `chain_positions` is supplied, unsupported position slots for that route are rejected with `invalid_input`
+- if `chain_positions` is malformed, has duplicate position slots, mixes deployment profiles, or names a `chain_id` that does not match the selected deployment profile, reject with `invalid_input`
+- if `chain_positions` is supplied, the server validates that each supplied position satisfies the requested `consistency` floor, including the default `consistency=head`, or returns `conflict`
+- if a supplied `(chain_id, block_number, block_hash)` does not match stored lineage, is orphaned for the requested floor, or cannot be reconciled with the other supplied positions as one route snapshot, return `conflict`
+- if a valid selector resolves to positions for which the required projection or execution output has not been built, return `stale` rather than reading raw facts or silently advancing to a newer projection
 
 Cross-chain rules:
 
@@ -58,6 +64,27 @@ Deployment-profile rules:
 - one deployment answers under exactly one profile at a time; responses and explicit `chain_positions` must not mix mainnet and Sepolia chain keys
 - the promoted ENSv2 `sepolia-dev` exact-name profile is supported only when that deployment profile is selected, and only for declared exact-name profile reads backed by the admitted `ETHRegistry` and `ETHRegistrar` source classes (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistry.json:L2 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistrar.json:L2 @ ens_v2@554c309)
 - this promotion does not admit the mainnet profile, reverse or primary-name reads, wrapper-derived authority, migration history, universal-resolver entrypoints, verified resolution, or execution-explain surfaces
+
+### Exact-Name Snapshot Selector
+
+The exact-name snapshot selector applies to:
+
+- `GET /v1/names/{namespace}/{name}`
+- `GET /v1/coverage/{namespace}/{name}`
+- `GET /v1/explain/names/{namespace}/{name}/surface-binding`
+- `GET /v1/explain/names/{namespace}/{name}/authority-control`
+- `GET /v1/resolutions/{namespace}/{name}` for its exact-name data row, declared topology, declared record inventory/cache joins, route-level coverage, and verified readback support checks
+
+Rules:
+
+- resolve `at`, explicit `chain_positions`, and `consistency` once for the request, before exact-name lookup, coverage lookup, declared topology construction, explain construction, or persisted execution readback
+- all exact-name route sections in the same response use that one selected `ChainPositions` object; a response must not combine the current binding from one snapshot with coverage, topology, resolver summaries, record inventory/cache, permission summaries, history pointers, or execution output from another snapshot
+- `GET /v1/coverage/{namespace}/{name}` returns the same top-level `coverage` object as `GET /v1/names/{namespace}/{name}` for the same `{namespace, name}` and selected snapshot
+- the surface-binding and authority-control explain routes identify the same current `logical_name_id`, `resource_id`, `token_lineage_id`, `surface_binding_id`, and `binding_kind` that the exact-name route selects at that snapshot, subject to each route's documented field shape
+- `GET /v1/resolutions/{namespace}/{name}` uses the same selected exact-name snapshot for `data`, `declared_state.topology`, `declared_state.record_inventory`, `declared_state.record_cache`, and route-level `coverage`; verified readback in `mode=verified|both` may join only persisted execution output whose request chain positions exactly match the selected snapshot
+- verified execution never advances the selected positions mid-request; when matching persisted execution output is absent, the route uses the documented unsupported, stale, or not-found behavior for the requested mode rather than running fresh execution or reading raw facts
+- API handlers serve these public responses from projections and execution outputs after selector resolution; they do not synthesize exact-name answers, coverage, topology, explain detail, or verified readback directly from raw facts or adapter-owned normalized events
+- `GET /v1/resolve/{name}` remains the namespace-inferred convenience route for resolution and currently exposes only its documented `mode` and `records` query parameters; after namespace inference, its exact-name joins use the canonical route's default snapshot selector and do not admit `at`, `chain_positions`, or `consistency` on this convenience route in the shipped contract
 
 ## 2. Shared Response Envelope
 
@@ -491,6 +518,12 @@ Rules:
 
 ### `GET /v1/names/{namespace}/{name}`
 
+Supported query parameters:
+
+- `at`
+- `chain_positions`
+- `consistency`
+
 Returns:
 
 - `data` surface identity: `logical_name_id`, `namespace`, `normalized_name`, `canonical_display_name`, `namehash`
@@ -504,6 +537,7 @@ Returns:
 
 Rules:
 
+- this route uses the exact-name snapshot selector; exact-name lookup, binding identifiers, declared summary sections, route-level `coverage`, provenance, and response `chain_positions` must describe one coherent snapshot
 - the exact-name route is authoritative for supported source classes even when one or more declared summary sections are still unsupported
 - for `namespace=ens` on the selected ENSv2 `sepolia-dev` profile, the promoted exact-name profile is supported for declared exact-name lookup only. It is backed by `ens_v2_registry_l1` registry state, token-resource links, label lifecycle events, and resolver-target events, plus `ens_v2_registrar_l1` `.eth` registration and renewal lifecycle events from the admitted `ETHRegistry` and `ETHRegistrar` deployments (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistry.json:L2 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistrar.json:L2 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L21 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L34 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L15 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L41 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L47 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L63 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRegistrar.sol:L21 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRegistrar.sol:L45 @ ens_v2@554c309)
 - the shared coverage object for that ENSv2 `sepolia-dev` exact-name profile class is `status=full`, `exhaustiveness=authoritative`, `source_classes_considered=["ens_v2_registry_l1","ens_v2_registrar_l1"]`, `enumeration_basis=exact_name_profile`, and `unsupported_reason=null`
@@ -534,11 +568,13 @@ Returns the declared-state coverage answer for one exact public surface.
 Supported query parameters:
 
 - `at`
+- `chain_positions`
 - `consistency`
 
 Rules:
 
-- this route honors only `at` and `consistency` from the common query set; if `at` is omitted, the common snapshot defaults apply and the route reads the latest available positions at `consistency=head` unless the caller supplies another supported `consistency`
+- this route honors only `at`, `chain_positions`, and `consistency` from the common query set; if `at` and `chain_positions` are both omitted, the common snapshot defaults apply and the route reads the latest available positions at `consistency=head` unless the caller supplies another supported `consistency`
+- this route uses the exact-name snapshot selector and must select the same `data`, binding identifiers, `coverage`, provenance, and response `chain_positions` as `GET /v1/names/{namespace}/{name}` for the same request selector
 - this route is declared-state only and `verified_state` is `null`
 - the top-level `coverage` field is the shared `Coverage` object for the requested name and snapshot
 - for `namespace=ens` under the selected ENSv2 `sepolia-dev` profile, the shared coverage object follows the same promoted exact-name profile rule as `GET /v1/names/{namespace}/{name}`: `status=full`, `exhaustiveness=authoritative`, `source_classes_considered=["ens_v2_registry_l1","ens_v2_registrar_l1"]`, `enumeration_basis=exact_name_profile`, and `unsupported_reason=null` for the admitted registry and registrar source classes (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistry.json:L2 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistrar.json:L2 @ ens_v2@554c309)
@@ -563,11 +599,12 @@ Returns the declared-state binding explanation for one exact public surface.
 Supported query parameters:
 
 - `at`
+- `chain_positions`
 - `consistency`
 
 Rules:
 
-- this route is scoped to the same exact-name target and point-in-time snapshot rules as `GET /v1/names/{namespace}/{name}`
+- this route is scoped to the same exact-name target and exact-name snapshot selector as `GET /v1/names/{namespace}/{name}`
 - this route is declared-state only and `verified_state` is `null`
 - `declared_state.surface_binding.surface_binding_id` identifies the current `SurfaceBinding` row whose `binding_kind` matches the exact-name answer's current binding; this route does not return historical binding rows or pagination state
 - `declared_state.history` reuses the exact-name history head-pointer contract and does not create a binding-only history ledger
@@ -591,11 +628,12 @@ Returns the declared-state authority and control explanation for one exact publi
 Supported query parameters:
 
 - `at`
+- `chain_positions`
 - `consistency`
 
 Rules:
 
-- this route is scoped to the same exact-name target and point-in-time snapshot rules as `GET /v1/names/{namespace}/{name}`
+- this route is scoped to the same exact-name target and exact-name snapshot selector as `GET /v1/names/{namespace}/{name}`
 - this route is declared-state only and `verified_state` is `null`
 - `declared_state.authority` uses the same object shape and fallback rule as the exact-name route; it does not widen authority semantics for the explain view
 - `declared_state.control` uses the same exact-name summary object as `GET /v1/names/{namespace}/{name}` and remains narrower than both the internal `ControlVector` and the dedicated resource-permissions collection
@@ -804,6 +842,7 @@ This is the canonical namespaced resolution route. `namespace` remains part of t
 Supported query parameters:
 
 - `at`
+- `chain_positions`
 - `consistency`
 - `mode=declared|verified|both`
 - `records`
@@ -933,6 +972,8 @@ When all declared sections are supported, they use this exact field structure:
 
 Rules:
 
+- this route uses the exact-name snapshot selector for `data`, declared topology, declared record inventory/cache, route-level `coverage`, and verified readback support checks
+- in `mode=verified|both`, persisted verified output is eligible only when its stored request chain positions exactly match the selected `chain_positions`; no verified selector may be satisfied from execution output produced for another snapshot
 - `topology`, `record_inventory`, and `record_cache` are always present as objects when `declared_state` is populated; any declared section that is not yet projected returns `UnsupportedSummary`
 - callers must round-trip the surfaced `record_key` strings in `records`; `record_family` and `selector_key` are explanatory fields, not alternate request identity
 - `record_inventory` defines the known record-selector space, explicit gaps, and the current version boundary for the requested surface; it does not imply global record enumeration
@@ -1150,6 +1191,9 @@ Rules:
 
 - use non-2xx `unsupported` only when the request cannot produce the route contract at all for the requested shape
 - when a mixed route can produce the envelope but one declared or verified subsection is unsupported, return `200` and surface that state through `UnsupportedSummary` or the shared `ResultStatus` vocabulary instead of raising a route-level `unsupported` error
+- for snapshot selectors, malformed `chain_positions`, unsupported position slots, missing required position slots, mixed deployment-profile positions, and combined `at` plus `chain_positions` return `400 invalid_input`
+- a syntactically valid selector whose supplied block hash, block number, canonicality floor, or cross-chain reconciliation cannot form one route snapshot returns `409 conflict`
+- a syntactically valid selector that resolves to a coherent snapshot but cannot yet be served from the required projection rows or matching persisted execution output returns `409 stale`
 
 ## 8. Versioning Rules
 

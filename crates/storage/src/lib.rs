@@ -20,6 +20,7 @@ mod raw_code;
 mod raw_payload_cache;
 mod record_inventory;
 mod resolver;
+mod snapshot_selection;
 
 use anyhow::{Context, Result};
 use clap::Args;
@@ -49,7 +50,7 @@ pub use backfill_jobs::{
 };
 pub use checkpoints::{
     ChainCheckpoint, ChainCheckpointUpdate, CheckpointBlockRef, advance_chain_checkpoints,
-    sync_chain_checkpoints,
+    load_chain_checkpoint, load_chain_checkpoint_snapshots, sync_chain_checkpoints,
 };
 pub use children::{
     ChildrenCurrentKeysetCursor, ChildrenCurrentPage, ChildrenCurrentRow, ChildrenCurrentSummary,
@@ -95,7 +96,8 @@ pub use lineage::{
 };
 pub use name_current::{
     NameCurrentRow, clear_name_current, delete_name_current, load_name_current,
-    load_name_current_by_logical_name_ids, upsert_name_current_rows,
+    load_name_current_by_logical_name_ids, load_name_current_for_snapshot,
+    upsert_name_current_rows,
 };
 pub use normalized_events::{
     NormalizedEvent, load_normalized_event_counts_by_kind, load_normalized_events_by_namespace,
@@ -140,11 +142,19 @@ pub use raw_payload_cache::{
 };
 pub use record_inventory::{
     RecordInventoryCurrentRow, clear_record_inventory_current, delete_record_inventory_current,
-    load_record_inventory_current, upsert_record_inventory_current_rows,
+    load_record_inventory_current, load_record_inventory_current_for_snapshot,
+    upsert_record_inventory_current_rows,
 };
 pub use resolver::{
     ResolverCurrentRow, clear_resolver_current, delete_resolver_current, load_resolver_current,
     upsert_resolver_current_rows,
+};
+pub use snapshot_selection::{
+    ChainPosition, ChainPositions, SelectedSnapshot, SnapshotAt, SnapshotConsistency,
+    SnapshotPositionRequirement, SnapshotProjectionRead, SnapshotSelectionError,
+    SnapshotSelectionErrorKind, SnapshotSelectionResult, SnapshotSelectionScope,
+    SnapshotSelectorInput, ensure_projection_chain_positions_match, parse_rfc3339_utc_timestamp,
+    resolve_exact_name_snapshot_selection,
 };
 
 /// Checked-in migrations for the bootstrap workspace.

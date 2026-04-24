@@ -19,16 +19,22 @@ use bigname_manifests::{
     load_namespace_manifest_snapshot,
 };
 use bigname_storage::{
-    AddressNameCurrentEntry, AddressNameRelation, AddressNamesCurrentDedupe, ChildrenCurrentRow,
-    DatabaseConfig, ExecutionCacheKey, ExecutionOutcome, ExecutionTrace, HistoryEvent,
-    HistoryScope, NameCurrentRow, PermissionScope, PermissionsCurrentRow, PrimaryNameClaimStatus,
-    PrimaryNameCurrentRow, RecordInventoryCurrentRow, ResolverCurrentRow, SurfaceBindingKind,
+    AddressNameCurrentEntry, AddressNameRelation, AddressNamesCurrentDedupe, ChainPositions,
+    ChildrenCurrentRow, DatabaseConfig, ExecutionCacheKey, ExecutionOutcome, ExecutionTrace,
+    HistoryEvent, HistoryScope, NameCurrentRow, PermissionScope, PermissionsCurrentRow,
+    PrimaryNameClaimStatus, PrimaryNameCurrentRow, RecordInventoryCurrentRow, ResolverCurrentRow,
+    SelectedSnapshot, SnapshotAt, SnapshotConsistency, SnapshotPositionRequirement,
+    SnapshotProjectionRead, SnapshotSelectionError, SnapshotSelectionErrorKind,
+    SnapshotSelectionScope, SnapshotSelectorInput, SurfaceBindingKind,
     VERIFIED_PRIMARY_NAME_INVALIDATION_KEY, VERIFIED_PRIMARY_NAME_LOOKUP_KEY,
-    VERIFIED_PRIMARY_NAME_REQUEST_TYPE, load_address_history, load_execution_outcome,
-    load_execution_trace, load_name_current, load_name_history, load_name_surface,
-    load_primary_name_current_snapshot, load_record_inventory_current, load_resolver_current,
-    load_resource, load_resource_history, load_surface_bindings_by_logical_name_id,
-    load_surface_bindings_by_resource_id,
+    VERIFIED_PRIMARY_NAME_REQUEST_TYPE, load_address_history, load_chain_checkpoint,
+    load_execution_outcome, load_execution_trace, load_name_current,
+    load_name_current_for_snapshot, load_name_history, load_name_surface,
+    load_primary_name_current_snapshot, load_record_inventory_current,
+    load_record_inventory_current_for_snapshot, load_resolver_current, load_resource,
+    load_resource_history, load_surface_bindings_by_logical_name_id,
+    load_surface_bindings_by_resource_id, parse_rfc3339_utc_timestamp,
+    resolve_exact_name_snapshot_selection,
 };
 use clap::{Args, Parser, Subcommand};
 use serde::{Deserialize, Serialize};
@@ -383,7 +389,23 @@ struct AddressHistoryQuery {
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
+struct ExactNameSnapshotQuery {
+    at: Option<String>,
+    chain_positions: Option<String>,
+    consistency: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
 struct ResolutionQuery {
+    at: Option<String>,
+    chain_positions: Option<String>,
+    consistency: Option<String>,
+    mode: Option<String>,
+    records: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+struct InferredResolutionQuery {
     mode: Option<String>,
     records: Option<String>,
 }

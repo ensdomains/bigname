@@ -16,10 +16,12 @@ async fn resolution_contract_returns_declared_and_verified_sections_by_mode() ->
         .await?;
     database.rebuild_name_current(logical_name_id).await?;
     database
-        .insert_record_inventory_current_row(resolution_record_inventory_current_row(
-            logical_name_id,
-            resource_id,
-        ))
+        .insert_record_inventory_current_row(
+            resolution_record_inventory_current_row_without_verified_entrypoint(
+                logical_name_id,
+                resource_id,
+            ),
+        )
         .await?;
 
     let default_response = app_router(database.app_state())
@@ -132,7 +134,6 @@ async fn resolution_contract_returns_declared_and_verified_sections_by_mode() ->
             ),
         ]
     );
-
     let inventory_selector_tuple_set = inventory_selector_tuples
         .iter()
         .cloned()
@@ -236,6 +237,35 @@ async fn get_resolution_payload(
     assert_eq!(response.status(), StatusCode::OK, "uri {uri}");
 
     read_json(response).await
+}
+
+fn query_encode(value: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut encoded = String::with_capacity(value.len());
+
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                encoded.push(byte as char);
+            }
+            _ => {
+                encoded.push('%');
+                encoded.push(HEX[(byte >> 4) as usize] as char);
+                encoded.push(HEX[(byte & 0x0f) as usize] as char);
+            }
+        }
+    }
+
+    encoded
+}
+
+fn authoritative_position_timestamp(chain_positions: &Value) -> Result<&str> {
+    chain_positions
+        .as_object()
+        .and_then(|positions| positions.get("ethereum").or_else(|| positions.values().next()))
+        .and_then(|position| position.get("timestamp"))
+        .and_then(Value::as_str)
+        .context("chain_positions must include an authoritative timestamp")
 }
 
 fn set_declared_current_resolver(
@@ -2073,6 +2103,11 @@ async fn resolution_inferred_route_matches_canonical_basenames_and_keeps_verifie
     database
         .rebuild_name_current(basenames_logical_name_id)
         .await?;
+    insert_basenames_supported_ethereum_position_for_current_row(
+        &database,
+        basenames_logical_name_id,
+    )
+    .await?;
     rebuild_record_inventory_current(&database, basenames_resource_id).await?;
 
     database
@@ -2098,6 +2133,7 @@ async fn resolution_inferred_route_matches_canonical_basenames_and_keeps_verifie
         &ens_name_row,
         &ens_records,
         Some(&ens_record_inventory_row),
+        ens_name_row.chain_positions.clone(),
     )?;
     let ens_request_key = ens_cache_key.request_key.clone();
     let ens_verified_queries = resolution_execution_verified_queries(
@@ -3296,10 +3332,18 @@ async fn resolution_contract_reuses_exact_name_envelope_fields() -> Result<()> {
         .await?;
     database.rebuild_name_current(logical_name_id).await?;
     database
-        .insert_record_inventory_current_row(resolution_record_inventory_current_row(
-            logical_name_id,
-            resource_id,
-        ))
+        .insert_record_inventory_current_row(
+            resolution_record_inventory_current_row_without_verified_entrypoint(
+                logical_name_id,
+                resource_id,
+            ),
+        )
+        .await?;
+    let name_row = bigname_storage::load_name_current(&database.pool, logical_name_id)
+        .await?
+        .context("resolution envelope parity requires an exact-name current row")?;
+    database
+        .seed_snapshot_selector_chain_positions(&name_row.chain_positions)
         .await?;
 
     let resolution_response = app_router(database.app_state())
@@ -3358,6 +3402,118 @@ async fn resolution_contract_reuses_exact_name_envelope_fields() -> Result<()> {
 }
 
 #[tokio::test]
+async fn resolution_contract_reuses_exact_name_snapshot_selector_for_at_and_chain_positions()
+-> Result<()> {
+    let database = HarnessDatabase::new().await?;
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0x2200);
+    let token_lineage_id = Uuid::from_u128(0x1100);
+    let surface_binding_id = Uuid::from_u128(0x3300);
+
+    database
+        .seed_exact_name_rebuild_inputs(
+            logical_name_id,
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    database.rebuild_name_current(logical_name_id).await?;
+    database
+        .insert_record_inventory_current_row(resolution_record_inventory_current_row(
+            logical_name_id,
+            resource_id,
+        ))
+        .await?;
+
+    let name_row = bigname_storage::load_name_current(&database.pool, logical_name_id)
+        .await?
+        .context("resolution selector parity requires an exact-name current row")?;
+    database
+        .seed_snapshot_selector_chain_positions(&name_row.chain_positions)
+        .await?;
+
+    let selected_at = query_encode(authoritative_position_timestamp(&name_row.chain_positions)?);
+    let selected_chain_positions = query_encode(&serde_json::to_string(&name_row.chain_positions)?);
+    let expected_declared_state = resolution_supported_declared_state(
+        logical_name_id,
+        resource_id,
+        &["text:com.twitter", "addr:60"],
+    );
+
+    for (case_label, selector_query) in [
+        (
+            "at",
+            format!("at={selected_at}&consistency=finalized"),
+        ),
+        (
+            "chain_positions",
+            format!("chain_positions={selected_chain_positions}&consistency=finalized"),
+        ),
+    ] {
+        let resolution_response = app_router(database.app_state())
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/v1/resolutions/ens/alice.eth?mode=declared&records=text:com.twitter,addr:60&{selector_query}"
+                    ))
+                    .body(Body::empty())
+                    .expect("request must build"),
+            )
+            .await
+            .with_context(|| format!("{case_label} resolution selector request failed"))?;
+        let name_response = app_router(database.app_state())
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/names/ens/alice.eth?{selector_query}"))
+                    .body(Body::empty())
+                    .expect("request must build"),
+            )
+            .await
+            .with_context(|| format!("{case_label} exact-name selector request failed"))?;
+
+        assert_eq!(resolution_response.status(), StatusCode::OK, "{case_label}");
+        assert_eq!(name_response.status(), StatusCode::OK, "{case_label}");
+
+        let resolution_payload: ResolutionResponse = read_json(resolution_response).await?;
+        let name_payload: NameResponse = read_json(name_response).await?;
+
+        assert_eq!(resolution_payload.data, name_payload.data, "{case_label}");
+        assert_eq!(
+            resolution_payload.provenance, name_payload.provenance,
+            "{case_label}"
+        );
+        assert_eq!(resolution_payload.coverage, name_payload.coverage, "{case_label}");
+        assert_eq!(
+            resolution_payload.chain_positions, name_payload.chain_positions,
+            "{case_label}"
+        );
+        assert_eq!(
+            resolution_payload.chain_positions, name_row.chain_positions,
+            "{case_label}"
+        );
+        assert_eq!(resolution_payload.consistency, "finalized", "{case_label}");
+        assert_eq!(
+            resolution_payload.consistency, name_payload.consistency,
+            "{case_label}"
+        );
+        assert_eq!(
+            resolution_payload.last_updated, name_payload.last_updated,
+            "{case_label}"
+        );
+        assert_eq!(
+            resolution_payload.declared_state.as_ref(),
+            Some(&expected_declared_state),
+            "{case_label}"
+        );
+        assert_eq!(resolution_payload.verified_state, None, "{case_label}");
+    }
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn resolution_contract_reads_persisted_avatar_answer_on_mixed_route_and_preserves_request_order()
 -> Result<()> {
     let database = HarnessDatabase::new().await?;
@@ -3397,6 +3553,7 @@ async fn resolution_contract_reads_persisted_avatar_answer_on_mixed_route_and_pr
         &name_row,
         &persisted_records,
         Some(&record_inventory_row),
+        name_row.chain_positions.clone(),
     )?;
     let request_key = cache_key.request_key.clone();
     let persisted_verified_queries = resolution_execution_verified_queries(
@@ -3499,6 +3656,7 @@ async fn resolution_execution_explain_contract_reads_persisted_answer_and_reuses
         &name_row,
         &explain_records,
         Some(&record_inventory_row),
+        name_row.chain_positions.clone(),
     )?;
     let request_key = cache_key.request_key.clone();
     let persisted_verified_queries =
@@ -3617,6 +3775,7 @@ async fn resolution_execution_explain_contract_reads_persisted_avatar_answer_and
         &name_row,
         &explain_records,
         Some(&record_inventory_row),
+        name_row.chain_positions.clone(),
     )?;
     let request_key = cache_key.request_key.clone();
     let persisted_verified_queries = resolution_execution_verified_queries(
@@ -3753,6 +3912,7 @@ async fn resolution_contract_reads_persisted_alias_only_avatar_answer_on_mixed_r
         &name_row,
         &alias_records,
         Some(&record_inventory_row),
+        name_row.chain_positions.clone(),
     )?;
     let request_key = cache_key.request_key.clone();
     let persisted_verified_queries =
@@ -3881,6 +4041,7 @@ async fn resolution_execution_explain_contract_reads_persisted_alias_only_avatar
         &name_row,
         &alias_records,
         Some(&record_inventory_row),
+        name_row.chain_positions.clone(),
     )?;
     let request_key = cache_key.request_key.clone();
     let persisted_verified_queries =
@@ -4015,7 +4176,12 @@ async fn resolution_contract_reads_persisted_wildcard_derived_answer_on_mixed_ro
 
     let records = parse_resolution_record_keys(Some("addr:60"), ResolutionMode::Verified)
         .map_err(|error| anyhow::anyhow!(error.message))?;
-    let cache_key = build_resolution_execution_cache_key(&name_row, &records, None)?;
+    let cache_key = build_resolution_execution_cache_key(
+        &name_row,
+        &records,
+        None,
+        name_row.chain_positions.clone(),
+    )?;
     let request_key = cache_key.request_key.clone();
     let expected_verified_queries =
         resolution_execution_verified_queries(execution_trace_id, &["addr:60"]);
@@ -4226,6 +4392,7 @@ async fn resolution_execution_explain_contract_returns_not_found_for_selector_se
         &name_row,
         &persisted_records,
         Some(&record_inventory_row),
+        name_row.chain_positions.clone(),
     )?;
     let request_key = cache_key.request_key.clone();
     let persisted_verified_queries =

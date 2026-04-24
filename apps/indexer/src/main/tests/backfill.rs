@@ -510,7 +510,8 @@ async fn source_family_backfill_persists_selector_identity_and_only_selected_tar
         vec![ProviderBlockFixture {
             block: block_42.clone(),
             logs: vec![
-                rpc_log_payload_at_address(&block_42, registry_address, 0),
+                rpc_ens_v2_label_registered_log_payload(&block_42, registry_address, "alice", 1, 0),
+                rpc_ens_v2_token_resource_log_payload(&block_42, registry_address, 1, 1_001, 1),
                 rpc_log_payload_at_address(&block_42, registrar_address, 1),
             ],
         }],
@@ -525,7 +526,7 @@ async fn source_family_backfill_persists_selector_identity_and_only_selected_tar
         backfill_job_config(range, "source-family-idempotent", "lease-source-family")?,
     )
     .await?;
-    assert_eq!(outcome.raw_log_count, 1);
+    assert_eq!(outcome.raw_log_count, 2);
     assert_eq!(outcome.raw_code_hash_count, 1);
     assert_eq!(table_count(database.pool(), "raw_transactions").await?, 1);
     assert_eq!(table_count(database.pool(), "raw_receipts").await?, 1);
@@ -613,10 +614,54 @@ async fn source_family_backfill_persists_selector_identity_and_only_selected_tar
         0
     );
     assert_eq!(
-        sqlx::query_scalar::<_, String>("SELECT emitting_address FROM raw_logs")
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM raw_logs WHERE emitting_address = $1")
+            .bind(registry_address)
             .fetch_one(database.pool())
             .await?,
+        2
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT emitting_address FROM raw_logs ORDER BY log_index LIMIT 1"
+        )
+        .fetch_one(database.pool())
+        .await?,
         registry_address.to_owned()
+    );
+    assert_eq!(table_count(database.pool(), "resources").await?, 1);
+    assert_eq!(table_count(database.pool(), "name_surfaces").await?, 1);
+    assert_eq!(table_count(database.pool(), "surface_bindings").await?, 1);
+
+    let registry_event_counts = sqlx::query_as::<_, (String, i64)>(
+        r#"
+        SELECT event_kind, COUNT(*)::BIGINT
+        FROM normalized_events
+        WHERE derivation_kind = 'ens_v2_registry_resource_surface'
+        GROUP BY event_kind
+        "#,
+    )
+    .fetch_all(database.pool())
+    .await?
+    .into_iter()
+    .collect::<BTreeMap<_, _>>();
+    assert_eq!(
+        registry_event_counts.get("TokenResourceLinked"),
+        Some(&1),
+        "real scoped backfill must run the ENSv2 registry resource/surface adapter"
+    );
+    assert_eq!(registry_event_counts.get("SurfaceBound"), Some(&1));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)::BIGINT
+            FROM normalized_events
+            WHERE derivation_kind = 'raw_log_preimage_observation'
+              AND event_kind = 'PreimageObserved'
+            "#
+        )
+        .fetch_one(database.pool())
+        .await?,
+        1
     );
 
     let code_requests = requests
@@ -1796,6 +1841,57 @@ fn rpc_log_payload_at_address(block: &ProviderBlock, address: &str, log_index: i
         Value::String(format!("0x{log_index:x}")),
     );
     payload
+}
+
+fn rpc_ens_v2_label_registered_log_payload(
+    block: &ProviderBlock,
+    address: &str,
+    label: &str,
+    token_id: u64,
+    log_index: u64,
+) -> Value {
+    json!({
+        "blockHash": block.block_hash.clone(),
+        "blockNumber": format!("0x{:x}", block.block_number),
+        "transactionHash": transaction_hash_for_block(block),
+        "transactionIndex": "0x0",
+        "logIndex": format!("0x{log_index:x}"),
+        "address": address,
+        "topics": [
+            ens_v2_label_registered_topic0(),
+            hex_string(&abi_word_u64(token_id)),
+            labelhash_hex(label),
+            hex_string(&abi_word_address("0x0000000000000000000000000000000000000dad"))
+        ],
+        "data": encode_ens_v2_label_registered_log_data(
+            label,
+            "0x0000000000000000000000000000000000000a11",
+            1_900_000_000,
+        )
+    })
+}
+
+fn rpc_ens_v2_token_resource_log_payload(
+    block: &ProviderBlock,
+    address: &str,
+    token_id: u64,
+    resource: u64,
+    log_index: u64,
+) -> Value {
+    json!({
+        "blockHash": block.block_hash.clone(),
+        "blockNumber": format!("0x{:x}", block.block_number),
+        "transactionHash": transaction_hash_for_block(block),
+        "transactionIndex": "0x0",
+        "logIndex": format!("0x{log_index:x}"),
+        "address": address,
+        "topics": [
+            ens_v2_token_resource_topic0(),
+            hex_string(&abi_word_u64(token_id)),
+            hex_string(&abi_word_u64(resource))
+        ],
+        "data": "0x"
+    })
 }
 
 async fn insert_raw_name_wrapped_log_at_address(

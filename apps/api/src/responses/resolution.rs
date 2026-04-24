@@ -1,39 +1,53 @@
 fn build_name_response(
     row: NameCurrentRow,
     record_inventory_row: Option<&RecordInventoryCurrentRow>,
+    selected_snapshot: &SelectedSnapshot,
 ) -> NameResponse {
     let declared_state = build_name_declared_state(&row, record_inventory_row);
 
-    build_name_declared_response(row, declared_state)
+    build_name_declared_response(row, declared_state, selected_snapshot)
 }
 
-fn build_name_coverage_response(row: NameCurrentRow) -> NameResponse {
+fn build_name_coverage_response(
+    row: NameCurrentRow,
+    selected_snapshot: &SelectedSnapshot,
+) -> NameResponse {
     let declared_state = build_name_coverage_declared_state(&row.coverage);
 
-    build_name_declared_response(row, declared_state)
+    build_name_declared_response(row, declared_state, selected_snapshot)
 }
 
-fn build_name_surface_binding_explain_response(row: NameCurrentRow) -> NameResponse {
+fn build_name_surface_binding_explain_response(
+    row: NameCurrentRow,
+    selected_snapshot: &SelectedSnapshot,
+) -> NameResponse {
     let declared_state = build_name_surface_binding_explain_declared_state(&row);
 
-    build_name_declared_response(row, declared_state)
+    build_name_declared_response(row, declared_state, selected_snapshot)
 }
 
-fn build_name_authority_control_explain_response(row: NameCurrentRow) -> NameResponse {
+fn build_name_authority_control_explain_response(
+    row: NameCurrentRow,
+    selected_snapshot: &SelectedSnapshot,
+) -> NameResponse {
     let declared_state = build_name_authority_control_explain_declared_state(&row);
 
-    build_name_declared_response(row, declared_state)
+    build_name_declared_response(row, declared_state, selected_snapshot)
 }
 
-fn build_name_declared_response(row: NameCurrentRow, declared_state: JsonValue) -> NameResponse {
+fn build_name_declared_response(
+    row: NameCurrentRow,
+    declared_state: JsonValue,
+    selected_snapshot: &SelectedSnapshot,
+) -> NameResponse {
     NameResponse {
         data: build_name_data(&row),
         declared_state,
         verified_state: None,
         provenance: build_name_provenance(&row.provenance),
         coverage: build_name_coverage(&row.coverage),
-        chain_positions: ensure_object(&row.chain_positions),
-        consistency: canonicality_consistency(&row.canonicality_summary).to_owned(),
+        chain_positions: selected_snapshot.chain_positions_value(),
+        consistency: selected_snapshot.consistency.as_str().to_owned(),
         last_updated: format_timestamp(row.last_recomputed_at),
     }
 }
@@ -44,6 +58,7 @@ fn build_resolution_response(
     records: &[ResolutionRecordKey],
     record_inventory_row: Option<&RecordInventoryCurrentRow>,
     persisted_verified_outcome: Option<&ExecutionOutcome>,
+    selected_snapshot: &SelectedSnapshot,
 ) -> Result<ResolutionResponse> {
     let data = build_name_data(&row);
     let declared_state = mode
@@ -58,8 +73,8 @@ fn build_resolution_response(
         persisted_verified_outcome.map(|outcome| outcome.execution_trace_id),
     );
     let coverage = build_name_coverage(&row.coverage);
-    let chain_positions = ensure_object(&row.chain_positions);
-    let consistency = canonicality_consistency(&row.canonicality_summary).to_owned();
+    let chain_positions = selected_snapshot.chain_positions_value();
+    let consistency = selected_snapshot.consistency.as_str().to_owned();
     let last_updated = format_timestamp(row.last_recomputed_at);
 
     Ok(ResolutionResponse {

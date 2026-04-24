@@ -22,6 +22,63 @@ fn openapi_parameter<'a>(operation: &'a Value, name: &str) -> &'a Value {
         .expect("expected parameter to exist")
 }
 
+fn openapi_parameter_names(operation: &Value) -> Vec<&str> {
+    operation
+        .get("parameters")
+        .and_then(Value::as_array)
+        .expect("OpenAPI operation must expose parameters")
+        .iter()
+        .filter_map(|parameter| parameter.get("name").and_then(Value::as_str))
+        .collect()
+}
+
+fn openapi_response_description<'a>(operation: &'a Value, status: &str) -> &'a str {
+    operation
+        .get("responses")
+        .and_then(|responses| responses.get(status))
+        .and_then(|response| response.get("description"))
+        .and_then(Value::as_str)
+        .expect("OpenAPI response must expose a description")
+}
+
+fn assert_exact_name_snapshot_parameters(
+    operation: &Value,
+    expected_parameter_names: &[&str],
+    expected_at_description: &str,
+) {
+    let actual_parameter_names = openapi_parameter_names(operation);
+    assert_eq!(actual_parameter_names.as_slice(), expected_parameter_names);
+
+    let at = openapi_parameter(operation, "at");
+    assert_eq!(
+        at.get("description").and_then(Value::as_str),
+        Some(expected_at_description)
+    );
+    assert_eq!(at.get("schema"), Some(&json!({ "type": "string" })));
+
+    let chain_positions = openapi_parameter(operation, "chain_positions");
+    assert_eq!(
+        chain_positions.get("description").and_then(Value::as_str),
+        Some(
+            "Explicit exact-name snapshot selector encoded as one JSON object using ChainPositions position objects. Mutually exclusive with `at`."
+        )
+    );
+    assert_eq!(
+        chain_positions.get("schema"),
+        Some(&json!({ "type": "string" }))
+    );
+
+    let consistency = openapi_parameter(operation, "consistency");
+    assert_eq!(
+        consistency.get("schema"),
+        Some(&json!({
+            "type": "string",
+            "enum": ["head", "safe", "finalized"],
+            "default": "head",
+        }))
+    );
+}
+
 fn openapi_schema<'a>(document: &'a Value, name: &str) -> &'a Value {
     document
         .get("components")
@@ -122,7 +179,48 @@ fn openapi_document_freezes_query_params_and_shared_envelopes() {
     assert_eq!(surface_classes.get("style"), Some(&json!("form")));
     assert_eq!(surface_classes.get("explode"), Some(&json!(false)));
 
+    let exact_name_at_description =
+        "Point-in-time selector for the exact-name snapshot. Mutually exclusive with `chain_positions`.";
+    for exact_name_path in [
+        "/v1/names/{namespace}/{name}",
+        "/v1/coverage/{namespace}/{name}",
+        "/v1/explain/names/{namespace}/{name}/surface-binding",
+        "/v1/explain/names/{namespace}/{name}/authority-control",
+    ] {
+        let operation = openapi_operation(&document, exact_name_path);
+        assert_exact_name_snapshot_parameters(
+            operation,
+            &["namespace", "name", "at", "chain_positions", "consistency"],
+            exact_name_at_description,
+        );
+        assert_eq!(
+            openapi_response_description(operation, "400"),
+            "Invalid snapshot selector"
+        );
+        assert_eq!(
+            openapi_response_description(operation, "409"),
+            "Snapshot conflict or stale projection"
+        );
+    }
+
     let resolutions = openapi_operation(&document, "/v1/resolutions/{namespace}/{name}");
+    assert_exact_name_snapshot_parameters(
+        resolutions,
+        &[
+            "namespace",
+            "name",
+            "at",
+            "chain_positions",
+            "consistency",
+            "mode",
+            "records",
+        ],
+        "Point-in-time selector for the exact-name snapshot used by resolution joins. Mutually exclusive with `chain_positions`.",
+    );
+    assert_eq!(
+        openapi_response_description(resolutions, "409"),
+        "Snapshot conflict or stale projection"
+    );
     let mode = openapi_parameter(resolutions, "mode");
     assert_eq!(
         mode.get("schema"),
@@ -137,16 +235,8 @@ fn openapi_document_freezes_query_params_and_shared_envelopes() {
     assert_eq!(records.get("explode"), Some(&json!(false)));
 
     let inferred_resolutions = openapi_operation(&document, "/v1/resolve/{name}");
-    let inferred_resolution_parameters = inferred_resolutions
-        .get("parameters")
-        .and_then(Value::as_array)
-        .expect("namespace-inferred resolution must expose parameters");
-    let inferred_resolution_parameter_names = inferred_resolution_parameters
-        .iter()
-        .filter_map(|parameter| parameter.get("name").and_then(Value::as_str))
-        .collect::<Vec<_>>();
     assert_eq!(
-        inferred_resolution_parameter_names,
+        openapi_parameter_names(inferred_resolutions),
         vec!["name", "mode", "records"]
     );
     let inferred_mode = openapi_parameter(inferred_resolutions, "mode");
@@ -168,16 +258,8 @@ fn openapi_document_freezes_query_params_and_shared_envelopes() {
         &document,
         "/v1/explain/resolutions/{namespace}/{name}/execution",
     );
-    let resolution_execution_parameters = resolution_execution
-        .get("parameters")
-        .and_then(Value::as_array)
-        .expect("resolution execution explain must expose parameters");
-    let resolution_execution_parameter_names = resolution_execution_parameters
-        .iter()
-        .filter_map(|parameter| parameter.get("name").and_then(Value::as_str))
-        .collect::<Vec<_>>();
     assert_eq!(
-        resolution_execution_parameter_names,
+        openapi_parameter_names(resolution_execution),
         vec!["namespace", "name", "records"]
     );
     let resolution_execution_records = openapi_parameter(resolution_execution, "records");

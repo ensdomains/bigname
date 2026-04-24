@@ -92,7 +92,24 @@ impl EnsV2RegistryResourceSurfaceSyncSummary {
         chain: &str,
         block_hashes: &[String],
     ) -> Result<Self> {
-        sync_ens_v2_registry_resource_surface_with_scope(pool, chain, true, block_hashes).await
+        sync_ens_v2_registry_resource_surface_with_scope(pool, chain, true, block_hashes, None)
+            .await
+    }
+
+    pub async fn sync_for_block_hashes_with_source_scope(
+        pool: &PgPool,
+        chain: &str,
+        block_hashes: &[String],
+        source_scope: &[(String, String, i64, i64)],
+    ) -> Result<Self> {
+        sync_ens_v2_registry_resource_surface_with_scope(
+            pool,
+            chain,
+            true,
+            block_hashes,
+            Some(source_scope),
+        )
+        .await
     }
 }
 
@@ -108,6 +125,8 @@ struct ActiveEmitter {
     role: Option<String>,
     source: WatchedContractSource,
     source_rank: i32,
+    active_from_block_number: Option<i64>,
+    active_to_block_number: Option<i64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -140,6 +159,14 @@ struct RegistryRawLogRow {
     source_family: String,
     manifest_version: i64,
     normalizer_version: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RegistryRawLogSourceScopeTarget {
+    source_family: String,
+    address: String,
+    effective_from_block: i64,
+    effective_to_block: i64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -270,7 +297,7 @@ pub async fn sync_ens_v2_registry_resource_surface(
     pool: &PgPool,
     chain: &str,
 ) -> Result<EnsV2RegistryResourceSurfaceSyncSummary> {
-    sync_ens_v2_registry_resource_surface_with_scope(pool, chain, false, &[]).await
+    sync_ens_v2_registry_resource_surface_with_scope(pool, chain, false, &[], None).await
 }
 
 async fn sync_ens_v2_registry_resource_surface_with_scope(
@@ -278,8 +305,21 @@ async fn sync_ens_v2_registry_resource_surface_with_scope(
     chain: &str,
     restrict_to_block_hashes: bool,
     block_hashes: &[String],
+    source_scope: Option<&[(String, String, i64, i64)]>,
 ) -> Result<EnsV2RegistryResourceSurfaceSyncSummary> {
-    let active_emitters = load_active_emitters(pool, chain).await?;
+    let source_scope = source_scope.map(normalized_source_scope_targets);
+    if source_scope.as_ref().is_some_and(Vec::is_empty) {
+        return Ok(EnsV2RegistryResourceSurfaceSyncSummary::empty(0));
+    }
+    let scoped_emitter_identities = source_scope.as_ref().map(|source_scope| {
+        source_scope
+            .iter()
+            .map(|target| (target.source_family.clone(), target.address.clone()))
+            .collect::<HashSet<_>>()
+    });
+
+    let active_emitters =
+        load_active_emitters(pool, chain, scoped_emitter_identities.as_ref()).await?;
     if active_emitters.is_empty() {
         return Ok(EnsV2RegistryResourceSurfaceSyncSummary::empty(0));
     }
@@ -290,6 +330,7 @@ async fn sync_ens_v2_registry_resource_surface_with_scope(
         &active_emitters,
         restrict_to_block_hashes,
         block_hashes,
+        source_scope.as_deref(),
     )
     .await?;
     let scanned_log_count = raw_logs.len();
@@ -1449,102 +1490,202 @@ async fn load_registry_raw_logs(
     emitters: &[ActiveEmitter],
     restrict_to_block_hashes: bool,
     block_hashes: &[String],
+    source_scope: Option<&[RegistryRawLogSourceScopeTarget]>,
 ) -> Result<Vec<RegistryRawLogRow>> {
     if emitters.is_empty() {
         return Ok(Vec::new());
     }
 
-    let emitters_by_address = emitters
-        .iter()
-        .cloned()
-        .map(|emitter| (emitter.address.clone(), emitter))
-        .collect::<HashMap<_, _>>();
+    let mut emitters_by_address = HashMap::<String, Vec<ActiveEmitter>>::new();
+    for emitter in emitters.iter().cloned() {
+        emitters_by_address
+            .entry(emitter.address.clone())
+            .or_default()
+            .push(emitter);
+    }
     let watched_addresses = emitters_by_address.keys().cloned().collect::<Vec<_>>();
-    let rows = sqlx::query(
-        r#"
-        SELECT
-            rl.chain_id,
-            rl.block_hash,
-            rl.block_number,
-            rb.block_timestamp,
-            rl.transaction_hash,
-            rl.transaction_index,
-            rl.log_index,
-            rl.emitting_address,
-            rl.topics,
-            rl.data,
-            rl.canonicality_state::TEXT AS canonicality_state
-        FROM raw_logs rl
-        JOIN raw_blocks rb
-          ON rb.chain_id = rl.chain_id
-         AND rb.block_hash = rl.block_hash
-        WHERE rl.chain_id = $1
-          AND lower(rl.emitting_address) = ANY($2::TEXT[])
-          AND ($3::BOOLEAN = FALSE OR rl.block_hash = ANY($4::TEXT[]))
-          AND rl.canonicality_state IN (
-              'canonical'::canonicality_state,
-              'safe'::canonicality_state,
-              'finalized'::canonicality_state
-          )
-        ORDER BY rl.block_number, rl.transaction_index, rl.log_index, lower(rl.emitting_address)
-        "#,
-    )
-    .bind(chain)
-    .bind(&watched_addresses)
-    .bind(restrict_to_block_hashes)
-    .bind(block_hashes)
-    .fetch_all(pool)
-    .await
-    .with_context(|| format!("failed to load ENSv2 registry raw logs for chain {chain}"))?;
+    let watched_range_addresses = emitters
+        .iter()
+        .map(|emitter| emitter.address.clone())
+        .collect::<Vec<_>>();
+    let watched_range_from_blocks = emitters
+        .iter()
+        .map(|emitter| emitter.active_from_block_number.unwrap_or(0))
+        .collect::<Vec<_>>();
+    let watched_range_to_blocks = emitters
+        .iter()
+        .map(|emitter| emitter.active_to_block_number.unwrap_or(i64::MAX))
+        .collect::<Vec<_>>();
 
-    rows.into_iter()
-        .map(|row| {
-            let emitting_address = normalize_address(
-                &row.try_get::<String, _>("emitting_address")
-                    .context("missing emitting_address")?,
-            );
-            let emitter = emitters_by_address
-                .get(&emitting_address)
-                .with_context(|| {
-                    format!(
-                        "missing ENSv2 registry emitter attribution for chain {chain} address {emitting_address}"
-                    )
-                })?;
-            Ok(RegistryRawLogRow {
-                chain_id: row.try_get("chain_id").context("missing chain_id")?,
-                block_hash: row.try_get("block_hash").context("missing block_hash")?,
-                block_number: row
-                    .try_get("block_number")
-                    .context("missing block_number")?,
-                block_timestamp: row
-                    .try_get("block_timestamp")
-                    .context("missing block_timestamp")?,
-                transaction_hash: row
-                    .try_get("transaction_hash")
-                    .context("missing transaction_hash")?,
-                transaction_index: row
-                    .try_get("transaction_index")
-                    .context("missing transaction_index")?,
-                log_index: row.try_get("log_index").context("missing log_index")?,
-                emitting_address,
-                topics: row.try_get("topics").context("missing topics")?,
-                data: row.try_get("data").context("missing data")?,
-                canonicality_state: parse_canonicality_state(
-                    &row.try_get::<String, _>("canonicality_state")
-                        .context("missing canonicality_state")?,
-                )?,
-                emitting_contract_instance_id: emitter.contract_instance_id,
-                source_manifest_id: emitter.source_manifest_id,
-                namespace: emitter.namespace.clone(),
-                source_family: emitter.source_family.clone(),
-                manifest_version: emitter.manifest_version,
-                normalizer_version: emitter.normalizer_version.clone(),
-            })
-        })
-        .collect()
+    let scoped_ranges = source_scope
+        .map(|source_scope| scoped_ranges_for_active_emitters(source_scope, emitters))
+        .transpose()?;
+    let rows = if let Some(scoped_ranges) = scoped_ranges.as_ref() {
+        if scoped_ranges.is_empty() {
+            return Ok(Vec::new());
+        }
+        let scoped_addresses = scoped_ranges
+            .iter()
+            .map(|target| target.address.clone())
+            .collect::<Vec<_>>();
+        let scoped_from_blocks = scoped_ranges
+            .iter()
+            .map(|target| target.effective_from_block)
+            .collect::<Vec<_>>();
+        let scoped_to_blocks = scoped_ranges
+            .iter()
+            .map(|target| target.effective_to_block)
+            .collect::<Vec<_>>();
+
+        sqlx::query(
+            r#"
+            SELECT
+                rl.chain_id,
+                rl.block_hash,
+                rl.block_number,
+                rb.block_timestamp,
+                rl.transaction_hash,
+                rl.transaction_index,
+                rl.log_index,
+                rl.emitting_address,
+                rl.topics,
+                rl.data,
+                rl.canonicality_state::TEXT AS canonicality_state
+            FROM raw_logs rl
+            JOIN raw_blocks rb
+              ON rb.chain_id = rl.chain_id
+             AND rb.block_hash = rl.block_hash
+            WHERE rl.chain_id = $1
+              AND lower(rl.emitting_address) = ANY($2::TEXT[])
+              AND ($3::BOOLEAN = FALSE OR rl.block_hash = ANY($4::TEXT[]))
+              AND EXISTS (
+                  SELECT 1
+                  FROM unnest($5::TEXT[], $6::BIGINT[], $7::BIGINT[]) AS watched(
+                      address,
+                      effective_from_block,
+                      effective_to_block
+                  )
+                  WHERE watched.address = lower(rl.emitting_address)
+                    AND rl.block_number BETWEEN watched.effective_from_block
+                        AND watched.effective_to_block
+              )
+              AND EXISTS (
+                  SELECT 1
+                  FROM unnest($8::TEXT[], $9::BIGINT[], $10::BIGINT[]) AS scoped(
+                      address,
+                      effective_from_block,
+                      effective_to_block
+                  )
+                  WHERE scoped.address = lower(rl.emitting_address)
+                    AND rl.block_number BETWEEN scoped.effective_from_block
+                        AND scoped.effective_to_block
+              )
+              AND rl.canonicality_state <> 'orphaned'::canonicality_state
+            ORDER BY rl.block_number, rl.transaction_index, rl.log_index, lower(rl.emitting_address)
+            "#,
+        )
+        .bind(chain)
+        .bind(&watched_addresses)
+        .bind(restrict_to_block_hashes)
+        .bind(block_hashes)
+        .bind(&watched_range_addresses)
+        .bind(&watched_range_from_blocks)
+        .bind(&watched_range_to_blocks)
+        .bind(&scoped_addresses)
+        .bind(&scoped_from_blocks)
+        .bind(&scoped_to_blocks)
+        .fetch_all(pool)
+        .await
+        .with_context(|| {
+            format!("failed to load scoped ENSv2 registry raw logs for chain {chain}")
+        })?
+    } else {
+        sqlx::query(
+            r#"
+            SELECT
+                rl.chain_id,
+                rl.block_hash,
+                rl.block_number,
+                rb.block_timestamp,
+                rl.transaction_hash,
+                rl.transaction_index,
+                rl.log_index,
+                rl.emitting_address,
+                rl.topics,
+                rl.data,
+                rl.canonicality_state::TEXT AS canonicality_state
+            FROM raw_logs rl
+            JOIN raw_blocks rb
+              ON rb.chain_id = rl.chain_id
+             AND rb.block_hash = rl.block_hash
+            WHERE rl.chain_id = $1
+              AND lower(rl.emitting_address) = ANY($2::TEXT[])
+              AND ($3::BOOLEAN = FALSE OR rl.block_hash = ANY($4::TEXT[]))
+              AND rl.canonicality_state <> 'orphaned'::canonicality_state
+            ORDER BY rl.block_number, rl.transaction_index, rl.log_index, lower(rl.emitting_address)
+            "#,
+        )
+        .bind(chain)
+        .bind(&watched_addresses)
+        .bind(restrict_to_block_hashes)
+        .bind(block_hashes)
+        .fetch_all(pool)
+        .await
+        .with_context(|| format!("failed to load ENSv2 registry raw logs for chain {chain}"))?
+    };
+
+    let mut output = Vec::new();
+    for row in rows {
+        let emitting_address = normalize_address(
+            &row.try_get::<String, _>("emitting_address")
+                .context("missing emitting_address")?,
+        );
+        let block_number = row
+            .try_get("block_number")
+            .context("missing block_number")?;
+        let Some(emitter) = emitters_by_address
+            .get(&emitting_address)
+            .and_then(|emitters| emitter_for_block_and_scope(emitters, block_number, source_scope))
+        else {
+            continue;
+        };
+        output.push(RegistryRawLogRow {
+            chain_id: row.try_get("chain_id").context("missing chain_id")?,
+            block_hash: row.try_get("block_hash").context("missing block_hash")?,
+            block_number,
+            block_timestamp: row
+                .try_get("block_timestamp")
+                .context("missing block_timestamp")?,
+            transaction_hash: row
+                .try_get("transaction_hash")
+                .context("missing transaction_hash")?,
+            transaction_index: row
+                .try_get("transaction_index")
+                .context("missing transaction_index")?,
+            log_index: row.try_get("log_index").context("missing log_index")?,
+            emitting_address,
+            topics: row.try_get("topics").context("missing topics")?,
+            data: row.try_get("data").context("missing data")?,
+            canonicality_state: parse_canonicality_state(
+                &row.try_get::<String, _>("canonicality_state")
+                    .context("missing canonicality_state")?,
+            )?,
+            emitting_contract_instance_id: emitter.contract_instance_id,
+            source_manifest_id: emitter.source_manifest_id,
+            namespace: emitter.namespace.clone(),
+            source_family: emitter.source_family.clone(),
+            manifest_version: emitter.manifest_version,
+            normalizer_version: emitter.normalizer_version.clone(),
+        });
+    }
+    Ok(output)
 }
 
-async fn load_active_emitters(pool: &PgPool, chain: &str) -> Result<Vec<ActiveEmitter>> {
+async fn load_active_emitters(
+    pool: &PgPool,
+    chain: &str,
+    scoped_emitter_identities: Option<&HashSet<(String, String)>>,
+) -> Result<Vec<ActiveEmitter>> {
     let watched_contracts = load_watched_contracts(pool)
         .await
         .context("failed to load watched contracts for ENSv2 registry adapter")?;
@@ -1571,7 +1712,7 @@ async fn load_active_emitters(pool: &PgPool, chain: &str) -> Result<Vec<ActiveEm
         .collect::<Vec<_>>();
     let active_manifests = load_active_manifest_metadata(pool, &manifest_ids).await?;
 
-    let mut emitters_by_address = HashMap::<String, ActiveEmitter>::new();
+    let mut emitter_candidates = Vec::new();
     for watched_contract in watched_contracts {
         let source_manifest_id = watched_contract
             .source_manifest_id
@@ -1579,6 +1720,14 @@ async fn load_active_emitters(pool: &PgPool, chain: &str) -> Result<Vec<ActiveEm
         let manifest = active_manifests.get(&source_manifest_id).with_context(|| {
             format!("missing active manifest metadata for manifest_id {source_manifest_id}")
         })?;
+        if scoped_emitter_identities.is_some_and(|scope| {
+            !scope.contains(&(
+                manifest.source_family.clone(),
+                normalize_address(&watched_contract.address),
+            ))
+        }) {
+            continue;
+        }
         if manifest.source_family != SOURCE_FAMILY_ENS_V2_ROOT_L1
             && manifest.source_family != SOURCE_FAMILY_ENS_V2_REGISTRY_L1
         {
@@ -1604,25 +1753,71 @@ async fn load_active_emitters(pool: &PgPool, chain: &str) -> Result<Vec<ActiveEm
             role: manifest.role.clone(),
             source: watched_contract.source,
             source_rank: source_rank(watched_contract.source),
+            active_from_block_number: watched_contract.active_from_block_number,
+            active_to_block_number: watched_contract.active_to_block_number,
         };
 
-        match emitters_by_address.get(&candidate.address) {
+        emitter_candidates.push(candidate);
+    }
+
+    Ok(preferred_emitters_by_scope(emitter_candidates))
+}
+
+fn source_scope_target_intersects_active_emitter(
+    target: &RegistryRawLogSourceScopeTarget,
+    emitter: &ActiveEmitter,
+) -> bool {
+    if target.source_family != emitter.source_family || target.address != emitter.address {
+        return false;
+    }
+
+    let emitter_from = emitter.active_from_block_number.unwrap_or(0);
+    let emitter_to = emitter.active_to_block_number.unwrap_or(i64::MAX);
+
+    target.effective_from_block <= emitter_to && emitter_from <= target.effective_to_block
+}
+
+fn emitter_sort_key(
+    emitter: &ActiveEmitter,
+) -> (&str, &str, Option<i64>, Option<i64>, i32, i64, Uuid) {
+    (
+        &emitter.source_family,
+        &emitter.address,
+        emitter.active_from_block_number,
+        emitter.active_to_block_number,
+        emitter.source_rank,
+        emitter.source_manifest_id,
+        emitter.contract_instance_id,
+    )
+}
+
+fn sort_emitters_by_scope(emitters: &mut [ActiveEmitter]) {
+    emitters.sort_by(|left, right| emitter_sort_key(left).cmp(&emitter_sort_key(right)));
+}
+
+fn preferred_emitters_by_scope(
+    candidates: impl IntoIterator<Item = ActiveEmitter>,
+) -> Vec<ActiveEmitter> {
+    let mut emitters_by_scope =
+        HashMap::<(String, String, Option<i64>, Option<i64>), ActiveEmitter>::new();
+    for candidate in candidates {
+        let scope_key = (
+            candidate.source_family.clone(),
+            candidate.address.clone(),
+            candidate.active_from_block_number,
+            candidate.active_to_block_number,
+        );
+        match emitters_by_scope.get(&scope_key) {
             Some(current) if !candidate_precedes(&candidate, current) => {}
             _ => {
-                emitters_by_address.insert(candidate.address.clone(), candidate);
+                emitters_by_scope.insert(scope_key, candidate);
             }
         }
     }
 
-    let mut emitters = emitters_by_address.into_values().collect::<Vec<_>>();
-    emitters.sort_by(|left, right| {
-        left.address
-            .cmp(&right.address)
-            .then(left.source_rank.cmp(&right.source_rank))
-            .then(left.source_manifest_id.cmp(&right.source_manifest_id))
-            .then(left.contract_instance_id.cmp(&right.contract_instance_id))
-    });
-    Ok(emitters)
+    let mut emitters = emitters_by_scope.into_values().collect::<Vec<_>>();
+    sort_emitters_by_scope(&mut emitters);
+    emitters
 }
 
 async fn load_active_manifest_metadata(
@@ -1903,6 +2098,80 @@ fn count_events_by_kind(events: &[NormalizedEvent]) -> BTreeMap<String, usize> {
     counts
 }
 
+fn normalized_source_scope_targets(
+    source_scope: &[(String, String, i64, i64)],
+) -> Vec<RegistryRawLogSourceScopeTarget> {
+    source_scope
+        .iter()
+        .map(
+            |(source_family, address, effective_from_block, effective_to_block)| {
+                RegistryRawLogSourceScopeTarget {
+                    source_family: source_family.clone(),
+                    address: normalize_address(address),
+                    effective_from_block: *effective_from_block,
+                    effective_to_block: *effective_to_block,
+                }
+            },
+        )
+        .collect()
+}
+
+fn scoped_ranges_for_active_emitters(
+    source_scope: &[RegistryRawLogSourceScopeTarget],
+    emitters: &[ActiveEmitter],
+) -> Result<Vec<RegistryRawLogSourceScopeTarget>> {
+    let mut ranges = Vec::new();
+    for target in source_scope {
+        if target.effective_to_block < target.effective_from_block {
+            bail!(
+                "ENSv2 registry source scope range {}..={} is invalid for {} {}",
+                target.effective_from_block,
+                target.effective_to_block,
+                target.source_family,
+                target.address
+            );
+        }
+        if emitters
+            .iter()
+            .any(|emitter| source_scope_target_intersects_active_emitter(target, emitter))
+        {
+            ranges.push(target.clone());
+        }
+    }
+    Ok(ranges)
+}
+
+fn emitter_for_block_and_scope<'a>(
+    emitters: &'a [ActiveEmitter],
+    block_number: i64,
+    source_scope: Option<&[RegistryRawLogSourceScopeTarget]>,
+) -> Option<&'a ActiveEmitter> {
+    let Some(source_scope) = source_scope else {
+        return emitters
+            .iter()
+            .find(|emitter| emitter_active_at_block(emitter, block_number));
+    };
+
+    emitters.iter().find(|emitter| {
+        emitter_active_at_block(emitter, block_number)
+            && source_scope.iter().any(|target| {
+                target.source_family == emitter.source_family
+                    && target.address == emitter.address
+                    && block_number >= target.effective_from_block
+                    && block_number <= target.effective_to_block
+            })
+    })
+}
+
+fn emitter_active_at_block(emitter: &ActiveEmitter, block_number: i64) -> bool {
+    emitter
+        .active_from_block_number
+        .is_none_or(|active_from| block_number >= active_from)
+        && emitter
+            .active_to_block_number
+            .is_none_or(|active_to| block_number <= active_to)
+}
+
 fn source_rank(source: WatchedContractSource) -> i32 {
     match source {
         WatchedContractSource::ManifestRoot => 0,
@@ -2140,7 +2409,10 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use bigname_storage::{default_database_url, load_surface_bindings_by_logical_name_id};
+    use bigname_storage::{
+        RawBlock, RawLog, default_database_url, load_surface_bindings_by_logical_name_id,
+        upsert_raw_blocks, upsert_raw_logs,
+    };
     use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
     use super::*;
@@ -2215,6 +2487,223 @@ mod tests {
             self.admin_pool.close().await;
             Ok(())
         }
+    }
+
+    #[tokio::test]
+    async fn ens_v2_scoped_backfill_sync_only_normalizes_selected_registry_targets() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let chain = "ethereum-sepolia";
+        let manifest_id = insert_test_registry_manifest(database.pool(), chain).await?;
+        let selected_contract_instance_id = Uuid::from_u128(0x1201);
+        let unselected_contract_instance_id = Uuid::from_u128(0x1202);
+        let selected_address = "0x00000000000000000000000000000000000000a1";
+        let unselected_address = "0x00000000000000000000000000000000000000b2";
+        let block_hash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+        insert_test_registry_contract(
+            database.pool(),
+            manifest_id,
+            "registry_selected",
+            selected_contract_instance_id,
+            selected_address,
+            0,
+        )
+        .await?;
+        insert_test_registry_contract(
+            database.pool(),
+            manifest_id,
+            "registry_unselected",
+            unselected_contract_instance_id,
+            unselected_address,
+            0,
+        )
+        .await?;
+        upsert_raw_blocks(database.pool(), &[test_raw_block(chain, block_hash, 42)]).await?;
+        upsert_raw_logs(
+            database.pool(),
+            &[
+                label_reserved_raw_log(chain, block_hash, 42, selected_address, 0, "alice"),
+                label_reserved_raw_log(chain, block_hash, 42, unselected_address, 1, "bob"),
+            ],
+        )
+        .await?;
+
+        let wrong_family_summary =
+            EnsV2RegistryResourceSurfaceSyncSummary::sync_for_block_hashes_with_source_scope(
+                database.pool(),
+                chain,
+                &[block_hash.to_owned()],
+                &[(
+                    "ens_v2_registrar_l1".to_owned(),
+                    selected_address.to_owned(),
+                    42,
+                    42,
+                )],
+            )
+            .await?;
+        assert_eq!(wrong_family_summary.scanned_log_count, 0);
+        assert_eq!(wrong_family_summary.total_normalized_event_count, 0);
+        assert_eq!(normalized_event_count(database.pool()).await?, 0);
+
+        let summary =
+            EnsV2RegistryResourceSurfaceSyncSummary::sync_for_block_hashes_with_source_scope(
+                database.pool(),
+                chain,
+                &[block_hash.to_owned()],
+                &[(
+                    SOURCE_FAMILY_ENS_V2_REGISTRY_L1.to_owned(),
+                    selected_address.to_owned(),
+                    42,
+                    42,
+                )],
+            )
+            .await?;
+
+        assert_eq!(summary.scanned_log_count, 1);
+        assert_eq!(summary.matched_log_count, 1);
+        assert_eq!(summary.total_normalized_event_count, 1);
+        assert_eq!(
+            summary.by_kind.get(EVENT_KIND_REGISTRATION_RESERVED),
+            Some(&1)
+        );
+        assert_eq!(
+            normalized_event_count_for_emitter(database.pool(), selected_address).await?,
+            1
+        );
+        assert_eq!(
+            normalized_event_count_for_emitter(database.pool(), unselected_address).await?,
+            0
+        );
+        assert_eq!(normalized_event_count(database.pool()).await?, 1);
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn ens_v2_scoped_loader_preserves_same_address_disjoint_effective_ranges() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let chain = "ethereum-sepolia";
+        let address = "0x00000000000000000000000000000000000000c1";
+        let first_block_hash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let second_block_hash =
+            "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let first_contract_instance_id = Uuid::from_u128(0x1301);
+        let second_contract_instance_id = Uuid::from_u128(0x1302);
+
+        upsert_raw_blocks(
+            database.pool(),
+            &[
+                test_raw_block(chain, first_block_hash, 40),
+                test_raw_block(chain, second_block_hash, 42),
+            ],
+        )
+        .await?;
+        upsert_raw_logs(
+            database.pool(),
+            &[
+                label_reserved_raw_log(chain, first_block_hash, 40, address, 0, "alice"),
+                label_reserved_raw_log(chain, second_block_hash, 42, address, 0, "bob"),
+            ],
+        )
+        .await?;
+
+        let emitters = vec![
+            test_active_emitter(address, first_contract_instance_id, 1, Some(40), Some(40)),
+            test_active_emitter(address, second_contract_instance_id, 2, Some(42), Some(42)),
+        ];
+        let source_scope = vec![
+            RegistryRawLogSourceScopeTarget {
+                source_family: SOURCE_FAMILY_ENS_V2_REGISTRY_L1.to_owned(),
+                address: normalize_address(address),
+                effective_from_block: 40,
+                effective_to_block: 40,
+            },
+            RegistryRawLogSourceScopeTarget {
+                source_family: SOURCE_FAMILY_ENS_V2_REGISTRY_L1.to_owned(),
+                address: normalize_address(address),
+                effective_from_block: 42,
+                effective_to_block: 42,
+            },
+        ];
+        let rows = load_registry_raw_logs(
+            database.pool(),
+            chain,
+            &emitters,
+            true,
+            &[first_block_hash.to_owned(), second_block_hash.to_owned()],
+            Some(&source_scope),
+        )
+        .await?;
+
+        assert_eq!(
+            rows.iter()
+                .map(|row| (row.block_number, row.emitting_contract_instance_id))
+                .collect::<Vec<_>>(),
+            vec![
+                (40, first_contract_instance_id),
+                (42, second_contract_instance_id)
+            ],
+            "same-address scoped registry targets must remain range-attributed"
+        );
+
+        let narrowed_rows = load_registry_raw_logs(
+            database.pool(),
+            chain,
+            &emitters,
+            true,
+            &[first_block_hash.to_owned(), second_block_hash.to_owned()],
+            Some(&source_scope[1..]),
+        )
+        .await?;
+        assert_eq!(
+            narrowed_rows
+                .iter()
+                .map(|row| (row.block_number, row.emitting_contract_instance_id))
+                .collect::<Vec<_>>(),
+            vec![(42, second_contract_instance_id)]
+        );
+
+        database.cleanup().await
+    }
+
+    #[test]
+    fn ens_v2_active_emitter_selection_preserves_same_address_disjoint_ranges() {
+        let address = "0x00000000000000000000000000000000000000c1";
+        let first_contract_instance_id = Uuid::from_u128(0x1401);
+        let second_contract_instance_id = Uuid::from_u128(0x1402);
+
+        let emitters = preferred_emitters_by_scope(vec![
+            test_active_emitter(address, first_contract_instance_id, 1, Some(40), Some(40)),
+            test_active_emitter(address, second_contract_instance_id, 2, Some(42), Some(42)),
+        ]);
+
+        assert_eq!(
+            emitters
+                .iter()
+                .map(|emitter| {
+                    (
+                        emitter.address.clone(),
+                        emitter.active_from_block_number,
+                        emitter.active_to_block_number,
+                        emitter.contract_instance_id,
+                    )
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    normalize_address(address),
+                    Some(40),
+                    Some(40),
+                    first_contract_instance_id,
+                ),
+                (
+                    normalize_address(address),
+                    Some(42),
+                    Some(42),
+                    second_contract_instance_id,
+                )
+            ]
+        );
     }
 
     #[test]
@@ -2872,6 +3361,235 @@ mod tests {
             };
             apply_registry_observation(observation, &mut context)
         }
+    }
+
+    async fn insert_test_registry_manifest(pool: &PgPool, chain: &str) -> Result<i64> {
+        sqlx::query_scalar::<_, i64>(
+            r#"
+            INSERT INTO manifest_versions (
+                manifest_version,
+                namespace,
+                source_family,
+                chain,
+                deployment_epoch,
+                rollout_status,
+                normalizer_version,
+                file_path,
+                manifest_payload
+            )
+            VALUES (
+                1,
+                'ens',
+                $1,
+                $2,
+                'ens_v2_registry_scope_test',
+                'active',
+                'uts46-v1',
+                $3,
+                '{"contracts":[]}'::JSONB
+            )
+            RETURNING manifest_id
+            "#,
+        )
+        .bind(SOURCE_FAMILY_ENS_V2_REGISTRY_L1)
+        .bind(chain)
+        .bind(format!(
+            "test/ens_v2_registry_scope_{}_{}.toml",
+            std::process::id(),
+            NEXT_TEST_ID.load(Ordering::Relaxed)
+        ))
+        .fetch_one(pool)
+        .await
+        .context("failed to insert scoped registry test manifest")
+    }
+
+    async fn insert_test_registry_contract(
+        pool: &PgPool,
+        manifest_id: i64,
+        role: &str,
+        contract_instance_id: Uuid,
+        address: &str,
+        active_from_block_number: i64,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO contract_instances (
+                contract_instance_id,
+                chain_id,
+                contract_kind,
+                provenance
+            )
+            SELECT $1, chain, 'registry', '{}'::JSONB
+            FROM manifest_versions
+            WHERE manifest_id = $2
+            "#,
+        )
+        .bind(contract_instance_id)
+        .bind(manifest_id)
+        .execute(pool)
+        .await
+        .context("failed to insert scoped registry test contract instance")?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO contract_instance_addresses (
+                contract_instance_id,
+                chain_id,
+                address,
+                active_from_block_number,
+                source_manifest_id,
+                provenance
+            )
+            SELECT $1, chain, $2, $3, manifest_id, '{}'::JSONB
+            FROM manifest_versions
+            WHERE manifest_id = $4
+            "#,
+        )
+        .bind(contract_instance_id)
+        .bind(normalize_address(address))
+        .bind(active_from_block_number)
+        .bind(manifest_id)
+        .execute(pool)
+        .await
+        .context("failed to insert scoped registry test contract address")?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO manifest_contract_instances (
+                manifest_id,
+                declaration_kind,
+                declaration_name,
+                contract_instance_id,
+                declared_address,
+                role,
+                proxy_kind
+            )
+            VALUES ($1, 'contract', $2, $3, $4, $2, 'none')
+            "#,
+        )
+        .bind(manifest_id)
+        .bind(role)
+        .bind(contract_instance_id)
+        .bind(normalize_address(address))
+        .execute(pool)
+        .await
+        .context("failed to insert scoped registry test manifest contract")?;
+
+        Ok(())
+    }
+
+    fn test_raw_block(chain: &str, block_hash: &str, block_number: i64) -> RawBlock {
+        RawBlock {
+            chain_id: chain.to_owned(),
+            block_hash: block_hash.to_owned(),
+            parent_hash: None,
+            block_number,
+            block_timestamp: OffsetDateTime::from_unix_timestamp(1_717_172_700 + block_number)
+                .expect("test timestamp should fit"),
+            logs_bloom: None,
+            transactions_root: None,
+            receipts_root: None,
+            state_root: None,
+            canonicality_state: CanonicalityState::Finalized,
+        }
+    }
+
+    fn test_active_emitter(
+        address: &str,
+        contract_instance_id: Uuid,
+        source_manifest_id: i64,
+        active_from_block_number: Option<i64>,
+        active_to_block_number: Option<i64>,
+    ) -> ActiveEmitter {
+        ActiveEmitter {
+            address: normalize_address(address),
+            contract_instance_id,
+            source_manifest_id,
+            namespace: "ens".to_owned(),
+            source_family: SOURCE_FAMILY_ENS_V2_REGISTRY_L1.to_owned(),
+            manifest_version: 1,
+            normalizer_version: "uts46-v1".to_owned(),
+            role: Some("registry".to_owned()),
+            source: WatchedContractSource::ManifestContract,
+            source_rank: source_rank(WatchedContractSource::ManifestContract),
+            active_from_block_number,
+            active_to_block_number,
+        }
+    }
+
+    fn label_reserved_raw_log(
+        chain: &str,
+        block_hash: &str,
+        block_number: i64,
+        emitting_address: &str,
+        log_index: i64,
+        label: &str,
+    ) -> RawLog {
+        RawLog {
+            chain_id: chain.to_owned(),
+            block_hash: block_hash.to_owned(),
+            block_number,
+            transaction_hash: format!("0xtx{block_number}{log_index}"),
+            transaction_index: log_index,
+            log_index,
+            emitting_address: normalize_address(emitting_address),
+            topics: vec![
+                keccak_signature_hex(LABEL_RESERVED_SIGNATURE),
+                topic_word((log_index + 1) as u64),
+                labelhash(label),
+                topic_address("0x0000000000000000000000000000000000000dad"),
+            ],
+            data: label_reserved_data(label, 1_900_000_000),
+            canonicality_state: CanonicalityState::Finalized,
+        }
+    }
+
+    fn label_reserved_data(label: &str, expiry: u64) -> Vec<u8> {
+        let mut data = Vec::new();
+        data.extend_from_slice(&word_bytes(64));
+        data.extend_from_slice(&word_bytes(expiry));
+        data.extend_from_slice(&word_bytes(label.len() as u64));
+        data.extend_from_slice(label.as_bytes());
+        while data.len() % 32 != 0 {
+            data.push(0);
+        }
+        data
+    }
+
+    fn word_bytes(value: u64) -> [u8; 32] {
+        let mut word = [0u8; 32];
+        word[24..32].copy_from_slice(&value.to_be_bytes());
+        word
+    }
+
+    fn topic_word(value: u64) -> String {
+        format!("0x{value:064x}")
+    }
+
+    fn topic_address(address: &str) -> String {
+        let normalized = address.trim_start_matches("0x").to_ascii_lowercase();
+        format!("0x{normalized:0>64}")
+    }
+
+    async fn normalized_event_count_for_emitter(pool: &PgPool, address: &str) -> Result<i64> {
+        sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)::BIGINT
+            FROM normalized_events
+            WHERE raw_fact_ref->>'emitting_address' = $1
+            "#,
+        )
+        .bind(normalize_address(address))
+        .fetch_one(pool)
+        .await
+        .context("failed to count scoped registry normalized events by emitter")
+    }
+
+    async fn normalized_event_count(pool: &PgPool) -> Result<i64> {
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM normalized_events")
+            .fetch_one(pool)
+            .await
+            .context("failed to count scoped registry normalized events")
     }
 
     fn labelhash(label: &str) -> String {

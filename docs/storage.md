@@ -266,6 +266,10 @@ Every current-state projection row carries:
 
 Projection tables may be truncated and rebuilt from canonical facts plus normalized events.
 
+Exact-name snapshot selection is a storage read boundary, not a new storage family. The API resolves `at`, explicit `chain_positions`, and `consistency` to one concrete `ChainPositions` object, then reads only projection rows and execution outputs eligible for that exact object. `name_current`, `coverage_current`, `surface_bindings_current`, `permissions_current`, and `record_inventory_current` must retain enough chain-position context for the API to reject mismatched joins rather than combine rows from different snapshots.
+
+If the selected exact-name positions are valid but no eligible projection or persisted execution output exists, the serving path returns the documented `stale`, `unsupported`, or `not_found` API state for that route and mode. It must not read raw facts, adapter-owned identity/event rows, or provider data directly to fill the public exact-name, coverage, topology, explain, or verified-readback response.
+
 ## 8. Raw Payload Cache and Object Storage
 
 Persist durable raw replay facts inline in Postgres when they are needed for indexed lookup, adapter replay, projection rebuild, execution-output rebuild, canonicality audit, or selected-target backfill proof. Treat large/full raw payload bytes as cache unless a doc-first policy declares that payload class durable:

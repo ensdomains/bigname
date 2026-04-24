@@ -196,12 +196,69 @@ impl TestDatabase {
         if initialize_name_current_schema {
             sqlx::query(
                 r#"
+                    CREATE TYPE canonicality_state AS ENUM (
+                        'observed',
+                        'canonical',
+                        'safe',
+                        'finalized',
+                        'orphaned'
+                    )
+                    "#,
+            )
+            .execute(&pool)
+            .await
+            .context("failed to create canonicality_state for API tests")?;
+            sqlx::query(
+                r#"
+                    CREATE TABLE chain_checkpoints (
+                        chain_id TEXT PRIMARY KEY,
+                        canonical_block_hash TEXT,
+                        canonical_block_number BIGINT,
+                        safe_block_hash TEXT,
+                        safe_block_number BIGINT,
+                        finalized_block_hash TEXT,
+                        finalized_block_number BIGINT,
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                        CHECK ((canonical_block_hash IS NULL) = (canonical_block_number IS NULL)),
+                        CHECK ((safe_block_hash IS NULL) = (safe_block_number IS NULL)),
+                        CHECK ((finalized_block_hash IS NULL) = (finalized_block_number IS NULL))
+                    )
+                    "#,
+            )
+            .execute(&pool)
+            .await
+            .context("failed to create chain_checkpoints for API tests")?;
+            sqlx::query(
+                r#"
+                    CREATE TABLE chain_lineage (
+                        chain_id TEXT NOT NULL,
+                        block_hash TEXT NOT NULL,
+                        parent_hash TEXT,
+                        block_number BIGINT NOT NULL CHECK (block_number >= 0),
+                        block_timestamp TIMESTAMPTZ NOT NULL,
+                        logs_bloom BYTEA,
+                        transactions_root TEXT,
+                        receipts_root TEXT,
+                        state_root TEXT,
+                        canonicality_state canonicality_state NOT NULL DEFAULT 'observed',
+                        observed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                        inserted_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                        PRIMARY KEY (chain_id, block_hash)
+                    )
+                    "#,
+            )
+            .execute(&pool)
+            .await
+            .context("failed to create chain_lineage for API tests")?;
+            sqlx::query(
+                r#"
                     CREATE TABLE name_surfaces (
                         logical_name_id TEXT PRIMARY KEY,
                         namespace TEXT NOT NULL,
                         canonical_display_name TEXT NOT NULL,
                         normalized_name TEXT NOT NULL,
                         namehash TEXT NOT NULL,
+                        canonicality_state canonicality_state NOT NULL DEFAULT 'finalized',
                         CHECK (logical_name_id = namespace || ':' || normalized_name)
                     )
                     "#,
@@ -212,7 +269,8 @@ impl TestDatabase {
             sqlx::query(
                 r#"
                     CREATE TABLE resources (
-                        resource_id UUID PRIMARY KEY
+                        resource_id UUID PRIMARY KEY,
+                        canonicality_state canonicality_state NOT NULL DEFAULT 'finalized'
                     )
                     "#,
             )
@@ -222,7 +280,8 @@ impl TestDatabase {
             sqlx::query(
                 r#"
                     CREATE TABLE token_lineages (
-                        token_lineage_id UUID PRIMARY KEY
+                        token_lineage_id UUID PRIMARY KEY,
+                        canonicality_state canonicality_state NOT NULL DEFAULT 'finalized'
                     )
                     "#,
             )
@@ -236,6 +295,7 @@ impl TestDatabase {
                         logical_name_id TEXT NOT NULL REFERENCES name_surfaces (logical_name_id),
                         resource_id UUID NOT NULL REFERENCES resources (resource_id),
                         binding_kind TEXT NOT NULL,
+                        canonicality_state canonicality_state NOT NULL DEFAULT 'finalized',
                         CHECK (
                             binding_kind IN (
                                 'declared_registry_path',
@@ -668,9 +728,18 @@ impl TestDatabase {
     }
 
     async fn insert_name_current_row(&self, row: bigname_storage::NameCurrentRow) -> Result<()> {
+        self.seed_snapshot_selector_chain_positions(&row.chain_positions)
+            .await?;
+        let basenames_record_inventory_positions = (row.namespace == "basenames")
+            .then_some(row.resource_id.zip(Some(row.chain_positions.clone())))
+            .flatten();
         bigname_storage::upsert_name_current_rows(&self.pool, &[row])
             .await
             .context("failed to upsert name_current row for API test")?;
+        if let Some((resource_id, chain_positions)) = basenames_record_inventory_positions {
+            self.set_record_inventory_chain_positions(resource_id, chain_positions)
+                .await?;
+        }
         Ok(())
     }
 
@@ -684,6 +753,159 @@ impl TestDatabase {
         Ok(())
     }
 
+    async fn seed_snapshot_selector_chain_positions(&self, chain_positions: &Value) -> Result<()> {
+        let Some(positions) = chain_positions.as_object() else {
+            return Ok(());
+        };
+
+        for position in positions.values() {
+            let chain_id = position
+                .get("chain_id")
+                .and_then(Value::as_str)
+                .context("chain_position.chain_id must be present for API selector test seed")?;
+            let block_hash = position
+                .get("block_hash")
+                .and_then(Value::as_str)
+                .context("chain_position.block_hash must be present for API selector test seed")?;
+            let block_number = position
+                .get("block_number")
+                .and_then(Value::as_i64)
+                .context(
+                    "chain_position.block_number must be present for API selector test seed",
+                )?;
+            let timestamp_value = position
+                .get("timestamp")
+                .and_then(Value::as_str)
+                .context("chain_position.timestamp must be present for API selector test seed")?;
+            let timestamp = parse_rfc3339_utc_timestamp(timestamp_value)
+                .map_err(|error| anyhow::anyhow!("{error}"))?;
+
+            sqlx::query(
+                r#"
+                INSERT INTO chain_lineage (
+                    chain_id,
+                    block_hash,
+                    block_number,
+                    block_timestamp,
+                    canonicality_state
+                )
+                VALUES ($1, $2, $3, $4, 'finalized'::canonicality_state)
+                ON CONFLICT (chain_id, block_hash) DO UPDATE SET
+                    block_number = EXCLUDED.block_number,
+                    block_timestamp = EXCLUDED.block_timestamp,
+                    canonicality_state = EXCLUDED.canonicality_state
+                "#,
+            )
+            .bind(chain_id)
+            .bind(block_hash)
+            .bind(block_number)
+            .bind(timestamp)
+            .execute(&self.pool)
+            .await
+            .with_context(|| {
+                format!("failed to seed chain_lineage for {chain_id} block {block_hash}")
+            })?;
+
+            sqlx::query(
+                r#"
+                INSERT INTO chain_checkpoints (
+                    chain_id,
+                    canonical_block_hash,
+                    canonical_block_number,
+                    safe_block_hash,
+                    safe_block_number,
+                    finalized_block_hash,
+                    finalized_block_number
+                )
+                VALUES ($1, $2, $3, $2, $3, $2, $3)
+                ON CONFLICT (chain_id) DO UPDATE SET
+                    canonical_block_hash = EXCLUDED.canonical_block_hash,
+                    canonical_block_number = EXCLUDED.canonical_block_number,
+                    safe_block_hash = EXCLUDED.safe_block_hash,
+                    safe_block_number = EXCLUDED.safe_block_number,
+                    finalized_block_hash = EXCLUDED.finalized_block_hash,
+                    finalized_block_number = EXCLUDED.finalized_block_number,
+                    updated_at = now()
+                "#,
+            )
+            .bind(chain_id)
+            .bind(block_hash)
+            .bind(block_number)
+            .execute(&self.pool)
+            .await
+            .with_context(|| format!("failed to seed chain checkpoint for {chain_id}"))?;
+        }
+
+        Ok(())
+    }
+
+    async fn seed_default_ens_snapshot_selector_position(&self) -> Result<()> {
+        self.seed_snapshot_selector_chain_positions(&json!({
+            "ethereum": {
+                "chain_id": "ethereum-mainnet",
+                "block_number": 21_000_003,
+                "block_hash": "0xbinding",
+                "timestamp": "2026-04-17T00:00:03Z"
+            }
+        }))
+        .await
+    }
+
+    async fn set_record_inventory_chain_positions(
+        &self,
+        resource_id: Uuid,
+        chain_positions: Value,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE record_inventory_current
+            SET chain_positions = $2::jsonb
+            WHERE resource_id = $1
+            "#,
+        )
+        .bind(resource_id)
+        .bind(&chain_positions)
+        .execute(&self.pool)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to set chain_positions on record_inventory_current rows for {resource_id}"
+            )
+        })?;
+        self.seed_snapshot_selector_chain_positions(&chain_positions)
+            .await
+    }
+
+    async fn sync_record_inventory_chain_positions_from_name_current(
+        &self,
+        resource_id: Uuid,
+    ) -> Result<()> {
+        let row = sqlx::query(
+            r#"
+            SELECT chain_positions
+            FROM name_current
+            WHERE resource_id = $1
+            ORDER BY logical_name_id
+            LIMIT 1
+            "#,
+        )
+        .bind(resource_id)
+        .fetch_optional(&self.pool)
+        .await
+        .with_context(|| {
+            format!("failed to load name_current chain_positions for resource_id {resource_id}")
+        })?;
+
+        let Some(row) = row else {
+            return Ok(());
+        };
+        let chain_positions = row
+            .try_get::<Value, _>("chain_positions")
+            .context("name_current row missing chain_positions")?;
+        self.set_record_inventory_chain_positions(resource_id, chain_positions)
+            .await
+    }
+
     async fn rebuild_name_current(&self, logical_name_id: &str) -> Result<()> {
         let database_url = std::env::var("BIGNAME_DATABASE_URL")
             .or_else(|_| std::env::var("DATABASE_URL"))
@@ -695,6 +917,7 @@ impl TestDatabase {
             .to_url_lossy()
             .to_string();
         let logical_name_id = logical_name_id.to_owned();
+        let logical_name_id_for_seed = logical_name_id.clone();
         let worker_manifest_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../apps/worker/Cargo.toml");
 
@@ -734,6 +957,18 @@ impl TestDatabase {
         })
         .await
         .context("worker name_current rebuild task panicked")??;
+
+        if let Some(row) = bigname_storage::load_name_current(&self.pool, &logical_name_id_for_seed)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to load rebuilt name_current row {logical_name_id_for_seed} for selector seed"
+                )
+            })?
+        {
+            self.seed_snapshot_selector_chain_positions(&row.chain_positions)
+                .await?;
+        }
 
         Ok(())
     }
@@ -806,6 +1041,7 @@ impl TestDatabase {
             .database(&self.database_name)
             .to_url_lossy()
             .to_string();
+        let resource_id_value = resource_id;
         let resource_id = resource_id.to_string();
         let worker_manifest_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../apps/worker/Cargo.toml");
@@ -846,6 +1082,32 @@ impl TestDatabase {
         })
         .await
         .context("worker record_inventory_current rebuild task panicked")??;
+
+        self.sync_record_inventory_chain_positions_from_name_current(resource_id_value)
+            .await?;
+
+        let rows = sqlx::query(
+            r#"
+            SELECT chain_positions
+            FROM record_inventory_current
+            WHERE resource_id = $1
+            "#,
+        )
+        .bind(resource_id_value)
+        .fetch_all(&self.pool)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to load rebuilt record_inventory_current rows for resource_id {resource_id_value}"
+            )
+        })?;
+        for row in rows {
+            let chain_positions = row
+                .try_get::<Value, _>("chain_positions")
+                .context("record_inventory_current row missing chain_positions")?;
+            self.seed_snapshot_selector_chain_positions(&chain_positions)
+                .await?;
+        }
 
         Ok(())
     }
@@ -1924,6 +2186,39 @@ async fn read_json<T: DeserializeOwned>(response: Response) -> Result<T> {
     serde_json::from_slice(&bytes).context("failed to decode API response JSON")
 }
 
+fn encode_query_value(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(char::from(byte))
+            }
+            _ => {
+                std::fmt::Write::write_fmt(&mut encoded, format_args!("%{byte:02X}"))
+                    .expect("writing to a String cannot fail");
+            }
+        }
+    }
+    encoded
+}
+
+async fn assert_public_invalid_input_response(
+    response: Response,
+    expected_message_fragment: &str,
+) -> Result<()> {
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let payload: ErrorResponse = read_json(response).await?;
+    assert_eq!(payload.error.code, "invalid_input");
+    assert!(
+        payload.error.message.contains(expected_message_fragment),
+        "expected invalid_input message to contain {expected_message_fragment:?}, got {:?}",
+        payload.error.message
+    );
+    assert!(payload.error.details.is_empty());
+    Ok(())
+}
+
 fn rewrite_cursor(cursor: &str, rewrite: impl FnOnce(&mut CursorEnvelope)) -> String {
     let decoded = decode_hex(cursor).expect("pagination cursor must be valid hex");
     let mut envelope: CursorEnvelope =
@@ -2973,7 +3268,7 @@ fn dynamic_resolver_unsupported_profile_record_inventory_current_row(
             "ethereum-mainnet": {
                 "chain_id": "ethereum-mainnet",
                 "block_number": 21_000_003,
-                "block_hash": "0xdynamicresolver",
+                "block_hash": "0xbinding",
                 "timestamp": "2026-04-17T00:00:03Z"
             }
         }),
@@ -3059,9 +3354,9 @@ fn worker_record_inventory_current_row(
         chain_positions: json!({
             "ethereum-mainnet": {
                 "chain_id": "ethereum-mainnet",
-                "block_number": 21_000_004,
-                "block_hash": "0xlastchange",
-                "timestamp": "2026-04-17T00:00:04Z"
+                "block_number": 21_000_003,
+                "block_hash": "0xbinding",
+                "timestamp": "2026-04-17T00:00:03Z"
             }
         }),
         canonicality_summary: json!({

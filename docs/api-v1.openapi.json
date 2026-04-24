@@ -1038,6 +1038,39 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "description": "Point-in-time selector for the exact-name snapshot. Mutually exclusive with `chain_positions`.",
+            "in": "query",
+            "name": "at",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Explicit exact-name snapshot selector encoded as one JSON object using ChainPositions position objects. Mutually exclusive with `at`.",
+            "in": "query",
+            "name": "chain_positions",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Snapshot consistency floor. Defaults to `head`.",
+            "in": "query",
+            "name": "consistency",
+            "required": false,
+            "schema": {
+              "default": "head",
+              "enum": [
+                "head",
+                "safe",
+                "finalized"
+              ],
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -1051,6 +1084,16 @@
             },
             "description": "Successful response"
           },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid snapshot selector"
+          },
           "404": {
             "content": {
               "application/json": {
@@ -1060,6 +1103,16 @@
               }
             },
             "description": "Requested resource was not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Snapshot conflict or stale projection"
           },
           "500": {
             "content": {
@@ -1103,6 +1156,39 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "description": "Point-in-time selector for the exact-name snapshot. Mutually exclusive with `chain_positions`.",
+            "in": "query",
+            "name": "at",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Explicit exact-name snapshot selector encoded as one JSON object using ChainPositions position objects. Mutually exclusive with `at`.",
+            "in": "query",
+            "name": "chain_positions",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Snapshot consistency floor. Defaults to `head`.",
+            "in": "query",
+            "name": "consistency",
+            "required": false,
+            "schema": {
+              "default": "head",
+              "enum": [
+                "head",
+                "safe",
+                "finalized"
+              ],
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -1116,6 +1202,16 @@
             },
             "description": "Successful response"
           },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid snapshot selector"
+          },
           "404": {
             "content": {
               "application/json": {
@@ -1125,6 +1221,16 @@
               }
             },
             "description": "Requested resource was not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Snapshot conflict or stale projection"
           },
           "500": {
             "content": {
@@ -1168,6 +1274,39 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "description": "Point-in-time selector for the exact-name snapshot. Mutually exclusive with `chain_positions`.",
+            "in": "query",
+            "name": "at",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Explicit exact-name snapshot selector encoded as one JSON object using ChainPositions position objects. Mutually exclusive with `at`.",
+            "in": "query",
+            "name": "chain_positions",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Snapshot consistency floor. Defaults to `head`.",
+            "in": "query",
+            "name": "consistency",
+            "required": false,
+            "schema": {
+              "default": "head",
+              "enum": [
+                "head",
+                "safe",
+                "finalized"
+              ],
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -1181,6 +1320,16 @@
             },
             "description": "Successful response"
           },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid snapshot selector"
+          },
           "404": {
             "content": {
               "application/json": {
@@ -1190,6 +1339,16 @@
               }
             },
             "description": "Requested resource was not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Snapshot conflict or stale projection"
           },
           "500": {
             "content": {
@@ -1697,6 +1856,39 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "description": "Point-in-time selector for the exact-name snapshot. Mutually exclusive with `chain_positions`.",
+            "in": "query",
+            "name": "at",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Explicit exact-name snapshot selector encoded as one JSON object using ChainPositions position objects. Mutually exclusive with `at`.",
+            "in": "query",
+            "name": "chain_positions",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Snapshot consistency floor. Defaults to `head`.",
+            "in": "query",
+            "name": "consistency",
+            "required": false,
+            "schema": {
+              "default": "head",
+              "enum": [
+                "head",
+                "safe",
+                "finalized"
+              ],
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -1710,6 +1902,16 @@
             },
             "description": "Successful response"
           },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid snapshot selector"
+          },
           "404": {
             "content": {
               "application/json": {
@@ -1719,6 +1921,16 @@
               }
             },
             "description": "Requested resource was not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Snapshot conflict or stale projection"
           },
           "500": {
             "content": {
@@ -2041,6 +2253,39 @@
             }
           },
           {
+            "description": "Point-in-time selector for the exact-name snapshot used by resolution joins. Mutually exclusive with `chain_positions`.",
+            "in": "query",
+            "name": "at",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Explicit exact-name snapshot selector encoded as one JSON object using ChainPositions position objects. Mutually exclusive with `at`.",
+            "in": "query",
+            "name": "chain_positions",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Snapshot consistency floor. Defaults to `head`.",
+            "in": "query",
+            "name": "consistency",
+            "required": false,
+            "schema": {
+              "default": "head",
+              "enum": [
+                "head",
+                "safe",
+                "finalized"
+              ],
+              "type": "string"
+            }
+          },
+          {
             "description": "Resolution read mode.",
             "in": "query",
             "name": "mode",
@@ -2097,6 +2342,16 @@
               }
             },
             "description": "Requested resource was not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Snapshot conflict or stale projection"
           },
           "500": {
             "content": {

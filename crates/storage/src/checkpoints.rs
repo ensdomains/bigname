@@ -64,6 +64,47 @@ pub async fn sync_chain_checkpoints(
     Ok(checkpoints)
 }
 
+/// Load one persisted checkpoint row without mutating the watched-chain set.
+pub async fn load_chain_checkpoint(
+    pool: &PgPool,
+    chain_id: &str,
+) -> Result<Option<ChainCheckpoint>> {
+    let row = sqlx::query(
+        r#"
+        SELECT
+            chain_id,
+            canonical_block_hash,
+            canonical_block_number,
+            safe_block_hash,
+            safe_block_number,
+            finalized_block_hash,
+            finalized_block_number
+        FROM chain_checkpoints
+        WHERE chain_id = $1
+        "#,
+    )
+    .bind(chain_id)
+    .fetch_optional(pool)
+    .await
+    .with_context(|| format!("failed to load checkpoint row for chain {chain_id}"))?;
+
+    row.map(decode_snapshot).transpose()
+}
+
+/// Load persisted checkpoint rows for the requested chain IDs without inserting
+/// missing rows. Duplicate chain IDs collapse and returned rows are sorted.
+pub async fn load_chain_checkpoint_snapshots(
+    pool: &PgPool,
+    chain_ids: &[String],
+) -> Result<Vec<ChainCheckpoint>> {
+    let chain_ids = collect_chain_ids(chain_ids);
+    if chain_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    load_chain_checkpoints(pool, &chain_ids).await
+}
+
 /// Advance persisted checkpoint pointers for one chain and promote stored
 /// lineage rows along the admitted ancestry path.
 pub async fn advance_chain_checkpoints(

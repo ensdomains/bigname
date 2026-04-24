@@ -96,158 +96,153 @@ async fn namespace_manifests(
 
 async fn name_current(
     Path((namespace, name)): Path<(String, String)>,
+    Query(query): Query<ExactNameSnapshotQuery>,
     State(state): State<AppState>,
 ) -> ApiResult<Json<NameResponse>> {
     ensure_public_namespace(&namespace)?;
 
-    let logical_name_id = format!("{namespace}:{name}");
-    let row = load_name_current(&state.pool, &logical_name_id)
-        .await
-        .map_err(|load_error| {
-            error!(
-                service = "api",
-                namespace = %namespace,
-                name = %name,
-                logical_name_id = %logical_name_id,
-                error = ?load_error,
-                "failed to load exact-name current projection"
-            );
-            ApiError::internal_error(format!(
-                "failed to load current projection for name {namespace}/{name}"
-            ))
-        })?;
+    let selected_snapshot = resolve_exact_name_selected_snapshot(
+        &state.pool,
+        &namespace,
+        ExactNameSnapshotSelector::from(&query),
+        false,
+    )
+    .await
+    .map_err(|error| {
+        map_internal_api_error(
+            error,
+            format!("failed to load current projection for name {namespace}/{name}"),
+        )
+    })?;
+    let row =
+        load_name_current_for_selected_snapshot(&state.pool, &namespace, &name, &selected_snapshot)
+            .await
+            .map_err(|error| {
+                map_internal_api_error(
+                    error,
+                    format!("failed to load current projection for name {namespace}/{name}"),
+                )
+            })?;
 
-    let Some(row) = row else {
-        return Err(ApiError {
-            status: StatusCode::NOT_FOUND,
-            code: "not_found",
-            message: format!("name {name} was not found in namespace {namespace}"),
-        });
-    };
-
-    let record_inventory_current = load_supported_record_inventory_current(&state.pool, &row)
-        .await
-        .map_err(|load_error| {
-            error!(
-                service = "api",
-                namespace = %namespace,
-                name = %name,
-                logical_name_id = %logical_name_id,
-                resource_id = ?row.resource_id,
-                error = ?load_error,
-                "failed to load record_inventory_current projection for exact-name route"
-            );
-            ApiError::internal_error(format!(
-                "failed to load declared record inventory for name {namespace}/{name}"
-            ))
-        })?;
+    let record_inventory_current =
+        load_supported_record_inventory_current_for_snapshot(&state.pool, &row, &selected_snapshot)
+            .await
+            .map_err(snapshot_selection_api_error)?;
 
     Ok(Json(build_name_response(
         row,
         record_inventory_current.as_ref(),
+        &selected_snapshot,
     )))
 }
 
 async fn coverage_current(
     Path((namespace, name)): Path<(String, String)>,
+    Query(query): Query<ExactNameSnapshotQuery>,
     State(state): State<AppState>,
 ) -> ApiResult<Json<NameResponse>> {
     ensure_public_namespace(&namespace)?;
 
-    let logical_name_id = format!("{namespace}:{name}");
-    let row = load_name_current(&state.pool, &logical_name_id)
-        .await
-        .map_err(|load_error| {
-            error!(
-                service = "api",
-                namespace = %namespace,
-                name = %name,
-                logical_name_id = %logical_name_id,
-                error = ?load_error,
-                "failed to load exact-name current projection for coverage route"
-            );
-            ApiError::internal_error(format!(
-                "failed to load current projection for name {namespace}/{name}"
-            ))
-        })?;
+    let selected_snapshot = resolve_exact_name_selected_snapshot(
+        &state.pool,
+        &namespace,
+        ExactNameSnapshotSelector::from(&query),
+        false,
+    )
+    .await
+    .map_err(|error| {
+        map_internal_api_error(
+            error,
+            format!("failed to load current projection for name {namespace}/{name}"),
+        )
+    })?;
+    let row =
+        load_name_current_for_selected_snapshot(&state.pool, &namespace, &name, &selected_snapshot)
+            .await
+            .map_err(|error| {
+                map_internal_api_error(
+                    error,
+                    format!("failed to load current projection for name {namespace}/{name}"),
+                )
+            })?;
 
-    let Some(row) = row else {
-        return Err(ApiError {
-            status: StatusCode::NOT_FOUND,
-            code: "not_found",
-            message: format!("name {name} was not found in namespace {namespace}"),
-        });
-    };
-
-    Ok(Json(build_name_coverage_response(row)))
+    Ok(Json(build_name_coverage_response(row, &selected_snapshot)))
 }
 
 async fn explain_surface_binding_current(
     Path((namespace, name)): Path<(String, String)>,
+    Query(query): Query<ExactNameSnapshotQuery>,
     State(state): State<AppState>,
 ) -> ApiResult<Json<NameResponse>> {
     ensure_public_namespace(&namespace)?;
 
-    let logical_name_id = format!("{namespace}:{name}");
-    let row = load_name_current(&state.pool, &logical_name_id)
-        .await
-        .map_err(|load_error| {
-            error!(
-                service = "api",
-                namespace = %namespace,
-                name = %name,
-                logical_name_id = %logical_name_id,
-                error = ?load_error,
-                "failed to load exact-name current projection for surface-binding explain route"
-            );
-            ApiError::internal_error(format!(
-                "failed to load surface-binding explain projection for name {namespace}/{name}"
-            ))
-        })?;
+    let selected_snapshot = resolve_exact_name_selected_snapshot(
+        &state.pool,
+        &namespace,
+        ExactNameSnapshotSelector::from(&query),
+        false,
+    )
+    .await
+    .map_err(|error| {
+        map_internal_api_error(
+            error,
+            format!("failed to load surface-binding explain projection for name {namespace}/{name}"),
+        )
+    })?;
+    let row =
+        load_name_current_for_selected_snapshot(&state.pool, &namespace, &name, &selected_snapshot)
+            .await
+            .map_err(|error| {
+                map_internal_api_error(
+                    error,
+                    format!(
+                        "failed to load surface-binding explain projection for name {namespace}/{name}"
+                    ),
+                )
+            })?;
 
-    let Some(row) = row else {
-        return Err(ApiError {
-            status: StatusCode::NOT_FOUND,
-            code: "not_found",
-            message: format!("name {name} was not found in namespace {namespace}"),
-        });
-    };
-
-    Ok(Json(build_name_surface_binding_explain_response(row)))
+    Ok(Json(build_name_surface_binding_explain_response(
+        row,
+        &selected_snapshot,
+    )))
 }
 
 async fn explain_authority_control_current(
     Path((namespace, name)): Path<(String, String)>,
+    Query(query): Query<ExactNameSnapshotQuery>,
     State(state): State<AppState>,
 ) -> ApiResult<Json<NameResponse>> {
     ensure_public_namespace(&namespace)?;
 
-    let logical_name_id = format!("{namespace}:{name}");
-    let row = load_name_current(&state.pool, &logical_name_id)
-        .await
-        .map_err(|load_error| {
-            error!(
-                service = "api",
-                namespace = %namespace,
-                name = %name,
-                logical_name_id = %logical_name_id,
-                error = ?load_error,
-                "failed to load exact-name current projection for authority-control explain route"
-            );
-            ApiError::internal_error(format!(
-                "failed to load authority-control explain projection for name {namespace}/{name}"
-            ))
-        })?;
+    let selected_snapshot = resolve_exact_name_selected_snapshot(
+        &state.pool,
+        &namespace,
+        ExactNameSnapshotSelector::from(&query),
+        false,
+    )
+    .await
+    .map_err(|error| {
+        map_internal_api_error(
+            error,
+            format!("failed to load authority-control explain projection for name {namespace}/{name}"),
+        )
+    })?;
+    let row =
+        load_name_current_for_selected_snapshot(&state.pool, &namespace, &name, &selected_snapshot)
+            .await
+            .map_err(|error| {
+                map_internal_api_error(
+                    error,
+                    format!(
+                        "failed to load authority-control explain projection for name {namespace}/{name}"
+                    ),
+                )
+            })?;
 
-    let Some(row) = row else {
-        return Err(ApiError {
-            status: StatusCode::NOT_FOUND,
-            code: "not_found",
-            message: format!("name {name} was not found in namespace {namespace}"),
-        });
-    };
-
-    Ok(Json(build_name_authority_control_explain_response(row)))
+    Ok(Json(build_name_authority_control_explain_response(
+        row,
+        &selected_snapshot,
+    )))
 }
 
 async fn explain_resolution_execution_current(
@@ -316,6 +311,7 @@ async fn explain_resolution_execution_current(
         &row,
         &cache_key_records,
         record_inventory_current.as_ref(),
+        row.chain_positions.clone(),
     )
     .map_err(|cache_key_error| {
         error!(
@@ -415,10 +411,15 @@ async fn resolution_current(
 
 async fn resolve_current(
     Path(name): Path<String>,
-    Query(query): Query<ResolutionQuery>,
+    Query(query): Query<InferredResolutionQuery>,
     State(state): State<AppState>,
 ) -> ApiResult<Json<ResolutionResponse>> {
     let namespace = infer_resolution_namespace(&name);
+    let query = ResolutionQuery {
+        mode: query.mode,
+        records: query.records,
+        ..ResolutionQuery::default()
+    };
 
     Ok(Json(
         resolution_response_for_name(&state.pool, namespace, &name, query).await?,
@@ -433,85 +434,46 @@ async fn resolution_response_for_name(
 ) -> ApiResult<ResolutionResponse> {
     let mode = parse_resolution_mode(query.mode.as_deref())?;
     let records = parse_resolution_record_keys(query.records.as_deref(), mode)?;
-    let logical_name_id = format!("{namespace}:{name}");
-    let row = load_name_current(pool, &logical_name_id)
-        .await
-        .map_err(|load_error| {
-            error!(
-                service = "api",
-                namespace = %namespace,
-                name = %name,
-                logical_name_id = %logical_name_id,
-                mode = ?mode,
-                records = ?records,
-                error = ?load_error,
-                "failed to load exact-name current projection for resolution route"
-            );
-            ApiError::internal_error(format!(
-                "failed to load resolution projection for name {namespace}/{name}"
-            ))
-        })?;
-
-    let Some(row) = row else {
-        return Err(ApiError {
-            status: StatusCode::NOT_FOUND,
-            code: "not_found",
-            message: format!("name {name} was not found in namespace {namespace}"),
-        });
-    };
+    let selected_snapshot = resolve_exact_name_selected_snapshot(
+        pool,
+        namespace,
+        ExactNameSnapshotSelector::from(&query),
+        namespace == BASENAMES_NAMESPACE && mode.includes_verified(),
+    )
+    .await?;
+    let row = load_name_current_for_selected_snapshot(pool, namespace, name, &selected_snapshot)
+        .await?;
 
     let record_inventory_current = if mode.includes_declared() || mode.includes_verified() {
-        load_supported_record_inventory_current(pool, &row)
+        load_supported_record_inventory_current_for_snapshot(pool, &row, &selected_snapshot)
             .await
-            .map_err(|load_error| {
-                error!(
-                    service = "api",
-                    namespace = %namespace,
-                    name = %name,
-                    logical_name_id = %logical_name_id,
-                    resource_id = ?row.resource_id,
-                    mode = ?mode,
-                    records = ?records,
-                    error = ?load_error,
-                    "failed to load record_inventory_current projection for resolution route"
-                );
-                ApiError::internal_error(format!(
-                    "failed to load declared resolution inventory for name {namespace}/{name}"
-                ))
-            })?
+            .map_err(snapshot_selection_api_error)?
     } else {
         None
     };
 
     let persisted_verified_outcome = if mode.includes_verified() {
-        load_resolution_verified_outcome(pool, &row, &records, record_inventory_current.as_ref())
+        load_resolution_verified_outcome(
+            pool,
+            &row,
+            &records,
+            record_inventory_current.as_ref(),
+            &selected_snapshot,
+        )
             .await
-            .map_err(|load_error| {
-                error!(
-                    service = "api",
-                    namespace = %namespace,
-                    name = %name,
-                    logical_name_id = %logical_name_id,
-                    resource_id = ?row.resource_id,
-                    mode = ?mode,
-                    records = ?records,
-                    error = ?load_error,
-                    "failed to load persisted verified resolution outcome for resolution route"
-                );
-                ApiError::internal_error(format!(
-                    "failed to load verified resolution for name {namespace}/{name}"
-                ))
-            })?
+            .map_err(snapshot_selection_api_error)?
     } else {
         None
     };
 
+    let logical_name_id = row.logical_name_id.clone();
     build_resolution_response(
         row,
         mode,
         &records,
         record_inventory_current.as_ref(),
         persisted_verified_outcome.as_ref(),
+        &selected_snapshot,
     )
     .map_err(|build_error| {
         error!(

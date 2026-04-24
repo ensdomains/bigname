@@ -1818,6 +1818,9 @@ async fn get_name_children_rejects_non_declared_surface_classes() -> Result<()> 
 #[tokio::test]
 async fn get_name_returns_not_found_when_projection_row_is_missing() -> Result<()> {
     let database = TestDatabase::new_with_schemas(false, true).await?;
+    database
+        .seed_default_ens_snapshot_selector_position()
+        .await?;
 
     let response = app_router(database.app_state())
         .oneshot(
@@ -1846,6 +1849,9 @@ async fn get_name_returns_not_found_when_projection_row_is_missing() -> Result<(
 #[tokio::test]
 async fn get_coverage_returns_not_found_when_projection_row_is_missing() -> Result<()> {
     let database = TestDatabase::new_with_schemas(false, true).await?;
+    database
+        .seed_default_ens_snapshot_selector_position()
+        .await?;
 
     let response = app_router(database.app_state())
         .oneshot(
@@ -1875,6 +1881,9 @@ async fn get_coverage_returns_not_found_when_projection_row_is_missing() -> Resu
 async fn get_surface_binding_explain_returns_not_found_when_projection_row_is_missing() -> Result<()>
 {
     let database = TestDatabase::new_with_schemas(false, true).await?;
+    database
+        .seed_default_ens_snapshot_selector_position()
+        .await?;
 
     let response = app_router(database.app_state())
         .oneshot(
@@ -1904,6 +1913,9 @@ async fn get_surface_binding_explain_returns_not_found_when_projection_row_is_mi
 async fn get_authority_control_explain_returns_not_found_when_projection_row_is_missing()
 -> Result<()> {
     let database = TestDatabase::new_with_schemas(false, true).await?;
+    database
+        .seed_default_ens_snapshot_selector_position()
+        .await?;
 
     let response = app_router(database.app_state())
         .oneshot(

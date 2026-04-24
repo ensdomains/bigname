@@ -127,29 +127,41 @@ impl ApiRouteId {
                 self.operation_id(),
                 "Single-name coverage and explain details",
                 "Coverage",
-                vec![namespace_path_parameter(), name_path_parameter()],
+                exact_name_snapshot_parameters(
+                    "Point-in-time selector for the exact-name snapshot. Mutually exclusive with `chain_positions`.",
+                ),
                 "ExactNameResponse",
-                false,
                 true,
-            ),
+                true,
+            )
+            .with_bad_request_description("Invalid snapshot selector")
+            .with_conflict_response(),
             Self::ExplainSurfaceBinding => openapi_json_get_operation(
                 self.operation_id(),
                 "Current surface-binding explain view for one exact name",
                 "Explain",
-                vec![namespace_path_parameter(), name_path_parameter()],
+                exact_name_snapshot_parameters(
+                    "Point-in-time selector for the exact-name snapshot. Mutually exclusive with `chain_positions`.",
+                ),
                 "ExactNameResponse",
-                false,
                 true,
-            ),
+                true,
+            )
+            .with_bad_request_description("Invalid snapshot selector")
+            .with_conflict_response(),
             Self::ExplainAuthorityControl => openapi_json_get_operation(
                 self.operation_id(),
                 "Current authority/control explain view for one exact name",
                 "Explain",
-                vec![namespace_path_parameter(), name_path_parameter()],
+                exact_name_snapshot_parameters(
+                    "Point-in-time selector for the exact-name snapshot. Mutually exclusive with `chain_positions`.",
+                ),
                 "ExactNameResponse",
-                false,
                 true,
-            ),
+                true,
+            )
+            .with_bad_request_description("Invalid snapshot selector")
+            .with_conflict_response(),
             Self::ExplainResolutionExecution => openapi_json_get_operation(
                 self.operation_id(),
                 "Persisted verified execution explain for one exact-name resolution request",
@@ -212,11 +224,15 @@ impl ApiRouteId {
                 self.operation_id(),
                 "Exact name lookup",
                 "Names",
-                vec![namespace_path_parameter(), name_path_parameter()],
+                exact_name_snapshot_parameters(
+                    "Point-in-time selector for the exact-name snapshot. Mutually exclusive with `chain_positions`.",
+                ),
                 "ExactNameResponse",
-                false,
                 true,
-            ),
+                true,
+            )
+            .with_bad_request_description("Invalid snapshot selector")
+            .with_conflict_response(),
             Self::ResolveCurrent => openapi_json_get_operation(
                 self.operation_id(),
                 "Namespace-inferred resolution topology, inventory, and verified reads",
@@ -240,22 +256,12 @@ impl ApiRouteId {
                 self.operation_id(),
                 "Resolution topology, inventory, and verified reads",
                 "Resolution",
-                vec![
-                    namespace_path_parameter(),
-                    name_path_parameter(),
-                    resolution_mode_query_parameter(),
-                    csv_query_parameter(
-                        "records",
-                        "Comma-separated record selectors. Required when `mode` is `verified` or `both`.",
-                        json!({
-                            "type": "string",
-                        }),
-                    ),
-                ],
+                resolution_current_parameters(),
                 "ResolutionResponse",
                 true,
                 true,
-            ),
+            )
+            .with_conflict_response(),
             Self::ResolverCurrent => openapi_json_get_operation(
                 self.operation_id(),
                 "Resolver overview",
@@ -978,6 +984,34 @@ fn json_response(description: &'static str, schema_name: &'static str) -> JsonVa
     })
 }
 
+trait OpenApiOperationExt {
+    fn with_bad_request_description(self, description: &'static str) -> JsonValue;
+    fn with_conflict_response(self) -> JsonValue;
+}
+
+impl OpenApiOperationExt for JsonValue {
+    fn with_bad_request_description(mut self, description: &'static str) -> JsonValue {
+        insert_error_response(&mut self, "400", description);
+        self
+    }
+
+    fn with_conflict_response(mut self) -> JsonValue {
+        insert_error_response(&mut self, "409", "Snapshot conflict or stale projection");
+        self
+    }
+}
+
+fn insert_error_response(operation: &mut JsonValue, status: &'static str, description: &'static str) {
+    operation
+        .get_mut("responses")
+        .and_then(JsonValue::as_object_mut)
+        .expect("OpenAPI operation must expose responses")
+        .insert(
+            status.to_owned(),
+            json_response(description, "ErrorResponse"),
+        );
+}
+
 fn schema_ref(schema_name: &str) -> JsonValue {
     json!({
         "$ref": format!("#/components/schemas/{schema_name}"),
@@ -1085,6 +1119,63 @@ fn name_path_parameter() -> JsonValue {
         "Normalized name within the namespace.",
         json!({
             "type": "string",
+        }),
+    )
+}
+
+fn exact_name_snapshot_parameters(at_description: &'static str) -> Vec<JsonValue> {
+    vec![
+        namespace_path_parameter(),
+        name_path_parameter(),
+        at_query_parameter(at_description),
+        chain_positions_query_parameter(),
+        consistency_query_parameter(),
+    ]
+}
+
+fn resolution_current_parameters() -> Vec<JsonValue> {
+    let mut parameters = exact_name_snapshot_parameters(
+        "Point-in-time selector for the exact-name snapshot used by resolution joins. Mutually exclusive with `chain_positions`.",
+    );
+    parameters.push(resolution_mode_query_parameter());
+    parameters.push(csv_query_parameter(
+        "records",
+        "Comma-separated record selectors. Required when `mode` is `verified` or `both`.",
+        json!({
+            "type": "string",
+        }),
+    ));
+    parameters
+}
+
+fn at_query_parameter(description: &'static str) -> JsonValue {
+    query_parameter(
+        "at",
+        description,
+        json!({
+            "type": "string",
+        }),
+    )
+}
+
+fn chain_positions_query_parameter() -> JsonValue {
+    query_parameter(
+        "chain_positions",
+        "Explicit exact-name snapshot selector encoded as one JSON object using ChainPositions position objects. Mutually exclusive with `at`.",
+        json!({
+            "type": "string",
+        }),
+    )
+}
+
+fn consistency_query_parameter() -> JsonValue {
+    query_parameter(
+        "consistency",
+        "Snapshot consistency floor. Defaults to `head`.",
+        json!({
+            "type": "string",
+            "enum": ["head", "safe", "finalized"],
+            "default": "head",
         }),
     )
 }

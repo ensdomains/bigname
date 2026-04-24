@@ -817,6 +817,7 @@ async fn rebuild_record_inventory_current(
     resource_id: Uuid,
 ) -> Result<()> {
     let database_url = database.database_url.clone();
+    let resource_id_value = resource_id;
     let resource_id = resource_id.to_string();
     let worker_manifest_path =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../apps/worker/Cargo.toml");
@@ -857,6 +858,34 @@ async fn rebuild_record_inventory_current(
                     })
                     .await
                     .context("worker record_inventory_current rebuild task panicked")??;
+
+    database
+        .sync_record_inventory_chain_positions_from_name_current(resource_id_value)
+        .await?;
+
+    let rows = sqlx::query(
+        r#"
+        SELECT chain_positions
+        FROM record_inventory_current
+        WHERE resource_id = $1
+        "#,
+    )
+    .bind(resource_id_value)
+    .fetch_all(&database.pool)
+    .await
+    .with_context(|| {
+        format!(
+            "failed to load rebuilt record_inventory_current rows for resource_id {resource_id_value}"
+        )
+    })?;
+    for row in rows {
+        let chain_positions = row
+            .try_get::<Value, _>("chain_positions")
+            .context("record_inventory_current row missing chain_positions")?;
+        database
+            .seed_snapshot_selector_chain_positions(&chain_positions)
+            .await?;
+    }
 
     Ok(())
 }
@@ -4140,6 +4169,15 @@ fn resolution_record_inventory_current_row(
     }
 }
 
+fn resolution_record_inventory_current_row_without_verified_entrypoint(
+    logical_name_id: &str,
+    resource_id: Uuid,
+) -> RecordInventoryCurrentRow {
+    let mut row = resolution_record_inventory_current_row(logical_name_id, resource_id);
+    row.coverage["unsupported_reason"] = json!("verified_resolution_entrypoint_unavailable");
+    row
+}
+
 fn resolution_record_inventory_current_row_with_boundary(
     logical_name_id: &str,
     resource_id: Uuid,
@@ -4909,12 +4947,11 @@ async fn seed_supported_basenames_rebuild_inputs(
                 "0xbasenamesl1",
                 None,
                 21_000_100,
-                1_776_387_700,
+                1_717_171_680,
             ),
         ],
     )
     .await?;
-    insert_chain_checkpoint(database, "ethereum-mainnet", "0xbasenamesl1", 21_000_100).await?;
     bigname_storage::upsert_name_surfaces(
         &database.pool,
         &[NameSurface {
@@ -5142,37 +5179,18 @@ async fn seed_supported_basenames_rebuild_inputs(
         .insert_capability_flag(manifest_id, "verified_resolution", "supported", None)
         .await?;
     insert_basenames_execution_manifest_contract(database, manifest_id).await?;
-    database.rebuild_name_current(logical_name_id).await
-}
-
-async fn insert_chain_checkpoint(
-    database: &HarnessDatabase,
-    chain_id: &str,
-    block_hash: &str,
-    block_number: i64,
-) -> Result<()> {
-    sqlx::query(
-        r#"
-                INSERT INTO chain_checkpoints (
-                    chain_id,
-                    finalized_block_hash,
-                    finalized_block_number
-                )
-                VALUES ($1, $2, $3)
-                ON CONFLICT (chain_id)
-                DO UPDATE SET
-                    finalized_block_hash = EXCLUDED.finalized_block_hash,
-                    finalized_block_number = EXCLUDED.finalized_block_number
-                "#,
-    )
-    .bind(chain_id)
-    .bind(block_hash)
-    .bind(block_number)
-    .execute(&database.pool)
-    .await
-    .with_context(|| format!("failed to insert chain checkpoint for {chain_id}"))?;
-
-    Ok(())
+    database
+        .seed_snapshot_selector_chain_positions(&json!({
+            "ethereum": {
+                "chain_id": "ethereum-mainnet",
+                "block_number": 21_000_100,
+                "block_hash": "0xbasenamesl1",
+                "timestamp": "2024-05-31T16:08:00Z",
+            }
+        }))
+        .await?;
+    database.rebuild_name_current(logical_name_id).await?;
+    insert_basenames_supported_ethereum_position_for_current_row(database, logical_name_id).await
 }
 
 async fn insert_basenames_execution_manifest_contract(
@@ -5262,9 +5280,20 @@ fn insert_basenames_supported_ethereum_position(name_row: &mut bigname_storage::
             "chain_id": "ethereum-mainnet",
             "block_number": 21_000_100,
             "block_hash": "0xbasenamesl1",
-            "timestamp": "2026-04-17T00:01:40Z",
+            "timestamp": "2024-05-31T16:08:00Z",
         }),
     );
+}
+
+async fn insert_basenames_supported_ethereum_position_for_current_row(
+    database: &HarnessDatabase,
+    logical_name_id: &str,
+) -> Result<()> {
+    let mut name_row = bigname_storage::load_name_current(&database.pool, logical_name_id)
+        .await?
+        .context("Basenames fixture requires name_current row before Ethereum selector seed")?;
+    insert_basenames_supported_ethereum_position(&mut name_row);
+    database.insert_name_current_row(name_row).await
 }
 
 fn basenames_resolution_execution_trace(
@@ -5861,6 +5890,7 @@ async fn seed_unsupported_ens_verified_resolution_fixture(
         &supported_name_row,
         &records,
         Some(&record_inventory_row),
+        supported_name_row.chain_positions.clone(),
     )?;
     let request_key = cache_key.request_key.clone();
 
@@ -6628,8 +6658,12 @@ async fn seed_persisted_resolution_execution_fixture(
     let records =
         parse_resolution_record_keys(Some("text:com.twitter,addr:60"), ResolutionMode::Verified)
             .map_err(|error| anyhow::anyhow!(error.message))?;
-    let cache_key =
-        build_resolution_execution_cache_key(&name_row, &records, Some(&record_inventory_row))?;
+    let cache_key = build_resolution_execution_cache_key(
+        &name_row,
+        &records,
+        Some(&record_inventory_row),
+        name_row.chain_positions.clone(),
+    )?;
     let request_key = cache_key.request_key.clone();
     let persisted_verified_queries =
         resolution_execution_verified_queries(execution_trace_id, &["addr:60", "text:com.twitter"]);

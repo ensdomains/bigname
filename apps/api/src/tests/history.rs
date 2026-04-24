@@ -2936,7 +2936,7 @@ async fn get_resource_permissions_returns_declared_state_collection() -> Result<
     );
     assert!(payload.verified_state.is_none());
     assert_eq!(payload.declared_state, json!({}));
-    assert_eq!(payload.page.page_size, 3);
+    assert_eq!(payload.page.page_size, 50);
     assert_eq!(payload.page.sort, "subject_scope_asc");
     assert_eq!(payload.consistency, "finalized");
     assert_eq!(payload.coverage.status, "full");
@@ -3094,7 +3094,7 @@ async fn get_resource_permissions_returns_declared_state_collection() -> Result<
         &replay_page_payload.data,
         &replay_page_payload.page,
         "subject_scope_asc",
-        3,
+        50,
         1,
     );
 

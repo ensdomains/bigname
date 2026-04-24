@@ -128,7 +128,8 @@ async fn get_resolution_execution_explain_returns_persisted_verified_state_and_r
         explain_payload.chain_positions,
         resolution_payload.chain_positions
     );
-    assert_eq!(explain_payload.consistency, resolution_payload.consistency);
+    assert_eq!(explain_payload.consistency, "finalized");
+    assert_eq!(resolution_payload.consistency, "head");
     assert_eq!(
         explain_payload.last_updated,
         resolution_payload.last_updated
@@ -379,7 +380,8 @@ async fn get_resolution_execution_explain_reads_persisted_alias_only_avatar_answ
         explain_payload.chain_positions,
         resolution_payload.chain_positions
     );
-    assert_eq!(explain_payload.consistency, resolution_payload.consistency);
+    assert_eq!(explain_payload.consistency, "head");
+    assert_eq!(resolution_payload.consistency, "head");
     assert_eq!(
         explain_payload.last_updated,
         resolution_payload.last_updated
@@ -536,13 +538,20 @@ fn insert_basenames_supported_ethereum_position(name_row: &mut bigname_storage::
         .chain_positions
         .as_object_mut()
         .expect("name_current.chain_positions must be an object");
+    let authoritative_timestamp = chain_positions
+        .values()
+        .find(|position| position.get("chain_id").and_then(Value::as_str) == Some("base-mainnet"))
+        .and_then(|position| position.get("timestamp"))
+        .and_then(Value::as_str)
+        .unwrap_or("2026-04-17T00:00:03Z")
+        .to_owned();
     chain_positions.insert(
         "ethereum".to_owned(),
         json!({
             "chain_id": "ethereum-mainnet",
             "block_number": 21_000_100,
             "block_hash": "0xbasenamesl1",
-            "timestamp": "2026-04-17T00:01:40Z",
+            "timestamp": authoritative_timestamp,
         }),
     );
 }
@@ -1619,7 +1628,7 @@ async fn get_resolution_inferred_basenames_verified_does_not_fallback_to_ens() -
         .context("inferred alice.base.eth verified resolution request failed")?;
 
     assert_eq!(canonical_ens_response.status(), StatusCode::OK);
-    assert_eq!(inferred_response.status(), StatusCode::OK);
+    assert_eq!(inferred_response.status(), StatusCode::CONFLICT);
 
     let canonical_ens_payload: ResolutionResponse = read_json(canonical_ens_response).await?;
     assert_eq!(
@@ -1641,22 +1650,11 @@ async fn get_resolution_inferred_basenames_verified_does_not_fallback_to_ens() -
         }))
     );
 
-    let inferred_payload: ResolutionResponse = read_json(inferred_response).await?;
+    let inferred_error: ErrorResponse = read_json(inferred_response).await?;
+    assert_eq!(inferred_error.error.code, "stale");
     assert_eq!(
-        inferred_payload.data.get("namespace"),
-        Some(&json!("basenames"))
-    );
-    assert_eq!(
-        inferred_payload.data.get("logical_name_id"),
-        Some(&json!("basenames:alice.base.eth"))
-    );
-    assert_eq!(
-        inferred_payload.verified_state,
-        Some(resolution_unsupported_verified_state(&["addr:60"]))
-    );
-    assert_eq!(
-        inferred_payload.provenance.get("execution_trace_id"),
-        Some(&Value::Null)
+        inferred_error.error.message,
+        "name_current projection does not match the selected snapshot"
     );
 
     database.cleanup().await?;
@@ -2355,9 +2353,11 @@ async fn get_resolution_both_mode_reads_persisted_basenames_transport_direct_ans
     database
         .rebuild_record_inventory_current(resource_id)
         .await?;
-    let name_row = bigname_storage::load_name_current(&database.pool, logical_name_id)
+    let mut name_row = bigname_storage::load_name_current(&database.pool, logical_name_id)
         .await?
         .context("basenames supported resolution test requires rebuilt name_current row")?;
+    insert_basenames_supported_ethereum_position(&mut name_row);
+    database.insert_name_current_row(name_row.clone()).await?;
     let topology = projected_resolution_topology(&name_row)?;
     let (topology_boundary, record_boundary) = projected_resolution_boundaries(&name_row)?;
     let worker_row = bigname_storage::load_record_inventory_current(
@@ -2942,31 +2942,11 @@ async fn get_resolution_keeps_basenames_transport_explicit_without_ethereum_posi
         .await
         .context("missing-ethereum basenames execution explain request failed")?;
 
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::CONFLICT);
     assert_eq!(explain_response.status(), StatusCode::NOT_FOUND);
 
-    let payload: ResolutionResponse = read_json(response).await?;
-    assert_eq!(
-        payload.verified_state,
-        Some(json!({
-            "verified_queries": [
-                {
-                    "record_key": "text:com.twitter",
-                    "status": "unsupported",
-                    "unsupported_reason": "verified resolution entrypoint is not yet supported",
-                },
-                {
-                    "record_key": "addr:60",
-                    "status": "unsupported",
-                    "unsupported_reason": "verified resolution entrypoint is not yet supported",
-                }
-            ]
-        }))
-    );
-    assert_eq!(
-        payload.provenance.get("execution_trace_id"),
-        Some(&Value::Null)
-    );
+    let payload: ErrorResponse = read_json(response).await?;
+    assert_eq!(payload.error.code, "conflict");
 
     let explain_payload: ErrorResponse = read_json(explain_response).await?;
     assert_eq!(explain_payload.error.code, "not_found");
@@ -4063,7 +4043,8 @@ async fn get_resolution_execution_explain_surfaces_persisted_avatar_answers_and_
         explain_payload.chain_positions,
         resolution_payload.chain_positions
     );
-    assert_eq!(explain_payload.consistency, resolution_payload.consistency);
+    assert_eq!(explain_payload.consistency, "finalized");
+    assert_eq!(resolution_payload.consistency, "head");
     assert_eq!(
         explain_payload.last_updated,
         resolution_payload.last_updated
@@ -4305,35 +4286,22 @@ async fn get_resolution_mode_parsing_populates_expected_sections() -> Result<()>
 
     assert_eq!(default_response.status(), StatusCode::OK);
     assert_eq!(declared_response.status(), StatusCode::OK);
-    assert_eq!(verified_response.status(), StatusCode::OK);
+    assert_eq!(verified_response.status(), StatusCode::CONFLICT);
     assert_eq!(both_response.status(), StatusCode::OK);
 
     let default_payload: ResolutionResponse = read_json(default_response).await?;
     let declared_payload: ResolutionResponse = read_json(declared_response).await?;
-    let verified_payload: ResolutionResponse = read_json(verified_response).await?;
+    let verified_error: ErrorResponse = read_json(verified_response).await?;
     let both_payload: ResolutionResponse = read_json(both_response).await?;
 
     assert!(default_payload.declared_state.is_some());
     assert_eq!(default_payload.verified_state, None);
     assert!(declared_payload.declared_state.is_some());
     assert_eq!(declared_payload.verified_state, None);
-    assert_eq!(verified_payload.declared_state, None);
+    assert_eq!(verified_error.error.code, "stale");
     assert_eq!(
-        verified_payload.verified_state,
-        Some(json!({
-            "verified_queries": [
-                {
-                    "record_key": "text",
-                    "status": "unsupported",
-                    "unsupported_reason": "verified resolution entrypoint is not yet supported",
-                },
-                {
-                    "record_key": "addr:60",
-                    "status": "unsupported",
-                    "unsupported_reason": "verified resolution entrypoint is not yet supported",
-                }
-            ]
-        }))
+        verified_error.error.message,
+        "persisted verified resolution output is not available for the selected snapshot"
     );
     assert!(both_payload.declared_state.is_some());
     assert_eq!(
@@ -5126,8 +5094,73 @@ async fn get_resolution_rejects_malformed_records() -> Result<()> {
 }
 
 #[tokio::test]
+async fn get_resolution_rejects_invalid_snapshot_selectors_as_invalid_input() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    let valid_positions = encode_query_value(
+        r#"{"ethereum":{"chain_id":"ethereum-mainnet","block_number":21000003,"block_hash":"0xbinding","timestamp":"2026-04-17T00:00:03Z"}}"#,
+    );
+    let duplicate_slot_positions = encode_query_value(
+        r#"{"ethereum":{"chain_id":"ethereum-mainnet","block_number":21000003,"block_hash":"0xbinding","timestamp":"2026-04-17T00:00:03Z"},"ethereum":{"chain_id":"ethereum-mainnet","block_number":21000004,"block_hash":"0xduplicate","timestamp":"2026-04-17T00:00:04Z"}}"#,
+    );
+    let unsupported_slot_positions = encode_query_value(
+        r#"{"polygon":{"chain_id":"ethereum-mainnet","block_number":21000003,"block_hash":"0xbinding","timestamp":"2026-04-17T00:00:03Z"}}"#,
+    );
+    let cases = vec![
+        (
+            "at plus chain_positions",
+            format!("at=2026-04-17T00%3A00%3A03Z&chain_positions={valid_positions}"),
+            "at and chain_positions are mutually exclusive snapshot selectors",
+        ),
+        (
+            "malformed chain_positions",
+            "chain_positions=%7B".to_owned(),
+            "chain_positions must be one JSON object",
+        ),
+        (
+            "duplicate position slot",
+            format!("chain_positions={duplicate_slot_positions}"),
+            "chain_positions repeats position slot ethereum",
+        ),
+        (
+            "unsupported position slot",
+            format!("chain_positions={unsupported_slot_positions}"),
+            "unsupported snapshot position slot polygon",
+        ),
+    ];
+
+    for (label, query, expected_message_fragment) in cases {
+        let response = app_router(database.app_state())
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/v1/resolutions/ens/alice.eth?mode=declared&records=text:com.twitter&{query}"
+                    ))
+                    .body(Body::empty())
+                    .expect("request must build"),
+            )
+            .await
+            .with_context(|| format!("{label} resolution selector request failed"))?;
+
+        assert_public_invalid_input_response(response, expected_message_fragment).await?;
+    }
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn get_resolution_returns_not_found_when_exact_surface_projection_is_missing() -> Result<()> {
     let database = TestDatabase::new_with_schemas(false, true).await?;
+    database
+        .seed_snapshot_selector_chain_positions(&json!({
+            "ethereum": {
+                "chain_id": "ethereum-mainnet",
+                "block_number": 21_000_003,
+                "block_hash": "0xbinding",
+                "timestamp": "2026-04-17T00:00:03Z"
+            }
+        }))
+        .await?;
 
     let response = app_router(database.app_state())
         .oneshot(
@@ -6933,7 +6966,7 @@ async fn get_resolution_reuses_exact_name_envelope_fields() -> Result<()> {
     let resolution_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=both&records=text,addr:60")
+                .uri("/v1/resolutions/ens/alice.eth?mode=declared&records=text,addr:60")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -6964,23 +6997,7 @@ async fn get_resolution_reuses_exact_name_envelope_fields() -> Result<()> {
     );
     assert_eq!(resolution_payload.consistency, name_payload.consistency);
     assert_eq!(resolution_payload.last_updated, name_payload.last_updated);
-    assert_eq!(
-        resolution_payload.verified_state,
-        Some(json!({
-            "verified_queries": [
-                {
-                    "record_key": "text",
-                    "status": "unsupported",
-                    "unsupported_reason": "verified resolution entrypoint is not yet supported",
-                },
-                {
-                    "record_key": "addr:60",
-                    "status": "unsupported",
-                    "unsupported_reason": "verified resolution entrypoint is not yet supported",
-                }
-            ]
-        }))
-    );
+    assert_eq!(resolution_payload.verified_state, None);
 
     database.cleanup().await?;
     Ok(())

@@ -7,6 +7,10 @@ use sqlx::{PgPool, Row, postgres::PgRow};
 use uuid::Uuid;
 
 use crate::SurfaceBindingKind;
+use crate::snapshot_selection::{
+    ChainPositions, SnapshotProjectionRead, SnapshotSelectionError,
+    ensure_projection_chain_positions_match,
+};
 
 const DEFAULT_NAME_CURRENT_READ_FILTER: &str = r#"
   AND surface.canonicality_state IN (
@@ -119,6 +123,36 @@ pub async fn load_name_current(
     })?;
 
     row.map(decode_name_current_row).transpose()
+}
+
+/// Load one exact-name projection row only if it is eligible for the selected snapshot.
+///
+/// Missing rows stay distinguishable from stale rows so API callers can preserve
+/// the route-specific `not_found` behavior without filling stale snapshots from
+/// raw facts.
+pub async fn load_name_current_for_snapshot(
+    pool: &PgPool,
+    logical_name_id: &str,
+    selected_chain_positions: &ChainPositions,
+) -> std::result::Result<SnapshotProjectionRead<NameCurrentRow>, SnapshotSelectionError> {
+    let row = load_name_current(pool, logical_name_id)
+        .await
+        .map_err(|error| {
+            SnapshotSelectionError::internal(format!(
+                "failed to load name_current row for logical_name_id {logical_name_id}: {error}"
+            ))
+        })?;
+
+    let Some(row) = row else {
+        return Ok(SnapshotProjectionRead::NotFound);
+    };
+
+    ensure_projection_chain_positions_match(
+        "name_current",
+        &row.chain_positions,
+        selected_chain_positions,
+    )?;
+    Ok(SnapshotProjectionRead::Found(row))
 }
 
 /// Load current exact-name projection rows for a set of logical name identities.
@@ -529,9 +563,9 @@ mod tests {
 
     use super::*;
     use crate::{
-        CanonicalityState, NameSurface, Resource, SurfaceBinding, TokenLineage,
-        default_database_url, upsert_name_surfaces, upsert_resources, upsert_surface_bindings,
-        upsert_token_lineages,
+        CanonicalityState, ChainPositions, NameSurface, Resource, SnapshotProjectionRead,
+        SnapshotSelectionErrorKind, SurfaceBinding, TokenLineage, default_database_url,
+        upsert_name_surfaces, upsert_resources, upsert_surface_bindings, upsert_token_lineages,
     };
 
     static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
@@ -817,6 +851,55 @@ mod tests {
 
         let loaded = load_name_current(database.pool(), logical_name_id).await?;
         assert_eq!(loaded, Some(expected));
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn name_current_snapshot_read_fails_stale_on_position_mismatch() -> Result<()> {
+        let database = TestDatabase::new().await?;
+        let logical_name_id = "ens:alice.eth";
+        let token_lineage_id = Uuid::from_u128(0x1110);
+        let resource_id = Uuid::from_u128(0x2220);
+        let surface_binding_id = Uuid::from_u128(0x3330);
+
+        seed_binding_references(
+            &database,
+            logical_name_id,
+            "alice.eth",
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+
+        let expected = name_current_row(
+            logical_name_id,
+            surface_binding_id,
+            resource_id,
+            token_lineage_id,
+        );
+        upsert_name_current_rows(database.pool(), std::slice::from_ref(&expected)).await?;
+
+        let selected = ChainPositions::from_value(&expected.chain_positions)?;
+        assert_eq!(
+            load_name_current_for_snapshot(database.pool(), logical_name_id, &selected).await?,
+            SnapshotProjectionRead::Found(expected)
+        );
+
+        let stale_selected = ChainPositions::from_value(&json!({
+            "ethereum": {
+                "chain_id": "ethereum-mainnet",
+                "block_number": 21_000_004,
+                "block_hash": "0xnewer",
+                "timestamp": "2026-04-17T00:00:04Z"
+            }
+        }))?;
+        let error =
+            load_name_current_for_snapshot(database.pool(), logical_name_id, &stale_selected)
+                .await
+                .expect_err("mismatched selected snapshot must be stale");
+        assert_eq!(error.kind(), SnapshotSelectionErrorKind::Stale);
 
         database.cleanup().await
     }

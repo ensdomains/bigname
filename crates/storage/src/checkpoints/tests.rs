@@ -13,7 +13,11 @@ use sqlx::{
 };
 
 use super::*;
-use crate::{ChainLineageBlock, default_database_url, upsert_chain_lineage_blocks};
+use crate::{
+    ChainLineageBlock, ChainPositions, SnapshotConsistency, SnapshotPositionRequirement,
+    SnapshotSelectionErrorKind, SnapshotSelectionScope, SnapshotSelectorInput,
+    default_database_url, resolve_exact_name_snapshot_selection, upsert_chain_lineage_blocks,
+};
 
 static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -303,6 +307,133 @@ async fn advances_checkpoints_and_promotes_lineage_states() -> Result<()> {
             ("0x003".to_owned(), "canonical".to_owned()),
         ]
     );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn resolves_exact_name_snapshot_from_checkpoint_state() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let base_timestamp = timestamp(1_717_171_717);
+
+    upsert_chain_lineage_blocks(
+        database.pool(),
+        &[
+            lineage_block(
+                "ethereum-mainnet",
+                "0x001",
+                None,
+                1,
+                base_timestamp,
+                CanonicalityState::Observed,
+            ),
+            lineage_block(
+                "ethereum-mainnet",
+                "0x002",
+                Some("0x001"),
+                2,
+                timestamp(1_717_171_729),
+                CanonicalityState::Observed,
+            ),
+            lineage_block(
+                "ethereum-mainnet",
+                "0x003",
+                Some("0x002"),
+                3,
+                timestamp(1_717_171_741),
+                CanonicalityState::Observed,
+            ),
+        ],
+    )
+    .await?;
+    advance_chain_checkpoints(
+        database.pool(),
+        &ChainCheckpointUpdate {
+            chain_id: "ethereum-mainnet".to_owned(),
+            canonical: Some(CheckpointBlockRef {
+                block_hash: "0x003".to_owned(),
+                block_number: 3,
+            }),
+            safe: Some(CheckpointBlockRef {
+                block_hash: "0x002".to_owned(),
+                block_number: 2,
+            }),
+            finalized: Some(CheckpointBlockRef {
+                block_hash: "0x001".to_owned(),
+                block_number: 1,
+            }),
+        },
+    )
+    .await?;
+
+    let scope = SnapshotSelectionScope::new(
+        vec![SnapshotPositionRequirement::new(
+            "ethereum",
+            "ethereum-mainnet",
+        )],
+        Some("ethereum".to_owned()),
+    )?;
+    let snapshot = resolve_exact_name_snapshot_selection(
+        database.pool(),
+        &scope,
+        &SnapshotSelectorInput::default(),
+    )
+    .await?;
+
+    assert_eq!(snapshot.consistency, SnapshotConsistency::Head);
+    assert_eq!(
+        snapshot.chain_positions.to_value()["ethereum"]["block_hash"],
+        "0x003"
+    );
+    assert_eq!(
+        snapshot.chain_positions.to_value()["ethereum"]["block_number"],
+        3
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn supplied_snapshot_position_must_satisfy_consistency_floor() -> Result<()> {
+    let database = TestDatabase::new().await?;
+
+    upsert_chain_lineage_blocks(
+        database.pool(),
+        &[lineage_block(
+            "ethereum-mainnet",
+            "0xhead",
+            None,
+            10,
+            timestamp(1_717_171_800),
+            CanonicalityState::Canonical,
+        )],
+    )
+    .await?;
+
+    let scope = SnapshotSelectionScope::new(
+        vec![SnapshotPositionRequirement::new(
+            "ethereum",
+            "ethereum-mainnet",
+        )],
+        Some("ethereum".to_owned()),
+    )?;
+    let supplied = ChainPositions::parse_explicit_json(
+        r#"{
+            "ethereum": {
+                "chain_id": "ethereum-mainnet",
+                "block_number": 10,
+                "block_hash": "0xhead",
+                "timestamp": "2024-05-31T16:10:00Z"
+            }
+        }"#,
+        &scope,
+    )?;
+    let input = SnapshotSelectorInput::new(None, Some(supplied), SnapshotConsistency::Safe)?;
+
+    let error = resolve_exact_name_snapshot_selection(database.pool(), &scope, &input)
+        .await
+        .expect_err("canonical-only block must not satisfy safe selector");
+    assert_eq!(error.kind(), SnapshotSelectionErrorKind::Conflict);
 
     database.cleanup().await
 }

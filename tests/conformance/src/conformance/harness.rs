@@ -702,7 +702,8 @@
 
             async fn rebuild_name_current(&self, logical_name_id: &str) -> Result<()> {
                 let database_url = self.database_url.clone();
-                let logical_name_id = logical_name_id.to_owned();
+                let logical_name_id_for_worker = logical_name_id.to_owned();
+                let logical_name_id_for_seed = logical_name_id.to_owned();
                 let worker_manifest_path =
                     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../apps/worker/Cargo.toml");
 
@@ -722,17 +723,17 @@
                         .arg("--database-url")
                         .arg(&database_url)
                         .arg("--logical-name-id")
-                        .arg(&logical_name_id)
+                        .arg(&logical_name_id_for_worker)
                         .output()
                         .with_context(|| {
                             format!(
-                                "failed to invoke worker name_current rebuild for {logical_name_id}"
+                                "failed to invoke worker name_current rebuild for {logical_name_id_for_worker}"
                             )
                         })?;
 
                     if !output.status.success() {
                         return Err(anyhow::anyhow!(
-                            "worker name_current rebuild failed for {logical_name_id}\nstdout:\n{}\nstderr:\n{}",
+                            "worker name_current rebuild failed for {logical_name_id_for_worker}\nstdout:\n{}\nstderr:\n{}",
                             String::from_utf8_lossy(&output.stdout),
                             String::from_utf8_lossy(&output.stderr),
                         ));
@@ -742,6 +743,19 @@
                 })
                 .await
                 .context("worker name_current rebuild task panicked")??;
+
+                if let Some(row) =
+                    bigname_storage::load_name_current(&self.pool, &logical_name_id_for_seed)
+                        .await
+                        .with_context(|| {
+                            format!(
+                                "failed to load rebuilt name_current row {logical_name_id_for_seed} for selector seed"
+                            )
+                        })?
+                {
+                    self.seed_snapshot_selector_chain_positions(&row.chain_positions)
+                        .await?;
+                }
 
                 Ok(())
             }
@@ -984,9 +998,18 @@
                 &self,
                 row: bigname_storage::NameCurrentRow,
             ) -> Result<()> {
+                self.seed_snapshot_selector_chain_positions(&row.chain_positions)
+                    .await?;
+                let record_inventory_positions = row
+                    .resource_id
+                    .map(|resource_id| (resource_id, row.chain_positions.clone()));
                 bigname_storage::upsert_name_current_rows(&self.pool, &[row])
                     .await
                     .context("failed to upsert name_current row for conformance harness")?;
+                if let Some((resource_id, chain_positions)) = record_inventory_positions {
+                    self.set_record_inventory_chain_positions(resource_id, chain_positions)
+                        .await?;
+                }
                 Ok(())
             }
 
@@ -994,12 +1017,165 @@
                 &self,
                 row: RecordInventoryCurrentRow,
             ) -> Result<()> {
+                let resource_id = row.resource_id;
+                let chain_positions = row.chain_positions.clone();
                 bigname_storage::upsert_record_inventory_current_rows(&self.pool, &[row])
                     .await
                     .context(
                         "failed to upsert record_inventory_current row for conformance harness",
                     )?;
+                self.sync_record_inventory_chain_positions_from_name_current(resource_id)
+                    .await?;
+                self.seed_snapshot_selector_chain_positions(&chain_positions)
+                    .await?;
                 Ok(())
+            }
+
+            async fn seed_snapshot_selector_chain_positions(
+                &self,
+                chain_positions: &Value,
+            ) -> Result<()> {
+                let Some(positions) = chain_positions.as_object() else {
+                    return Ok(());
+                };
+
+                for position in positions.values() {
+                    let chain_id = position
+                        .get("chain_id")
+                        .and_then(Value::as_str)
+                        .context("chain_position.chain_id must be present for selector seed")?;
+                    let block_hash = position
+                        .get("block_hash")
+                        .and_then(Value::as_str)
+                        .context("chain_position.block_hash must be present for selector seed")?;
+                    let block_number = position
+                        .get("block_number")
+                        .and_then(Value::as_i64)
+                        .context("chain_position.block_number must be present for selector seed")?;
+                    let timestamp_value = position
+                        .get("timestamp")
+                        .and_then(Value::as_str)
+                        .context("chain_position.timestamp must be present for selector seed")?;
+                    let timestamp =
+                        bigname_storage::parse_rfc3339_utc_timestamp(timestamp_value)
+                            .map_err(|error| anyhow::anyhow!("{error}"))?;
+
+                    sqlx::query(
+                        r#"
+                        INSERT INTO chain_lineage (
+                            chain_id,
+                            block_hash,
+                            block_number,
+                            block_timestamp,
+                            canonicality_state
+                        )
+                        VALUES ($1, $2, $3, $4, 'finalized'::canonicality_state)
+                        ON CONFLICT (chain_id, block_hash) DO UPDATE SET
+                            block_number = EXCLUDED.block_number,
+                            block_timestamp = EXCLUDED.block_timestamp,
+                            canonicality_state = EXCLUDED.canonicality_state
+                        "#,
+                    )
+                    .bind(chain_id)
+                    .bind(block_hash)
+                    .bind(block_number)
+                    .bind(timestamp)
+                    .execute(&self.pool)
+                    .await
+                    .with_context(|| {
+                        format!("failed to seed chain_lineage for {chain_id} block {block_hash}")
+                    })?;
+
+                    sqlx::query(
+                        r#"
+                        INSERT INTO chain_checkpoints (
+                            chain_id,
+                            canonical_block_hash,
+                            canonical_block_number,
+                            safe_block_hash,
+                            safe_block_number,
+                            finalized_block_hash,
+                            finalized_block_number
+                        )
+                        VALUES ($1, $2, $3, $2, $3, $2, $3)
+                        ON CONFLICT (chain_id) DO UPDATE SET
+                            canonical_block_hash = EXCLUDED.canonical_block_hash,
+                            canonical_block_number = EXCLUDED.canonical_block_number,
+                            safe_block_hash = EXCLUDED.safe_block_hash,
+                            safe_block_number = EXCLUDED.safe_block_number,
+                            finalized_block_hash = EXCLUDED.finalized_block_hash,
+                            finalized_block_number = EXCLUDED.finalized_block_number,
+                            updated_at = now()
+                        "#,
+                    )
+                    .bind(chain_id)
+                    .bind(block_hash)
+                    .bind(block_number)
+                    .execute(&self.pool)
+                    .await
+                    .with_context(|| {
+                        format!("failed to seed chain checkpoint for {chain_id}")
+                    })?;
+                }
+
+                Ok(())
+            }
+
+            async fn set_record_inventory_chain_positions(
+                &self,
+                resource_id: Uuid,
+                chain_positions: Value,
+            ) -> Result<()> {
+                sqlx::query(
+                    r#"
+                    UPDATE record_inventory_current
+                    SET chain_positions = $2::jsonb
+                    WHERE resource_id = $1
+                    "#,
+                )
+                .bind(resource_id)
+                .bind(&chain_positions)
+                .execute(&self.pool)
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to set chain_positions on record_inventory_current rows for {resource_id}"
+                    )
+                })?;
+                self.seed_snapshot_selector_chain_positions(&chain_positions)
+                    .await
+            }
+
+            async fn sync_record_inventory_chain_positions_from_name_current(
+                &self,
+                resource_id: Uuid,
+            ) -> Result<()> {
+                let row = sqlx::query(
+                    r#"
+                    SELECT chain_positions
+                    FROM name_current
+                    WHERE resource_id = $1
+                    ORDER BY logical_name_id
+                    LIMIT 1
+                    "#,
+                )
+                .bind(resource_id)
+                .fetch_optional(&self.pool)
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to load name_current chain_positions for resource_id {resource_id}"
+                    )
+                })?;
+
+                let Some(row) = row else {
+                    return Ok(());
+                };
+                let chain_positions = row
+                    .try_get::<Value, _>("chain_positions")
+                    .context("name_current row missing chain_positions")?;
+                self.set_record_inventory_chain_positions(resource_id, chain_positions)
+                    .await
             }
 
             async fn seed_history_binding(
