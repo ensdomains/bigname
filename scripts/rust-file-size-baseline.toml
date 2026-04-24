@@ -141,8 +141,7 @@ loc = 891
 
 [[files]]
 path = "apps/worker/src/children.rs"
-loc = 1086
-justification = "Phase 0 ratchet baseline for an existing large production file; future changes should split or shrink it."
+loc = 273
 
 [[files]]
 path = "apps/worker/src/cli.rs"
@@ -154,8 +153,7 @@ loc = 493
 
 [[files]]
 path = "apps/worker/src/execution.rs"
-loc = 1095
-justification = "Phase 0 ratchet baseline for an existing large production file; future changes should split or shrink it."
+loc = 211
 
 [[files]]
 path = "apps/worker/src/inspect.rs"
@@ -247,8 +245,31 @@ loc = 200
 
 [[files]]
 path = "apps/worker/src/permissions.rs"
-loc = 1342
-justification = "Phase 0 ratchet baseline for an existing large production file; future changes should split or shrink it."
+loc = 77
+
+[[files]]
+path = "apps/worker/src/permissions/canonicality.rs"
+loc = 119
+
+[[files]]
+path = "apps/worker/src/permissions/json.rs"
+loc = 180
+
+[[files]]
+path = "apps/worker/src/permissions/load.rs"
+loc = 96
+
+[[files]]
+path = "apps/worker/src/permissions/persist.rs"
+loc = 90
+
+[[files]]
+path = "apps/worker/src/permissions/project.rs"
+loc = 95
+
+[[files]]
+path = "apps/worker/src/permissions/types.rs"
+loc = 32
 
 [[files]]
 path = "apps/worker/src/primary_name.rs"
@@ -268,8 +289,31 @@ loc = 21
 
 [[files]]
 path = "apps/worker/src/record_inventory.rs"
-loc = 1147
-justification = "Phase 0 ratchet baseline for an existing large production file; future changes should split or shrink it."
+loc = 39
+
+[[files]]
+path = "apps/worker/src/record_inventory/chain_position.rs"
+loc = 194
+
+[[files]]
+path = "apps/worker/src/record_inventory/json.rs"
+loc = 300
+
+[[files]]
+path = "apps/worker/src/record_inventory/loading.rs"
+loc = 140
+
+[[files]]
+path = "apps/worker/src/record_inventory/profile.rs"
+loc = 154
+
+[[files]]
+path = "apps/worker/src/record_inventory/projection.rs"
+loc = 330
+
+[[files]]
+path = "apps/worker/src/record_inventory/types.rs"
+loc = 46
 
 [[files]]
 path = "apps/worker/src/replay.rs"
@@ -293,8 +337,23 @@ loc = 26
 
 [[files]]
 path = "apps/worker/src/resolver.rs"
-loc = 1248
-justification = "Phase 0 ratchet baseline for an existing large production file; future changes should split or shrink it."
+loc = 162
+
+[[files]]
+path = "apps/worker/src/resolver/profile.rs"
+loc = 129
+
+[[files]]
+path = "apps/worker/src/resolver/state_helpers.rs"
+loc = 228
+
+[[files]]
+path = "apps/worker/src/resolver/summary_json.rs"
+loc = 425
+
+[[files]]
+path = "apps/worker/src/resolver/target_loading.rs"
+loc = 397
 
 [[files]]
 path = "apps/worker/src/runtime.rs"
