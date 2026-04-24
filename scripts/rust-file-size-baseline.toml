@@ -599,7 +599,23 @@ loc = 74
 
 [[files]]
 path = "crates/adapters/src/ens_v1_reverse_claim.rs"
-loc = 631
+loc = 199
+
+[[files]]
+path = "crates/adapters/src/ens_v1_reverse_claim/active_emitters.rs"
+loc = 158
+
+[[files]]
+path = "crates/adapters/src/ens_v1_reverse_claim/events.rs"
+loc = 106
+
+[[files]]
+path = "crates/adapters/src/ens_v1_reverse_claim/helpers.rs"
+loc = 94
+
+[[files]]
+path = "crates/adapters/src/ens_v1_reverse_claim/raw_logs.rs"
+loc = 121
 
 [[files]]
 path = "crates/adapters/src/ens_v1_subregistry_discovery.rs"
