@@ -164,7 +164,27 @@ loc = 452
 
 [[files]]
 path = "apps/indexer/src/main/backfill.rs"
-loc = 729
+loc = 116
+
+[[files]]
+path = "apps/indexer/src/main/backfill/failure_recording.rs"
+loc = 65
+
+[[files]]
+path = "apps/indexer/src/main/backfill/fetching.rs"
+loc = 262
+
+[[files]]
+path = "apps/indexer/src/main/backfill/range_resolution.rs"
+loc = 41
+
+[[files]]
+path = "apps/indexer/src/main/backfill/reservation_execution.rs"
+loc = 201
+
+[[files]]
+path = "apps/indexer/src/main/backfill/selection.rs"
+loc = 96
 
 [[files]]
 path = "apps/indexer/src/main/bootstrap_backfill.rs"
