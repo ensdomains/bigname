@@ -1188,7 +1188,31 @@ loc = 606
 
 [[files]]
 path = "crates/storage/src/permissions.rs"
-loc = 890
+loc = 31
+
+[[files]]
+path = "crates/storage/src/permissions/decode.rs"
+loc = 62
+
+[[files]]
+path = "crates/storage/src/permissions/paging.rs"
+loc = 148
+
+[[files]]
+path = "crates/storage/src/permissions/reads.rs"
+loc = 251
+
+[[files]]
+path = "crates/storage/src/permissions/types.rs"
+loc = 197
+
+[[files]]
+path = "crates/storage/src/permissions/validation.rs"
+loc = 55
+
+[[files]]
+path = "crates/storage/src/permissions/writes.rs"
+loc = 211
 
 [[files]]
 path = "crates/storage/src/primary_name.rs"
