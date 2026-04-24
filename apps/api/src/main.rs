@@ -11,7 +11,6 @@ use axum::{
     Json, Router,
     extract::{Path, Query, State},
     http::StatusCode,
-    response::{IntoResponse, Response},
     routing::get,
 };
 use bigname_manifests::{
@@ -49,6 +48,33 @@ use sqlx::{
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
+mod errors;
+mod pagination;
+mod query;
+mod routes;
+mod state;
+
+use crate::{
+    errors::{ApiError, ApiResult},
+    pagination::{
+        CURSOR_VERSION, CursorEnvelope, CursorSpec, DEFAULT_PAGE_SIZE, HistoryPageResponse,
+        MAX_PAGE_SIZE, PaginationRequest, PaginationWindow,
+    },
+    query::{
+        AddressHistoryQuery, AddressNamesIncludeOptions, AddressNamesQuery, ChildrenQuery,
+        ExactNameSnapshotQuery, HistoryQuery, InferredResolutionQuery, PermissionsQuery,
+        PrimaryNameQuery, ResolutionExecutionExplainQuery, ResolutionMode, ResolutionQuery,
+        ResolutionRecordKey,
+    },
+    routes::{API_ROUTE_DEFINITIONS, ApiRouteDefinition, ApiRouteId},
+    state::AppState,
+};
+
+#[cfg(test)]
+use crate::errors::ErrorResponse;
+#[cfg(test)]
+use axum::response::Response;
+
 #[derive(Parser, Debug)]
 #[command(name = "bigname-api", about = "Bootstrap API process for bigname")]
 struct Cli {
@@ -69,134 +95,6 @@ struct ServeArgs {
     #[command(flatten)]
     database: DatabaseConfig,
 }
-
-#[derive(Clone)]
-struct AppState {
-    phase: &'static str,
-    pool: PgPool,
-}
-
-#[derive(Clone, Copy)]
-struct ApiRouteDefinition {
-    id: ApiRouteId,
-    path: &'static str,
-    published_in_contract: bool,
-}
-
-#[derive(Clone, Copy)]
-enum ApiRouteId {
-    Health,
-    AddressNames,
-    AddressHistory,
-    PrimaryNames,
-    Coverage,
-    ExplainSurfaceBinding,
-    ExplainAuthorityControl,
-    ExplainResolutionExecution,
-    NamespaceMetadata,
-    NameChildren,
-    NameCurrent,
-    ResolveCurrent,
-    ResolutionCurrent,
-    ResolverCurrent,
-    NameHistory,
-    ResourceHistory,
-    ResourcePermissions,
-    NamespaceManifests,
-}
-
-const API_ROUTE_DEFINITIONS: &[ApiRouteDefinition] = &[
-    ApiRouteDefinition {
-        id: ApiRouteId::Health,
-        path: "/healthz",
-        published_in_contract: false,
-    },
-    ApiRouteDefinition {
-        id: ApiRouteId::AddressNames,
-        path: "/v1/addresses/{address}/names",
-        published_in_contract: true,
-    },
-    ApiRouteDefinition {
-        id: ApiRouteId::AddressHistory,
-        path: "/v1/history/addresses/{address}",
-        published_in_contract: true,
-    },
-    ApiRouteDefinition {
-        id: ApiRouteId::PrimaryNames,
-        path: "/v1/primary-names/{address}",
-        published_in_contract: true,
-    },
-    ApiRouteDefinition {
-        id: ApiRouteId::Coverage,
-        path: "/v1/coverage/{namespace}/{name}",
-        published_in_contract: true,
-    },
-    ApiRouteDefinition {
-        id: ApiRouteId::ExplainSurfaceBinding,
-        path: "/v1/explain/names/{namespace}/{name}/surface-binding",
-        published_in_contract: true,
-    },
-    ApiRouteDefinition {
-        id: ApiRouteId::ExplainAuthorityControl,
-        path: "/v1/explain/names/{namespace}/{name}/authority-control",
-        published_in_contract: true,
-    },
-    ApiRouteDefinition {
-        id: ApiRouteId::ExplainResolutionExecution,
-        path: "/v1/explain/resolutions/{namespace}/{name}/execution",
-        published_in_contract: true,
-    },
-    ApiRouteDefinition {
-        id: ApiRouteId::NamespaceMetadata,
-        path: "/v1/namespaces/{namespace}",
-        published_in_contract: true,
-    },
-    ApiRouteDefinition {
-        id: ApiRouteId::NameChildren,
-        path: "/v1/names/{namespace}/{name}/children",
-        published_in_contract: true,
-    },
-    ApiRouteDefinition {
-        id: ApiRouteId::NameCurrent,
-        path: "/v1/names/{namespace}/{name}",
-        published_in_contract: true,
-    },
-    ApiRouteDefinition {
-        id: ApiRouteId::ResolveCurrent,
-        path: "/v1/resolve/{name}",
-        published_in_contract: true,
-    },
-    ApiRouteDefinition {
-        id: ApiRouteId::ResolutionCurrent,
-        path: "/v1/resolutions/{namespace}/{name}",
-        published_in_contract: true,
-    },
-    ApiRouteDefinition {
-        id: ApiRouteId::ResolverCurrent,
-        path: "/v1/resolvers/{chain_id}/{resolver_address}",
-        published_in_contract: true,
-    },
-    ApiRouteDefinition {
-        id: ApiRouteId::NameHistory,
-        path: "/v1/history/names/{namespace}/{name}",
-        published_in_contract: true,
-    },
-    ApiRouteDefinition {
-        id: ApiRouteId::ResourceHistory,
-        path: "/v1/history/resources/{resource_id}",
-        published_in_contract: true,
-    },
-    ApiRouteDefinition {
-        id: ApiRouteId::ResourcePermissions,
-        path: "/v1/resources/{resource_id}/permissions",
-        published_in_contract: true,
-    },
-    ApiRouteDefinition {
-        id: ApiRouteId::NamespaceManifests,
-        path: "/v1/manifests/{namespace}",
-        published_in_contract: true,
-    },
-];
 
 #[derive(Serialize)]
 struct HealthResponse {
@@ -341,111 +239,6 @@ struct PrimaryNameResponse {
 
 type ResolverResponse = NameResponse;
 
-#[derive(Clone, Debug, Default, Deserialize)]
-struct HistoryQuery {
-    scope: Option<String>,
-    cursor: Option<String>,
-    page_size: Option<u64>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
-struct PermissionsQuery {
-    subject: Option<String>,
-    scope: Option<String>,
-    cursor: Option<String>,
-    page_size: Option<u64>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
-struct ChildrenQuery {
-    surface_classes: Option<String>,
-    include: Option<String>,
-    cursor: Option<String>,
-    page_size: Option<u64>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
-struct AddressNamesQuery {
-    namespace: Option<String>,
-    relation: Option<String>,
-    dedupe_by: Option<String>,
-    include: Option<String>,
-    cursor: Option<String>,
-    page_size: Option<u64>,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-struct AddressNamesIncludeOptions {
-    role_summary: bool,
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
-struct AddressHistoryQuery {
-    namespace: Option<String>,
-    relation: Option<String>,
-    scope: Option<String>,
-    cursor: Option<String>,
-    page_size: Option<u64>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
-struct ExactNameSnapshotQuery {
-    at: Option<String>,
-    chain_positions: Option<String>,
-    consistency: Option<String>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
-struct ResolutionQuery {
-    at: Option<String>,
-    chain_positions: Option<String>,
-    consistency: Option<String>,
-    mode: Option<String>,
-    records: Option<String>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
-struct InferredResolutionQuery {
-    mode: Option<String>,
-    records: Option<String>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
-struct ResolutionExecutionExplainQuery {
-    records: Option<String>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
-struct PrimaryNameQuery {
-    namespace: Option<String>,
-    coin_type: Option<String>,
-    mode: Option<String>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ResolutionMode {
-    Declared,
-    Verified,
-    Both,
-}
-
-impl ResolutionMode {
-    fn includes_declared(self) -> bool {
-        matches!(self, Self::Declared | Self::Both)
-    }
-
-    fn includes_verified(self) -> bool {
-        matches!(self, Self::Verified | Self::Both)
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct ResolutionRecordKey {
-    record_key: String,
-    record_family: String,
-    selector_key: Option<String>,
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum PrimaryNameTupleState {
     ProjectionUnavailable,
@@ -545,63 +338,6 @@ struct ResourcePermissionsResponse {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-struct HistoryPageResponse {
-    cursor: Option<String>,
-    next_cursor: Option<String>,
-    page_size: u64,
-    sort: String,
-}
-
-const DEFAULT_PAGE_SIZE: u64 = 50;
-const MAX_PAGE_SIZE: u64 = 200;
-const CURSOR_VERSION: u8 = 1;
-
-#[derive(Clone, Debug)]
-struct PaginationRequest {
-    active: bool,
-    cursor: Option<String>,
-    page_size: u64,
-}
-
-#[derive(Clone, Debug)]
-struct PaginationWindow {
-    start: usize,
-    end: usize,
-    page: HistoryPageResponse,
-}
-
-#[derive(Clone, Debug)]
-struct CursorSpec {
-    route: &'static str,
-    anchor: String,
-    sort: &'static str,
-    filters: BTreeMap<String, String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-struct CursorEnvelope {
-    version: u8,
-    route: String,
-    anchor: String,
-    sort: String,
-    filters: BTreeMap<String, String>,
-    item: BTreeMap<String, String>,
-}
-
-impl CursorSpec {
-    fn envelope(&self, item: BTreeMap<String, String>) -> CursorEnvelope {
-        CursorEnvelope {
-            version: CURSOR_VERSION,
-            route: self.route.to_owned(),
-            anchor: self.anchor.clone(),
-            sort: self.sort.to_owned(),
-            filters: self.filters.clone(),
-            item,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct CoverageResponse {
     status: String,
     exhaustiveness: String,
@@ -652,52 +388,6 @@ impl From<&ActiveManifestVersion> for ManifestVersionRef {
         }
     }
 }
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-struct ErrorResponse {
-    error: ErrorBody,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-struct ErrorBody {
-    code: String,
-    message: String,
-    details: BTreeMap<String, String>,
-}
-
-struct ApiError {
-    status: StatusCode,
-    code: &'static str,
-    message: String,
-}
-
-impl ApiError {
-    fn internal_error(message: impl Into<String>) -> Self {
-        Self {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            code: "internal_error",
-            message: message.into(),
-        }
-    }
-}
-
-impl IntoResponse for ApiError {
-    fn into_response(self) -> Response {
-        (
-            self.status,
-            Json(ErrorResponse {
-                error: ErrorBody {
-                    code: self.code.to_owned(),
-                    message: self.message,
-                    details: BTreeMap::new(),
-                },
-            }),
-        )
-            .into_response()
-    }
-}
-
-type ApiResult<T> = std::result::Result<T, ApiError>;
 
 const PUBLIC_NAMESPACES: &[&str] = &["ens", "basenames"];
 const VERIFIED_RESOLUTION_REQUEST_TYPE: &str = "verified_resolution";

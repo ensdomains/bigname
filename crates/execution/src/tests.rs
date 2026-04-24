@@ -9,8 +9,8 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::{Context, Result};
-use serde_json::json;
+use anyhow::{Context, Result, bail};
+use serde_json::{Map, Value, json};
 use sqlx::{
     ConnectOptions, PgPool, Row,
     postgres::{PgConnectOptions, PgPoolOptions},
@@ -18,8 +18,30 @@ use sqlx::{
 };
 use tokio::time::{Duration, timeout};
 
+use super::primary_name::{
+    normalized_verified_primary_name_request_key, validate_verified_primary_request,
+};
+use super::revalidation::{
+    build_requested_chain_positions_from_projection, normalize_alias_detail,
+    normalize_transport_detail, normalize_wildcard_detail, selector_family_and_key,
+};
+use super::validation::{
+    VerifiedQueryStatus, VerifiedQuerySummary, extract_requested_selectors,
+    extract_supported_verified_queries, normalized_request_key, persisted_trace_detail_object,
+    validate_direct_request,
+};
 use super::*;
-use bigname_storage::{MIGRATOR, NormalizedEvent, default_database_url};
+use bigname_storage::{
+    ChainLineageBlock, ExecutionCacheKey, ExecutionOutcome, ExecutionTrace, MIGRATOR,
+    NameCurrentRow, NameSurface, NormalizedEvent, PrimaryNameClaimStatus, PrimaryNameCurrentRow,
+    RawCallSnapshot, RecordInventoryCurrentRow, Resource,
+    SupportedVerifiedResolutionRecordKey as SupportedVerifiedRecordKey, SurfaceBinding,
+    SurfaceBindingKind, TokenLineage, default_database_url, upsert_chain_lineage_blocks,
+    upsert_execution_outcome, upsert_execution_trace, upsert_name_current_rows,
+    upsert_name_surfaces, upsert_primary_name_current_rows, upsert_record_inventory_current_rows,
+    upsert_resources, upsert_surface_bindings, upsert_token_lineages,
+};
+use uuid::Uuid;
 
 static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
 static WORKER_CARGO_LOCK: Mutex<()> = Mutex::new(());
@@ -638,17 +660,17 @@ fn projected_topology_for_request(
     resolver_chain_id: &str,
     resolver_address: &str,
 ) -> Value {
-    let alias = super::normalize_alias_detail(
+    let alias = normalize_alias_detail(
         persisted_trace_detail_object(&request.trace, "alias").as_ref(),
         &request.trace.namespace,
     )
     .expect("request alias detail must normalize");
-    let wildcard = super::normalize_wildcard_detail(
+    let wildcard = normalize_wildcard_detail(
         persisted_trace_detail_object(&request.trace, "wildcard").as_ref(),
         &request.trace.namespace,
     )
     .expect("request wildcard detail must normalize");
-    let transport = super::normalize_transport_detail(
+    let transport = normalize_transport_detail(
         persisted_trace_detail_object(&request.trace, "transport").as_ref(),
     )
     .expect("request transport detail must normalize");

@@ -10,18 +10,30 @@ wiring_new_file_max_loc = 500
 wiring_files = ["lib.rs", "main.rs"]
 
 [[files]]
+path = "apps/api/src/errors.rs"
+loc = 54
+
+[[files]]
 path = "apps/api/src/handlers.rs"
 loc = 1307
 justification = "Phase 0 ratchet baseline for an existing large production file; future changes should split or shrink it."
 
 [[files]]
 path = "apps/api/src/main.rs"
-loc = 727
+loc = 417
 
 [[files]]
 path = "apps/api/src/openapi.rs"
 loc = 1336
 justification = "Phase 0 ratchet baseline for an existing large production file; future changes should split or shrink it."
+
+[[files]]
+path = "apps/api/src/pagination.rs"
+loc = 60
+
+[[files]]
+path = "apps/api/src/query.rs"
+loc = 106
 
 [[files]]
 path = "apps/api/src/responses.rs"
@@ -55,6 +67,14 @@ loc = 426
 path = "apps/api/src/responses/resolution_verified.rs"
 loc = 921
 justification = "Phase 0 ratchet baseline for an existing large production file; future changes should split or shrink it."
+
+[[files]]
+path = "apps/api/src/routes.rs"
+loc = 121
+
+[[files]]
+path = "apps/api/src/state.rs"
+loc = 7
 
 [[files]]
 path = "apps/api/src/support.rs"
@@ -98,6 +118,14 @@ loc = 1086
 justification = "Phase 0 ratchet baseline for an existing large production file; future changes should split or shrink it."
 
 [[files]]
+path = "apps/worker/src/cli.rs"
+loc = 348
+
+[[files]]
+path = "apps/worker/src/commands.rs"
+loc = 493
+
+[[files]]
 path = "apps/worker/src/execution.rs"
 loc = 1095
 justification = "Phase 0 ratchet baseline for an existing large production file; future changes should split or shrink it."
@@ -109,8 +137,15 @@ justification = "Phase 0 ratchet baseline for an existing large production file;
 
 [[files]]
 path = "apps/worker/src/main.rs"
-loc = 1563
-justification = "Phase 0 ratchet baseline for an existing oversized wiring file; future changes should move logic behind smaller modules."
+loc = 29
+
+[[files]]
+path = "apps/worker/src/main_tests.rs"
+loc = 323
+
+[[files]]
+path = "apps/worker/src/manifest_drift.rs"
+loc = 372
 
 [[files]]
 path = "apps/worker/src/name_current.rs"
@@ -141,6 +176,10 @@ justification = "Phase 0 ratchet baseline for an existing large production file;
 path = "apps/worker/src/resolver.rs"
 loc = 1248
 justification = "Phase 0 ratchet baseline for an existing large production file; future changes should split or shrink it."
+
+[[files]]
+path = "apps/worker/src/runtime.rs"
+loc = 34
 
 [[files]]
 path = "crates/adapters/src/block_derived_normalized_events.rs"
@@ -202,9 +241,37 @@ path = "crates/domain/src/lib.rs"
 loc = 6
 
 [[files]]
+path = "crates/execution/src/json_helpers.rs"
+loc = 106
+
+[[files]]
 path = "crates/execution/src/lib.rs"
-loc = 3698
-justification = "Phase 0 ratchet baseline for an existing oversized wiring file; future changes should move logic behind smaller modules."
+loc = 47
+
+[[files]]
+path = "crates/execution/src/persistence.rs"
+loc = 278
+
+[[files]]
+path = "crates/execution/src/primary_name.rs"
+loc = 650
+
+[[files]]
+path = "crates/execution/src/revalidation.rs"
+loc = 1021
+justification = "Phase 0 ratchet baseline for an existing large production file; future changes should split or shrink it."
+
+[[files]]
+path = "crates/execution/src/validation/mod.rs"
+loc = 71
+
+[[files]]
+path = "crates/execution/src/validation/path.rs"
+loc = 768
+
+[[files]]
+path = "crates/execution/src/validation/resolution.rs"
+loc = 890
 
 [[files]]
 path = "crates/manifests/src/lib.rs"
