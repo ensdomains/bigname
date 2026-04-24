@@ -812,7 +812,43 @@ loc = 278
 
 [[files]]
 path = "crates/execution/src/primary_name.rs"
-loc = 650
+loc = 55
+
+[[files]]
+path = "crates/execution/src/primary_name/anchor.rs"
+loc = 31
+
+[[files]]
+path = "crates/execution/src/primary_name/context.rs"
+loc = 22
+
+[[files]]
+path = "crates/execution/src/primary_name/keys.rs"
+loc = 12
+
+[[files]]
+path = "crates/execution/src/primary_name/name_ref.rs"
+loc = 48
+
+[[files]]
+path = "crates/execution/src/primary_name/outcome.rs"
+loc = 113
+
+[[files]]
+path = "crates/execution/src/primary_name/payload.rs"
+loc = 121
+
+[[files]]
+path = "crates/execution/src/primary_name/readback.rs"
+loc = 35
+
+[[files]]
+path = "crates/execution/src/primary_name/request.rs"
+loc = 56
+
+[[files]]
+path = "crates/execution/src/primary_name/trace.rs"
+loc = 242
 
 [[files]]
 path = "crates/execution/src/revalidation.rs"
