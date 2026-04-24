@@ -1,0 +1,67 @@
+use anyhow::{Context, Result};
+use serde_json::{Map as JsonMap, json};
+use sqlx::types::JsonValue;
+use tracing::info;
+
+use crate::{API_ROUTE_DEFINITIONS, AppState, Router, ServeArgs, shutdown_signal};
+
+use super::schemas::openapi_components;
+
+pub(crate) async fn serve(args: ServeArgs) -> Result<()> {
+    let pool = bigname_storage::connect(&args.database).await?;
+    let state = AppState {
+        phase: bigname_domain::bootstrap_phase(),
+        pool,
+    };
+    let router = app_router(state);
+    let listener = tokio::net::TcpListener::bind(args.bind_addr)
+        .await
+        .context("failed to bind the API listener")?;
+
+    info!(
+        service = "api",
+        bind_addr = %args.bind_addr,
+        phase = bigname_domain::bootstrap_phase(),
+        "API booted"
+    );
+
+    axum::serve(listener, router)
+        .with_graceful_shutdown(shutdown_signal("api"))
+        .await
+        .context("API server exited unexpectedly")
+}
+
+pub(crate) fn app_router(state: AppState) -> Router {
+    API_ROUTE_DEFINITIONS
+        .iter()
+        .copied()
+        .fold(Router::new(), |router, route| route.register(router))
+        .with_state(state)
+}
+
+pub(crate) fn render_openapi_document() -> String {
+    let mut rendered =
+        serde_json::to_string_pretty(&openapi_document()).expect("OpenAPI document must render");
+    rendered.push('\n');
+    rendered
+}
+
+pub(crate) fn openapi_document() -> JsonValue {
+    let mut paths = JsonMap::new();
+    for route in API_ROUTE_DEFINITIONS {
+        if let Some(path_item) = route.openapi_path_item() {
+            paths.insert(route.path.to_owned(), path_item);
+        }
+    }
+
+    json!({
+        "openapi": "3.1.0",
+        "info": {
+            "title": "bigname API v1",
+            "version": "phase-7",
+            "description": "Machine-readable publication of the currently shipped public API surface derived from apps/api/src/main.rs.",
+        },
+        "paths": JsonValue::Object(paths),
+        "components": openapi_components(),
+    })
+}

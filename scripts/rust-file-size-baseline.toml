@@ -24,8 +24,27 @@ loc = 417
 
 [[files]]
 path = "apps/api/src/openapi.rs"
-loc = 1336
-justification = "Phase 0 ratchet baseline for an existing large production file; future changes should split or shrink it."
+loc = 29
+
+[[files]]
+path = "apps/api/src/openapi/parameters.rs"
+loc = 305
+
+[[files]]
+path = "apps/api/src/openapi/responses.rs"
+loc = 203
+
+[[files]]
+path = "apps/api/src/openapi/route_operations.rs"
+loc = 366
+
+[[files]]
+path = "apps/api/src/openapi/schemas.rs"
+loc = 449
+
+[[files]]
+path = "apps/api/src/openapi/server.rs"
+loc = 67
 
 [[files]]
 path = "apps/api/src/pagination.rs"
@@ -611,8 +630,31 @@ loc = 198
 
 [[files]]
 path = "crates/adapters/src/ens_v2_registrar.rs"
-loc = 1063
-justification = "Phase 0 ratchet baseline for an existing large production file; future changes should split or shrink it."
+loc = 114
+
+[[files]]
+path = "crates/adapters/src/ens_v2_registrar/active_emitters.rs"
+loc = 148
+
+[[files]]
+path = "crates/adapters/src/ens_v2_registrar/decoding.rs"
+loc = 180
+
+[[files]]
+path = "crates/adapters/src/ens_v2_registrar/event_building.rs"
+loc = 141
+
+[[files]]
+path = "crates/adapters/src/ens_v2_registrar/persistence_summary.rs"
+loc = 75
+
+[[files]]
+path = "crates/adapters/src/ens_v2_registrar/raw_logs.rs"
+loc = 128
+
+[[files]]
+path = "crates/adapters/src/ens_v2_registrar/resource_links.rs"
+loc = 57
 
 [[files]]
 path = "crates/adapters/src/ens_v2_registry.rs"
@@ -925,8 +967,27 @@ loc = 479
 
 [[files]]
 path = "crates/storage/src/children.rs"
-loc = 1212
-justification = "Phase 0 ratchet baseline for an existing large production file; future changes should split or shrink it."
+loc = 46
+
+[[files]]
+path = "crates/storage/src/children/reads.rs"
+loc = 340
+
+[[files]]
+path = "crates/storage/src/children/source_decode.rs"
+loc = 70
+
+[[files]]
+path = "crates/storage/src/children/sources.rs"
+loc = 462
+
+[[files]]
+path = "crates/storage/src/children/types.rs"
+loc = 79
+
+[[files]]
+path = "crates/storage/src/children/writes.rs"
+loc = 258
 
 [[files]]
 path = "crates/storage/src/execution.rs"
@@ -1063,8 +1124,39 @@ loc = 687
 
 [[files]]
 path = "crates/storage/src/raw_children.rs"
-loc = 1030
-justification = "Phase 0 ratchet baseline for an existing large production file; future changes should split or shrink it."
+loc = 17
+
+[[files]]
+path = "crates/storage/src/raw_children/decode.rs"
+loc = 84
+
+[[files]]
+path = "crates/storage/src/raw_children/load.rs"
+loc = 176
+
+[[files]]
+path = "crates/storage/src/raw_children/log.rs"
+loc = 144
+
+[[files]]
+path = "crates/storage/src/raw_children/orphaning.rs"
+loc = 138
+
+[[files]]
+path = "crates/storage/src/raw_children/receipt.rs"
+loc = 151
+
+[[files]]
+path = "crates/storage/src/raw_children/transaction.rs"
+loc = 142
+
+[[files]]
+path = "crates/storage/src/raw_children/types.rs"
+loc = 57
+
+[[files]]
+path = "crates/storage/src/raw_children/validation.rs"
+loc = 184
 
 [[files]]
 path = "crates/storage/src/raw_code.rs"
@@ -1077,8 +1169,27 @@ justification = "Phase 0 ratchet baseline for an existing large production file;
 
 [[files]]
 path = "crates/storage/src/record_inventory.rs"
-loc = 1107
-justification = "Phase 0 ratchet baseline for an existing large production file; future changes should split or shrink it."
+loc = 15
+
+[[files]]
+path = "crates/storage/src/record_inventory/batch_upsert.rs"
+loc = 343
+
+[[files]]
+path = "crates/storage/src/record_inventory/boundary_key.rs"
+loc = 147
+
+[[files]]
+path = "crates/storage/src/record_inventory/row_decode.rs"
+loc = 94
+
+[[files]]
+path = "crates/storage/src/record_inventory/snapshot_reads.rs"
+loc = 147
+
+[[files]]
+path = "crates/storage/src/record_inventory/validation.rs"
+loc = 426
 
 [[files]]
 path = "crates/storage/src/resolution_support.rs"
@@ -1091,5 +1202,24 @@ loc = 817
 
 [[files]]
 path = "crates/storage/src/snapshot_selection.rs"
-loc = 1297
-justification = "Phase 0 ratchet baseline for an existing large production file; future changes should split or shrink it."
+loc = 19
+
+[[files]]
+path = "crates/storage/src/snapshot_selection/chain_position.rs"
+loc = 225
+
+[[files]]
+path = "crates/storage/src/snapshot_selection/consistency.rs"
+loc = 47
+
+[[files]]
+path = "crates/storage/src/snapshot_selection/error.rs"
+loc = 84
+
+[[files]]
+path = "crates/storage/src/snapshot_selection/parsing.rs"
+loc = 382
+
+[[files]]
+path = "crates/storage/src/snapshot_selection/selection.rs"
+loc = 489

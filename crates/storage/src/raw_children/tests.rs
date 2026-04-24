@@ -4,7 +4,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde_json::json;
 use sqlx::{
     PgPool,
@@ -13,8 +13,8 @@ use sqlx::{
 
 use super::*;
 use crate::{
-    RawBlock, RawCallSnapshot, RawCodeHash, RawPayloadCacheMetadataUpsert, default_database_url,
-    upsert_raw_blocks, upsert_raw_call_snapshots, upsert_raw_code_hashes,
+    CanonicalityState, RawBlock, RawCallSnapshot, RawCodeHash, RawPayloadCacheMetadataUpsert,
+    default_database_url, upsert_raw_blocks, upsert_raw_call_snapshots, upsert_raw_code_hashes,
     upsert_raw_payload_cache_metadata,
 };
 
