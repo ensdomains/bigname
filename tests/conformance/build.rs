@@ -8,6 +8,7 @@ fn main() {
     let source_path = manifest_dir.join("../../apps/api/src/main.rs");
     let source = inline_local_includes(&source_path);
     let rewritten = rewrite_openapi_components(&strip_crate_recursion_limit(&source))
+        .replace("crate::", "crate::shipped_api::")
         .replace("\n#[cfg(test)]\nmod tests;\n", "\n");
     let out_path = PathBuf::from(env::var("OUT_DIR").expect("out dir")).join("api_main.rs");
 
@@ -21,8 +22,12 @@ fn inline_local_includes(source_path: &Path) -> String {
     let source = fs::read_to_string(source_path)
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", source_path.display()));
     let mut rewritten = String::with_capacity(source.len());
+    let lines: Vec<&str> = source.split_inclusive('\n').collect();
+    let mut index = 0;
+    let mut previous_cfg_test = false;
 
-    for line in source.split_inclusive('\n') {
+    while index < lines.len() {
+        let line = lines[index];
         let trimmed = line.trim();
         if let Some(include_path) = parse_include_path(trimmed) {
             let resolved = source_path
@@ -33,10 +38,54 @@ fn inline_local_includes(source_path: &Path) -> String {
             if !rewritten.ends_with('\n') {
                 rewritten.push('\n');
             }
+            previous_cfg_test = false;
+            index += 1;
             continue;
         }
 
+        if let Some((resolved, consumed)) =
+            parse_concat_manifest_include(&lines[index..], source_path)
+        {
+            rewritten.push_str(&inline_local_includes(&resolved));
+            if !rewritten.ends_with('\n') {
+                rewritten.push('\n');
+            }
+            previous_cfg_test = false;
+            index += consumed;
+            continue;
+        }
+
+        if let Some(path_attr) = parse_path_attr(trimmed) {
+            if let Some(next_line) = lines.get(index + 1) {
+                if let Some((visibility, module_name)) = parse_mod_decl(next_line.trim()) {
+                    let resolved = source_path
+                        .parent()
+                        .unwrap_or_else(|| {
+                            panic!("{} has no parent directory", source_path.display())
+                        })
+                        .join(path_attr);
+                    push_inlined_module(&mut rewritten, visibility, module_name, &resolved);
+                    previous_cfg_test = false;
+                    index += 2;
+                    continue;
+                }
+            }
+        }
+
+        if !previous_cfg_test {
+            if let Some((visibility, module_name)) = parse_mod_decl(trimmed) {
+                if let Some(resolved) = resolve_module_path(source_path, module_name) {
+                    push_inlined_module(&mut rewritten, visibility, module_name, &resolved);
+                    previous_cfg_test = false;
+                    index += 1;
+                    continue;
+                }
+            }
+        }
+
         rewritten.push_str(line);
+        previous_cfg_test = trimmed == "#[cfg(test)]";
+        index += 1;
     }
 
     rewritten
@@ -44,6 +93,87 @@ fn inline_local_includes(source_path: &Path) -> String {
 
 fn parse_include_path(line: &str) -> Option<&str> {
     line.strip_prefix("include!(\"")?.strip_suffix("\");")
+}
+
+fn parse_concat_manifest_include(lines: &[&str], source_path: &Path) -> Option<(PathBuf, usize)> {
+    if lines.len() < 4 || lines[0].trim() != "include!(concat!(" {
+        return None;
+    }
+    if lines[1].trim() != r#"env!("CARGO_MANIFEST_DIR"),"# || lines[3].trim() != "));" {
+        return None;
+    }
+
+    let manifest_path = lines[2]
+        .trim()
+        .strip_prefix('"')?
+        .strip_suffix("\",")
+        .or_else(|| lines[2].trim().strip_prefix('"')?.strip_suffix('"'))?;
+    Some((resolve_manifest_include_path(source_path, manifest_path), 4))
+}
+
+fn resolve_manifest_include_path(source_path: &Path, manifest_path: &str) -> PathBuf {
+    let mut current = source_path
+        .parent()
+        .unwrap_or_else(|| panic!("{} has no parent directory", source_path.display()));
+
+    loop {
+        if current.file_name().is_some_and(|name| name == "src") {
+            let manifest_dir = current
+                .parent()
+                .unwrap_or_else(|| panic!("{} has no parent directory", current.display()));
+            return manifest_dir.join(manifest_path.trim_start_matches('/'));
+        }
+
+        current = current
+            .parent()
+            .unwrap_or_else(|| panic!("failed to find src ancestor for {}", source_path.display()));
+    }
+}
+
+fn parse_path_attr(line: &str) -> Option<&str> {
+    line.strip_prefix("#[path = \"")?.strip_suffix("\"]")
+}
+
+fn parse_mod_decl(line: &str) -> Option<(&str, &str)> {
+    let declaration = line.strip_suffix(';')?;
+    for prefix in ["pub(super) mod ", "pub(crate) mod ", "pub mod ", "mod "] {
+        if let Some(module_name) = declaration.strip_prefix(prefix) {
+            let visibility = prefix.strip_suffix("mod ").unwrap_or(prefix).trim_end();
+            return Some((visibility, module_name));
+        }
+    }
+    None
+}
+
+fn resolve_module_path(source_path: &Path, module_name: &str) -> Option<PathBuf> {
+    let parent = source_path.parent()?;
+    let file_path = parent.join(format!("{module_name}.rs"));
+    if file_path.exists() {
+        return Some(file_path);
+    }
+
+    let mod_path = parent.join(module_name).join("mod.rs");
+    mod_path.exists().then_some(mod_path)
+}
+
+fn push_inlined_module(
+    rewritten: &mut String,
+    visibility: &str,
+    module_name: &str,
+    source_path: &Path,
+) {
+    if !visibility.is_empty() {
+        rewritten.push_str(visibility);
+        rewritten.push(' ');
+    }
+    rewritten.push_str("mod ");
+    rewritten.push_str(module_name);
+    rewritten.push_str(" {\n");
+    rewritten.push_str(&inline_local_includes(source_path));
+    if !rewritten.ends_with('\n') {
+        rewritten.push('\n');
+    }
+    rewritten.push_str("}\n");
 }
 
 fn strip_crate_recursion_limit(source: &str) -> String {
@@ -68,9 +198,10 @@ fn strip_crate_recursion_limit(source: &str) -> String {
 
 fn rewrite_openapi_components(source: &str) -> String {
     const START: &str = "fn openapi_components() -> JsonValue {";
-    const END: &str = "\nfn declared_response_schema(";
+    const LEGACY_END: &str = "\nfn declared_response_schema(";
+    const SPLIT_SCHEMA_END: &str = "\nfn primary_name_claimed_result_schema(";
     const REPLACEMENT: &str = r###"fn openapi_components() -> JsonValue {
-    let mut schemas = JsonMap::new();
+    let mut schemas = serde_json::Map::new();
     schemas.insert("JsonObject".to_owned(), json_object_schema());
     schemas.insert("NullValue".to_owned(), json!({ "type": "null" }));
     schemas.insert(
@@ -446,7 +577,7 @@ fn rewrite_openapi_components(source: &str) -> String {
         }),
     );
 
-    let mut components = JsonMap::new();
+    let mut components = serde_json::Map::new();
     components.insert("schemas".to_owned(), JsonValue::Object(schemas));
     JsonValue::Object(components)
 }
@@ -455,10 +586,15 @@ fn rewrite_openapi_components(source: &str) -> String {
     let start = source
         .find(START)
         .unwrap_or_else(|| panic!("failed to find `{START}` in copied api source"));
-    let end = source[start..]
-        .find(END)
-        .map(|offset| start + offset)
-        .unwrap_or_else(|| panic!("failed to find `{END}` after `{START}` in copied api source"));
+    let end = [LEGACY_END, SPLIT_SCHEMA_END]
+        .into_iter()
+        .filter_map(|marker| source[start..].find(marker).map(|offset| start + offset))
+        .min()
+        .unwrap_or_else(|| {
+            panic!(
+                "failed to find `{LEGACY_END}` or `{SPLIT_SCHEMA_END}` after `{START}` in copied api source"
+            )
+        });
 
     let mut rewritten = String::with_capacity(source.len() + REPLACEMENT.len());
     rewritten.push_str(&source[..start]);
