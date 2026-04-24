@@ -175,7 +175,7 @@ loc = 221
 
 [[files]]
 path = "apps/indexer/src/main.rs"
-loc = 452
+loc = 265
 
 [[files]]
 path = "apps/indexer/src/main/backfill.rs"
@@ -204,6 +204,10 @@ loc = 96
 [[files]]
 path = "apps/indexer/src/main/bootstrap_backfill.rs"
 loc = 382
+
+[[files]]
+path = "apps/indexer/src/main/cli.rs"
+loc = 114
 
 [[files]]
 path = "apps/indexer/src/main/reconciliation.rs"
@@ -240,6 +244,10 @@ loc = 232
 [[files]]
 path = "apps/indexer/src/main/reconciliation/types.rs"
 loc = 126
+
+[[files]]
+path = "apps/indexer/src/main/replay.rs"
+loc = 226
 
 [[files]]
 path = "apps/indexer/src/main/runtime.rs"

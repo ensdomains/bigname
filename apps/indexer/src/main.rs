@@ -6,27 +6,29 @@ mod backfill;
 mod backfill_tests;
 #[path = "main/bootstrap_backfill.rs"]
 mod bootstrap_backfill;
+#[path = "main/cli.rs"]
+mod cli;
 mod provider;
 #[path = "main/reconciliation.rs"]
 mod reconciliation;
+#[path = "main/replay.rs"]
+mod replay;
 #[path = "main/runtime.rs"]
 mod runtime;
 #[cfg(test)]
 #[path = "main/tests.rs"]
 mod tests;
 
+#[cfg(test)]
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 use backfill::{BackfillBlockRange, BackfillJobRunConfig, run_resumable_hash_pinned_backfill_job};
+use bigname_manifests::load_watched_source_selector_plan;
 #[cfg(test)]
 use bigname_manifests::{
     ManifestLoadStatus, ManifestLoadSummary, ManifestSyncStatus, ManifestSyncSummary,
     WatchedChainPlan, load_watched_chain_plan, load_watched_contract_summary,
-};
-use bigname_manifests::{
-    WatchedSourceSelector, WatchedTargetIdentity, load_watched_source_selector_plan,
 };
 #[allow(unused_imports)]
 use bigname_storage::{
@@ -37,128 +39,26 @@ use bigname_storage::{
 };
 #[allow(unused_imports)]
 use bootstrap_backfill::*;
-use clap::{Args, Parser, Subcommand};
+use clap::Parser;
+use cli::{
+    BackfillArgs, Cli, Command, ReplayArgs, ReplayCommand, ReplayNormalizedEventsArgs, RunArgs,
+};
 #[allow(unused_imports)]
 use provider::{JsonRpcProvider, ProviderBlock, ProviderHeadSnapshot, ProviderRegistry};
 #[allow(unused_imports)]
 use reconciliation::*;
+pub(crate) use replay::{
+    backfill_lease_expires_at, default_backfill_lease_owner, deployment_profile_from_manifest_root,
+    generated_backfill_lease_token,
+};
+use replay::{backfill_source_selector, replay_normalized_events_selection};
 #[allow(unused_imports)]
 use runtime::*;
 #[allow(unused_imports)]
 use sha3::{Digest, Keccak256};
-use sqlx::types::time::OffsetDateTime;
 use tracing::info;
 
 const MAX_PARENT_FETCH_DEPTH: usize = 32;
-#[derive(Parser, Debug)]
-#[command(
-    name = "bigname-indexer",
-    about = "Bootstrap indexer process for bigname"
-)]
-struct Cli {
-    #[command(subcommand)]
-    command: Command,
-}
-
-#[derive(Subcommand, Debug)]
-enum Command {
-    Run(RunArgs),
-    Backfill(BackfillArgs),
-    Replay(ReplayArgs),
-}
-
-#[derive(Args, Debug)]
-struct RunArgs {
-    #[command(flatten)]
-    database: DatabaseConfig,
-    #[arg(
-        long,
-        env = "BIGNAME_INDEXER_MANIFESTS_ROOT",
-        default_value = "manifests"
-    )]
-    manifests_root: PathBuf,
-    #[arg(
-        long,
-        env = "BIGNAME_INDEXER_POLL_INTERVAL_SECS",
-        default_value_t = 5_u64
-    )]
-    poll_interval_secs: u64,
-    #[arg(
-        long = "chain-rpc-url",
-        env = "BIGNAME_INDEXER_CHAIN_RPC_URLS",
-        value_delimiter = ','
-    )]
-    chain_rpc_urls: Vec<String>,
-}
-
-#[derive(Args, Debug)]
-struct BackfillArgs {
-    #[command(flatten)]
-    database: DatabaseConfig,
-    #[arg(
-        long,
-        env = "BIGNAME_INDEXER_MANIFESTS_ROOT",
-        default_value = "manifests"
-    )]
-    manifests_root: PathBuf,
-    #[arg(
-        long = "chain-rpc-url",
-        env = "BIGNAME_INDEXER_CHAIN_RPC_URLS",
-        value_delimiter = ','
-    )]
-    chain_rpc_urls: Vec<String>,
-    #[arg(long)]
-    chain: String,
-    #[arg(long)]
-    from_block: i64,
-    #[arg(long)]
-    to_block: i64,
-    #[arg(long)]
-    idempotency_key: String,
-    #[arg(long)]
-    deployment_profile: Option<String>,
-    #[arg(long, conflicts_with = "watch_targets")]
-    source_family: Option<String>,
-    #[arg(
-        long = "watch-target",
-        value_name = "CONTRACT_INSTANCE_ID",
-        conflicts_with = "source_family"
-    )]
-    watch_targets: Vec<sqlx::types::Uuid>,
-    #[arg(long)]
-    lease_owner: Option<String>,
-    #[arg(long)]
-    lease_token: Option<String>,
-    #[arg(long, default_value_t = 300_u64)]
-    lease_duration_secs: u64,
-}
-
-#[derive(Args, Debug)]
-struct ReplayArgs {
-    #[command(subcommand)]
-    command: ReplayCommand,
-}
-
-#[derive(Subcommand, Debug)]
-enum ReplayCommand {
-    NormalizedEvents(ReplayNormalizedEventsArgs),
-}
-
-#[derive(Args, Debug)]
-struct ReplayNormalizedEventsArgs {
-    #[command(flatten)]
-    database: DatabaseConfig,
-    #[arg(long, env = "BIGNAME_INDEXER_DEPLOYMENT_PROFILE")]
-    deployment_profile: String,
-    #[arg(long)]
-    chain: String,
-    #[arg(long, requires = "to_block", conflicts_with = "block_hashes")]
-    from_block: Option<i64>,
-    #[arg(long, requires = "from_block", conflicts_with = "block_hashes")]
-    to_block: Option<i64>,
-    #[arg(long = "block-hash", value_name = "BLOCK_HASH")]
-    block_hashes: Vec<String>,
-}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -362,91 +262,4 @@ async fn run_replay_normalized_events(args: ReplayNormalizedEventsArgs) -> Resul
 
     log_raw_fact_normalized_event_replay_outcome(&outcome);
     Ok(())
-}
-
-fn replay_normalized_events_selection(
-    args: &ReplayNormalizedEventsArgs,
-) -> Result<RawFactNormalizedEventReplaySelection> {
-    if !args.block_hashes.is_empty() {
-        return Ok(RawFactNormalizedEventReplaySelection::BlockHashes(
-            args.block_hashes.clone(),
-        ));
-    }
-
-    let from_block = args
-        .from_block
-        .context("--from-block is required when --block-hash is not supplied")?;
-    let to_block = args
-        .to_block
-        .context("--to-block is required when --block-hash is not supplied")?;
-    Ok(RawFactNormalizedEventReplaySelection::BlockRange {
-        from_block,
-        to_block,
-    })
-}
-
-fn backfill_source_selector(args: &BackfillArgs) -> Result<WatchedSourceSelector> {
-    if let Some(source_family) = &args.source_family {
-        let source_family = source_family.trim();
-        if source_family.is_empty() {
-            bail!("--source-family must not be empty");
-        }
-        return Ok(WatchedSourceSelector::SourceFamily(
-            source_family.to_owned(),
-        ));
-    }
-
-    if !args.watch_targets.is_empty() {
-        return Ok(WatchedSourceSelector::WatchedTargetSet(
-            args.watch_targets
-                .iter()
-                .copied()
-                .map(|contract_instance_id| WatchedTargetIdentity {
-                    contract_instance_id,
-                })
-                .collect(),
-        ));
-    }
-
-    Ok(WatchedSourceSelector::WholeActiveWatchedChain)
-}
-
-pub(crate) fn deployment_profile_from_manifest_root(manifests_root: &std::path::Path) -> String {
-    let root_name = manifests_root
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("manifests");
-    if root_name == "manifests" {
-        "mainnet".to_owned()
-    } else if let Some(profile) = root_name.strip_prefix("manifests-") {
-        profile.to_owned()
-    } else {
-        root_name.to_owned()
-    }
-}
-
-pub(crate) fn default_backfill_lease_owner() -> String {
-    format!("bigname-indexer:{}", std::process::id())
-}
-
-pub(crate) fn generated_backfill_lease_token() -> Result<String> {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .context("system clock is before unix epoch")?
-        .as_nanos();
-    Ok(format!("bigname-indexer:{}:{nanos}", std::process::id()))
-}
-
-pub(crate) fn backfill_lease_expires_at(lease_duration_secs: u64) -> Result<OffsetDateTime> {
-    if lease_duration_secs == 0 {
-        bail!("backfill lease duration must be greater than zero");
-    }
-    let duration = i64::try_from(lease_duration_secs)
-        .context("backfill lease duration does not fit in i64 seconds")?;
-    let deadline = OffsetDateTime::now_utc()
-        .unix_timestamp()
-        .checked_add(duration)
-        .context("backfill lease expiry timestamp overflowed")?;
-    OffsetDateTime::from_unix_timestamp(deadline)
-        .context("backfill lease expiry timestamp is out of range")
 }
