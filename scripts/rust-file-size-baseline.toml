@@ -10,6 +10,10 @@ wiring_new_file_max_loc = 500
 wiring_files = ["lib.rs", "main.rs"]
 
 [[files]]
+path = "apps/api/src/cli.rs"
+loc = 25
+
+[[files]]
 path = "apps/api/src/errors.rs"
 loc = 54
 
@@ -51,7 +55,7 @@ loc = 32
 
 [[files]]
 path = "apps/api/src/main.rs"
-loc = 417
+loc = 101
 
 [[files]]
 path = "apps/api/src/openapi.rs"
@@ -200,6 +204,10 @@ loc = 36
 [[files]]
 path = "apps/api/src/support/snapshots.rs"
 loc = 221
+
+[[files]]
+path = "apps/api/src/types.rs"
+loc = 301
 
 [[files]]
 path = "apps/indexer/src/main.rs"
