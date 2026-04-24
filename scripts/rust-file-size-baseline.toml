@@ -1255,7 +1255,23 @@ loc = 85
 
 [[files]]
 path = "crates/storage/src/history.rs"
-loc = 724
+loc = 166
+
+[[files]]
+path = "crates/storage/src/history/address_matches.rs"
+loc = 245
+
+[[files]]
+path = "crates/storage/src/history/decoders.rs"
+loc = 83
+
+[[files]]
+path = "crates/storage/src/history/paging.rs"
+loc = 182
+
+[[files]]
+path = "crates/storage/src/history/selectors.rs"
+loc = 81
 
 [[files]]
 path = "crates/storage/src/identity.rs"
