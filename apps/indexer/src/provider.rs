@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, bail};
 use bytes::Bytes;
@@ -75,6 +75,36 @@ impl ProviderRegistry {
 
     pub fn configured_chain_count(&self) -> usize {
         self.providers.len()
+    }
+
+    pub fn ensure_configured_chains_admitted<'a>(
+        &self,
+        admitted_chains: impl IntoIterator<Item = &'a str>,
+    ) -> Result<()> {
+        let admitted_chains = admitted_chains.into_iter().collect::<BTreeSet<_>>();
+        let invalid_chains = self
+            .providers
+            .keys()
+            .filter(|chain| !admitted_chains.contains(chain.as_str()))
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        if invalid_chains.is_empty() {
+            return Ok(());
+        }
+
+        let admitted_chain_list = if admitted_chains.is_empty() {
+            "<none>".to_owned()
+        } else {
+            admitted_chains
+                .iter()
+                .copied()
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        bail!(
+            "configured RPC provider chains outside selected/admitted runtime chain set: {}; admitted runtime chains: {admitted_chain_list}",
+            invalid_chains.join(", ")
+        );
     }
 }
 

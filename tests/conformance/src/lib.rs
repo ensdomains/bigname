@@ -57,6 +57,12 @@ async fn backfill_sources_source_family_existing_response_lock() -> anyhow::Resu
 
 #[cfg(test)]
 #[tokio::test]
+async fn backfill_sources_retention_and_replay_semantics() -> anyhow::Result<()> {
+    shipped_api::conformance::run_backfill_sources_retention_and_replay_semantics().await
+}
+
+#[cfg(test)]
+#[tokio::test]
 async fn reorg_chaos_drill_conformance_job() -> anyhow::Result<()> {
     shipped_api::conformance::run_reorg_chaos_drill_conformance_job().await
 }

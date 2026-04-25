@@ -559,6 +559,8 @@ This Phase 4 admission freezes adapter inputs and ownership only. It does not ad
 
 ENSv1 dynamic resolver discovery is nevertheless required before declared record reads can claim consumer replacement. The statically admitted PublicResolver is an initial seed, not the full resolver corpus. The admitted manifest/discovery rule treats canonical nonzero `NewResolver(node, resolver)` observations from admitted ENSv1 registry emitters as node-to-resolver binding updates and resolver contract instances for `ens_v1_resolver_l1`; zero-address resolver observations close only the affected node-to-resolver binding. The ENSv1 registry declares `NewResolver`, emits it from `setResolver`, and emits it from `_setResolverAndTTL` when record or subnode-record calls change resolver state (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L12 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L89 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L174 @ ens_v1@91c966f). Resolver contract admission does not by itself admit a supported resolver profile; typed record, version, and authorization facts require a separate supported-profile gate. The first dynamic ENSv1 supported-profile gate is PublicResolver-compatible only, using explicit profile admission evidence such as stored code-hash facts, proxy / implementation edge facts, or another non-schema admission rule; unknown dynamic resolvers remain watched targets with explicit `pending` or `unsupported` profile state and must not feed record inventory, record cache, or resolver overview projections. Basenames resolver-profile admission is frozen separately in the Basenames section below (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L20 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L31 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L131 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L150 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/ResolverBase.sol:L17 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/ResolverBase.sol:L23 @ ens_v1@91c966f).
 
+`ENSRegistryOld` admission stays inside `ens_v1_registry_l1` as migration-aware historical input. The old registry address and `start_block = 3327417` come from the pinned subgraph, while `9380380` is only the pinned-subgraph start for the current ENS registry, not original ENS history (upstream: .refs/ens_subgraph/subgraph.yaml:L15 @ ens_subgraph@723f1b6) (upstream: .refs/ens_subgraph/subgraph.yaml:L39 @ ens_subgraph@723f1b6) (upstream: .refs/ens_subgraph/subgraph.yaml:L42 @ ens_subgraph@723f1b6) (upstream: .refs/ens_subgraph/subgraph.yaml:L44 @ ens_subgraph@723f1b6). Old-registry logs must not be unioned with current-registry logs by latest block: current-registry `NewOwner` marks the affected subnode migrated, later old-registry owner / resolver / TTL updates for that node are suppressed from current topology, and only old-registry root resolver updates retain the frozen exception (upstream: .refs/ens_subgraph/src/ensRegistry.ts:L134 @ ens_subgraph@723f1b6) (upstream: .refs/ens_subgraph/src/ensRegistry.ts:L230 @ ens_subgraph@723f1b6) (upstream: .refs/ens_subgraph/src/ensRegistry.ts:L238 @ ens_subgraph@723f1b6) (upstream: .refs/ens_subgraph/src/ensRegistry.ts:L246 @ ens_subgraph@723f1b6). This admission does not create a separate registry source family, widen capability flags, or claim consumer replacement.
+
 Current admitted ENSv2 `sepolia-dev` split:
 
 - `ens_v2_root_l1` owns the `RootRegistry` manifest root for the alternate `sepolia-dev` profile (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/RootRegistry.json:L2 @ ens_v2@554c309).
@@ -641,6 +643,7 @@ Rules:
 - for ENS primary-name reads in Phase 7, that reverse-family ownership admits only the reverse-claim tuple; it does not authorize combining reverse-only claim precedence with resolver-backed or execution-derived name identity to manufacture richer `claimed_primary_name` payloads (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L100 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L123 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L129 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L130 @ ens_v1@91c966f)
 - Basenames declared authority on the shipped mainnet profile is split across `basenames_base_registry` through contract role `registry` at `0xb94704422c2a1e396835a571837aa5ae53285a95`, `basenames_base_registrar` through contract role `registrar` at `0x03c4738ee98ae44591e1a4a4f3cab6641d95dd9a`, and `basenames_base_resolver` through contract role `resolver` at `0xC6d566A56A1aFf6508b41f6c90ff131615583BCD` (upstream: .refs/basenames/README.md:L28 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L29 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L34 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/Registry.sol:L10 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L15 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/L2Resolver.sol:L22 @ basenames@1809bbc)
 - ENSv1 and Basenames declared record support requires dynamic resolver discovery and resolver-profile admission before consumer replacement can be claimed: resolver addresses observed through admitted registry `NewResolver` logs must become admitted resolver contract instances through resolver discovery edges, and resolver-local facts may be consumed only after supported profile admission for the relevant fact family; for ENSv1, the first dynamic supported profile is PublicResolver-compatible only, while for Basenames the first dynamic supported profile is Base-side `L2Resolver`-compatible only. Unknown dynamic resolvers in either namespace remain explicit `pending` or `unsupported`; the Basenames gate is separate from L1 transport / execution and offchain-gateway admission (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L12 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L20 @ ens_v1@91c966f) (upstream: .refs/basenames/src/L2/Registry.sol:L132 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/L2Resolver.sol:L22 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/L2Resolver.sol:L182 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/L2Resolver.sol:L193 @ basenames@1809bbc)
+- ENSv1 old-registry admission is migration-aware and source-family-local to `ens_v1_registry_l1`: it may seed pre-migration topology and the root resolver exception, but it does not make `9380380` original ENS history, admit a second current registry owner, or graduate exact-name, children, history, resolver overview, or consumer-replacement coverage (upstream: .refs/ens_subgraph/subgraph.yaml:L15 @ ens_subgraph@723f1b6) (upstream: .refs/ens_subgraph/subgraph.yaml:L44 @ ens_subgraph@723f1b6) (upstream: .refs/ens_subgraph/src/ensRegistry.ts:L238 @ ens_subgraph@723f1b6) (upstream: .refs/ens_subgraph/src/ensRegistry.ts:L246 @ ens_subgraph@723f1b6)
 - Basenames declared primary-claim intake on the shipped mainnet profile belongs to `basenames_base_primary`, whose canonical contract role is `reverse_registrar` at `0x79ea96012eea67a83431f1701b3dff7e37f9e282` (upstream: .refs/basenames/README.md:L33 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L12 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L150 @ basenames@1809bbc)
 - that six-family Basenames split freezes the first declared read-plane boundary: exact-name, address-name, and children reads take declared truth from the Base registry / registrar / resolver families, while `basenames_base_primary` stays a separate claim-intake family (upstream: .refs/basenames/README.md:L69 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L70 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L12 @ basenames@1809bbc)
 - Basenames L1 compatibility transport on the shipped mainnet profile belongs to `basenames_l1_compat`, whose canonical contract role is `l1_resolver` at `0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31` (upstream: .refs/basenames/README.md:L22 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L69 @ basenames@1809bbc) (upstream: .refs/basenames/src/L1/L1Resolver.sol:L13 @ basenames@1809bbc)
@@ -711,6 +714,7 @@ Profile rules:
 - the shipped baseline profile is `ethereum-mainnet` plus `base-mainnet`
 - later Sepolia support is additive as an alternate deployment profile, not a concurrent expansion of the same canonical corpus
 - one deployment must choose exactly one profile at a time; it must not ingest, reconcile, or answer across mainnet and Sepolia in the same truth set
+- provider availability is per selected profile and active watched chain. A Base RPC endpoint is not required for an Ethereum-only run, and a selected profile with no configured Base provider must mark Base provider-backed intake idle / unavailable rather than failing startup for configured chains.
 
 Shared stages:
 
@@ -725,7 +729,13 @@ Shared stages:
 
 Historical backfill enters through persisted, bounded jobs and range checkpoints, then uses the same raw fact, adapter, normalized-event, and projection stages as live intake. Backfill checkpoint state is operational worker state; it does not promote canonical, safe, or finalized chain checkpoints.
 
-Postgres is the hot indexed and replay-focused store for this path. Live ingestion and backfill may fetch full block-scoped payloads, but Postgres retains replay-critical facts, lineage/header anchors, selected/admitted target logs, replay-required call snapshots/enrichments, and optional payload-cache metadata. Large/full block payloads and non-indexed transaction or receipt bodies are evictable cache by default once durable replay facts have been extracted; hash-addressed cold storage is required only for payload classes explicitly declared durable.
+Full backfill covers the entire admitted history for the selected profile and
+selected targets. Startup bootstrap caps, including
+`BIGNAME_INDEXER_BOOTSTRAP_BACKFILL_MAX_BLOCKS=25000`, are intake-readiness
+limits on automatic job creation only; they do not define complete history,
+route coverage, manifest support, or consumer-replacement graduation.
+
+Postgres is the hot indexed and replay-focused store for this path. Live ingestion and backfill may fetch full block-scoped payloads, but Postgres retains replay-critical facts, lineage/header anchors, selected/admitted target logs, replay-required call snapshots/enrichments, and optional payload-cache metadata. Large/full block payloads and non-indexed transaction or receipt bodies are evictable cache by default once durable replay facts have been extracted; hash-addressed cold storage is required only for payload classes explicitly declared durable. Empty historical blocks retain lineage/header anchors and optional audit metadata only; they must not force full payload cache or block-bundle retention.
 
 Exact lineage, fetch, notification, and reconciliation rules for this plane live in `docs/chain-intake.md`.
 
@@ -1485,6 +1495,19 @@ Backfill range checkpoint ownership is separate from chain checkpoint ownership.
 
 Source-scoped backfill is selected-target-only. It may retain selected target logs/facts, minimal lineage/header anchors, replay-required enrichments, and cache metadata needed for block-hash-scoped admission or audit, but it must not turn unselected block-wide transaction, receipt, or block bodies into Postgres hot rows merely because they were fetched during scanning.
 
+Historical backfill over finalized or safe ranges must persist selected facts
+with the strongest canonicality supported by available checkpoint evidence:
+`finalized`, `safe`, or `canonical` rather than `observed` when that evidence
+exists. The job lifecycle still remains separate from checkpoint promotion.
+
+Operational catch-up follows finalized head by chaining finite idempotent
+backfill chunks whose ends are no greater than the finalized head observed at
+chunk creation. Each chunk must pass DB-size, writable-free-disk, and configured
+object-cache budget checks before range work starts. Capacity failures pause or
+fail the chunk with explicit metadata; they must not discard durable selected
+facts, widen source identity, downgrade canonicality, or force full payload
+retention for empty historical blocks.
+
 Required backfills include:
 
 - ENSv1 historical state
@@ -1516,11 +1539,13 @@ Metrics:
 - verification failure rate
 - coverage partial rate
 - replay duration
+- backfill catch-up chunk capacity checks, including Postgres size and writable free disk
 
 Required tooling:
 
 - replay from checkpoint
 - backfill source range
+- follow finalized head with bounded idempotent catch-up jobs
 - inspect backfill job and range checkpoints
 - rerun projections from normalized events
 - inspect persisted execution trace

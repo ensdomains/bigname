@@ -1,6 +1,6 @@
 use std::{path::PathBuf, time::Duration};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tracing::{info, warn};
 
 use crate::provider::ProviderRegistry;
@@ -8,7 +8,8 @@ use crate::reconciliation::poll_provider_heads;
 
 use super::adapter_sync::sync_adapter_owned_raw_log_state;
 use super::intake::{
-    IntakeChainTask, intake_runtime_state, sync_intake_chain_tasks, watched_chain_plan_state,
+    IntakeChainTask, intake_runtime_state, sync_intake_chain_tasks,
+    validate_provider_registry_for_intake_tasks, watched_chain_plan_state,
 };
 use super::logging::{
     log_intake_chain_tasks, log_manifest_normalized_event_summary, log_manifest_runtime_state,
@@ -141,6 +142,13 @@ pub(crate) async fn run_poll_loop(
                                         .await
                                         {
                                             Ok(next_tasks) => {
+                                                validate_provider_registry_for_intake_tasks(
+                                                    &next_tasks,
+                                                    provider_registry,
+                                                )
+                                                .context(
+                                                    "refreshed repository manifest state no longer matches configured RPC providers",
+                                                )?;
                                                 let previous_watch_state = watched_chain_plan_state(
                                                     &manifest_runtime_state.watched_chain_plan,
                                                 );
@@ -363,6 +371,13 @@ pub(crate) async fn run_poll_loop(
                     .await
                 {
                     Ok(Some((next_manifest_runtime_state, next_tasks))) => {
+                        validate_provider_registry_for_intake_tasks(
+                            &next_tasks,
+                            provider_registry,
+                        )
+                        .context(
+                            "refreshed stored discovery state no longer matches configured RPC providers",
+                        )?;
                         let previous_watch_state =
                             watched_chain_plan_state(&manifest_runtime_state.watched_chain_plan);
                         let next_watch_state =

@@ -35,6 +35,7 @@ struct AutoBootstrapBackfillFixture {
     active_from_block_number: Option<i64>,
     active_to_block_number: Option<i64>,
     provider_head_block_number: i64,
+    bootstrap_backfill_max_blocks: Option<i64>,
 }
 
 struct AutoBootstrapUnknownStartFixture {
@@ -44,6 +45,20 @@ struct AutoBootstrapUnknownStartFixture {
     contract_instance_id: &'static str,
     address: &'static str,
     manifest_role: &'static str,
+}
+
+struct HistoricalReplayRetentionProbe {
+    chain_id: &'static str,
+    watched_address: &'static str,
+    claimed_address: &'static str,
+    empty_block_hash: &'static str,
+    empty_block_number: i64,
+    finalized_block_hash: &'static str,
+    finalized_block_number: i64,
+    safe_block_hash: &'static str,
+    safe_block_number: i64,
+    observed_block_hash: &'static str,
+    observed_block_number: i64,
 }
 
 pub(crate) async fn run_backfill_sources_auto_bootstrap() -> Result<()> {
@@ -70,6 +85,7 @@ pub(crate) async fn run_backfill_sources_auto_bootstrap() -> Result<()> {
     let completed_jobs =
         seed_completed_auto_bootstrap_backfill_jobs(&database, &eligible_targets).await?;
     assert_completed_auto_bootstrap_backfill_jobs(&completed_jobs);
+    assert_auto_bootstrap_cap_is_not_full_history(&completed_jobs);
     assert_auto_bootstrap_unknown_start_absent_from_source_identity(&completed_jobs);
     let after_jobs_before_replay =
         snapshot_auto_bootstrap_existing_routes(&database, &corpus).await?;
@@ -225,6 +241,46 @@ pub(crate) async fn run_backfill_source_family_existing_response_lock() -> Resul
         StatusCode::NOT_FOUND,
     )
     .await?;
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+pub(crate) async fn run_backfill_sources_retention_and_replay_semantics() -> Result<()> {
+    let database = HarnessDatabase::new().await?;
+    let completed_jobs = seed_completed_source_family_backfill_jobs(&database).await?;
+    assert_completed_source_family_backfill_jobs(&completed_jobs);
+    assert_full_profile_started_history_is_covered(&completed_jobs, "mainnet");
+    assert_full_profile_started_history_is_covered(&completed_jobs, "sepolia-dev");
+
+    let replay_probe = seed_historical_replay_retention_probe(&database).await?;
+    let backfill_surface_before_replay = snapshot_backfill_lifecycle_surface(&database).await?;
+    let manifest_policy_before_replay = snapshot_manifest_policy_surface(&database).await?;
+    replay_raw_fact_normalized_events_for_blocks(
+        &database,
+        "mainnet",
+        replay_probe.chain_id,
+        &[
+            replay_probe.empty_block_hash,
+            replay_probe.finalized_block_hash,
+            replay_probe.safe_block_hash,
+            replay_probe.observed_block_hash,
+        ],
+    )
+    .await?;
+    assert_empty_historical_block_retention(&database, &replay_probe).await?;
+    assert_safe_finalized_historical_facts_replay_as_non_observed(&database, &replay_probe)
+        .await?;
+    assert_eq!(
+        snapshot_backfill_lifecycle_surface(&database).await?,
+        backfill_surface_before_replay,
+        "historical raw-fact replay must not mutate completed backfill jobs or range checkpoints"
+    );
+    assert_eq!(
+        snapshot_manifest_policy_surface(&database).await?,
+        manifest_policy_before_replay,
+        "historical raw-fact replay must not change manifest rollout or capability policy state"
+    );
 
     database.cleanup().await?;
     Ok(())
@@ -672,6 +728,319 @@ async fn assert_source_family_raw_retention_probe_scoped(
     Ok(())
 }
 
+async fn seed_historical_replay_retention_probe(
+    database: &HarnessDatabase,
+) -> Result<HistoricalReplayRetentionProbe> {
+    let probe = HistoricalReplayRetentionProbe {
+        chain_id: "ethereum-mainnet",
+        watched_address: RAW_RETENTION_REPLAY_WATCHED_ADDRESS,
+        claimed_address: RAW_REPLAY_PROBE_CLAIMED_ADDRESS,
+        empty_block_hash: "0xe500000000000000000000000000000000000000000000000000000000000500",
+        empty_block_number: 500,
+        finalized_block_hash: "0xf501000000000000000000000000000000000000000000000000000000000501",
+        finalized_block_number: 501,
+        safe_block_hash: "0x5a02000000000000000000000000000000000000000000000000000000000502",
+        safe_block_number: 502,
+        observed_block_hash: "0x0b03000000000000000000000000000000000000000000000000000000000503",
+        observed_block_number: 503,
+    };
+    let manifest_id = database
+        .insert_manifest(
+            "ens",
+            RAW_REPLAY_PROBE_SOURCE_FAMILY,
+            probe.chain_id,
+            "ens_v1",
+            91,
+            "active",
+            "uts46-v1",
+        )
+        .await?;
+    seed_active_replay_contract(
+        database,
+        manifest_id,
+        Uuid::from_u128(0xbac500),
+        probe.chain_id,
+        RAW_REPLAY_PROBE_CONTRACT_ROLE,
+        probe.watched_address,
+    )
+    .await?;
+    seed_historical_replay_block(
+        database,
+        probe.chain_id,
+        probe.empty_block_hash,
+        probe.empty_block_number,
+        CanonicalityState::Finalized,
+        false,
+        probe.watched_address,
+    )
+    .await?;
+    seed_historical_replay_block(
+        database,
+        probe.chain_id,
+        probe.finalized_block_hash,
+        probe.finalized_block_number,
+        CanonicalityState::Finalized,
+        true,
+        probe.watched_address,
+    )
+    .await?;
+    seed_historical_replay_block(
+        database,
+        probe.chain_id,
+        probe.safe_block_hash,
+        probe.safe_block_number,
+        CanonicalityState::Safe,
+        true,
+        probe.watched_address,
+    )
+    .await?;
+    seed_historical_replay_block(
+        database,
+        probe.chain_id,
+        probe.observed_block_hash,
+        probe.observed_block_number,
+        CanonicalityState::Observed,
+        true,
+        probe.watched_address,
+    )
+    .await?;
+
+    Ok(probe)
+}
+
+async fn seed_historical_replay_block(
+    database: &HarnessDatabase,
+    chain_id: &str,
+    block_hash: &str,
+    block_number: i64,
+    canonicality_state: CanonicalityState,
+    include_selected_log: bool,
+    watched_address: &str,
+) -> Result<()> {
+    let parent_hash =
+        "0xfeed000000000000000000000000000000000000000000000000000000000500";
+    bigname_storage::upsert_chain_lineage_blocks(
+        &database.pool,
+        &[bigname_storage::ChainLineageBlock {
+            chain_id: chain_id.to_owned(),
+            block_hash: block_hash.to_owned(),
+            parent_hash: Some(parent_hash.to_owned()),
+            block_number,
+            block_timestamp: timestamp(1_717_195_000 + block_number),
+            logs_bloom: None,
+            transactions_root: None,
+            receipts_root: None,
+            state_root: None,
+            canonicality_state,
+        }],
+    )
+    .await
+    .with_context(|| {
+        format!("failed to seed historical replay lineage for block {block_hash}")
+    })?;
+
+    let mut block = raw_block(
+        chain_id,
+        block_hash,
+        Some(parent_hash),
+        block_number,
+        1_717_195_000 + block_number,
+    );
+    block.canonicality_state = canonicality_state;
+    bigname_storage::upsert_raw_blocks(&database.pool, &[block])
+        .await
+        .with_context(|| format!("failed to seed historical replay raw block {block_hash}"))?;
+
+    if include_selected_log {
+        bigname_storage::upsert_raw_logs(
+            &database.pool,
+            &[bigname_storage::RawLog {
+                chain_id: chain_id.to_owned(),
+                block_hash: block_hash.to_owned(),
+                block_number,
+                transaction_hash: format!("0x{block_number:064x}"),
+                transaction_index: 0,
+                log_index: 0,
+                emitting_address: watched_address.to_ascii_lowercase(),
+                topics: vec![
+                    RAW_REPLAY_PROBE_REVERSE_CLAIMED_TOPIC0.to_owned(),
+                    RAW_REPLAY_PROBE_CLAIMED_ADDRESS_TOPIC.to_owned(),
+                    RAW_REPLAY_PROBE_REVERSE_NODE_TOPIC.to_owned(),
+                ],
+                data: Vec::new(),
+                canonicality_state,
+            }],
+        )
+        .await
+        .with_context(|| {
+            format!("failed to seed historical replay selected raw log for block {block_hash}")
+        })?;
+    }
+
+    Ok(())
+}
+
+async fn assert_empty_historical_block_retention(
+    database: &HarnessDatabase,
+    probe: &HistoricalReplayRetentionProbe,
+) -> Result<()> {
+    assert_eq!(
+        block_scoped_table_count(
+            database,
+            "chain_lineage",
+            probe.chain_id,
+            probe.empty_block_hash
+        )
+        .await?,
+        1,
+        "empty historical block must retain its lineage/header anchor"
+    );
+    assert_eq!(
+        block_scoped_table_count(database, "raw_blocks", probe.chain_id, probe.empty_block_hash)
+            .await?,
+        1,
+        "empty historical block must retain its compact raw block anchor"
+    );
+    for table in [
+        "raw_logs",
+        "raw_transactions",
+        "raw_receipts",
+        "raw_payload_cache_metadata",
+        "normalized_events",
+    ] {
+        assert_eq!(
+            block_scoped_table_count(database, table, probe.chain_id, probe.empty_block_hash)
+                .await?,
+            0,
+            "empty historical block must not retain {table} rows by default"
+        );
+    }
+
+    let selected_replay_event_count = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)::BIGINT
+        FROM normalized_events
+        WHERE chain_id = $1
+          AND block_hash = ANY($2::TEXT[])
+          AND event_kind = 'ReverseChanged'
+          AND after_state->>'address' = $3
+        "#,
+    )
+    .bind(probe.chain_id)
+    .bind(vec![
+        probe.finalized_block_hash.to_owned(),
+        probe.safe_block_hash.to_owned(),
+    ])
+    .bind(probe.claimed_address)
+    .fetch_one(&database.pool)
+    .await
+    .context("failed to count selected historical replay normalized events")?;
+    assert_eq!(
+        selected_replay_event_count, 2,
+        "selected safe/finalized raw facts must remain replayable without empty-block payload retention"
+    );
+
+    Ok(())
+}
+
+async fn assert_safe_finalized_historical_facts_replay_as_non_observed(
+    database: &HarnessDatabase,
+    probe: &HistoricalReplayRetentionProbe,
+) -> Result<()> {
+    let replayed_states = sqlx::query_as::<_, (i64, String)>(
+        r#"
+        SELECT block_number, canonicality_state::TEXT
+        FROM normalized_events
+        WHERE chain_id = $1
+          AND block_hash = ANY($2::TEXT[])
+          AND event_kind = 'ReverseChanged'
+        ORDER BY block_number
+        "#,
+    )
+    .bind(probe.chain_id)
+    .bind(vec![
+        probe.finalized_block_hash.to_owned(),
+        probe.safe_block_hash.to_owned(),
+    ])
+    .fetch_all(&database.pool)
+    .await
+    .context("failed to load safe/finalized historical replay states")?;
+    assert_eq!(
+        replayed_states,
+        vec![
+            (probe.finalized_block_number, "finalized".to_owned()),
+            (probe.safe_block_number, "safe".to_owned()),
+        ],
+        "safe/finalized historical raw facts must replay as non-observed normalized events"
+    );
+
+    let observed_event_count = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)::BIGINT
+        FROM normalized_events
+        WHERE chain_id = $1
+          AND (
+              block_hash = $2
+              OR canonicality_state = 'observed'::canonicality_state
+          )
+          AND source_family = $3
+        "#,
+    )
+    .bind(probe.chain_id)
+    .bind(probe.observed_block_hash)
+    .bind(RAW_REPLAY_PROBE_SOURCE_FAMILY)
+    .fetch_one(&database.pool)
+    .await
+    .context("failed to count observed historical replay events")?;
+    assert_eq!(
+        observed_event_count, 0,
+        "observed historical raw facts must not enter canonical-only replay or projection inputs"
+    );
+
+    database
+        .rebuild_primary_names_current(probe.claimed_address, "ens", "60")
+        .await?;
+    let primary_name = bigname_storage::load_primary_name_current(
+        &database.pool,
+        probe.claimed_address,
+        "ens",
+        "60",
+    )
+    .await?
+    .context("safe/finalized reverse-claim replay should rebuild the primary-name tuple")?;
+    assert_eq!(primary_name.claim_status, PrimaryNameClaimStatus::NotFound);
+    assert_eq!(primary_name.address, probe.claimed_address);
+    assert_eq!(primary_name.namespace, "ens");
+    assert_eq!(primary_name.coin_type, "60");
+    assert_eq!(
+        primary_name
+            .claim_provenance
+            .get("verified_primary_name_lookup")
+            .and_then(|lookup| lookup.get("address"))
+            .and_then(Value::as_str),
+        Some(probe.claimed_address),
+        "canonical-only projection rebuild should be driven by replayed safe/finalized facts"
+    );
+
+    Ok(())
+}
+
+async fn block_scoped_table_count(
+    database: &HarnessDatabase,
+    table: &str,
+    chain_id: &str,
+    block_hash: &str,
+) -> Result<i64> {
+    sqlx::query_scalar::<_, i64>(&format!(
+        "SELECT COUNT(*)::BIGINT FROM {table} WHERE chain_id = $1 AND block_hash = $2"
+    ))
+    .bind(chain_id)
+    .bind(block_hash)
+    .fetch_one(&database.pool)
+    .await
+    .with_context(|| format!("failed to count {table} rows for block {block_hash}"))
+}
+
 async fn snapshot_backfill_lifecycle_surface(
     database: &HarnessDatabase,
 ) -> Result<Vec<(i64, String, String, String, String, i64, String, i64)>> {
@@ -987,6 +1356,83 @@ fn assert_completed_auto_bootstrap_backfill_jobs(
     }
 }
 
+fn assert_auto_bootstrap_cap_is_not_full_history(
+    completed_jobs: &[(
+        AutoBootstrapBackfillFixture,
+        bigname_storage::BackfillJobRecord,
+    )],
+) {
+    let capped_jobs = completed_jobs
+        .iter()
+        .filter(|(fixture, _)| fixture.bootstrap_backfill_max_blocks.is_some())
+        .collect::<Vec<_>>();
+    assert!(
+        !capped_jobs.is_empty(),
+        "automatic bootstrap conformance must include a capped startup range"
+    );
+
+    for (fixture, completed_job) in capped_jobs {
+        let admitted_start = fixture.admitted_history_start_block_number();
+        let bootstrap_start = fixture.effective_from_block_number();
+        assert!(
+            bootstrap_start > admitted_start,
+            "{} capped bootstrap job must start after admitted history start to prove partiality",
+            fixture.source_family
+        );
+        assert_eq!(
+            completed_job.job.range_start_block_number, bootstrap_start,
+            "{} capped bootstrap job must persist the capped finite range start",
+            fixture.source_family
+        );
+        assert_eq!(
+            completed_job.job.range_end_block_number,
+            fixture.effective_to_block_number(),
+            "{} capped bootstrap job must persist the finite provider-head range end",
+            fixture.source_family
+        );
+
+        let selected_targets = completed_job
+            .job
+            .source_identity
+            .get("selected_targets")
+            .and_then(Value::as_array)
+            .expect("capped automatic bootstrap job should persist selected targets");
+        assert_eq!(selected_targets.len(), 1);
+        let selected_target = &selected_targets[0];
+        assert_eq!(
+            selected_target
+                .get("effective_from_block")
+                .and_then(Value::as_i64),
+            Some(bootstrap_start),
+            "{} capped bootstrap selected target must use the capped range start",
+            fixture.source_family
+        );
+        assert_ne!(
+            selected_target
+                .get("effective_from_block")
+                .and_then(Value::as_i64),
+            Some(admitted_start),
+            "{} capped bootstrap source identity must not masquerade as full admitted history",
+            fixture.source_family
+        );
+
+        let source_identity = serde_json::to_string(&completed_job.job.source_identity)
+            .expect("automatic bootstrap source identity should serialize");
+        for forbidden in [
+            "full_historical_completeness",
+            "historical_completeness",
+            "consumer_replacement",
+            "route_coverage",
+            "full_history",
+        ] {
+            assert!(
+                !source_identity.contains(forbidden),
+                "capped bootstrap source identity must not carry full-history marker {forbidden}: {source_identity}"
+            );
+        }
+    }
+}
+
 fn assert_completed_source_family_backfill_jobs(
     completed_jobs: &[(
         SourceFamilyBackfillFixture,
@@ -1136,6 +1582,129 @@ fn assert_completed_source_family_backfill_jobs(
                     && range.completed_at.is_some()
             }),
             "{} source-family job must persist completed child ranges",
+            fixture.source_family
+        );
+    }
+}
+
+fn assert_full_profile_started_history_is_covered(
+    completed_jobs: &[(
+        SourceFamilyBackfillFixture,
+        bigname_storage::BackfillJobRecord,
+    )],
+    deployment_profile: &str,
+) {
+    let expected_targets = source_family_backfill_fixtures()
+        .into_iter()
+        .filter(|fixture| fixture.deployment_profile == deployment_profile)
+        .map(|fixture| {
+            (
+                fixture.chain_id,
+                fixture.source_family,
+                fixture.contract_instance_id,
+                fixture.address,
+                fixture.range_start_block_number,
+                fixture.range_end_block_number,
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    let actual_targets = completed_jobs
+        .iter()
+        .filter(|(fixture, _)| fixture.deployment_profile == deployment_profile)
+        .map(|(fixture, completed_job)| {
+            let selected_targets = completed_job
+                .job
+                .source_identity
+                .get("selected_targets")
+                .and_then(Value::as_array)
+                .expect("completed source-family job should persist selected targets");
+            assert_eq!(
+                selected_targets.len(),
+                1,
+                "{} full-history source-family job should retain one selected target",
+                fixture.source_family
+            );
+            let selected_target = &selected_targets[0];
+            (
+                completed_job.job.chain_id.as_str(),
+                selected_target
+                    .get("source_family")
+                    .and_then(Value::as_str)
+                    .expect("selected target should include source_family"),
+                selected_target
+                    .get("contract_instance_id")
+                    .and_then(Value::as_str)
+                    .expect("selected target should include contract_instance_id"),
+                selected_target
+                    .get("address")
+                    .and_then(Value::as_str)
+                    .expect("selected target should include address"),
+                selected_target
+                    .get("effective_from_block")
+                    .and_then(Value::as_i64)
+                    .expect("selected target should include effective_from_block"),
+                selected_target
+                    .get("effective_to_block")
+                    .and_then(Value::as_i64)
+                    .expect("selected target should include effective_to_block"),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        actual_targets, expected_targets,
+        "{deployment_profile} completed source-family jobs must cover the whole admitted started history for every selected target"
+    );
+
+    for (fixture, completed_job) in completed_jobs
+        .iter()
+        .filter(|(fixture, _)| fixture.deployment_profile == deployment_profile)
+    {
+        assert_eq!(
+            completed_job.job.range_start_block_number, fixture.range_start_block_number,
+            "{} full-history job must start at admitted history",
+            fixture.source_family
+        );
+        assert_eq!(
+            completed_job.job.range_end_block_number, fixture.range_end_block_number,
+            "{} full-history job must end at the selected finite history boundary",
+            fixture.source_family
+        );
+        let mut ranges = completed_job
+            .ranges
+            .iter()
+            .map(|range| {
+                (
+                    range.range_start_block_number,
+                    range.range_end_block_number,
+                    range.checkpoint_block_number,
+                    range.status,
+                )
+            })
+            .collect::<Vec<_>>();
+        ranges.sort_by_key(|(start, end, _, _)| (*start, *end));
+        assert_eq!(
+            ranges.first().map(|(start, _, _, _)| *start),
+            Some(fixture.range_start_block_number),
+            "{} full-history ranges must start at admitted history",
+            fixture.source_family
+        );
+        assert_eq!(
+            ranges.last().map(|(_, end, _, _)| *end),
+            Some(fixture.range_end_block_number),
+            "{} full-history ranges must end at the selected finite history boundary",
+            fixture.source_family
+        );
+        assert!(
+            ranges.windows(2).all(|window| window[0].1 + 1 == window[1].0),
+            "{} full-history ranges must be contiguous without gaps",
+            fixture.source_family
+        );
+        assert!(
+            ranges.iter().all(|(_, end, checkpoint, status)| {
+                *status == bigname_storage::BackfillLifecycleStatus::Completed
+                    && checkpoint == end
+            }),
+            "{} full-history ranges must all complete at their declared ends",
             fixture.source_family
         );
     }
@@ -1825,7 +2394,7 @@ async fn load_auto_bootstrap_manifest_started_targets(
                 assert_eq!(target.address, fixture.address);
                 assert_eq!(
                     target.effective_from_block,
-                    fixture.effective_from_block_number()
+                    fixture.admitted_history_start_block_number()
                 );
                 assert_eq!(target.effective_to_block, fixture.active_to_block_number);
                 resolved_fixtures.push(fixture.clone());
@@ -1984,10 +2553,24 @@ async fn insert_auto_bootstrap_contract_target(
 }
 
 impl AutoBootstrapBackfillFixture {
-    fn effective_from_block_number(&self) -> i64 {
+    fn admitted_history_start_block_number(&self) -> i64 {
         self.active_from_block_number
             .map(|active_from| active_from.max(self.manifest_start_block_number))
             .unwrap_or(self.manifest_start_block_number)
+    }
+
+    fn effective_from_block_number(&self) -> i64 {
+        let admitted_start = self.admitted_history_start_block_number();
+        let capped_start = self
+            .bootstrap_backfill_max_blocks
+            .map(|max_blocks| {
+                self.provider_head_block_number
+                    .checked_sub(max_blocks - 1)
+                    .unwrap_or(0)
+                    .max(0)
+            })
+            .unwrap_or(admitted_start);
+        admitted_start.max(capped_start)
     }
 
     fn effective_to_block_number(&self) -> i64 {
@@ -2011,6 +2594,7 @@ fn auto_bootstrap_manifest_started_fixtures() -> Vec<AutoBootstrapBackfillFixtur
             active_from_block_number: Some(125),
             active_to_block_number: Some(160),
             provider_head_block_number: 170,
+            bootstrap_backfill_max_blocks: None,
         },
         AutoBootstrapBackfillFixture {
             namespace: "ens",
@@ -2024,6 +2608,21 @@ fn auto_bootstrap_manifest_started_fixtures() -> Vec<AutoBootstrapBackfillFixtur
             active_from_block_number: None,
             active_to_block_number: None,
             provider_head_block_number: 260,
+            bootstrap_backfill_max_blocks: None,
+        },
+        AutoBootstrapBackfillFixture {
+            namespace: "ens",
+            deployment_profile: "sepolia-dev",
+            chain_id: "ethereum-sepolia",
+            source_family: "ens_v2_resolver_l1",
+            contract_instance_id: "00000000-0000-0000-0000-00000000b401",
+            address: "0x000000000000000000000000000000000000b401",
+            manifest_role: "resolver",
+            manifest_start_block_number: 100,
+            active_from_block_number: Some(120),
+            active_to_block_number: None,
+            provider_head_block_number: 30_200,
+            bootstrap_backfill_max_blocks: Some(25_000),
         },
     ]
 }

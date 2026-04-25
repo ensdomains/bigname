@@ -293,7 +293,7 @@ async fn hash_pinned_backfill_persists_range_and_is_idempotent_without_advancing
         .await?,
         2
     );
-    assert_eq!(table_count(database.pool(), "chain_lineage").await?, 0);
+    assert_eq!(table_count(database.pool(), "chain_lineage").await?, 2);
     assert_eq!(
         sqlx::query_as::<_, (String, i64, String, i64, String, i64)>(
             r#"
@@ -325,7 +325,7 @@ async fn hash_pinned_backfill_persists_range_and_is_idempotent_without_advancing
         )
         .fetch_one(database.pool())
         .await?,
-        "observed".to_owned()
+        "canonical".to_owned()
     );
     assert_eq!(
         sqlx::query_scalar::<_, String>(
@@ -333,17 +333,42 @@ async fn hash_pinned_backfill_persists_range_and_is_idempotent_without_advancing
         )
         .fetch_one(database.pool())
         .await?,
-        "observed".to_owned()
+        "canonical".to_owned()
     );
 
     let requests = requests
         .lock()
         .expect("request log must not be poisoned")
         .clone();
-    assert_eq!(requests.len(), 11);
+    assert_eq!(requests.len(), 15);
+    let tagged_head_requests = requests
+        .iter()
+        .filter(|request| {
+            request.method == "eth_getBlockByNumber"
+                && request
+                    .params
+                    .first()
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| !value.starts_with("0x"))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        tagged_head_requests
+            .iter()
+            .map(|request| request.params.first().and_then(Value::as_str))
+            .collect::<Vec<_>>(),
+        vec![Some("latest"), Some("safe"), Some("finalized")]
+    );
     let block_number_requests = requests
         .iter()
-        .filter(|request| request.method == "eth_getBlockByNumber")
+        .filter(|request| {
+            request.method == "eth_getBlockByNumber"
+                && request
+                    .params
+                    .first()
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| value.starts_with("0x"))
+        })
         .collect::<Vec<_>>();
     assert_eq!(block_number_requests.len(), 4);
     assert_eq!(
@@ -368,14 +393,14 @@ async fn hash_pinned_backfill_persists_range_and_is_idempotent_without_advancing
         block_number_requests[0].http_request_id, block_number_requests[2].http_request_id,
         "post-log hash validation must re-fetch block numbers after the range log request"
     );
-    assert_eq!(requests[0].method, "eth_getBlockByNumber");
+    assert_eq!(requests[4].method, "eth_getBlockByNumber");
     assert_eq!(
-        requests[0].params.first().and_then(Value::as_str),
+        requests[4].params.first().and_then(Value::as_str),
         Some("0x2a")
     );
-    assert_eq!(requests[1].method, "eth_getBlockByNumber");
+    assert_eq!(requests[5].method, "eth_getBlockByNumber");
     assert_eq!(
-        requests[1].params.first().and_then(Value::as_str),
+        requests[5].params.first().and_then(Value::as_str),
         Some("0x2b")
     );
     let log_requests = requests
@@ -408,14 +433,28 @@ async fn hash_pinned_backfill_persists_range_and_is_idempotent_without_advancing
         )]),
         "backfill log range must be scoped to the selected address set"
     );
-    assert_eq!(requests[5].method, "eth_getBlockByHash");
+    let full_block_requests = requests
+        .iter()
+        .filter(|request| {
+            request.method == "eth_getBlockByHash"
+                && request.params.get(1) == Some(&Value::Bool(true))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(full_block_requests.len(), 2);
+    assert_eq!(full_block_requests[0].method, "eth_getBlockByHash");
     assert_eq!(
-        requests[5].params.first().and_then(Value::as_str),
+        full_block_requests[0]
+            .params
+            .first()
+            .and_then(Value::as_str),
         Some(block_42.block_hash.as_str())
     );
-    assert_eq!(requests[7].method, "eth_getBlockByHash");
+    assert_eq!(full_block_requests[1].method, "eth_getBlockByHash");
     assert_eq!(
-        requests[7].params.first().and_then(Value::as_str),
+        full_block_requests[1]
+            .params
+            .first()
+            .and_then(Value::as_str),
         Some(block_43.block_hash.as_str())
     );
     let code_requests = requests
@@ -430,9 +469,9 @@ async fn hash_pinned_backfill_persists_range_and_is_idempotent_without_advancing
             && request.batch_size == 2),
         "hash-pinned code observations must share one JSON-RPC batch HTTP request"
     );
-    assert_eq!(requests[9].method, "eth_getCode");
+    assert_eq!(code_requests[0].method, "eth_getCode");
     assert_eq!(
-        requests[9]
+        code_requests[0]
             .params
             .get(1)
             .and_then(Value::as_object)
@@ -440,9 +479,9 @@ async fn hash_pinned_backfill_persists_range_and_is_idempotent_without_advancing
             .and_then(Value::as_str),
         Some(block_42.block_hash.as_str())
     );
-    assert_eq!(requests[10].method, "eth_getCode");
+    assert_eq!(code_requests[1].method, "eth_getCode");
     assert_eq!(
-        requests[10]
+        code_requests[1]
             .params
             .get(1)
             .and_then(Value::as_object)
@@ -450,6 +489,292 @@ async fn hash_pinned_backfill_persists_range_and_is_idempotent_without_advancing
             .and_then(Value::as_str),
         Some(block_43.block_hash.as_str())
     );
+
+    server.abort();
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn manual_finite_backfill_runs_full_requested_range_without_startup_cap() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_backfill_job_tables(database.pool()).await?;
+    let contract_instance_id = Uuid::from_u128(9_100);
+    let address = "0x0000000000000000000000000000000000000001";
+
+    insert_watched_manifest_contract(
+        database.pool(),
+        9_100,
+        "ens",
+        "ethereum-mainnet",
+        "ens_v1_wrapper_l1",
+        contract_instance_id,
+        address,
+    )
+    .await?;
+
+    let range = BackfillBlockRange::new(1, 4)?;
+    let source_plan = load_watched_source_selector_plan(
+        database.pool(),
+        "ethereum-mainnet",
+        WatchedSourceSelector::WholeActiveWatchedChain,
+        range.from_block,
+        range.to_block,
+    )
+    .await?;
+    let block_1 = provider_block(
+        "0x1000000000000000000000000000000000000000000000000000000000000001",
+        Some("0x0000000000000000000000000000000000000000000000000000000000000000"),
+        1,
+    );
+    let block_2 = provider_block(
+        "0x2000000000000000000000000000000000000000000000000000000000000002",
+        Some(&block_1.block_hash),
+        2,
+    );
+    let block_3 = provider_block(
+        "0x3000000000000000000000000000000000000000000000000000000000000003",
+        Some(&block_2.block_hash),
+        3,
+    );
+    let block_4 = provider_block(
+        "0x4000000000000000000000000000000000000000000000000000000000000004",
+        Some(&block_3.block_hash),
+        4,
+    );
+    let requests = Arc::new(Mutex::new(Vec::<RecordedRpcRequest>::new()));
+    let (provider, server) = number_resolving_provider(
+        vec![
+            block_1.clone(),
+            block_2.clone(),
+            block_3.clone(),
+            block_4.clone(),
+        ],
+        Arc::clone(&requests),
+    )
+    .await?;
+
+    let outcome = run_resumable_hash_pinned_backfill_job(
+        database.pool(),
+        &source_plan,
+        &provider,
+        backfill_job_config(range, "manual-full-finite-range", "lease-manual-full")?,
+    )
+    .await?;
+
+    assert_eq!((outcome.from_block, outcome.to_block), (1, 4));
+    assert_eq!(outcome.resolved_block_count, 4);
+    assert_eq!(outcome.raw_block_count, 4);
+    assert_eq!(outcome.raw_log_count, 4);
+    assert_eq!(outcome.raw_code_hash_count, 4);
+
+    let job = load_backfill_job(database.pool(), outcome.backfill_job_id)
+        .await?
+        .expect("manual finite backfill job must exist");
+    assert_eq!(job.range_start_block_number, 1);
+    assert_eq!(job.range_end_block_number, 4);
+    let ranges = load_backfill_ranges(database.pool(), outcome.backfill_job_id).await?;
+    assert_eq!(ranges.len(), 1);
+    assert_eq!(ranges[0].range_start_block_number, 1);
+    assert_eq!(ranges[0].range_end_block_number, 4);
+    assert_eq!(table_count(database.pool(), "raw_blocks").await?, 4);
+    assert_eq!(table_count(database.pool(), "chain_lineage").await?, 4);
+
+    server.abort();
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn source_scoped_backfill_empty_historical_blocks_skip_payload_cache_metadata() -> Result<()>
+{
+    let database = TestDatabase::new().await?;
+    create_backfill_job_tables(database.pool()).await?;
+    let contract_instance_id = Uuid::from_u128(9_200);
+    let address = "0x0000000000000000000000000000000000000001";
+
+    insert_watched_manifest_contract(
+        database.pool(),
+        9_200,
+        "ens",
+        "ethereum-mainnet",
+        "ens_v1_wrapper_l1",
+        contract_instance_id,
+        address,
+    )
+    .await?;
+
+    let range = BackfillBlockRange::new(42, 42)?;
+    let source_plan = load_watched_source_selector_plan(
+        database.pool(),
+        "ethereum-mainnet",
+        WatchedSourceSelector::SourceFamily("ens_v1_wrapper_l1".to_owned()),
+        range.from_block,
+        range.to_block,
+    )
+    .await?;
+    let block = provider_block(
+        "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        Some("0x9999999999999999999999999999999999999999999999999999999999999999"),
+        42,
+    );
+    let requests = Arc::new(Mutex::new(Vec::<RecordedRpcRequest>::new()));
+    let (provider, server) = number_resolving_provider_with_fixtures(
+        vec![ProviderBlockFixture {
+            block: block.clone(),
+            logs: Vec::new(),
+        }],
+        Arc::clone(&requests),
+    )
+    .await?;
+
+    let outcome = run_resumable_hash_pinned_backfill_job(
+        database.pool(),
+        &source_plan,
+        &provider,
+        backfill_job_config(range, "empty-selected-target-block", "lease-empty")?,
+    )
+    .await?;
+
+    assert_eq!(outcome.raw_block_count, 1);
+    assert_eq!(outcome.raw_log_count, 0);
+    assert_eq!(outcome.raw_transaction_count, 0);
+    assert_eq!(outcome.raw_receipt_count, 0);
+    assert_eq!(outcome.raw_code_hash_count, 1);
+    assert_eq!(table_count(database.pool(), "chain_lineage").await?, 1);
+    assert_eq!(table_count(database.pool(), "raw_blocks").await?, 1);
+    assert_eq!(table_count(database.pool(), "raw_code_hashes").await?, 1);
+    assert_eq!(table_count(database.pool(), "raw_logs").await?, 0);
+    assert_eq!(table_count(database.pool(), "raw_transactions").await?, 0);
+    assert_eq!(table_count(database.pool(), "raw_receipts").await?, 0);
+    assert_eq!(
+        table_count(database.pool(), "raw_payload_cache_metadata").await?,
+        0
+    );
+    assert_eq!(table_count(database.pool(), "normalized_events").await?, 0);
+
+    server.abort();
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn backfill_uses_finalized_safe_and_canonical_evidence_for_admitted_rows() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_backfill_job_tables(database.pool()).await?;
+    let contract_instance_id = Uuid::from_u128(9_300);
+    let address = "0x0000000000000000000000000000000000000001";
+
+    insert_watched_manifest_contract(
+        database.pool(),
+        9_300,
+        "ens",
+        "ethereum-mainnet",
+        "ens_v1_wrapper_l1",
+        contract_instance_id,
+        address,
+    )
+    .await?;
+
+    let block_40 = provider_block(
+        "0x4000000000000000000000000000000000000000000000000000000000000040",
+        Some("0x3999999999999999999999999999999999999999999999999999999999999939"),
+        40,
+    );
+    let block_41 = provider_block(
+        "0x4100000000000000000000000000000000000000000000000000000000000041",
+        Some(&block_40.block_hash),
+        41,
+    );
+    let block_42 = provider_block(
+        "0x4200000000000000000000000000000000000000000000000000000000000042",
+        Some(&block_41.block_hash),
+        42,
+    );
+    let requests = Arc::new(Mutex::new(Vec::<RecordedRpcRequest>::new()));
+    let (provider, server) = number_resolving_provider_with_fixtures_and_heads(
+        vec![
+            ProviderBlockFixture {
+                block: block_40.clone(),
+                logs: vec![rpc_log_payload(&block_40)],
+            },
+            ProviderBlockFixture {
+                block: block_41.clone(),
+                logs: vec![rpc_log_payload(&block_41)],
+            },
+            ProviderBlockFixture {
+                block: block_42.clone(),
+                logs: vec![rpc_log_payload(&block_42)],
+            },
+        ],
+        Arc::clone(&requests),
+        Some(41),
+        Some(40),
+    )
+    .await?;
+
+    let range = BackfillBlockRange::new(40, 42)?;
+    let source_plan = load_watched_source_selector_plan(
+        database.pool(),
+        "ethereum-mainnet",
+        WatchedSourceSelector::SourceFamily("ens_v1_wrapper_l1".to_owned()),
+        range.from_block,
+        range.to_block,
+    )
+    .await?;
+    let outcome = run_resumable_hash_pinned_backfill_job(
+        database.pool(),
+        &source_plan,
+        &provider,
+        backfill_job_config(range, "canonicality-evidence", "lease-canonicality")?,
+    )
+    .await?;
+    assert_eq!(outcome.raw_log_count, 3);
+    assert_eq!(outcome.raw_code_hash_count, 3);
+
+    let expected_states = vec![
+        (40, "finalized".to_owned()),
+        (41, "safe".to_owned()),
+        (42, "canonical".to_owned()),
+    ];
+    for table in ["chain_lineage", "raw_blocks", "raw_logs", "raw_code_hashes"] {
+        let states = sqlx::query_as::<_, (i64, String)>(&format!(
+            "SELECT block_number, canonicality_state::TEXT FROM {table} ORDER BY block_number"
+        ))
+        .fetch_all(database.pool())
+        .await?;
+        assert_eq!(states, expected_states, "{table} canonicality mismatch");
+    }
+
+    let payload_states = sqlx::query_as::<_, (i64, Vec<String>)>(
+        r#"
+        SELECT
+            block_number,
+            ARRAY_AGG(DISTINCT canonicality_state::TEXT ORDER BY canonicality_state::TEXT)::TEXT[]
+        FROM raw_payload_cache_metadata
+        GROUP BY block_number
+        ORDER BY block_number
+        "#,
+    )
+    .fetch_all(database.pool())
+    .await?;
+    assert_eq!(
+        payload_states,
+        vec![
+            (40, vec!["finalized".to_owned()]),
+            (41, vec!["safe".to_owned()]),
+            (42, vec!["canonical".to_owned()]),
+        ]
+    );
+
+    let normalized_event_states = sqlx::query_as::<_, (i64, String)>(
+        r#"
+        SELECT block_number, canonicality_state::TEXT
+        FROM normalized_events
+        WHERE event_kind = 'PreimageObserved'
+        ORDER BY block_number
+        "#,
+    )
+    .fetch_all(database.pool())
+    .await?;
+    assert_eq!(normalized_event_states, expected_states);
 
     server.abort();
     database.cleanup().await
@@ -1507,10 +1832,25 @@ async fn hash_pinned_backfill_fails_missing_hash_payload_without_number_fallback
 
         let result = match method {
             "eth_getBlockByNumber" => {
-                assert_eq!(params.first().and_then(Value::as_str), Some("0x2a"));
-                rpc_block_bundle_payload(&provider_block(block_hash, None, 42))
+                let selection = params
+                    .first()
+                    .and_then(Value::as_str)
+                    .expect("block number or tag parameter must be present");
+                match selection {
+                    "latest" | "0x2a" => {
+                        rpc_block_bundle_payload(&provider_block(block_hash, None, 42))
+                    }
+                    "safe" | "finalized" => Value::Null,
+                    _ => panic!("unexpected block selection: {body}"),
+                }
             }
-            "eth_getBlockByHash" => Value::Null,
+            "eth_getBlockByHash" => {
+                if params.get(1) == Some(&Value::Bool(false)) {
+                    rpc_block_bundle_payload(&provider_block(block_hash, None, 42))
+                } else {
+                    Value::Null
+                }
+            }
             _ => panic!("unexpected RPC request: {body}"),
         };
 
@@ -1613,7 +1953,14 @@ async fn hash_pinned_backfill_fails_missing_hash_payload_without_number_fallback
             .iter()
             .map(|request| request.method.as_str())
             .collect::<Vec<_>>(),
-        vec!["eth_getBlockByNumber", "eth_getBlockByHash"]
+        vec![
+            "eth_getBlockByNumber",
+            "eth_getBlockByNumber",
+            "eth_getBlockByNumber",
+            "eth_getBlockByHash",
+            "eth_getBlockByNumber",
+            "eth_getBlockByHash"
+        ]
     );
 
     server.abort();
@@ -1641,6 +1988,15 @@ async fn number_resolving_provider_with_fixtures(
     fixtures: Vec<ProviderBlockFixture>,
     requests: Arc<Mutex<Vec<RecordedRpcRequest>>>,
 ) -> Result<(provider::JsonRpcProvider, JoinHandle<()>)> {
+    number_resolving_provider_with_fixtures_and_heads(fixtures, requests, None, None).await
+}
+
+async fn number_resolving_provider_with_fixtures_and_heads(
+    fixtures: Vec<ProviderBlockFixture>,
+    requests: Arc<Mutex<Vec<RecordedRpcRequest>>>,
+    safe_block_number: Option<i64>,
+    finalized_block_number: Option<i64>,
+) -> Result<(provider::JsonRpcProvider, JoinHandle<()>)> {
     let fixtures_by_hash = Arc::new(
         fixtures
             .into_iter()
@@ -1653,6 +2009,27 @@ async fn number_resolving_provider_with_fixtures(
             .map(|fixture| (fixture.block.block_number, fixture.block.block_hash.clone()))
             .collect::<BTreeMap<_, _>>(),
     );
+    let latest_hash = hashes_by_number
+        .iter()
+        .next_back()
+        .map(|(_, hash)| hash.clone())
+        .context("backfill provider fixture must include a latest block")?;
+    let safe_hash = safe_block_number
+        .map(|block_number| {
+            hashes_by_number
+                .get(&block_number)
+                .cloned()
+                .with_context(|| format!("safe block fixture {block_number} is missing"))
+        })
+        .transpose()?;
+    let finalized_hash = finalized_block_number
+        .map(|block_number| {
+            hashes_by_number
+                .get(&block_number)
+                .cloned()
+                .with_context(|| format!("finalized block fixture {block_number} is missing"))
+        })
+        .transpose()?;
 
     let (url, server) = spawn_json_rpc_server(Arc::new(move |body| {
         let method = body
@@ -1677,21 +2054,48 @@ async fn number_resolving_provider_with_fixtures(
         let result = match method {
             "eth_getBlockByNumber" => {
                 assert_eq!(params.get(1), Some(&Value::Bool(false)));
-                let block_number = params
+                let selection = params
                     .first()
                     .and_then(Value::as_str)
-                    .map(parse_rpc_block_number)
-                    .expect("block number parameter must be present");
-                let block_hash = hashes_by_number
-                    .get(&block_number)
-                    .unwrap_or_else(|| panic!("unexpected block number request: {body}"));
-                let fixture = fixtures_by_hash
-                    .get(block_hash)
-                    .expect("number index must point at a fixture block");
-                rpc_block_bundle_payload(&fixture.block)
+                    .expect("block number or tag parameter must be present");
+                match selection {
+                    "latest" => {
+                        let fixture = fixtures_by_hash
+                            .get(&latest_hash)
+                            .expect("latest hash must point at a fixture block");
+                        rpc_block_bundle_payload(&fixture.block)
+                    }
+                    "safe" => match &safe_hash {
+                        Some(block_hash) => {
+                            let fixture = fixtures_by_hash
+                                .get(block_hash)
+                                .expect("safe hash must point at a fixture block");
+                            rpc_block_bundle_payload(&fixture.block)
+                        }
+                        None => Value::Null,
+                    },
+                    "finalized" => match &finalized_hash {
+                        Some(block_hash) => {
+                            let fixture = fixtures_by_hash
+                                .get(block_hash)
+                                .expect("finalized hash must point at a fixture block");
+                            rpc_block_bundle_payload(&fixture.block)
+                        }
+                        None => Value::Null,
+                    },
+                    block_number => {
+                        let block_number = parse_rpc_block_number(block_number);
+                        let block_hash = hashes_by_number
+                            .get(&block_number)
+                            .unwrap_or_else(|| panic!("unexpected block number request: {body}"));
+                        let fixture = fixtures_by_hash
+                            .get(block_hash)
+                            .expect("number index must point at a fixture block");
+                        rpc_block_bundle_payload(&fixture.block)
+                    }
+                }
             }
             "eth_getBlockByHash" => {
-                assert_eq!(params.get(1), Some(&Value::Bool(true)));
                 let block_hash = params
                     .first()
                     .and_then(Value::as_str)

@@ -26,7 +26,7 @@ After these are accepted, parallel work can start.
 | Platform and DevEx | workspace bootstrap, CI, local dev, config loading | ADR 0001 | Rust workspace, compose/dev env, CI gates |
 | Storage and Domain | migrations, IDs, storage traits, domain types | `storage.md`, `chain-intake.md`, ADR 0002 | schema, migration harness, shared types |
 | Manifests and Discovery | manifest loader, discovery graph, capability registry | `manifests.md`, ADR 0001 | manifest crate, discovery persistence, admission logic |
-| Intake and Adapters | chain intake, ENSv1/ENSv2/Basenames adapters, normalized events | `storage.md`, `chain-intake.md`, `manifests.md` | raw fact intake, adapter routing, normalized events |
+| Intake and Adapters | chain intake, ENSv1/ENSv2/Basenames adapters, normalized events | `storage.md`, `chain-intake.md`, `manifests.md` | raw fact intake, per-chain provider availability handling, adapter routing, normalized events |
 | Projections and API | current-state projections, read handlers, OpenAPI output | `api-v1.md`, `projections.md`, `storage.md` | read models, API routes, contract tests |
 | Verified Execution | resolution execution, primary verification, trace persistence | `execution.md`, `manifests.md`, `storage.md` | execution crate, invalidation, explain traces |
 | Conformance and Fixtures | fixtures, replay tests, consumer capability checks | `api-v1.md`, `execution.md`, `consumer-capabilities.md` | golden fixtures, contract tests, replay suites, capability mapping |
@@ -44,8 +44,8 @@ After these are accepted, parallel work can start.
 Initial ownership should map to directories:
 
 - `apps/api`: Projections and API
-- `apps/indexer`: Intake and Adapters
-- `apps/worker`: Projections, replay, backfill, execution jobs
+- `apps/indexer`: Intake and Adapters, including selected-profile provider setup and automatic bootstrap job creation
+- `apps/worker`: Projections, replay, bounded backfill, finalized catch-up, capacity-guarded chunk execution, execution jobs
 - `crates/domain`: Storage and Domain
 - `crates/storage`: Storage and Domain
 - `crates/manifests`: Manifests and Discovery
@@ -77,3 +77,4 @@ In parallel once the storage/domain interfaces are merged:
 - do not share write ownership of migration files without coordination
 - treat fixture updates as cross-workstream review points
 - if a workstream needs a new shared field or enum, update the relevant doc first
+- bootstrap backfill caps and finalized catch-up progress are operational readiness signals only; they must not be used by any workstream as route-coverage or consumer-replacement evidence without the full admitted-history and conformance gates in `consumer-capabilities.md`

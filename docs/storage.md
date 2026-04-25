@@ -37,6 +37,14 @@ Postgres is the hot indexed and replay-focused store, not an archive-style raw c
 
 Large/full block payloads and non-indexed transaction, receipt, or block bodies are evictable cache by default once the durable replay facts have been extracted. They may live inline during a hot window, in local/provider cache, in hash-addressed object storage, or not be retained at all. Hash-addressed cold storage is required only for payload classes that a doc-first policy explicitly declares durable. If metadata is retained for an evictable payload, it should be stable enough to explain what was fetched, such as payload kind, chain id, block hash/number where block-scoped, optional digest, size, content type or encoding, source observation metadata, observed time, and canonicality state when applicable.
 
+Historical backfill does not turn empty blocks into hot payload archives. For a
+block with no selected target logs/facts and no replay-required enrichment, the
+durable storage contract is limited to lineage/header anchors and any compact
+audit metadata required by the selected retention policy. Full block bodies,
+receipt bundles, transaction bundles, and payload-cache bytes for those empty
+historical blocks remain evictable or absent unless a later doc-first policy
+declares that payload class durable.
+
 Provider re-fetch is an explicit, fallible cache-fill path. For block-scoped payloads, it must be block-hash-scoped, verify the retained digest before any bytes are used, and fail closed if the digest is absent, the digest mismatches, or the provider cannot serve the exact historical payload. Provider re-fetch is not a substitute for retaining selected replay facts, lineage, normalized events, execution artifacts, or orphaned-branch audit truth.
 
 Retention windows and compaction cadence are operational policy. They do not change route coverage, API consistency semantics, manifest capability flags, rollout status, or consumer-replacement graduation.
@@ -78,6 +86,7 @@ ENSv1 continuity rules for adapters:
 - for ENSv1 direct-authority cases in this slice, write `SurfaceBinding.binding_kind = declared_registry_path`; do not use a different binding kind merely because the authority anchor changed between registry, registrar, and wrapper control
 - `ens_v1_wrapper_l1` identity input is the admitted NameWrapper contract instance plus the wrapped node. Wrapper ownership, fuse, expiry, wrap, unwrap, resolver, and TTL observations update the active wrapper-backed resource or close/reactivate bindings according to the authority-anchor rules above; they do not create a separate migration resource unless a later doc-first wrapper / migration history slice admits that behavior (upstream: .refs/ens_v1/deployments/mainnet/NameWrapper.json:L2 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L27 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L35 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L666 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L676 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022 @ ens_v1@91c966f).
 - `ens_v1_resolver_l1` identity input is the admitted PublicResolver contract instance plus the node and record selector. Resolver addresses remain source-graph contract instances or time-ranged attributes, not `resource_id`s; resolver-local approvals and delegates attach to the active resolver-scoped permission rows and do not backfill registry or wrapper authority (upstream: .refs/ens_v1/deployments/mainnet/PublicResolver.json:L2 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L38 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L44 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L78 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L97 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L114 @ ens_v1@91c966f).
+- `ENSRegistryOld` identity input, if admitted, is a migration-aware input to `ens_v1_registry_l1`, not a separate current registry owner and not a latest-log-wins stream. Adapters may attach old-registry owner, child, TTL, and resolver observations to current topology only while the target node remains unmigrated; once a current-registry `NewOwner` marks that subnode migrated, later old-registry observations for that node remain raw/audit facts and must not rewrite the active `resource_id`, `surface_binding_id`, node resolver binding, TTL, child edge, or projection input. The root resolver exception may update only the `ROOT_NODE` resolver binding and resolver-discovery input. The current registry fallback contract reads old owner, resolver, and TTL only when the current registry has no record, while the pinned subgraph marks current `NewOwner` output as migrated and suppresses old-registry handlers except for root resolver (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L18 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L29 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L40 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L153 @ ens_v1@91c966f) (upstream: .refs/ens_subgraph/src/ensRegistry.ts:L134 @ ens_subgraph@723f1b6) (upstream: .refs/ens_subgraph/src/ensRegistry.ts:L238 @ ens_subgraph@723f1b6) (upstream: .refs/ens_subgraph/src/ensRegistry.ts:L246 @ ens_subgraph@723f1b6).
 
 ENSv2 continuity rules for adapters:
 
@@ -129,6 +138,8 @@ Within the `execution_*` family, the only non-execution-worker write owner is sy
 
 For ENSv1 identity rows and normalized authority / permission events, adapters are responsible for minting and reusing `resource_id`, `token_lineage_id`, and `surface_binding_id` according to the continuity rules above and for attaching normalized events to the authoritative `resource_id` in effect at that chain position. Projection workers consume those identity rows and normalized events; they do not infer alternate continuity or synthesize cross-resource permission carry on their own.
 
+For ENSv1 old-registry admission, adapters own the migration guard before a raw old-registry log can become a topology-changing normalized event. Storage helpers, projection workers, and API reads must not merge old and current registry rows by block order alone; canonicality-aware replay re-applies the same migrated-node rule and root resolver exception before writing current-state projections (upstream: .refs/ens_subgraph/src/ensRegistry.ts:L238 @ ens_subgraph@723f1b6) (upstream: .refs/ens_subgraph/src/ensRegistry.ts:L246 @ ens_subgraph@723f1b6).
+
 For ENSv1 wrapper and resolver Phase 4 rows, adapters may append normalized identity, authority, permission, resolver-change, record, preimage, fuse, and expiry events from the admitted NameWrapper and PublicResolver families. They must not write projection rows, mutate manifest capability state, infer route coverage graduation, or persist wrapper upgrade / migration history from the wrapper upgrade path without a later doc-first admission of that history surface (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L479 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L500 @ ens_v1@91c966f).
 
 For ENSv1 and Basenames dynamic resolver discovery, manifests/discovery owns the `contract_instance_id` and discovery-edge admission created from registry `NewResolver` observations, while adapter/projection state owns the node-to-resolver binding lifetime. Resolver adapters may append typed resolver-local normalized events only after the emitter address resolves to a direct manifest-admitted or resolver-discovery-admitted contract instance in the relevant resolver source family and that instance has supported resolver-profile admission for the emitted fact family; projection workers and API reads must surface explicit unsupported or gap state when the current resolver target has not reached those boundaries (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L12 @ ens_v1@91c966f) (upstream: .refs/basenames/src/L2/Registry.sol:L132 @ basenames@1809bbc).
@@ -158,6 +169,16 @@ At minimum, backfill persistence must carry:
 - `backfill_jobs`: one row per bounded backfill job with selected profile, chain, selector kind, resolved source identity, scan mode, declared range start and end, idempotency key, lifecycle status, failure metadata, and timestamp metadata
 - `backfill_ranges`: child rows or equivalent range records with declared range bounds, next checkpoint, lease owner, lease token, lease expiry, attempt counters, lifecycle status, failure metadata, and timestamp metadata
 - monotonic helper-owned checkpoint fields that allow a worker to resume after crash without widening the original range or reclassifying already admitted facts
+
+Operational finalized catch-up uses these same `backfill_*` families. It may
+create many finite chunks, but each chunk must preserve one immutable job shape
+and idempotency key. Capacity checks are part of the chunk lifecycle: before
+range work starts, the worker must check current Postgres size, writable free
+disk, and any configured object-cache budget, and record an explicit failure or
+paused state in existing lifecycle/failure metadata when capacity is
+insufficient. Capacity failures must not mutate raw facts, canonicality state,
+selected target identity, chain checkpoints, projections, manifests, discovery,
+or public API state.
 
 Backfill source selector storage freezes the job identity fields used by the source-scoped runner:
 
@@ -248,6 +269,14 @@ Reusable `execution_cache_outcomes` rows must carry dependencies tied to explici
 
 Backfill range checkpoints are separate from canonicality checkpoints. Advancing or completing a backfill job records only that bounded fetch/resume work reached a position in its declared range; it must not change any `canonicality_state` value and must not advance `canonical_head`, `safe_head`, or `finalized_head`.
 
+Backfill raw admission still writes canonicality for the facts it admits. When
+the admitted historical range is already proven canonical, safe, or finalized by
+retained lineage or provider checkpoint evidence, new lineage, raw-fact, and
+normalized-event rows must use `canonical`, `safe`, or `finalized` as
+appropriate instead of leaving those rows `observed` solely because the source
+was backfill. If the evidence is absent, the storage layer must preserve the
+weaker explicit state and leave the gap visible to audit and coverage tooling.
+
 Read-only canonicality inspection uses storage audit helpers over `chain_lineage`, raw fact tables, retained payload-cache metadata, and `normalized_events`. The worker single-block inspection contract remains `bigname-worker inspect canonicality --chain-id <id> --block-hash <hash>` and resolves one `(chain_id, block_hash)`. For that requested block hash, helpers may report whether a stored lineage row exists and, for stored rows, block lineage, parent hash, block number, canonicality state, raw fact counts, payload-cache metadata counts or digests where retained, and normalized-event counts.
 
 Read-only stored lineage range inspection is worker-owned operational tooling over `chain_lineage`. The bounded command `bigname-worker inspect stored-lineage-range` lists only lineage rows already stored for the requested chain and finite block range, ordered stably by `(block_number, block_hash)` unless a later doc-first contract adds another explicit order. It renders stable JSON per observed block with chain id, block number, block hash, parent hash, canonicality state, timestamp, and any stored promotion markers; nullable stored fields render as `null` rather than disappearing. It must not infer missing heights, gaps, span-wide canonicality, aggregate finality, or completeness for the requested range. It must not mutate lineage, raw facts, normalized events, projections, execution cache rows, backfill jobs, backfill range checkpoints, or `canonical_head`, `safe_head`, or `finalized_head`.
@@ -278,6 +307,7 @@ Persist durable raw replay facts inline in Postgres when they are needed for ind
 - non-indexed transaction bodies
 - non-indexed receipt bodies
 - block-scoped payload batches fetched by live ingestion or backfill but not selected for admitted target replay
+- full payload cache or block bundles for historical blocks with no selected target facts or replay-required enrichments
 
 Evictable payload cache may be inline, local, object-backed, provider-refetchable, or absent after durable facts are extracted. Postgres stores only the metadata needed by the selected retention contract, such as payload kind, block identity fields, digest when the payload may later be dereferenced or refetched, size, content type or encoding, object key when object-backed, and observation metadata. Cache metadata without a retained digest may describe what was fetched, but it cannot authorize later byte use. Reads that dereference object-backed cache or re-fetch from a provider must verify the retained digest before use and fail closed on missing digest, mismatch, or unavailable historical data.
 
@@ -320,7 +350,7 @@ To keep parallel work safe:
 
 - storage owns migrations and query primitives
 - storage owns backfill job/range helper primitives for idempotent create, reserve, advance, complete, and fail transitions
-- worker/backfill code owns operational writes to `backfill_*` through those helpers
+- worker/backfill code owns operational writes to `backfill_*` through those helpers, including finalized catch-up chunk creation and capacity pause/failure metadata
 - adapters own inserts into identity and normalized-event tables
 - projection workers own materialized read models
 - execution workers own trace and step writes plus normal cache outcome writes

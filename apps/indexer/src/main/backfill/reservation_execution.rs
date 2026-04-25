@@ -1,9 +1,9 @@
 use anyhow::{Context, Result, bail};
 use bigname_manifests::WatchedSourceSelectorPlan;
 use bigname_storage::{
-    BackfillJobCreate, BackfillLifecycleStatus, BackfillRange, BackfillRangeSpec,
-    advance_backfill_range, complete_backfill_range, create_backfill_job, load_backfill_job,
-    reserve_backfill_range,
+    BackfillJobCreate, BackfillJobRecord, BackfillLifecycleStatus, BackfillRange,
+    BackfillRangeSpec, advance_backfill_range, complete_backfill_range, create_backfill_job,
+    load_backfill_job, reserve_backfill_range,
 };
 use tracing::info;
 
@@ -12,11 +12,35 @@ use crate::provider::JsonRpcProvider;
 use super::{
     BackfillBlockRange, BackfillJobRunConfig, BackfillJobRunOutcome,
     failure_recording::{ReservedRangeFailure, record_reserved_range_failure},
-    fetching::run_hash_pinned_backfill_range,
+    fetching::{load_backfill_canonicality_evidence, run_hash_pinned_backfill_range},
 };
 
 const HASH_PINNED_BACKFILL_SCAN_MODE: &str = "hash_pinned_block";
 const HASH_PINNED_BACKFILL_CHUNK_BLOCKS: i64 = 32;
+
+pub(crate) async fn create_hash_pinned_backfill_job(
+    pool: &sqlx::PgPool,
+    source_plan: &WatchedSourceSelectorPlan,
+    config: &BackfillJobRunConfig,
+) -> Result<BackfillJobRecord> {
+    create_backfill_job(
+        pool,
+        &BackfillJobCreate {
+            deployment_profile: config.deployment_profile.clone(),
+            chain_id: source_plan.watched_chain_plan.chain.clone(),
+            source_identity: source_plan.source_identity_payload(),
+            scan_mode: HASH_PINNED_BACKFILL_SCAN_MODE.to_owned(),
+            range_start_block_number: config.range.from_block,
+            range_end_block_number: config.range.to_block,
+            idempotency_key: config.idempotency_key.clone(),
+            ranges: vec![BackfillRangeSpec {
+                range_start_block_number: config.range.from_block,
+                range_end_block_number: config.range.to_block,
+            }],
+        },
+    )
+    .await
+}
 
 pub(crate) async fn run_resumable_hash_pinned_backfill_job(
     pool: &sqlx::PgPool,
@@ -25,20 +49,7 @@ pub(crate) async fn run_resumable_hash_pinned_backfill_job(
     config: BackfillJobRunConfig,
 ) -> Result<BackfillJobRunOutcome> {
     let watched_chain = &source_plan.watched_chain_plan;
-    let request = BackfillJobCreate {
-        deployment_profile: config.deployment_profile.clone(),
-        chain_id: watched_chain.chain.clone(),
-        source_identity: source_plan.source_identity_payload(),
-        scan_mode: HASH_PINNED_BACKFILL_SCAN_MODE.to_owned(),
-        range_start_block_number: config.range.from_block,
-        range_end_block_number: config.range.to_block,
-        idempotency_key: config.idempotency_key.clone(),
-        ranges: vec![BackfillRangeSpec {
-            range_start_block_number: config.range.from_block,
-            range_end_block_number: config.range.to_block,
-        }],
-    };
-    let record = create_backfill_job(pool, &request).await?;
+    let record = create_hash_pinned_backfill_job(pool, source_plan, &config).await?;
     let mut outcome = BackfillJobRunOutcome::new(record.job.backfill_job_id, source_plan, &config);
 
     info!(
@@ -125,29 +136,58 @@ async fn run_reserved_hash_pinned_backfill_range(
 ) -> Result<()> {
     let mut active_range = reserved_range.clone();
     let mut block_number = active_range.checkpoint_block_number;
+    let canonicality_evidence = match load_backfill_canonicality_evidence(
+        pool,
+        &source_plan.watched_chain_plan.chain,
+        provider,
+    )
+    .await
+    {
+        Ok(evidence) => evidence,
+        Err(error) => {
+            return Err(record_reserved_range_failure(ReservedRangeFailure {
+                pool,
+                reserved_range: &active_range,
+                config,
+                failure_reason: "backfill canonicality evidence load failed",
+                block_number: Some(block_number),
+                attempted_range: None,
+                phase: "canonicality_evidence",
+                error,
+            })
+            .await);
+        }
+    };
     while block_number <= active_range.range_end_block_number {
         let chunk_end = block_number
             .checked_add(HASH_PINNED_BACKFILL_CHUNK_BLOCKS - 1)
             .unwrap_or(active_range.range_end_block_number)
             .min(active_range.range_end_block_number);
         let chunk_range = BackfillBlockRange::new(block_number, chunk_end)?;
-        let chunk_outcome =
-            match run_hash_pinned_backfill_range(pool, source_plan, provider, chunk_range).await {
-                Ok(outcome) => outcome,
-                Err(error) => {
-                    return Err(record_reserved_range_failure(ReservedRangeFailure {
-                        pool,
-                        reserved_range: &active_range,
-                        config,
-                        failure_reason: "hash-pinned backfill failed",
-                        block_number: Some(block_number),
-                        attempted_range: Some(chunk_range),
-                        phase: "hash_pinned_intake",
-                        error,
-                    })
-                    .await);
-                }
-            };
+        let chunk_outcome = match run_hash_pinned_backfill_range(
+            pool,
+            source_plan,
+            provider,
+            chunk_range,
+            canonicality_evidence,
+        )
+        .await
+        {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                return Err(record_reserved_range_failure(ReservedRangeFailure {
+                    pool,
+                    reserved_range: &active_range,
+                    config,
+                    failure_reason: "hash-pinned backfill failed",
+                    block_number: Some(block_number),
+                    attempted_range: Some(chunk_range),
+                    phase: "hash_pinned_intake",
+                    error,
+                })
+                .await);
+            }
+        };
         aggregate.add_range_outcome(&chunk_outcome);
 
         active_range = match advance_backfill_range(

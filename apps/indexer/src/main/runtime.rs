@@ -18,7 +18,8 @@ pub(crate) use adapter_sync::sync_adapter_owned_raw_log_state;
 #[allow(unused_imports)]
 pub(crate) use intake::{
     IntakeChainTask, IntakeRuntimeState, WatchedChainPlanState, checkpoint_mode,
-    intake_runtime_state, sync_intake_chain_tasks, watched_chain_plan_state,
+    intake_runtime_state, sync_intake_chain_tasks, validate_provider_registry_for_intake_tasks,
+    watched_chain_plan_state,
 };
 #[allow(unused_imports)]
 pub(crate) use logging::{

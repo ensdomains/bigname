@@ -39,6 +39,10 @@ These may exist later as separate capabilities, but they must not leak into the 
 
 ## 3. ENSv1 And Basenames Resolver Discovery Boundary
 
+ENSv1 old-registry intake is migration-aware historical admission, not a second current registry stream. If `ENSRegistryOld` is admitted, it stays under `ens_v1_registry_l1` as an allow-listed migration-epoch input at `0x314159265dd8dbb310642f98f50c066173c1259b` with `start_block = 3327417` from the pinned subgraph. The current registry `startBlock: 9380380` remains only the current registry's pinned-subgraph start, not original ENS history (upstream: .refs/ens_subgraph/subgraph.yaml:L10 @ ens_subgraph@723f1b6) (upstream: .refs/ens_subgraph/subgraph.yaml:L15 @ ens_subgraph@723f1b6) (upstream: .refs/ens_subgraph/subgraph.yaml:L39 @ ens_subgraph@723f1b6) (upstream: .refs/ens_subgraph/subgraph.yaml:L42 @ ens_subgraph@723f1b6) (upstream: .refs/ens_subgraph/subgraph.yaml:L44 @ ens_subgraph@723f1b6).
+
+Old-registry raw facts must retain their emitter identity and pass a migration guard before they can normalize into current topology. A current-registry `NewOwner` marks the affected subnode migrated; once migrated, later old-registry `NewOwner`, `Transfer`, `NewTTL`, and non-root `NewResolver` observations for that node are retained as facts but must not overwrite the current owner, resolver, TTL, child edge, resolver-discovery edge, or projection input. The root resolver is the only exception: old-registry `NewResolver(ROOT_NODE, resolver)` may still update the root resolver binding and feed `ens_v1_resolver_l1` discovery. The pinned subgraph's old-registry handlers encode the same migrated-node guard and root resolver exception (upstream: .refs/ens_subgraph/src/ensRegistry.ts:L134 @ ens_subgraph@723f1b6) (upstream: .refs/ens_subgraph/src/ensRegistry.ts:L230 @ ens_subgraph@723f1b6) (upstream: .refs/ens_subgraph/src/ensRegistry.ts:L238 @ ens_subgraph@723f1b6) (upstream: .refs/ens_subgraph/src/ensRegistry.ts:L246 @ ens_subgraph@723f1b6) (upstream: .refs/ens_subgraph/src/ensRegistry.ts:L252 @ ens_subgraph@723f1b6) (upstream: .refs/ens_subgraph/src/ensRegistry.ts:L259 @ ens_subgraph@723f1b6).
+
 ENSv1 and Basenames declared record indexing must not stop at the statically admitted resolver deployments. For the shipped mainnet profile, registry-level resolver changes are discovery inputs:
 
 - ENSv1 registry `NewResolver(node, resolver)` logs from admitted `ens_v1_registry_l1` emitters must produce resolver discovery observations for `ens_v1_resolver_l1`; nonzero resolver addresses create or refresh node-to-resolver bindings and resolver contract instances, while zero-address resolver changes close only the affected node-to-resolver binding (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L12 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L89 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L174 @ ens_v1@91c966f).
@@ -96,6 +100,16 @@ declare active watched chains that are fully synchronized into manifest,
 discovery, watch-plan, and checkpoint setup while automatic bootstrap and live
 provider work stay idle until that chain has a configured provider. Current
 bootstrap provider support accepts `http://` JSON-RPC endpoints only.
+
+Provider availability is evaluated per selected profile and per active watched
+chain. A Base RPC endpoint is not a global startup prerequisite: an
+Ethereum-only profile must start without a Base provider, and a profile whose
+Base chain has no configured provider must leave Base provider-backed intake,
+automatic bootstrap, backfill catch-up, and live head following idle with an
+explicit operational `unavailable` / `no_provider` reason rather than failing
+startup for other configured chains. A configured provider for a chain outside
+the selected profile remains invalid because the runtime must not ingest across
+profiles.
 
 ## 6. Head Model And Recent Window
 
@@ -180,6 +194,13 @@ Backfill may use either:
 
 Backfill is scheduled as persisted, bounded jobs. A job is scoped to one selected deployment profile, chain, source selector, scan mode, and explicit block range. The source selector mode is `whole_active_watched_chain` by default when no selector is supplied, `source_family`, or an explicit `watched_target_set`. The job range must be finite at creation time; open-ended tail following remains live intake, not a backfill job.
 
+Full historical backfill means covering the entire admitted history for the
+selected deployment profile, chain, and selected targets. The start is the
+manifest/discovery admitted start for each selected target, not an arbitrary
+recent window. A recent chunk, a startup bootstrap range, or a partially
+completed source-family conformance run is not complete history and must not be
+used as consumer-replacement or route-coverage evidence.
+
 ### Automatic Bootstrap Backfill
 
 `phase9-indexer-run-auto-backfill-bootstrap` is a shared-interface,
@@ -192,6 +213,7 @@ Automatic bootstrap follows these rules:
 
 - it runs after manifest sync, discovery admission, watch-plan materialization, and per-chain checkpoint row setup for the selected deployment profile
 - active watched chains without configured providers remain idle after that setup; bootstrap must not create jobs for a chain whose provider cannot supply a finite bootstrap end
+- `BIGNAME_INDEXER_BOOTSTRAP_BACKFILL_MAX_BLOCKS=25000` is only a startup bootstrap cap for automatically created finite jobs. It limits how much recent work startup may enqueue; it does not redefine admitted history, prove historical completeness, satisfy full backfill, widen route coverage, or create consumer-replacement evidence.
 - each candidate target is the resolved watched target keyed by `contract_instance_id`, source family, chain, normalized address, and effective range; raw address is never accepted as durable source identity
 - the persisted source identity for an automatically created job is the sorted resolved target set with effective range start and effective range end, matching the same canonical target tuple used by source-scoped backfill
 - a target with declared `start_block` is eligible only from that inclusive block, further narrowed by its active watch range and the finite bootstrap range end resolved at job creation time
@@ -223,7 +245,29 @@ The persisted source identity for any selector is the resolved target set, not t
 
 Backfill intake for a source-scoped job is selected-target-only and block-hash-scoped. The runner may use block-number ranges to enumerate candidate blocks, but every persisted block-scoped fact or enrichment must be anchored to the resolved block hash before admission through the shared intake path. The job may persist minimal lineage/header anchors needed for that block-hash-scoped admission, but target-scoped log admission, call snapshots, normalized events, and downstream projection invalidation must be limited to the selected targets. A source-scoped job must not opportunistically admit unselected watched targets merely because they appear in the same block, receipt batch, source family, or chain range.
 
-Source-scoped backfill must avoid retaining unselected block-wide transaction, receipt, or full block bodies in Postgres. If the runner fetches broader block-scoped payloads to locate or verify selected target facts, the Postgres hot store keeps selected-target logs/facts, minimal lineage/header anchors, replay-required enrichments, and any cache metadata needed for block-hash-scoped admission or audit. Unselected full bodies are evictable cache unless an explicit doc-first retention policy declares that payload class durable; otherwise the selected replay contract must not depend on them.
+When historical backfill admits finalized or safe historical ranges, persisted
+lineage, raw facts, and normalized events must carry the best canonicality state
+supported by available checkpoint evidence: `finalized` for ranges proven below
+the finalized checkpoint, `safe` for ranges proven below the safe checkpoint,
+and `canonical` for reconciled canonical ranges that are not yet safe. They
+must not remain `observed` merely because they entered through backfill. If the
+provider or retained lineage cannot prove the required checkpoint relationship,
+the runner must fail closed or persist the weaker explicit state and report the
+gap; backfill lifecycle transitions themselves still must not promote
+`canonical_head`, `safe_head`, or `finalized_head`.
+
+Source-scoped backfill must avoid retaining unselected block-wide transaction,
+receipt, or full block bodies in Postgres. If the runner fetches broader
+block-scoped payloads to locate or verify selected target facts, the Postgres
+hot store keeps selected-target logs/facts, minimal lineage/header anchors,
+replay-required enrichments, and any cache metadata needed for block-hash-scoped
+admission or audit. Historical blocks with no selected target facts or
+replay-required enrichments retain only the lineage/header anchors and optional
+audit metadata required by the selected retention contract; they must not retain
+full payload cache entries, receipt bundles, transaction bundles, or block
+bodies by default. Unselected full bodies are evictable cache unless an explicit
+doc-first retention policy declares that payload class durable; otherwise the
+selected replay contract must not depend on them.
 
 Source-family backfill conformance intake for the shipped mainnet profile is limited to proving that the source selector, resolved `source_identity`, bounded job lifecycle, shared raw-fact intake, and later raw-fact normalized-event replay coexist for already admitted targets. The initial conformance families are:
 
@@ -235,6 +279,32 @@ Source-family backfill conformance intake for the shipped mainnet profile is lim
 For these conformance families, `source_identity` is the canonical resolved target tuple persisted by the job substrate. It must include the selector mode plus the sorted selected targets, and each target identity is keyed by `source_family`, `contract_instance_id`, normalized address, effective target range start, and effective target range end. Same-address targets in `basenames_l1_compat` and `basenames_execution` are therefore distinct source identities, while repeated selection of the same full tuple remains idempotent. Replay coexistence means a completed source-family backfill job and a later raw-fact normalized-event replay over the same canonical facts can both upsert through their owned storage boundaries without mutating each other's checkpoints, raw facts, or public read surfaces.
 
 Source-family backfill conformance is a non-graduation test. Passing it does not add or widen a public route, change route-level coverage, promote manifest capabilities from `shadow` or `unsupported`, add a capability group, graduate ENSv2 exact-name support, claim wrapper / migration history support, admit a fallback primary-name source, or change consumer-replacement meaning. It proves selector correctness, source-identity stability, bounded lifecycle persistence, selected-target-only intake, and replay coexistence only.
+
+### Operational Finalized Catch-up
+
+Operational catch-up to the finalized head is a sequence of bounded backfill
+jobs, not a hidden unbounded scanner. Each catch-up chunk has an immutable job
+shape, an idempotency key, a finite start, and a finite end no greater than the
+finalized head observed for that chain when the chunk is created. Following the
+finalized head means repeatedly creating the next finite chunk after the prior
+chunk is complete or safely resumable; live intake remains responsible for the
+open-ended tail.
+
+Before reserving or running every catch-up chunk, the worker must check current
+Postgres size, writable free disk, and any configured object-cache budget against
+the chunk's estimated write amplification. If capacity is below the configured
+minimum, or if the estimate would exceed the budget, the chunk must pause or
+fail with explicit capacity metadata before starting new range work. Capacity
+failure must not widen the job, drop retained replay facts, downgrade
+canonicality, or silently switch to retaining fewer selected facts.
+
+Catch-up uses the same selected-target retention contract as other backfill:
+durable selected facts, lineage/header anchors, selected target logs, and
+replay-required enrichments are retained, while empty historical blocks and
+unselected full payloads remain cache/metadata-only or absent. Catch-up progress
+does not change route coverage or consumer-replacement meaning until the full
+admitted history for the relevant capability has completed and the normal
+capability conformance gates pass.
 
 Storage helpers own lifecycle mutation. They must be idempotent:
 

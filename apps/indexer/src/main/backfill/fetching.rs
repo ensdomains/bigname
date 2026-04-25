@@ -3,20 +3,23 @@ use std::collections::BTreeMap;
 use anyhow::{Context, Result, bail};
 use bigname_manifests::{WatchedSourceSelectorKind, WatchedSourceSelectorPlan};
 use bigname_storage::{
-    CanonicalityState, RawCodeHash, RawLog, RawPayloadCacheMetadataUpsert, RawReceipt,
-    RawTransaction, upsert_raw_blocks, upsert_raw_code_hashes, upsert_raw_logs,
-    upsert_raw_payload_cache_metadata, upsert_raw_receipts, upsert_raw_transactions,
+    CanonicalityState, ChainCheckpoint, RawCodeHash, RawLog, RawPayloadCacheMetadataUpsert,
+    RawReceipt, RawTransaction, load_chain_checkpoint, upsert_chain_lineage_blocks,
+    upsert_raw_blocks, upsert_raw_code_hashes, upsert_raw_logs, upsert_raw_payload_cache_metadata,
+    upsert_raw_receipts, upsert_raw_transactions,
 };
 use tracing::info;
 
 use crate::{
     provider::{
-        JsonRpcProvider, ProviderBlockCodeObservationRequest, ProviderLog, ProviderResolvedBlock,
+        JsonRpcProvider, ProviderBlock, ProviderBlockCodeObservationRequest, ProviderHeadSnapshot,
+        ProviderLog, ProviderResolvedBlock,
     },
     reconciliation::{
-        ensure_provider_bundle_matches_raw_block, provider_block_to_raw_block,
-        provider_code_observation_to_raw_code_hash, provider_logs_to_selected_raw_logs,
-        provider_raw_payload_cache_metadata_to_upserts, provider_receipts_to_selected_raw_receipts,
+        ensure_provider_bundle_matches_raw_block, provider_block_to_lineage,
+        provider_block_to_raw_block, provider_code_observation_to_raw_code_hash,
+        provider_logs_to_selected_raw_logs, provider_raw_payload_cache_metadata_to_upserts,
+        provider_receipts_to_selected_raw_receipts,
         provider_transactions_to_selected_raw_transactions,
         retained_transaction_keys_from_raw_logs, sync_adapter_state_from_persisted_raw_payloads,
         sync_adapter_state_from_scoped_persisted_raw_payloads,
@@ -31,11 +34,84 @@ use super::{
     },
 };
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct BackfillCanonicalityEvidence {
+    canonical_block_number: Option<i64>,
+    safe_block_number: Option<i64>,
+    finalized_block_number: Option<i64>,
+}
+
+impl BackfillCanonicalityEvidence {
+    fn from_heads(heads: &ProviderHeadSnapshot) -> Self {
+        Self {
+            canonical_block_number: Some(heads.canonical.block_number),
+            safe_block_number: heads.safe.as_ref().map(|block| block.block_number),
+            finalized_block_number: heads.finalized.as_ref().map(|block| block.block_number),
+        }
+    }
+
+    fn include_checkpoint(&mut self, checkpoint: Option<&ChainCheckpoint>) {
+        let Some(checkpoint) = checkpoint else {
+            return;
+        };
+
+        self.canonical_block_number = max_optional_i64(
+            self.canonical_block_number,
+            checkpoint.canonical_block_number,
+        );
+        self.safe_block_number =
+            max_optional_i64(self.safe_block_number, checkpoint.safe_block_number);
+        self.finalized_block_number = max_optional_i64(
+            self.finalized_block_number,
+            checkpoint.finalized_block_number,
+        );
+    }
+
+    fn state_for_block(self, block: &ProviderBlock) -> CanonicalityState {
+        if self
+            .finalized_block_number
+            .is_some_and(|finalized| block.block_number <= finalized)
+        {
+            CanonicalityState::Finalized
+        } else if self
+            .safe_block_number
+            .is_some_and(|safe| block.block_number <= safe)
+        {
+            CanonicalityState::Safe
+        } else if self
+            .canonical_block_number
+            .is_some_and(|canonical| block.block_number <= canonical)
+        {
+            CanonicalityState::Canonical
+        } else {
+            CanonicalityState::Observed
+        }
+    }
+}
+
+pub(super) async fn load_backfill_canonicality_evidence(
+    pool: &sqlx::PgPool,
+    chain: &str,
+    provider: &JsonRpcProvider,
+) -> Result<BackfillCanonicalityEvidence> {
+    let heads = provider.fetch_chain_heads().await.with_context(|| {
+        format!("failed to load provider checkpoint evidence for chain {chain}")
+    })?;
+    let checkpoint = load_chain_checkpoint(pool, chain)
+        .await
+        .with_context(|| format!("failed to load stored checkpoint evidence for chain {chain}"))?;
+    let mut evidence = BackfillCanonicalityEvidence::from_heads(&heads);
+    evidence.include_checkpoint(checkpoint.as_ref());
+
+    Ok(evidence)
+}
+
 pub(crate) async fn run_hash_pinned_backfill_range(
     pool: &sqlx::PgPool,
     source_plan: &WatchedSourceSelectorPlan,
     provider: &JsonRpcProvider,
     range: BackfillBlockRange,
+    canonicality_evidence: BackfillCanonicalityEvidence,
 ) -> Result<BackfillOutcome> {
     let watched_chain = &source_plan.watched_chain_plan;
     let source_scope = selected_target_sync_scope(source_plan);
@@ -76,6 +152,7 @@ pub(crate) async fn run_hash_pinned_backfill_range(
     let mut code_hashes = Vec::<RawCodeHash>::new();
     let mut cache_metadata = Vec::<RawPayloadCacheMetadataUpsert>::new();
     let mut raw_blocks_by_hash = BTreeMap::new();
+    let mut lineage_blocks = Vec::with_capacity(resolved_blocks.len());
     let mut code_observation_requests = Vec::new();
 
     for (resolved_block, bundle) in resolved_blocks.iter().zip(bundles.iter()) {
@@ -91,17 +168,15 @@ pub(crate) async fn run_hash_pinned_backfill_range(
             );
         }
 
-        let raw_block = provider_block_to_raw_block(
-            &watched_chain.chain,
-            &bundle.block,
-            CanonicalityState::Observed,
-        );
+        let canonicality_state = canonicality_evidence.state_for_block(&bundle.block);
+        let raw_block =
+            provider_block_to_raw_block(&watched_chain.chain, &bundle.block, canonicality_state);
         ensure_provider_bundle_matches_raw_block(&raw_block, bundle)?;
 
-        cache_metadata.extend(provider_raw_payload_cache_metadata_to_upserts(
+        lineage_blocks.push(provider_block_to_lineage(
             &watched_chain.chain,
-            &raw_block,
-            &bundle.raw_payloads,
+            &bundle.block,
+            canonicality_state,
         ));
         let block_logs = if fetch_logs_by_safe_ranges {
             ranged_logs_by_block
@@ -117,6 +192,13 @@ pub(crate) async fn run_hash_pinned_backfill_range(
             &selected_addresses,
         )?;
         let retained_transaction_keys = retained_transaction_keys_from_raw_logs(&selected_logs);
+        if !selected_logs.is_empty() {
+            cache_metadata.extend(provider_raw_payload_cache_metadata_to_upserts(
+                &watched_chain.chain,
+                &raw_block,
+                &bundle.raw_payloads,
+            ));
+        }
         transactions.extend(provider_transactions_to_selected_raw_transactions(
             &watched_chain.chain,
             &raw_block,
@@ -176,6 +258,7 @@ pub(crate) async fn run_hash_pinned_backfill_range(
         );
     }
 
+    upsert_chain_lineage_blocks(pool, &lineage_blocks).await?;
     upsert_raw_blocks(pool, &raw_blocks).await?;
     upsert_raw_payload_cache_metadata(pool, &cache_metadata).await?;
     upsert_raw_transactions(pool, &transactions).await?;
@@ -222,6 +305,14 @@ pub(crate) async fn run_hash_pinned_backfill_range(
     );
 
     Ok(outcome)
+}
+
+fn max_optional_i64(left: Option<i64>, right: Option<i64>) -> Option<i64> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.max(right)),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    }
 }
 
 async fn fetch_backfill_logs_by_safe_ranges(

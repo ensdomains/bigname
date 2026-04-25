@@ -15,7 +15,9 @@ use sqlx::types::time::OffsetDateTime;
 
 #[allow(unused_imports)]
 pub(crate) use fetching::run_hash_pinned_backfill_range;
-pub(crate) use reservation_execution::run_resumable_hash_pinned_backfill_job;
+pub(crate) use reservation_execution::{
+    create_hash_pinned_backfill_job, run_resumable_hash_pinned_backfill_job,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct BackfillBlockRange {

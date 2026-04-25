@@ -8,6 +8,12 @@ mod backfill_tests;
 mod bootstrap_backfill;
 #[path = "main/cli.rs"]
 mod cli;
+#[path = "main/ops_catchup.rs"]
+mod ops_catchup;
+#[cfg(test)]
+#[allow(dead_code, unused_imports)]
+#[path = "main/tests/ops_catchup.rs"]
+mod ops_catchup_tests;
 mod provider;
 #[path = "main/reconciliation.rs"]
 mod reconciliation;
@@ -41,7 +47,8 @@ use bigname_storage::{
 use bootstrap_backfill::*;
 use clap::Parser;
 use cli::{
-    BackfillArgs, Cli, Command, ReplayArgs, ReplayCommand, ReplayNormalizedEventsArgs, RunArgs,
+    BackfillArgs, Cli, Command, OpsCatchupArgs, ReplayArgs, ReplayCommand,
+    ReplayNormalizedEventsArgs, RunArgs,
 };
 #[allow(unused_imports)]
 use provider::{JsonRpcProvider, ProviderBlock, ProviderHeadSnapshot, ProviderRegistry};
@@ -67,6 +74,7 @@ async fn main() -> Result<()> {
     match Cli::parse().command {
         Command::Run(args) => run(args).await,
         Command::Backfill(args) => run_backfill(args).await,
+        Command::OpsCatchup(args) => run_ops_catchup(args).await,
         Command::Replay(args) => run_replay(args).await,
     }
 }
@@ -89,12 +97,14 @@ async fn run(args: RunArgs) -> Result<()> {
     log_intake_chain_tasks("startup", &intake_chain_tasks);
     let intake_runtime_state = intake_runtime_state(&intake_chain_tasks);
     let provider_registry = ProviderRegistry::from_chain_rpc_urls(&args.chain_rpc_urls)?;
+    validate_provider_registry_for_intake_tasks(&intake_chain_tasks, &provider_registry)?;
     log_provider_registry("startup", &intake_chain_tasks, &provider_registry);
     let bootstrap_backfill_outcome = run_startup_bootstrap_backfills(
         &pool,
         &args.manifests_root,
         &intake_chain_tasks,
         &provider_registry,
+        args.bootstrap_backfill_max_blocks,
     )
     .await?;
 
@@ -159,6 +169,7 @@ async fn run(args: RunArgs) -> Result<()> {
         bootstrap_backfill_skipped_future_target_count = bootstrap_backfill_outcome.skipped_future_target_count,
         bootstrap_backfill_reserved_range_count = bootstrap_backfill_outcome.reserved_range_count,
         bootstrap_backfill_completed_range_count = bootstrap_backfill_outcome.completed_range_count,
+        bootstrap_backfill_max_blocks = args.bootstrap_backfill_max_blocks,
         watched_plan_refresh_interval_secs = args.poll_interval_secs,
         adapter_status = bigname_adapters::bootstrap_status(),
         poll_interval_secs = args.poll_interval_secs,
@@ -187,6 +198,13 @@ async fn run_backfill(args: BackfillArgs) -> Result<()> {
     let manifest_runtime_state = build_manifest_runtime_state(&pool, &manifest_repository).await?;
     log_manifest_runtime_state(&manifest_runtime_state);
     log_watched_chain_plan("backfill", &manifest_runtime_state.watched_chain_plan);
+    let provider_registry = ProviderRegistry::from_chain_rpc_urls(&args.chain_rpc_urls)?;
+    provider_registry.ensure_configured_chains_admitted(
+        manifest_runtime_state
+            .watched_chain_plan
+            .iter()
+            .map(|chain| chain.chain.as_str()),
+    )?;
     let selector = backfill_source_selector(&args)?;
     let source_plan = load_watched_source_selector_plan(
         &pool,
@@ -196,7 +214,6 @@ async fn run_backfill(args: BackfillArgs) -> Result<()> {
         range.to_block,
     )
     .await?;
-    let provider_registry = ProviderRegistry::from_chain_rpc_urls(&args.chain_rpc_urls)?;
     info!(
         service = "indexer",
         command = "backfill",
@@ -238,6 +255,29 @@ async fn run_backfill(args: BackfillArgs) -> Result<()> {
     };
 
     run_resumable_hash_pinned_backfill_job(&pool, &source_plan, provider, config).await?;
+    Ok(())
+}
+
+async fn run_ops_catchup(args: OpsCatchupArgs) -> Result<()> {
+    let config = ops_catchup::OpsCatchupConfig::from_args(&args)?;
+    let manifest_repository = load_manifest_repository(&args.manifests_root)?;
+    let manifest_summary = manifest_repository.summary().clone();
+    log_manifest_summary(&manifest_summary);
+    ensure_manifest_root_ready(&manifest_summary)?;
+
+    let pool = bigname_storage::connect(&args.database).await?;
+    let manifest_runtime_state = build_manifest_runtime_state(&pool, &manifest_repository).await?;
+    log_manifest_runtime_state(&manifest_runtime_state);
+    log_watched_chain_plan("ops-catchup", &manifest_runtime_state.watched_chain_plan);
+    let intake_chain_tasks =
+        sync_intake_chain_tasks(&pool, &manifest_runtime_state.watched_chain_plan).await?;
+    log_intake_chain_tasks("ops-catchup", &intake_chain_tasks);
+    let provider_registry = ProviderRegistry::from_chain_rpc_urls(&args.chain_rpc_urls)?;
+    validate_provider_registry_for_intake_tasks(&intake_chain_tasks, &provider_registry)?;
+    log_provider_registry("ops-catchup", &intake_chain_tasks, &provider_registry);
+
+    ops_catchup::run_ops_finalized_catchup(&pool, &intake_chain_tasks, &provider_registry, config)
+        .await?;
     Ok(())
 }
 

@@ -341,6 +341,63 @@ fn intake_runtime_state_counts_checkpoint_modes() {
     );
 }
 
+#[test]
+fn provider_registry_validation_accepts_missing_base_and_rejects_out_of_profile_entries()
+-> Result<()> {
+    let tasks = vec![
+        IntakeChainTask {
+            chain: "base-mainnet".to_owned(),
+            addresses: vec!["0x00000000000000000000000000000000000000bb".to_owned()],
+            manifest_root_entry_count: 0,
+            manifest_contract_entry_count: 1,
+            discovery_edge_entry_count: 1,
+            checkpoint: ChainCheckpoint {
+                chain_id: "base-mainnet".to_owned(),
+                canonical_block_hash: None,
+                canonical_block_number: None,
+                safe_block_hash: None,
+                safe_block_number: None,
+                finalized_block_hash: None,
+                finalized_block_number: None,
+            },
+        },
+        IntakeChainTask {
+            chain: "ethereum-mainnet".to_owned(),
+            addresses: vec!["0x0000000000000000000000000000000000000001".to_owned()],
+            manifest_root_entry_count: 1,
+            manifest_contract_entry_count: 1,
+            discovery_edge_entry_count: 0,
+            checkpoint: ChainCheckpoint {
+                chain_id: "ethereum-mainnet".to_owned(),
+                canonical_block_hash: None,
+                canonical_block_number: None,
+                safe_block_hash: None,
+                safe_block_number: None,
+                finalized_block_hash: None,
+                finalized_block_number: None,
+            },
+        },
+    ];
+    let ethereum_only =
+        ProviderRegistry::from_chain_rpc_urls(&["ethereum-mainnet=http://127.0.0.1:8545".into()])?;
+    validate_provider_registry_for_intake_tasks(&tasks, &ethereum_only)?;
+
+    let out_of_profile = ProviderRegistry::from_chain_rpc_urls(&[
+        "ethereum-mainnet=http://127.0.0.1:8545".into(),
+        "optimism-mainnet=http://127.0.0.1:7545".into(),
+    ])?;
+    let error = validate_provider_registry_for_intake_tasks(&tasks, &out_of_profile)
+        .expect_err("configured provider outside selected profile must fail");
+    assert!(
+        error.to_string().contains(
+            "configured RPC provider chains outside selected/admitted runtime chain set: optimism-mainnet"
+        ),
+        "unexpected error: {error:#}"
+    );
+
+    Ok(())
+}
+
 #[tokio::test]
 async fn sync_intake_chain_tasks_creates_missing_checkpoint_rows() -> Result<()> {
     let database = TestDatabase::new().await?;
@@ -732,6 +789,7 @@ async fn bootstrap_auto_backfill_drains_manifest_started_targets_and_preserves_c
         &manifest_root,
         &intake_tasks,
         &provider_registry,
+        DEFAULT_BOOTSTRAP_BACKFILL_MAX_BLOCKS,
     )
     .await?;
     assert_eq!(outcome.active_chain_count, 2);
@@ -911,7 +969,7 @@ async fn bootstrap_auto_backfill_drains_manifest_started_targets_and_preserves_c
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM chain_lineage")
             .fetch_one(database.pool())
             .await?,
-        0
+        2
     );
 
     let rerun = run_startup_bootstrap_backfills(
@@ -919,6 +977,7 @@ async fn bootstrap_auto_backfill_drains_manifest_started_targets_and_preserves_c
         &manifest_root,
         &intake_tasks,
         &provider_registry,
+        DEFAULT_BOOTSTRAP_BACKFILL_MAX_BLOCKS,
     )
     .await?;
     assert_eq!(rerun.drained_job_count, 1);
@@ -1043,6 +1102,184 @@ async fn bootstrap_auto_backfill_drains_manifest_started_targets_and_preserves_c
             Value::String(grouped_address.to_owned()),
         ]),
         "bootstrap log range must include grouped eligible addresses only"
+    );
+
+    server.abort();
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn bootstrap_auto_backfill_caps_recent_startup_range() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_bootstrap_backfill_job_tables(database.pool()).await?;
+    let manifest_root = PathBuf::from("manifests");
+    let contract_instance_id = Uuid::from_u128(9_500);
+    let address = "0x0000000000000000000000000000000000000950";
+
+    insert_bootstrap_manifest_version(
+        database.pool(),
+        950,
+        "ens",
+        "ethereum-mainnet",
+        "ens_bootstrap_registry",
+        json!({
+            "contracts": [
+                {
+                    "role": "registry",
+                    "address": address,
+                    "start_block": 1
+                }
+            ],
+            "roots": []
+        }),
+    )
+    .await?;
+    insert_contract_instance(
+        database.pool(),
+        contract_instance_id,
+        "ethereum-mainnet",
+        "contract",
+    )
+    .await?;
+    insert_active_contract_instance_address(
+        database.pool(),
+        contract_instance_id,
+        "ethereum-mainnet",
+        address,
+        Some(950),
+    )
+    .await?;
+    insert_manifest_contract_instance(
+        database.pool(),
+        950,
+        "registry",
+        contract_instance_id,
+        address,
+        "none",
+        None,
+        None,
+    )
+    .await?;
+
+    let watched_plan = load_watched_chain_plan(database.pool()).await?;
+    let intake_tasks = sync_intake_chain_tasks(database.pool(), &watched_plan).await?;
+    let block_1 = provider_block(
+        "0x1000000000000000000000000000000000000000000000000000000000000001",
+        Some("0x0000000000000000000000000000000000000000000000000000000000000000"),
+        1,
+    );
+    let block_2 = provider_block(
+        "0x2000000000000000000000000000000000000000000000000000000000000002",
+        Some(&block_1.block_hash),
+        2,
+    );
+    let block_3 = provider_block(
+        "0x3000000000000000000000000000000000000000000000000000000000000003",
+        Some(&block_2.block_hash),
+        3,
+    );
+    let block_4 = provider_block(
+        "0x4000000000000000000000000000000000000000000000000000000000000004",
+        Some(&block_3.block_hash),
+        4,
+    );
+    let requests = Arc::new(Mutex::new(Vec::<BootstrapRpcRequest>::new()));
+    let (provider, server) = bootstrap_auto_backfill_provider(
+        vec![
+            ProviderBlockFixture {
+                block: block_1.clone(),
+                logs: vec![bootstrap_rpc_log_payload_at_address(&block_1, address, 0)],
+            },
+            ProviderBlockFixture {
+                block: block_2.clone(),
+                logs: vec![bootstrap_rpc_log_payload_at_address(&block_2, address, 0)],
+            },
+            ProviderBlockFixture {
+                block: block_3.clone(),
+                logs: vec![bootstrap_rpc_log_payload_at_address(&block_3, address, 0)],
+            },
+            ProviderBlockFixture {
+                block: block_4.clone(),
+                logs: vec![bootstrap_rpc_log_payload_at_address(&block_4, address, 0)],
+            },
+        ],
+        Arc::clone(&requests),
+    )
+    .await?;
+    let provider_registry =
+        ProviderRegistry::from_chain_rpc_urls(&[format!("ethereum-mainnet={provider}")])?;
+
+    let outcome = run_startup_bootstrap_backfills(
+        database.pool(),
+        &manifest_root,
+        &intake_tasks,
+        &provider_registry,
+        2,
+    )
+    .await?;
+    assert_eq!(outcome.drained_job_count, 1);
+    assert_eq!(outcome.resolved_block_count, 2);
+    assert_eq!(outcome.raw_log_count, 2);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM raw_blocks")
+            .fetch_one(database.pool())
+            .await?,
+        2
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM chain_lineage")
+            .fetch_one(database.pool())
+            .await?,
+        2
+    );
+
+    let job = sqlx::query_as::<_, (i64, i64, String, Value)>(
+        r#"
+        SELECT
+            range_start_block_number,
+            range_end_block_number,
+            idempotency_key,
+            source_identity
+        FROM backfill_jobs
+        "#,
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!((job.0, job.1), (3, 4));
+    assert!(job.2.contains("from=3:to=4"));
+    assert_eq!(
+        job.3
+            .get("selected_targets")
+            .and_then(Value::as_array)
+            .and_then(|targets| targets.first())
+            .and_then(|target| target.get("effective_from_block"))
+            .and_then(Value::as_i64),
+        Some(3)
+    );
+    assert_eq!(
+        job.3
+            .get("selected_targets")
+            .and_then(Value::as_array)
+            .and_then(|targets| targets.first())
+            .and_then(|target| target.get("effective_to_block"))
+            .and_then(Value::as_i64),
+        Some(4)
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (i64, i64)>(
+            "SELECT range_start_block_number, range_end_block_number FROM backfill_ranges"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        (3, 4)
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM raw_blocks WHERE block_number IN (1, 2)"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        0
     );
 
     server.abort();

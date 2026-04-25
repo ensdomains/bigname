@@ -45,6 +45,27 @@ If `BIGNAME_INDEXER_CHAIN_RPC_URLS` is unset, the indexer still syncs
 manifest/watch state, but provider-backed live ingestion remains idle. Current
 bootstrap RPC support accepts `http://` endpoints.
 
+RPC requirements are per selected profile and active watched chain. An
+Ethereum-only run may omit Base entirely. If the selected profile includes Base
+but no Base RPC is configured, Base provider-backed intake, automatic bootstrap,
+backfill catch-up, and live head following stay idle with an explicit
+`no_provider` / unavailable operational state; startup for configured chains
+must not fail solely because Base is missing. A provider entry for a chain that
+is not part of the selected manifest root is invalid.
+
+`BIGNAME_INDEXER_BOOTSTRAP_BACKFILL_MAX_BLOCKS=25000` is only the startup
+bootstrap cap for automatically created finite backfill jobs. It limits how much
+recent work startup may enqueue. It is not complete history, not a substitute
+for explicit full backfill over the selected profile's admitted ranges, and not
+consumer-replacement or route-coverage evidence.
+
+Operational catch-up to finalized head should be run as bounded idempotent
+backfill chunks. Before every chunk starts range work, check current Postgres
+size, writable free disk, and any configured object-cache budget. Capacity
+shortage should pause or fail the chunk explicitly instead of silently retaining
+less selected replay data or retaining full payload bundles for empty historical
+blocks.
+
 ## GHCR Image
 
 The repository publishes the image to:

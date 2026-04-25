@@ -25,6 +25,45 @@ fn provider_registry_parses_chain_rpc_urls() -> Result<()> {
 }
 
 #[test]
+fn provider_registry_accepts_ethereum_only_rpc_without_base_provider() -> Result<()> {
+    let registry = ProviderRegistry::from_chain_rpc_urls(&[
+        "ethereum-mainnet=http://127.0.0.1:8545".to_owned(),
+    ])?;
+
+    assert_eq!(registry.configured_chain_count(), 1);
+    assert!(registry.provider_for("ethereum-mainnet").is_some());
+    assert!(registry.provider_for("base-mainnet").is_none());
+    registry.ensure_configured_chains_admitted(["base-mainnet", "ethereum-mainnet"].into_iter())?;
+    Ok(())
+}
+
+#[test]
+fn provider_registry_rejects_configured_chains_outside_admitted_set() -> Result<()> {
+    let registry = ProviderRegistry::from_chain_rpc_urls(&[
+        "ethereum-mainnet=http://127.0.0.1:8545".to_owned(),
+        "optimism-mainnet=http://127.0.0.1:7545".to_owned(),
+    ])?;
+
+    let error = registry
+        .ensure_configured_chains_admitted(["base-mainnet", "ethereum-mainnet"].into_iter())
+        .expect_err("out-of-profile provider must be rejected");
+
+    assert!(
+        error.to_string().contains(
+            "configured RPC provider chains outside selected/admitted runtime chain set: optimism-mainnet"
+        ),
+        "unexpected error: {error:#}"
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("admitted runtime chains: base-mainnet, ethereum-mainnet"),
+        "unexpected error: {error:#}"
+    );
+    Ok(())
+}
+
+#[test]
 fn provider_block_selection_formats_json_rpc_parameters() -> Result<()> {
     assert_eq!(
         ProviderBlockSelection::Number(42).json_rpc_parameter()?,

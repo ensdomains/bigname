@@ -100,6 +100,146 @@ async fn build_manifest_runtime_state_loads_checked_in_repository_seed() -> Resu
 }
 
 #[tokio::test]
+async fn ethereum_only_provider_leaves_active_base_watch_state_idle() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let manifests_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../manifests");
+    let manifest_repository = load_manifest_repository(&manifests_root)?;
+    let runtime_state = build_manifest_runtime_state(database.pool(), &manifest_repository).await?;
+    let mut intake_tasks =
+        sync_intake_chain_tasks(database.pool(), &runtime_state.watched_chain_plan).await?;
+
+    let base_task = intake_tasks
+        .iter()
+        .find(|task| task.chain == "base-mainnet")
+        .expect("checked-in manifests must leave Base actively watched")
+        .clone();
+    assert!(
+        intake_tasks
+            .iter()
+            .any(|task| task.chain == "ethereum-mainnet"),
+        "checked-in manifests must leave Ethereum actively watched"
+    );
+
+    let canonical_head = provider_block(
+        "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        Some("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+        42,
+    );
+    let canonical_hash = canonical_head.block_hash.clone();
+    let rpc_head = canonical_head.clone();
+    let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let request_log = std::sync::Arc::clone(&requests);
+    let (ethereum_rpc_url, server) = spawn_json_rpc_server(std::sync::Arc::new(move |body| {
+        request_log
+            .lock()
+            .expect("request log must not be poisoned")
+            .push(body.clone());
+        let method = body
+            .get("method")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let params = body
+            .get("params")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let first_param = params
+            .first()
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+
+        let result = match method {
+            "eth_getBlockByNumber" if first_param == "latest" => {
+                json!({ "hash": canonical_hash.clone() })
+            }
+            "eth_getBlockByNumber" if first_param == "safe" || first_param == "finalized" => {
+                Value::Null
+            }
+            "eth_getBlockByHash" if first_param == rpc_head.block_hash.as_str() => {
+                rpc_block_bundle_payload(&rpc_head)
+            }
+            "eth_getLogs" => Value::Array(Vec::<Value>::new()),
+            "eth_getBlockReceipts" if first_param == rpc_head.block_hash.as_str() => {
+                Value::Array(vec![rpc_receipt_payload(&rpc_head)])
+            }
+            "eth_getCode" => Value::String("0x6001600155".to_owned()),
+            _ => panic!("unexpected Ethereum-only RPC request: {body}"),
+        };
+
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": result,
+        })
+    }))
+    .await?;
+    let chain_rpc_urls = vec![format!("ethereum-mainnet={ethereum_rpc_url}")];
+    let provider_registry = ProviderRegistry::from_chain_rpc_urls(&chain_rpc_urls)?;
+    assert!(provider_registry.provider_for("ethereum-mainnet").is_some());
+    assert!(provider_registry.provider_for("base-mainnet").is_none());
+    validate_provider_registry_for_intake_tasks(&intake_tasks, &provider_registry)?;
+
+    log_provider_registry("test", &intake_tasks, &provider_registry);
+    poll_provider_heads(database.pool(), &mut intake_tasks, &provider_registry).await?;
+
+    let base_task_after_poll = intake_tasks
+        .iter()
+        .find(|task| task.chain == "base-mainnet")
+        .expect("Base task must remain present after provider polling");
+    assert_eq!(base_task_after_poll.checkpoint.canonical_block_number, None);
+    assert_eq!(base_task_after_poll.checkpoint.canonical_block_hash, None);
+    let ethereum_task_after_poll = intake_tasks
+        .iter()
+        .find(|task| task.chain == "ethereum-mainnet")
+        .expect("Ethereum task must remain present after provider polling");
+    assert_eq!(
+        ethereum_task_after_poll.checkpoint.canonical_block_number,
+        Some(42)
+    );
+
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM raw_blocks WHERE chain_id = 'base-mainnet'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM raw_blocks WHERE chain_id = 'ethereum-mainnet'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        1
+    );
+
+    let request_bodies = requests
+        .lock()
+        .expect("request log must not be poisoned")
+        .iter()
+        .map(Value::to_string)
+        .collect::<Vec<_>>();
+    assert!(
+        !request_bodies.is_empty(),
+        "Ethereum provider should be used for the configured chain"
+    );
+    for base_address in &base_task.addresses {
+        assert!(
+            !request_bodies
+                .iter()
+                .any(|request| request.contains(base_address)),
+            "Base address {base_address} must not be requested from the Ethereum-only RPC"
+        );
+    }
+
+    server.abort();
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn refresh_watched_chain_plan_detects_storage_changes() -> Result<()> {
     let database = TestDatabase::new().await?;
     let root_contract_instance_id = Uuid::from_u128(41);

@@ -3,6 +3,12 @@ use std::path::PathBuf;
 use bigname_storage::DatabaseConfig;
 use clap::{Args, Parser, Subcommand};
 
+use crate::bootstrap_backfill::DEFAULT_BOOTSTRAP_BACKFILL_MAX_BLOCKS;
+use crate::ops_catchup::{
+    DEFAULT_OPS_CATCHUP_CHUNK_BLOCKS, DEFAULT_OPS_CATCHUP_FOLLOW_POLL_INTERVAL_SECS,
+    DEFAULT_OPS_CATCHUP_LEASE_DURATION_SECS,
+};
+
 #[derive(Parser, Debug)]
 #[command(
     name = "bigname-indexer",
@@ -17,6 +23,7 @@ pub(crate) struct Cli {
 pub(crate) enum Command {
     Run(RunArgs),
     Backfill(BackfillArgs),
+    OpsCatchup(OpsCatchupArgs),
     Replay(ReplayArgs),
 }
 
@@ -42,6 +49,12 @@ pub(crate) struct RunArgs {
         value_delimiter = ','
     )]
     pub(crate) chain_rpc_urls: Vec<String>,
+    #[arg(
+        long,
+        env = "BIGNAME_INDEXER_BOOTSTRAP_BACKFILL_MAX_BLOCKS",
+        default_value_t = DEFAULT_BOOTSTRAP_BACKFILL_MAX_BLOCKS
+    )]
+    pub(crate) bootstrap_backfill_max_blocks: i64,
 }
 
 #[derive(Args, Debug)]
@@ -84,6 +97,76 @@ pub(crate) struct BackfillArgs {
     pub(crate) lease_token: Option<String>,
     #[arg(long, default_value_t = 300_u64)]
     pub(crate) lease_duration_secs: u64,
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct OpsCatchupArgs {
+    #[command(flatten)]
+    pub(crate) database: DatabaseConfig,
+    #[arg(
+        long,
+        env = "BIGNAME_INDEXER_MANIFESTS_ROOT",
+        default_value = "manifests"
+    )]
+    pub(crate) manifests_root: PathBuf,
+    #[arg(
+        long = "chain-rpc-url",
+        env = "BIGNAME_INDEXER_CHAIN_RPC_URLS",
+        value_delimiter = ','
+    )]
+    pub(crate) chain_rpc_urls: Vec<String>,
+    #[arg(long, env = "BIGNAME_INDEXER_DEPLOYMENT_PROFILE")]
+    pub(crate) deployment_profile: Option<String>,
+    #[arg(
+        long,
+        env = "BIGNAME_INDEXER_OPS_CATCHUP_CHUNK_BLOCKS",
+        default_value_t = DEFAULT_OPS_CATCHUP_CHUNK_BLOCKS
+    )]
+    pub(crate) chunk_blocks: i64,
+    #[arg(
+        long,
+        env = "BIGNAME_INDEXER_OPS_CATCHUP_FOLLOW",
+        default_value_t = false
+    )]
+    pub(crate) follow: bool,
+    #[arg(
+        long,
+        env = "BIGNAME_INDEXER_OPS_CATCHUP_FOLLOW_ITERATIONS",
+        requires = "follow"
+    )]
+    pub(crate) follow_iterations: Option<u64>,
+    #[arg(
+        long,
+        env = "BIGNAME_INDEXER_OPS_CATCHUP_FOLLOW_POLL_INTERVAL_SECS",
+        default_value_t = DEFAULT_OPS_CATCHUP_FOLLOW_POLL_INTERVAL_SECS
+    )]
+    pub(crate) follow_poll_interval_secs: u64,
+    #[arg(
+        long,
+        env = "BIGNAME_INDEXER_OPS_CATCHUP_LEASE_DURATION_SECS",
+        default_value_t = DEFAULT_OPS_CATCHUP_LEASE_DURATION_SECS
+    )]
+    pub(crate) lease_duration_secs: u64,
+    #[arg(long, env = "BIGNAME_INDEXER_OPS_CATCHUP_POSTGRES_MAX_BYTES")]
+    pub(crate) postgres_max_bytes: Option<u64>,
+    #[arg(
+        long,
+        env = "BIGNAME_INDEXER_OPS_CATCHUP_MIN_FREE_DISK_BYTES",
+        default_value_t = 0_u64
+    )]
+    pub(crate) min_writable_free_disk_bytes: u64,
+    #[arg(
+        long,
+        env = "BIGNAME_INDEXER_OPS_CATCHUP_DISK_PATH",
+        default_value = "."
+    )]
+    pub(crate) writable_free_disk_path: PathBuf,
+    #[arg(
+        long,
+        env = "BIGNAME_INDEXER_OPS_CATCHUP_ESTIMATED_BYTES_PER_BLOCK",
+        default_value_t = 0_u64
+    )]
+    pub(crate) estimated_bytes_per_block: u64,
 }
 
 #[derive(Args, Debug)]

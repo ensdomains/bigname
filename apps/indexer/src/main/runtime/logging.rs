@@ -14,7 +14,8 @@ use tracing::{info, warn};
 use crate::provider::ProviderRegistry;
 
 use super::intake::{
-    IntakeChainTask, checkpoint_mode, intake_runtime_state, watched_chain_plan_state,
+    IntakeChainTask, ProviderAvailabilityStatus, checkpoint_mode, intake_runtime_state,
+    provider_availability_state, watched_chain_plan_state,
 };
 use super::manifest::{DiscoveryAdmissionSnapshot, ManifestRuntimeState};
 
@@ -463,22 +464,32 @@ pub(crate) fn log_provider_registry(
     tasks: &[IntakeChainTask],
     provider_registry: &ProviderRegistry,
 ) {
+    let availability = provider_availability_state(tasks, provider_registry);
+
     info!(
         service = "indexer",
         stage,
-        rpc_configured_chain_count = provider_registry.configured_chain_count(),
-        intake_chain_count = tasks.len(),
+        rpc_configured_chain_count = availability.configured_chain_count,
+        intake_chain_count = availability.intake_chain_count,
+        provider_available_chain_count = availability.available_chain_count,
+        provider_unavailable_chain_count = availability.unavailable_chain_count,
         "provider registry loaded for intake chains"
     );
 
-    for task in tasks {
-        if provider_registry.provider_for(&task.chain).is_none() {
+    for chain in &availability.chains {
+        if chain.status == ProviderAvailabilityStatus::Unavailable {
             warn!(
                 service = "indexer",
                 stage,
-                chain = %task.chain,
-                intake_address_count = task.addresses.len(),
-                "no RPC provider is configured for an active intake chain; provider-backed head fetch will stay idle for this chain"
+                chain = %chain.chain,
+                intake_address_count = chain.address_count,
+                intake_entry_count_total = chain.entry_count,
+                provider_availability_status = chain.status.as_str(),
+                provider_unavailable_reason = chain
+                    .unavailable_reason
+                    .map(|reason| reason.as_str()),
+                provider_backed_intake_status = "idle",
+                "provider-backed intake is idle for active chain because no RPC provider is configured"
             );
         }
     }

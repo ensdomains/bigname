@@ -14,9 +14,10 @@ use crate::{
     backfill_lease_expires_at, default_backfill_lease_owner, deployment_profile_from_manifest_root,
     generated_backfill_lease_token,
     provider::ProviderRegistry,
-    runtime::IntakeChainTask,
+    runtime::{IntakeChainTask, validate_provider_registry_for_intake_tasks},
 };
 
+pub(crate) const DEFAULT_BOOTSTRAP_BACKFILL_MAX_BLOCKS: i64 = 25_000;
 const BOOTSTRAP_BACKFILL_LEASE_DURATION_SECS: u64 = 300;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -70,7 +71,10 @@ pub(crate) async fn run_startup_bootstrap_backfills(
     manifests_root: &Path,
     intake_chain_tasks: &[IntakeChainTask],
     provider_registry: &ProviderRegistry,
+    bootstrap_backfill_max_blocks: i64,
 ) -> Result<BootstrapBackfillOutcome> {
+    validate_bootstrap_backfill_max_blocks(bootstrap_backfill_max_blocks)?;
+    validate_provider_registry_for_intake_tasks(intake_chain_tasks, provider_registry)?;
     let deployment_profile = deployment_profile_from_manifest_root(manifests_root);
     let lease_owner = format!("{}:bootstrap-backfill", default_backfill_lease_owner());
     let mut outcome = BootstrapBackfillOutcome {
@@ -129,6 +133,7 @@ pub(crate) async fn run_startup_bootstrap_backfills(
             bootstrap_backfill_status = "planning",
             chain = %task.chain,
             provider_head_block,
+            bootstrap_backfill_max_blocks,
             eligible_bootstrap_target_count = bootstrap_targets.len(),
             skipped_unknown_start_target_count = outcome.skipped_unknown_start_target_count,
             "manifest-declared bootstrap targets loaded"
@@ -136,7 +141,12 @@ pub(crate) async fn run_startup_bootstrap_backfills(
 
         let mut target_ranges = Vec::new();
         for target in bootstrap_targets {
-            let Some(range) = bootstrap_target_range(&target, provider_head_block)? else {
+            let Some(range) = bootstrap_target_range(
+                &target,
+                provider_head_block,
+                bootstrap_backfill_max_blocks,
+            )?
+            else {
                 outcome.skipped_future_target_count += 1;
                 info!(
                     service = "indexer",
@@ -149,7 +159,8 @@ pub(crate) async fn run_startup_bootstrap_backfills(
                     effective_from_block = target.effective_from_block,
                     effective_to_block = target.effective_to_block,
                     provider_head_block,
-                    "manifest-declared bootstrap target is outside the finite provider head"
+                    bootstrap_backfill_max_blocks,
+                    "manifest-declared bootstrap target is outside the finite startup bootstrap range"
                 );
                 continue;
             };
@@ -219,6 +230,7 @@ pub(crate) async fn run_startup_bootstrap_backfills(
         skipped_unknown_start_target_count = outcome.skipped_unknown_start_target_count,
         drained_bootstrap_job_count = outcome.drained_job_count,
         skipped_future_target_count = outcome.skipped_future_target_count,
+        bootstrap_backfill_max_blocks,
         reserved_range_count = outcome.reserved_range_count,
         completed_range_count = outcome.completed_range_count,
         resolved_block_count = outcome.resolved_block_count,
@@ -251,16 +263,33 @@ pub(crate) fn bootstrap_backfill_idempotency_key(
 fn bootstrap_target_range(
     target: &ManifestBootstrapTarget,
     provider_head_block: i64,
+    bootstrap_backfill_max_blocks: i64,
 ) -> Result<Option<BackfillBlockRange>> {
+    validate_bootstrap_backfill_max_blocks(bootstrap_backfill_max_blocks)?;
+    let capped_start_block = provider_head_block
+        .checked_sub(bootstrap_backfill_max_blocks - 1)
+        .unwrap_or(0)
+        .max(0);
     let finite_end_block = target
         .effective_to_block
         .map(|effective_to_block| effective_to_block.min(provider_head_block))
         .unwrap_or(provider_head_block);
-    if target.effective_from_block > finite_end_block {
+    let finite_start_block = target.effective_from_block.max(capped_start_block);
+    if finite_start_block > finite_end_block {
         return Ok(None);
     }
 
-    BackfillBlockRange::new(target.effective_from_block, finite_end_block).map(Some)
+    BackfillBlockRange::new(finite_start_block, finite_end_block).map(Some)
+}
+
+fn validate_bootstrap_backfill_max_blocks(bootstrap_backfill_max_blocks: i64) -> Result<()> {
+    if bootstrap_backfill_max_blocks <= 0 {
+        bail!(
+            "startup bootstrap backfill max blocks must be positive, got {bootstrap_backfill_max_blocks}"
+        );
+    }
+
+    Ok(())
 }
 
 fn plan_bootstrap_backfill_segments(
