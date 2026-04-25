@@ -6,10 +6,10 @@ use std::{
 
 use anyhow::{Context, Result};
 use bigname_storage::{
-    ChainLineageBlock, NameSurface, NormalizedEvent, RawBlock, Resource, SurfaceBinding,
+    ChainLineageBlock, NameSurface, NormalizedEvent, RawBlock, RawLog, Resource, SurfaceBinding,
     TokenLineage, default_database_url, load_name_current, upsert_chain_lineage_blocks,
     upsert_name_current_rows, upsert_name_surfaces, upsert_normalized_events, upsert_raw_blocks,
-    upsert_resources, upsert_surface_bindings, upsert_token_lineages,
+    upsert_raw_logs, upsert_resources, upsert_surface_bindings, upsert_token_lineages,
 };
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
@@ -215,6 +215,180 @@ async fn rebuilds_first_registration_into_name_current() -> Result<()> {
     assert_eq!(row.coverage["status"], Value::String("full".to_owned()));
     assert_eq!(row.coverage["unsupported_reason"], Value::Null);
     assert_eq!(row.manifest_version, 3);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn rebuild_ignores_suppressed_old_registry_raw_facts_after_migration() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let binding = IdentityBinding::new("ens:migrated.eth", "migrated.eth", 0x1110, 0x2220, 0x3330);
+    let current_owner = "0x00000000000000000000000000000000000000aa";
+    let suppressed_owner = "0x00000000000000000000000000000000000000bb";
+    let current_resolver = "0x00000000000000000000000000000000000000cc";
+    let suppressed_resolver = "0x00000000000000000000000000000000000000dd";
+
+    seed_raw_blocks(
+        database.pool(),
+        &[
+            raw_block(
+                "ethereum-mainnet",
+                "0xensold-current-grant",
+                100,
+                1_776_300_100,
+            ),
+            raw_block(
+                "ethereum-mainnet",
+                "0xensold-current-owner",
+                101,
+                1_776_300_101,
+            ),
+            raw_block(
+                "ethereum-mainnet",
+                "0xensold-current-resolver",
+                102,
+                1_776_300_102,
+            ),
+            raw_block(
+                "ethereum-mainnet",
+                "0xensold-suppressed-old",
+                500,
+                1_776_300_500,
+            ),
+        ],
+    )
+    .await?;
+    seed_raw_logs(
+        database.pool(),
+        &[old_registry_raw_log(
+            "suppressed-name-current",
+            "0xensold-suppressed-old",
+            500,
+            7,
+            suppressed_owner,
+            suppressed_resolver,
+        )],
+    )
+    .await?;
+    seed_identity(
+        database.pool(),
+        &binding,
+        "0xensold-current-grant",
+        100,
+        1_776_300_100,
+    )
+    .await?;
+    seed_events(
+        database.pool(),
+        &[
+            with_source_family(
+                authority_event(
+                    &binding,
+                    "ensold-current-grant",
+                    "RegistrationGranted",
+                    "0xensold-current-grant",
+                    100,
+                    Some(0),
+                    json!({}),
+                    json!({
+                        "authority_kind": "registry",
+                        "authority_key": "registry:ethereum-mainnet:migrated.eth",
+                        "registrant": current_owner,
+                        "expiry": 1_900_000_000_i64,
+                    }),
+                ),
+                "ens_v1_registry_l1",
+            ),
+            with_source_family(
+                authority_event(
+                    &binding,
+                    "ensold-current-owner",
+                    "AuthorityTransferred",
+                    "0xensold-current-owner",
+                    101,
+                    Some(0),
+                    json!({}),
+                    json!({
+                        "owner": current_owner,
+                    }),
+                ),
+                "ens_v1_registry_l1",
+            ),
+            with_source_family(
+                resolver_event(
+                    &binding,
+                    "ensold-current-resolver",
+                    current_resolver,
+                    "0xensold-current-resolver",
+                    102,
+                    0,
+                ),
+                "ens_v1_registry_l1",
+            ),
+        ],
+    )
+    .await?;
+
+    let summary = rebuild_name_current(database.pool(), Some(&binding.logical_name_id)).await?;
+    assert_eq!(summary.upserted_row_count, 1);
+
+    let row = load_name_current(database.pool(), &binding.logical_name_id)
+        .await?
+        .context("rebuilt migrated ENSv1 row must exist")?;
+    assert_eq!(
+        row.declared_summary["registration"]["registrant"],
+        json!(current_owner)
+    );
+    assert_eq!(
+        row.declared_summary["control"]["registry_owner"],
+        json!(current_owner)
+    );
+    assert_eq!(
+        row.declared_summary["resolver"]["address"],
+        json!(current_resolver)
+    );
+    assert_eq!(
+        row.declared_summary["resolver"]["latest_event_kind"],
+        json!(EVENT_KIND_RESOLVER_CHANGED)
+    );
+    assert_eq!(
+        row.declared_summary["history"]["surface_head"]["event_kind"],
+        json!(EVENT_KIND_RESOLVER_CHANGED)
+    );
+    assert_eq!(
+        row.declared_summary["history"]["surface_head"]["chain_position"]["block_number"],
+        json!(102)
+    );
+    assert_eq!(
+        row.declared_summary["history"]["resource_head"]["event_kind"],
+        json!(EVENT_KIND_RESOLVER_CHANGED)
+    );
+    assert_eq!(row.chain_positions["ethereum"]["block_number"], json!(102));
+    assert_eq!(row.coverage["status"], json!("full"));
+    assert_eq!(row.coverage["unsupported_reason"], Value::Null);
+    assert_eq!(
+        row.coverage["source_classes_considered"],
+        json!(["ensv1_registry_path"])
+    );
+    assert_eq!(row.last_recomputed_at, timestamp(1_776_300_102));
+    assert_eq!(
+        row.provenance["normalized_event_ids"]
+            .as_array()
+            .map(Vec::len),
+        Some(3)
+    );
+
+    let projection_json = serde_json::to_string(&json!({
+        "declared_summary": row.declared_summary,
+        "provenance": row.provenance,
+        "coverage": row.coverage,
+        "chain_positions": row.chain_positions,
+        "canonicality_summary": row.canonicality_summary,
+    }))?;
+    assert!(!projection_json.contains("0xensold-suppressed-old"));
+    assert!(!projection_json.contains(suppressed_owner));
+    assert!(!projection_json.contains(suppressed_resolver));
+    assert!(!projection_json.contains("suppressed-name-current"));
 
     database.cleanup().await
 }
@@ -2684,6 +2858,11 @@ async fn seed_raw_blocks(pool: &PgPool, blocks: &[RawBlock]) -> Result<()> {
     Ok(())
 }
 
+async fn seed_raw_logs(pool: &PgPool, logs: &[RawLog]) -> Result<()> {
+    upsert_raw_logs(pool, logs).await?;
+    Ok(())
+}
+
 async fn seed_events(pool: &PgPool, events: &[NormalizedEvent]) -> Result<()> {
     upsert_normalized_events(pool, events).await?;
     Ok(())
@@ -2924,6 +3103,33 @@ fn raw_block(chain_id: &str, block_hash: &str, block_number: i64, unix_timestamp
         transactions_root: None,
         receipts_root: None,
         state_root: None,
+        canonicality_state: CanonicalityState::Finalized,
+    }
+}
+
+fn old_registry_raw_log(
+    identity_suffix: &str,
+    block_hash: &str,
+    block_number: i64,
+    log_index: i64,
+    owner: &str,
+    resolver: &str,
+) -> RawLog {
+    RawLog {
+        chain_id: "ethereum-mainnet".to_owned(),
+        block_hash: block_hash.to_owned(),
+        block_number,
+        transaction_hash: format!("tx:ensold:{identity_suffix}"),
+        transaction_index: 0,
+        log_index,
+        emitting_address: "0x0000000000000000000000000000000000000f01".to_owned(),
+        topics: vec![
+            "ENSRegistryOld".to_owned(),
+            identity_suffix.to_owned(),
+            owner.to_owned(),
+            resolver.to_owned(),
+        ],
+        data: format!("suppressed-old-registry:{identity_suffix}").into_bytes(),
         canonicality_state: CanonicalityState::Finalized,
     }
 }
@@ -3183,6 +3389,11 @@ fn ens_v2_alias_event(
 
 fn with_source_manifest_id(mut event: NormalizedEvent, source_manifest_id: i64) -> NormalizedEvent {
     event.source_manifest_id = Some(source_manifest_id);
+    event
+}
+
+fn with_source_family(mut event: NormalizedEvent, source_family: &str) -> NormalizedEvent {
+    event.source_family = source_family.to_owned();
     event
 }
 

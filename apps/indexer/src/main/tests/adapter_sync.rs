@@ -578,6 +578,25 @@ async fn sync_adapter_owned_raw_log_state_backfills_basenames_reverse_claims_and
     .await?;
     insert_manifest_contract_instance(
         database.pool(),
+        3,
+        "registry",
+        registry_contract_instance_id,
+        registry_address,
+        "none",
+        None,
+        None,
+    )
+    .await?;
+    insert_manifest_discovery_rule(
+        database.pool(),
+        3,
+        "resolver",
+        "registry",
+        "reachable_from_root",
+    )
+    .await?;
+    insert_manifest_contract_instance(
+        database.pool(),
         4,
         "resolver",
         resolver_contract_instance_id,
@@ -715,7 +734,27 @@ async fn sync_adapter_owned_raw_log_state_backfills_basenames_reverse_claims_and
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM normalized_events WHERE event_kind = 'ResolverChanged' AND namespace = 'basenames'"
+            r#"
+            SELECT COUNT(*)::BIGINT
+            FROM normalized_events
+            WHERE event_kind = 'ResolverChanged'
+              AND namespace = 'basenames'
+              AND derivation_kind = 'ens_v1_unwrapped_authority'
+            "#
+        )
+        .fetch_one(database.pool())
+        .await?,
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)::BIGINT
+            FROM normalized_events
+            WHERE event_kind = 'ResolverChanged'
+              AND source_family = 'basenames_base_registry'
+              AND derivation_kind = 'ens_v1_registry_resolver_changed'
+            "#
         )
         .fetch_one(database.pool())
         .await?,

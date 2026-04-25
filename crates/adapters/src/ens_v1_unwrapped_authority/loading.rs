@@ -1,3 +1,7 @@
+use super::scope::{
+    AuthorityRawLogSourceScopeTarget, emitter_for_block_and_scope,
+    scoped_ranges_for_active_emitters,
+};
 use super::*;
 
 impl AuthorityRawLogRow {
@@ -92,17 +96,17 @@ pub(super) async fn load_authority_raw_logs(
     active_emitters: &[ActiveEmitter],
     restrict_to_block_hashes: bool,
     block_hashes: &[String],
+    source_scope: Option<&[AuthorityRawLogSourceScopeTarget]>,
 ) -> Result<Vec<AuthorityRawLogRow>> {
-    let mut emitters_by_address = HashMap::<String, ActiveEmitter>::new();
-    for emitter in active_emitters {
-        match emitters_by_address.get(&emitter.address) {
-            Some(current) if !candidate_precedes(emitter, current) => {}
-            _ => {
-                emitters_by_address.insert(emitter.address.clone(), emitter.clone());
-            }
-        }
+    let mut emitters_by_address = HashMap::<String, Vec<ActiveEmitter>>::new();
+    for emitter in active_emitters.iter().cloned() {
+        emitters_by_address
+            .entry(emitter.address.clone())
+            .or_default()
+            .push(emitter);
     }
-    let watched_addresses = active_emitters
+    let watched_addresses = emitters_by_address.keys().cloned().collect::<Vec<_>>();
+    let watched_range_addresses = active_emitters
         .iter()
         .map(|emitter| emitter.address.clone())
         .collect::<Vec<_>>();
@@ -115,58 +119,146 @@ pub(super) async fn load_authority_raw_logs(
         .map(|emitter| emitter.active_to_block_number.unwrap_or(i64::MAX))
         .collect::<Vec<_>>();
 
-    let rows = sqlx::query(
-        r#"
-        SELECT
-            rl.chain_id AS chain_id,
-            rl.block_hash AS block_hash,
-            rl.block_number AS block_number,
-            rb.block_timestamp AS block_timestamp,
-            rl.transaction_hash AS transaction_hash,
-            rl.transaction_index AS transaction_index,
-            rl.log_index AS log_index,
-            rl.emitting_address AS emitting_address,
-            rl.topics AS topics,
-            rl.data AS data,
-            rl.canonicality_state::TEXT AS canonicality_state
-        FROM raw_logs rl
-        JOIN raw_blocks rb
-          ON rb.chain_id = rl.chain_id
-         AND rb.block_hash = rl.block_hash
-        WHERE rl.chain_id = $1
-          AND lower(rl.emitting_address) = ANY($2::TEXT[])
-          AND ($3::BOOLEAN = FALSE OR rl.block_hash = ANY($4::TEXT[]))
-          AND EXISTS (
-              SELECT 1
-              FROM unnest($5::TEXT[], $6::BIGINT[], $7::BIGINT[]) AS watched(
-                  address,
-                  effective_from_block,
-                  effective_to_block
+    let scoped_ranges = source_scope
+        .map(|source_scope| scoped_ranges_for_active_emitters(source_scope, active_emitters))
+        .transpose()?;
+    let rows = if let Some(scoped_ranges) = scoped_ranges.as_ref() {
+        if scoped_ranges.is_empty() {
+            return Ok(Vec::new());
+        }
+        let scoped_addresses = scoped_ranges
+            .iter()
+            .map(|target| target.address.clone())
+            .collect::<Vec<_>>();
+        let scoped_from_blocks = scoped_ranges
+            .iter()
+            .map(|target| target.effective_from_block)
+            .collect::<Vec<_>>();
+        let scoped_to_blocks = scoped_ranges
+            .iter()
+            .map(|target| target.effective_to_block)
+            .collect::<Vec<_>>();
+
+        sqlx::query(
+            r#"
+            SELECT
+                rl.chain_id AS chain_id,
+                rl.block_hash AS block_hash,
+                rl.block_number AS block_number,
+                rb.block_timestamp AS block_timestamp,
+                rl.transaction_hash AS transaction_hash,
+                rl.transaction_index AS transaction_index,
+                rl.log_index AS log_index,
+                rl.emitting_address AS emitting_address,
+                rl.topics AS topics,
+                rl.data AS data,
+                rl.canonicality_state::TEXT AS canonicality_state
+            FROM raw_logs rl
+            JOIN raw_blocks rb
+              ON rb.chain_id = rl.chain_id
+             AND rb.block_hash = rl.block_hash
+            WHERE rl.chain_id = $1
+              AND lower(rl.emitting_address) = ANY($2::TEXT[])
+              AND ($3::BOOLEAN = FALSE OR rl.block_hash = ANY($4::TEXT[]))
+              AND EXISTS (
+                  SELECT 1
+                  FROM unnest($5::TEXT[], $6::BIGINT[], $7::BIGINT[]) AS watched(
+                      address,
+                      effective_from_block,
+                      effective_to_block
+                  )
+                  WHERE watched.address = lower(rl.emitting_address)
+                    AND rl.block_number BETWEEN watched.effective_from_block
+                        AND watched.effective_to_block
               )
-              WHERE watched.address = lower(rl.emitting_address)
-                AND rl.block_number BETWEEN watched.effective_from_block
-                    AND watched.effective_to_block
-          )
-          AND rl.canonicality_state IN (
-              'canonical'::canonicality_state,
-              'safe'::canonicality_state,
-              'finalized'::canonicality_state
-          )
-        ORDER BY rl.block_number, rl.transaction_index, rl.log_index
-        "#,
-    )
-    .bind(chain)
-    .bind(&watched_addresses)
-    .bind(restrict_to_block_hashes)
-    .bind(block_hashes)
-    .bind(&watched_addresses)
-    .bind(&watched_effective_from_blocks)
-    .bind(&watched_effective_to_blocks)
-    .fetch_all(pool)
-    .await
-    .with_context(|| {
-        format!("failed to load ENSv1 unwrapped authority raw logs for chain {chain}")
-    })?;
+              AND EXISTS (
+                  SELECT 1
+                  FROM unnest($8::TEXT[], $9::BIGINT[], $10::BIGINT[]) AS scoped(
+                      address,
+                      effective_from_block,
+                      effective_to_block
+                  )
+                  WHERE scoped.address = lower(rl.emitting_address)
+                    AND rl.block_number BETWEEN scoped.effective_from_block
+                        AND scoped.effective_to_block
+              )
+              AND rl.canonicality_state IN (
+                  'canonical'::canonicality_state,
+                  'safe'::canonicality_state,
+                  'finalized'::canonicality_state
+              )
+            ORDER BY rl.block_number, rl.transaction_index, rl.log_index
+            "#,
+        )
+        .bind(chain)
+        .bind(&watched_addresses)
+        .bind(restrict_to_block_hashes)
+        .bind(block_hashes)
+        .bind(&watched_range_addresses)
+        .bind(&watched_effective_from_blocks)
+        .bind(&watched_effective_to_blocks)
+        .bind(&scoped_addresses)
+        .bind(&scoped_from_blocks)
+        .bind(&scoped_to_blocks)
+        .fetch_all(pool)
+        .await
+        .with_context(|| {
+            format!("failed to load scoped ENSv1 unwrapped authority raw logs for chain {chain}")
+        })?
+    } else {
+        sqlx::query(
+            r#"
+            SELECT
+                rl.chain_id AS chain_id,
+                rl.block_hash AS block_hash,
+                rl.block_number AS block_number,
+                rb.block_timestamp AS block_timestamp,
+                rl.transaction_hash AS transaction_hash,
+                rl.transaction_index AS transaction_index,
+                rl.log_index AS log_index,
+                rl.emitting_address AS emitting_address,
+                rl.topics AS topics,
+                rl.data AS data,
+                rl.canonicality_state::TEXT AS canonicality_state
+            FROM raw_logs rl
+            JOIN raw_blocks rb
+              ON rb.chain_id = rl.chain_id
+             AND rb.block_hash = rl.block_hash
+            WHERE rl.chain_id = $1
+              AND lower(rl.emitting_address) = ANY($2::TEXT[])
+              AND ($3::BOOLEAN = FALSE OR rl.block_hash = ANY($4::TEXT[]))
+              AND EXISTS (
+                  SELECT 1
+                  FROM unnest($5::TEXT[], $6::BIGINT[], $7::BIGINT[]) AS watched(
+                      address,
+                      effective_from_block,
+                      effective_to_block
+                  )
+                  WHERE watched.address = lower(rl.emitting_address)
+                    AND rl.block_number BETWEEN watched.effective_from_block
+                        AND watched.effective_to_block
+              )
+              AND rl.canonicality_state IN (
+                  'canonical'::canonicality_state,
+                  'safe'::canonicality_state,
+                  'finalized'::canonicality_state
+              )
+            ORDER BY rl.block_number, rl.transaction_index, rl.log_index
+            "#,
+        )
+        .bind(chain)
+        .bind(&watched_addresses)
+        .bind(restrict_to_block_hashes)
+        .bind(block_hashes)
+        .bind(&watched_range_addresses)
+        .bind(&watched_effective_from_blocks)
+        .bind(&watched_effective_to_blocks)
+        .fetch_all(pool)
+        .await
+        .with_context(|| {
+            format!("failed to load ENSv1 unwrapped authority raw logs for chain {chain}")
+        })?
+    };
 
     rows.into_iter()
         .map(|row| {
@@ -174,15 +266,21 @@ pub(super) async fn load_authority_raw_logs(
                 .try_get::<String, _>("emitting_address")
                 .context("missing emitting_address")?
                 .to_ascii_lowercase();
-            let emitter = emitters_by_address.get(&address).with_context(|| {
-                format!("missing active emitter metadata for chain {chain} address {address}")
-            })?;
+            let block_number = row
+                .try_get("block_number")
+                .context("missing block_number")?;
+            let emitter = emitters_by_address
+                .get(&address)
+                .and_then(|emitters| {
+                    emitter_for_block_and_scope(emitters, block_number, source_scope)
+                })
+                .with_context(|| {
+                    format!("missing active emitter metadata for chain {chain} address {address}")
+                })?;
             Ok(AuthorityRawLogRow {
                 chain_id: row.try_get("chain_id").context("missing chain_id")?,
                 block_hash: row.try_get("block_hash").context("missing block_hash")?,
-                block_number: row
-                    .try_get("block_number")
-                    .context("missing block_number")?,
+                block_number,
                 block_timestamp: row
                     .try_get("block_timestamp")
                     .context("missing block_timestamp")?,
@@ -205,6 +303,7 @@ pub(super) async fn load_authority_raw_logs(
                 source_family: emitter.source_family.clone(),
                 manifest_version: emitter.manifest_version,
                 normalizer_version: emitter.normalizer_version.clone(),
+                contract_role: emitter.contract_role.clone(),
             })
         })
         .collect()
@@ -221,6 +320,7 @@ pub(super) async fn load_active_emitters(pool: &PgPool, chain: &str) -> Result<V
     if watched_contracts.is_empty() {
         return Ok(Vec::new());
     }
+    let contract_roles = load_manifest_contract_roles(pool, &watched_contracts).await?;
 
     let manifest_ids = watched_contracts
         .iter()
@@ -257,12 +357,16 @@ pub(super) async fn load_active_emitters(pool: &PgPool, chain: &str) -> Result<V
         }
 
         let candidate = ActiveEmitter {
-            address: watched_contract.address,
+            address: watched_contract.address.to_ascii_lowercase(),
+            contract_instance_id: watched_contract.contract_instance_id,
             source_manifest_id,
             namespace: manifest.namespace.clone(),
             source_family: manifest.source_family.clone(),
             manifest_version: manifest.manifest_version,
             normalizer_version: manifest.normalizer_version.clone(),
+            contract_role: contract_roles
+                .get(&(source_manifest_id, watched_contract.contract_instance_id))
+                .cloned(),
             active_from_block_number: watched_contract.active_from_block_number,
             active_to_block_number: watched_contract.active_to_block_number,
             source_rank: source_rank(watched_contract.source),
@@ -318,15 +422,59 @@ pub(super) async fn load_active_manifest_metadata(
         .collect()
 }
 
+async fn load_manifest_contract_roles(
+    pool: &PgPool,
+    watched_contracts: &[WatchedContract],
+) -> Result<HashMap<(i64, Uuid), String>> {
+    let manifest_ids = watched_contracts
+        .iter()
+        .filter_map(|contract| contract.source_manifest_id)
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let contract_instance_ids = watched_contracts
+        .iter()
+        .map(|contract| contract.contract_instance_id)
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if manifest_ids.is_empty() || contract_instance_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let rows = sqlx::query(
+        r#"
+        SELECT manifest_id, contract_instance_id, role
+        FROM manifest_contract_instances
+        WHERE declaration_kind = 'contract'
+          AND manifest_id = ANY($1::BIGINT[])
+          AND contract_instance_id = ANY($2::UUID[])
+        "#,
+    )
+    .bind(&manifest_ids)
+    .bind(&contract_instance_ids)
+    .fetch_all(pool)
+    .await
+    .context("failed to load manifest contract roles for ENSv1 unwrapped authority")?;
+
+    rows.into_iter()
+        .map(|row| {
+            Ok((
+                (
+                    row.try_get("manifest_id").context("missing manifest_id")?,
+                    row.try_get("contract_instance_id")
+                        .context("missing contract_instance_id")?,
+                ),
+                row.try_get("role").context("missing role")?,
+            ))
+        })
+        .collect()
+}
+
 fn source_rank(source: WatchedContractSource) -> i32 {
     match source {
         WatchedContractSource::ManifestRoot => 0,
         WatchedContractSource::ManifestContract => 1,
         WatchedContractSource::DiscoveryEdge => 2,
     }
-}
-
-fn candidate_precedes(candidate: &ActiveEmitter, current: &ActiveEmitter) -> bool {
-    (candidate.source_rank, candidate.source_manifest_id)
-        < (current.source_rank, current.source_manifest_id)
 }

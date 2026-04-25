@@ -26,7 +26,7 @@ use sqlx::{
 use super::{
     hex_topic::{
         ZERO_ADDRESS, ZERO_NODE, child_node, hex_string, new_owner_topic0, new_resolver_topic0,
-        normalize_address, normalize_hex_32,
+        new_ttl_topic0, normalize_address, normalize_hex_32, registry_transfer_topic0,
     },
     *,
 };
@@ -163,6 +163,55 @@ fn manifest_contents(include_discovery_rule: bool) -> String {
         "ENSRegistry",
         "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E",
         include_discovery_rule,
+    )
+}
+
+fn manifest_contents_with_old_registry(
+    current_registry_address: &str,
+    old_registry_address: &str,
+    current_start_block: i64,
+    old_start_block: i64,
+) -> String {
+    format!(
+        r#"
+manifest_version = 3
+namespace = "ens"
+source_family = "{ENS_V1_REGISTRY_SOURCE_FAMILY}"
+chain = "ethereum-mainnet"
+deployment_epoch = "ens_v1"
+rollout_status = "active"
+normalizer_version = "uts46-v1"
+
+[capability_flags]
+declared_children = "supported"
+
+[[roots]]
+name = "ENSRegistry"
+address = "{current_registry_address}"
+start_block = {current_start_block}
+
+[[contracts]]
+role = "registry"
+address = "{current_registry_address}"
+proxy_kind = "none"
+start_block = {current_start_block}
+
+[[contracts]]
+role = "registry_old"
+address = "{old_registry_address}"
+proxy_kind = "none"
+start_block = {old_start_block}
+
+[[discovery_rules]]
+edge_kind = "subregistry"
+from_role = "registry"
+admission = "reachable_from_root"
+
+[[discovery_rules]]
+edge_kind = "resolver"
+from_role = "registry"
+admission = "reachable_from_root"
+"#
     )
 }
 
@@ -371,6 +420,105 @@ async fn insert_raw_new_resolver_log(pool: &PgPool, log: RawNewResolverLog<'_>) 
     Ok(())
 }
 
+struct RawRegistryTransferLog<'a> {
+    chain_id: &'a str,
+    block_hash: &'a str,
+    block_number: i64,
+    emitting_address: &'a str,
+    owner: &'a str,
+    node: &'a str,
+    canonicality_state: CanonicalityState,
+}
+
+async fn insert_raw_registry_transfer_log(
+    pool: &PgPool,
+    log: RawRegistryTransferLog<'_>,
+) -> Result<()> {
+    upsert_raw_blocks(
+        pool,
+        &[RawBlock {
+            chain_id: log.chain_id.to_owned(),
+            block_hash: log.block_hash.to_owned(),
+            parent_hash: None,
+            block_number: log.block_number,
+            block_timestamp: OffsetDateTime::UNIX_EPOCH,
+            logs_bloom: None,
+            transactions_root: None,
+            receipts_root: None,
+            state_root: None,
+            canonicality_state: log.canonicality_state,
+        }],
+    )
+    .await?;
+
+    upsert_raw_logs(
+        pool,
+        &[RawLog {
+            chain_id: log.chain_id.to_owned(),
+            block_hash: log.block_hash.to_owned(),
+            block_number: log.block_number,
+            transaction_hash: format!("0xtx{:02x}", log.block_number),
+            transaction_index: 0,
+            log_index: 0,
+            emitting_address: log.emitting_address.to_owned(),
+            topics: vec![registry_transfer_topic0(), normalize_hex_32(log.node)?],
+            data: encode_new_owner_log_data(log.owner),
+            canonicality_state: log.canonicality_state,
+        }],
+    )
+    .await?;
+
+    Ok(())
+}
+
+struct RawNewTtlLog<'a> {
+    chain_id: &'a str,
+    block_hash: &'a str,
+    block_number: i64,
+    emitting_address: &'a str,
+    node: &'a str,
+    ttl: u64,
+    canonicality_state: CanonicalityState,
+}
+
+async fn insert_raw_new_ttl_log(pool: &PgPool, log: RawNewTtlLog<'_>) -> Result<()> {
+    upsert_raw_blocks(
+        pool,
+        &[RawBlock {
+            chain_id: log.chain_id.to_owned(),
+            block_hash: log.block_hash.to_owned(),
+            parent_hash: None,
+            block_number: log.block_number,
+            block_timestamp: OffsetDateTime::UNIX_EPOCH,
+            logs_bloom: None,
+            transactions_root: None,
+            receipts_root: None,
+            state_root: None,
+            canonicality_state: log.canonicality_state,
+        }],
+    )
+    .await?;
+
+    upsert_raw_logs(
+        pool,
+        &[RawLog {
+            chain_id: log.chain_id.to_owned(),
+            block_hash: log.block_hash.to_owned(),
+            block_number: log.block_number,
+            transaction_hash: format!("0xtx{:02x}", log.block_number),
+            transaction_index: 0,
+            log_index: 0,
+            emitting_address: log.emitting_address.to_owned(),
+            topics: vec![new_ttl_topic0(), normalize_hex_32(log.node)?],
+            data: abi_word_u64(log.ttl).to_vec(),
+            canonicality_state: log.canonicality_state,
+        }],
+    )
+    .await?;
+
+    Ok(())
+}
+
 async fn load_contract_instance_for_address(
     pool: &PgPool,
     chain: &str,
@@ -433,6 +581,12 @@ fn encode_new_owner_log_data(owner: &str) -> Vec<u8> {
 
 fn encode_registry_new_resolver_log_data(resolver: &str) -> Vec<u8> {
     abi_word_address(resolver).to_vec()
+}
+
+fn abi_word_u64(value: u64) -> [u8; 32] {
+    let mut word = [0u8; 32];
+    word[24..].copy_from_slice(&value.to_be_bytes());
+    word
 }
 
 fn abi_word_address(value: &str) -> [u8; 32] {
@@ -840,6 +994,503 @@ async fn canonical_new_resolver_log_persists_resolver_edge_without_profile_suppo
     assert_eq!(
         resolver_source_plan.selected_targets[0].contract_instance_id,
         discovered_contract_instance_id
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn block_hash_replay_sync_skips_discovery_reconciliation_and_unselected_registry_logs()
+-> Result<()> {
+    let _permit = crate::acquire_test_db_permit().await;
+    let test_dir = TestDir::new()?;
+    let database = TestDatabase::new().await?;
+
+    test_dir.write_manifest("ens", "ens_v1_registry_l1", "v1", &manifest_contents(true))?;
+    test_dir.write_manifest(
+        "ens",
+        ENS_V1_RESOLVER_SOURCE_FAMILY,
+        "v1",
+        &resolver_manifest_contents_for_family(
+            "ens",
+            ENS_V1_RESOLVER_SOURCE_FAMILY,
+            "ethereum-mainnet",
+            "ens_v1",
+        ),
+    )?;
+    sync_repository(database.pool(), &load_repository(&test_dir.path)?).await?;
+    insert_raw_new_resolver_log(
+        database.pool(),
+        RawNewResolverLog {
+            chain_id: "ethereum-mainnet",
+            block_hash: "0x4242424242424242424242424242424242424242424242424242424242424242",
+            block_number: 42,
+            emitting_address: "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E",
+            resolver: "0x00000000000000000000000000000000000000cc",
+            node: ZERO_NODE,
+            canonicality_state: CanonicalityState::Canonical,
+        },
+    )
+    .await?;
+    insert_raw_new_resolver_log(
+        database.pool(),
+        RawNewResolverLog {
+            chain_id: "ethereum-mainnet",
+            block_hash: "0x4343434343434343434343434343434343434343434343434343434343434343",
+            block_number: 43,
+            emitting_address: "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E",
+            resolver: "0x00000000000000000000000000000000000000dd",
+            node: &labelhash_hex("unselected"),
+            canonicality_state: CanonicalityState::Canonical,
+        },
+    )
+    .await?;
+
+    let summary =
+        EnsV1SubregistryDiscoverySyncSummary::sync_for_block_hashes_without_discovery_reconciliation(
+            database.pool(),
+            "ethereum-mainnet",
+            &["0x4242424242424242424242424242424242424242424242424242424242424242"
+                .to_owned()],
+        )
+        .await?;
+    assert_eq!(
+        summary,
+        EnsV1SubregistryDiscoverySyncSummary {
+            scanned_log_count: 1,
+            matched_log_count: 1,
+            active_observation_count: 1,
+            active_edge_count: 0,
+            admitted_edge_count: 0,
+            inserted_edge_count: 0,
+            deactivated_edge_count: 0,
+        }
+    );
+    assert_eq!(
+        query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM discovery_edges")
+            .fetch_one(database.pool())
+            .await?,
+        0
+    );
+    assert!(
+        load_normalized_events_by_namespace(database.pool(), "ens")
+            .await?
+            .is_empty()
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn ens_registry_old_seeds_before_current_and_later_old_new_owner_is_suppressed() -> Result<()>
+{
+    let _permit = crate::acquire_test_db_permit().await;
+    let test_dir = TestDir::new()?;
+    let database = TestDatabase::new().await?;
+    let current_registry = "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E";
+    let old_registry = "0x314159265dd8dbb310642f98f50c066173c1259b";
+
+    test_dir.write_manifest(
+        "ens",
+        "ens_v1_registry_l1",
+        "v3",
+        &manifest_contents_with_old_registry(current_registry, old_registry, 10, 1),
+    )?;
+    sync_repository(database.pool(), &load_repository(&test_dir.path)?).await?;
+
+    insert_raw_new_owner_log_with_key(
+        database.pool(),
+        RawNewOwnerLog {
+            chain_id: "ethereum-mainnet",
+            block_hash: "0x0101010101010101010101010101010101010101010101010101010101010101",
+            block_number: 9,
+            emitting_address: old_registry,
+            owner: "0x00000000000000000000000000000000000000aa",
+            parent_node: ZERO_NODE,
+            label: "eth",
+            canonicality_state: CanonicalityState::Canonical,
+        },
+    )
+    .await?;
+
+    let seeded = sync_ens_v1_subregistry_discovery(database.pool(), "ethereum-mainnet").await?;
+    assert_eq!(seeded.scanned_log_count, 1);
+    assert_eq!(seeded.matched_log_count, 1);
+    assert_eq!(
+        query_scalar::<_, String>(
+            "SELECT address FROM contract_instance_addresses WHERE contract_instance_id = (
+                SELECT to_contract_instance_id FROM discovery_edges
+                WHERE discovery_source = $1 AND deactivated_at IS NULL
+                LIMIT 1
+            )"
+        )
+        .bind(ens_v1_subregistry_discovery_source("ethereum-mainnet"))
+        .fetch_one(database.pool())
+        .await?,
+        "0x00000000000000000000000000000000000000aa".to_owned()
+    );
+
+    insert_raw_new_owner_log_with_key(
+        database.pool(),
+        RawNewOwnerLog {
+            chain_id: "ethereum-mainnet",
+            block_hash: "0x0202020202020202020202020202020202020202020202020202020202020202",
+            block_number: 10,
+            emitting_address: current_registry,
+            owner: "0x00000000000000000000000000000000000000bb",
+            parent_node: ZERO_NODE,
+            label: "eth",
+            canonicality_state: CanonicalityState::Canonical,
+        },
+    )
+    .await?;
+    insert_raw_new_owner_log_with_key(
+        database.pool(),
+        RawNewOwnerLog {
+            chain_id: "ethereum-mainnet",
+            block_hash: "0x0303030303030303030303030303030303030303030303030303030303030303",
+            block_number: 11,
+            emitting_address: old_registry,
+            owner: "0x00000000000000000000000000000000000000cc",
+            parent_node: ZERO_NODE,
+            label: "eth",
+            canonicality_state: CanonicalityState::Canonical,
+        },
+    )
+    .await?;
+
+    let guarded = sync_ens_v1_subregistry_discovery(database.pool(), "ethereum-mainnet").await?;
+    assert_eq!(guarded.scanned_log_count, 3);
+    assert_eq!(guarded.matched_log_count, 2);
+    assert_eq!(
+        query_scalar::<_, String>(
+            "SELECT address FROM contract_instance_addresses WHERE contract_instance_id = (
+                SELECT to_contract_instance_id FROM discovery_edges
+                WHERE discovery_source = $1 AND deactivated_at IS NULL
+                LIMIT 1
+            )"
+        )
+        .bind(ens_v1_subregistry_discovery_source("ethereum-mainnet"))
+        .fetch_one(database.pool())
+        .await?,
+        "0x00000000000000000000000000000000000000bb".to_owned()
+    );
+    assert_eq!(
+        query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM discovery_edges de
+             JOIN contract_instance_addresses cia
+               ON cia.contract_instance_id = de.to_contract_instance_id
+              AND cia.address = '0x00000000000000000000000000000000000000cc'
+             WHERE de.deactivated_at IS NULL"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        0
+    );
+
+    let replay = sync_ens_v1_subregistry_discovery(database.pool(), "ethereum-mainnet").await?;
+    assert_eq!(replay.inserted_edge_count, 0);
+    assert_eq!(
+        query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM normalized_events WHERE event_kind = 'SubregistryChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        2
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn ens_registry_old_non_root_resolver_transfer_and_ttl_after_migration_are_suppressed()
+-> Result<()> {
+    let _permit = crate::acquire_test_db_permit().await;
+    let test_dir = TestDir::new()?;
+    let database = TestDatabase::new().await?;
+    let current_registry = "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E";
+    let old_registry = "0x314159265dd8dbb310642f98f50c066173c1259b";
+
+    test_dir.write_manifest(
+        "ens",
+        "ens_v1_registry_l1",
+        "v3",
+        &manifest_contents_with_old_registry(current_registry, old_registry, 10, 1),
+    )?;
+    test_dir.write_manifest(
+        "ens",
+        ENS_V1_RESOLVER_SOURCE_FAMILY,
+        "v1",
+        &resolver_manifest_contents_for_family(
+            "ens",
+            ENS_V1_RESOLVER_SOURCE_FAMILY,
+            "ethereum-mainnet",
+            "ens_v1",
+        ),
+    )?;
+    sync_repository(database.pool(), &load_repository(&test_dir.path)?).await?;
+
+    let node = child_node(ZERO_NODE, &labelhash_hex("eth"))?;
+    insert_raw_new_owner_log_with_key(
+        database.pool(),
+        RawNewOwnerLog {
+            chain_id: "ethereum-mainnet",
+            block_hash: "0x1111111111111111111111111111111111111111111111111111111111111111",
+            block_number: 10,
+            emitting_address: current_registry,
+            owner: "0x00000000000000000000000000000000000000bb",
+            parent_node: ZERO_NODE,
+            label: "eth",
+            canonicality_state: CanonicalityState::Safe,
+        },
+    )
+    .await?;
+    insert_raw_new_resolver_log(
+        database.pool(),
+        RawNewResolverLog {
+            chain_id: "ethereum-mainnet",
+            block_hash: "0x1212121212121212121212121212121212121212121212121212121212121212",
+            block_number: 11,
+            emitting_address: old_registry,
+            resolver: "0x00000000000000000000000000000000000000dd",
+            node: &node,
+            canonicality_state: CanonicalityState::Canonical,
+        },
+    )
+    .await?;
+    insert_raw_registry_transfer_log(
+        database.pool(),
+        RawRegistryTransferLog {
+            chain_id: "ethereum-mainnet",
+            block_hash: "0x1313131313131313131313131313131313131313131313131313131313131313",
+            block_number: 12,
+            emitting_address: old_registry,
+            owner: "0x00000000000000000000000000000000000000ee",
+            node: &node,
+            canonicality_state: CanonicalityState::Finalized,
+        },
+    )
+    .await?;
+    insert_raw_new_ttl_log(
+        database.pool(),
+        RawNewTtlLog {
+            chain_id: "ethereum-mainnet",
+            block_hash: "0x1414141414141414141414141414141414141414141414141414141414141414",
+            block_number: 13,
+            emitting_address: old_registry,
+            node: &node,
+            ttl: 3600,
+            canonicality_state: CanonicalityState::Canonical,
+        },
+    )
+    .await?;
+
+    let summary = sync_ens_v1_subregistry_discovery(database.pool(), "ethereum-mainnet").await?;
+    assert_eq!(summary.scanned_log_count, 4);
+    assert_eq!(summary.matched_log_count, 1);
+    assert_eq!(
+        query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM discovery_edges WHERE edge_kind = 'resolver' AND deactivated_at IS NULL"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        0
+    );
+    assert_eq!(
+        query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM normalized_events WHERE event_kind = 'ResolverChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        0
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn ens_registry_old_root_resolver_exception_feeds_current_registry_resolver_discovery()
+-> Result<()> {
+    let _permit = crate::acquire_test_db_permit().await;
+    let test_dir = TestDir::new()?;
+    let database = TestDatabase::new().await?;
+    let current_registry = "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E";
+    let old_registry = "0x314159265dd8dbb310642f98f50c066173c1259b";
+
+    test_dir.write_manifest(
+        "ens",
+        "ens_v1_registry_l1",
+        "v3",
+        &manifest_contents_with_old_registry(current_registry, old_registry, 10, 1),
+    )?;
+    test_dir.write_manifest(
+        "ens",
+        ENS_V1_RESOLVER_SOURCE_FAMILY,
+        "v1",
+        &resolver_manifest_contents_for_family(
+            "ens",
+            ENS_V1_RESOLVER_SOURCE_FAMILY,
+            "ethereum-mainnet",
+            "ens_v1",
+        ),
+    )?;
+    sync_repository(database.pool(), &load_repository(&test_dir.path)?).await?;
+
+    insert_raw_new_resolver_log(
+        database.pool(),
+        RawNewResolverLog {
+            chain_id: "ethereum-mainnet",
+            block_hash: "0x2121212121212121212121212121212121212121212121212121212121212121",
+            block_number: 11,
+            emitting_address: old_registry,
+            resolver: "0x00000000000000000000000000000000000000dd",
+            node: ZERO_NODE,
+            canonicality_state: CanonicalityState::Canonical,
+        },
+    )
+    .await?;
+
+    let summary = sync_ens_v1_subregistry_discovery(database.pool(), "ethereum-mainnet").await?;
+    assert_eq!(summary.scanned_log_count, 1);
+    assert_eq!(summary.matched_log_count, 1);
+    assert_eq!(summary.active_edge_count, 1);
+
+    let current_registry_instance =
+        load_contract_instance_for_address(database.pool(), "ethereum-mainnet", current_registry)
+            .await?;
+    let resolver_instance = load_contract_instance_for_address(
+        database.pool(),
+        "ethereum-mainnet",
+        "0x00000000000000000000000000000000000000dd",
+    )
+    .await?;
+    let discovery_edge = sqlx::query(
+        "SELECT from_contract_instance_id, to_contract_instance_id, provenance
+         FROM discovery_edges
+         WHERE edge_kind = 'resolver' AND deactivated_at IS NULL",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(
+        discovery_edge.try_get::<Uuid, _>("from_contract_instance_id")?,
+        current_registry_instance
+    );
+    assert_eq!(
+        discovery_edge.try_get::<Uuid, _>("to_contract_instance_id")?,
+        resolver_instance
+    );
+    let provenance = discovery_edge.try_get::<serde_json::Value, _>("provenance")?;
+    assert_eq!(
+        provenance["ens_registry_old_root_resolver_exception"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        provenance["emitting_address"].as_str(),
+        Some("0x314159265dd8dbb310642f98f50c066173c1259b")
+    );
+
+    let normalized_events = load_normalized_events_by_namespace(database.pool(), "ens").await?;
+    assert_eq!(normalized_events.len(), 1);
+    assert_eq!(normalized_events[0].event_kind, EVENT_KIND_RESOLVER_CHANGED);
+    assert_eq!(
+        normalized_events[0].after_state["node"].as_str(),
+        Some(ZERO_NODE)
+    );
+    assert_eq!(
+        normalized_events[0].after_state["emitting_address"].as_str(),
+        Some("0x314159265dd8dbb310642f98f50c066173c1259b")
+    );
+    assert_eq!(
+        normalized_events[0].after_state["from_contract_instance_id"].as_str(),
+        Some(current_registry_instance.to_string().as_str())
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn ens_registry_old_raw_loading_respects_manifest_start_blocks() -> Result<()> {
+    let _permit = crate::acquire_test_db_permit().await;
+    let test_dir = TestDir::new()?;
+    let database = TestDatabase::new().await?;
+    let current_registry = "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E";
+    let old_registry = "0x314159265dd8dbb310642f98f50c066173c1259b";
+
+    test_dir.write_manifest(
+        "ens",
+        "ens_v1_registry_l1",
+        "v3",
+        &manifest_contents_with_old_registry(current_registry, old_registry, 100, 50),
+    )?;
+    sync_repository(database.pool(), &load_repository(&test_dir.path)?).await?;
+
+    insert_raw_new_owner_log_with_key(
+        database.pool(),
+        RawNewOwnerLog {
+            chain_id: "ethereum-mainnet",
+            block_hash: "0x3131313131313131313131313131313131313131313131313131313131313131",
+            block_number: 49,
+            emitting_address: old_registry,
+            owner: "0x00000000000000000000000000000000000000aa",
+            parent_node: ZERO_NODE,
+            label: "eth",
+            canonicality_state: CanonicalityState::Canonical,
+        },
+    )
+    .await?;
+    insert_raw_new_owner_log_with_key(
+        database.pool(),
+        RawNewOwnerLog {
+            chain_id: "ethereum-mainnet",
+            block_hash: "0x3232323232323232323232323232323232323232323232323232323232323232",
+            block_number: 50,
+            emitting_address: old_registry,
+            owner: "0x00000000000000000000000000000000000000bb",
+            parent_node: ZERO_NODE,
+            label: "eth",
+            canonicality_state: CanonicalityState::Safe,
+        },
+    )
+    .await?;
+    insert_raw_new_owner_log_with_key(
+        database.pool(),
+        RawNewOwnerLog {
+            chain_id: "ethereum-mainnet",
+            block_hash: "0x3333333333333333333333333333333333333333333333333333333333333333",
+            block_number: 99,
+            emitting_address: current_registry,
+            owner: "0x00000000000000000000000000000000000000cc",
+            parent_node: ZERO_NODE,
+            label: "eth",
+            canonicality_state: CanonicalityState::Finalized,
+        },
+    )
+    .await?;
+    insert_raw_new_owner_log_with_key(
+        database.pool(),
+        RawNewOwnerLog {
+            chain_id: "ethereum-mainnet",
+            block_hash: "0x3434343434343434343434343434343434343434343434343434343434343434",
+            block_number: 100,
+            emitting_address: current_registry,
+            owner: "0x00000000000000000000000000000000000000dd",
+            parent_node: ZERO_NODE,
+            label: "eth",
+            canonicality_state: CanonicalityState::Canonical,
+        },
+    )
+    .await?;
+
+    let summary = sync_ens_v1_subregistry_discovery(database.pool(), "ethereum-mainnet").await?;
+    assert_eq!(summary.scanned_log_count, 2);
+    assert_eq!(summary.matched_log_count, 2);
+    assert_eq!(
+        query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM normalized_events WHERE block_number IN (49, 99)"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        0
     );
 
     database.cleanup().await

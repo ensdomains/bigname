@@ -1816,12 +1816,15 @@ async fn rejects_conflicting_active_start_blocks_for_same_contract_instance() ->
 }
 
 #[tokio::test]
-async fn checked_in_registry_v2_manifests_admit_resolver_discovery() -> Result<()> {
+async fn checked_in_registry_manifests_admit_resolver_discovery() -> Result<()> {
     for case in [
         (
             "ens",
             "ens_v1_registry_l1",
             "ens_v1_resolver_l1",
+            "v3",
+            3_u64,
+            3_usize,
             "ethereum-mainnet",
             "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E",
             "0xF29100983E058B709F3D539b0c765937B804AC15",
@@ -1838,6 +1841,9 @@ async fn checked_in_registry_v2_manifests_admit_resolver_discovery() -> Result<(
             "basenames",
             "basenames_base_registry",
             "basenames_base_resolver",
+            "v2",
+            2_u64,
+            2_usize,
             "base-mainnet",
             "0xb94704422c2a1e396835a571837aa5ae53285a95",
             "0xC6d566A56A1aFf6508b41f6c90ff131615583BCD",
@@ -1855,6 +1861,9 @@ async fn checked_in_registry_v2_manifests_admit_resolver_discovery() -> Result<(
             namespace,
             source_family,
             resolver_source_family,
+            registry_version_tag,
+            registry_manifest_version,
+            expected_contract_count,
             chain,
             registry_address,
             resolver_address,
@@ -1865,18 +1874,19 @@ async fn checked_in_registry_v2_manifests_admit_resolver_discovery() -> Result<(
         ) = case;
         let test_dir = TestDir::new()?;
         let database = TestDatabase::new().await?;
-        let manifest = checked_in_manifest_contents(namespace, source_family, "v2")?;
+        let manifest =
+            checked_in_manifest_contents(namespace, source_family, registry_version_tag)?;
 
         for citation in citations {
             assert!(
                 manifest.contains(citation),
-                "{namespace}/{source_family}/v2 manifest is missing upstream citation {citation}"
+                "{namespace}/{source_family}/{registry_version_tag} manifest is missing upstream citation {citation}"
             );
         }
 
         let resolver_manifest =
             checked_in_manifest_contents(namespace, resolver_source_family, "v1")?;
-        test_dir.write_manifest(namespace, source_family, "v2", &manifest)?;
+        test_dir.write_manifest(namespace, source_family, registry_version_tag, &manifest)?;
         test_dir.write_manifest(namespace, resolver_source_family, "v1", &resolver_manifest)?;
         let repository = load_repository(&test_dir.path)?;
         assert_eq!(repository.summary().status, ManifestLoadStatus::Loaded);
@@ -1887,11 +1897,11 @@ async fn checked_in_registry_v2_manifests_admit_resolver_discovery() -> Result<(
             .iter()
             .find(|loaded_manifest| {
                 loaded_manifest.manifest.source_family == source_family
-                    && loaded_manifest.manifest.manifest_version == 2
+                    && loaded_manifest.manifest.manifest_version == registry_manifest_version
             })
-            .expect("registry v2 manifest must load")
+            .expect("registry manifest must load")
             .manifest;
-        assert_eq!(loaded_manifest.manifest_version, 2);
+        assert_eq!(loaded_manifest.manifest_version, registry_manifest_version);
         assert_eq!(loaded_manifest.rollout_status, RolloutStatus::Active);
         assert_eq!(
             loaded_manifest.discovery_rules,
@@ -1914,7 +1924,7 @@ async fn checked_in_registry_v2_manifests_admit_resolver_discovery() -> Result<(
         assert_eq!(summary.synced_manifest_count, 2);
         assert_eq!(summary.active_manifest_count, 2);
         assert_eq!(summary.root_count, 1);
-        assert_eq!(summary.contract_count, 2);
+        assert_eq!(summary.contract_count, expected_contract_count);
         assert_eq!(summary.capability_count, 1);
         assert_eq!(summary.discovery_rule_count, 2);
 
@@ -1922,7 +1932,8 @@ async fn checked_in_registry_v2_manifests_admit_resolver_discovery() -> Result<(
             load_active_manifests_for_namespace(database.pool(), namespace).await?;
         assert_eq!(active_manifests.len(), 2);
         assert!(active_manifests.iter().any(|manifest| {
-            manifest.source_family == source_family && manifest.manifest_version == 2
+            manifest.source_family == source_family
+                && manifest.manifest_version == registry_manifest_version
         }));
         assert!(active_manifests.iter().any(|manifest| {
             manifest.source_family == resolver_source_family && manifest.manifest_version == 1
@@ -2046,13 +2057,243 @@ async fn checked_in_registry_v2_manifests_admit_resolver_discovery() -> Result<(
 }
 
 #[tokio::test]
+async fn checked_in_ens_registry_v3_admits_current_and_old_registry_targets() -> Result<()> {
+    let test_dir = TestDir::new()?;
+    let database = TestDatabase::new().await?;
+    let registry_v2_manifest = checked_in_manifest_contents("ens", "ens_v1_registry_l1", "v2")?;
+    let registry_v3_manifest = checked_in_manifest_contents("ens", "ens_v1_registry_l1", "v3")?;
+
+    for citation in [
+        "(upstream: .refs/ens_subgraph/subgraph.yaml:L15 @ ens_subgraph@723f1b6)",
+        "(upstream: .refs/ens_subgraph/subgraph.yaml:L39 @ ens_subgraph@723f1b6)",
+        "(upstream: .refs/ens_subgraph/subgraph.yaml:L42 @ ens_subgraph@723f1b6)",
+        "(upstream: .refs/ens_subgraph/subgraph.yaml:L44 @ ens_subgraph@723f1b6)",
+    ] {
+        assert!(
+            registry_v3_manifest.contains(citation),
+            "ENSv1 registry v3 manifest is missing upstream citation {citation}"
+        );
+    }
+
+    test_dir.write_manifest("ens", "ens_v1_registry_l1", "v2", &registry_v2_manifest)?;
+    test_dir.write_manifest("ens", "ens_v1_registry_l1", "v3", &registry_v3_manifest)?;
+
+    let repository = load_repository(&test_dir.path)?;
+    assert_eq!(repository.summary().status, ManifestLoadStatus::Loaded);
+    assert_eq!(repository.manifests().len(), 2);
+
+    let manifests_by_version = repository
+        .manifests()
+        .iter()
+        .map(|loaded_manifest| {
+            (
+                loaded_manifest.manifest.manifest_version,
+                &loaded_manifest.manifest,
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let registry_v2 = manifests_by_version[&2_u64];
+    let registry_v3 = manifests_by_version[&3_u64];
+
+    assert_eq!(registry_v2.rollout_status, RolloutStatus::Deprecated);
+    assert_eq!(registry_v3.rollout_status, RolloutStatus::Active);
+    assert_eq!(registry_v3.roots.len(), 1);
+    assert_eq!(registry_v3.roots[0].start_block, Some(9_380_380));
+    assert_eq!(registry_v3.contracts.len(), 2);
+
+    let current_contract = registry_v3
+        .contracts
+        .iter()
+        .find(|contract| contract.role == "registry")
+        .expect("current registry role must be present");
+    let old_contract = registry_v3
+        .contracts
+        .iter()
+        .find(|contract| contract.role == "registry_old")
+        .expect("old registry role must be present");
+    assert_eq!(
+        normalize_address(&current_contract.address),
+        "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e"
+    );
+    assert_eq!(current_contract.start_block, Some(9_380_380));
+    assert_eq!(
+        normalize_address(&old_contract.address),
+        "0x314159265dd8dbb310642f98f50c066173c1259b"
+    );
+    assert_eq!(old_contract.start_block, Some(3_327_417));
+    assert_eq!(
+        registry_v3.capability_flags, registry_v2.capability_flags,
+        "v3 must not change ENSv1 registry capability flags"
+    );
+    let registry_v3_capability_flags = registry_v3.capability_flags.clone();
+
+    let summary = sync_repository(database.pool(), &repository).await?;
+    assert_eq!(summary.status, ManifestSyncStatus::Synced);
+    assert_eq!(summary.synced_manifest_count, 2);
+    assert_eq!(summary.active_manifest_count, 1);
+    assert_eq!(summary.root_count, 2);
+    assert_eq!(summary.contract_count, 3);
+    assert_eq!(summary.capability_count, 2);
+    assert_eq!(summary.discovery_rule_count, 4);
+
+    assert_eq!(
+        load_manifest_rollout_statuses(database.pool(), "ens").await?,
+        vec![
+            ("ens_v1_registry_l1".to_owned(), "deprecated".to_owned()),
+            ("ens_v1_registry_l1".to_owned(), "active".to_owned()),
+        ]
+    );
+    assert_eq!(
+        load_capability_flags_for_source_family_version(
+            database.pool(),
+            "ens",
+            "ens_v1_registry_l1",
+            3
+        )
+        .await?,
+        load_capability_flags_for_source_family_version(
+            database.pool(),
+            "ens",
+            "ens_v1_registry_l1",
+            2
+        )
+        .await?
+    );
+
+    let active_manifests = load_active_manifests_for_namespace(database.pool(), "ens").await?;
+    assert_eq!(active_manifests.len(), 1);
+    assert_eq!(active_manifests[0].source_family, "ens_v1_registry_l1");
+    assert_eq!(active_manifests[0].manifest_version, 3);
+    assert_eq!(
+        active_manifests[0].capability_flags,
+        registry_v3_capability_flags
+    );
+
+    let current_registry = normalize_address("0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E");
+    let old_registry = normalize_address("0x314159265dd8dbb310642f98f50c066173c1259b");
+    let watched_contracts = load_watched_contracts(database.pool()).await?;
+    assert_eq!(watched_contracts.len(), 3);
+
+    let watched_current_root = watched_contracts
+        .iter()
+        .find(|contract| {
+            contract.address == current_registry
+                && contract.source == WatchedContractSource::ManifestRoot
+        })
+        .expect("current registry root must be watched");
+    let watched_current_contract = watched_contracts
+        .iter()
+        .find(|contract| {
+            contract.address == current_registry
+                && contract.source == WatchedContractSource::ManifestContract
+        })
+        .expect("current registry contract must be watched");
+    let watched_old_contract = watched_contracts
+        .iter()
+        .find(|contract| {
+            contract.address == old_registry
+                && contract.source == WatchedContractSource::ManifestContract
+        })
+        .expect("old registry contract must be watched");
+
+    assert_eq!(
+        watched_current_root.contract_instance_id,
+        watched_current_contract.contract_instance_id
+    );
+    assert_ne!(
+        watched_current_contract.contract_instance_id,
+        watched_old_contract.contract_instance_id
+    );
+    assert_eq!(
+        watched_current_contract.active_from_block_number,
+        Some(9_380_380)
+    );
+    assert_eq!(
+        watched_old_contract.active_from_block_number,
+        Some(3_327_417)
+    );
+
+    let current_contract_instance_id = watched_current_contract.contract_instance_id;
+    let old_contract_instance_id = watched_old_contract.contract_instance_id;
+
+    assert_eq!(
+        load_watched_chain_plan(database.pool()).await?,
+        vec![WatchedChainPlan {
+            chain: "ethereum-mainnet".to_owned(),
+            addresses: vec![current_registry.clone(), old_registry.clone()],
+            manifest_root_entry_count: 1,
+            manifest_contract_entry_count: 2,
+            discovery_edge_entry_count: 0,
+        }]
+    );
+
+    let selector_plan = load_watched_source_selector_plan(
+        database.pool(),
+        "ethereum-mainnet",
+        WatchedSourceSelector::SourceFamily("ens_v1_registry_l1".to_owned()),
+        0,
+        10_000_000,
+    )
+    .await?;
+    assert_eq!(selector_plan.selected_targets.len(), 2);
+    assert!(
+        selector_plan
+            .selected_targets
+            .contains(&WatchedBackfillTarget {
+                source_family: "ens_v1_registry_l1".to_owned(),
+                contract_instance_id: current_contract_instance_id,
+                address: current_registry.clone(),
+                effective_from_block: 9_380_380,
+                effective_to_block: 10_000_000,
+            })
+    );
+    assert!(
+        selector_plan
+            .selected_targets
+            .contains(&WatchedBackfillTarget {
+                source_family: "ens_v1_registry_l1".to_owned(),
+                contract_instance_id: old_contract_instance_id,
+                address: old_registry.clone(),
+                effective_from_block: 3_327_417,
+                effective_to_block: 10_000_000,
+            })
+    );
+
+    let bootstrap_targets =
+        load_manifest_declared_bootstrap_targets(database.pool(), "ethereum-mainnet").await?;
+    assert_eq!(bootstrap_targets.len(), 2);
+    assert!(bootstrap_targets.contains(&ManifestBootstrapTarget {
+        source_family: "ens_v1_registry_l1".to_owned(),
+        contract_instance_id: current_contract_instance_id,
+        address: current_registry,
+        effective_from_block: 9_380_380,
+        effective_to_block: None,
+    }));
+    assert!(bootstrap_targets.contains(&ManifestBootstrapTarget {
+        source_family: "ens_v1_registry_l1".to_owned(),
+        contract_instance_id: old_contract_instance_id,
+        address: old_registry,
+        effective_from_block: 3_327_417,
+        effective_to_block: None,
+    }));
+    assert!(
+        load_manifest_skipped_bootstrap_targets(database.pool(), "ethereum-mainnet")
+            .await?
+            .is_empty()
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn ens_v1_resolver_public_resolver_profile_admission_keeps_unknowns_watch_only() -> Result<()>
 {
     let test_dir = TestDir::new()?;
     let database = TestDatabase::new().await?;
-    let registry_manifest = checked_in_manifest_contents("ens", "ens_v1_registry_l1", "v2")?;
+    let registry_manifest = checked_in_manifest_contents("ens", "ens_v1_registry_l1", "v3")?;
     let resolver_manifest = checked_in_manifest_contents("ens", "ens_v1_resolver_l1", "v1")?;
-    test_dir.write_manifest("ens", "ens_v1_registry_l1", "v2", &registry_manifest)?;
+    test_dir.write_manifest("ens", "ens_v1_registry_l1", "v3", &registry_manifest)?;
     test_dir.write_manifest("ens", "ens_v1_resolver_l1", "v1", &resolver_manifest)?;
 
     let repository = load_repository(&test_dir.path)?;
@@ -2680,12 +2921,17 @@ async fn dynamic_resolver_backfill_selector_loads_edge_address_intersections() -
         ) = case;
         let test_dir = TestDir::new()?;
         let database = TestDatabase::new().await?;
+        let registry_version_tag = if registry_source_family == "ens_v1_registry_l1" {
+            "v3"
+        } else {
+            "v2"
+        };
 
         test_dir.write_manifest(
             namespace,
             registry_source_family,
-            "v2",
-            &checked_in_manifest_contents(namespace, registry_source_family, "v2")?,
+            registry_version_tag,
+            &checked_in_manifest_contents(namespace, registry_source_family, registry_version_tag)?,
         )?;
         test_dir.write_manifest(
             namespace,
@@ -2908,8 +3154,8 @@ async fn resolver_discovery_edges_do_not_become_transitive_registry_parents() ->
     test_dir.write_manifest(
         "ens",
         "ens_v1_registry_l1",
-        "v2",
-        &checked_in_manifest_contents("ens", "ens_v1_registry_l1", "v2")?,
+        "v3",
+        &checked_in_manifest_contents("ens", "ens_v1_registry_l1", "v3")?,
     )?;
     sync_repository(database.pool(), &load_repository(&test_dir.path)?).await?;
 

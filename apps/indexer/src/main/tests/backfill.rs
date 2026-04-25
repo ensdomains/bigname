@@ -1506,6 +1506,236 @@ async fn source_scoped_backfill_enforces_selected_target_effective_ranges_during
 }
 
 #[tokio::test]
+async fn source_scoped_backfill_ensv1_registry_syncs_current_and_old_targets_safely() -> Result<()>
+{
+    let database = TestDatabase::new().await?;
+    create_backfill_job_tables(database.pool()).await?;
+    let registry_contract_instance_id = Uuid::from_u128(1_301);
+    let registry_old_contract_instance_id = Uuid::from_u128(1_302);
+    let registry_address = "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e";
+    let registry_old_address = "0x314159265dd8dbb310642f98f50c066173c1259b";
+
+    insert_manifest_version_with_source_family(
+        database.pool(),
+        131,
+        "ens",
+        "ethereum-mainnet",
+        "ens_v1_registry_l1",
+    )
+    .await?;
+    for (contract_instance_id, role, address, active_from) in [
+        (
+            registry_contract_instance_id,
+            "registry",
+            registry_address,
+            43,
+        ),
+        (
+            registry_old_contract_instance_id,
+            "registry_old",
+            registry_old_address,
+            41,
+        ),
+    ] {
+        insert_contract_instance(
+            database.pool(),
+            contract_instance_id,
+            "ethereum-mainnet",
+            "contract",
+        )
+        .await?;
+        insert_active_contract_instance_address(
+            database.pool(),
+            contract_instance_id,
+            "ethereum-mainnet",
+            address,
+            Some(131),
+        )
+        .await?;
+        set_contract_instance_address_range(
+            database.pool(),
+            contract_instance_id,
+            Some(active_from),
+            None,
+        )
+        .await?;
+        insert_manifest_contract_instance(
+            database.pool(),
+            131,
+            role,
+            contract_instance_id,
+            address,
+            "none",
+            None,
+            None,
+        )
+        .await?;
+    }
+    insert_manifest_root_contract_instance(
+        database.pool(),
+        131,
+        registry_contract_instance_id,
+        registry_address,
+    )
+    .await?;
+    insert_manifest_discovery_rule(
+        database.pool(),
+        131,
+        "subregistry",
+        "registry",
+        "reachable_from_root",
+    )
+    .await?;
+
+    let range = BackfillBlockRange::new(41, 43)?;
+    let source_plan = load_watched_source_selector_plan(
+        database.pool(),
+        "ethereum-mainnet",
+        WatchedSourceSelector::SourceFamily("ens_v1_registry_l1".to_owned()),
+        range.from_block,
+        range.to_block,
+    )
+    .await?;
+    assert_eq!(
+        source_plan
+            .selected_targets
+            .iter()
+            .map(|target| (
+                target.address.as_str(),
+                target.effective_from_block,
+                target.effective_to_block
+            ))
+            .collect::<Vec<_>>(),
+        vec![(registry_address, 43, 43), (registry_old_address, 41, 43),]
+    );
+
+    let old_block = provider_block(
+        "0x1313131313131313131313131313131313131313131313131313131313131313",
+        Some("0x1212121212121212121212121212121212121212121212121212121212121212"),
+        41,
+    );
+    let gap_block = provider_block(
+        "0x1515151515151515151515151515151515151515151515151515151515151515",
+        Some(&old_block.block_hash),
+        42,
+    );
+    let current_block = provider_block(
+        "0x1414141414141414141414141414141414141414141414141414141414141414",
+        Some(&gap_block.block_hash),
+        43,
+    );
+    let requests = Arc::new(Mutex::new(Vec::<RecordedRpcRequest>::new()));
+    let (provider, server) = number_resolving_provider_with_fixtures(
+        vec![
+            ProviderBlockFixture {
+                block: old_block.clone(),
+                logs: vec![rpc_registry_new_owner_log_payload(
+                    &old_block,
+                    registry_old_address,
+                    "0x0000000000000000000000000000000000000000000000000000000000000000",
+                    "eth",
+                    "0x0000000000000000000000000000000000000001",
+                    0,
+                )],
+            },
+            ProviderBlockFixture {
+                block: gap_block,
+                logs: Vec::new(),
+            },
+            ProviderBlockFixture {
+                block: current_block.clone(),
+                logs: vec![
+                    rpc_registry_new_owner_log_payload(
+                        &current_block,
+                        registry_address,
+                        "0x0000000000000000000000000000000000000000000000000000000000000000",
+                        "eth",
+                        "0x0000000000000000000000000000000000000002",
+                        0,
+                    ),
+                    rpc_registry_new_owner_log_payload(
+                        &current_block,
+                        registry_old_address,
+                        "0x0000000000000000000000000000000000000000000000000000000000000000",
+                        "eth",
+                        "0x0000000000000000000000000000000000000003",
+                        1,
+                    ),
+                ],
+            },
+        ],
+        Arc::clone(&requests),
+    )
+    .await?;
+
+    let outcome = run_resumable_hash_pinned_backfill_job(
+        database.pool(),
+        &source_plan,
+        &provider,
+        backfill_job_config(
+            range,
+            "ensv1-registry-old-adapter-guard",
+            "lease-ensv1-registry",
+        )?,
+    )
+    .await?;
+    assert_eq!(outcome.raw_log_count, 3);
+    assert_eq!(
+        sqlx::query_scalar::<_, Vec<String>>(
+            r#"
+            SELECT COALESCE(
+                ARRAY_AGG(emitting_address ORDER BY block_number, log_index),
+                ARRAY[]::TEXT[]
+            )
+            FROM raw_logs
+            "#
+        )
+        .fetch_one(database.pool())
+        .await?,
+        vec![
+            registry_old_address.to_owned(),
+            registry_address.to_owned(),
+            registry_old_address.to_owned(),
+        ]
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM normalized_events")
+            .fetch_one(database.pool())
+            .await?,
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            r#"
+            SELECT raw_fact_ref->>'emitting_address'
+            FROM normalized_events
+            WHERE event_kind = 'SubregistryChanged'
+              AND derivation_kind = 'ens_v1_subregistry_changed'
+            "#
+        )
+        .fetch_one(database.pool())
+        .await?,
+        registry_address.to_owned()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            r#"
+            SELECT after_state->>'owner'
+            FROM normalized_events
+            WHERE event_kind = 'SubregistryChanged'
+              AND derivation_kind = 'ens_v1_subregistry_changed'
+            "#
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "0x0000000000000000000000000000000000000002".to_owned()
+    );
+
+    server.abort();
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn source_scoped_backfill_does_not_normalize_preexisting_unselected_raw_logs() -> Result<()> {
     let database = TestDatabase::new().await?;
     create_backfill_job_tables(database.pool()).await?;
@@ -2245,6 +2475,30 @@ fn rpc_log_payload_at_address(block: &ProviderBlock, address: &str, log_index: i
         Value::String(format!("0x{log_index:x}")),
     );
     payload
+}
+
+fn rpc_registry_new_owner_log_payload(
+    block: &ProviderBlock,
+    address: &str,
+    parent_node: &str,
+    label: &str,
+    owner: &str,
+    log_index: i64,
+) -> Value {
+    json!({
+        "blockHash": block.block_hash.clone(),
+        "blockNumber": format!("0x{:x}", block.block_number),
+        "transactionHash": transaction_hash_for_block(block),
+        "transactionIndex": "0x0",
+        "logIndex": format!("0x{log_index:x}"),
+        "address": address,
+        "topics": [
+            ens_v1_new_owner_topic0(),
+            parent_node,
+            labelhash_hex(label),
+        ],
+        "data": hex_string(&abi_word_address(owner)),
+    })
 }
 
 fn rpc_ens_v2_label_registered_log_payload(

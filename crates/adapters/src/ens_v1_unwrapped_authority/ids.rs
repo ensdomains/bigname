@@ -58,8 +58,16 @@ pub(super) fn transfer_topic0() -> String {
     keccak256_hex(TRANSFER_SIGNATURE.as_bytes())
 }
 
+pub(super) fn registry_transfer_topic0() -> String {
+    keccak256_hex(REGISTRY_TRANSFER_SIGNATURE.as_bytes())
+}
+
 pub(super) fn new_owner_topic0() -> String {
     keccak256_hex(NEW_OWNER_SIGNATURE.as_bytes())
+}
+
+pub(super) fn new_ttl_topic0() -> String {
+    keccak256_hex(NEW_TTL_SIGNATURE.as_bytes())
 }
 
 pub(super) fn new_resolver_topic0() -> String {

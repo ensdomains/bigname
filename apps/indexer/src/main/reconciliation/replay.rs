@@ -9,7 +9,7 @@ use bigname_storage::{
 };
 
 use super::{
-    adapter_sync::sync_adapter_state_from_persisted_raw_payloads,
+    adapter_sync::sync_replay_normalized_events_from_persisted_raw_payloads,
     types::{
         PersistedRawPayloadAdapterSyncSummary, RawFactNormalizedEventReplayOutcome,
         RawFactNormalizedEventReplayRequest, RawFactNormalizedEventReplaySelection,
@@ -56,7 +56,12 @@ pub(crate) async fn replay_raw_fact_normalized_events(
     let normalized_event_summary = if block_hashes.is_empty() {
         PersistedRawPayloadAdapterSyncSummary::default()
     } else {
-        sync_adapter_state_from_persisted_raw_payloads(pool, &request.chain, &block_hashes).await?
+        sync_replay_normalized_events_from_persisted_raw_payloads(
+            pool,
+            &request.chain,
+            &block_hashes,
+        )
+        .await?
     };
 
     Ok(RawFactNormalizedEventReplayOutcome {

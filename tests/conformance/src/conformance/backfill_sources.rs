@@ -1,12 +1,38 @@
+const ENS_V1_REGISTRY_CURRENT_CONTRACT_INSTANCE_ID: &str = "00000000-0000-0000-0000-000000009101";
+const ENS_V1_REGISTRY_OLD_CONTRACT_INSTANCE_ID: &str = "00000000-0000-0000-0000-000000009106";
+const ENS_V1_REGISTRY_AUTO_BOOTSTRAP_CURRENT_CONTRACT_INSTANCE_ID: &str =
+    "00000000-0000-0000-0000-00000000b101";
+const ENS_V1_REGISTRY_AUTO_BOOTSTRAP_OLD_CONTRACT_INSTANCE_ID: &str =
+    "00000000-0000-0000-0000-00000000b102";
+const ENS_V1_REGISTRY_CURRENT_ADDRESS: &str = "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e";
+const ENS_V1_REGISTRY_OLD_ADDRESS: &str = "0x314159265dd8dbb310642f98f50c066173c1259b";
+const ENS_V1_REGISTRY_CURRENT_START_BLOCK: i64 = 9_380_380;
+const ENS_V1_REGISTRY_OLD_START_BLOCK: i64 = 3_327_417;
+const ENS_V1_REGISTRY_BACKFILL_END_BLOCK: i64 = 10_000_000;
+const ENS_V1_REGISTRY_OLD_REPLAY_NEW_OWNER_TOPIC0: &str =
+    "0xce0457fe73731f824cc272376169235128c118b49d344817417c6d108d155e82";
+const ENS_V1_REGISTRY_OLD_REPLAY_PARENT_NODE: &str =
+    "0x0000000000000000000000000000000000000000000000000000000000000000";
+const ENS_V1_REGISTRY_OLD_REPLAY_LABELHASH: &str =
+    "0x1111111111111111111111111111111111111111111111111111111111111111";
+const ENS_V1_REGISTRY_OLD_REPLAY_CURRENT_OWNER: &str = "0x0000000000000000000000000000000000000002";
+
+#[derive(Clone)]
+struct SourceFamilyBackfillTarget {
+    contract_instance_id: &'static str,
+    address: &'static str,
+    range_start_block_number: i64,
+    range_end_block_number: i64,
+}
+
 struct SourceFamilyBackfillFixture {
     namespace: &'static str,
     deployment_profile: &'static str,
     chain_id: &'static str,
     source_family: &'static str,
-    contract_instance_id: &'static str,
-    address: &'static str,
     range_start_block_number: i64,
     range_end_block_number: i64,
+    selected_targets: Vec<SourceFamilyBackfillTarget>,
 }
 
 struct DynamicResolverBackfillFixture {
@@ -61,6 +87,14 @@ struct HistoricalReplayRetentionProbe {
     observed_block_number: i64,
 }
 
+struct EnsRegistryOldMigrationReplayProbe {
+    chain_id: &'static str,
+    current_registry_address: &'static str,
+    old_registry_address: &'static str,
+    old_block_hash: &'static str,
+    current_block_hash: &'static str,
+}
+
 pub(crate) async fn run_backfill_sources_auto_bootstrap() -> Result<()> {
     let database = HarnessDatabase::new().await?;
     let corpus = seed_replay_supported_read_corpus(&database).await?;
@@ -79,6 +113,9 @@ pub(crate) async fn run_backfill_sources_auto_bootstrap() -> Result<()> {
     let eligible_targets = load_auto_bootstrap_manifest_started_targets(&database).await?;
     let skipped_targets = load_auto_bootstrap_manifest_skipped_targets(&database).await?;
     assert_auto_bootstrap_manifest_targets_skip_unknown_start(&eligible_targets);
+    assert_auto_bootstrap_ens_registry_targets_have_separate_current_and_old_starts(
+        &eligible_targets,
+    );
     assert_auto_bootstrap_unknown_start_reported_skipped(&skipped_targets);
 
     let before_jobs = snapshot_auto_bootstrap_existing_routes(&database, &corpus).await?;
@@ -101,7 +138,9 @@ pub(crate) async fn run_backfill_sources_auto_bootstrap() -> Result<()> {
     assert_existing_ensv1_exact_name_after_jobs_and_replay(&database, ensv1_logical_name_id)
         .await?;
     assert_ensv2_shadow_exact_name_coverage_is_not_graduated(&after_replay);
+    assert_ens_registry_old_admission_does_not_surface_consumer_coverage(&after_replay);
     assert_auto_bootstrap_api_coverage_is_not_graduated(&database, &corpus, &after_replay).await?;
+    assert_api_coverage_is_not_graduated_by_old_registry(&database, &corpus, &after_replay).await?;
     assert_replay_collection_empty(
         &database,
         ReplayRoute {
@@ -163,6 +202,7 @@ pub(crate) async fn run_backfill_source_family_existing_response_lock() -> Resul
     assert_completed_dynamic_resolver_backfill_jobs(&completed_dynamic_resolver_jobs);
     let source_family_raw_retention_probe =
         seed_source_family_raw_retention_probe(&database, &completed_jobs).await?;
+    let registry_old_replay_probe = seed_ens_registry_old_migration_replay_probe(&database).await?;
     let backfill_surface_before_raw_retention =
         snapshot_backfill_lifecycle_surface(&database).await?;
     let manifest_policy_before_raw_retention = snapshot_manifest_policy_surface(&database).await?;
@@ -173,31 +213,40 @@ pub(crate) async fn run_backfill_source_family_existing_response_lock() -> Resul
         &[source_family_raw_retention_probe.block_hash],
     )
     .await?;
-    assert_cache_first_raw_retention_replay_probe(
+    assert_cache_first_raw_retention_replay_probe(&database, &source_family_raw_retention_probe)
+        .await?;
+    assert_source_family_raw_retention_probe_scoped(&database, &source_family_raw_retention_probe)
+        .await?;
+    replay_raw_fact_normalized_events_for_blocks(
         &database,
-        &source_family_raw_retention_probe,
+        "mainnet",
+        registry_old_replay_probe.chain_id,
+        &[
+            registry_old_replay_probe.old_block_hash,
+            registry_old_replay_probe.current_block_hash,
+        ],
     )
     .await?;
-    assert_source_family_raw_retention_probe_scoped(
+    assert_ens_registry_old_migration_suppression_survived_replay(
         &database,
-        &source_family_raw_retention_probe,
+        &registry_old_replay_probe,
     )
     .await?;
     assert_eq!(
         snapshot_backfill_lifecycle_surface(&database).await?,
         backfill_surface_before_raw_retention,
-        "source-family raw-retention replay must not mutate completed backfill jobs or range checkpoints"
+        "source-family raw-retention and old-registry replay must not mutate completed backfill jobs or range checkpoints"
     );
     assert_eq!(
         snapshot_manifest_policy_surface(&database).await?,
         manifest_policy_before_raw_retention,
-        "source-family raw-retention replay must not change manifest rollout or capability policy state"
+        "source-family raw-retention and old-registry replay must not change manifest rollout or capability policy state"
     );
     let after_jobs_before_replay =
         snapshot_replay_stale_current_answer_routes(&database, &corpus).await?;
     assert_eq!(
         after_jobs_before_replay, before_jobs,
-        "completed source-family jobs, dynamic resolver jobs, and cache-first raw-retention replay must not mutate shipped route responses before projection replay"
+        "completed source-family jobs, dynamic resolver jobs, cache-first raw-retention replay, and old-registry replay must not mutate shipped route responses before projection replay"
     );
 
     replay_all_current_projections(&database).await?;
@@ -207,6 +256,8 @@ pub(crate) async fn run_backfill_source_family_existing_response_lock() -> Resul
     assert_existing_ensv1_exact_name_after_jobs_and_replay(&database, ensv1_logical_name_id)
         .await?;
     assert_ensv2_shadow_exact_name_coverage_is_not_graduated(&after_replay);
+    assert_ens_registry_old_admission_does_not_surface_consumer_coverage(&after_replay);
+    assert_api_coverage_is_not_graduated_by_old_registry(&database, &corpus, &after_replay).await?;
     assert_replay_collection_empty(
         &database,
         ReplayRoute {
@@ -269,8 +320,7 @@ pub(crate) async fn run_backfill_sources_retention_and_replay_semantics() -> Res
     )
     .await?;
     assert_empty_historical_block_retention(&database, &replay_probe).await?;
-    assert_safe_finalized_historical_facts_replay_as_non_observed(&database, &replay_probe)
-        .await?;
+    assert_safe_finalized_historical_facts_replay_as_non_observed(&database, &replay_probe).await?;
     assert_eq!(
         snapshot_backfill_lifecycle_surface(&database).await?,
         backfill_surface_before_replay,
@@ -585,6 +635,10 @@ async fn seed_source_family_raw_retention_probe(
                 && fixture.source_family == RAW_REPLAY_PROBE_SOURCE_FAMILY
         })
         .context("source-family backfill fixtures must include ENSv1 reverse replay target")?;
+    let target = fixture
+        .selected_targets
+        .first()
+        .context("source-family raw-retention fixture must include a selected target")?;
     let manifest_id = database
         .insert_manifest(
             fixture.namespace,
@@ -596,7 +650,7 @@ async fn seed_source_family_raw_retention_probe(
             "uts46-v1",
         )
         .await?;
-    let contract_instance_id = Uuid::parse_str(fixture.contract_instance_id).with_context(|| {
+    let contract_instance_id = Uuid::parse_str(target.contract_instance_id).with_context(|| {
         format!(
             "source-family fixture {} contract_instance_id must parse as UUID",
             fixture.source_family
@@ -608,15 +662,15 @@ async fn seed_source_family_raw_retention_probe(
         contract_instance_id,
         fixture.chain_id,
         RAW_REPLAY_PROBE_CONTRACT_ROLE,
-        fixture.address,
+        target.address,
     )
     .await?;
 
     let probe = RawRetentionProbe {
         chain_id: fixture.chain_id,
         block_hash: "0xbac1f11100000000000000000000000000000000000000000000000000000303",
-        block_number: fixture.range_start_block_number,
-        watched_address: fixture.address,
+        block_number: target.range_start_block_number,
+        watched_address: target.address,
     };
     bigname_storage::upsert_chain_lineage_blocks(
         &database.pool,
@@ -624,8 +678,7 @@ async fn seed_source_family_raw_retention_probe(
             chain_id: probe.chain_id.to_owned(),
             block_hash: probe.block_hash.to_owned(),
             parent_hash: Some(
-                "0xbac1f11000000000000000000000000000000000000000000000000000000302"
-                    .to_owned(),
+                "0xbac1f11000000000000000000000000000000000000000000000000000000302".to_owned(),
             ),
             block_number: probe.block_number,
             block_timestamp: timestamp(1_717_194_303),
@@ -656,9 +709,8 @@ async fn seed_source_family_raw_retention_probe(
             chain_id: probe.chain_id.to_owned(),
             block_hash: probe.block_hash.to_owned(),
             block_number: probe.block_number,
-            transaction_hash:
-                "0xbac1f1feedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeed303"
-                    .to_owned(),
+            transaction_hash: "0xbac1f1feedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeed303"
+                .to_owned(),
             transaction_index: 0,
             log_index: 0,
             emitting_address: probe.watched_address.to_ascii_lowercase(),
@@ -712,11 +764,13 @@ async fn assert_source_family_raw_retention_probe_scoped(
         "#,
     )
     .bind(RAW_REPLAY_PROBE_SOURCE_FAMILY)
-    .bind(json!([{
-        "source_family": RAW_REPLAY_PROBE_SOURCE_FAMILY,
-        "address": probe.watched_address,
-    }])
-    .to_string())
+    .bind(
+        json!([{
+            "source_family": RAW_REPLAY_PROBE_SOURCE_FAMILY,
+            "address": probe.watched_address,
+        }])
+        .to_string(),
+    )
     .fetch_one(&database.pool)
     .await
     .context("failed to count source-family raw-retention selected backfill jobs")?;
@@ -817,8 +871,7 @@ async fn seed_historical_replay_block(
     include_selected_log: bool,
     watched_address: &str,
 ) -> Result<()> {
-    let parent_hash =
-        "0xfeed000000000000000000000000000000000000000000000000000000000500";
+    let parent_hash = "0xfeed000000000000000000000000000000000000000000000000000000000500";
     bigname_storage::upsert_chain_lineage_blocks(
         &database.pool,
         &[bigname_storage::ChainLineageBlock {
@@ -835,9 +888,7 @@ async fn seed_historical_replay_block(
         }],
     )
     .await
-    .with_context(|| {
-        format!("failed to seed historical replay lineage for block {block_hash}")
-    })?;
+    .with_context(|| format!("failed to seed historical replay lineage for block {block_hash}"))?;
 
     let mut block = raw_block(
         chain_id,
@@ -880,6 +931,315 @@ async fn seed_historical_replay_block(
     Ok(())
 }
 
+async fn seed_ens_registry_old_migration_replay_probe(
+    database: &HarnessDatabase,
+) -> Result<EnsRegistryOldMigrationReplayProbe> {
+    let probe = EnsRegistryOldMigrationReplayProbe {
+        chain_id: "ethereum-mainnet",
+        current_registry_address: ENS_V1_REGISTRY_CURRENT_ADDRESS,
+        old_registry_address: ENS_V1_REGISTRY_OLD_ADDRESS,
+        old_block_hash: "0xe1501d0000000000000000000000000000000000000000000000000000000041",
+        current_block_hash: "0xe1501d0000000000000000000000000000000000000000000000000000000043",
+    };
+    let manifest_id = database
+        .insert_manifest(
+            "ens",
+            "ens_v1_registry_l1",
+            probe.chain_id,
+            "ens_v1",
+            106,
+            "active",
+            "uts46-v1",
+        )
+        .await?;
+    let current_contract_instance_id =
+        Uuid::parse_str(ENS_V1_REGISTRY_CURRENT_CONTRACT_INSTANCE_ID)
+            .context("current registry replay contract ID must parse")?;
+    let old_contract_instance_id = Uuid::parse_str(ENS_V1_REGISTRY_OLD_CONTRACT_INSTANCE_ID)
+        .context("old registry replay contract ID must parse")?;
+    seed_active_replay_contract(
+        database,
+        manifest_id,
+        current_contract_instance_id,
+        probe.chain_id,
+        "registry",
+        probe.current_registry_address,
+    )
+    .await?;
+    seed_active_replay_contract(
+        database,
+        manifest_id,
+        old_contract_instance_id,
+        probe.chain_id,
+        "registry_old",
+        probe.old_registry_address,
+    )
+    .await?;
+    seed_ens_registry_old_replay_root_and_discovery_rule(
+        database,
+        manifest_id,
+        current_contract_instance_id,
+        probe.current_registry_address,
+    )
+    .await?;
+
+    bigname_storage::upsert_chain_lineage_blocks(
+        &database.pool,
+        &[
+            bigname_storage::ChainLineageBlock {
+                chain_id: probe.chain_id.to_owned(),
+                block_hash: probe.old_block_hash.to_owned(),
+                parent_hash: Some(
+                    "0xe1501c0000000000000000000000000000000000000000000000000000000040".to_owned(),
+                ),
+                block_number: 41,
+                block_timestamp: timestamp(1_717_196_041),
+                logs_bloom: None,
+                transactions_root: None,
+                receipts_root: None,
+                state_root: None,
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            bigname_storage::ChainLineageBlock {
+                chain_id: probe.chain_id.to_owned(),
+                block_hash: probe.current_block_hash.to_owned(),
+                parent_hash: Some(probe.old_block_hash.to_owned()),
+                block_number: 43,
+                block_timestamp: timestamp(1_717_196_043),
+                logs_bloom: None,
+                transactions_root: None,
+                receipts_root: None,
+                state_root: None,
+                canonicality_state: CanonicalityState::Canonical,
+            },
+        ],
+    )
+    .await
+    .context("failed to seed ENSRegistryOld replay lineage")?;
+    bigname_storage::upsert_raw_blocks(
+        &database.pool,
+        &[
+            raw_block(
+                probe.chain_id,
+                probe.old_block_hash,
+                Some("0xe1501c0000000000000000000000000000000000000000000000000000000040"),
+                41,
+                1_717_196_041,
+            ),
+            raw_block(
+                probe.chain_id,
+                probe.current_block_hash,
+                Some(probe.old_block_hash),
+                43,
+                1_717_196_043,
+            ),
+        ],
+    )
+    .await
+    .context("failed to seed ENSRegistryOld replay raw blocks")?;
+    bigname_storage::upsert_raw_logs(
+        &database.pool,
+        &[
+            ens_registry_old_replay_new_owner_log(
+                probe.chain_id,
+                probe.old_block_hash,
+                41,
+                "0xe1501dfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeed41",
+                0,
+                probe.old_registry_address,
+                "0x0000000000000000000000000000000000000001",
+            )?,
+            ens_registry_old_replay_new_owner_log(
+                probe.chain_id,
+                probe.current_block_hash,
+                43,
+                "0xe1501dfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeed43",
+                0,
+                probe.current_registry_address,
+                ENS_V1_REGISTRY_OLD_REPLAY_CURRENT_OWNER,
+            )?,
+            ens_registry_old_replay_new_owner_log(
+                probe.chain_id,
+                probe.current_block_hash,
+                43,
+                "0xe1501dfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeed43",
+                1,
+                probe.old_registry_address,
+                "0x0000000000000000000000000000000000000003",
+            )?,
+        ],
+    )
+    .await
+    .context("failed to seed ENSRegistryOld replay raw logs")?;
+
+    Ok(probe)
+}
+
+async fn seed_ens_registry_old_replay_root_and_discovery_rule(
+    database: &HarnessDatabase,
+    manifest_id: i64,
+    current_contract_instance_id: Uuid,
+    current_registry_address: &str,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO manifest_contract_instances (
+            manifest_id,
+            declaration_kind,
+            declaration_name,
+            contract_instance_id,
+            declared_address
+        )
+        VALUES ($1, 'root', 'ENSRegistry', $2, lower($3))
+        "#,
+    )
+    .bind(manifest_id)
+    .bind(current_contract_instance_id)
+    .bind(current_registry_address)
+    .execute(&database.pool)
+    .await
+    .context("failed to seed ENSRegistryOld replay root contract")?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO manifest_discovery_rules (manifest_id, edge_kind, from_role, admission)
+        VALUES ($1, 'subregistry', 'registry', 'reachable_from_root')
+        "#,
+    )
+    .bind(manifest_id)
+    .execute(&database.pool)
+    .await
+    .context("failed to seed ENSRegistryOld replay subregistry discovery rule")?;
+
+    Ok(())
+}
+
+fn ens_registry_old_replay_new_owner_log(
+    chain_id: &str,
+    block_hash: &str,
+    block_number: i64,
+    transaction_hash: &str,
+    log_index: i64,
+    emitting_address: &str,
+    owner: &str,
+) -> Result<bigname_storage::RawLog> {
+    Ok(bigname_storage::RawLog {
+        chain_id: chain_id.to_owned(),
+        block_hash: block_hash.to_owned(),
+        block_number,
+        transaction_hash: transaction_hash.to_owned(),
+        transaction_index: 0,
+        log_index,
+        emitting_address: emitting_address.to_ascii_lowercase(),
+        topics: vec![
+            ENS_V1_REGISTRY_OLD_REPLAY_NEW_OWNER_TOPIC0.to_owned(),
+            ENS_V1_REGISTRY_OLD_REPLAY_PARENT_NODE.to_owned(),
+            ENS_V1_REGISTRY_OLD_REPLAY_LABELHASH.to_owned(),
+        ],
+        data: abi_word_address_bytes(owner)?,
+        canonicality_state: CanonicalityState::Canonical,
+    })
+}
+
+fn abi_word_address_bytes(address: &str) -> Result<Vec<u8>> {
+    let address = address
+        .strip_prefix("0x")
+        .context("address must start with 0x")?;
+    anyhow::ensure!(address.len() == 40, "address must be 20 bytes");
+    let mut word = vec![0_u8; 32];
+    for (index, chunk) in address.as_bytes().chunks(2).enumerate() {
+        let hex = std::str::from_utf8(chunk).context("address hex chunk must be utf-8")?;
+        word[12 + index] =
+            u8::from_str_radix(hex, 16).with_context(|| format!("invalid address byte {hex}"))?;
+    }
+    Ok(word)
+}
+
+async fn assert_ens_registry_old_migration_suppression_survived_replay(
+    database: &HarnessDatabase,
+    probe: &EnsRegistryOldMigrationReplayProbe,
+) -> Result<()> {
+    let raw_log_emitters = sqlx::query_scalar::<_, Vec<String>>(
+        r#"
+        SELECT COALESCE(
+            ARRAY_AGG(emitting_address ORDER BY block_number, log_index),
+            ARRAY[]::TEXT[]
+        )
+        FROM raw_logs
+        WHERE chain_id = $1
+          AND block_hash = ANY($2::TEXT[])
+        "#,
+    )
+    .bind(probe.chain_id)
+    .bind(vec![
+        probe.old_block_hash.to_owned(),
+        probe.current_block_hash.to_owned(),
+    ])
+    .fetch_one(&database.pool)
+    .await
+    .context("failed to load ENSRegistryOld replay raw emitters")?;
+    assert_eq!(
+        raw_log_emitters,
+        vec![
+            probe.old_registry_address.to_owned(),
+            probe.current_registry_address.to_owned(),
+            probe.old_registry_address.to_owned(),
+        ],
+        "canonical replay must retain current and old registry raw facts as selected audit inputs"
+    );
+
+    let normalized_event_count = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)::BIGINT
+        FROM normalized_events
+        WHERE chain_id = $1
+          AND block_hash = ANY($2::TEXT[])
+          AND event_kind = 'SubregistryChanged'
+          AND derivation_kind = 'ens_v1_subregistry_changed'
+        "#,
+    )
+    .bind(probe.chain_id)
+    .bind(vec![
+        probe.old_block_hash.to_owned(),
+        probe.current_block_hash.to_owned(),
+    ])
+    .fetch_one(&database.pool)
+    .await
+    .context("failed to load ENSRegistryOld replay normalized events")?;
+    assert_eq!(
+        normalized_event_count, 0,
+        "raw replay must not emit SubregistryChanged without a pre-existing discovery edge"
+    );
+
+    let current_contract_instance_id =
+        Uuid::parse_str(ENS_V1_REGISTRY_CURRENT_CONTRACT_INSTANCE_ID)
+            .context("current registry replay contract ID must parse")?;
+    let old_contract_instance_id = Uuid::parse_str(ENS_V1_REGISTRY_OLD_CONTRACT_INSTANCE_ID)
+        .context("old registry replay contract ID must parse")?;
+    let replay_edge_count = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)::BIGINT
+        FROM discovery_edges
+        WHERE chain_id = $1
+          AND (
+              from_contract_instance_id = ANY($2::UUID[])
+              OR to_contract_instance_id = ANY($2::UUID[])
+          )
+        "#,
+    )
+    .bind(probe.chain_id)
+    .bind(vec![current_contract_instance_id, old_contract_instance_id])
+    .fetch_one(&database.pool)
+    .await
+    .context("failed to count ENSRegistryOld replay discovery edges")?;
+    assert_eq!(
+        replay_edge_count, 0,
+        "raw replay must not synthesize discovery edges for ENSRegistryOld audit facts"
+    );
+
+    Ok(())
+}
+
 async fn assert_empty_historical_block_retention(
     database: &HarnessDatabase,
     probe: &HistoricalReplayRetentionProbe,
@@ -896,8 +1256,13 @@ async fn assert_empty_historical_block_retention(
         "empty historical block must retain its lineage/header anchor"
     );
     assert_eq!(
-        block_scoped_table_count(database, "raw_blocks", probe.chain_id, probe.empty_block_hash)
-            .await?,
+        block_scoped_table_count(
+            database,
+            "raw_blocks",
+            probe.chain_id,
+            probe.empty_block_hash
+        )
+        .await?,
         1,
         "empty historical block must retain its compact raw block anchor"
     );
@@ -1531,43 +1896,61 @@ fn assert_completed_source_family_backfill_jobs(
             .get("selected_targets")
             .and_then(Value::as_array)
             .expect("source-family job should persist selected targets");
-        assert_eq!(selected_targets.len(), 1);
-        let selected_target = &selected_targets[0];
+        assert_eq!(selected_targets.len(), fixture.selected_targets.len());
+        let actual_targets = selected_targets
+            .iter()
+            .map(|selected_target| {
+                (
+                    selected_target
+                        .get("source_family")
+                        .and_then(Value::as_str)
+                        .expect("selected target should include source_family"),
+                    selected_target
+                        .get("contract_instance_id")
+                        .and_then(Value::as_str)
+                        .expect("selected target should include contract_instance_id"),
+                    selected_target
+                        .get("address")
+                        .and_then(Value::as_str)
+                        .expect("selected target should include address"),
+                    selected_target
+                        .get("effective_from_block")
+                        .and_then(Value::as_i64)
+                        .expect("selected target should include effective_from_block"),
+                    selected_target
+                        .get("effective_to_block")
+                        .and_then(Value::as_i64)
+                        .expect("selected target should include effective_to_block"),
+                )
+            })
+            .collect::<BTreeSet<_>>();
+        let expected_targets = fixture
+            .selected_targets
+            .iter()
+            .map(|target| {
+                assert!(
+                    Uuid::parse_str(target.contract_instance_id).is_ok(),
+                    "{} fixture contract_instance_id should be UUID-shaped",
+                    fixture.source_family
+                );
+                assert_ne!(
+                    target.contract_instance_id, fixture.source_family,
+                    "{} fixture contract_instance_id must not collapse to source_family",
+                    fixture.source_family
+                );
+                (
+                    fixture.source_family,
+                    target.contract_instance_id,
+                    target.address,
+                    target.range_start_block_number,
+                    target.range_end_block_number,
+                )
+            })
+            .collect::<BTreeSet<_>>();
         assert_eq!(
-            selected_target.get("source_family").and_then(Value::as_str),
-            Some(fixture.source_family)
-        );
-        assert_eq!(
-            selected_target
-                .get("contract_instance_id")
-                .and_then(Value::as_str),
-            Some(fixture.contract_instance_id)
-        );
-        assert!(
-            Uuid::parse_str(fixture.contract_instance_id).is_ok(),
-            "{} fixture contract_instance_id should be UUID-shaped",
+            actual_targets, expected_targets,
+            "{} source-family selected targets must match the fixture lock",
             fixture.source_family
-        );
-        assert_ne!(
-            fixture.contract_instance_id, fixture.source_family,
-            "{} fixture contract_instance_id must not collapse to source_family",
-            fixture.source_family
-        );
-        assert_eq!(
-            selected_target.get("address").and_then(Value::as_str),
-            Some(fixture.address)
-        );
-        assert_eq!(
-            selected_target
-                .get("effective_from_block")
-                .and_then(Value::as_i64),
-            Some(fixture.range_start_block_number)
-        );
-        assert_eq!(
-            selected_target
-                .get("effective_to_block")
-                .and_then(Value::as_i64),
-            Some(fixture.range_end_block_number)
         );
         assert!(
             completed_job.job.completed_at.is_some(),
@@ -1585,6 +1968,7 @@ fn assert_completed_source_family_backfill_jobs(
             fixture.source_family
         );
     }
+    assert_ens_v1_registry_source_family_selected_targets(completed_jobs);
 }
 
 fn assert_full_profile_started_history_is_covered(
@@ -1597,21 +1981,27 @@ fn assert_full_profile_started_history_is_covered(
     let expected_targets = source_family_backfill_fixtures()
         .into_iter()
         .filter(|fixture| fixture.deployment_profile == deployment_profile)
-        .map(|fixture| {
-            (
-                fixture.chain_id,
-                fixture.source_family,
-                fixture.contract_instance_id,
-                fixture.address,
-                fixture.range_start_block_number,
-                fixture.range_end_block_number,
-            )
+        .flat_map(|fixture| {
+            fixture
+                .selected_targets
+                .iter()
+                .map(|target| {
+                    (
+                        fixture.chain_id,
+                        fixture.source_family,
+                        target.contract_instance_id,
+                        target.address,
+                        target.range_start_block_number,
+                        target.range_end_block_number,
+                    )
+                })
+                .collect::<Vec<_>>()
         })
         .collect::<BTreeSet<_>>();
     let actual_targets = completed_jobs
         .iter()
         .filter(|(fixture, _)| fixture.deployment_profile == deployment_profile)
-        .map(|(fixture, completed_job)| {
+        .flat_map(|(fixture, completed_job)| {
             let selected_targets = completed_job
                 .job
                 .source_identity
@@ -1620,34 +2010,38 @@ fn assert_full_profile_started_history_is_covered(
                 .expect("completed source-family job should persist selected targets");
             assert_eq!(
                 selected_targets.len(),
-                1,
-                "{} full-history source-family job should retain one selected target",
+                fixture.selected_targets.len(),
+                "{} full-history source-family job should retain its selected target lock",
                 fixture.source_family
             );
-            let selected_target = &selected_targets[0];
-            (
-                completed_job.job.chain_id.as_str(),
-                selected_target
-                    .get("source_family")
-                    .and_then(Value::as_str)
-                    .expect("selected target should include source_family"),
-                selected_target
-                    .get("contract_instance_id")
-                    .and_then(Value::as_str)
-                    .expect("selected target should include contract_instance_id"),
-                selected_target
-                    .get("address")
-                    .and_then(Value::as_str)
-                    .expect("selected target should include address"),
-                selected_target
-                    .get("effective_from_block")
-                    .and_then(Value::as_i64)
-                    .expect("selected target should include effective_from_block"),
-                selected_target
-                    .get("effective_to_block")
-                    .and_then(Value::as_i64)
-                    .expect("selected target should include effective_to_block"),
-            )
+            selected_targets
+                .iter()
+                .map(|selected_target| {
+                    (
+                        completed_job.job.chain_id.as_str(),
+                        selected_target
+                            .get("source_family")
+                            .and_then(Value::as_str)
+                            .expect("selected target should include source_family"),
+                        selected_target
+                            .get("contract_instance_id")
+                            .and_then(Value::as_str)
+                            .expect("selected target should include contract_instance_id"),
+                        selected_target
+                            .get("address")
+                            .and_then(Value::as_str)
+                            .expect("selected target should include address"),
+                        selected_target
+                            .get("effective_from_block")
+                            .and_then(Value::as_i64)
+                            .expect("selected target should include effective_from_block"),
+                        selected_target
+                            .get("effective_to_block")
+                            .and_then(Value::as_i64)
+                            .expect("selected target should include effective_to_block"),
+                    )
+                })
+                .collect::<Vec<_>>()
         })
         .collect::<BTreeSet<_>>();
     assert_eq!(
@@ -1695,19 +2089,87 @@ fn assert_full_profile_started_history_is_covered(
             fixture.source_family
         );
         assert!(
-            ranges.windows(2).all(|window| window[0].1 + 1 == window[1].0),
+            ranges
+                .windows(2)
+                .all(|window| window[0].1 + 1 == window[1].0),
             "{} full-history ranges must be contiguous without gaps",
             fixture.source_family
         );
         assert!(
             ranges.iter().all(|(_, end, checkpoint, status)| {
-                *status == bigname_storage::BackfillLifecycleStatus::Completed
-                    && checkpoint == end
+                *status == bigname_storage::BackfillLifecycleStatus::Completed && checkpoint == end
             }),
             "{} full-history ranges must all complete at their declared ends",
             fixture.source_family
         );
     }
+}
+
+fn assert_ens_v1_registry_source_family_selected_targets(
+    completed_jobs: &[(
+        SourceFamilyBackfillFixture,
+        bigname_storage::BackfillJobRecord,
+    )],
+) {
+    let registry_job = completed_jobs
+        .iter()
+        .find(|(fixture, _)| fixture.source_family == "ens_v1_registry_l1")
+        .expect("source-family conformance must include ENSv1 registry");
+    let selected_targets = registry_job
+        .1
+        .job
+        .source_identity
+        .get("selected_targets")
+        .and_then(Value::as_array)
+        .expect("ENSv1 registry source identity must include selected targets");
+    assert_eq!(
+        selected_targets.len(),
+        2,
+        "ENSv1 registry source-family conformance must select current and old registry targets"
+    );
+    let current = selected_targets
+        .iter()
+        .find(|target| {
+            target.get("contract_instance_id").and_then(Value::as_str)
+                == Some(ENS_V1_REGISTRY_CURRENT_CONTRACT_INSTANCE_ID)
+        })
+        .expect("ENSv1 registry source identity must include current registry target");
+    let old = selected_targets
+        .iter()
+        .find(|target| {
+            target.get("contract_instance_id").and_then(Value::as_str)
+                == Some(ENS_V1_REGISTRY_OLD_CONTRACT_INSTANCE_ID)
+        })
+        .expect("ENSv1 registry source identity must include old registry target");
+    assert_ne!(
+        current.get("contract_instance_id"),
+        old.get("contract_instance_id"),
+        "current and old registry targets must keep separate contract_instance_id values"
+    );
+    assert_eq!(
+        current.get("source_family").and_then(Value::as_str),
+        Some("ens_v1_registry_l1")
+    );
+    assert_eq!(
+        old.get("source_family").and_then(Value::as_str),
+        Some("ens_v1_registry_l1")
+    );
+    assert_eq!(
+        current.get("address").and_then(Value::as_str),
+        Some(ENS_V1_REGISTRY_CURRENT_ADDRESS)
+    );
+    assert_eq!(
+        old.get("address").and_then(Value::as_str),
+        Some(ENS_V1_REGISTRY_OLD_ADDRESS)
+    );
+    assert_eq!(
+        current.get("effective_from_block").and_then(Value::as_i64),
+        Some(ENS_V1_REGISTRY_CURRENT_START_BLOCK)
+    );
+    assert_eq!(
+        old.get("effective_from_block").and_then(Value::as_i64),
+        Some(ENS_V1_REGISTRY_OLD_START_BLOCK)
+    );
 }
 
 fn assert_completed_dynamic_resolver_backfill_jobs(
@@ -1886,6 +2348,90 @@ fn assert_ensv2_shadow_exact_name_coverage_is_not_graduated(snapshots: &[(&'stat
     );
 }
 
+fn assert_ens_registry_old_admission_does_not_surface_consumer_coverage(
+    snapshots: &[(&'static str, Value)],
+) {
+    for label in [
+        "exact-name",
+        "children-collection",
+        "name-history",
+        "resolver",
+        "pending-profile-resolver",
+        "unsupported-profile-resolver",
+    ] {
+        let payload = replay_route_payload(snapshots, label);
+        for forbidden in [
+            "registry_old",
+            "ENSRegistryOld",
+            ENS_V1_REGISTRY_OLD_ADDRESS,
+            ENS_V1_REGISTRY_OLD_CONTRACT_INSTANCE_ID,
+            ENS_V1_REGISTRY_AUTO_BOOTSTRAP_OLD_CONTRACT_INSTANCE_ID,
+            "ens_registry_old_migration_epoch_input",
+            "ens_registry_old_root_resolver_exception",
+            "source_identity_hash",
+            "consumer_replacement",
+            "consumer-replacement",
+        ] {
+            assert_json_not_contains(
+                payload,
+                forbidden,
+                &format!(
+                    "{label} route must not surface old-registry admission as consumer coverage"
+                ),
+            );
+        }
+    }
+}
+
+async fn assert_api_coverage_is_not_graduated_by_old_registry(
+    database: &HarnessDatabase,
+    corpus: &ReplayCorpus,
+    snapshots: &[(&'static str, Value)],
+) -> Result<()> {
+    let exact_name = replay_route_payload(snapshots, "exact-name");
+    let coverage_payload = request_replay_route(
+        database,
+        &ReplayRoute {
+            label: "old-registry-coverage-non-graduation",
+            uri: format!("/v1/coverage/basenames/{}", corpus.route_name),
+        },
+    )
+    .await?;
+
+    assert_eq!(
+        coverage_payload.get("coverage"),
+        exact_name.get("coverage"),
+        "old-registry source-family admission must not graduate a separate API coverage contract"
+    );
+    assert_eq!(
+        coverage_payload.get("data"),
+        exact_name.get("data"),
+        "coverage route should remain an alias of the existing exact-name response data"
+    );
+    for forbidden in [
+        "registry_old",
+        "ENSRegistryOld",
+        ENS_V1_REGISTRY_OLD_ADDRESS,
+        ENS_V1_REGISTRY_OLD_CONTRACT_INSTANCE_ID,
+        ENS_V1_REGISTRY_AUTO_BOOTSTRAP_OLD_CONTRACT_INSTANCE_ID,
+        "ens_registry_old_migration_epoch_input",
+        "backfill_job",
+        "source_identity_hash",
+        "consumer_replacement",
+        "consumer-replacement",
+    ] {
+        assert_json_not_contains(
+            &coverage_payload,
+            forbidden,
+            &format!(
+                "old-registry operational evidence must not surface API coverage marker {forbidden}"
+            ),
+        );
+    }
+
+    Ok(())
+}
+
 async fn assert_auto_bootstrap_api_coverage_is_not_graduated(
     database: &HarnessDatabase,
     corpus: &ReplayCorpus,
@@ -1950,6 +2496,52 @@ fn assert_auto_bootstrap_manifest_targets_skip_unknown_start(
     assert!(
         !actual_targets.contains(&(unknown.source_family, unknown.contract_instance_id)),
         "unknown-start Basenames target must be absent from automatic bootstrap manifest targets"
+    );
+}
+
+fn assert_auto_bootstrap_ens_registry_targets_have_separate_current_and_old_starts(
+    eligible_targets: &[AutoBootstrapBackfillFixture],
+) {
+    let registry_targets = eligible_targets
+        .iter()
+        .filter(|fixture| {
+            fixture.chain_id == "ethereum-mainnet" && fixture.source_family == "ens_v1_registry_l1"
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        registry_targets.len(),
+        2,
+        "automatic bootstrap must select current and old ENSv1 registry targets"
+    );
+    let current = registry_targets
+        .iter()
+        .find(|fixture| fixture.manifest_role == "registry")
+        .expect("automatic bootstrap must include current registry role");
+    let old = registry_targets
+        .iter()
+        .find(|fixture| fixture.manifest_role == "registry_old")
+        .expect("automatic bootstrap must include old registry role");
+    assert_ne!(
+        current.contract_instance_id, old.contract_instance_id,
+        "automatic bootstrap must keep current and old registry contract instances separate"
+    );
+    assert_eq!(
+        current.contract_instance_id,
+        ENS_V1_REGISTRY_AUTO_BOOTSTRAP_CURRENT_CONTRACT_INSTANCE_ID
+    );
+    assert_eq!(
+        old.contract_instance_id,
+        ENS_V1_REGISTRY_AUTO_BOOTSTRAP_OLD_CONTRACT_INSTANCE_ID
+    );
+    assert_eq!(current.address, ENS_V1_REGISTRY_CURRENT_ADDRESS);
+    assert_eq!(old.address, ENS_V1_REGISTRY_OLD_ADDRESS);
+    assert_eq!(
+        current.effective_from_block_number(),
+        ENS_V1_REGISTRY_CURRENT_START_BLOCK
+    );
+    assert_eq!(
+        old.effective_from_block_number(),
+        ENS_V1_REGISTRY_OLD_START_BLOCK
     );
 }
 
@@ -2053,17 +2645,24 @@ fn source_family_identity(fixture: &SourceFamilyBackfillFixture) -> Value {
 }
 
 fn source_family_identity_payload_without_hash(fixture: &SourceFamilyBackfillFixture) -> Value {
+    let selected_targets = fixture
+        .selected_targets
+        .iter()
+        .map(|target| {
+            json!({
+                "source_family": fixture.source_family,
+                "contract_instance_id": target.contract_instance_id,
+                "address": target.address,
+                "effective_from_block": target.range_start_block_number,
+                "effective_to_block": target.range_end_block_number,
+            })
+        })
+        .collect::<Vec<_>>();
     json!({
         "selector_kind": "source_family",
         "source_family": fixture.source_family,
         "requested_watched_targets": [],
-        "selected_targets": [{
-            "source_family": fixture.source_family,
-            "contract_instance_id": fixture.contract_instance_id,
-            "address": fixture.address,
-            "effective_from_block": fixture.range_start_block_number,
-            "effective_to_block": fixture.range_end_block_number,
-        }],
+        "selected_targets": selected_targets,
     })
 }
 
@@ -2142,150 +2741,188 @@ fn source_family_backfill_fixtures() -> Vec<SourceFamilyBackfillFixture> {
             "mainnet",
             "ethereum-mainnet",
             "ens_v1_registry_l1",
-            "00000000-0000-0000-0000-000000009101",
-            "0x0000000000000000000000000000000000000101",
-            90,
-            180,
+            vec![
+                source_family_backfill_target(
+                    ENS_V1_REGISTRY_CURRENT_CONTRACT_INSTANCE_ID,
+                    ENS_V1_REGISTRY_CURRENT_ADDRESS,
+                    ENS_V1_REGISTRY_CURRENT_START_BLOCK,
+                    ENS_V1_REGISTRY_BACKFILL_END_BLOCK,
+                ),
+                source_family_backfill_target(
+                    ENS_V1_REGISTRY_OLD_CONTRACT_INSTANCE_ID,
+                    ENS_V1_REGISTRY_OLD_ADDRESS,
+                    ENS_V1_REGISTRY_OLD_START_BLOCK,
+                    ENS_V1_REGISTRY_BACKFILL_END_BLOCK,
+                ),
+            ],
         ),
         source_family_backfill_fixture(
             "ens",
             "mainnet",
             "ethereum-mainnet",
             "ens_v1_registrar_l1",
-            "00000000-0000-0000-0000-000000009102",
-            "0x0000000000000000000000000000000000000102",
-            181,
-            260,
+            vec![source_family_backfill_target(
+                "00000000-0000-0000-0000-000000009102",
+                "0x0000000000000000000000000000000000000102",
+                181,
+                260,
+            )],
         ),
         source_family_backfill_fixture(
             "ens",
             "mainnet",
             "ethereum-mainnet",
             "ens_v1_reverse_l1",
-            "00000000-0000-0000-0000-000000009103",
-            "0x0000000000000000000000000000000000000103",
-            261,
-            320,
+            vec![source_family_backfill_target(
+                "00000000-0000-0000-0000-000000009103",
+                "0x0000000000000000000000000000000000000103",
+                261,
+                320,
+            )],
         ),
         source_family_backfill_fixture(
             "ens",
             "mainnet",
             "ethereum-mainnet",
             "ens_v1_wrapper_l1",
-            "00000000-0000-0000-0000-000000009104",
-            "0xd4416b13d2b3a9abae7acd5d6c2bbdbe25686401",
-            321,
-            360,
+            vec![source_family_backfill_target(
+                "00000000-0000-0000-0000-000000009104",
+                "0xd4416b13d2b3a9abae7acd5d6c2bbdbe25686401",
+                321,
+                360,
+            )],
         ),
         source_family_backfill_fixture(
             "ens",
             "mainnet",
             "ethereum-mainnet",
             "ens_v1_resolver_l1",
-            "00000000-0000-0000-0000-000000009105",
-            "0xf29100983e058b709f3d539b0c765937b804ac15",
-            361,
-            400,
+            vec![source_family_backfill_target(
+                "00000000-0000-0000-0000-000000009105",
+                "0xf29100983e058b709f3d539b0c765937b804ac15",
+                361,
+                400,
+            )],
         ),
         source_family_backfill_fixture(
             "ens",
             "sepolia-dev",
             "ethereum-sepolia",
             "ens_v2_root_l1",
-            "00000000-0000-0000-0000-000000009201",
-            "0x0000000000000000000000000000000000000201",
-            80,
-            120,
+            vec![source_family_backfill_target(
+                "00000000-0000-0000-0000-000000009201",
+                "0x0000000000000000000000000000000000000201",
+                80,
+                120,
+            )],
         ),
         source_family_backfill_fixture(
             "ens",
             "sepolia-dev",
             "ethereum-sepolia",
             "ens_v2_registry_l1",
-            "00000000-0000-0000-0000-000000009202",
-            "0x0000000000000000000000000000000000000202",
-            121,
-            180,
+            vec![source_family_backfill_target(
+                "00000000-0000-0000-0000-000000009202",
+                "0x0000000000000000000000000000000000000202",
+                121,
+                180,
+            )],
         ),
         source_family_backfill_fixture(
             "ens",
             "sepolia-dev",
             "ethereum-sepolia",
             "ens_v2_registrar_l1",
-            "00000000-0000-0000-0000-000000009203",
-            "0x0000000000000000000000000000000000000203",
-            181,
-            240,
+            vec![source_family_backfill_target(
+                "00000000-0000-0000-0000-000000009203",
+                "0x0000000000000000000000000000000000000203",
+                181,
+                240,
+            )],
         ),
         source_family_backfill_fixture(
             "ens",
             "sepolia-dev",
             "ethereum-sepolia",
             "ens_v2_resolver_l1",
-            "00000000-0000-0000-0000-000000009204",
-            "0x0000000000000000000000000000000000000204",
-            241,
-            300,
+            vec![source_family_backfill_target(
+                "00000000-0000-0000-0000-000000009204",
+                "0x0000000000000000000000000000000000000204",
+                241,
+                300,
+            )],
         ),
         source_family_backfill_fixture(
             "basenames",
             "mainnet",
             "base-mainnet",
             "basenames_base_registry",
-            "00000000-0000-0000-0000-000000009301",
-            "0x0000000000000000000000000000000000000301",
-            98,
-            150,
+            vec![source_family_backfill_target(
+                "00000000-0000-0000-0000-000000009301",
+                "0x0000000000000000000000000000000000000301",
+                98,
+                150,
+            )],
         ),
         source_family_backfill_fixture(
             "basenames",
             "mainnet",
             "base-mainnet",
             "basenames_base_registrar",
-            "00000000-0000-0000-0000-000000009302",
-            "0x0000000000000000000000000000000000000302",
-            151,
-            210,
+            vec![source_family_backfill_target(
+                "00000000-0000-0000-0000-000000009302",
+                "0x0000000000000000000000000000000000000302",
+                151,
+                210,
+            )],
         ),
         source_family_backfill_fixture(
             "basenames",
             "mainnet",
             "base-mainnet",
             "basenames_base_resolver",
-            "00000000-0000-0000-0000-000000009303",
-            "0x0000000000000000000000000000000000000303",
-            211,
-            261,
+            vec![source_family_backfill_target(
+                "00000000-0000-0000-0000-000000009303",
+                "0x0000000000000000000000000000000000000303",
+                211,
+                261,
+            )],
         ),
         source_family_backfill_fixture(
             "basenames",
             "mainnet",
             "base-mainnet",
             "basenames_base_primary",
-            "00000000-0000-0000-0000-000000009304",
-            "0x0000000000000000000000000000000000000304",
-            262,
-            320,
+            vec![source_family_backfill_target(
+                "00000000-0000-0000-0000-000000009304",
+                "0x0000000000000000000000000000000000000304",
+                262,
+                320,
+            )],
         ),
         source_family_backfill_fixture(
             "basenames",
             "mainnet",
             "ethereum-mainnet",
             "basenames_l1_compat",
-            "00000000-0000-0000-0000-000000009305",
-            "0xde9049636f4a1dfe0a64d1bfe3155c0a14c54f31",
-            401,
-            440,
+            vec![source_family_backfill_target(
+                "00000000-0000-0000-0000-000000009305",
+                "0xde9049636f4a1dfe0a64d1bfe3155c0a14c54f31",
+                401,
+                440,
+            )],
         ),
         source_family_backfill_fixture(
             "basenames",
             "mainnet",
             "ethereum-mainnet",
             "basenames_execution",
-            "00000000-0000-0000-0000-000000009306",
-            "0xde9049636f4a1dfe0a64d1bfe3155c0a14c54f31",
-            441,
-            480,
+            vec![source_family_backfill_target(
+                "00000000-0000-0000-0000-000000009306",
+                "0xde9049636f4a1dfe0a64d1bfe3155c0a14c54f31",
+                441,
+                480,
+            )],
         ),
     ]
 }
@@ -2295,16 +2932,36 @@ fn source_family_backfill_fixture(
     deployment_profile: &'static str,
     chain_id: &'static str,
     source_family: &'static str,
-    contract_instance_id: &'static str,
-    address: &'static str,
-    range_start_block_number: i64,
-    range_end_block_number: i64,
+    selected_targets: Vec<SourceFamilyBackfillTarget>,
 ) -> SourceFamilyBackfillFixture {
+    let range_start_block_number = selected_targets
+        .iter()
+        .map(|target| target.range_start_block_number)
+        .min()
+        .expect("source-family fixture must include at least one selected target");
+    let range_end_block_number = selected_targets
+        .iter()
+        .map(|target| target.range_end_block_number)
+        .max()
+        .expect("source-family fixture must include at least one selected target");
     SourceFamilyBackfillFixture {
         namespace,
         deployment_profile,
         chain_id,
         source_family,
+        range_start_block_number,
+        range_end_block_number,
+        selected_targets,
+    }
+}
+
+fn source_family_backfill_target(
+    contract_instance_id: &'static str,
+    address: &'static str,
+    range_start_block_number: i64,
+    range_end_block_number: i64,
+) -> SourceFamilyBackfillTarget {
+    SourceFamilyBackfillTarget {
         contract_instance_id,
         address,
         range_start_block_number,
@@ -2313,33 +2970,50 @@ fn source_family_backfill_fixture(
 }
 
 async fn seed_auto_bootstrap_manifest_sources(database: &HarnessDatabase) -> Result<()> {
+    let mut fixtures_by_manifest =
+        BTreeMap::<(&str, &str, &str), Vec<AutoBootstrapBackfillFixture>>::new();
     for fixture in auto_bootstrap_manifest_started_fixtures() {
-        let manifest_id = insert_auto_bootstrap_manifest(
-            database,
-            fixture.namespace,
-            fixture.source_family,
-            fixture.chain_id,
-            json!({
-                "contracts": [{
+        fixtures_by_manifest
+            .entry((fixture.namespace, fixture.source_family, fixture.chain_id))
+            .or_default()
+            .push(fixture);
+    }
+
+    for ((namespace, source_family, chain_id), fixtures) in fixtures_by_manifest {
+        let contracts = fixtures
+            .iter()
+            .map(|fixture| {
+                json!({
                     "role": fixture.manifest_role,
                     "address": fixture.address,
                     "start_block": fixture.manifest_start_block_number,
-                }],
+                })
+            })
+            .collect::<Vec<_>>();
+        let manifest_id = insert_auto_bootstrap_manifest(
+            database,
+            namespace,
+            source_family,
+            chain_id,
+            json!({
+                "contracts": contracts,
                 "roots": [],
             }),
         )
         .await?;
-        insert_auto_bootstrap_contract_target(
-            database,
-            manifest_id,
-            fixture.chain_id,
-            fixture.contract_instance_id,
-            fixture.address,
-            fixture.manifest_role,
-            fixture.active_from_block_number,
-            fixture.active_to_block_number,
-        )
-        .await?;
+        for fixture in fixtures {
+            insert_auto_bootstrap_contract_target(
+                database,
+                manifest_id,
+                fixture.chain_id,
+                fixture.contract_instance_id,
+                fixture.address,
+                fixture.manifest_role,
+                fixture.active_from_block_number,
+                fixture.active_to_block_number,
+            )
+            .await?;
+        }
     }
 
     let unknown = auto_bootstrap_unknown_start_fixture();
@@ -2380,7 +3054,7 @@ async fn load_auto_bootstrap_manifest_started_targets(
         .map(|fixture| ((fixture.chain_id, fixture.contract_instance_id), fixture))
         .collect::<BTreeMap<_, _>>();
     let mut resolved_fixtures = Vec::new();
-    for chain in ["base-mainnet", "ethereum-sepolia"] {
+    for chain in ["base-mainnet", "ethereum-mainnet", "ethereum-sepolia"] {
         for target in
             bigname_manifests::load_manifest_declared_bootstrap_targets(&database.pool, chain)
                 .await
@@ -2582,6 +3256,34 @@ impl AutoBootstrapBackfillFixture {
 
 fn auto_bootstrap_manifest_started_fixtures() -> Vec<AutoBootstrapBackfillFixture> {
     vec![
+        AutoBootstrapBackfillFixture {
+            namespace: "ens",
+            deployment_profile: "mainnet",
+            chain_id: "ethereum-mainnet",
+            source_family: "ens_v1_registry_l1",
+            contract_instance_id: ENS_V1_REGISTRY_AUTO_BOOTSTRAP_CURRENT_CONTRACT_INSTANCE_ID,
+            address: ENS_V1_REGISTRY_CURRENT_ADDRESS,
+            manifest_role: "registry",
+            manifest_start_block_number: ENS_V1_REGISTRY_CURRENT_START_BLOCK,
+            active_from_block_number: None,
+            active_to_block_number: None,
+            provider_head_block_number: 9_400_000,
+            bootstrap_backfill_max_blocks: None,
+        },
+        AutoBootstrapBackfillFixture {
+            namespace: "ens",
+            deployment_profile: "mainnet",
+            chain_id: "ethereum-mainnet",
+            source_family: "ens_v1_registry_l1",
+            contract_instance_id: ENS_V1_REGISTRY_AUTO_BOOTSTRAP_OLD_CONTRACT_INSTANCE_ID,
+            address: ENS_V1_REGISTRY_OLD_ADDRESS,
+            manifest_role: "registry_old",
+            manifest_start_block_number: ENS_V1_REGISTRY_OLD_START_BLOCK,
+            active_from_block_number: None,
+            active_to_block_number: None,
+            provider_head_block_number: 9_400_000,
+            bootstrap_backfill_max_blocks: None,
+        },
         AutoBootstrapBackfillFixture {
             namespace: "ens",
             deployment_profile: "sepolia-dev",

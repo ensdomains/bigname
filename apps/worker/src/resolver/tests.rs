@@ -5,10 +5,10 @@ use std::{
 
 use anyhow::Result;
 use bigname_storage::{
-    NameSurface, NormalizedEvent, RawBlock, RawCodeHash, Resource, SurfaceBinding,
+    NameSurface, NormalizedEvent, RawBlock, RawCodeHash, RawLog, Resource, SurfaceBinding,
     default_database_url, load_resolver_current, upsert_name_surfaces, upsert_normalized_events,
-    upsert_raw_blocks, upsert_raw_code_hashes, upsert_resolver_current_rows, upsert_resources,
-    upsert_surface_bindings,
+    upsert_raw_blocks, upsert_raw_code_hashes, upsert_raw_logs, upsert_resolver_current_rows,
+    upsert_resources, upsert_surface_bindings,
 };
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
@@ -270,6 +270,146 @@ async fn resolver_current_keyed_rebuild_projects_bindings_permissions_and_unsupp
         json!(101)
     );
     assert_eq!(row.canonicality_summary["status"], json!("finalized"));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn resolver_current_ignores_suppressed_old_registry_raw_facts_after_migration() -> Result<()>
+{
+    let database = TestDatabase::new().await?;
+    let resource_id = Uuid::from_u128(0x8120);
+    let surface_binding_id = Uuid::from_u128(0x8220);
+    let registry_manifest_id = insert_manifest_version(
+        database.pool(),
+        SOURCE_FAMILY_ENS_V1_REGISTRY_L1,
+        "manifests/ens/ens_v1_registry_l1/v3.toml",
+    )
+    .await?;
+    let resolver_manifest_id = insert_manifest_version(
+        database.pool(),
+        SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
+        "manifests/ens/ens_v1_resolver_l1/v1.toml",
+    )
+    .await?;
+    let resolver_contract_instance_id = Uuid::from_u128(0x8121);
+    let current_resolver = "0x0000000000000000000000000000000000008121";
+    let suppressed_resolver = "0x0000000000000000000000000000000000008122";
+
+    insert_contract_instance(
+        database.pool(),
+        resolver_contract_instance_id,
+        current_resolver,
+        resolver_manifest_id,
+    )
+    .await?;
+    insert_manifest_contract_instance(
+        database.pool(),
+        resolver_manifest_id,
+        "public_resolver",
+        resolver_contract_instance_id,
+        current_resolver,
+    )
+    .await?;
+    seed_identity(
+        database.pool(),
+        "ens:migrated.eth",
+        resource_id,
+        surface_binding_id,
+        "migrated.eth",
+        SurfaceBindingKind::DeclaredRegistryPath,
+    )
+    .await?;
+    seed_raw_blocks(
+        database.pool(),
+        &[
+            raw_block("ethereum-mainnet", "0xres0150", 150, 1_776_302_150),
+            raw_block(
+                "ethereum-mainnet",
+                "0xensold-resolver-suppressed",
+                550,
+                1_776_302_550,
+            ),
+        ],
+    )
+    .await?;
+    seed_raw_logs(
+        database.pool(),
+        &[old_registry_raw_log(
+            "suppressed-resolver-overview",
+            "0xensold-resolver-suppressed",
+            550,
+            11,
+            suppressed_resolver,
+        )],
+    )
+    .await?;
+    seed_resolver_events(
+        database.pool(),
+        &[resolver_event_with_manifest(
+            "surviving-current-resolver",
+            "ens:migrated.eth",
+            resource_id,
+            current_resolver,
+            SOURCE_FAMILY_ENS_V1_REGISTRY_L1,
+            registry_manifest_id,
+            150,
+            0,
+        )],
+    )
+    .await?;
+
+    let summary = rebuild_resolver_current(database.pool(), None, None).await?;
+    assert_eq!(summary.requested_resolver_count, 1);
+    assert_eq!(summary.upserted_row_count, 1);
+
+    let current_row = load_resolver_current(database.pool(), "ethereum-mainnet", current_resolver)
+        .await?
+        .context("current resolver_current row should exist")?;
+    assert_eq!(
+        current_row.declared_summary["bindings"]["status"],
+        json!("supported")
+    );
+    assert_eq!(current_row.declared_summary["bindings"]["count"], json!(1));
+    assert_eq!(
+        current_row.declared_summary["bindings"]["items"][0]["logical_name_id"],
+        json!("ens:migrated.eth")
+    );
+    assert_eq!(
+        current_row.declared_summary["event_summary"]["by_kind"][EVENT_KIND_RESOLVER_CHANGED],
+        json!(1)
+    );
+    assert_eq!(
+        current_row.chain_positions["ethereum-mainnet"]["block_number"],
+        json!(150)
+    );
+    assert_eq!(current_row.coverage["status"], json!("full"));
+    assert_eq!(current_row.coverage["unsupported_reason"], Value::Null);
+    assert_eq!(current_row.provenance["normalized_event_ids"], json!([1]));
+
+    let suppressed_summary = rebuild_resolver_current(
+        database.pool(),
+        Some("ethereum-mainnet"),
+        Some(suppressed_resolver),
+    )
+    .await?;
+    assert_eq!(suppressed_summary.upserted_row_count, 0);
+    assert!(
+        load_resolver_current(database.pool(), "ethereum-mainnet", suppressed_resolver)
+            .await?
+            .is_none()
+    );
+
+    let projection_json = serde_json::to_string(&json!({
+        "declared_summary": current_row.declared_summary,
+        "provenance": current_row.provenance,
+        "coverage": current_row.coverage,
+        "chain_positions": current_row.chain_positions,
+        "canonicality_summary": current_row.canonicality_summary,
+    }))?;
+    assert!(!projection_json.contains("0xensold-resolver-suppressed"));
+    assert!(!projection_json.contains(suppressed_resolver));
+    assert!(!projection_json.contains("suppressed-resolver-overview"));
 
     database.cleanup().await
 }
@@ -896,6 +1036,11 @@ async fn seed_raw_blocks(pool: &PgPool, blocks: &[RawBlock]) -> Result<()> {
     Ok(())
 }
 
+async fn seed_raw_logs(pool: &PgPool, logs: &[RawLog]) -> Result<()> {
+    upsert_raw_logs(pool, logs).await?;
+    Ok(())
+}
+
 async fn seed_resolver_events(pool: &PgPool, events: &[NormalizedEvent]) -> Result<()> {
     upsert_normalized_events(pool, events).await?;
     Ok(())
@@ -1340,6 +1485,31 @@ fn raw_block(chain_id: &str, block_hash: &str, block_number: i64, unix_timestamp
         transactions_root: None,
         receipts_root: None,
         state_root: None,
+        canonicality_state: CanonicalityState::Finalized,
+    }
+}
+
+fn old_registry_raw_log(
+    event_identity: &str,
+    block_hash: &str,
+    block_number: i64,
+    log_index: i64,
+    resolver_address: &str,
+) -> RawLog {
+    RawLog {
+        chain_id: "ethereum-mainnet".to_owned(),
+        block_hash: block_hash.to_owned(),
+        block_number,
+        transaction_hash: format!("0xtxensoldresolver{block_number:04x}"),
+        transaction_index: 0,
+        log_index,
+        emitting_address: "0x0000000000000000000000000000000000000f01".to_owned(),
+        topics: vec![
+            "ENSRegistryOld".to_owned(),
+            event_identity.to_owned(),
+            resolver_address.to_owned(),
+        ],
+        data: format!("suppressed-old-registry:{event_identity}").into_bytes(),
         canonicality_state: CanonicalityState::Finalized,
     }
 }

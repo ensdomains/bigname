@@ -4,16 +4,44 @@ pub async fn sync_ens_v1_unwrapped_authority(
     pool: &PgPool,
     chain: &str,
 ) -> Result<EnsV1UnwrappedAuthoritySyncSummary> {
-    sync_ens_v1_unwrapped_authority_with_scope(pool, chain, false, &[]).await
+    sync_ens_v1_unwrapped_authority_with_scope(pool, chain, false, &[], None).await
 }
 
 impl EnsV1UnwrappedAuthoritySyncSummary {
+    fn empty(scanned_log_count: usize) -> Self {
+        Self {
+            scanned_log_count,
+            matched_log_count: 0,
+            total_name_surface_count: 0,
+            total_resource_count: 0,
+            total_surface_binding_count: 0,
+            total_normalized_event_count: 0,
+            by_kind: BTreeMap::new(),
+        }
+    }
+
     pub async fn sync_for_block_hashes(
         pool: &PgPool,
         chain: &str,
         block_hashes: &[String],
     ) -> Result<Self> {
-        sync_ens_v1_unwrapped_authority_with_scope(pool, chain, true, block_hashes).await
+        sync_ens_v1_unwrapped_authority_with_scope(pool, chain, true, block_hashes, None).await
+    }
+
+    pub async fn sync_for_block_hashes_with_source_scope(
+        pool: &PgPool,
+        chain: &str,
+        block_hashes: &[String],
+        source_scope: &[(String, String, i64, i64)],
+    ) -> Result<Self> {
+        sync_ens_v1_unwrapped_authority_with_scope(
+            pool,
+            chain,
+            true,
+            block_hashes,
+            Some(source_scope),
+        )
+        .await
     }
 }
 
@@ -22,31 +50,21 @@ async fn sync_ens_v1_unwrapped_authority_with_scope(
     chain: &str,
     restrict_to_block_hashes: bool,
     block_hashes: &[String],
+    source_scope: Option<&[(String, String, i64, i64)]>,
 ) -> Result<EnsV1UnwrappedAuthoritySyncSummary> {
+    let source_scope = source_scope.map(normalized_authority_source_scope_targets);
+    if source_scope.as_ref().is_some_and(Vec::is_empty) {
+        return Ok(EnsV1UnwrappedAuthoritySyncSummary::empty(0));
+    }
+
     let active_emitters = load_active_emitters(pool, chain).await?;
     if active_emitters.is_empty() {
-        return Ok(EnsV1UnwrappedAuthoritySyncSummary {
-            scanned_log_count: 0,
-            matched_log_count: 0,
-            total_name_surface_count: 0,
-            total_resource_count: 0,
-            total_surface_binding_count: 0,
-            total_normalized_event_count: 0,
-            by_kind: BTreeMap::new(),
-        });
+        return Ok(EnsV1UnwrappedAuthoritySyncSummary::empty(0));
     }
 
     let canonical_blocks = load_canonical_blocks(pool, chain).await?;
     if canonical_blocks.is_empty() {
-        return Ok(EnsV1UnwrappedAuthoritySyncSummary {
-            scanned_log_count: 0,
-            matched_log_count: 0,
-            total_name_surface_count: 0,
-            total_resource_count: 0,
-            total_surface_binding_count: 0,
-            total_normalized_event_count: 0,
-            by_kind: BTreeMap::new(),
-        });
+        return Ok(EnsV1UnwrappedAuthoritySyncSummary::empty(0));
     }
 
     let block_index = CanonicalBlockIndex {
@@ -60,30 +78,52 @@ async fn sync_ens_v1_unwrapped_authority_with_scope(
         &active_emitters,
         restrict_to_block_hashes,
         block_hashes,
+        source_scope.as_deref(),
     )
     .await?;
     let scanned_log_count = raw_logs.len();
     if raw_logs.is_empty() {
-        return Ok(EnsV1UnwrappedAuthoritySyncSummary {
-            scanned_log_count,
-            matched_log_count: 0,
-            total_name_surface_count: 0,
-            total_resource_count: 0,
-            total_surface_binding_count: 0,
-            total_normalized_event_count: 0,
-            by_kind: BTreeMap::new(),
-        });
+        return Ok(EnsV1UnwrappedAuthoritySyncSummary::empty(scanned_log_count));
     }
 
     let mut histories = BTreeMap::<String, NameHistory>::new();
     let mut reverse_histories = BTreeMap::<String, ReverseClaimSourceHistory>::new();
     let mut namehash_to_labelhash = HashMap::<String, String>::new();
+    let preload_migrated_registry_nodes = source_scope.is_some() || restrict_to_block_hashes;
+    let mut migrated_registry_nodes = if preload_migrated_registry_nodes {
+        let first_selected_block = raw_logs
+            .iter()
+            .map(|raw_log| raw_log.block_number)
+            .min()
+            .context("non-empty raw log set must have a first block")?;
+        load_migrated_registry_nodes_before_block(
+            pool,
+            chain,
+            &active_emitters,
+            first_selected_block,
+        )
+        .await?
+    } else {
+        HashSet::<String>::new()
+    };
     let mut matched_log_count = 0usize;
     for raw_log in &raw_logs {
-        if resolver_profile_gate.rejects_resolver_local_fact(raw_log) {
+        let migration_guard = registry_migration_guard_action(raw_log)?;
+        if migration_guard.suppressed_by(&migrated_registry_nodes) {
             continue;
         }
-        let Some(observation) = build_authority_observation(raw_log)? else {
+
+        if resolver_profile_gate.rejects_resolver_local_fact(raw_log) {
+            if let Some(node) = migration_guard.mark_migrated_node() {
+                migrated_registry_nodes.insert(node.to_owned());
+            }
+            continue;
+        }
+        let observation = build_authority_observation(raw_log)?;
+        if let Some(node) = migration_guard.mark_migrated_node() {
+            migrated_registry_nodes.insert(node.to_owned());
+        }
+        let Some(observation) = observation else {
             continue;
         };
         matched_log_count += 1;

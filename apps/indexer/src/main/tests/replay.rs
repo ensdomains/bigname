@@ -710,6 +710,137 @@ async fn replay_normalized_events_rejects_mixed_canonicality_raw_logs() -> Resul
 }
 
 #[tokio::test]
+async fn replay_normalized_events_does_not_mutate_discovery_edges_or_scan_unselected_registry_discovery_logs()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let chain = "ethereum-mainnet";
+    let registry_manifest_id = 30;
+    let resolver_manifest_id = 31;
+    let registry_contract_instance_id = Uuid::from_u128(0x930);
+    let registry_address = "0x00000000000000000000000000000000000000bb";
+    let selected_resolver = "0x00000000000000000000000000000000000000c1";
+    let unselected_resolver = "0x00000000000000000000000000000000000000c2";
+    let selected_block = provider_block(
+        "0x7070707070707070707070707070707070707070707070707070707070707070",
+        Some("0x6060606060606060606060606060606060606060606060606060606060606060"),
+        70,
+    );
+    let unselected_block = provider_block(
+        "0x7171717171717171717171717171717171717171717171717171717171717171",
+        Some(&selected_block.block_hash),
+        71,
+    );
+
+    insert_active_replay_manifest_contract(
+        database.pool(),
+        registry_manifest_id,
+        "ens",
+        "ens_v1_registry_l1",
+        chain,
+        "ens_v1",
+        registry_contract_instance_id,
+        registry_address,
+        "registry",
+    )
+    .await?;
+    insert_manifest_root_contract_instance(
+        database.pool(),
+        registry_manifest_id,
+        registry_contract_instance_id,
+        registry_address,
+    )
+    .await?;
+    insert_manifest_discovery_rule(
+        database.pool(),
+        registry_manifest_id,
+        "resolver",
+        "registry",
+        "reachable_from_root",
+    )
+    .await?;
+    insert_active_replay_manifest(
+        database.pool(),
+        resolver_manifest_id,
+        "ens",
+        "ens_v1_resolver_l1",
+        chain,
+        "ens_v1",
+    )
+    .await?;
+
+    for block in [&selected_block, &unselected_block] {
+        insert_chain_lineage_for_block(database.pool(), chain, block, CanonicalityState::Canonical)
+            .await?;
+    }
+    insert_raw_new_resolver_log_for_node_at_index(
+        database.pool(),
+        chain,
+        &selected_block,
+        registry_address,
+        selected_resolver,
+        &namehash_for_dns_name(&dns_encoded_eth_name("selected")),
+        0,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    insert_raw_new_resolver_log_for_node_at_index(
+        database.pool(),
+        chain,
+        &unselected_block,
+        registry_address,
+        unselected_resolver,
+        &namehash_for_dns_name(&dns_encoded_eth_name("unselected")),
+        0,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+
+    let outcome = replay_raw_fact_normalized_events(
+        database.pool(),
+        RawFactNormalizedEventReplayRequest {
+            deployment_profile: "mainnet".to_owned(),
+            chain: chain.to_owned(),
+            selection: RawFactNormalizedEventReplaySelection::BlockHashes(vec![
+                selected_block.block_hash.clone(),
+            ]),
+        },
+    )
+    .await?;
+
+    assert_eq!(outcome.selected_block_count, 1);
+    assert_eq!(outcome.canonical_raw_log_count, 1);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM discovery_edges")
+            .fetch_one(database.pool())
+            .await?,
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM normalized_events WHERE raw_fact_ref->>'block_hash' = $1"
+        )
+        .bind(&unselected_block.block_hash)
+        .fetch_one(database.pool())
+        .await?,
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)::BIGINT
+            FROM normalized_events
+            WHERE derivation_kind = 'ens_v1_registry_resolver_changed'
+            "#
+        )
+        .fetch_one(database.pool())
+        .await?,
+        0
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn replay_normalized_events_respects_ensv1_dynamic_resolver_watch_target_range() -> Result<()>
 {
     assert_dynamic_resolver_replay_respects_watch_target_range(DynamicResolverReplayConfig {
@@ -856,6 +987,21 @@ async fn assert_dynamic_resolver_replay_respects_watch_target_range(
         "registry",
     )
     .await?;
+    insert_manifest_root_contract_instance(
+        database.pool(),
+        registry_manifest_id,
+        registry_contract_instance_id,
+        registry_address,
+    )
+    .await?;
+    insert_manifest_discovery_rule(
+        database.pool(),
+        registry_manifest_id,
+        "resolver",
+        "registry",
+        "reachable_from_root",
+    )
+    .await?;
     insert_active_replay_manifest(
         database.pool(),
         resolver_manifest_id,
@@ -917,7 +1063,6 @@ async fn assert_dynamic_resolver_replay_respects_watch_target_range(
     for contract_instance_id in [
         supported_resolver_contract_instance_id,
         pending_resolver_contract_instance_id,
-        unsupported_resolver_contract_instance_id,
     ] {
         insert_active_discovery_edge_with_range(
             database.pool(),
@@ -1232,11 +1377,31 @@ async fn assert_dynamic_resolver_replay_respects_watch_target_range(
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*)::BIGINT FROM normalized_events WHERE event_kind = 'ResolverChanged'"
+            r#"
+            SELECT COUNT(*)::BIGINT
+            FROM normalized_events
+            WHERE event_kind = 'ResolverChanged'
+              AND derivation_kind = 'ens_v1_unwrapped_authority'
+            "#
         )
         .fetch_one(database.pool())
         .await?,
         3
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)::BIGINT
+            FROM normalized_events
+            WHERE event_kind = 'ResolverChanged'
+              AND source_family = $1
+              AND derivation_kind = 'ens_v1_registry_resolver_changed'
+            "#
+        )
+        .bind(config.registry_source_family)
+        .fetch_one(database.pool())
+        .await?,
+        0
     );
     let admissions = if config.resolver_source_family == "ens_v1_resolver_l1" {
         bigname_manifests::load_ens_v1_public_resolver_profile_admissions(database.pool()).await?
@@ -1267,11 +1432,6 @@ async fn assert_dynamic_resolver_replay_respects_watch_target_range(
         vec![
             (supported_resolver_address, "supported", "code_hash_match"),
             (pending_resolver_address, "pending", "code_hash_pending"),
-            (
-                unsupported_resolver_address,
-                "unsupported",
-                "code_hash_mismatch"
-            )
         ]
     );
     assert_no_duplicate_normalized_event_identities(database.pool()).await?;

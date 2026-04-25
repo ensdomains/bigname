@@ -1,7 +1,7 @@
 use anyhow::Result;
 use bigname_storage::{
-    NameSurface, NormalizedEvent, RawBlock, load_children_current, upsert_name_surfaces,
-    upsert_normalized_events, upsert_raw_blocks,
+    NameSurface, NormalizedEvent, RawBlock, RawLog, load_children_current, upsert_name_surfaces,
+    upsert_normalized_events, upsert_raw_blocks, upsert_raw_logs,
 };
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 
@@ -117,6 +117,97 @@ async fn rebuilds_declared_children_for_one_parent() -> Result<()> {
     );
     assert_eq!(rows[1].child_logical_name_id, "ens:carol.parent.eth");
     assert_eq!(rows[1].last_recomputed_at, timestamp(1_717_172_102));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn rebuild_ignores_suppressed_old_registry_raw_facts_for_migrated_children() -> Result<()> {
+    let database = test_database().await?;
+    let parent = "ens:migrated.eth";
+    let current_child = "ens:alice.migrated.eth";
+    let suppressed_child = "ens:legacy.migrated.eth";
+    let current_child_node = "node:alice.migrated.eth";
+    let suppressed_child_node = "node:legacy.migrated.eth";
+
+    seed_raw_blocks(
+        database.pool(),
+        &[
+            raw_block("ethereum-mainnet", "0xblock78", 120, 1_776_301_120),
+            raw_block(
+                "ethereum-mainnet",
+                "0xensold-children-suppressed",
+                520,
+                1_776_301_520,
+            ),
+        ],
+    )
+    .await?;
+    seed_raw_logs(
+        database.pool(),
+        &[old_registry_raw_log(
+            "suppressed-children",
+            "0xensold-children-suppressed",
+            520,
+            9,
+            "node:migrated.eth",
+            suppressed_child_node,
+        )],
+    )
+    .await?;
+    seed_name_surfaces(
+        database.pool(),
+        &[
+            name_surface(parent, "migrated.eth", "node:migrated.eth", 60),
+            name_surface(current_child, "alice.migrated.eth", current_child_node, 61),
+            name_surface(
+                suppressed_child,
+                "legacy.migrated.eth",
+                suppressed_child_node,
+                62,
+            ),
+        ],
+    )
+    .await?;
+    seed_subregistry_events(
+        database.pool(),
+        &[subregistry_event(
+            "ens",
+            "current-child-survives",
+            "node:migrated.eth",
+            current_child_node,
+            120,
+            0,
+            false,
+            true,
+        )],
+    )
+    .await?;
+
+    let summary = rebuild_children_current(database.pool(), Some(parent)).await?;
+    assert_eq!(summary.requested_parent_count, 1);
+    assert_eq!(summary.upserted_row_count, 1);
+
+    let rows = load_children_current(database.pool(), parent).await?;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].child_logical_name_id, current_child);
+    assert_eq!(
+        rows[0].chain_positions["ethereum"]["block_number"],
+        json!(120)
+    );
+    assert!(
+        rows.iter()
+            .all(|row| row.child_logical_name_id != suppressed_child)
+    );
+
+    let projection_json = serde_json::to_string(&json!({
+        "provenance": rows[0].provenance.clone(),
+        "chain_positions": rows[0].chain_positions.clone(),
+        "canonicality_summary": rows[0].canonicality_summary.clone(),
+    }))?;
+    assert!(!projection_json.contains("0xensold-children-suppressed"));
+    assert!(!projection_json.contains(suppressed_child_node));
+    assert!(!projection_json.contains("suppressed-children"));
 
     database.cleanup().await
 }
@@ -526,6 +617,11 @@ async fn seed_raw_blocks(pool: &PgPool, blocks: &[RawBlock]) -> Result<()> {
     Ok(())
 }
 
+async fn seed_raw_logs(pool: &PgPool, logs: &[RawLog]) -> Result<()> {
+    upsert_raw_logs(pool, logs).await?;
+    Ok(())
+}
+
 async fn seed_name_surfaces(pool: &PgPool, surfaces: &[NameSurface]) -> Result<()> {
     upsert_name_surfaces(pool, surfaces).await?;
     Ok(())
@@ -547,6 +643,33 @@ fn raw_block(chain_id: &str, block_hash: &str, block_number: i64, unix_timestamp
         transactions_root: None,
         receipts_root: None,
         state_root: None,
+        canonicality_state: CanonicalityState::Finalized,
+    }
+}
+
+fn old_registry_raw_log(
+    event_identity: &str,
+    block_hash: &str,
+    block_number: i64,
+    log_index: i64,
+    parent_node: &str,
+    child_node: &str,
+) -> RawLog {
+    RawLog {
+        chain_id: "ethereum-mainnet".to_owned(),
+        block_hash: block_hash.to_owned(),
+        block_number,
+        transaction_hash: format!("0xtxensold{block_number:04x}"),
+        transaction_index: 0,
+        log_index,
+        emitting_address: "0x0000000000000000000000000000000000000f01".to_owned(),
+        topics: vec![
+            "ENSRegistryOld".to_owned(),
+            event_identity.to_owned(),
+            parent_node.to_owned(),
+            child_node.to_owned(),
+        ],
+        data: format!("suppressed-old-registry:{event_identity}").into_bytes(),
         canonicality_state: CanonicalityState::Finalized,
     }
 }

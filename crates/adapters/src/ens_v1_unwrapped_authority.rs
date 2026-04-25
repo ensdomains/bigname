@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use anyhow::{Context, Result, bail};
-use bigname_manifests::{WatchedContractSource, load_watched_contracts};
+use bigname_manifests::{WatchedContract, WatchedContractSource, load_watched_contracts};
 use bigname_storage::{
     CanonicalityState, NameSurface, NormalizedEvent, Resource, SurfaceBinding, SurfaceBindingKind,
     TokenLineage, load_name_surface_including_noncanonical, load_resource_including_noncanonical,
@@ -23,6 +23,7 @@ const SOURCE_FAMILY_ENS_V1_WRAPPER_L1: &str = "ens_v1_wrapper_l1";
 const SOURCE_FAMILY_BASENAMES_BASE_REGISTRAR: &str = "basenames_base_registrar";
 const SOURCE_FAMILY_BASENAMES_BASE_REGISTRY: &str = "basenames_base_registry";
 const SOURCE_FAMILY_BASENAMES_BASE_RESOLVER: &str = "basenames_base_resolver";
+const CONTRACT_ROLE_REGISTRY_OLD: &str = "registry_old";
 
 const DERIVATION_KIND_ENS_V1_UNWRAPPED_AUTHORITY: &str = "ens_v1_unwrapped_authority";
 const EVENT_KIND_AUTHORITY_EPOCH_CHANGED: &str = "AuthorityEpochChanged";
@@ -48,7 +49,9 @@ const NAME_CHANGED_SIGNATURE: &str = "NameChanged(bytes32,string)";
 const NEW_RESOLVER_SIGNATURE: &str = "NewResolver(bytes32,address)";
 const TEXT_CHANGED_SIGNATURE: &str = "TextChanged(bytes32,string,string)";
 const TRANSFER_SIGNATURE: &str = "Transfer(address,address,uint256)";
+const REGISTRY_TRANSFER_SIGNATURE: &str = "Transfer(bytes32,address)";
 const NEW_OWNER_SIGNATURE: &str = "NewOwner(bytes32,bytes32,address)";
+const NEW_TTL_SIGNATURE: &str = "NewTTL(bytes32,uint64)";
 const VERSION_CHANGED_SIGNATURE: &str = "VersionChanged(bytes32,uint64)";
 const NAME_WRAPPED_SIGNATURE: &str = "NameWrapped(bytes32,bytes,address,uint32,uint64)";
 const NAME_UNWRAPPED_SIGNATURE: &str = "NameUnwrapped(bytes32,address)";
@@ -81,11 +84,13 @@ pub struct EnsV1UnwrappedAuthoritySyncSummary {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ActiveEmitter {
     address: String,
+    contract_instance_id: Uuid,
     source_manifest_id: i64,
     namespace: String,
     source_family: String,
     manifest_version: i64,
     normalizer_version: String,
+    contract_role: Option<String>,
     active_from_block_number: Option<i64>,
     active_to_block_number: Option<i64>,
     source_rank: i32,
@@ -128,6 +133,7 @@ struct AuthorityRawLogRow {
     source_family: String,
     manifest_version: i64,
     normalizer_version: String,
+    contract_role: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -453,6 +459,7 @@ mod finalization;
 mod ids;
 mod loading;
 mod materialization;
+mod migration_guard;
 mod names;
 mod observation;
 mod permissions;
@@ -460,6 +467,7 @@ mod profiles;
 mod release_events;
 mod resolver_gate;
 mod reverse_claims;
+mod scope;
 mod transition;
 
 pub use self::pipeline::sync_ens_v1_unwrapped_authority;
@@ -467,8 +475,8 @@ pub use self::pipeline::sync_ens_v1_unwrapped_authority;
 use self::{
     abi::*, apply::*, apply_registrar::*, apply_registry::*, apply_resolver::*, apply_wrapper::*,
     event_builders::*, event_state::*, finalization::*, ids::*, loading::*, materialization::*,
-    names::*, observation::*, permissions::*, profiles::*, release_events::*, resolver_gate::*,
-    reverse_claims::*, transition::*,
+    migration_guard::*, names::*, observation::*, permissions::*, profiles::*, release_events::*,
+    resolver_gate::*, reverse_claims::*, scope::*, transition::*,
 };
 
 mod pipeline;

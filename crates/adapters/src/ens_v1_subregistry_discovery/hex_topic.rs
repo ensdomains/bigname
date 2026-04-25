@@ -3,7 +3,8 @@ use sha3::{Digest, Keccak256};
 
 const NEW_OWNER_SIGNATURE: &str = "NewOwner(bytes32,bytes32,address)";
 const NEW_RESOLVER_SIGNATURE: &str = "NewResolver(bytes32,address)";
-#[cfg(test)]
+const REGISTRY_TRANSFER_SIGNATURE: &str = "Transfer(bytes32,address)";
+const NEW_TTL_SIGNATURE: &str = "NewTTL(bytes32,uint64)";
 pub(super) const ZERO_NODE: &str =
     "0x0000000000000000000000000000000000000000000000000000000000000000";
 pub(super) const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
@@ -59,6 +60,14 @@ pub(super) fn new_owner_topic0() -> String {
 
 pub(super) fn new_resolver_topic0() -> String {
     keccak_signature_hex(NEW_RESOLVER_SIGNATURE)
+}
+
+pub(super) fn registry_transfer_topic0() -> String {
+    keccak_signature_hex(REGISTRY_TRANSFER_SIGNATURE)
+}
+
+pub(super) fn new_ttl_topic0() -> String {
+    keccak_signature_hex(NEW_TTL_SIGNATURE)
 }
 
 fn keccak_signature_hex(signature: &str) -> String {
