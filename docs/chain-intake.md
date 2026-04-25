@@ -213,7 +213,7 @@ Automatic bootstrap follows these rules:
 
 - it runs after manifest sync, discovery admission, watch-plan materialization, and per-chain checkpoint row setup for the selected deployment profile
 - active watched chains without configured providers remain idle after that setup; bootstrap must not create jobs for a chain whose provider cannot supply a finite bootstrap end
-- `BIGNAME_INDEXER_BOOTSTRAP_BACKFILL_MAX_BLOCKS=25000` is only a startup bootstrap cap for automatically created finite jobs. It limits how much recent work startup may enqueue; it does not redefine admitted history, prove historical completeness, satisfy full backfill, widen route coverage, or create consumer-replacement evidence.
+- automatic bootstrap covers each eligible target from its manifest/discovery admitted start through the finite provider head observed at job creation time. It must not cap the start to an arbitrary recent window; full admitted history is the default startup work for configured chains.
 - each candidate target is the resolved watched target keyed by `contract_instance_id`, source family, chain, normalized address, and effective range; raw address is never accepted as durable source identity
 - the persisted source identity for an automatically created job is the sorted resolved target set with effective range start and effective range end, matching the same canonical target tuple used by source-scoped backfill
 - a target with declared `start_block` is eligible only from that inclusive block, further narrowed by its active watch range and the finite bootstrap range end resolved at job creation time

@@ -53,11 +53,18 @@ backfill catch-up, and live head following stay idle with an explicit
 must not fail solely because Base is missing. A provider entry for a chain that
 is not part of the selected manifest root is invalid.
 
-`BIGNAME_INDEXER_BOOTSTRAP_BACKFILL_MAX_BLOCKS=25000` is only the startup
-bootstrap cap for automatically created finite backfill jobs. It limits how much
-recent work startup may enqueue. It is not complete history, not a substitute
-for explicit full backfill over the selected profile's admitted ranges, and not
-consumer-replacement or route-coverage evidence.
+Startup bootstrap creates finite backfill jobs from each eligible target's
+manifest/discovery admitted start through the provider head observed at job
+creation time. It does not cap work to a recent window. This is still
+operational intake work: completing bootstrap alone is not consumer-replacement
+or route-coverage evidence without the relevant projection, route, conformance,
+and rollout gates.
+
+Hash-pinned backfill execution batches each reserved range into
+`BIGNAME_INDEXER_HASH_PINNED_BACKFILL_CHUNK_BLOCKS`-sized chunks. The default
+server profile uses `1024` blocks. Larger chunks reduce checkpoint churn and RPC
+round trips during long historical bootstrap, while also increasing the amount
+of range work retried after a failed chunk.
 
 Operational catch-up to finalized head should be run as bounded idempotent
 backfill chunks. Before every chunk starts range work, check current Postgres

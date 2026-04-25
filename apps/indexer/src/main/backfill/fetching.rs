@@ -265,17 +265,23 @@ pub(crate) async fn run_hash_pinned_backfill_range(
     upsert_raw_receipts(pool, &receipts).await?;
     upsert_raw_logs(pool, &logs).await?;
     upsert_raw_code_hashes(pool, &code_hashes).await?;
-    if source_plan.selector_kind == WatchedSourceSelectorKind::WholeActiveWatchedChain {
-        sync_adapter_state_from_persisted_raw_payloads(pool, &watched_chain.chain, &block_hashes)
+    if !logs.is_empty() {
+        if source_plan.selector_kind == WatchedSourceSelectorKind::WholeActiveWatchedChain {
+            sync_adapter_state_from_persisted_raw_payloads(
+                pool,
+                &watched_chain.chain,
+                &block_hashes,
+            )
             .await?;
-    } else {
-        sync_adapter_state_from_scoped_persisted_raw_payloads(
-            pool,
-            &watched_chain.chain,
-            &block_hashes,
-            &source_scope,
-        )
-        .await?;
+        } else {
+            sync_adapter_state_from_scoped_persisted_raw_payloads(
+                pool,
+                &watched_chain.chain,
+                &block_hashes,
+                &source_scope,
+            )
+            .await?;
+        }
     }
 
     let outcome = BackfillOutcome {

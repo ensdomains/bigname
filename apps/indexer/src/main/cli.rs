@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use bigname_storage::DatabaseConfig;
 use clap::{Args, Parser, Subcommand};
 
-use crate::bootstrap_backfill::DEFAULT_BOOTSTRAP_BACKFILL_MAX_BLOCKS;
+use crate::backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS;
 use crate::ops_catchup::{
     DEFAULT_OPS_CATCHUP_CHUNK_BLOCKS, DEFAULT_OPS_CATCHUP_FOLLOW_POLL_INTERVAL_SECS,
     DEFAULT_OPS_CATCHUP_LEASE_DURATION_SECS,
@@ -50,11 +50,11 @@ pub(crate) struct RunArgs {
     )]
     pub(crate) chain_rpc_urls: Vec<String>,
     #[arg(
-        long,
-        env = "BIGNAME_INDEXER_BOOTSTRAP_BACKFILL_MAX_BLOCKS",
-        default_value_t = DEFAULT_BOOTSTRAP_BACKFILL_MAX_BLOCKS
+        long = "hash-pinned-chunk-blocks",
+        env = "BIGNAME_INDEXER_HASH_PINNED_BACKFILL_CHUNK_BLOCKS",
+        default_value_t = DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS
     )]
-    pub(crate) bootstrap_backfill_max_blocks: i64,
+    pub(crate) hash_pinned_chunk_blocks: i64,
 }
 
 #[derive(Args, Debug)]
@@ -97,6 +97,12 @@ pub(crate) struct BackfillArgs {
     pub(crate) lease_token: Option<String>,
     #[arg(long, default_value_t = 300_u64)]
     pub(crate) lease_duration_secs: u64,
+    #[arg(
+        long = "hash-pinned-chunk-blocks",
+        env = "BIGNAME_INDEXER_HASH_PINNED_BACKFILL_CHUNK_BLOCKS",
+        default_value_t = DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS
+    )]
+    pub(crate) hash_pinned_chunk_blocks: i64,
 }
 
 #[derive(Args, Debug)]

@@ -9,6 +9,7 @@ mod runner;
 
 #[allow(unused_imports)]
 pub(crate) use config::OpsCatchupOutcome;
+#[allow(unused_imports)]
 pub(crate) use config::{
     CapacityGuardConfig, DEFAULT_OPS_CATCHUP_CHUNK_BLOCKS,
     DEFAULT_OPS_CATCHUP_FOLLOW_POLL_INTERVAL_SECS, DEFAULT_OPS_CATCHUP_LEASE_DURATION_SECS,

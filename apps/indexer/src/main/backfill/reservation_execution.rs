@@ -16,7 +16,7 @@ use super::{
 };
 
 const HASH_PINNED_BACKFILL_SCAN_MODE: &str = "hash_pinned_block";
-const HASH_PINNED_BACKFILL_CHUNK_BLOCKS: i64 = 32;
+pub(crate) const DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS: i64 = 1_024;
 
 pub(crate) async fn create_hash_pinned_backfill_job(
     pool: &sqlx::PgPool,
@@ -48,6 +48,7 @@ pub(crate) async fn run_resumable_hash_pinned_backfill_job(
     provider: &JsonRpcProvider,
     config: BackfillJobRunConfig,
 ) -> Result<BackfillJobRunOutcome> {
+    validate_hash_pinned_chunk_blocks(config.hash_pinned_chunk_blocks)?;
     let watched_chain = &source_plan.watched_chain_plan;
     let record = create_hash_pinned_backfill_job(pool, source_plan, &config).await?;
     let mut outcome = BackfillJobRunOutcome::new(record.job.backfill_job_id, source_plan, &config);
@@ -64,6 +65,7 @@ pub(crate) async fn run_resumable_hash_pinned_backfill_job(
         from_block = config.range.from_block,
         to_block = config.range.to_block,
         idempotency_key = %config.idempotency_key,
+        hash_pinned_chunk_blocks = config.hash_pinned_chunk_blocks,
         range_count = record.ranges.len(),
         "resumable backfill job loaded"
     );
@@ -106,6 +108,7 @@ pub(crate) async fn run_resumable_hash_pinned_backfill_job(
             from_block = outcome.from_block,
             to_block = outcome.to_block,
             idempotency_key = %outcome.idempotency_key,
+            hash_pinned_chunk_blocks = config.hash_pinned_chunk_blocks,
             reserved_range_count = outcome.reserved_range_count,
             completed_range_count = outcome.completed_range_count,
             resolved_block_count = outcome.resolved_block_count,
@@ -160,7 +163,7 @@ async fn run_reserved_hash_pinned_backfill_range(
     };
     while block_number <= active_range.range_end_block_number {
         let chunk_end = block_number
-            .checked_add(HASH_PINNED_BACKFILL_CHUNK_BLOCKS - 1)
+            .checked_add(config.hash_pinned_chunk_blocks - 1)
             .unwrap_or(active_range.range_end_block_number)
             .min(active_range.range_end_block_number);
         let chunk_range = BackfillBlockRange::new(block_number, chunk_end)?;
@@ -236,6 +239,14 @@ async fn run_reserved_hash_pinned_backfill_range(
             error,
         })
         .await);
+    }
+
+    Ok(())
+}
+
+fn validate_hash_pinned_chunk_blocks(chunk_blocks: i64) -> Result<()> {
+    if chunk_blocks <= 0 {
+        bail!("hash-pinned backfill chunk blocks must be positive, got {chunk_blocks}");
     }
 
     Ok(())

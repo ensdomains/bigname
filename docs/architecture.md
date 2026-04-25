@@ -730,10 +730,12 @@ Shared stages:
 Historical backfill enters through persisted, bounded jobs and range checkpoints, then uses the same raw fact, adapter, normalized-event, and projection stages as live intake. Backfill checkpoint state is operational worker state; it does not promote canonical, safe, or finalized chain checkpoints.
 
 Full backfill covers the entire admitted history for the selected profile and
-selected targets. Startup bootstrap caps, including
-`BIGNAME_INDEXER_BOOTSTRAP_BACKFILL_MAX_BLOCKS=25000`, are intake-readiness
-limits on automatic job creation only; they do not define complete history,
-route coverage, manifest support, or consumer-replacement graduation.
+selected targets. Startup bootstrap follows the same admitted-history rule for
+configured chains by creating finite jobs from each eligible target's admitted
+start through the provider head observed at job creation time. Completing those
+intake jobs still does not define route coverage, manifest support, or
+consumer-replacement graduation without the matching projection, route,
+conformance, and rollout evidence.
 
 Postgres is the hot indexed and replay-focused store for this path. Live ingestion and backfill may fetch full block-scoped payloads, but Postgres retains replay-critical facts, lineage/header anchors, selected/admitted target logs, replay-required call snapshots/enrichments, and optional payload-cache metadata. Large/full block payloads and non-indexed transaction or receipt bodies are evictable cache by default once durable replay facts have been extracted; hash-addressed cold storage is required only for payload classes explicitly declared durable. Empty historical blocks retain lineage/header anchors and optional audit metadata only; they must not force full payload cache or block-bundle retention.
 

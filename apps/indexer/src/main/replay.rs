@@ -135,6 +135,7 @@ mod tests {
             lease_owner: None,
             lease_token: None,
             lease_duration_secs: 300,
+            hash_pinned_chunk_blocks: crate::backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS,
         }
     }
 

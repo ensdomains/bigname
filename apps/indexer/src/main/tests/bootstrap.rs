@@ -789,7 +789,7 @@ async fn bootstrap_auto_backfill_drains_manifest_started_targets_and_preserves_c
         &manifest_root,
         &intake_tasks,
         &provider_registry,
-        DEFAULT_BOOTSTRAP_BACKFILL_MAX_BLOCKS,
+        crate::backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS,
     )
     .await?;
     assert_eq!(outcome.active_chain_count, 2);
@@ -977,7 +977,7 @@ async fn bootstrap_auto_backfill_drains_manifest_started_targets_and_preserves_c
         &manifest_root,
         &intake_tasks,
         &provider_registry,
-        DEFAULT_BOOTSTRAP_BACKFILL_MAX_BLOCKS,
+        crate::backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS,
     )
     .await?;
     assert_eq!(rerun.drained_job_count, 1);
@@ -1109,7 +1109,7 @@ async fn bootstrap_auto_backfill_drains_manifest_started_targets_and_preserves_c
 }
 
 #[tokio::test]
-async fn bootstrap_auto_backfill_caps_recent_startup_range() -> Result<()> {
+async fn bootstrap_auto_backfill_covers_declared_start_to_provider_head() -> Result<()> {
     let database = TestDatabase::new().await?;
     create_bootstrap_backfill_job_tables(database.pool()).await?;
     let manifest_root = PathBuf::from("manifests");
@@ -1214,23 +1214,23 @@ async fn bootstrap_auto_backfill_caps_recent_startup_range() -> Result<()> {
         &manifest_root,
         &intake_tasks,
         &provider_registry,
-        2,
+        crate::backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS,
     )
     .await?;
     assert_eq!(outcome.drained_job_count, 1);
-    assert_eq!(outcome.resolved_block_count, 2);
-    assert_eq!(outcome.raw_log_count, 2);
+    assert_eq!(outcome.resolved_block_count, 4);
+    assert_eq!(outcome.raw_log_count, 4);
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM raw_blocks")
             .fetch_one(database.pool())
             .await?,
-        2
+        4
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM chain_lineage")
             .fetch_one(database.pool())
             .await?,
-        2
+        4
     );
 
     let job = sqlx::query_as::<_, (i64, i64, String, Value)>(
@@ -1245,8 +1245,8 @@ async fn bootstrap_auto_backfill_caps_recent_startup_range() -> Result<()> {
     )
     .fetch_one(database.pool())
     .await?;
-    assert_eq!((job.0, job.1), (3, 4));
-    assert!(job.2.contains("from=3:to=4"));
+    assert_eq!((job.0, job.1), (1, 4));
+    assert!(job.2.contains("from=1:to=4"));
     assert_eq!(
         job.3
             .get("selected_targets")
@@ -1254,7 +1254,7 @@ async fn bootstrap_auto_backfill_caps_recent_startup_range() -> Result<()> {
             .and_then(|targets| targets.first())
             .and_then(|target| target.get("effective_from_block"))
             .and_then(Value::as_i64),
-        Some(3)
+        Some(1)
     );
     assert_eq!(
         job.3
@@ -1271,7 +1271,7 @@ async fn bootstrap_auto_backfill_caps_recent_startup_range() -> Result<()> {
         )
         .fetch_one(database.pool())
         .await?,
-        (3, 4)
+        (1, 4)
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
@@ -1279,7 +1279,7 @@ async fn bootstrap_auto_backfill_caps_recent_startup_range() -> Result<()> {
         )
         .fetch_one(database.pool())
         .await?,
-        0
+        2
     );
 
     server.abort();

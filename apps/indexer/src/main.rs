@@ -104,7 +104,7 @@ async fn run(args: RunArgs) -> Result<()> {
         &args.manifests_root,
         &intake_chain_tasks,
         &provider_registry,
-        args.bootstrap_backfill_max_blocks,
+        args.hash_pinned_chunk_blocks,
     )
     .await?;
 
@@ -169,7 +169,8 @@ async fn run(args: RunArgs) -> Result<()> {
         bootstrap_backfill_skipped_future_target_count = bootstrap_backfill_outcome.skipped_future_target_count,
         bootstrap_backfill_reserved_range_count = bootstrap_backfill_outcome.reserved_range_count,
         bootstrap_backfill_completed_range_count = bootstrap_backfill_outcome.completed_range_count,
-        bootstrap_backfill_max_blocks = args.bootstrap_backfill_max_blocks,
+        bootstrap_backfill_range_policy = "manifest_declared_start_to_provider_head",
+        hash_pinned_chunk_blocks = args.hash_pinned_chunk_blocks,
         watched_plan_refresh_interval_secs = args.poll_interval_secs,
         adapter_status = bigname_adapters::bootstrap_status(),
         poll_interval_secs = args.poll_interval_secs,
@@ -252,6 +253,7 @@ async fn run_backfill(args: BackfillArgs) -> Result<()> {
         lease_owner,
         lease_token,
         lease_expires_at,
+        hash_pinned_chunk_blocks: args.hash_pinned_chunk_blocks,
     };
 
     run_resumable_hash_pinned_backfill_job(&pool, &source_plan, provider, config).await?;

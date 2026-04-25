@@ -16,7 +16,8 @@ use sqlx::types::time::OffsetDateTime;
 #[allow(unused_imports)]
 pub(crate) use fetching::run_hash_pinned_backfill_range;
 pub(crate) use reservation_execution::{
-    create_hash_pinned_backfill_job, run_resumable_hash_pinned_backfill_job,
+    DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS, create_hash_pinned_backfill_job,
+    run_resumable_hash_pinned_backfill_job,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -52,6 +53,7 @@ pub(crate) struct BackfillJobRunConfig {
     pub(crate) lease_owner: String,
     pub(crate) lease_token: String,
     pub(crate) lease_expires_at: OffsetDateTime,
+    pub(crate) hash_pinned_chunk_blocks: i64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

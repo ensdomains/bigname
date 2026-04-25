@@ -3511,6 +3511,7 @@ fn backfill_job_config(
         lease_owner: "indexer-backfill-test".to_owned(),
         lease_token: lease_token.to_owned(),
         lease_expires_at: backfill_lease_deadline()?,
+        hash_pinned_chunk_blocks: backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS,
     })
 }
 

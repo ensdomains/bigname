@@ -199,10 +199,13 @@ The selected target range fields are the intersection of the watched target's ac
 Automatic bootstrap backfill uses the same `backfill_jobs`,
 `backfill_ranges`, and source-identity payloads as explicitly requested
 backfill. It must persist finite declared range bounds before job creation and
-store selected targets keyed by `contract_instance_id` plus effective range. A
-watched target whose manifest-declared `start_block` is unknown is skipped by
-bootstrap and leaves no synthetic block-zero, provider-history, or job-start
-range in `backfill_*`.
+store selected targets keyed by `contract_instance_id` plus effective range.
+For configured chains, bootstrap ranges start at each eligible target's
+manifest/discovery admitted start and end at the finite provider head observed
+at job creation time; bootstrap must not replace that start with an arbitrary
+recent-window cap. A watched target whose manifest-declared `start_block` is
+unknown is skipped by bootstrap and leaves no synthetic block-zero,
+provider-history, recent-window, or job-start range in `backfill_*`.
 
 Backfill job and range checkpoint rows are operational state. They do not replace `chain_lineage`, do not define canonicality, and do not promote `canonical_head`, `safe_head`, or `finalized_head`.
 
