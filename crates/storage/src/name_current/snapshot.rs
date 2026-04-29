@@ -85,14 +85,10 @@ async fn name_current_projection_covers_selected_snapshot(
             }
             continue;
         }
-        if !selected_extends_projected_ancestry(
-            pool,
-            chain_id,
-            projected_position,
-            selected_position,
-        )
-        .await?
-        {
+        if !position_is_canonical_lineage_member(pool, chain_id, projected_position).await? {
+            return Ok(false);
+        }
+        if !position_is_canonical_lineage_member(pool, chain_id, selected_position).await? {
             return Ok(false);
         }
         if name_current_has_newer_projection_inputs(
@@ -129,35 +125,19 @@ fn positions_by_chain_id(
     Ok(by_chain_id)
 }
 
-async fn selected_extends_projected_ancestry(
+async fn position_is_canonical_lineage_member(
     pool: &PgPool,
     chain_id: &str,
-    projected_position: &ChainPosition,
-    selected_position: &ChainPosition,
+    position: &ChainPosition,
 ) -> std::result::Result<bool, SnapshotSelectionError> {
     sqlx::query_scalar::<_, bool>(
         r#"
-        WITH RECURSIVE selected_ancestry AS (
-            SELECT block_hash, parent_hash, block_number, canonicality_state
+        SELECT EXISTS (
+            SELECT 1
             FROM chain_lineage
             WHERE chain_id = $1
               AND block_hash = $2
               AND block_number = $3
-
-            UNION ALL
-
-            SELECT parent.block_hash, parent.parent_hash, parent.block_number, parent.canonicality_state
-            FROM chain_lineage parent
-            JOIN selected_ancestry child
-              ON parent.chain_id = $1
-             AND parent.block_hash = child.parent_hash
-            WHERE child.block_number > $4
-        )
-        SELECT EXISTS (
-            SELECT 1
-            FROM selected_ancestry
-            WHERE block_number = $4
-              AND block_hash = $5
               AND canonicality_state IN (
                   'canonical'::canonicality_state,
                   'safe'::canonicality_state,
@@ -167,16 +147,14 @@ async fn selected_extends_projected_ancestry(
         "#,
     )
     .bind(chain_id)
-    .bind(&selected_position.block_hash)
-    .bind(selected_position.block_number)
-    .bind(projected_position.block_number)
-    .bind(&projected_position.block_hash)
+    .bind(&position.block_hash)
+    .bind(position.block_number)
     .fetch_one(pool)
     .await
     .map_err(|error| {
         SnapshotSelectionError::internal(format!(
-            "failed to check name_current ancestry from selected block {} to projected block {} on chain {chain_id}: {error}",
-            selected_position.block_hash, projected_position.block_hash
+            "failed to check name_current chain position block {} on chain {chain_id}: {error}",
+            position.block_hash
         ))
     })
 }

@@ -1,14 +1,22 @@
 //! ENS verified-resolution exact-surface execution persistence bootstrap.
 
+mod ens_resolution;
+mod ens_resolution_abi;
+mod ens_resolution_call;
 mod json_helpers;
 mod persistence;
 mod primary_name;
 mod revalidation;
+mod rpc;
 mod validation;
 
 pub use bigname_storage::{
     CanonicalityState, ExecutionTraceStep, load_execution_outcome, load_execution_trace,
     load_raw_call_snapshots_by_block_hash,
+};
+pub use ens_resolution::{
+    EnsResolutionRecord, OnDemandEnsResolutionError, OnDemandEnsResolutionErrorKind,
+    OnDemandEnsResolutionRequest, execute_ens_universal_resolver_verified_resolution,
 };
 pub use persistence::{
     LoadedEnsVerifiedPrimaryName, PersistEnsExactNameVerifiedResolutionRequest,
@@ -18,6 +26,7 @@ pub use persistence::{
     persist_basenames_exact_name_verified_resolution_transport_direct,
     persist_ens_exact_name_verified_resolution_direct, persist_ens_verified_primary_name,
 };
+pub use rpc::ChainRpcUrls;
 
 pub const VERIFIED_RESOLUTION_REQUEST_TYPE: &str = "verified_resolution";
 pub const VERIFIED_PRIMARY_NAME_REQUEST_TYPE: &str = "verified_primary_name";

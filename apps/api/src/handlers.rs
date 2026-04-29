@@ -12,6 +12,8 @@ mod handler_namespaces;
 mod handler_primary_names;
 #[path = "handlers/resolution.rs"]
 mod handler_resolution;
+#[path = "handlers/resolution_on_demand.rs"]
+mod handler_resolution_on_demand;
 #[path = "handlers/resolvers.rs"]
 mod handler_resolvers;
 

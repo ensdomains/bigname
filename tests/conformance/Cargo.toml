@@ -10,6 +10,7 @@ build = "build.rs"
 anyhow = "1.0.100"
 axum = { version = "0.8.6", features = ["http1", "json", "tokio"] }
 bigname-domain = { path = "../../crates/domain" }
+bigname-execution = { path = "../../crates/execution" }
 bigname-manifests = { path = "../../crates/manifests" }
 bigname-storage = { path = "../../crates/storage" }
 clap = { version = "4.5.49", features = ["derive", "env"] }

@@ -45,6 +45,20 @@ If `BIGNAME_INDEXER_CHAIN_RPC_URLS` is unset, the indexer still syncs
 manifest/watch state, but provider-backed live ingestion remains idle. Current
 bootstrap RPC support accepts `http://` endpoints.
 
+The API service also needs its own Ethereum JSON-RPC provider for live ENS
+verified resolution, configured as
+`BIGNAME_API_CHAIN_RPC_URLS=ethereum-mainnet=<http-url>`. `GET /v1/resolutions/{namespace}/{name}` and
+`GET /v1/resolve/{name}` in `mode=verified|both` first use matching persisted
+execution output; when supported ENS verified-resolution selectors are missing
+from execution storage, the API executes them against the selected exact-name
+snapshot, persists the trace/outcome, and then returns the result. With no `at`
+or `chain_positions` selector, that target is `consistency=head` at the latest
+stored Ethereum checkpoint, not provider latest. Missing API provider
+configuration or a provider that cannot serve the selected block must fail
+closed with `409 stale` plus a configuration message; it must not fall back
+to declared record cache. The indexer RPC setting and Reth DB source settings do
+not satisfy this API live-execution provider requirement by themselves.
+
 Deployments with a same-host Reth database can layer
 `docker-compose.reth-db.yml` on top of the server compose file. Set
 `BIGNAME_INDEXER_RETH_DATADIR_HOST` to the host Reth datadir,

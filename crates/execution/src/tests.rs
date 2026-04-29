@@ -539,6 +539,34 @@ fn first_boundary_manifest_version(manifest_versions: &Value) -> i64 {
         .unwrap_or(1)
 }
 
+fn name_current_manifest_versions_for_request(
+    request: &PersistEnsExactNameVerifiedResolutionRequest,
+) -> Value {
+    let mut manifest_versions = request.outcome.cache_key.manifest_versions.clone();
+    if request.trace.namespace == BASENAMES_NAMESPACE
+        && let Some(items) = manifest_versions.as_array_mut()
+    {
+        for item in items {
+            let Some(object) = item.as_object_mut() else {
+                continue;
+            };
+            if object
+                .get("source_family")
+                .and_then(Value::as_str)
+                .is_some_and(|value| value == BASENAMES_EXECUTION_SOURCE_FAMILY)
+                && object
+                    .get("manifest_version")
+                    .and_then(Value::as_i64)
+                    .is_some_and(|value| value == 2)
+            {
+                object.insert("chain".to_owned(), json!(ETHEREUM_MAINNET_CHAIN_ID));
+                object.insert("deployment_epoch".to_owned(), json!("basenames_v1"));
+            }
+        }
+    }
+    manifest_versions
+}
+
 fn projection_chain_positions_for_request(
     request: &PersistEnsExactNameVerifiedResolutionRequest,
 ) -> Value {
@@ -870,7 +898,7 @@ fn supported_resolution_name_current_row(
                 "chain_id": resolver_chain_id_for_request(request),
                 "block_hash": "0xtrace-support"
             }],
-            "manifest_versions": request.outcome.cache_key.manifest_versions.clone(),
+            "manifest_versions": name_current_manifest_versions_for_request(request),
             "execution_trace_id": null,
             "derivation_kind": "projection_apply"
         }),
@@ -2684,6 +2712,81 @@ async fn persists_successful_direct_path_and_reads_back_storage_identity() -> Re
             database.pool(),
             ETHEREUM_MAINNET_CHAIN_ID,
             "0xabc123",
+        )
+        .await?,
+        request.raw_call_snapshots
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn persists_direct_path_for_later_selected_snapshot_without_recursive_ancestry() -> Result<()>
+{
+    let database = TestDatabase::new().await?;
+    let mut request = success_request();
+    seed_supported_resolution_storage(&database, &request).await?;
+    upsert_chain_lineage_blocks(
+        database.pool(),
+        &[
+            ChainLineageBlock {
+                chain_id: ETHEREUM_MAINNET_CHAIN_ID.to_owned(),
+                block_hash: "0xabc123".to_owned(),
+                parent_hash: None,
+                block_number: 21_000_000,
+                block_timestamp: timestamp(1_717_171_717),
+                logs_bloom: None,
+                transactions_root: None,
+                receipts_root: None,
+                state_root: None,
+                canonicality_state: CanonicalityState::Finalized,
+            },
+            ChainLineageBlock {
+                chain_id: ETHEREUM_MAINNET_CHAIN_ID.to_owned(),
+                block_hash: "0xabc124".to_owned(),
+                parent_hash: Some("0xnot-the-projected-parent".to_owned()),
+                block_number: 21_000_001,
+                block_timestamp: timestamp(1_717_171_729),
+                logs_bloom: None,
+                transactions_root: None,
+                receipts_root: None,
+                state_root: None,
+                canonicality_state: CanonicalityState::Canonical,
+            },
+        ],
+    )
+    .await?;
+
+    let selected_positions = json!([
+        {
+            "chain_id": ETHEREUM_MAINNET_CHAIN_ID,
+            "block_number": 21_000_001,
+            "block_hash": "0xabc124"
+        }
+    ]);
+    request.outcome.cache_key.requested_chain_positions = selected_positions.clone();
+    request.trace.chain_context["requested_positions"] = selected_positions;
+    for snapshot in &mut request.raw_call_snapshots {
+        snapshot.block_hash = "0xabc124".to_owned();
+        snapshot.block_number = 21_000_001;
+    }
+    for step in &mut request.trace.steps {
+        step.canonicality_dependency[ETHEREUM_MAINNET_CHAIN_ID]["block_hash"] = json!("0xabc124");
+        step.canonicality_dependency[ETHEREUM_MAINNET_CHAIN_ID]["block_number"] = json!(21_000_001);
+    }
+
+    let persisted =
+        persist_ens_exact_name_verified_resolution_direct(database.pool(), &request).await?;
+    assert_eq!(persisted.cache_key, request.outcome.cache_key);
+    assert_eq!(
+        load_execution_outcome(database.pool(), &persisted.cache_key).await?,
+        Some(request.outcome.clone())
+    );
+    assert_eq!(
+        load_raw_call_snapshots_by_block_hash(
+            database.pool(),
+            ETHEREUM_MAINNET_CHAIN_ID,
+            "0xabc124",
         )
         .await?,
         request.raw_call_snapshots

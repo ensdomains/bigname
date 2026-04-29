@@ -42,6 +42,8 @@ mod resolution_verified {
         ));
     }
 
+    pub(super) use readback::ResolutionVerifiedOutcomeLookup;
+
     pub(super) fn build_resolution_declared_state(
         row: &NameCurrentRow,
         record_inventory_row: Option<&RecordInventoryCurrentRow>,
@@ -67,14 +69,15 @@ mod resolution_verified {
         response::build_resolution_execution_explain_verified_state(row, records, trace, outcome)
     }
 
-    pub(super) async fn load_resolution_verified_outcome(
+    pub(super) async fn lookup_resolution_verified_outcome(
         pool: &PgPool,
         row: &NameCurrentRow,
         records: &[ResolutionRecordKey],
         record_inventory_row: Option<&RecordInventoryCurrentRow>,
         selected_snapshot: &SelectedSnapshot,
-    ) -> std::result::Result<Option<ExecutionOutcome>, SnapshotSelectionError> {
-        readback::load_resolution_verified_outcome(
+    ) -> std::result::Result<readback::ResolutionVerifiedOutcomeLookup, SnapshotSelectionError>
+    {
+        readback::lookup_resolution_verified_outcome(
             pool,
             row,
             records,
@@ -153,8 +156,9 @@ mod resolution_verified {
 use self::resolution_verified::{
     build_resolution_declared_state, build_resolution_execution_cache_key,
     build_resolution_execution_explain_verified_state, build_resolution_verified_state,
-    find_supported_record_inventory_boundary, load_resolution_verified_outcome,
+    find_supported_record_inventory_boundary, lookup_resolution_verified_outcome,
     load_supported_record_inventory_current, load_supported_record_inventory_current_for_snapshot,
     record_inventory_lookup_key, record_version_boundary_has_pointer,
+    ResolutionVerifiedOutcomeLookup,
     resolution_execution_cache_lookup_records, resolution_verified_support_boundary,
 };

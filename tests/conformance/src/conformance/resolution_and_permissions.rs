@@ -15,14 +15,47 @@ async fn resolution_contract_returns_declared_and_verified_sections_by_mode() ->
         )
         .await?;
     database.rebuild_name_current(logical_name_id).await?;
+    let record_inventory_row = resolution_record_inventory_current_row_without_verified_entrypoint(
+        logical_name_id,
+        resource_id,
+    );
     database
-        .insert_record_inventory_current_row(
-            resolution_record_inventory_current_row_without_verified_entrypoint(
-                logical_name_id,
-                resource_id,
-            ),
-        )
+        .insert_record_inventory_current_row(record_inventory_row.clone())
         .await?;
+    let name_row = bigname_storage::load_name_current(&database.pool, logical_name_id)
+        .await?
+        .context("resolution mode contract requires an exact-name current row")?;
+    let both_records =
+        parse_resolution_record_keys(Some("text:com.twitter"), ResolutionMode::Verified)
+            .map_err(|error| anyhow::anyhow!(error.message))?;
+    let both_cache_key = build_resolution_execution_cache_key(
+        &name_row,
+        &both_records,
+        Some(&record_inventory_row),
+        name_row.chain_positions.clone(),
+    )?;
+    let both_execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000067);
+    let both_verified_queries =
+        resolution_execution_verified_queries(both_execution_trace_id, &["text:com.twitter"]);
+    upsert_execution_trace(
+        &database.pool,
+        &resolution_execution_trace(
+            both_execution_trace_id,
+            &both_cache_key.request_key,
+            &["text:com.twitter"],
+            both_verified_queries.clone(),
+        ),
+    )
+    .await?;
+    upsert_execution_outcome(
+        &database.pool,
+        &resolution_execution_outcome(
+            both_execution_trace_id,
+            both_cache_key,
+            both_verified_queries.clone(),
+        ),
+    )
+    .await?;
 
     let default_response = app_router(database.app_state())
         .oneshot(
@@ -47,7 +80,7 @@ async fn resolution_contract_returns_declared_and_verified_sections_by_mode() ->
     let verified_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=verified&records=text,addr:60")
+                .uri("/v1/resolutions/ens/alice.eth?mode=verified&records=text")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -95,7 +128,7 @@ async fn resolution_contract_returns_declared_and_verified_sections_by_mode() ->
     assert_eq!(verified_payload.declared_state, None);
     assert_eq!(
         verified_payload.verified_state,
-        Some(resolution_unsupported_verified_state(&["text", "addr:60"]))
+        Some(resolution_unsupported_verified_state(&["text"]))
     );
     assert_eq!(
         both_payload.declared_state.as_ref(),
@@ -103,7 +136,7 @@ async fn resolution_contract_returns_declared_and_verified_sections_by_mode() ->
     );
     assert_eq!(
         both_payload.verified_state,
-        Some(resolution_unsupported_verified_state(&["text:com.twitter"]))
+        Some(json!({ "verified_queries": both_verified_queries }))
     );
 
     let default_declared_state = default_payload
@@ -2082,7 +2115,7 @@ async fn resolution_inferred_route_matches_canonical_ens_for_exact_base_eth() ->
 }
 
 #[tokio::test]
-async fn resolution_inferred_route_matches_canonical_basenames_and_keeps_verified_selector_local()
+async fn resolution_inferred_route_matches_canonical_basenames_and_keeps_verified_stale_without_persisted_output()
 -> Result<()> {
     let database = HarnessDatabase::new().await?;
     let basenames_logical_name_id = "basenames:alice.base.eth";
@@ -2172,19 +2205,41 @@ async fn resolution_inferred_route_matches_canonical_basenames_and_keeps_verifie
     )
     .await?;
     rebuild_record_inventory_current(&database, basenames_resource_id).await?;
-    let canonical_verified_payload = get_resolution_payload(
-        &database,
-        "/v1/resolutions/basenames/alice.base.eth?mode=verified&records=text:com.twitter,addr:60",
-    )
-    .await?;
-    let inferred_verified_payload = get_resolution_payload(
-        &database,
-        "/v1/resolve/alice.base.eth?mode=verified&records=text:com.twitter,addr:60",
-    )
-    .await?;
+    database
+        .seed_snapshot_selector_for_route(
+            "/v1/resolutions/basenames/alice.base.eth?mode=verified&records=text:com.twitter,addr:60",
+        )
+        .await?;
+    let canonical_verified_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(
+                    "/v1/resolutions/basenames/alice.base.eth?mode=verified&records=text:com.twitter,addr:60",
+                )
+                .body(Body::empty())
+                .expect("canonical Basenames verified request must build"),
+        )
+        .await
+        .context("canonical Basenames verified resolution request failed")?;
+    let inferred_verified_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(
+                    "/v1/resolve/alice.base.eth?mode=verified&records=text:com.twitter,addr:60",
+                )
+                .body(Body::empty())
+                .expect("inferred Basenames verified request must build"),
+        )
+        .await
+        .context("inferred Basenames verified resolution request failed")?;
+
+    assert_eq!(
+        canonical_verified_response.status(),
+        StatusCode::CONFLICT
+    );
+    assert_eq!(inferred_verified_response.status(), StatusCode::CONFLICT);
 
     assert_eq!(inferred_declared_payload, canonical_declared_payload);
-    assert_eq!(inferred_verified_payload, canonical_verified_payload);
     assert_eq!(
         inferred_declared_payload.data.get("namespace"),
         Some(&json!("basenames"))
@@ -2193,26 +2248,16 @@ async fn resolution_inferred_route_matches_canonical_basenames_and_keeps_verifie
         inferred_declared_payload.data.get("logical_name_id"),
         Some(&json!("basenames:alice.base.eth"))
     );
+    let canonical_verified_payload: ErrorResponse = read_json(canonical_verified_response).await?;
+    let inferred_verified_payload: ErrorResponse = read_json(inferred_verified_response).await?;
     assert_eq!(
-        inferred_verified_payload.data.get("namespace"),
-        Some(&json!("basenames"))
+        inferred_verified_payload.error.code,
+        canonical_verified_payload.error.code
     );
+    assert_eq!(inferred_verified_payload.error.code, "stale");
     assert_eq!(
-        inferred_verified_payload.data.get("logical_name_id"),
-        Some(&json!("basenames:alice.base.eth"))
-    );
-    assert_eq!(
-        inferred_verified_payload.verified_state,
-        Some(resolution_unsupported_verified_state(&[
-            "text:com.twitter",
-            "addr:60",
-        ]))
-    );
-    assert_eq!(
-        inferred_verified_payload
-            .provenance
-            .get("execution_trace_id"),
-        Some(&Value::Null)
+        inferred_verified_payload.error.message,
+        "persisted verified resolution output is not available for the selected snapshot"
     );
 
     database.cleanup().await?;
@@ -2967,6 +3012,30 @@ async fn resolution_contract_reads_persisted_basenames_transport_direct_answers(
         }))
     );
 
+    let mut unsupported_worker_row = worker_row.clone();
+    unsupported_worker_row.coverage["unsupported_reason"] = json!("resolver_family_pending");
+    database
+        .insert_record_inventory_current_row(unsupported_worker_row)
+        .await?;
+    let unsupported_explain_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(
+                    "/v1/explain/resolutions/basenames/alice.base.eth/execution?records=text:com.twitter,addr:60",
+                )
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("pending-inventory basenames execution explain request failed")?;
+    assert_eq!(unsupported_explain_response.status(), StatusCode::OK);
+    let unsupported_explain_payload: ResolutionResponse =
+        read_json(unsupported_explain_response).await?;
+    assert_eq!(
+        unsupported_explain_payload.verified_state,
+        explain_payload.verified_state
+    );
+
     database.cleanup().await?;
     Ok(())
 }
@@ -3021,6 +3090,11 @@ async fn resolution_contract_keeps_basenames_transport_explicit_without_projecte
     )
     .await?
     .context("worker-produced basenames record_inventory_current row must exist")?;
+    let topology = basenames_supported_topology(
+        logical_name_id,
+        resource_id,
+        &worker_row.record_version_boundary,
+    );
     let mut name_row = bigname_storage::load_name_current(&database.pool, logical_name_id)
         .await?
         .context("basenames missing-topology conformance test requires name_current row")?;
@@ -3082,33 +3156,81 @@ async fn resolution_contract_keeps_basenames_transport_explicit_without_projecte
                 .context("missing-topology basenames execution explain request failed")?;
 
     assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(explain_response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(explain_response.status(), StatusCode::OK);
 
     let payload: ResolutionResponse = read_json(response).await?;
+    let explain_payload: ResolutionResponse = read_json(explain_response).await?;
+    let declared_state = payload
+        .declared_state
+        .as_ref()
+        .context("missing-topology basenames mixed resolution must include declared_state")?;
+    let explain_verified_state = explain_payload
+        .verified_state
+        .as_ref()
+        .context("missing-topology basenames explain response must include verified_state")?;
+    let explain_execution = explain_verified_state
+        .get("execution")
+        .context("missing-topology basenames explain response must include execution summary")?;
+
+    assert_eq!(declared_state.get("topology"), Some(&topology));
     assert_eq!(
         payload.verified_state,
         Some(json!({
             "verified_queries": [
                 {
                     "record_key": "text:com.twitter",
-                    "status": "unsupported",
-                    "unsupported_reason": "verified resolution entrypoint is not yet supported",
+                    "status": "not_found",
+                    "failure_reason": "no_text_record",
+                    "provenance": {
+                        "execution_trace_id": execution_trace_id.to_string(),
+                    }
                 },
                 {
                     "record_key": "addr:60",
-                    "status": "unsupported",
-                    "unsupported_reason": "verified resolution entrypoint is not yet supported",
+                    "status": "success",
+                    "value": {
+                        "coin_type": "60",
+                        "value": "0x00000000000000000000000000000000000000aa",
+                    },
+                    "provenance": {
+                        "execution_trace_id": execution_trace_id.to_string(),
+                    }
                 }
             ]
         }))
     );
     assert_eq!(
         payload.provenance.get("execution_trace_id"),
-        Some(&Value::Null)
+        Some(&Value::String(execution_trace_id.to_string()))
     );
-
-    let explain_payload: ErrorResponse = read_json(explain_response).await?;
-    assert_eq!(explain_payload.error.code, "not_found");
+    assert_basenames_execution_v2_provenance(
+        &payload.provenance,
+        "missing-topology basenames mixed route",
+    );
+    assert_eq!(
+        payload.provenance.get("manifest_versions"),
+        name_row.provenance.get("manifest_versions")
+    );
+    assert_basenames_execution_entrypoint(
+        explain_execution,
+        "missing-topology basenames execution explain route",
+    );
+    assert_eq!(
+        explain_payload.verified_state,
+        Some(json!({
+            "execution": basenames_resolution_execution_summary(
+                execution_trace_id,
+                logical_name_id,
+                resource_id,
+            ),
+            "verified_queries": payload
+                .verified_state
+                .as_ref()
+                .and_then(|state| state.get("verified_queries"))
+                .cloned()
+                .expect("verified_state must include verified_queries"),
+        }))
+    );
 
     database.cleanup().await?;
     Ok(())
@@ -3338,13 +3460,12 @@ async fn resolution_contract_reuses_exact_name_envelope_fields() -> Result<()> {
         )
         .await?;
     database.rebuild_name_current(logical_name_id).await?;
+    let record_inventory_row = resolution_record_inventory_current_row_without_verified_entrypoint(
+        logical_name_id,
+        resource_id,
+    );
     database
-        .insert_record_inventory_current_row(
-            resolution_record_inventory_current_row_without_verified_entrypoint(
-                logical_name_id,
-                resource_id,
-            ),
-        )
+        .insert_record_inventory_current_row(record_inventory_row.clone())
         .await?;
     let name_row = bigname_storage::load_name_current(&database.pool, logical_name_id)
         .await?
@@ -3352,6 +3473,39 @@ async fn resolution_contract_reuses_exact_name_envelope_fields() -> Result<()> {
     database
         .seed_snapshot_selector_chain_positions(&name_row.chain_positions)
         .await?;
+    let records =
+        parse_resolution_record_keys(Some("text:com.twitter,addr:60"), ResolutionMode::Verified)
+            .map_err(|error| anyhow::anyhow!(error.message))?;
+    let cache_key = build_resolution_execution_cache_key(
+        &name_row,
+        &records,
+        Some(&record_inventory_row),
+        name_row.chain_positions.clone(),
+    )?;
+    let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000068);
+    let persisted_verified_queries = resolution_execution_verified_queries(
+        execution_trace_id,
+        &["text:com.twitter", "addr:60"],
+    );
+    upsert_execution_trace(
+        &database.pool,
+        &resolution_execution_trace(
+            execution_trace_id,
+            &cache_key.request_key,
+            &["text:com.twitter", "addr:60"],
+            persisted_verified_queries.clone(),
+        ),
+    )
+    .await?;
+    upsert_execution_outcome(
+        &database.pool,
+        &resolution_execution_outcome(
+            execution_trace_id,
+            cache_key,
+            persisted_verified_queries.clone(),
+        ),
+    )
+    .await?;
 
     let resolution_response = app_router(database.app_state())
         .oneshot(
@@ -3384,7 +3538,16 @@ async fn resolution_contract_reuses_exact_name_envelope_fields() -> Result<()> {
     );
 
     assert_eq!(resolution_payload.data, name_payload.data);
-    assert_eq!(resolution_payload.provenance, name_payload.provenance);
+    let mut resolution_provenance_without_execution = resolution_payload.provenance.clone();
+    resolution_provenance_without_execution["execution_trace_id"] = Value::Null;
+    assert_eq!(
+        resolution_provenance_without_execution,
+        name_payload.provenance
+    );
+    assert_eq!(
+        resolution_payload.provenance.get("execution_trace_id"),
+        Some(&json!(execution_trace_id.to_string()))
+    );
     assert_eq!(resolution_payload.coverage, name_payload.coverage);
     assert_eq!(
         resolution_payload.chain_positions,
@@ -3398,10 +3561,7 @@ async fn resolution_contract_reuses_exact_name_envelope_fields() -> Result<()> {
     );
     assert_eq!(
         resolution_payload.verified_state,
-        Some(resolution_unsupported_verified_state(&[
-            "text:com.twitter",
-            "addr:60",
-        ]))
+        Some(json!({ "verified_queries": persisted_verified_queries }))
     );
 
     database.cleanup().await?;

@@ -10,9 +10,11 @@ pub(crate) use path::{
     manifest_versions_include_source_family_for_context, normalize_address,
     persisted_trace_detail_object, required_chain_positions,
 };
+#[cfg(test)]
+pub(crate) use resolution::extract_supported_verified_queries;
 pub(crate) use resolution::{
-    extract_requested_selectors, extract_supported_verified_queries,
-    validate_basenames_transport_direct_request, validate_direct_request,
+    extract_requested_selectors, validate_basenames_transport_direct_request,
+    validate_direct_request,
 };
 
 pub(crate) fn normalized_request_key(

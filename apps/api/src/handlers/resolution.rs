@@ -1,4 +1,5 @@
 use super::*;
+use super::handler_resolution_on_demand::execute_ens_verified_resolution_cache_miss;
 
 pub(super) async fn explain_resolution_execution_current(
     Path((namespace, name)): Path<(String, String)>,
@@ -60,7 +61,6 @@ pub(super) async fn explain_resolution_execution_current(
             ),
         });
     }
-
     let cache_key_records = resolution_execution_cache_lookup_records(&row, &records);
     let cache_key = build_resolution_execution_cache_key(
         &row,
@@ -160,7 +160,7 @@ pub(super) async fn resolution_current(
     ensure_public_namespace(&namespace)?;
 
     Ok(Json(
-        resolution_response_for_name(&state.pool, &namespace, &name, query).await?,
+        resolution_response_for_name(&state, &namespace, &name, query).await?,
     ))
 }
 
@@ -177,16 +177,17 @@ pub(super) async fn resolve_current(
     };
 
     Ok(Json(
-        resolution_response_for_name(&state.pool, namespace, &name, query).await?,
+        resolution_response_for_name(&state, namespace, &name, query).await?,
     ))
 }
 
 async fn resolution_response_for_name(
-    pool: &PgPool,
+    state: &AppState,
     namespace: &str,
     name: &str,
     query: ResolutionQuery,
 ) -> ApiResult<ResolutionResponse> {
+    let pool = &state.pool;
     let mode = parse_resolution_mode(query.mode.as_deref())?;
     let records = parse_resolution_record_keys(query.records.as_deref(), mode)?;
     let selected_snapshot = resolve_exact_name_selected_snapshot(
@@ -208,7 +209,7 @@ async fn resolution_response_for_name(
     };
 
     let persisted_verified_outcome = if mode.includes_verified() {
-        load_resolution_verified_outcome(
+        match lookup_resolution_verified_outcome(
             pool,
             &row,
             &records,
@@ -217,6 +218,22 @@ async fn resolution_response_for_name(
         )
         .await
         .map_err(snapshot_selection_api_error)?
+        {
+            ResolutionVerifiedOutcomeLookup::Found(outcome) => Some(outcome),
+            ResolutionVerifiedOutcomeLookup::NotSupported => None,
+            ResolutionVerifiedOutcomeLookup::CacheMiss => Some(
+                execute_ens_verified_resolution_cache_miss(
+                    pool,
+                    &state.chain_rpc_urls,
+                    &row,
+                    &records,
+                    record_inventory_current.as_ref(),
+                    &selected_snapshot,
+                )
+                .await
+                .map_err(snapshot_selection_api_error)?,
+            ),
+        }
     } else {
         None
     };
@@ -253,15 +270,34 @@ async fn load_resolution_record_inventory_current_for_snapshot(
     mode: ResolutionMode,
     selected_snapshot: &SelectedSnapshot,
 ) -> std::result::Result<Option<RecordInventoryCurrentRow>, SnapshotSelectionError> {
+    let allow_selected_superset =
+        row.namespace == BASENAMES_NAMESPACE && mode.includes_verified();
     match load_supported_record_inventory_current_for_snapshot(pool, row, selected_snapshot).await {
         Ok(Some(record_inventory_row)) => Ok(Some(record_inventory_row)),
         Ok(None) => {
-            load_record_inventory_current_matching_selected_snapshot(pool, row, selected_snapshot)
-                .await
+            load_record_inventory_current_matching_selected_snapshot(
+                pool,
+                row,
+                selected_snapshot,
+                allow_selected_superset,
+            )
+            .await
         }
         Err(error) if error.kind() == SnapshotSelectionErrorKind::Stale => {
             if let Some(record_inventory_row) =
                 load_explicit_unsupported_record_inventory_current(pool, row).await?
+            {
+                return Ok(Some(record_inventory_row));
+            }
+
+            if allow_selected_superset
+                && let Some(record_inventory_row) = load_record_inventory_current_matching_selected_snapshot(
+                    pool,
+                    row,
+                    selected_snapshot,
+                    true,
+                )
+                .await?
             {
                 return Ok(Some(record_inventory_row));
             }
@@ -281,6 +317,7 @@ async fn load_record_inventory_current_matching_selected_snapshot(
     pool: &PgPool,
     row: &NameCurrentRow,
     selected_snapshot: &SelectedSnapshot,
+    allow_selected_superset: bool,
 ) -> std::result::Result<Option<RecordInventoryCurrentRow>, SnapshotSelectionError> {
     let Some((resource_id, _)) = record_inventory_lookup_key(row) else {
         return Ok(None);
@@ -324,10 +361,11 @@ async fn load_record_inventory_current_matching_selected_snapshot(
                 error.message()
             ))
         })?;
-        if !selected_snapshot
-            .chain_positions
-            .equivalent_by_chain_id(&projected)
-        {
+        if !record_inventory_chain_positions_match_selected_snapshot(
+            &projected,
+            selected_snapshot,
+            allow_selected_superset,
+        ) {
             continue;
         }
 
@@ -351,6 +389,22 @@ async fn load_record_inventory_current_matching_selected_snapshot(
         )));
     }
 
+    if allow_selected_superset {
+        return load_record_inventory_current(pool, resource_id, &record_version_boundary)
+            .await
+            .map_err(|error| {
+                SnapshotSelectionError::internal(format!(
+                    "failed to load record_inventory_current row for resource_id {resource_id}: {error}"
+                ))
+            })?
+            .ok_or_else(|| {
+                SnapshotSelectionError::internal(format!(
+                    "matched record_inventory_current boundary for resource_id {resource_id} but the projection row was not loadable"
+                ))
+            })
+            .map(Some);
+    }
+
     match load_record_inventory_current_for_snapshot(
         pool,
         resource_id,
@@ -364,6 +418,58 @@ async fn load_record_inventory_current_matching_selected_snapshot(
             "matched record_inventory_current boundary for resource_id {resource_id} but the projection row was not loadable"
         ))),
     }
+}
+
+pub(crate) fn record_inventory_chain_positions_match_selected_snapshot(
+    projected: &ChainPositions,
+    selected_snapshot: &SelectedSnapshot,
+    allow_selected_superset: bool,
+) -> bool {
+    if !allow_selected_superset {
+        return selected_snapshot
+            .chain_positions
+            .equivalent_by_chain_id(projected);
+    }
+
+    let Some(projected_authoritative_position) = projected
+        .as_map()
+        .values()
+        .find(|position| position.chain_id == bigname_storage::BASE_MAINNET_CHAIN_ID)
+    else {
+        return false;
+    };
+    let base_matches_selected = selected_snapshot
+        .chain_positions
+        .as_map()
+        .values()
+        .any(|selected_position| {
+            selected_position.chain_id == bigname_storage::BASE_MAINNET_CHAIN_ID
+                && selected_position.block_number == projected_authoritative_position.block_number
+                && selected_position.block_hash == projected_authoritative_position.block_hash
+                && selected_position.timestamp == projected_authoritative_position.timestamp
+        });
+    if !base_matches_selected {
+        return false;
+    }
+
+    projected.as_map().values().all(|projected_position| {
+        selected_snapshot
+            .chain_positions
+            .as_map()
+            .values()
+            .any(|selected_position| {
+                selected_position.chain_id == projected_position.chain_id
+                    && selected_position.block_number == projected_position.block_number
+                    && selected_position.block_hash == projected_position.block_hash
+                    && selected_position.timestamp == projected_position.timestamp
+            })
+    })
+}
+
+fn record_inventory_current_has_explicit_unsupported_coverage(
+    row: &RecordInventoryCurrentRow,
+) -> bool {
+    string_field(provenance_field(&row.coverage, "unsupported_reason")).is_some()
 }
 
 async fn load_explicit_unsupported_record_inventory_current(
@@ -425,12 +531,6 @@ async fn load_explicit_unsupported_record_inventory_current(
         record_inventory_current_has_explicit_unsupported_coverage(&record_inventory_row)
             .then_some(record_inventory_row),
     )
-}
-
-fn record_inventory_current_has_explicit_unsupported_coverage(
-    row: &RecordInventoryCurrentRow,
-) -> bool {
-    string_field(provenance_field(&row.coverage, "unsupported_reason")).is_some()
 }
 
 fn infer_resolution_namespace(name: &str) -> &'static str {

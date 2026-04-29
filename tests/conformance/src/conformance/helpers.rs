@@ -5288,6 +5288,7 @@ async fn insert_basenames_supported_ethereum_position_for_current_row(
     let mut name_row = bigname_storage::load_name_current(&database.pool, logical_name_id)
         .await?
         .context("Basenames fixture requires name_current row before Ethereum selector seed")?;
+    append_basenames_execution_manifest_version(&mut name_row);
     insert_basenames_supported_ethereum_position(&mut name_row);
     database.insert_name_current_row(name_row).await
 }

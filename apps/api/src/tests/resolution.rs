@@ -1999,6 +1999,120 @@ fn basenames_supported_topology(
     })
 }
 
+#[test]
+fn basenames_selected_superset_requires_authoritative_base_inventory_position() {
+    let base_position = json!({
+        "chain_id": "base-mainnet",
+        "block_number": 21_000_003,
+        "block_hash": "0xbase-binding",
+        "timestamp": "2026-04-17T00:00:03Z",
+    });
+    let ethereum_position = json!({
+        "chain_id": "ethereum-mainnet",
+        "block_number": 21_000_100,
+        "block_hash": "0xbasenamesl1",
+        "timestamp": "2026-04-17T00:00:03Z",
+    });
+    let selected_snapshot = SelectedSnapshot {
+        chain_positions: ChainPositions::from_value(&json!({
+            "base": base_position.clone(),
+            "ethereum": ethereum_position.clone(),
+        }))
+        .expect("selected chain positions must parse"),
+        consistency: SnapshotConsistency::Finalized,
+    };
+
+    for projected in [
+        json!({}),
+        json!({
+            "ethereum": ethereum_position.clone(),
+        }),
+        json!({
+            "base": {
+                "chain_id": "base-mainnet",
+                "block_number": 21_000_004,
+                "block_hash": "0xbase-other",
+                "timestamp": "2026-04-17T00:00:04Z",
+            }
+        }),
+    ] {
+        let projected = ChainPositions::from_value(&projected)
+            .expect("projected chain positions must parse");
+        assert!(!crate::handler_resolution::record_inventory_chain_positions_match_selected_snapshot(
+            &projected,
+            &selected_snapshot,
+            true,
+        ));
+    }
+
+    let projected = ChainPositions::from_value(&json!({
+        "base-mainnet": base_position,
+    }))
+    .expect("projected base-only chain position must parse");
+    assert!(crate::handler_resolution::record_inventory_chain_positions_match_selected_snapshot(
+        &projected,
+        &selected_snapshot,
+        true,
+    ));
+}
+
+#[test]
+fn basenames_legacy_support_requires_explicit_execution_chain_and_epoch() {
+    let mut row = exact_name_row(
+        "basenames:alice.base.eth",
+        Uuid::from_u128(0x6a00),
+        Uuid::from_u128(0x6a01),
+        Uuid::from_u128(0x6a02),
+    );
+    row.namespace = "basenames".to_owned();
+    row.normalized_name = "alice.base.eth".to_owned();
+    row.canonical_display_name = "Alice.base.eth".to_owned();
+    row.namehash = "namehash:alice.base.eth".to_owned();
+    row.declared_summary["resolver"]["chain_id"] = json!("base-mainnet");
+    row.provenance["manifest_versions"] = json!([basenames_execution_manifest_version()]);
+    row.chain_positions = json!({
+        "base": {
+            "chain_id": "base-mainnet",
+            "block_number": 21_000_003,
+            "block_hash": "0xbase-binding",
+            "timestamp": "2026-04-17T00:00:03Z",
+        },
+        "ethereum": {
+            "chain_id": "ethereum-mainnet",
+            "block_number": 21_000_100,
+            "block_hash": "0xbasenamesl1",
+            "timestamp": "2026-04-17T00:00:03Z",
+        }
+    });
+    assert!(bigname_storage::resolution_verified_support_boundary(&row, None).is_some());
+
+    let mut missing_chain = row.clone();
+    missing_chain.provenance["manifest_versions"][0]
+        .as_object_mut()
+        .expect("manifest version must be an object")
+        .remove("chain");
+    assert!(
+        bigname_storage::resolution_verified_support_boundary(&missing_chain, None).is_none()
+    );
+
+    let mut wrong_chain = row.clone();
+    wrong_chain.provenance["manifest_versions"][0]["chain"] = json!("base-mainnet");
+    assert!(bigname_storage::resolution_verified_support_boundary(&wrong_chain, None).is_none());
+
+    let mut missing_epoch = row.clone();
+    missing_epoch.provenance["manifest_versions"][0]
+        .as_object_mut()
+        .expect("manifest version must be an object")
+        .remove("deployment_epoch");
+    assert!(
+        bigname_storage::resolution_verified_support_boundary(&missing_epoch, None).is_none()
+    );
+
+    let mut wrong_epoch = row;
+    wrong_epoch.provenance["manifest_versions"][0]["deployment_epoch"] = json!("basenames_v2");
+    assert!(bigname_storage::resolution_verified_support_boundary(&wrong_epoch, None).is_none());
+}
+
 fn basenames_no_declared_resolver_topology(
     logical_name_id: &str,
     normalized_name: &str,
@@ -3002,6 +3116,28 @@ async fn get_resolution_both_mode_reads_persisted_basenames_transport_direct_ans
         }))
     );
 
+    let mut unsupported_worker_row = worker_row.clone();
+    unsupported_worker_row.coverage["unsupported_reason"] = json!("resolver_family_pending");
+    database
+        .insert_record_inventory_current_row(unsupported_worker_row)
+        .await?;
+    let unsupported_explain_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/explain/resolutions/basenames/alice.base.eth/execution?records=text:com.twitter,addr:60")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("pending-inventory basenames execution explain request failed")?;
+    assert_eq!(unsupported_explain_response.status(), StatusCode::OK);
+    let unsupported_explain_payload: ResolutionResponse =
+        read_json(unsupported_explain_response).await?;
+    assert_eq!(
+        unsupported_explain_payload.verified_state,
+        explain_payload.verified_state
+    );
+
     database.cleanup().await?;
     Ok(())
 }
@@ -3362,6 +3498,11 @@ async fn get_resolution_keeps_basenames_transport_explicit_without_projected_top
     .context(
         "worker-produced basenames record_inventory_current row must exist after transport seed",
     )?;
+    let topology = basenames_supported_topology(
+        logical_name_id,
+        resource_id,
+        &worker_row.record_version_boundary,
+    );
 
     let requested_chain_positions =
         requested_chain_positions_from_name_current(&name_row.chain_positions);
@@ -3512,33 +3653,133 @@ async fn get_resolution_keeps_basenames_transport_explicit_without_projected_top
         .context("missing-topology basenames execution explain request failed")?;
 
     assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(explain_response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(explain_response.status(), StatusCode::OK);
 
     let payload: ResolutionResponse = read_json(response).await?;
+    let explain_payload: ResolutionResponse = read_json(explain_response).await?;
+    let declared_state = payload
+        .declared_state
+        .as_ref()
+        .context("missing-topology basenames mixed resolution must include declared_state")?;
+
+    assert_eq!(declared_state.get("topology"), Some(&topology));
     assert_eq!(
         payload.verified_state,
         Some(json!({
             "verified_queries": [
                 {
                     "record_key": "text:com.twitter",
-                    "status": "unsupported",
-                    "unsupported_reason": "verified resolution entrypoint is not yet supported",
+                    "status": "not_found",
+                    "failure_reason": "no_text_record",
+                    "provenance": {
+                        "execution_trace_id": execution_trace_id.to_string(),
+                    }
                 },
                 {
                     "record_key": "addr:60",
-                    "status": "unsupported",
-                    "unsupported_reason": "verified resolution entrypoint is not yet supported",
+                    "status": "success",
+                    "value": {
+                        "coin_type": "60",
+                        "value": "0x00000000000000000000000000000000000000aa",
+                    },
+                    "provenance": {
+                        "execution_trace_id": execution_trace_id.to_string(),
+                    }
                 }
             ]
         }))
     );
     assert_eq!(
         payload.provenance.get("execution_trace_id"),
-        Some(&Value::Null)
+        Some(&Value::String(execution_trace_id.to_string()))
     );
-
-    let explain_payload: ErrorResponse = read_json(explain_response).await?;
-    assert_eq!(explain_payload.error.code, "not_found");
+    assert_eq!(
+        payload.provenance.get("manifest_versions"),
+        name_row.provenance.get("manifest_versions")
+    );
+    assert_eq!(
+        explain_payload.verified_state,
+        Some(json!({
+            "execution": {
+                "execution_trace_id": execution_trace_id.to_string(),
+                "selected_entrypoint": {
+                    "source_family": "basenames_execution",
+                    "role": "l1_resolver",
+                    "chain_id": "ethereum-mainnet",
+                    "contract_address": "0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31"
+                },
+                "resolver_discovery_path": topology.get("resolver_path").cloned().expect("topology must include resolver_path"),
+                "wildcard": {
+                    "source": null,
+                    "matched_labels": []
+                },
+                "alias": {
+                    "final_target": null,
+                    "hops": []
+                },
+                "steps": [
+                    {
+                        "step_index": 0,
+                        "step_kind": "load_declared_topology",
+                        "input_digest": "sha256:topology-input",
+                        "output_digest": "sha256:topology-output",
+                        "latency": 4,
+                        "canonicality_dependency": {
+                            "base-mainnet": {
+                                "block_hash": "0xbase-binding",
+                                "block_number": 100,
+                                "state": "finalized"
+                            }
+                        }
+                    },
+                    {
+                        "step_index": 1,
+                        "step_kind": "call_l1_resolver",
+                        "input_digest": "sha256:l1-input",
+                        "output_digest": "sha256:l1-output",
+                        "latency": 17,
+                        "canonicality_dependency": {
+                            "ethereum-mainnet": {
+                                "block_hash": "0xbase-binding",
+                                "block_number": 100,
+                                "state": "finalized"
+                            }
+                        }
+                    },
+                    {
+                        "step_index": 2,
+                        "step_kind": "ccip_offchain_lookup",
+                        "input_digest": "sha256:ccip-input",
+                        "output_digest": "sha256:ccip-output",
+                        "latency": 29,
+                        "canonicality_dependency": {
+                            "ethereum-mainnet": {
+                                "block_hash": "0xbase-binding",
+                                "block_number": 100,
+                                "state": "finalized"
+                            }
+                        }
+                    },
+                    {
+                        "step_index": 3,
+                        "step_kind": "resolve_with_proof",
+                        "input_digest": "sha256:proof-input",
+                        "output_digest": "sha256:proof-output",
+                        "latency": 11,
+                        "canonicality_dependency": {
+                            "ethereum-mainnet": {
+                                "block_hash": "0xbase-binding",
+                                "block_number": 100,
+                                "state": "finalized"
+                            }
+                        }
+                    }
+                ],
+                "finished_at": format_timestamp(timestamp(1_717_171_900))
+            },
+            "verified_queries": payload.verified_state.as_ref().and_then(|state| state.get("verified_queries")).cloned().expect("verified_state must include verified_queries")
+        }))
+    );
 
     database.cleanup().await?;
     Ok(())
@@ -5162,7 +5403,7 @@ async fn get_resolution_mode_parsing_populates_expected_sections() -> Result<()>
     assert_eq!(verified_error.error.code, "stale");
     assert_eq!(
         verified_error.error.message,
-        "persisted verified resolution output is not available for the selected snapshot"
+        "verified resolution RPC provider for ethereum-mainnet is not configured; set BIGNAME_API_CHAIN_RPC_URLS=ethereum-mainnet=<url>"
     );
     assert!(both_payload.declared_state.is_some());
     assert_eq!(
@@ -5249,7 +5490,7 @@ async fn get_resolution_verified_modes_keep_missing_supported_output_stale_for_s
             assert_eq!(payload.error.code, "stale", "{mode} {label}");
             assert_eq!(
                 payload.error.message,
-                "persisted verified resolution output is not available for the selected snapshot",
+                "verified resolution RPC provider for ethereum-mainnet is not configured; set BIGNAME_API_CHAIN_RPC_URLS=ethereum-mainnet=<url>",
                 "{mode} {label}"
             );
         }
@@ -6911,7 +7152,7 @@ async fn get_resolution_dynamic_resolver_profile_non_graduation_keeps_ensv1_reco
 }
 
 #[tokio::test]
-async fn get_resolution_dynamic_resolver_pending_profile_keeps_verified_records_explicit()
+async fn get_resolution_dynamic_resolver_pending_profile_keeps_missing_verified_output_stale()
 -> Result<()> {
     let database = TestDatabase::new_with_schemas(false, true).await?;
     let logical_name_id = "ens:alice.eth";
@@ -6963,63 +7204,146 @@ async fn get_resolution_dynamic_resolver_pending_profile_keeps_verified_records_
         .await
         .context("pending dynamic resolver mixed resolution request failed")?;
 
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+
+    let payload: ErrorResponse = read_json(response).await?;
+    assert_eq!(payload.error.code, "stale");
+    assert_eq!(
+        payload.error.message,
+        "verified resolution RPC provider for ethereum-mainnet is not configured; set BIGNAME_API_CHAIN_RPC_URLS=ethereum-mainnet=<url>"
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_resolution_dynamic_resolver_pending_profile_reads_persisted_verified_output()
+-> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0x9d53);
+    let token_lineage_id = Uuid::from_u128(0x9d54);
+    let surface_binding_id = Uuid::from_u128(0x9d55);
+    let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000045);
+    let dynamic_resolver_address = "0x0000000000000000000000000000000000000d51";
+    let request_key = resolution_execution_request_key(&["addr:60"]);
+    let persisted_verified_queries = json!([
+        {
+            "record_key": "addr:60",
+            "status": "success",
+            "value": {
+                "coin_type": "60",
+                "value": "0x00000000000000000000000000000000000000dd"
+            },
+            "provenance": {
+                "execution_trace_id": execution_trace_id.to_string()
+            }
+        }
+    ]);
+
+    database
+        .seed_name_current_binding(
+            logical_name_id,
+            "ens",
+            "alice.eth",
+            "Alice.eth",
+            "namehash:alice.eth",
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    database
+        .insert_name_current_row(name_current_row_with_current_resolver(
+            exact_name_row(
+                logical_name_id,
+                surface_binding_id,
+                resource_id,
+                token_lineage_id,
+            ),
+            "ethereum-mainnet",
+            dynamic_resolver_address,
+        ))
+        .await?;
+    database
+        .insert_record_inventory_current_row(
+            dynamic_resolver_unsupported_profile_record_inventory_current_row(
+                logical_name_id,
+                resource_id,
+            ),
+        )
+        .await?;
+
+    let mut trace = resolution_execution_trace(
+        execution_trace_id,
+        &request_key,
+        &["addr:60"],
+        persisted_verified_queries.clone(),
+    );
+    trace.steps[0].step_payload = json!({
+        "entrypoint": "universal_resolver",
+        "resolver": dynamic_resolver_address,
+    });
+    let outcome = resolution_execution_outcome(
+        execution_trace_id,
+        &request_key,
+        persisted_verified_queries.clone(),
+        logical_name_id,
+        resource_id,
+    );
+    upsert_execution_trace(&database.pool, &trace).await?;
+    upsert_execution_outcome(&database.pool, &outcome).await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resolutions/ens/alice.eth?mode=both&records=addr:60")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("pending dynamic resolver persisted verified request failed")?;
+    let explain_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/explain/resolutions/ens/alice.eth/execution?records=addr:60")
+                .body(Body::empty())
+                .expect("explain request must build"),
+        )
+        .await
+        .context("pending dynamic resolver persisted explain request failed")?;
+
     assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(explain_response.status(), StatusCode::OK);
 
     let payload: ResolutionResponse = read_json(response).await?;
+    let explain_payload: ResolutionResponse = read_json(explain_response).await?;
     let declared_state = payload
         .declared_state
         .as_ref()
         .expect("declared_state must be present");
     assert_eq!(
-        declared_state.pointer("/topology/resolver_path/0/address"),
-        Some(&json!(dynamic_resolver_address))
-    );
-    assert_eq!(
-        declared_state.pointer("/record_cache/entries"),
-        Some(&json!([
-            {
-                "record_key": "addr:60",
-                "record_family": "addr",
-                "selector_key": "60",
-                "status": "unsupported",
-                "unsupported_reason": "resolver_family_pending",
-            },
-            {
-                "record_key": "text:com.twitter",
-                "record_family": "text",
-                "selector_key": "com.twitter",
-                "status": "unsupported",
-                "unsupported_reason": "resolver_family_pending",
-            },
-            {
-                "record_key": "contenthash",
-                "record_family": "contenthash",
-                "selector_key": null,
-                "status": "not_found",
-            }
-        ]))
+        declared_state.pointer("/record_cache/entries/0/unsupported_reason"),
+        Some(&json!("resolver_family_pending"))
     );
     assert_eq!(
         payload.verified_state,
-        Some(json!({
-            "verified_queries": [
-                {
-                    "record_key": "addr:60",
-                    "status": "unsupported",
-                    "unsupported_reason": "verified resolution entrypoint is not yet supported",
-                },
-                {
-                    "record_key": "text:com.twitter",
-                    "status": "unsupported",
-                    "unsupported_reason": "verified resolution entrypoint is not yet supported",
-                },
-                {
-                    "record_key": "contenthash",
-                    "status": "unsupported",
-                    "unsupported_reason": "verified resolution entrypoint is not yet supported",
-                }
-            ]
-        }))
+        Some(json!({ "verified_queries": persisted_verified_queries }))
+    );
+    assert_eq!(
+        payload.provenance.get("execution_trace_id"),
+        Some(&Value::String(execution_trace_id.to_string()))
+    );
+    assert_eq!(
+        explain_payload
+            .verified_state
+            .as_ref()
+            .and_then(|state| state.get("verified_queries")),
+        payload
+            .verified_state
+            .as_ref()
+            .and_then(|state| state.get("verified_queries"))
     );
 
     database.cleanup().await?;

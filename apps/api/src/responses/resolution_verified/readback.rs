@@ -5,23 +5,26 @@ pub(super) fn supported_resolution_verified_readback_records(
     bigname_storage::supported_resolution_verified_readback_records(row, records)
 }
 
-pub(super) async fn load_resolution_verified_outcome(
+pub(crate) enum ResolutionVerifiedOutcomeLookup {
+    Found(ExecutionOutcome),
+    CacheMiss,
+    NotSupported,
+}
+
+pub(super) async fn lookup_resolution_verified_outcome(
     pool: &PgPool,
     row: &NameCurrentRow,
     records: &[ResolutionRecordKey],
     record_inventory_row: Option<&RecordInventoryCurrentRow>,
     selected_snapshot: &SelectedSnapshot,
-) -> std::result::Result<Option<ExecutionOutcome>, SnapshotSelectionError> {
+) -> std::result::Result<ResolutionVerifiedOutcomeLookup, SnapshotSelectionError> {
     if resolution_verified_support_boundary(row, record_inventory_row).is_none() {
-        return Ok(None);
-    }
-    if record_inventory_blocks_verified_entrypoint(record_inventory_row) {
-        return Ok(None);
+        return Ok(ResolutionVerifiedOutcomeLookup::NotSupported);
     }
 
     let supported_records = supported_resolution_verified_readback_records(row, records);
     if supported_records.is_empty() {
-        return Ok(None);
+        return Ok(ResolutionVerifiedOutcomeLookup::NotSupported);
     }
     let cache_key_records = resolution_execution_cache_lookup_records(row, &supported_records);
 
@@ -37,24 +40,41 @@ pub(super) async fn load_resolution_verified_outcome(
             row.logical_name_id
         ))
     })?;
-    let outcome = load_execution_outcome(pool, &cache_key)
-        .await
+    let mut outcome = load_execution_outcome(pool, &cache_key).await.map_err(|error| {
+        SnapshotSelectionError::internal(format!(
+            "failed to load persisted verified resolution outcome for {}: {error}",
+            row.logical_name_id
+        ))
+    })?;
+    if outcome.is_none() && cache_key_records != supported_records {
+        let full_selector_cache_key = build_resolution_execution_cache_key(
+            row,
+            &supported_records,
+            record_inventory_row,
+            selected_snapshot.chain_positions_value(),
+        )
         .map_err(|error| {
             SnapshotSelectionError::internal(format!(
-                "failed to load persisted verified resolution outcome for {}: {error}",
+                "failed to derive full-selector verified resolution cache key for {}: {error}",
                 row.logical_name_id
             ))
         })?;
+        outcome = load_execution_outcome(pool, &full_selector_cache_key)
+            .await
+            .map_err(|error| {
+                SnapshotSelectionError::internal(format!(
+                    "failed to load full-selector persisted verified resolution outcome for {}: {error}",
+                    row.logical_name_id
+                ))
+            })?;
+    }
 
     match outcome {
         Some(outcome) => {
             validate_loaded_resolution_verified_outcome(row, records, &outcome)?;
-            Ok(Some(outcome))
+            Ok(ResolutionVerifiedOutcomeLookup::Found(outcome))
         }
-        None => Err(SnapshotSelectionError::stale(
-            "persisted verified resolution output is not available for the selected snapshot"
-                .to_owned(),
-        )),
+        None => Ok(ResolutionVerifiedOutcomeLookup::CacheMiss),
     }
 }
 
@@ -84,13 +104,6 @@ fn validate_loaded_resolution_verified_outcome(
     Ok(())
 }
 
-fn record_inventory_blocks_verified_entrypoint(
-    record_inventory_row: Option<&RecordInventoryCurrentRow>,
-) -> bool {
-    record_inventory_row.is_some_and(|row| {
-        string_field(provenance_field(&row.coverage, "unsupported_reason")).is_some()
-    })
-}
 pub(super) fn reordered_persisted_verified_queries(
     outcome: &ExecutionOutcome,
     records: &[ResolutionRecordKey],

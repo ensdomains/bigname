@@ -44,6 +44,22 @@ head fetch and live ingestion stay idle. Current bootstrap RPC support accepts
 `http://` endpoints only; use a local node or local HTTP proxy for hosted RPC
 providers that expose only HTTPS.
 
+## Live API Execution Configuration
+
+`GET /v1/resolutions/{namespace}/{name}` and `GET /v1/resolve/{name}` in
+`mode=verified|both` may execute supported ENS verified-resolution selectors on
+demand when matching persisted execution output is absent. That live execution
+uses the selected exact-name snapshot: no `at` and no `chain_positions` means
+`consistency=head` and the latest stored Ethereum checkpoint, and the API call
+targets that selected block rather than provider latest.
+
+Configure `BIGNAME_API_CHAIN_RPC_URLS=ethereum-mainnet=<http-url>` for the API
+process before relying on live ENS verified resolution. This is separate from
+`BIGNAME_INDEXER_CHAIN_RPC_URLS`, which feeds indexer intake and checkpoint
+state only. If the API Ethereum provider is not configured, supported live ENS
+verified selectors fail closed with `409 stale` and a configuration message
+instead of falling back to declared record cache.
+
 Deployments with a local Reth database can also set
 `BIGNAME_INDEXER_CHAIN_RETH_DB_SOURCES` to a comma-delimited list of
 `<chain>=<reth-datadir>` entries. Configure at most one source per chain. The

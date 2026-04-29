@@ -30,6 +30,7 @@ Defaults:
 
 - `consistency=head`
 - `mode=declared`
+- no `at` and no `chain_positions` selects `consistency=head` and the latest stored checkpoint for each chain required by the route; any on-demand verified execution targets those selected block positions, not a provider's newer head
 
 ### Snapshot Selection Rules
 
@@ -49,7 +50,8 @@ Validation rules:
 - if `chain_positions` is malformed, has duplicate position slots, mixes deployment profiles, or names a `chain_id` that does not match the selected deployment profile, reject with `invalid_input`
 - if `chain_positions` is supplied, the server validates that each supplied position satisfies the requested `consistency` floor, including the default `consistency=head`, or returns `conflict`
 - if a supplied `(chain_id, block_number, block_hash)` does not match stored lineage, is orphaned for the requested floor, or cannot be reconciled with the other supplied positions as one route snapshot, return `conflict`
-- if a valid selector resolves to positions for which the required projection or execution output has not been built, return `stale` rather than reading raw facts or silently advancing to a newer projection
+- if a valid selector resolves to positions for which the required projection rows have not been built, return `stale` rather than reading raw facts or silently advancing to a newer projection
+- if matching persisted execution output is absent, persisted-readback routes and entrypoints return their documented stale or not-found state; the documented exception is supported ENS verified resolution on `GET /v1/resolutions/{namespace}/{name}` and `GET /v1/resolve/{name}`, which may perform on-demand execution after snapshot selection and persist the outcome before returning
 - current-state projection rows may serve a later selected snapshot only when the projection's stored chain-position context is on the same required chain set and no newer canonical projection input for that row's keys exists at or before the selected positions; otherwise the route returns `stale`
 
 Cross-chain rules:
@@ -74,17 +76,20 @@ The exact-name snapshot selector applies to:
 - `GET /v1/coverage/{namespace}/{name}`
 - `GET /v1/explain/names/{namespace}/{name}/surface-binding`
 - `GET /v1/explain/names/{namespace}/{name}/authority-control`
-- `GET /v1/resolutions/{namespace}/{name}` for its exact-name data row, declared topology, declared record inventory/cache joins, route-level coverage, and verified readback support checks
+- `GET /v1/resolutions/{namespace}/{name}` for its exact-name data row, declared topology, declared record inventory/cache joins, route-level coverage, verified support checks, and verified execution target selection
 
 Rules:
 
-- resolve `at`, explicit `chain_positions`, and `consistency` once for the request, before exact-name lookup, coverage lookup, declared topology construction, explain construction, or persisted execution readback
+- resolve `at`, explicit `chain_positions`, and `consistency` once for the request, before exact-name lookup, coverage lookup, declared topology construction, explain construction, persisted execution lookup, or on-demand execution
 - all exact-name route sections in the same response use that one selected `ChainPositions` object; a response must not combine the current binding from one snapshot with coverage, topology, resolver summaries, record inventory/cache, permission summaries, history pointers, or execution output from another snapshot
 - an exact-name `name_current` row whose stored position is older than the selected snapshot remains eligible only when the worker-owned invalidation check finds no newer canonical normalized event or surface-binding input for that `logical_name_id` or current `resource_id` through the selected positions
 - `GET /v1/coverage/{namespace}/{name}` returns the same top-level `coverage` object as `GET /v1/names/{namespace}/{name}` for the same `{namespace, name}` and selected snapshot
 - the surface-binding and authority-control explain routes identify the same current `logical_name_id`, `resource_id`, `token_lineage_id`, `surface_binding_id`, and `binding_kind` that the exact-name route selects at that snapshot, subject to each route's documented field shape
-- `GET /v1/resolutions/{namespace}/{name}` uses the same selected exact-name snapshot for `data`, `declared_state.topology`, `declared_state.record_inventory`, `declared_state.record_cache`, and route-level `coverage`; verified readback in `mode=verified|both` may join only persisted execution output whose request chain positions exactly match the selected snapshot
-- verified execution never advances the selected positions mid-request; when matching persisted execution output is absent, the route uses the documented unsupported, stale, or not-found behavior for the requested mode rather than running fresh execution or reading raw facts
+- `GET /v1/resolutions/{namespace}/{name}` uses the same selected exact-name snapshot for `data`, `declared_state.topology`, `declared_state.record_inventory`, `declared_state.record_cache`, route-level `coverage`, verified support checks, and any on-demand verified execution
+- in `mode=verified|both`, verified output may join the response only when its request chain positions exactly match the selected snapshot; if matching output is absent for a supported ENS verified-resolution selector, the API executes that selector against the selected exact-name snapshot, persists the trace and outcome, and returns the newly persisted output
+- verified execution never advances the selected positions mid-request; unsupported selector families, unsupported verified path classes, and persisted-readback-only entrypoints keep their documented unsupported, stale, or not-found behavior rather than reading raw facts or declared cache values
+- when no `at` or `chain_positions` selector is supplied, the selected exact-name snapshot is `consistency=head` at the latest stored checkpoint, and live execution targets that selected chain position
+- live ENS verified resolution requires an API Ethereum RPC provider configured for the API process; if the provider is missing or cannot serve the selected block, supported selectors return `409 stale` with a configuration message rather than falling back to `declared_state.record_cache`
 - API handlers serve these public responses from projections and execution outputs after selector resolution; they do not synthesize exact-name answers, coverage, topology, explain detail, or verified readback directly from raw facts or adapter-owned normalized events
 - `GET /v1/resolve/{name}` remains the namespace-inferred convenience route for resolution and currently exposes only its documented `mode` and `records` query parameters; after namespace inference, its exact-name joins use the canonical route's default snapshot selector and do not admit `at`, `chain_positions`, or `consistency` on this convenience route in the shipped contract
 
@@ -975,8 +980,9 @@ When all declared sections are supported, they use this exact field structure:
 
 Rules:
 
-- this route uses the exact-name snapshot selector for `data`, declared topology, declared record inventory/cache, route-level `coverage`, and verified readback support checks
+- this route uses the exact-name snapshot selector for `data`, declared topology, declared record inventory/cache, route-level `coverage`, verified support checks, and verified execution target selection
 - in `mode=verified|both`, persisted verified output is eligible only when its stored request chain positions exactly match the selected `chain_positions`; no verified selector may be satisfied from execution output produced for another snapshot
+- when matching persisted output is absent for a supported ENS Universal Resolver selector, the route performs on-demand execution against the selected exact-name snapshot, persists the request-scoped trace and selector outcome, and returns that persisted outcome in the same response (upstream: .refs/ens_v1/contracts/universalResolver/IUniversalResolver.sol:L44 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/universalResolver/IUniversalResolver.sol:L52 @ ens_v1@91c966f)
 - `topology`, `record_inventory`, and `record_cache` are always present as objects when `declared_state` is populated; any declared section that is not yet projected returns `UnsupportedSummary`
 - callers must round-trip the surfaced `record_key` strings in `records`; `record_family` and `selector_key` are explanatory fields, not alternate request identity
 - `record_inventory` defines the known record-selector space, explicit gaps, and the current version boundary for the requested surface; it does not imply global record enumeration
@@ -994,7 +1000,8 @@ Rules:
 - if the exact surface does not exist for the requested namespace and snapshot, return `404 not_found`
 - `verified_queries` returns one result object per requested selector in request order
 - `verified_queries[*].status` uses the shared `ResultStatus` vocabulary; the initial resolution contract uses `success`, `not_found`, `unsupported`, and `execution_failed`
-- unsupported selector families, unsupported resolver families, or namespaces without a verified entrypoint return `200` with `verified_queries[*].status=unsupported`; they do not silently downgrade to declared cache values
+- unsupported selector families, unsupported verified path classes, or namespaces without a verified entrypoint return `200` with `verified_queries[*].status=unsupported`; they do not silently downgrade to declared cache values
+- declared resolver-profile gaps such as `resolver_family_pending` remain visible in `declared_state.record_inventory` and `declared_state.record_cache`, but they do not by themselves suppress verified execution for an otherwise supported Universal Resolver path; in `mode=verified|both`, supported ENS selectors either read matching persisted execution output or execute on demand at the selected snapshot, then persist and return the outcome (upstream: .refs/ens_v1/contracts/universalResolver/IUniversalResolver.sol:L44 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/universalResolver/IUniversalResolver.sol:L52 @ ens_v1@91c966f)
 - public verified resolution support is narrower than the full declared topology model: in the shipped Phase 7 slice, `namespace=ens` exact-surface direct-path requests are supported first, the already frozen alias-only non-direct class remains in scope, and the first additive wildcard-derived class is exact-surface ENS wildcard-derived paths
 - for that support check, use the same declared topology snapshot that would populate `declared_state.topology` under `mode=declared|both`; a request is direct-path only when `resolver_path[0].logical_name_id` equals top-level `data.logical_name_id`, `wildcard.source=null` with `matched_labels=[]`, `alias.final_target=null` with `hops=[]`, and all `transport` fields are `null`
 - the already frozen ENS alias-only non-direct support class is the exact-surface class where alias rewriting participates on that same declared topology snapshot, `alias.final_target` is non-`null` with `hops` non-empty, `wildcard.source=null` with `matched_labels=[]`, and all `transport` fields are `null`
@@ -1005,6 +1012,7 @@ Rules:
 - other `namespace=basenames` verified requests, including alias-participating, wildcard-derived, linked-subregistry, transport-free, or later offchain-gateway path classes, remain explicit `unsupported` until a later doc-first contract change broadens the slice; this first Basenames support class does not widen ENS support classes and keeps future gateway admission separate from the frozen Base-authority-plus-L1Resolver slice (upstream: .refs/basenames/README.md:L69 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L70 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L71 @ basenames@1809bbc)
 - that supported Basenames verified-resolution class does not change the declared read plane: exact-name, address-name, and children reads remain on the separate Base-side declared contract above, and `basenames_base_primary` stays claim intake only (upstream: .refs/basenames/README.md:L70 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L12 @ basenames@1809bbc)
 - supported verified queries that execute but do not produce a trustworthy answer return `status=execution_failed` with `failure_reason`
+- when a supported ENS verified selector needs on-demand execution, the API Ethereum RPC provider is required to serve the selected Ethereum block; missing provider configuration or provider inability to serve that block returns `409 stale` with a configuration message and never falls back to `declared_state.record_cache`
 - for `mode=verified` or `mode=both`, top-level `provenance` includes the request-scoped execution trace summary and each `verified_queries[*]` item may carry narrower provenance for the specific selector result
 - the additive alias-only and wildcard-derived support classes, and the remaining support-boundary `unsupported` results, do not change the mixed route envelope, selector order, query parameters, the shared route-level `coverage` object, or the already-published machine-readable route shape in `docs/api-v1.openapi.json`
 - deeper execution explanation stays on the shipped `GET /v1/explain/resolutions/{namespace}/{name}/execution` route; `GET /v1/resolutions/{namespace}/{name}` does not inline ordered step lists or a raw trace dump
@@ -1032,10 +1040,12 @@ Rules:
 - `GET /v1/resolutions/{namespace}/{name}` remains the canonical route; clients that already know the namespace should use it, and all persisted identity continues to be namespaced
 - the response must surface the inferred namespace through the existing identity fields, including `data.namespace` and `data.logical_name_id`
 - after inference, `mode`, `records`, declared-state, verified-state, provenance, coverage, and error semantics follow the canonical route for the inferred `{namespace, name}` tuple within this shipped query surface
+- because this route does not expose `at`, `chain_positions`, or `consistency`, the inferred canonical tuple uses the default exact-name snapshot: `consistency=head` at the latest stored checkpoint, and any supported ENS on-demand execution targets that selected chain position
 - selector identity is namespace-local after inference: for `*.base.eth`, `records` is interpreted against the inferred `basenames` record selector space, not the ENS selector space
 - namespace inference and verified support are separate gates; `*.base.eth` requests do not fall back to `namespace=ens` outside the Basenames exact-surface transport-assisted direct-path support class
 - for inferred `namespace=basenames`, `mode=verified|both` uses the same Basenames verified-support boundary frozen for the canonical route above; outside the exact-surface transport-assisted direct-path class, each requested verified selector returns `status=unsupported`
 - exact `base.eth` follows the inferred `namespace=ens` canonical route and therefore uses ENS support and selector semantics
+- inferred ENS requests in `mode=verified|both` share the canonical route's cache-or-live-execute behavior for supported verified-resolution selectors and the same fail-closed API Ethereum RPC provider requirement
 
 ### `GET /v1/explain/resolutions/{namespace}/{name}/execution`
 
@@ -1196,7 +1206,8 @@ Rules:
 - when a mixed route can produce the envelope but one declared or verified subsection is unsupported, return `200` and surface that state through `UnsupportedSummary` or the shared `ResultStatus` vocabulary instead of raising a route-level `unsupported` error
 - for snapshot selectors, malformed `chain_positions`, unsupported position slots, missing required position slots, mixed deployment-profile positions, and combined `at` plus `chain_positions` return `400 invalid_input`
 - a syntactically valid selector whose supplied block hash, block number, canonicality floor, or cross-chain reconciliation cannot form one route snapshot returns `409 conflict`
-- a syntactically valid selector that resolves to a coherent snapshot but cannot yet be served from the required projection rows or matching persisted execution output returns `409 stale`
+- a syntactically valid selector that resolves to a coherent snapshot but cannot yet be served from the required projection rows returns `409 stale`
+- persisted-readback routes or entrypoints that require matching execution output and cannot find it return the route's documented stale or not-found state; supported ENS verified resolution instead attempts on-demand execution, and returns `409 stale` with a configuration message when the API Ethereum RPC provider is not configured or cannot serve the selected block
 
 ## 8. Versioning Rules
 

@@ -9,9 +9,11 @@ use super::schemas::openapi_components;
 
 pub(crate) async fn serve(args: ServeArgs) -> Result<()> {
     let pool = bigname_storage::connect(&args.database).await?;
+    let chain_rpc_urls = args.effective_chain_rpc_urls()?;
     let state = AppState {
         phase: bigname_domain::bootstrap_phase(),
         pool,
+        chain_rpc_urls,
     };
     let router = app_router(state);
     let listener = tokio::net::TcpListener::bind(args.bind_addr)

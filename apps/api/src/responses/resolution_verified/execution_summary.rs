@@ -115,13 +115,13 @@ fn build_resolution_execution_resolver_discovery_path(
     }
 
     let declared_resolver = provenance_field(&row.declared_summary, "resolver");
-    let chain_id = trace
-        .contracts_called
-        .as_array()
-        .and_then(|items| items.iter().find(|item| item.is_object()))
-        .and_then(|item| string_field(provenance_field(item, "chain_id")))
+    let chain_id = string_field(declared_resolver.and_then(|value| provenance_field(value, "chain_id")))
         .or_else(|| {
-            string_field(declared_resolver.and_then(|value| provenance_field(value, "chain_id")))
+            trace
+                .contracts_called
+                .as_array()
+                .and_then(|items| items.iter().find(|item| item.is_object()))
+                .and_then(|item| string_field(provenance_field(item, "chain_id")))
         });
     let address = trace
         .steps

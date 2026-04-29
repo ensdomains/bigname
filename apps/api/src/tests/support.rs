@@ -481,9 +481,14 @@ impl TestDatabase {
     }
 
     fn app_state(&self) -> AppState {
+        self.app_state_with_chain_rpc_urls(bigname_execution::ChainRpcUrls::default())
+    }
+
+    fn app_state_with_chain_rpc_urls(&self, chain_rpc_urls: bigname_execution::ChainRpcUrls) -> AppState {
         AppState {
             phase: "test",
             pool: self.pool.clone(),
+            chain_rpc_urls,
         }
     }
 

@@ -76,6 +76,7 @@ services:
     environment:
       <<: *bigname-env
       BIGNAME_API_BIND_ADDR: ${BIGNAME_API_BIND_ADDR:-0.0.0.0:3000}
+      BIGNAME_API_CHAIN_RPC_URLS: ${BIGNAME_API_CHAIN_RPC_URLS:-}
 
   indexer:
     <<: *bigname-service

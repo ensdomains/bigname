@@ -3,7 +3,7 @@ use std::{
     time::Instant,
 };
 
-use alloy_consensus::{BlockHeader as _, Transaction as _, TxReceipt as _};
+use alloy_consensus::{BlockHeader as _, TxReceipt as _};
 use alloy_rpc_types_eth::{Filter, Topic};
 use anyhow::{Context, Result, bail};
 use reth_ethereum::provider::{

@@ -8,7 +8,13 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 bigname-storage.workspace = true
+bytes = "1.10.1"
+http-body-util = "0.1.3"
+hyper = { version = "1.9.0", features = ["client", "http1"] }
+hyper-util = { version = "0.1.20", features = ["client", "client-legacy", "http1", "tokio"] }
+serde.workspace = true
 serde_json = "1.0.149"
+sha3 = "0.10.8"
 sqlx = { workspace = true, features = ["time"] }
 uuid.workspace = true
 

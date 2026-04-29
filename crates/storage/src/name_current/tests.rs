@@ -359,7 +359,8 @@ async fn name_current_snapshot_read_covers_later_snapshot_until_new_input() -> R
 }
 
 #[tokio::test]
-async fn name_current_snapshot_read_rejects_later_snapshot_on_different_ancestry() -> Result<()> {
+async fn name_current_snapshot_read_rejects_later_snapshot_when_projected_block_is_noncanonical()
+-> Result<()> {
     let database = test_database().await?;
     let logical_name_id = "ens:alice.eth";
     let token_lineage_id = Uuid::from_u128(0x1120);
@@ -387,24 +388,33 @@ async fn name_current_snapshot_read_rejects_later_snapshot_on_different_ancestry
         database.pool(),
         &[
             lineage_block("0xbinding", None, 21_000_003),
-            lineage_block("0xfork-parent", None, 21_000_003),
-            lineage_block("0xfork", Some("0xfork-parent"), 21_000_004),
+            lineage_block("0xnewer", Some("0xbinding"), 21_000_004),
         ],
     )
     .await?;
+    sqlx::query(
+        r#"
+        UPDATE chain_lineage
+        SET canonicality_state = 'orphaned'::canonicality_state
+        WHERE chain_id = 'ethereum-mainnet'
+          AND block_hash = '0xbinding'
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
 
-    let forked_selected = ChainPositions::from_value(&json!({
+    let later_selected = ChainPositions::from_value(&json!({
         "ethereum": {
             "chain_id": "ethereum-mainnet",
             "block_number": 21_000_004,
-            "block_hash": "0xfork",
+            "block_hash": "0xnewer",
             "timestamp": "2026-04-17T00:00:04Z"
         }
     }))?;
 
-    let error = load_name_current_for_snapshot(database.pool(), logical_name_id, &forked_selected)
+    let error = load_name_current_for_snapshot(database.pool(), logical_name_id, &later_selected)
         .await
-        .expect_err("later selected snapshot on another fork must be stale");
+        .expect_err("later selected snapshot from a noncanonical projection block must be stale");
     assert_eq!(error.kind(), SnapshotSelectionErrorKind::Stale);
 
     database.cleanup().await

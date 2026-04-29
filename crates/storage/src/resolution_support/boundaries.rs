@@ -12,7 +12,7 @@ use super::{
         BASE_MAINNET_CHAIN_ID, BASENAMES_NAMESPACE, ENS_NAMESPACE, ETHEREUM_MAINNET_CHAIN_ID,
         ResolutionProjectionChainPosition, VerifiedResolutionPathClass,
         VerifiedResolutionSupportBoundary, json_field, json_string_field,
-        resolution_projection_chain_position_from_value,
+        resolution_projection_chain_position_from_value, summary_is_unsupported,
     },
     topology::{
         classify_supported_resolution_topology, projected_resolution_topology,
@@ -122,7 +122,10 @@ pub fn resolution_verified_support_boundary(
             {
                 return None;
             }
-            BASENAMES_NAMESPACE if !row_has_basenames_supported_chain_positions(row) => {
+            BASENAMES_NAMESPACE
+                if !row_has_basenames_supported_chain_positions(row)
+                    || !row_has_basenames_execution_v2_manifest(row) =>
+            {
                 return None;
             }
             ENS_NAMESPACE | BASENAMES_NAMESPACE => {}
@@ -140,9 +143,16 @@ pub fn resolution_verified_support_boundary(
         });
     }
 
+    if row.namespace == BASENAMES_NAMESPACE {
+        return build_legacy_basenames_verified_support_boundary(
+            row,
+            resolution_record_version_boundary(row, record_inventory_row),
+            row_has_basenames_supported_chain_positions(row),
+        );
+    }
+
     let topology_version_boundary = match row.namespace.as_str() {
         ENS_NAMESPACE => build_supported_resolution_verified_boundary(row)?,
-        BASENAMES_NAMESPACE => return None,
         _ => return None,
     };
     let record_version_boundary = resolution_record_version_boundary(row, record_inventory_row)
@@ -195,7 +205,8 @@ pub fn try_resolution_verified_support_boundary(
                 return Ok(None);
             }
             BASENAMES_NAMESPACE
-                if !row_has_basenames_supported_chain_positions_for_revalidation(row) =>
+                if !row_has_basenames_supported_chain_positions_for_revalidation(row)
+                    || !row_has_basenames_execution_v2_manifest(row) =>
             {
                 return Ok(None);
             }
@@ -214,9 +225,16 @@ pub fn try_resolution_verified_support_boundary(
         }));
     }
 
+    if row.namespace == BASENAMES_NAMESPACE {
+        return Ok(build_legacy_basenames_verified_support_boundary(
+            row,
+            resolution_record_version_boundary_for_revalidation(row, record_inventory_row),
+            row_has_basenames_supported_chain_positions_for_revalidation(row),
+        ));
+    }
+
     let Some(topology_version_boundary) = (match row.namespace.as_str() {
         ENS_NAMESPACE => build_supported_resolution_declared_boundary_for_revalidation(row),
-        BASENAMES_NAMESPACE => None,
         _ => None,
     }) else {
         return Ok(None);
@@ -234,6 +252,66 @@ pub fn try_resolution_verified_support_boundary(
         topology_version_boundary,
         record_version_boundary,
     }))
+}
+
+fn build_legacy_basenames_verified_support_boundary(
+    row: &NameCurrentRow,
+    version_boundary: Option<Value>,
+    has_supported_chain_positions: bool,
+) -> Option<VerifiedResolutionSupportBoundary> {
+    if !has_supported_chain_positions || !can_derive_legacy_basenames_direct_topology(row) {
+        return None;
+    }
+
+    let version_boundary = version_boundary?;
+    Some(VerifiedResolutionSupportBoundary {
+        path_class: VerifiedResolutionPathClass::BasenamesTransportDirect,
+        topology_version_boundary: version_boundary.clone(),
+        record_version_boundary: version_boundary,
+    })
+}
+
+fn can_derive_legacy_basenames_direct_topology(row: &NameCurrentRow) -> bool {
+    if row.namespace != BASENAMES_NAMESPACE
+        || row.binding_kind != Some(SurfaceBindingKind::DeclaredRegistryPath)
+        || row.resource_id.is_none()
+        || !row_has_basenames_execution_v2_manifest(row)
+    {
+        return false;
+    }
+
+    let Some(resolver_summary) = json_field(&row.declared_summary, "resolver")
+        .filter(|value| value.is_object())
+        .filter(|value| !summary_is_unsupported(Some(value)))
+    else {
+        return false;
+    };
+
+    let Some(resolver_chain_id) = json_string_field(json_field(resolver_summary, "chain_id"))
+    else {
+        return false;
+    };
+    let Some(resolver_address) = json_string_field(json_field(resolver_summary, "address")) else {
+        return false;
+    };
+
+    resolver_chain_id == BASE_MAINNET_CHAIN_ID && !resolver_address.is_empty()
+}
+
+fn row_has_basenames_execution_v2_manifest(row: &NameCurrentRow) -> bool {
+    json_field(&row.provenance, "manifest_versions")
+        .and_then(Value::as_array)
+        .is_some_and(|items| {
+            items.iter().any(|item| {
+                json_string_field(json_field(item, "source_family")).as_deref()
+                    == Some("basenames_execution")
+                    && json_field(item, "manifest_version").and_then(Value::as_i64) == Some(2)
+                    && json_string_field(json_field(item, "chain")).as_deref()
+                        == Some(ETHEREUM_MAINNET_CHAIN_ID)
+                    && json_string_field(json_field(item, "deployment_epoch")).as_deref()
+                        == Some("basenames_v1")
+            })
+        })
 }
 
 fn build_supported_resolution_verified_boundary(row: &NameCurrentRow) -> Option<Value> {

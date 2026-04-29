@@ -1,5 +1,6 @@
 mod details;
 mod positions;
+#[cfg(test)]
 mod selectors;
 mod storage;
 mod topology;
@@ -8,10 +9,9 @@ use anyhow::{Context, Result, bail};
 use sqlx::{Postgres, Transaction};
 
 use crate::persistence::PersistEnsExactNameVerifiedResolutionRequest;
-use crate::validation::{extract_requested_selectors, extract_supported_verified_queries};
+use crate::validation::extract_requested_selectors;
 use crate::{BASENAMES_NAMESPACE, ENS_NAMESPACE};
 
-use selectors::ensure_storage_selector_families_supported;
 use storage::{
     load_name_current_for_revalidation, load_supported_record_inventory_current_for_revalidation,
 };
@@ -19,6 +19,7 @@ use topology::{
     build_resolution_topology_for_revalidation, ensure_storage_supported_boundary_matches_request,
 };
 
+#[cfg(test)]
 pub(crate) use positions::build_requested_chain_positions_from_projection;
 
 pub(crate) async fn revalidate_supported_resolution_persistence_from_storage(
@@ -26,7 +27,6 @@ pub(crate) async fn revalidate_supported_resolution_persistence_from_storage(
     request: &PersistEnsExactNameVerifiedResolutionRequest,
 ) -> Result<()> {
     let requested_selectors = extract_requested_selectors(&request.trace)?;
-    let queries = extract_supported_verified_queries(&request.outcome)?;
     let logical_name_id = format!(
         "{}:{}",
         request.trace.namespace, requested_selectors.surface
@@ -70,17 +70,17 @@ pub(crate) async fn revalidate_supported_resolution_persistence_from_storage(
         );
     }
 
-    let stored_requested_positions =
-        build_requested_chain_positions_from_projection(&row.chain_positions)?;
     let outcome_requested_positions = positions::normalize_requested_chain_positions(
         Some(&request.outcome.cache_key.requested_chain_positions),
         &format!("{context} cache_key.requested_chain_positions"),
     )?;
-    if stored_requested_positions != outcome_requested_positions {
-        bail!(
-            "{context} cache_key.requested_chain_positions must match projected chain_positions for logical_name_id {logical_name_id}"
-        );
-    }
+    positions::ensure_requested_positions_are_eligible_for_projection(
+        transaction,
+        &row,
+        &outcome_requested_positions,
+        context,
+    )
+    .await?;
 
     let topology = build_resolution_topology_for_revalidation(&row, record_inventory_row.as_ref())?;
     let support_boundary = bigname_storage::try_resolution_verified_support_boundary(
@@ -100,13 +100,6 @@ pub(crate) async fn revalidate_supported_resolution_persistence_from_storage(
         &support_boundary,
         context,
     )?;
-    ensure_storage_selector_families_supported(
-        record_inventory_row.as_ref(),
-        &queries,
-        &request.outcome.cache_key.request_key,
-        context,
-    )?;
-
     Ok(())
 }
 
@@ -130,6 +123,7 @@ pub(crate) fn normalize_transport_detail(
     details::normalize_transport_detail(value)
 }
 
+#[cfg(test)]
 pub(crate) fn selector_family_and_key(
     record_key: &str,
     selector: &bigname_storage::SupportedVerifiedResolutionRecordKey,

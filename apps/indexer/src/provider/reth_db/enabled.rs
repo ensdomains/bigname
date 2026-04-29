@@ -12,8 +12,9 @@ use reth_ethereum::{
     node::{EthereumNode, api::NodeTypesWithDBAdapter},
     primitives::Block as _,
     provider::{
-        BlockHashReader, BlockNumReader, BlockReader, HeaderProvider, ProviderFactory,
-        ReceiptProvider, TransactionVariant, db::DatabaseEnv, providers::ReadOnlyConfig,
+        BlockHashReader, BlockNumReader, BlockReader, ChainStateBlockReader, HeaderProvider,
+        ProviderFactory, ReceiptProvider, TransactionVariant, db::DatabaseEnv,
+        providers::ReadOnlyConfig,
     },
 };
 
@@ -32,7 +33,9 @@ use convert::{
     provider_receipts_and_logs_from_recovered, provider_transactions_from_recovered,
 };
 
-use super::{ProviderBlock, ProviderBlockBundle, ProviderHeadSnapshot, ProviderResolvedBlock};
+use crate::provider::{
+    ProviderBlock, ProviderBlockBundle, ProviderHeadSnapshot, ProviderResolvedBlock,
+};
 
 type EthereumRethProviderFactory =
     ProviderFactory<NodeTypesWithDBAdapter<EthereumNode, DatabaseEnv>>;
