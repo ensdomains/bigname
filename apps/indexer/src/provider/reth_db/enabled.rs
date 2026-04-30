@@ -82,9 +82,21 @@ impl RethDbReader {
         let safe_number = nonzero_checkpoint_number(provider.last_safe_block_number()?);
         let finalized_number = nonzero_checkpoint_number(provider.last_finalized_block_number()?);
         drop(provider);
+        let canonical_hash = if chain_info.best_hash == B256::ZERO {
+            factory
+                .block_hash(chain_info.best_number)?
+                .with_context(|| {
+                    format!(
+                        "Reth DB did not return canonical block hash for best number {}",
+                        chain_info.best_number
+                    )
+                })?
+        } else {
+            chain_info.best_hash
+        };
 
         Ok(ProviderHeadSnapshot {
-            canonical: self.fetch_block_by_b256(&factory, chain_info.best_hash)?,
+            canonical: self.fetch_block_by_b256(&factory, canonical_hash)?,
             safe: safe_number
                 .map(|number| self.fetch_block_by_number(&factory, number, "safe"))
                 .transpose()?,
