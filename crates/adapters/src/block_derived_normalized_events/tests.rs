@@ -691,6 +691,68 @@ fn ens_v2_registry_and_registrar_name_bearing_logs_emit_preimage_observations() 
 }
 
 #[test]
+fn oversized_label_logs_do_not_abort_preimage_observation() -> Result<()> {
+    let oversized_label = "a".repeat(usize::from(u8::MAX) + 1);
+    let registrar_log = watched_log(
+        SOURCE_FAMILY_ENS_V1_REGISTRAR_L1,
+        4,
+        RegistrarExplicitLabelEvent::NameRegistered.topics(&oversized_label),
+        encode_registrar_label_log_data(&oversized_label),
+    );
+    assert!(build_preimage_observed_events(&registrar_log)?.is_empty());
+
+    let registry_log = watched_log(
+        SOURCE_FAMILY_ENS_V2_REGISTRY_L1,
+        5,
+        vec![
+            keccak_signature_hex(ENS_V2_LABEL_REGISTERED_SIGNATURE),
+            hex_string(&abi_word_u64(1)),
+            keccak256_hex(oversized_label.as_bytes()),
+            hex_string(&abi_word_address(
+                "0x00000000000000000000000000000000000000aa",
+            )),
+        ],
+        encode_ens_v2_label_registered_data(
+            &oversized_label,
+            "0x00000000000000000000000000000000000000bb",
+            2_000_000_000,
+        ),
+    );
+    assert!(build_preimage_observed_events(&registry_log)?.is_empty());
+
+    Ok(())
+}
+
+#[test]
+fn malformed_label_payloads_do_not_abort_preimage_observation() -> Result<()> {
+    let malformed_dynamic_string = abi_word_u64(96).to_vec();
+    let registrar_log = watched_log(
+        SOURCE_FAMILY_ENS_V1_REGISTRAR_L1,
+        6,
+        RegistrarExplicitLabelEvent::NameRegistered.topics("malformed"),
+        malformed_dynamic_string.clone(),
+    );
+    assert!(build_preimage_observed_events(&registrar_log)?.is_empty());
+
+    let registry_log = watched_log(
+        SOURCE_FAMILY_ENS_V2_REGISTRY_L1,
+        7,
+        vec![
+            keccak_signature_hex(ENS_V2_LABEL_REGISTERED_SIGNATURE),
+            hex_string(&abi_word_u64(1)),
+            keccak256_hex(b"malformed"),
+            hex_string(&abi_word_address(
+                "0x00000000000000000000000000000000000000aa",
+            )),
+        ],
+        malformed_dynamic_string,
+    );
+    assert!(build_preimage_observed_events(&registry_log)?.is_empty());
+
+    Ok(())
+}
+
+#[test]
 fn ens_v2_resolver_name_bearing_logs_emit_preimage_observations() -> Result<()> {
     let alice_dns_name = dns_encoded_name(&["alice", "eth"]);
     let bob_dns_name = dns_encoded_name(&["bob", "eth"]);

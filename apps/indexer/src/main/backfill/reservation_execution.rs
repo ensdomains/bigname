@@ -25,6 +25,7 @@ use super::{
 };
 
 const HASH_PINNED_BACKFILL_SCAN_MODE: &str = "hash_pinned_block";
+const SOURCE_FAMILY_ENS_V1_RESOLVER_L1: &str = "ens_v1_resolver_l1";
 pub(crate) const DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS: i64 = 1_024;
 pub(crate) const COMPACT_SOURCE_IDENTITY_SELECTED_TARGET_THRESHOLD: usize = 10_000;
 
@@ -55,6 +56,10 @@ pub(crate) async fn create_hash_pinned_backfill_job(
 pub(crate) fn backfill_job_source_identity_payload(
     source_plan: &WatchedSourceSelectorPlan,
 ) -> Result<Value> {
+    if includes_generic_resolver_event_scope(source_plan) {
+        return generic_topic_scan_source_identity_payload(source_plan);
+    }
+
     if source_plan.selector_kind != WatchedSourceSelectorKind::SourceFamily
         || source_plan.selected_targets.len() <= COMPACT_SOURCE_IDENTITY_SELECTED_TARGET_THRESHOLD
     {
@@ -73,8 +78,8 @@ pub(crate) fn backfill_job_source_identity_payload(
         "selected_targets_sample": selected_targets_sample(&source_plan.selected_targets),
         "source_identity_payload_format": "selected_targets_digest_v1",
     });
-    let source_identity_hash = keccak256_json_digest(&payload)
-        .context("failed to digest compact backfill source identity")?;
+    let source_identity_hash =
+        keccak256_json_digest(&payload).context("failed to digest backfill source identity")?;
     payload
         .as_object_mut()
         .expect("compact source identity payload must be an object")
@@ -83,6 +88,73 @@ pub(crate) fn backfill_job_source_identity_payload(
             Value::String(source_identity_hash),
         );
     Ok(payload)
+}
+
+fn generic_topic_scan_source_identity_payload(
+    source_plan: &WatchedSourceSelectorPlan,
+) -> Result<Value> {
+    let selected_targets = source_plan
+        .selected_targets
+        .iter()
+        .filter(|target| target.source_family != SOURCE_FAMILY_ENS_V1_RESOLVER_L1)
+        .cloned()
+        .collect::<Vec<_>>();
+    let requested_watched_targets = source_plan.requested_watched_targets.clone();
+    let generic_topic_scans = json!([
+        {
+            "source_family": SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
+            "source_identity_payload_format": "generic_resolver_event_topics_v1"
+        }
+    ]);
+
+    let mut payload = if selected_targets.len() <= COMPACT_SOURCE_IDENTITY_SELECTED_TARGET_THRESHOLD
+    {
+        json!({
+            "selector_kind": source_plan.selector_kind.as_str(),
+            "source_family": &source_plan.source_family,
+            "requested_watched_targets": requested_watched_targets,
+            "selected_targets": selected_targets,
+            "generic_topic_scans": generic_topic_scans,
+            "source_identity_payload_format": "selected_targets_with_generic_topic_scans_v1",
+        })
+    } else {
+        let selected_targets_digest = keccak256_json_digest(&selected_targets)
+            .context("failed to digest compact generic-topic-scan source selected targets")?;
+        json!({
+            "selector_kind": source_plan.selector_kind.as_str(),
+            "source_family": &source_plan.source_family,
+            "requested_watched_targets": requested_watched_targets,
+            "selected_target_count": selected_targets.len(),
+            "selected_targets_digest_algorithm": "keccak256",
+            "selected_targets_digest": selected_targets_digest,
+            "selected_targets_sample": selected_targets_sample(&selected_targets),
+            "generic_topic_scans": generic_topic_scans,
+            "source_identity_payload_format": "selected_targets_digest_with_generic_topic_scans_v1",
+        })
+    };
+    let source_identity_hash = keccak256_json_digest(&payload)
+        .context("failed to digest generic-topic-scan backfill source identity")?;
+    payload
+        .as_object_mut()
+        .expect("generic-topic-scan source identity payload must be an object")
+        .insert(
+            "source_identity_hash".to_owned(),
+            Value::String(source_identity_hash),
+        );
+    Ok(payload)
+}
+
+fn is_ens_v1_resolver_source_family_plan(source_plan: &WatchedSourceSelectorPlan) -> bool {
+    source_plan.selector_kind == WatchedSourceSelectorKind::SourceFamily
+        && source_plan.source_family.as_deref() == Some(SOURCE_FAMILY_ENS_V1_RESOLVER_L1)
+}
+
+fn includes_generic_resolver_event_scope(source_plan: &WatchedSourceSelectorPlan) -> bool {
+    is_ens_v1_resolver_source_family_plan(source_plan)
+        || source_plan
+            .selected_targets
+            .iter()
+            .any(|target| target.source_family == SOURCE_FAMILY_ENS_V1_RESOLVER_L1)
 }
 
 fn selected_targets_sample(selected_targets: &[WatchedBackfillTarget]) -> Value {
@@ -158,6 +230,7 @@ pub(crate) async fn run_resumable_hash_pinned_backfill_job(
         idempotency_key = %config.idempotency_key,
         hash_pinned_chunk_blocks = config.hash_pinned_chunk_blocks,
         adapter_sync_mode = config.adapter_sync_mode.as_str(),
+        header_audit_mode = config.header_audit_mode.as_str(),
         range_count = record.ranges.len(),
         "resumable backfill job loaded"
     );
@@ -273,6 +346,7 @@ async fn run_reserved_hash_pinned_backfill_range(
             chunk_range,
             canonicality_evidence,
             config.adapter_sync_mode,
+            config.header_audit_mode,
         )
         .await
         {

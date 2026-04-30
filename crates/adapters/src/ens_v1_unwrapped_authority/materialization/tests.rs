@@ -71,6 +71,34 @@ fn trim_incoming_bindings_at_existing_starts_closes_historical_open_interval() {
     assert_eq!(incoming[0].active_to, Some(existing[0].active_from));
 }
 
+#[test]
+fn normalize_surface_bindings_tightens_duplicate_active_to() -> Result<()> {
+    let earlier_close =
+        OffsetDateTime::from_unix_timestamp(1_695_284_247).expect("test timestamp is valid");
+    let later_close =
+        OffsetDateTime::from_unix_timestamp(1_695_370_647).expect("test timestamp is valid");
+    let first = test_binding(
+        Uuid::from_u128(0x100),
+        "ens:missioncontrol.2718.eth",
+        1_695_230_399,
+        Some(later_close),
+    );
+    let second = test_binding(
+        Uuid::from_u128(0x100),
+        "ens:missioncontrol.2718.eth",
+        1_695_230_399,
+        Some(earlier_close),
+    );
+
+    let mut bindings = vec![first, second];
+    normalize_surface_bindings_for_upsert(&mut bindings)?;
+
+    assert_eq!(bindings.len(), 1);
+    assert_eq!(bindings[0].active_to, Some(earlier_close));
+
+    Ok(())
+}
+
 fn test_surface(logical_name_id: &str, input_name: &str, namehash: &str) -> NameSurface {
     let normalized_name = logical_name_id
         .strip_prefix("ens:")

@@ -6,7 +6,7 @@ pub(super) fn resolver_profile_fact_nodes(raw_logs: &[AuthorityRawLogRow]) -> Re
         let Some(topic0) = raw_log.topics.first() else {
             continue;
         };
-        if resolver_fact_family_for_topic0(&raw_log.source_family, topic0).is_none() {
+        if resolver_fact_families_for_topic0(&raw_log.source_family, topic0).is_empty() {
             continue;
         }
         let Some(node) = raw_log.topics.get(1) else {
@@ -22,6 +22,7 @@ pub(super) fn apply_authority_raw_logs(
     histories: &mut BTreeMap<String, NameHistory>,
     reverse_histories: &mut BTreeMap<String, ReverseClaimSourceHistory>,
     known_names_by_namehash: &mut HashMap<String, NameMetadata>,
+    known_name_refs_by_namehash: &mut HashMap<String, ObservationRef>,
     namehash_to_labelhash: &mut HashMap<String, String>,
     pending_namehash_observations: &mut HashMap<String, Vec<AuthorityObservation>>,
     same_tx_name_intro_positions: &HashMap<String, Vec<RawLogPosition>>,
@@ -37,6 +38,7 @@ pub(super) fn apply_authority_raw_logs(
             histories,
             reverse_histories,
             known_names_by_namehash,
+            known_name_refs_by_namehash,
             namehash_to_labelhash,
             pending_namehash_observations,
             same_tx_name_intro_positions,
@@ -56,6 +58,7 @@ pub(super) fn apply_authority_raw_log(
     histories: &mut BTreeMap<String, NameHistory>,
     reverse_histories: &mut BTreeMap<String, ReverseClaimSourceHistory>,
     known_names_by_namehash: &mut HashMap<String, NameMetadata>,
+    known_name_refs_by_namehash: &mut HashMap<String, ObservationRef>,
     namehash_to_labelhash: &mut HashMap<String, String>,
     pending_namehash_observations: &mut HashMap<String, Vec<AuthorityObservation>>,
     same_tx_name_intro_positions: &HashMap<String, Vec<RawLogPosition>>,
@@ -88,6 +91,7 @@ pub(super) fn apply_authority_raw_log(
         histories,
         reverse_histories,
         known_names_by_namehash,
+        known_name_refs_by_namehash,
         namehash_to_labelhash,
         pending_namehash_observations,
         same_tx_name_intro_positions,
@@ -102,12 +106,44 @@ fn apply_authority_observation(
     histories: &mut BTreeMap<String, NameHistory>,
     reverse_histories: &mut BTreeMap<String, ReverseClaimSourceHistory>,
     known_names_by_namehash: &mut HashMap<String, NameMetadata>,
+    known_name_refs_by_namehash: &mut HashMap<String, ObservationRef>,
     namehash_to_labelhash: &mut HashMap<String, String>,
     pending_namehash_observations: &mut HashMap<String, Vec<AuthorityObservation>>,
     same_tx_name_intro_positions: &HashMap<String, Vec<RawLogPosition>>,
     reverse_claim_sources: &HashMap<String, ReverseClaimSource>,
     block_index: &CanonicalBlockIndex,
 ) -> Result<()> {
+    if let Some(name) = learn_record_raw_name_preimage(
+        &observation,
+        reverse_claim_sources,
+        known_names_by_namehash,
+        known_name_refs_by_namehash,
+        namehash_to_labelhash,
+    ) && let Some(pending) = pending_namehash_observations.remove(&name.namehash)
+    {
+        let labelhash = name
+            .labelhashes
+            .first()
+            .cloned()
+            .context("learned name preimage is missing a first labelhash")?;
+        let name_ref = known_name_refs_by_namehash.get(&name.namehash).cloned();
+        for pending_observation in pending {
+            apply_authority_observation_for_labelhash(
+                pending_observation,
+                &labelhash,
+                Some(name.clone()),
+                name_ref.clone(),
+                histories,
+                known_names_by_namehash,
+                known_name_refs_by_namehash,
+                namehash_to_labelhash,
+                pending_namehash_observations,
+                same_tx_name_intro_positions,
+                block_index,
+            )?;
+        }
+    }
+
     let labelhash = if let Some(namehash) = observation_namehash(&observation) {
         let defer_to_same_tx_intro =
             should_defer_preloaded_namehash_observation(&observation, same_tx_name_intro_positions);
@@ -141,13 +177,18 @@ fn apply_authority_observation(
     let known_name = observation_namehash(&observation)
         .and_then(|namehash| known_names_by_namehash.get(namehash))
         .cloned();
+    let known_name_ref = observation_namehash(&observation)
+        .and_then(|namehash| known_name_refs_by_namehash.get(namehash))
+        .cloned();
 
     apply_authority_observation_for_labelhash(
         observation,
         &labelhash,
         known_name,
+        known_name_ref,
         histories,
         known_names_by_namehash,
+        known_name_refs_by_namehash,
         namehash_to_labelhash,
         pending_namehash_observations,
         same_tx_name_intro_positions,
@@ -159,8 +200,10 @@ fn apply_authority_observation_for_labelhash(
     observation: AuthorityObservation,
     labelhash: &str,
     known_name: Option<NameMetadata>,
+    known_name_ref: Option<ObservationRef>,
     histories: &mut BTreeMap<String, NameHistory>,
     known_names_by_namehash: &mut HashMap<String, NameMetadata>,
+    known_name_refs_by_namehash: &mut HashMap<String, ObservationRef>,
     namehash_to_labelhash: &mut HashMap<String, String>,
     pending_namehash_observations: &mut HashMap<String, Vec<AuthorityObservation>>,
     same_tx_name_intro_positions: &HashMap<String, Vec<RawLogPosition>>,
@@ -171,7 +214,7 @@ fn apply_authority_observation_for_labelhash(
         .or_insert_with(|| NameHistory {
             name: known_name.clone(),
             labelhash: labelhash.to_owned(),
-            first_name_ref: None,
+            first_name_ref: known_name_ref.clone(),
             current_registration: None,
             current_wrapper_key: None,
             wrapper_authorities: BTreeMap::new(),
@@ -187,6 +230,9 @@ fn apply_authority_observation_for_labelhash(
         });
     if history.name.is_none() {
         history.name = known_name;
+        if let Some(reference) = known_name_ref.clone() {
+            history.first_name_ref.get_or_insert(reference);
+        }
     }
 
     apply_observation(history, observation, block_index)?;
@@ -197,13 +243,16 @@ fn apply_authority_observation_for_labelhash(
             .entry(name.namehash.clone())
             .or_insert_with(|| name.clone());
         if let Some(pending) = pending_namehash_observations.remove(&name.namehash) {
+            let name_ref = known_name_refs_by_namehash.get(&name.namehash).cloned();
             for pending_observation in pending {
                 apply_authority_observation_for_labelhash(
                     pending_observation,
                     labelhash,
                     Some(name.clone()),
+                    name_ref.clone(),
                     histories,
                     known_names_by_namehash,
+                    known_name_refs_by_namehash,
                     namehash_to_labelhash,
                     pending_namehash_observations,
                     same_tx_name_intro_positions,
@@ -213,6 +262,38 @@ fn apply_authority_observation_for_labelhash(
         }
     }
     Ok(())
+}
+
+fn learn_record_raw_name_preimage(
+    observation: &AuthorityObservation,
+    reverse_claim_sources: &HashMap<String, ReverseClaimSource>,
+    known_names_by_namehash: &mut HashMap<String, NameMetadata>,
+    known_name_refs_by_namehash: &mut HashMap<String, ObservationRef>,
+    namehash_to_labelhash: &mut HashMap<String, String>,
+) -> Option<NameMetadata> {
+    let AuthorityObservation::RecordChanged(event) = observation else {
+        return None;
+    };
+    if event.selector.record_key != "name" {
+        return None;
+    }
+    if !reverse_claim_sources.contains_key(&event.namehash) {
+        return None;
+    }
+    let raw_name = event.raw_name.as_deref()?;
+    let name = observe_text_name_with_reference(raw_name, &event.reference, ENS_NORMALIZER_VERSION)
+        .ok()?;
+    let labelhash = name.labelhashes.first()?.clone();
+    namehash_to_labelhash
+        .entry(name.namehash.clone())
+        .or_insert(labelhash);
+    known_name_refs_by_namehash
+        .entry(name.namehash.clone())
+        .or_insert_with(|| event.reference.clone());
+    known_names_by_namehash
+        .entry(name.namehash.clone())
+        .or_insert_with(|| name.clone());
+    Some(name)
 }
 
 fn should_defer_preloaded_namehash_observation(

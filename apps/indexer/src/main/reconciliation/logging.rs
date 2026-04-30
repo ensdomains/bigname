@@ -28,6 +28,7 @@ pub(crate) fn log_raw_fact_normalized_event_replay_outcome(
         deployment_profile = %outcome.deployment_profile,
         chain = %outcome.chain,
         selection_kind = outcome.selection_kind,
+        source_scope_target_count = outcome.source_scope_target_count,
         selected_block_count = outcome.selected_block_count,
         canonical_raw_log_count = outcome.canonical_raw_log_count,
         scanned_raw_log_count = outcome.scanned_raw_log_count,

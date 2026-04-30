@@ -13,15 +13,15 @@ use anyhow::{Result, bail};
 use bigname_manifests::WatchedSourceSelectorPlan;
 use sqlx::types::time::OffsetDateTime;
 
+use crate::reconciliation::HeaderAuditMode;
+
 #[allow(unused_imports)]
 pub(crate) use fetching::run_hash_pinned_backfill_range;
 #[cfg(test)]
+pub(crate) use reservation_execution::COMPACT_SOURCE_IDENTITY_SELECTED_TARGET_THRESHOLD;
 pub(crate) use reservation_execution::{
-    COMPACT_SOURCE_IDENTITY_SELECTED_TARGET_THRESHOLD, backfill_job_source_identity_payload,
-};
-pub(crate) use reservation_execution::{
-    DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS, create_hash_pinned_backfill_job,
-    run_resumable_hash_pinned_backfill_job,
+    DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS, backfill_job_source_identity_payload,
+    create_hash_pinned_backfill_job, run_resumable_hash_pinned_backfill_job,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -110,6 +110,7 @@ pub(crate) struct BackfillJobRunConfig {
     pub(crate) lease_expires_at: OffsetDateTime,
     pub(crate) hash_pinned_chunk_blocks: i64,
     pub(crate) adapter_sync_mode: BackfillAdapterSyncMode,
+    pub(crate) header_audit_mode: HeaderAuditMode,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

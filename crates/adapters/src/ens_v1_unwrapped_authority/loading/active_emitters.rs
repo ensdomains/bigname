@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
-use super::super::scope::AuthorityRawLogSourceScopeTarget;
+use super::super::scope::{
+    AuthorityRawLogSourceScopeTarget, is_generic_resolver_event_source_scope_target,
+};
 use super::super::*;
 use anyhow::{Context, Result};
 use bigname_manifests::{
@@ -80,6 +82,60 @@ pub(in crate::ens_v1_unwrapped_authority) async fn load_active_emitters(
             .then(left.source_manifest_id.cmp(&right.source_manifest_id))
     });
     Ok(emitters)
+}
+
+pub(in crate::ens_v1_unwrapped_authority) async fn load_generic_resolver_event_sources(
+    pool: &PgPool,
+    chain: &str,
+    source_scope: Option<&[AuthorityRawLogSourceScopeTarget]>,
+) -> Result<Vec<GenericResolverEventSource>> {
+    let scope_ranges = match source_scope {
+        Some(source_scope) => {
+            let ranges = source_scope
+                .iter()
+                .filter(|target| is_generic_resolver_event_source_scope_target(target))
+                .map(|target| {
+                    (
+                        Some(target.effective_from_block),
+                        Some(target.effective_to_block),
+                    )
+                })
+                .collect::<Vec<_>>();
+            if ranges.is_empty() {
+                return Ok(Vec::new());
+            }
+            ranges
+        }
+        None => vec![(None, None)],
+    };
+
+    let manifests = load_active_manifest_metadata_for_source_family(
+        pool,
+        chain,
+        SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
+    )
+    .await?;
+    let mut sources = Vec::new();
+    for manifest in manifests {
+        for (effective_from_block, effective_to_block) in &scope_ranges {
+            sources.push(GenericResolverEventSource {
+                source_manifest_id: manifest.manifest_id,
+                namespace: manifest.namespace.clone(),
+                source_family: manifest.source_family.clone(),
+                manifest_version: manifest.manifest_version,
+                normalizer_version: manifest.normalizer_version.clone(),
+                effective_from_block: *effective_from_block,
+                effective_to_block: *effective_to_block,
+            });
+        }
+    }
+    sources.sort_by(|left, right| {
+        left.effective_from_block
+            .cmp(&right.effective_from_block)
+            .then(left.effective_to_block.cmp(&right.effective_to_block))
+            .then(left.source_manifest_id.cmp(&right.source_manifest_id))
+    });
+    Ok(sources)
 }
 
 async fn load_scoped_watched_contracts(
@@ -440,4 +496,47 @@ fn source_rank(source: WatchedContractSource) -> i32 {
         WatchedContractSource::ManifestContract => 1,
         WatchedContractSource::DiscoveryEdge => 2,
     }
+}
+
+async fn load_active_manifest_metadata_for_source_family(
+    pool: &PgPool,
+    chain: &str,
+    source_family: &str,
+) -> Result<Vec<ActiveManifestMetadata>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT manifest_id, chain, namespace, source_family, manifest_version, normalizer_version
+        FROM manifest_versions
+        WHERE rollout_status = 'active'
+          AND chain = $1
+          AND source_family = $2
+        ORDER BY manifest_id
+        "#,
+    )
+    .bind(chain)
+    .bind(source_family)
+    .fetch_all(pool)
+    .await
+    .with_context(|| {
+        format!("failed to load active {source_family} manifest metadata for {chain}")
+    })?;
+
+    rows.into_iter()
+        .map(|row| {
+            Ok(ActiveManifestMetadata {
+                manifest_id: row.try_get("manifest_id").context("missing manifest_id")?,
+                chain: row.try_get("chain").context("missing chain")?,
+                namespace: row.try_get("namespace").context("missing namespace")?,
+                source_family: row
+                    .try_get("source_family")
+                    .context("missing source_family")?,
+                manifest_version: row
+                    .try_get("manifest_version")
+                    .context("missing manifest_version")?,
+                normalizer_version: row
+                    .try_get("normalizer_version")
+                    .context("missing normalizer_version")?,
+            })
+        })
+        .collect()
 }

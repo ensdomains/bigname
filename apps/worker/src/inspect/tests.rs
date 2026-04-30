@@ -726,7 +726,7 @@ fn renders_canonicality_inspection_json() {
     assert_eq!(rendered["lineage_canonicality"], "safe");
     assert_eq!(rendered["parent_hash"], "0xparent");
     assert_eq!(rendered["block_number"], 123);
-    assert_eq!(rendered["raw_fact_counts"]["raw_blocks"], 1);
+    assert_eq!(rendered["raw_fact_counts"]["chain_lineage"], 1);
     assert_eq!(rendered["raw_fact_counts"]["raw_code_hashes"], 2);
     assert_eq!(rendered["raw_fact_counts"]["raw_transactions"], 3);
     assert_eq!(rendered["raw_fact_counts"]["raw_receipts"], 4);

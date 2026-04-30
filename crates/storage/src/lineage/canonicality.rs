@@ -39,20 +39,6 @@ impl CanonicalityState {
         }
     }
 
-    pub(crate) fn merge_upsert(self, incoming: Self) -> Self {
-        match incoming {
-            Self::Orphaned => Self::Orphaned,
-            Self::Observed => {
-                if self == Self::Orphaned {
-                    Self::Observed
-                } else {
-                    self
-                }
-            }
-            Self::Canonical | Self::Safe | Self::Finalized => self.promote_to(incoming),
-        }
-    }
-
     fn rank(self) -> u8 {
         match self {
             Self::Observed => 0,

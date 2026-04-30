@@ -4,7 +4,7 @@ mod active_emitters;
 mod blocks;
 mod raw_logs;
 
-pub(super) use active_emitters::load_active_emitters;
+pub(super) use active_emitters::{load_active_emitters, load_generic_resolver_event_sources};
 pub(super) use blocks::{
     load_canonical_blocks, load_canonical_blocks_for_restricted_authority_sync,
 };

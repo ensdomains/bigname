@@ -1265,6 +1265,24 @@ async fn seed_wildcard_name_current_rebuild_inputs(
         ],
     )
     .await?;
+    upsert_chain_lineage_blocks(
+        database.pool(),
+        &[
+            chain_lineage_block(
+                ETHEREUM_MAINNET_CHAIN_ID,
+                "0xsource-record-version",
+                102,
+                1_717_171_702,
+            ),
+            chain_lineage_block(
+                ETHEREUM_MAINNET_CHAIN_ID,
+                "0xbinding-wildcard",
+                103,
+                1_717_171_703,
+            ),
+        ],
+    )
+    .await?;
     bigname_storage::upsert_name_surfaces(
         database.pool(),
         &[
@@ -2790,6 +2808,60 @@ async fn persists_direct_path_for_later_selected_snapshot_without_recursive_ance
         )
         .await?,
         request.raw_call_snapshots
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn persists_direct_path_when_name_projection_is_newer_than_record_inventory_projection()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let mut request = success_request();
+    let selected_positions = json!([
+        {
+            "chain_id": ETHEREUM_MAINNET_CHAIN_ID,
+            "block_number": 21_000_001,
+            "block_hash": "0xabc124"
+        }
+    ]);
+    request.outcome.cache_key.requested_chain_positions = selected_positions.clone();
+    request.trace.chain_context["requested_positions"] = selected_positions;
+    for snapshot in &mut request.raw_call_snapshots {
+        snapshot.block_hash = "0xabc124".to_owned();
+        snapshot.block_number = 21_000_001;
+    }
+    for step in &mut request.trace.steps {
+        step.canonicality_dependency[ETHEREUM_MAINNET_CHAIN_ID]["block_hash"] = json!("0xabc124");
+        step.canonicality_dependency[ETHEREUM_MAINNET_CHAIN_ID]["block_number"] = json!(21_000_001);
+    }
+
+    seed_supported_resolution_storage(&database, &request).await?;
+    upsert_chain_lineage_blocks(
+        database.pool(),
+        &[
+            chain_lineage_block(
+                ETHEREUM_MAINNET_CHAIN_ID,
+                "0xabc123",
+                21_000_000,
+                1_717_171_717,
+            ),
+            chain_lineage_block(
+                ETHEREUM_MAINNET_CHAIN_ID,
+                "0xabc124",
+                21_000_001,
+                1_717_171_729,
+            ),
+        ],
+    )
+    .await?;
+
+    let persisted =
+        persist_ens_exact_name_verified_resolution_direct(database.pool(), &request).await?;
+    assert_eq!(persisted.cache_key, request.outcome.cache_key);
+    assert_eq!(
+        load_execution_outcome(database.pool(), &persisted.cache_key).await?,
+        Some(request.outcome.clone())
     );
 
     database.cleanup().await

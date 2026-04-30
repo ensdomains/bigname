@@ -48,9 +48,9 @@ ENSv1 and Basenames declared record indexing must not stop at the statically adm
 - ENSv1 registry `NewResolver(node, resolver)` logs from admitted `ens_v1_registry_l1` emitters must produce resolver discovery observations for `ens_v1_resolver_l1`; nonzero resolver addresses create or refresh node-to-resolver bindings and resolver contract instances, while zero-address resolver changes close only the affected node-to-resolver binding (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L12 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L89 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L174 @ ens_v1@91c966f).
 - Basenames registry `NewResolver(node, resolver)` logs from admitted `basenames_base_registry` emitters must produce resolver discovery observations for `basenames_base_resolver`; nonzero Base-side resolver addresses create or refresh node-to-resolver bindings and resolver contract instances, while zero-address resolver changes close only the affected node-to-resolver binding (upstream: .refs/basenames/src/L2/Registry.sol:L19 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/Registry.sol:L132 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/Registry.sol:L223 @ basenames@1809bbc).
 
-The resolver address observed in declared topology is therefore not sufficient by itself. Contract-instance admission, node-to-resolver binding state, and supported resolver-profile admission are separate. Resolver-local record, record-version, permission, alias, or resolver-overview facts may be consumed only after the resolver address resolves to an admitted `contract_instance_id` through direct manifest admission or a resolver discovery edge and the instance is admitted as a supported resolver profile for the relevant fact family. Until those gates are active, declared record reads must surface explicit unsupported or gap state rather than pretending the current resolver has been indexed.
+The resolver address observed in declared topology is therefore not sufficient by itself. Contract-instance admission, node-to-resolver binding state, generic event intake, and supported resolver-profile admission are separate. For ENSv1, retained generic resolver-local record/version events such as `AddrChanged`, `AddressChanged`, `TextChanged`, and `VersionChanged` may feed observed selector/cache and version-boundary facts when the emitter and node match the selected resolver binding; unobserved selectors remain explicit gaps or `resolver_family_pending` rather than silently becoming absent or complete. Generic resolver-topic intake is topic-first and may encounter non-ENS emitters or incompatible event declarations; a raw log whose payload cannot ABI-decode to the upstream resolver event shape is retained but must not emit an observed selector/cache or version-boundary fact (upstream: .refs/ens_v1/contracts/resolvers/profiles/IAddressResolver.sol:L6 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/profiles/INameResolver.sol:L5 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/profiles/ITextResolver.sol:L5 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/profiles/ITextResolver.sol:L10 @ ens_v1@91c966f). Resolver-profile admission is still required before bigname claims complete record-family coverage, resolver overview completeness, resolver-local authorization semantics, latest-only behavior, or event-to-onchain-call parity (upstream: .refs/ens_v1/contracts/resolvers/profiles/IAddrResolver.sol:L6 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/profiles/IAddressResolver.sol:L6 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/profiles/ITextResolver.sol:L5 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/profiles/IVersionableResolver.sol:L5 @ ens_v1@91c966f). Basenames resolver-local record, permission, alias, and resolver-overview facts remain governed by the separate `L2Resolver`-compatible profile gate.
 
-For ENSv1, the first dynamic resolver-profile admission is limited to discovered instances that are explicitly admitted as PublicResolver-compatible for the relevant fact families. The profile gate may use stored code-hash observations, proxy / implementation edges, or another explicit non-schema admission rule, but registry `NewResolver` observation alone is not enough. Unknown dynamic ENSv1 resolvers remain admitted watch targets only; their resolver-profile state must stay explicit `pending` or `unsupported`, and resolver-local normalized events from those emitters must not feed record inventory, record cache, or resolver overview projections. PublicResolver compatibility is anchored to the upstream PublicResolver profile mixins, ERC165 support, and ResolverBase record-versioning (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L20 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L31 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L131 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L150 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/ResolverBase.sol:L17 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/ResolverBase.sol:L23 @ ens_v1@91c966f). This ENSv1 profile admission does not widen Basenames resolver-profile support (upstream: .refs/basenames/src/L2/L2Resolver.sol:L22 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/Registry.sol:L132 @ basenames@1809bbc).
+For ENSv1, the first dynamic resolver-profile admission is limited to explicit ENS Labs PublicResolver-generation profiles for the relevant complete fact families. The profile gate may use direct manifest admission, first-party known-resolver admission, stored code-hash observations, proxy / implementation edges, or another explicit non-schema admission rule, but registry `NewResolver` observation alone is not enough. Unknown dynamic ENSv1 resolvers keep explicit `pending` or `unsupported` resolver-profile state for profile-gated behavior, and older admitted generations expose only the families listed for their profile. PublicResolver-generation compatibility is anchored to the upstream PublicResolver profile mixins, ERC165 support, and ResolverBase record-versioning (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L20 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L31 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L131 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L150 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/ResolverBase.sol:L17 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/ResolverBase.sol:L21 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/ResolverBase.sol:L22 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/ResolverBase.sol:L23 @ ens_v1@91c966f). This ENSv1 profile admission does not widen Basenames resolver-profile support (upstream: .refs/basenames/src/L2/L2Resolver.sol:L22 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/Registry.sol:L132 @ basenames@1809bbc).
 
 ## 4. ENSv2 Phase 5 Adapter Intake Boundary
 
@@ -94,6 +94,16 @@ provider URLs. Reth DB values are local Reth data directories for deployments
 that have a same-host Reth database/static-file store. The checked-in local
 default selects `manifests`; the ENSv2 Sepolia dev profile is selected by
 setting `BIGNAME_INDEXER_MANIFESTS_ROOT=manifests-sepolia-dev`.
+
+Header audit retention is an explicit operational mode. By default,
+`bigname-indexer run`, `backfill`, and `ops-catchup` persist minimal block
+anchors only: block hash, parent hash, number, timestamp, and canonicality
+state. Passing `--retain-header-audit-fields` or setting
+`BIGNAME_INDEXER_RETAIN_HEADER_AUDIT_FIELDS=true` retains nullable
+`logs_bloom`, `transactions_root`, `receipts_root`, and `state_root` when the
+provider returns them. Minimal replay may coexist with those retained fields
+without clearing them; auditable replay may fill a previously minimal row, and
+conflicting non-null audit fields remain an identity mismatch.
 
 At most one provider source may be configured for a chain. JSON-RPC remains the
 portable source. A Reth DB source is an optional intake source, not a protocol
@@ -175,6 +185,11 @@ Rules:
 
 - block hash is the identity anchor for every block-scoped object
 - `parent_hash` is required in lineage storage
+- lineage ancestry repair requires only block hash, parent hash, block number,
+  timestamp, and canonicality state. Header audit fields such as logs bloom,
+  transaction root, receipt root, and state root are retained only in an
+  explicit auditable-header mode; otherwise they are nullable and omitted from
+  the hot sparse-backfill path.
 - every raw fact row that comes from chain data carries `chain_id`, `block_number`, and `block_hash`
 - full block, transaction, and receipt payloads may be fetched during live indexing, but Postgres retains only replay-critical hot facts and optional cache metadata for non-critical full bodies
 - cache metadata should be stable enough to explain which payload was fetched; any metadata that may authorize later byte use must include a retained digest, and that digest must be verified before a cached, object-backed, or provider-refetched payload is used
@@ -238,7 +253,8 @@ Automatic bootstrap follows these rules:
 - active watched chains without configured providers remain idle after that setup; bootstrap must not create jobs for a chain whose provider cannot supply a finite bootstrap end
 - automatic bootstrap covers each eligible target from its manifest/discovery admitted start through the finite provider head observed at job creation time. It must not cap the start to an arbitrary recent window; full admitted history is the default startup work for configured chains.
 - each candidate target is the resolved watched target keyed by `contract_instance_id`, source family, chain, normalized address, and effective range; raw address is never accepted as durable source identity
-- the persisted source identity for an automatically created job is the sorted resolved target set with effective range start and effective range end, matching the same canonical target tuple used by source-scoped backfill; very large selected target sets may use the compact digest form described below instead of embedding every target tuple in one JSONB value
+- automatic bootstrap groups all eligible targets whose finite ranges overlap into the same raw-fact job segment by default. It must not run one full-chain pass per source family merely because source-scoped repair exists. Source-scoped jobs remain an explicit operational targeting mode for repair, conformance, or manual backfill.
+- the persisted source identity for an automatically created job is the sorted resolved target set with effective range start and effective range end, matching the same canonical target tuple used by source-scoped backfill; very large selected target sets may use the compact digest form described below instead of embedding every target tuple in one JSONB value. If the segment includes ENSv1 generic resolver-event intake, the source identity must also carry `generic_topic_scans` for `ens_v1_resolver_l1`; resolver profile/admission addresses are not the address filter for those generic event facts.
 - a target with declared `start_block` is eligible only from that inclusive block, further narrowed by its active watch range and the finite bootstrap range end resolved at job creation time
 - a target with omitted `start_block` has unknown historical start and must be skipped explicitly with that reason; bootstrap must not infer the target start from block zero, the current job range start, manifest activation, provider history, or any default range
 - every created job must have finite declared range start and finite declared range end before insertion into `backfill_jobs`; open-ended historical catch-up remains live intake or a later explicit job, not automatic bootstrap
@@ -266,7 +282,9 @@ The source-scoped backfill runner selector has three mutually exclusive modes:
 
 The persisted source identity for any selector is the resolved target set, not the CLI spelling that produced it. It is stable and sorted by `source_family`, `contract_instance_id`, normalized address, effective target range start, and effective target range end. Duplicate target identities must collapse only when the full canonical target tuple matches; if the same selector resolves conflicting metadata for the same target identity, job creation fails with an explicit source identity conflict. For idempotency-key reuse, the runner compares the persisted selector mode and resolved source identity. If the active watch plan has changed such that the same CLI selector now resolves to a different target set, the same idempotency key conflicts instead of mutating the existing job. When a selected target set is too large to retain safely as one JSONB payload, the persisted identity may use `source_identity_payload_format=selected_targets_digest_v1`: selector fields, requested target identities, selected target count, a digest algorithm, a digest of the sorted selected target tuples, a first/last target audit sample, and `source_identity_hash`. The sorted canonical target tuple remains the digest input; the runner does not downgrade to raw-address identity or make the selector mutable.
 
-Backfill intake for a source-scoped job is selected-target-only and block-hash-scoped. The runner may use block-number ranges to enumerate candidate blocks, but every persisted block-scoped fact or enrichment must be anchored to the resolved block hash before admission through the shared intake path. The job may persist minimal lineage/header anchors needed for that block-hash-scoped admission, but target-scoped log admission, call snapshots, normalized events, and downstream projection invalidation must be limited to the selected targets. A source-scoped job must not opportunistically admit unselected watched targets merely because they appear in the same block, receipt batch, source family, or chain range.
+Backfill intake for a source-scoped job is selected-target-only and block-hash-scoped. The runner may use block-number ranges to enumerate candidate blocks, but every persisted block-scoped fact or enrichment must be anchored to the resolved block hash before admission through the shared intake path. The job may persist minimal lineage/header anchors needed for that block-hash-scoped admission, but target-scoped log admission, call snapshots, normalized events, and downstream projection invalidation must be limited to the selected targets. A source-scoped job must not opportunistically admit unselected watched targets merely because they appear in the same block, receipt batch, source family, or chain range. This selected-target-only rule applies to explicit repair jobs; automatic full bootstrap uses the combined segment rule above.
+
+For ENSv1 resolver events, source-scoped or explicit per-target backfill is an operational repair and targeting mode over persisted watched targets. It is not the default semantic model for generic resolver-local event intake and must not turn ENS Labs PublicResolver-generation profile admission into the address set for baseline `AddrChanged`, `AddressChanged`, `TextChanged`, or `VersionChanged` observations. Full bootstrap and whole-active-watched-chain backfill may combine the generic resolver topic scan with address-scoped source families in one raw-fact range: resolver events are topic-scanned across all emitters, while non-resolver families keep their address-scoped filters. Topic matches whose indexed fields or ABI payload do not match the ENSv1 resolver declaration are retained raw facts but are not selector/cache evidence. Replay and projection must continue to distinguish observed selector/cache facts from profile-gated complete-family and parity claims.
 
 When historical backfill admits finalized or safe historical ranges, persisted
 lineage, raw facts, and normalized events must carry the best canonicality state
@@ -285,12 +303,15 @@ block-scoped payloads to locate or verify selected target facts, the Postgres
 hot store keeps selected-target logs/facts, minimal lineage/header anchors,
 replay-required enrichments, and any cache metadata needed for block-hash-scoped
 admission or audit. Historical blocks with no selected target facts or
-replay-required enrichments retain only the lineage/header anchors and optional
-audit metadata required by the selected retention contract; they must not retain
-full payload cache entries, receipt bundles, transaction bundles, or block
-bodies by default. Unselected full bodies are evictable cache unless an explicit
-doc-first retention policy declares that payload class durable; otherwise the
-selected replay contract must not depend on them.
+replay-required enrichments retain only one `chain_lineage` header anchor per
+observed block identity for ancestry repair and checkpoint accounting. Optional
+header audit fields are retained in `chain_header_audit` only when the
+auditable-header mode is explicitly enabled for the run; full payload cache
+entries, receipt bundles, transaction bundles, or block bodies are not retained
+by default. Unselected full bodies are
+evictable cache unless an explicit doc-first retention policy declares that
+payload class durable; otherwise the selected replay contract must not depend on
+them.
 
 Source-family backfill conformance intake for the shipped mainnet profile is limited to proving that the source selector, resolved `source_identity`, bounded job lifecycle, shared raw-fact intake, and later raw-fact normalized-event replay coexist for already admitted targets. The initial conformance families are:
 
@@ -338,6 +359,11 @@ Storage helpers own lifecycle mutation. They must be idempotent:
 - `fail_backfill_range` and `fail_backfill_job` record bounded failure state and failure metadata without rewinding completed checkpoints, clearing completed ranges, or mutating raw facts
 
 Range checkpoints are owned by the backfill job substrate. They record operational progress for fetch/resume only and must not be reused as chain checkpoints, projection replay checkpoints, or API consistency checkpoints. The runner must not call chain checkpoint advancement as a side effect of creating, reserving, advancing, completing, failing, or reusing a backfill job, regardless of whether the selector is whole-chain, source-family scoped, or an explicit watched-target set.
+Bootstrap planning may use completed range checkpoints and expired or failed
+range checkpoints as lower bounds for the next bounded bootstrap job with the
+same resolved source identity. It must not use an unexpired active lease as
+coverage, and this bootstrap resume shortcut still does not promote chain heads
+or mutate canonicality outside the raw-fact write path.
 
 Rules:
 
@@ -401,7 +427,11 @@ Cache dependencies must be tied to explicit block-hash-bearing chain positions o
 
 Raw-fact normalized-event replay is bounded operational tooling over already persisted canonical raw facts. A replay request selects a finite deployment profile, chain, and block range or explicit block-hash set. For selected blocks, canonical raw facts are rows whose block identity is `canonical`, `safe`, or `finalized`; `observed` and `orphaned` facts are excluded unless a later audit-only contract explicitly admits them.
 
-The raw-fact normalized-event replay runner performs an upsert-only adapter resync by invoking the same adapter-owned `normalized_events` boundary used after live or backfill raw admission. It must read persisted raw facts, lineage state, and the already persisted manifest/source identity needed to route those facts. It may advance its own indexer-owned `normalized_replay_*` operational cursor so automatic replay can resume after restart. It may use a retained durable cold payload only when the retained replay contract requires that payload. For block-scoped payloads, it may use provider re-fetch only through an explicit block-hash-scoped, retained-digest-checked, fail-closed cache-fill path; if no retained digest exists, the payload cannot satisfy that contract. Provider re-fetch must not replace selected replay facts that the docs require Postgres to retain. It must not re-open live intake, create or reserve backfill ranges, advance backfill range checkpoints, mutate backfill jobs, promote `canonical_head`, `safe_head`, or `finalized_head`, rebuild projections, write public API state, or expose a public `v1` route.
+The raw-fact normalized-event replay runner performs an upsert-only adapter resync by invoking the same adapter-owned `normalized_events` boundary used after live or backfill raw admission. It must read persisted raw facts, lineage state, optional header-audit state when retained, and the already persisted manifest/source identity needed to route those facts. It may advance its own indexer-owned `normalized_replay_*` operational cursor so automatic replay can resume after restart. It may use a retained durable cold payload only when the retained replay contract requires that payload. For block-scoped payloads, it may use provider re-fetch only through an explicit block-hash-scoped, retained-digest-checked, fail-closed cache-fill path; if no retained digest exists, the payload cannot satisfy that contract. Provider re-fetch must not replace selected replay facts that the docs require Postgres to retain. It must not re-open live intake, create or reserve backfill ranges, advance backfill range checkpoints, mutate backfill jobs, promote `canonical_head`, `safe_head`, or `finalized_head`, rebuild projections, write public API state, or expose a public `v1` route.
+
+Automatic normalized-event replay catch-up uses a single all-source chain cursor over persisted canonical raw facts and replays selected blocks in block order. It must not split catch-up into per-source-family cursors: cross-family adapters may need registry, registrar, wrapper, resolver, and reverse-claim facts in the same chronological stream to produce non-overlapping identity intervals. Source-scoped replay remains an explicit repair/backfill selector for bounded target sets, not the automatic catch-up default.
+
+Selected-target replay scopes are operational scan bounds. For ENSv1 generic resolver-local events, replay may narrow which persisted raw logs are resubmitted to the adapter, but the scope does not graduate coverage, mutate resolver profiles, suppress otherwise retained generic resolver observations, or make profile state the source of truth for observed selector/cache facts.
 
 Replay does not delete stale `normalized_events`, purge rows derived from selected blocks, or replace existing payloads for an already persisted normalized-event identity. Existing normalized-event identities can only be refreshed through the storage upsert canonicality path; stale conflicting payloads remain a hard storage mismatch rather than being rewritten by replay. Raw facts and lineage remain immutable, projection rebuild remains downstream worker-owned, and API responses continue to read projections and execution output rather than the replay runner.
 
@@ -411,8 +441,9 @@ The raw admission transaction boundary is one block.
 
 That transaction writes:
 
-- lineage rows for the admitted block
-- hot raw block, transaction, receipt, and log facts needed for selected replay contracts
+- one `chain_lineage` header-anchor row for the admitted block
+- optional `chain_header_audit` fields when auditable header retention is enabled
+- hot raw transaction, receipt, and log facts needed for selected replay contracts
 - optional cache metadata or digests for non-critical full block-scoped payloads when the selected retention contract keeps them
 - any block-scoped call snapshots captured through that intake-owned raw-fact handoff
 - normalized events emitted from those facts

@@ -186,6 +186,7 @@ async fn run_ops_finalized_catchup_chunk(
         lease_expires_at: backfill_lease_expires_at(config.lease_duration_secs)?,
         hash_pinned_chunk_blocks: crate::backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS,
         adapter_sync_mode: crate::backfill::BackfillAdapterSyncMode::Inline,
+        header_audit_mode: config.header_audit_mode,
     };
     let record = create_hash_pinned_backfill_job(pool, &source_plan, &run_config).await?;
     if record.job.status == BackfillLifecycleStatus::Completed {

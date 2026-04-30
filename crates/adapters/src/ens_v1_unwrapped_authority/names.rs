@@ -1,5 +1,11 @@
 use super::*;
 
+const MAX_DNS_LABEL_OCTETS: usize = u8::MAX as usize;
+
+pub(super) fn can_observe_registrar_label(label: &str) -> bool {
+    !label.is_empty() && label.to_ascii_lowercase().len() <= MAX_DNS_LABEL_OCTETS
+}
+
 pub(super) fn observe_registrar_name_with_reference(
     label: &str,
     reference: &ObservationRef,
@@ -22,6 +28,9 @@ pub(super) fn observe_registrar_name_with_version(
 ) -> Result<NameMetadata> {
     if label.is_empty() {
         bail!("registrar label must not be empty");
+    }
+    if !can_observe_registrar_label(label) {
+        bail!("registrar label exceeds DNS length");
     }
     let normalized_label = label.to_ascii_lowercase();
     let safe_label = postgres_text_safe(label);
@@ -122,6 +131,59 @@ pub(super) fn observe_dns_encoded_name_with_reference(
         dns_encoded_name: dns_name,
         namehash: namehash_hex(&labels),
         labelhashes: labels.iter().map(|label| keccak256_hex(label)).collect(),
+        normalizer_version: normalizer_version.to_owned(),
+    })
+}
+
+pub(super) fn observe_text_name_with_reference(
+    raw_name: &str,
+    reference: &ObservationRef,
+    normalizer_version: &str,
+) -> Result<NameMetadata> {
+    let input_labels = raw_name
+        .trim_end_matches('.')
+        .split('.')
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if input_labels.is_empty() || input_labels.iter().any(|label| label.is_empty()) {
+        bail!("text name preimage must contain non-empty labels");
+    }
+    let normalized_labels = input_labels
+        .iter()
+        .map(|label| label.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    let normalized_label_bytes = normalized_labels
+        .iter()
+        .map(|label| label.as_bytes().to_vec())
+        .collect::<Vec<_>>();
+    let mut dns_name = Vec::new();
+    for label in &normalized_label_bytes {
+        dns_name.push(u8::try_from(label.len()).context("text name label exceeds DNS length")?);
+        dns_name.extend_from_slice(label);
+    }
+    dns_name.push(0);
+    let normalized_name = normalized_labels
+        .iter()
+        .map(|label| postgres_text_safe(label))
+        .collect::<Vec<_>>()
+        .join(".");
+    let input_name = input_labels
+        .iter()
+        .map(|label| postgres_text_safe(label))
+        .collect::<Vec<_>>()
+        .join(".");
+    Ok(NameMetadata {
+        namespace: reference.namespace.clone(),
+        logical_name_id: format!("{}:{normalized_name}", reference.namespace),
+        input_name,
+        canonical_display_name: normalized_name.clone(),
+        normalized_name,
+        dns_encoded_name: dns_name,
+        namehash: namehash_hex(&normalized_label_bytes),
+        labelhashes: normalized_label_bytes
+            .iter()
+            .map(|label| keccak256_hex(label))
+            .collect(),
         normalizer_version: normalizer_version.to_owned(),
     })
 }

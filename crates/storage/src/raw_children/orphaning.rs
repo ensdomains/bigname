@@ -31,14 +31,6 @@ pub async fn mark_raw_block_facts_range_orphaned(
         bail!("missing stored raw block for chain {chain_id} block {from_hash}");
     }
 
-    let block_count = mark_block_hash_set_orphaned(
-        &mut *transaction,
-        "raw_blocks",
-        "observed_at",
-        chain_id,
-        &block_hashes,
-    )
-    .await?;
     let code_hash_count = mark_block_hash_set_orphaned(
         &mut *transaction,
         "raw_code_hashes",
@@ -94,7 +86,7 @@ pub async fn mark_raw_block_facts_range_orphaned(
         .context("failed to commit raw fact orphaning")?;
 
     Ok(RawFactOrphanCounts {
-        block_count,
+        block_count: 0,
         code_hash_count,
         transaction_count,
         receipt_count,

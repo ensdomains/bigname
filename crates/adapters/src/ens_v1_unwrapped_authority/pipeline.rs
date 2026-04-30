@@ -58,18 +58,32 @@ async fn sync_ens_v1_unwrapped_authority_with_scope(
     source_scope: Option<&[(String, String, i64, i64)]>,
 ) -> Result<EnsV1UnwrappedAuthoritySyncSummary> {
     let source_scope = source_scope.map(normalized_authority_source_scope_targets);
+    let total_started = Instant::now();
     if source_scope.as_ref().is_some_and(Vec::is_empty) {
         return Ok(EnsV1UnwrappedAuthoritySyncSummary::empty(0));
     }
 
+    let active_emitters_started = Instant::now();
+    let generic_resolver_event_sources =
+        load_generic_resolver_event_sources(pool, chain, source_scope.as_deref()).await?;
     let active_emitters = load_active_emitters(pool, chain, source_scope.as_deref()).await?;
-    if active_emitters.is_empty() {
+    let raw_log_active_emitters = active_emitters
+        .iter()
+        .filter(|emitter| {
+            generic_resolver_event_sources.is_empty()
+                || emitter.source_family != SOURCE_FAMILY_ENS_V1_RESOLVER_L1
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let active_emitters_ms = active_emitters_started.elapsed().as_millis();
+    if active_emitters.is_empty() && generic_resolver_event_sources.is_empty() {
         return Ok(EnsV1UnwrappedAuthoritySyncSummary::empty(0));
     }
 
     let mut histories = BTreeMap::<String, NameHistory>::new();
     let mut reverse_histories = BTreeMap::<String, ReverseClaimSourceHistory>::new();
     let mut known_names_by_namehash = HashMap::<String, NameMetadata>::new();
+    let mut known_name_refs_by_namehash = HashMap::<String, ObservationRef>::new();
     let mut namehash_to_labelhash = HashMap::<String, String>::new();
     let mut pending_namehash_observations = HashMap::<String, Vec<AuthorityObservation>>::new();
     let mut same_tx_name_intro_positions = HashMap::<String, Vec<RawLogPosition>>::new();
@@ -77,54 +91,80 @@ async fn sync_ens_v1_unwrapped_authority_with_scope(
     let scanned_log_count;
     let block_index;
     let mut matched_log_count = 0usize;
+    let mut raw_log_load_ms = 0;
+    let canonical_blocks_ms;
+    let reverse_claim_sources_ms;
+    let resolver_profile_gate_ms;
+    let mut same_tx_name_intro_ms = 0;
+    let mut preload_name_metadata_ms = 0;
+    let mut migrated_registry_nodes_ms = 0;
+    let apply_ms;
 
-    if !restrict_to_block_hashes && source_scope.is_none() {
+    if !restrict_to_block_hashes
+        && source_scope.is_none()
+        && generic_resolver_event_sources.is_empty()
+    {
+        let canonical_blocks_started = Instant::now();
         let canonical_blocks = load_canonical_blocks(pool, chain).await?;
+        canonical_blocks_ms = canonical_blocks_started.elapsed().as_millis();
         if canonical_blocks.is_empty() {
             return Ok(EnsV1UnwrappedAuthoritySyncSummary::empty(0));
         }
         block_index = CanonicalBlockIndex {
             blocks: canonical_blocks,
         };
+        let reverse_claim_sources_started = Instant::now();
         let reverse_claim_sources = load_reverse_claim_sources(pool, chain).await?;
+        reverse_claim_sources_ms = reverse_claim_sources_started.elapsed().as_millis();
+        let resolver_profile_gate_started = Instant::now();
         let resolver_profile_gate = ResolverProfileGate::load(pool).await?;
+        resolver_profile_gate_ms = resolver_profile_gate_started.elapsed().as_millis();
 
-        scanned_log_count = stream_authority_raw_logs(pool, chain, &active_emitters, |raw_log| {
-            if apply_authority_raw_log(
-                &raw_log,
-                &mut histories,
-                &mut reverse_histories,
-                &mut known_names_by_namehash,
-                &mut namehash_to_labelhash,
-                &mut pending_namehash_observations,
-                &same_tx_name_intro_positions,
-                &mut migrated_registry_nodes,
-                &reverse_claim_sources,
-                &resolver_profile_gate,
-                &block_index,
-            )? {
-                matched_log_count += 1;
-            }
-            Ok(())
-        })
-        .await?;
+        let stream_apply_started = Instant::now();
+        scanned_log_count =
+            stream_authority_raw_logs(pool, chain, &raw_log_active_emitters, |raw_log| {
+                if apply_authority_raw_log(
+                    &raw_log,
+                    &mut histories,
+                    &mut reverse_histories,
+                    &mut known_names_by_namehash,
+                    &mut known_name_refs_by_namehash,
+                    &mut namehash_to_labelhash,
+                    &mut pending_namehash_observations,
+                    &same_tx_name_intro_positions,
+                    &mut migrated_registry_nodes,
+                    &reverse_claim_sources,
+                    &resolver_profile_gate,
+                    &block_index,
+                )? {
+                    matched_log_count += 1;
+                }
+                Ok(())
+            })
+            .await?;
+        apply_ms = stream_apply_started.elapsed().as_millis();
     } else {
+        let raw_log_load_started = Instant::now();
         let raw_logs = load_authority_raw_logs(
             pool,
             chain,
-            &active_emitters,
+            &raw_log_active_emitters,
+            &generic_resolver_event_sources,
             restrict_to_block_hashes,
             block_hashes,
             source_scope.as_deref(),
         )
         .await?;
+        raw_log_load_ms = raw_log_load_started.elapsed().as_millis();
         scanned_log_count = raw_logs.len();
         if raw_logs.is_empty() {
             return Ok(EnsV1UnwrappedAuthoritySyncSummary::empty(scanned_log_count));
         }
 
+        let canonical_blocks_started = Instant::now();
         let canonical_blocks =
             load_canonical_blocks_for_restricted_authority_sync(pool, chain, &raw_logs).await?;
+        canonical_blocks_ms = canonical_blocks_started.elapsed().as_millis();
         if canonical_blocks.is_empty() {
             return Ok(EnsV1UnwrappedAuthoritySyncSummary::empty(scanned_log_count));
         }
@@ -133,28 +173,48 @@ async fn sync_ens_v1_unwrapped_authority_with_scope(
         };
 
         let resolver_profile_fact_nodes = resolver_profile_fact_nodes(&raw_logs)?;
+        let reverse_claim_sources_started = Instant::now();
         let reverse_claim_sources = if !resolver_profile_fact_nodes.is_empty() {
             load_reverse_claim_sources_for_nodes(pool, chain, &resolver_profile_fact_nodes).await?
         } else {
             HashMap::new()
         };
+        reverse_claim_sources_ms = reverse_claim_sources_started.elapsed().as_millis();
+        let resolver_profile_gate_started = Instant::now();
         let resolver_profile_gate = if !resolver_profile_fact_nodes.is_empty() {
             ResolverProfileGate::load_for_raw_logs(pool, &raw_logs).await?
         } else {
             ResolverProfileGate::default()
         };
+        resolver_profile_gate_ms = resolver_profile_gate_started.elapsed().as_millis();
+        let same_tx_name_intro_started = Instant::now();
         same_tx_name_intro_positions = name_intro_positions_for_raw_logs(&raw_logs)?;
+        same_tx_name_intro_ms = same_tx_name_intro_started.elapsed().as_millis();
+        let preload_name_metadata_started = Instant::now();
         preload_name_metadata_for_raw_logs(pool, &raw_logs, &mut known_names_by_namehash).await?;
+        preload_name_metadata_ms = preload_name_metadata_started.elapsed().as_millis();
         for name in known_names_by_namehash.values() {
             if let Some(labelhash) = name.labelhashes.first() {
                 namehash_to_labelhash.insert(name.namehash.clone(), labelhash.clone());
             }
         }
+        preload_restricted_name_histories(
+            pool,
+            chain,
+            &raw_logs,
+            &mut histories,
+            &mut known_names_by_namehash,
+            &mut known_name_refs_by_namehash,
+            &mut namehash_to_labelhash,
+            &block_index,
+        )
+        .await?;
 
         let preload_migrated_registry_nodes = raw_logs
             .iter()
             .any(|raw_log| raw_log.contract_role.as_deref() == Some(CONTRACT_ROLE_REGISTRY_OLD));
         if preload_migrated_registry_nodes {
+            let migrated_registry_nodes_started = Instant::now();
             let first_selected_block = raw_logs
                 .iter()
                 .map(|raw_log| raw_log.block_number)
@@ -167,13 +227,16 @@ async fn sync_ens_v1_unwrapped_authority_with_scope(
                 first_selected_block,
             )
             .await?;
+            migrated_registry_nodes_ms = migrated_registry_nodes_started.elapsed().as_millis();
         }
 
+        let apply_started = Instant::now();
         matched_log_count += apply_authority_raw_logs(
             &raw_logs,
             &mut histories,
             &mut reverse_histories,
             &mut known_names_by_namehash,
+            &mut known_name_refs_by_namehash,
             &mut namehash_to_labelhash,
             &mut pending_namehash_observations,
             &same_tx_name_intro_positions,
@@ -182,6 +245,7 @@ async fn sync_ens_v1_unwrapped_authority_with_scope(
             &resolver_profile_gate,
             &block_index,
         )?;
+        apply_ms = apply_started.elapsed().as_millis();
     }
 
     if scanned_log_count == 0 {
@@ -202,6 +266,11 @@ async fn sync_ens_v1_unwrapped_authority_with_scope(
         namespace: active_emitters
             .first()
             .map(|emitter| emitter.namespace.clone())
+            .or_else(|| {
+                generic_resolver_event_sources
+                    .first()
+                    .map(|source| source.namespace.clone())
+            })
             .unwrap_or_else(|| "ens".to_owned()),
     };
 
@@ -210,7 +279,10 @@ async fn sync_ens_v1_unwrapped_authority_with_scope(
     let mut surfaces = Vec::<NameSurface>::new();
     let mut bindings = Vec::<SurfaceBinding>::new();
     let mut events = Vec::<NormalizedEvent>::new();
+    let mut token_lineage_ids = HashSet::<Uuid>::new();
+    let mut resource_ids = HashSet::<Uuid>::new();
 
+    let materialization_started = Instant::now();
     for history in histories.into_values() {
         let Some(name) = history.name.clone() else {
             continue;
@@ -224,7 +296,9 @@ async fn sync_ens_v1_unwrapped_authority_with_scope(
         }
 
         if let Some(registry_anchor) = finalized.registry_resource_anchor.as_ref() {
-            resources.push(
+            push_resource_once(
+                &mut resources,
+                &mut resource_ids,
                 build_resource(
                     pool,
                     deterministic_uuid(&format!(
@@ -250,7 +324,9 @@ async fn sync_ens_v1_unwrapped_authority_with_scope(
         for lease in &finalized.registrar_leases {
             let token_lineage_id =
                 deterministic_uuid(&format!("token-lineage:{}", lease.authority_key));
-            token_lineages.push(
+            push_token_lineage_once(
+                &mut token_lineages,
+                &mut token_lineage_ids,
                 build_token_lineage(
                     pool,
                     token_lineage_id,
@@ -266,7 +342,9 @@ async fn sync_ens_v1_unwrapped_authority_with_scope(
                 )
                 .await?,
             );
-            resources.push(
+            push_resource_once(
+                &mut resources,
+                &mut resource_ids,
                 build_resource(
                     pool,
                     deterministic_uuid(&format!("resource:{}", lease.authority_key)),
@@ -291,7 +369,9 @@ async fn sync_ens_v1_unwrapped_authority_with_scope(
         for authority in &finalized.wrapper_authorities {
             let token_lineage_id =
                 deterministic_uuid(&format!("token-lineage:{}", authority.authority_key));
-            token_lineages.push(
+            push_token_lineage_once(
+                &mut token_lineages,
+                &mut token_lineage_ids,
                 build_token_lineage(
                     pool,
                     token_lineage_id,
@@ -307,7 +387,9 @@ async fn sync_ens_v1_unwrapped_authority_with_scope(
                 )
                 .await?,
             );
-            resources.push(
+            push_resource_once(
+                &mut resources,
+                &mut resource_ids,
                 build_resource(
                     pool,
                     deterministic_uuid(&format!("resource:{}", authority.authority_key)),
@@ -331,6 +413,16 @@ async fn sync_ens_v1_unwrapped_authority_with_scope(
         }
 
         for segment in finalized.bindings {
+            ensure_binding_authority_identity_rows(
+                pool,
+                &mut token_lineages,
+                &mut token_lineage_ids,
+                &mut resources,
+                &mut resource_ids,
+                &name.logical_name_id,
+                &segment,
+            )
+            .await?;
             bindings.push(
                 build_surface_binding(pool, &name.logical_name_id, &segment, &head_ref.chain_id)
                     .await?,
@@ -341,19 +433,73 @@ async fn sync_ens_v1_unwrapped_authority_with_scope(
     for history in reverse_histories.into_values() {
         events.extend(history.events);
     }
+    let materialization_ms = materialization_started.elapsed().as_millis();
 
+    let normalize_started = Instant::now();
     let by_kind = count_events_by_kind(&events);
     coalesce_name_surfaces_for_upsert(&mut surfaces);
     normalize_surface_bindings_for_upsert(&mut bindings)?;
+    let normalize_ms = normalize_started.elapsed().as_millis();
+    let closure_started = Instant::now();
     let closure_count = prepend_existing_open_binding_closures(pool, &mut bindings).await?;
+    let closure_ms = closure_started.elapsed().as_millis();
+    let token_lineages_started = Instant::now();
     upsert_token_lineages(pool, &token_lineages).await?;
+    let token_lineages_upsert_ms = token_lineages_started.elapsed().as_millis();
+    let resources_started = Instant::now();
     upsert_resources(pool, &resources).await?;
+    let resources_upsert_ms = resources_started.elapsed().as_millis();
+    let surfaces_started = Instant::now();
     upsert_name_surfaces(pool, &surfaces).await?;
+    let surfaces_upsert_ms = surfaces_started.elapsed().as_millis();
+    let binding_closures_started = Instant::now();
     if closure_count > 0 {
         upsert_surface_bindings(pool, &bindings[..closure_count]).await?;
     }
+    let binding_closures_upsert_ms = binding_closures_started.elapsed().as_millis();
+    let bindings_started = Instant::now();
     upsert_surface_bindings(pool, &bindings[closure_count..]).await?;
+    let bindings_upsert_ms = bindings_started.elapsed().as_millis();
+    let normalized_events_started = Instant::now();
     let normalized_event_upsert = upsert_normalized_events_with_summary(pool, &events).await?;
+    let normalized_events_upsert_ms = normalized_events_started.elapsed().as_millis();
+
+    tracing::info!(
+        service = "adapters",
+        adapter = DERIVATION_KIND_ENS_V1_UNWRAPPED_AUTHORITY,
+        chain,
+        restrict_to_block_hashes,
+        block_hash_count = block_hashes.len(),
+        source_scope_target_count = source_scope.as_ref().map_or(0, Vec::len),
+        active_emitter_count = active_emitters.len(),
+        scanned_log_count,
+        matched_log_count,
+        history_count = surfaces.len(),
+        resource_count = resources.len(),
+        binding_count = bindings.len(),
+        normalized_event_count = events.len(),
+        normalized_event_inserted_count = normalized_event_upsert.inserted_count,
+        active_emitters_ms,
+        raw_log_load_ms,
+        canonical_blocks_ms,
+        reverse_claim_sources_ms,
+        resolver_profile_gate_ms,
+        same_tx_name_intro_ms,
+        preload_name_metadata_ms,
+        migrated_registry_nodes_ms,
+        apply_ms,
+        materialization_ms,
+        normalize_ms,
+        closure_ms,
+        token_lineages_upsert_ms,
+        resources_upsert_ms,
+        surfaces_upsert_ms,
+        binding_closures_upsert_ms,
+        bindings_upsert_ms,
+        normalized_events_upsert_ms,
+        total_ms = total_started.elapsed().as_millis(),
+        "ENSv1 unwrapped-authority replay timing"
+    );
 
     Ok(EnsV1UnwrappedAuthoritySyncSummary {
         scanned_log_count,
@@ -365,4 +511,120 @@ async fn sync_ens_v1_unwrapped_authority_with_scope(
         total_normalized_event_inserted_count: normalized_event_upsert.inserted_count,
         by_kind,
     })
+}
+
+async fn ensure_binding_authority_identity_rows(
+    pool: &PgPool,
+    token_lineages: &mut Vec<TokenLineage>,
+    token_lineage_ids: &mut HashSet<Uuid>,
+    resources: &mut Vec<Resource>,
+    resource_ids: &mut HashSet<Uuid>,
+    logical_name_id: &str,
+    segment: &BindingSegment,
+) -> Result<()> {
+    let mut provenance = Map::from_iter([
+        (
+            "adapter".to_owned(),
+            Value::String(DERIVATION_KIND_ENS_V1_UNWRAPPED_AUTHORITY.to_owned()),
+        ),
+        (
+            "authority_kind".to_owned(),
+            Value::String(segment.authority.kind.as_str().to_owned()),
+        ),
+        (
+            "authority_key".to_owned(),
+            Value::String(segment.authority.authority_key.clone()),
+        ),
+        (
+            "logical_name_id".to_owned(),
+            Value::String(logical_name_id.to_owned()),
+        ),
+        (
+            "source_event".to_owned(),
+            Value::String("surface_binding_authority".to_owned()),
+        ),
+        (
+            "binding_source_family".to_owned(),
+            Value::String(segment.authority.binding_source_family.clone()),
+        ),
+        (
+            "binding_manifest_version".to_owned(),
+            Value::Number(segment.authority.binding_manifest_version.into()),
+        ),
+        (
+            "binding_manifest_id".to_owned(),
+            Value::Number(segment.authority.binding_manifest_id.into()),
+        ),
+    ]);
+    if segment.authority.kind == AuthorityKind::Registrar {
+        if let Some(labelhash) =
+            registrar_labelhash_from_authority_key(&segment.authority.authority_key)
+        {
+            provenance.insert("labelhash".to_owned(), Value::String(labelhash));
+        }
+        if let Some(active_to) = segment.active_to {
+            provenance.insert(
+                "released_at".to_owned(),
+                Value::Number(active_to.unix_timestamp().into()),
+            );
+            if let Some(expiry) = active_to
+                .unix_timestamp()
+                .checked_sub(ENS_GRACE_PERIOD_SECS)
+            {
+                provenance.insert("expiry".to_owned(), Value::Number(expiry.into()));
+            }
+        }
+    }
+    let provenance = Value::Object(provenance);
+
+    if let Some(token_lineage_id) = segment.authority.token_lineage_id {
+        push_token_lineage_once(
+            token_lineages,
+            token_lineage_ids,
+            build_token_lineage_from_boundary(
+                pool,
+                token_lineage_id,
+                &segment.anchor_ref.chain_id,
+                &segment.anchor_ref,
+                provenance.clone(),
+            )
+            .await?,
+        );
+    }
+
+    push_resource_once(
+        resources,
+        resource_ids,
+        build_resource(
+            pool,
+            segment.authority.resource_id,
+            segment.authority.token_lineage_id,
+            &segment.anchor_ref.chain_id,
+            &segment.anchor_ref,
+            provenance,
+        )
+        .await?,
+    );
+
+    Ok(())
+}
+
+fn push_token_lineage_once(
+    token_lineages: &mut Vec<TokenLineage>,
+    token_lineage_ids: &mut HashSet<Uuid>,
+    token_lineage: TokenLineage,
+) {
+    if token_lineage_ids.insert(token_lineage.token_lineage_id) {
+        token_lineages.push(token_lineage);
+    }
+}
+
+fn push_resource_once(
+    resources: &mut Vec<Resource>,
+    resource_ids: &mut HashSet<Uuid>,
+    resource: Resource,
+) {
+    if resource_ids.insert(resource.resource_id) {
+        resources.push(resource);
+    }
 }

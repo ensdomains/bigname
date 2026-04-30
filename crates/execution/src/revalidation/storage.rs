@@ -9,12 +9,23 @@ use crate::json_helpers::{json_field, json_string_field};
 pub(super) async fn load_supported_record_inventory_current_for_revalidation(
     transaction: &mut Transaction<'_, Postgres>,
     row: &NameCurrentRow,
+    request_record_version_boundary: &Value,
 ) -> Result<Option<RecordInventoryCurrentRow>> {
     let Some((resource_id, record_version_boundary)) =
         bigname_storage::resolution_record_inventory_lookup_key_for_revalidation(row)?
     else {
         return Ok(None);
     };
+
+    if let Some(record_inventory_row) = load_record_inventory_current_for_revalidation(
+        transaction,
+        resource_id,
+        request_record_version_boundary,
+    )
+    .await?
+    {
+        return Ok(Some(record_inventory_row));
+    }
 
     if let Some(record_inventory_row) = load_record_inventory_current_for_revalidation(
         transaction,

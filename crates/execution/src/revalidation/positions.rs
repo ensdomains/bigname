@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, bail};
-use bigname_storage::NameCurrentRow;
+use bigname_storage::{NameCurrentRow, RecordInventoryCurrentRow};
 use serde_json::{Map, Value};
 use sqlx::{Postgres, Transaction};
 
@@ -134,6 +134,109 @@ pub(super) async fn ensure_requested_positions_are_eligible_for_projection(
     Ok(())
 }
 
+pub(super) async fn ensure_requested_positions_are_eligible_for_record_inventory_projection(
+    transaction: &mut Transaction<'_, Postgres>,
+    row: &RecordInventoryCurrentRow,
+    requested_positions: &[RequestedChainPosition],
+    allow_requested_superset: bool,
+    context: &str,
+) -> Result<()> {
+    let projected_positions = build_requested_chain_positions_from_projection(&row.chain_positions)
+        .with_context(|| {
+            format!(
+                "{context} failed to normalize record_inventory_current chain_positions for resource_id {}",
+                row.resource_id
+            )
+        })?;
+    if projected_positions == requested_positions {
+        return Ok(());
+    }
+
+    let projected_by_chain_id = positions_by_chain_id(
+        &projected_positions,
+        &format!("{context} record_inventory_current chain_positions"),
+    )?;
+    let requested_by_chain_id = positions_by_chain_id(
+        requested_positions,
+        &format!("{context} cache_key.requested_chain_positions"),
+    )?;
+    let chain_set_supported = if allow_requested_superset {
+        projected_by_chain_id
+            .keys()
+            .all(|chain_id| requested_by_chain_id.contains_key(chain_id))
+    } else {
+        projected_by_chain_id
+            .keys()
+            .eq(requested_by_chain_id.keys())
+    };
+    if !chain_set_supported {
+        bail!(
+            "{context} cache_key.requested_chain_positions must use the same chain set as record_inventory_current chain_positions for resource_id {}",
+            row.resource_id
+        );
+    }
+
+    let logical_name_id = row
+        .record_version_boundary
+        .get("logical_name_id")
+        .and_then(Value::as_str);
+    for (chain_id, projected_position) in &projected_by_chain_id {
+        let requested_position = requested_by_chain_id
+            .get(chain_id)
+            .expect("requested map must have the same chain_id keys as projected map");
+        if requested_position.block_number < projected_position.block_number {
+            bail!(
+                "{context} cache_key.requested_chain_positions is older than record_inventory_current chain_positions for resource_id {} on chain {}",
+                row.resource_id,
+                chain_id
+            );
+        }
+        if requested_position.block_number == projected_position.block_number {
+            if requested_position.block_hash != projected_position.block_hash {
+                bail!(
+                    "{context} cache_key.requested_chain_positions does not match record_inventory_current chain_positions for resource_id {} on chain {}",
+                    row.resource_id,
+                    chain_id
+                );
+            }
+            continue;
+        }
+
+        if !position_is_canonical_lineage_member(transaction, chain_id, projected_position).await? {
+            bail!(
+                "{context} record_inventory_current chain_positions block is no longer canonical for resource_id {} on chain {}",
+                row.resource_id,
+                chain_id
+            );
+        }
+        if !position_is_canonical_lineage_member(transaction, chain_id, requested_position).await? {
+            bail!(
+                "{context} cache_key.requested_chain_positions block is not canonical for resource_id {} on chain {}",
+                row.resource_id,
+                chain_id
+            );
+        }
+        if record_inventory_has_newer_projection_inputs(
+            transaction,
+            row,
+            logical_name_id,
+            chain_id,
+            projected_position.block_number,
+            requested_position.block_number,
+        )
+        .await?
+        {
+            bail!(
+                "{context} cache_key.requested_chain_positions crosses newer record_inventory_current inputs for resource_id {} on chain {}",
+                row.resource_id,
+                chain_id
+            );
+        }
+    }
+
+    Ok(())
+}
+
 fn positions_by_chain_id<'a>(
     positions: &'a [RequestedChainPosition],
     context: &str,
@@ -257,6 +360,55 @@ async fn name_current_has_newer_projection_inputs(
         format!(
             "failed to check execution requested-position surface-binding invalidation for {}",
             row.logical_name_id
+        )
+    })
+}
+
+async fn record_inventory_has_newer_projection_inputs(
+    transaction: &mut Transaction<'_, Postgres>,
+    row: &RecordInventoryCurrentRow,
+    logical_name_id: Option<&str>,
+    chain_id: &str,
+    projected_block_number: i64,
+    selected_block_number: i64,
+) -> Result<bool> {
+    sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM normalized_events ne
+            WHERE ne.chain_id = $1
+              AND ne.block_number > $2
+              AND ne.block_number <= $3
+              AND ne.canonicality_state IN (
+                  'canonical'::canonicality_state,
+                  'safe'::canonicality_state,
+                  'finalized'::canonicality_state
+              )
+              AND ne.event_kind IN (
+                  'RecordChanged',
+                  'RecordVersionChanged',
+                  'ResolverChanged'
+              )
+              AND (
+                  ne.resource_id = $4
+                  OR ($5::TEXT IS NOT NULL AND ne.logical_name_id = $5)
+              )
+            LIMIT 1
+        )
+        "#,
+    )
+    .bind(chain_id)
+    .bind(projected_block_number)
+    .bind(selected_block_number)
+    .bind(row.resource_id)
+    .bind(logical_name_id)
+    .fetch_one(&mut **transaction)
+    .await
+    .with_context(|| {
+        format!(
+            "failed to check execution requested-position record_inventory_current invalidation for resource_id {}",
+            row.resource_id
         )
     })
 }

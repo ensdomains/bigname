@@ -46,19 +46,22 @@ where
     let row = sqlx::query(
         r#"
         SELECT
-            chain_id,
-            block_hash,
-            parent_hash,
-            block_number,
-            block_timestamp,
-            logs_bloom,
-            transactions_root,
-            receipts_root,
-            state_root,
-            canonicality_state::TEXT AS canonicality_state
-        FROM chain_lineage
-        WHERE chain_id = $1
-          AND block_hash = $2
+            lineage.chain_id,
+            lineage.block_hash,
+            lineage.parent_hash,
+            lineage.block_number,
+            lineage.block_timestamp,
+            audit.logs_bloom,
+            audit.transactions_root,
+            audit.receipts_root,
+            audit.state_root,
+            lineage.canonicality_state::TEXT AS canonicality_state
+        FROM chain_lineage AS lineage
+        LEFT JOIN chain_header_audit AS audit
+          ON audit.chain_id = lineage.chain_id
+         AND audit.block_hash = lineage.block_hash
+        WHERE lineage.chain_id = $1
+          AND lineage.block_hash = $2
         "#,
     )
     .bind(chain_id)
@@ -105,15 +108,18 @@ where
             lineage.parent_hash,
             lineage.block_number,
             lineage.block_timestamp,
-            lineage.logs_bloom,
-            lineage.transactions_root,
-            lineage.receipts_root,
-            lineage.state_root,
+            audit.logs_bloom,
+            audit.transactions_root,
+            audit.receipts_root,
+            audit.state_root,
             lineage.canonicality_state::TEXT AS canonicality_state
         FROM lineage_path
         JOIN chain_lineage AS lineage
           ON lineage.chain_id = lineage_path.chain_id
          AND lineage.block_hash = lineage_path.block_hash
+        LEFT JOIN chain_header_audit AS audit
+          ON audit.chain_id = lineage.chain_id
+         AND audit.block_hash = lineage.block_hash
         ORDER BY lineage_path.depth
         "#,
     )
@@ -137,19 +143,22 @@ where
     let rows = sqlx::query(
         r#"
         SELECT
-            chain_id,
-            block_hash,
-            parent_hash,
-            block_number,
-            block_timestamp,
-            logs_bloom,
-            transactions_root,
-            receipts_root,
-            state_root,
-            canonicality_state::TEXT AS canonicality_state
-        FROM chain_lineage
-        WHERE chain_id = $1
-          AND block_hash = ANY($2::TEXT[])
+            lineage.chain_id,
+            lineage.block_hash,
+            lineage.parent_hash,
+            lineage.block_number,
+            lineage.block_timestamp,
+            audit.logs_bloom,
+            audit.transactions_root,
+            audit.receipts_root,
+            audit.state_root,
+            lineage.canonicality_state::TEXT AS canonicality_state
+        FROM chain_lineage AS lineage
+        LEFT JOIN chain_header_audit AS audit
+          ON audit.chain_id = lineage.chain_id
+         AND audit.block_hash = lineage.block_hash
+        WHERE lineage.chain_id = $1
+          AND lineage.block_hash = ANY($2::TEXT[])
         "#,
     )
     .bind(chain_id)

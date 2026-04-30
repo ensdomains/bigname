@@ -152,7 +152,7 @@
             ] {
                 let updated = sqlx::query(
                     r#"
-                    UPDATE raw_blocks
+                    UPDATE chain_lineage
                     SET parent_hash = $1
                     WHERE chain_id = 'base-mainnet'
                       AND block_hash = $2
@@ -163,12 +163,12 @@
                 .execute(&database.pool)
                 .await
                 .with_context(|| {
-                    format!("failed to stitch chaos parent link for raw block {block_hash}")
+                    format!("failed to stitch chaos parent link for lineage block {block_hash}")
                 })?
                 .rows_affected();
                 anyhow::ensure!(
                     updated == 1,
-                    "expected to stitch one chaos parent link for raw block {block_hash}, updated {updated}"
+                    "expected to stitch one chaos parent link for lineage block {block_hash}, updated {updated}"
                 );
             }
 

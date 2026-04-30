@@ -578,7 +578,7 @@ async fn reconcile_fetched_heads_marks_losing_branch_orphaned_on_reorg() -> Resu
         );
     assert_eq!(
             sqlx::query_scalar::<_, String>(
-                "SELECT canonicality_state::TEXT FROM raw_blocks WHERE block_hash = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'"
+                "SELECT canonicality_state::TEXT FROM chain_lineage WHERE block_hash = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'"
             )
             .fetch_one(database.pool())
             .await?,
@@ -586,7 +586,7 @@ async fn reconcile_fetched_heads_marks_losing_branch_orphaned_on_reorg() -> Resu
         );
     assert_eq!(
             sqlx::query_scalar::<_, String>(
-                "SELECT canonicality_state::TEXT FROM raw_blocks WHERE block_hash = '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'"
+                "SELECT canonicality_state::TEXT FROM chain_lineage WHERE block_hash = '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'"
             )
             .fetch_one(database.pool())
             .await?,
@@ -594,7 +594,7 @@ async fn reconcile_fetched_heads_marks_losing_branch_orphaned_on_reorg() -> Resu
         );
     assert_eq!(
             sqlx::query_scalar::<_, String>(
-                "SELECT canonicality_state::TEXT FROM raw_blocks WHERE block_hash = '0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'"
+                "SELECT canonicality_state::TEXT FROM chain_lineage WHERE block_hash = '0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'"
             )
             .fetch_one(database.pool())
             .await?,
@@ -602,7 +602,7 @@ async fn reconcile_fetched_heads_marks_losing_branch_orphaned_on_reorg() -> Resu
         );
     assert_eq!(
             sqlx::query_scalar::<_, String>(
-                "SELECT canonicality_state::TEXT FROM raw_blocks WHERE block_hash = '0x1111111111111111111111111111111111111111111111111111111111111111'"
+                "SELECT canonicality_state::TEXT FROM chain_lineage WHERE block_hash = '0x1111111111111111111111111111111111111111111111111111111111111111'"
             )
             .fetch_one(database.pool())
             .await?,
@@ -898,7 +898,7 @@ async fn reorg_reconcile_fetched_heads_orphans_losing_branch_rows_when_raw_block
     )
     .await?;
     assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM raw_blocks WHERE block_hash = $1")
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM chain_lineage WHERE block_hash = $1")
             .bind(&losing_block.block_hash)
             .fetch_one(database.pool())
             .await?,
@@ -1121,7 +1121,7 @@ async fn reorg_reconcile_fetched_heads_orphans_losing_branch_rows_when_raw_block
         },
     )
     .await?
-    .expect("reorg reconciliation must update task state when raw_blocks are missing");
+    .expect("reorg reconciliation must update task state when chain_lineage rows are missing");
 
     assert_eq!(
         outcome.canonical_status,
@@ -1138,7 +1138,7 @@ async fn reorg_reconcile_fetched_heads_orphans_losing_branch_rows_when_raw_block
     );
     assert_eq!(
         sqlx::query_scalar::<_, String>(
-            "SELECT canonicality_state::TEXT FROM raw_blocks WHERE block_hash = $1"
+            "SELECT canonicality_state::TEXT FROM chain_lineage WHERE block_hash = $1"
         )
         .bind(&losing_block.block_hash)
         .fetch_one(database.pool())

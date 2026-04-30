@@ -1,7 +1,6 @@
 use anyhow::{Result, bail};
 
 use super::types::RawBlock;
-use crate::CanonicalityState;
 
 pub(super) fn validate_raw_block(block: &RawBlock) -> Result<()> {
     if block.block_number < 0 {
@@ -39,46 +38,4 @@ pub(super) fn validate_replay_hashes(chain_id: &str, block_hashes: &[String]) ->
         }
     }
     Ok(())
-}
-
-pub(super) fn ensure_raw_identity_matches(existing: &RawBlock, incoming: &RawBlock) -> Result<()> {
-    if existing.parent_hash != incoming.parent_hash
-        || existing.block_number != incoming.block_number
-        || existing.block_timestamp != incoming.block_timestamp
-        || existing.logs_bloom != incoming.logs_bloom
-        || existing.transactions_root != incoming.transactions_root
-        || existing.receipts_root != incoming.receipts_root
-        || existing.state_root != incoming.state_root
-    {
-        bail!(
-            "raw block identity mismatch for chain {} block {}",
-            existing.chain_id,
-            existing.block_hash
-        );
-    }
-
-    Ok(())
-}
-
-pub(super) fn merge_canonicality(
-    current: CanonicalityState,
-    incoming: CanonicalityState,
-) -> CanonicalityState {
-    match incoming {
-        CanonicalityState::Orphaned => CanonicalityState::Orphaned,
-        CanonicalityState::Observed => {
-            if current == CanonicalityState::Orphaned {
-                CanonicalityState::Observed
-            } else {
-                current
-            }
-        }
-        CanonicalityState::Canonical | CanonicalityState::Safe | CanonicalityState::Finalized => {
-            if current == CanonicalityState::Orphaned {
-                incoming
-            } else {
-                current.promote_to(incoming)
-            }
-        }
-    }
 }

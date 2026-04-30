@@ -1,0 +1,621 @@
+use super::*;
+
+pub(super) async fn preload_restricted_name_histories(
+    pool: &PgPool,
+    chain: &str,
+    raw_logs: &[AuthorityRawLogRow],
+    histories: &mut BTreeMap<String, NameHistory>,
+    known_names_by_namehash: &mut HashMap<String, NameMetadata>,
+    known_name_refs_by_namehash: &mut HashMap<String, ObservationRef>,
+    namehash_to_labelhash: &mut HashMap<String, String>,
+    block_index: &CanonicalBlockIndex,
+) -> Result<()> {
+    let Some(first_log) = raw_logs.first() else {
+        return Ok(());
+    };
+    let boundary_block = first_log.block_number;
+    let boundary_timestamp = first_log.block_timestamp;
+    let labelhashes =
+        restricted_replay_labelhashes(raw_logs, known_names_by_namehash, namehash_to_labelhash)?;
+    if labelhashes.is_empty() {
+        return Ok(());
+    }
+
+    let rows = sqlx::query(
+        r#"
+        SELECT DISTINCT ON (surface.logical_name_id)
+            surface.namespace,
+            surface.logical_name_id,
+            surface.input_name,
+            surface.canonical_display_name,
+            surface.normalized_name,
+            surface.dns_encoded_name,
+            surface.namehash,
+            surface.labelhashes,
+            surface.normalizer_version,
+            binding.surface_binding_id,
+            binding.resource_id,
+            binding.binding_kind,
+            binding.active_from,
+            binding.active_to,
+            binding.chain_id AS binding_chain_id,
+            binding.block_hash AS binding_block_hash,
+            binding.block_number AS binding_block_number,
+            binding.canonicality_state::TEXT AS binding_canonicality_state,
+            resource.provenance AS resource_provenance
+        FROM name_surfaces surface
+        JOIN surface_bindings binding
+          ON binding.logical_name_id = surface.logical_name_id
+        JOIN resources resource
+          ON resource.resource_id = binding.resource_id
+        WHERE binding.chain_id = $1
+          AND lower(surface.labelhashes[1]) = ANY($2::TEXT[])
+          AND binding.active_from <= $3
+          AND binding.block_number < $4
+          AND (
+              binding.active_to IS NULL
+              OR binding.active_to > $3
+          )
+          AND surface.canonicality_state IN (
+              'canonical'::canonicality_state,
+              'safe'::canonicality_state,
+              'finalized'::canonicality_state
+          )
+          AND binding.canonicality_state IN (
+              'canonical'::canonicality_state,
+              'safe'::canonicality_state,
+              'finalized'::canonicality_state
+          )
+          AND resource.canonicality_state IN (
+              'canonical'::canonicality_state,
+              'safe'::canonicality_state,
+              'finalized'::canonicality_state
+          )
+        ORDER BY
+            surface.logical_name_id,
+            binding.active_from DESC,
+            binding.block_number DESC,
+            binding.surface_binding_id
+        "#,
+    )
+    .bind(chain)
+    .bind(&labelhashes)
+    .bind(boundary_timestamp)
+    .bind(boundary_block)
+    .fetch_all(pool)
+    .await
+    .with_context(|| {
+        format!(
+            "failed to preload ENSv1 restricted replay histories for chain {chain} before block {boundary_block}"
+        )
+    })?;
+
+    let logical_name_ids = rows
+        .iter()
+        .map(|row| row.get::<String, _>("logical_name_id"))
+        .collect::<Vec<_>>();
+    let resolver_state =
+        load_latest_resolver_state_before_block(pool, &logical_name_ids, boundary_block).await?;
+    let record_versions =
+        load_latest_record_versions_before_block(pool, &logical_name_ids, boundary_block).await?;
+
+    for row in rows {
+        let name = name_metadata_from_preload_row(&row)?;
+        let Some(labelhash) = name.labelhashes.first().cloned() else {
+            continue;
+        };
+        known_names_by_namehash
+            .entry(name.namehash.clone())
+            .or_insert_with(|| name.clone());
+        namehash_to_labelhash
+            .entry(name.namehash.clone())
+            .or_insert_with(|| labelhash.clone());
+
+        let logical_name_id = name.logical_name_id.clone();
+        let resource_provenance: Value = row
+            .try_get("resource_provenance")
+            .context("missing resource_provenance")?;
+        let active_from = row
+            .try_get("active_from")
+            .context("missing binding active_from")?;
+        let active_to = row
+            .try_get("active_to")
+            .context("missing binding active_to")?;
+        let binding_ref = BoundaryRef {
+            chain_id: row
+                .try_get("binding_chain_id")
+                .context("missing binding_chain_id")?,
+            block_hash: row
+                .try_get("binding_block_hash")
+                .context("missing binding_block_hash")?,
+            block_number: row
+                .try_get("binding_block_number")
+                .context("missing binding_block_number")?,
+            block_timestamp: active_from,
+            canonicality_state: decode_preload_canonicality_state(
+                &row.try_get::<String, _>("binding_canonicality_state")
+                    .context("missing binding_canonicality_state")?,
+            )?,
+            namespace: name.namespace.clone(),
+        };
+        let surface_binding_id = row
+            .try_get("surface_binding_id")
+            .context("missing surface_binding_id")?;
+        let resource_id = row.try_get("resource_id").context("missing resource_id")?;
+
+        let history = histories
+            .entry(labelhash.clone())
+            .or_insert_with(|| empty_preloaded_history(labelhash.clone(), Some(name.clone())));
+        if history.name.is_none() {
+            history.name = Some(name.clone());
+        }
+        known_name_refs_by_namehash
+            .entry(name.namehash.clone())
+            .or_insert_with(|| observation_ref_from_boundary(&binding_ref, None, None, None));
+
+        if let Some(resolver) = resolver_state.get(&logical_name_id) {
+            history.current_resolver = Some(resolver.clone());
+        }
+        if let Some(record_version) = record_versions.get(&logical_name_id) {
+            history.current_record_version = Some(*record_version);
+        }
+
+        let authority_kind = resource_provenance
+            .get("authority_kind")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        match authority_kind {
+            "registrar" => preload_registrar_history(
+                history,
+                &resource_provenance,
+                &binding_ref,
+                surface_binding_id,
+                active_to,
+                block_index,
+            )?,
+            "wrapper" => preload_wrapper_history(
+                history,
+                &resource_provenance,
+                &binding_ref,
+                surface_binding_id,
+            )?,
+            "registry_only" => preload_registry_history(
+                history,
+                &resource_provenance,
+                &binding_ref,
+                surface_binding_id,
+                resource_id,
+            ),
+            _ => {}
+        }
+    }
+
+    Ok(())
+}
+
+fn restricted_replay_labelhashes(
+    raw_logs: &[AuthorityRawLogRow],
+    known_names_by_namehash: &HashMap<String, NameMetadata>,
+    namehash_to_labelhash: &HashMap<String, String>,
+) -> Result<Vec<String>> {
+    let mut labelhashes = BTreeSet::<String>::new();
+    for raw_log in raw_logs {
+        let Some(observation) = build_authority_observation(raw_log)? else {
+            continue;
+        };
+        if let Some(namehash) = observation_namehash(&observation) {
+            if let Some(labelhash) = namehash_to_labelhash.get(namehash) {
+                labelhashes.insert(labelhash.to_ascii_lowercase());
+            } else if let Some(name) = known_names_by_namehash.get(namehash)
+                && let Some(labelhash) = name.labelhashes.first()
+            {
+                labelhashes.insert(labelhash.to_ascii_lowercase());
+            }
+        } else {
+            labelhashes.insert(observation_labelhash(&observation).to_ascii_lowercase());
+        }
+    }
+    Ok(labelhashes.into_iter().collect())
+}
+
+async fn load_latest_resolver_state_before_block(
+    pool: &PgPool,
+    logical_name_ids: &[String],
+    boundary_block: i64,
+) -> Result<HashMap<String, String>> {
+    if logical_name_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let rows = sqlx::query(
+        r#"
+        SELECT DISTINCT ON (logical_name_id)
+            logical_name_id,
+            after_state->>'resolver' AS resolver
+        FROM normalized_events
+        WHERE logical_name_id = ANY($1::TEXT[])
+          AND block_number < $2
+          AND event_kind = $3
+          AND canonicality_state IN (
+              'canonical'::canonicality_state,
+              'safe'::canonicality_state,
+              'finalized'::canonicality_state
+          )
+        ORDER BY logical_name_id, block_number DESC, log_index DESC, normalized_event_id DESC
+        "#,
+    )
+    .bind(logical_name_ids)
+    .bind(boundary_block)
+    .bind(EVENT_KIND_RESOLVER_CHANGED)
+    .fetch_all(pool)
+    .await
+    .context("failed to preload latest resolver state before restricted replay")?;
+
+    let mut state = HashMap::new();
+    for row in rows {
+        let Some(resolver) = row.try_get::<Option<String>, _>("resolver")? else {
+            continue;
+        };
+        state.insert(row.try_get("logical_name_id")?, resolver);
+    }
+    Ok(state)
+}
+
+async fn load_latest_record_versions_before_block(
+    pool: &PgPool,
+    logical_name_ids: &[String],
+    boundary_block: i64,
+) -> Result<HashMap<String, i64>> {
+    if logical_name_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let rows = sqlx::query(
+        r#"
+        SELECT DISTINCT ON (logical_name_id)
+            logical_name_id,
+            after_state->>'record_version' AS record_version
+        FROM normalized_events
+        WHERE logical_name_id = ANY($1::TEXT[])
+          AND block_number < $2
+          AND event_kind = $3
+          AND canonicality_state IN (
+              'canonical'::canonicality_state,
+              'safe'::canonicality_state,
+              'finalized'::canonicality_state
+          )
+        ORDER BY logical_name_id, block_number DESC, log_index DESC, normalized_event_id DESC
+        "#,
+    )
+    .bind(logical_name_ids)
+    .bind(boundary_block)
+    .bind(EVENT_KIND_RECORD_VERSION_CHANGED)
+    .fetch_all(pool)
+    .await
+    .context("failed to preload latest record versions before restricted replay")?;
+
+    let mut state = HashMap::new();
+    for row in rows {
+        let Some(record_version) = row.try_get::<Option<String>, _>("record_version")? else {
+            continue;
+        };
+        if let Ok(record_version) = record_version.parse::<i64>() {
+            state.insert(row.try_get("logical_name_id")?, record_version);
+        }
+    }
+    Ok(state)
+}
+
+fn name_metadata_from_preload_row(row: &sqlx::postgres::PgRow) -> Result<NameMetadata> {
+    Ok(NameMetadata {
+        namespace: row.try_get("namespace").context("missing namespace")?,
+        logical_name_id: row
+            .try_get("logical_name_id")
+            .context("missing logical_name_id")?,
+        input_name: row.try_get("input_name").context("missing input_name")?,
+        canonical_display_name: row
+            .try_get("canonical_display_name")
+            .context("missing canonical_display_name")?,
+        normalized_name: row
+            .try_get("normalized_name")
+            .context("missing normalized_name")?,
+        dns_encoded_name: row
+            .try_get("dns_encoded_name")
+            .context("missing dns_encoded_name")?,
+        namehash: row
+            .try_get::<String, _>("namehash")
+            .context("missing namehash")?
+            .to_ascii_lowercase(),
+        labelhashes: row.try_get("labelhashes").context("missing labelhashes")?,
+        normalizer_version: row
+            .try_get("normalizer_version")
+            .context("missing normalizer_version")?,
+    })
+}
+
+pub(super) fn empty_preloaded_history(
+    labelhash: String,
+    name: Option<NameMetadata>,
+) -> NameHistory {
+    NameHistory {
+        name,
+        labelhash,
+        first_name_ref: None,
+        current_registration: None,
+        current_wrapper_key: None,
+        wrapper_authorities: BTreeMap::new(),
+        current_registry_owner: None,
+        current_resolver: None,
+        current_record_version: None,
+        open_binding: None,
+        bindings: Vec::new(),
+        events: Vec::new(),
+        registry_resource_anchor: None,
+        latest_registry_owner_ref: None,
+        latest_registry_owner_before_registration: None,
+    }
+}
+
+pub(super) fn preload_registrar_history(
+    history: &mut NameHistory,
+    provenance: &Value,
+    binding_ref: &BoundaryRef,
+    surface_binding_id: Uuid,
+    binding_active_to: Option<OffsetDateTime>,
+    block_index: &CanonicalBlockIndex,
+) -> Result<()> {
+    let authority_key = provenance_string(provenance, "authority_key")?;
+    let labelhash = registrar_labelhash_from_provenance_or_authority_key(
+        provenance,
+        &authority_key,
+        &history.labelhash,
+    );
+    let expiry = registrar_expiry_from_provenance_or_binding_end(provenance, binding_active_to)?;
+    let expiry = OffsetDateTime::from_unix_timestamp(expiry)
+        .context("preloaded registrar expiry is not a valid unix timestamp")?;
+    let registrant = provenance
+        .get("registrant")
+        .and_then(Value::as_str)
+        .unwrap_or(ZERO_ADDRESS)
+        .to_owned();
+    let source_manifest_id = manifest_id_from_authority_key(&authority_key).unwrap_or(0);
+    let source_family = default_registrar_source_family(&binding_ref.namespace).to_owned();
+    let start_ref = observation_ref_from_boundary(
+        binding_ref,
+        Some(source_family),
+        Some(source_manifest_id),
+        log_index_from_authority_key(&authority_key),
+    );
+    let lease = RegistrationLease {
+        authority_key,
+        labelhash,
+        registrant,
+        expiry,
+        release_ref: block_index
+            .first_block_at_or_after(release_after_grace(expiry)?, &binding_ref.namespace),
+        start_ref,
+    };
+    let anchor = build_registrar_anchor(&lease);
+    history.current_registration = Some(lease);
+    history.open_binding = Some(OpenBinding {
+        surface_binding_id,
+        authority: anchor,
+        active_from: binding_ref.block_timestamp,
+        anchor_ref: binding_ref.clone(),
+    });
+    Ok(())
+}
+
+fn registrar_labelhash_from_provenance_or_authority_key(
+    provenance: &Value,
+    authority_key: &str,
+    history_labelhash: &str,
+) -> String {
+    provenance
+        .get("labelhash")
+        .and_then(Value::as_str)
+        .map(|value| value.to_ascii_lowercase())
+        .or_else(|| registrar_labelhash_from_authority_key(authority_key))
+        .unwrap_or_else(|| history_labelhash.to_owned())
+}
+
+fn registrar_expiry_from_provenance_or_binding_end(
+    provenance: &Value,
+    binding_active_to: Option<OffsetDateTime>,
+) -> Result<i64> {
+    if let Some(expiry) = provenance.get("expiry").and_then(Value::as_i64) {
+        return Ok(expiry);
+    }
+    if let Some(released_at) = provenance.get("released_at").and_then(Value::as_i64) {
+        return released_at
+            .checked_sub(ENS_GRACE_PERIOD_SECS)
+            .context("preloaded registrar released_at cannot be converted to expiry");
+    }
+    if let Some(active_to) = binding_active_to {
+        return active_to
+            .unix_timestamp()
+            .checked_sub(ENS_GRACE_PERIOD_SECS)
+            .context("preloaded registrar binding end cannot be converted to expiry");
+    }
+
+    bail!("preloaded authority provenance is missing integer expiry");
+}
+
+pub(super) fn registrar_labelhash_from_authority_key(authority_key: &str) -> Option<String> {
+    let mut parts = authority_key.split(':');
+    if parts.next()? != "registrar" {
+        return None;
+    }
+    let _chain = parts.next()?;
+    let _manifest_id = parts.next()?;
+    let labelhash = parts.next()?;
+    if !labelhash.starts_with("0x") {
+        return None;
+    }
+    Some(labelhash.to_ascii_lowercase())
+}
+
+fn preload_wrapper_history(
+    history: &mut NameHistory,
+    provenance: &Value,
+    binding_ref: &BoundaryRef,
+    surface_binding_id: Uuid,
+) -> Result<()> {
+    let authority_key = provenance_string(provenance, "authority_key")?;
+    let node = provenance_string(provenance, "namehash")
+        .or_else(|_| provenance_string(provenance, "node"))
+        .unwrap_or_else(|_| {
+            history
+                .name
+                .as_ref()
+                .map(|name| name.namehash.clone())
+                .unwrap_or_default()
+        });
+    let owner = provenance
+        .get("owner")
+        .and_then(Value::as_str)
+        .unwrap_or(ZERO_ADDRESS)
+        .to_owned();
+    let fuses = provenance
+        .get("fuses")
+        .and_then(Value::as_i64)
+        .unwrap_or_default();
+    let expiry = provenance_i64(provenance, "expiry")?;
+    let expiry = OffsetDateTime::from_unix_timestamp(expiry)
+        .context("preloaded wrapper expiry is not a valid unix timestamp")?;
+    let source_manifest_id = manifest_id_from_authority_key(&authority_key).unwrap_or(0);
+    let start_ref = observation_ref_from_boundary(
+        binding_ref,
+        Some(SOURCE_FAMILY_ENS_V1_WRAPPER_L1.to_owned()),
+        Some(source_manifest_id),
+        log_index_from_authority_key(&authority_key),
+    );
+    let wrapper = WrapperAuthority {
+        authority_key: authority_key.clone(),
+        node,
+        owner,
+        fuses,
+        expiry,
+        start_ref,
+        end_ref: None,
+    };
+    let anchor = build_wrapper_anchor(&wrapper);
+    history
+        .wrapper_authorities
+        .insert(authority_key.clone(), wrapper);
+    history.current_wrapper_key = Some(authority_key);
+    history.open_binding = Some(OpenBinding {
+        surface_binding_id,
+        authority: anchor,
+        active_from: binding_ref.block_timestamp,
+        anchor_ref: binding_ref.clone(),
+    });
+    Ok(())
+}
+
+fn preload_registry_history(
+    history: &mut NameHistory,
+    provenance: &Value,
+    binding_ref: &BoundaryRef,
+    surface_binding_id: Uuid,
+    resource_id: Uuid,
+) {
+    let labelhash = history.labelhash.clone();
+    let authority_key = provenance
+        .get("authority_key")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| format!("registry-only:{}:{}", binding_ref.chain_id, labelhash));
+    let source_family = authority_profile_for_source_family(
+        provenance
+            .get("source_family")
+            .and_then(Value::as_str)
+            .unwrap_or(SOURCE_FAMILY_ENS_V1_REGISTRY_L1),
+    )
+    .map(|profile| profile.registry_source_family().to_owned())
+    .unwrap_or_else(|| SOURCE_FAMILY_ENS_V1_REGISTRY_L1.to_owned());
+    let source_manifest_id = manifest_id_from_authority_key(&authority_key).unwrap_or(0);
+    let authority = AuthorityAnchor {
+        kind: AuthorityKind::RegistryOnly,
+        authority_key,
+        resource_id,
+        token_lineage_id: None,
+        binding_source_family: source_family,
+        binding_manifest_version: 1,
+        binding_manifest_id: source_manifest_id,
+    };
+    history.current_registry_owner = provenance
+        .get("current_registry_owner")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    history.registry_resource_anchor = Some(binding_ref.clone());
+    history.latest_registry_owner_ref = Some(observation_ref_from_boundary(
+        binding_ref,
+        Some(authority.binding_source_family.clone()),
+        Some(authority.binding_manifest_id),
+        None,
+    ));
+    history.open_binding = Some(OpenBinding {
+        surface_binding_id,
+        authority,
+        active_from: binding_ref.block_timestamp,
+        anchor_ref: binding_ref.clone(),
+    });
+}
+
+fn observation_ref_from_boundary(
+    boundary: &BoundaryRef,
+    source_family: Option<String>,
+    source_manifest_id: Option<i64>,
+    log_index: Option<i64>,
+) -> ObservationRef {
+    ObservationRef {
+        chain_id: boundary.chain_id.clone(),
+        block_hash: boundary.block_hash.clone(),
+        block_number: boundary.block_number,
+        block_timestamp: boundary.block_timestamp,
+        transaction_hash: None,
+        transaction_index: None,
+        log_index,
+        canonicality_state: boundary.canonicality_state,
+        namespace: boundary.namespace.clone(),
+        source_manifest_id: source_manifest_id.unwrap_or(0),
+        source_family: source_family
+            .unwrap_or_else(|| default_registrar_source_family(&boundary.namespace).to_owned()),
+        manifest_version: 1,
+    }
+}
+
+fn provenance_string(provenance: &Value, key: &str) -> Result<String> {
+    provenance
+        .get(key)
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .with_context(|| format!("preloaded authority provenance is missing {key}"))
+}
+
+fn provenance_i64(provenance: &Value, key: &str) -> Result<i64> {
+    provenance
+        .get(key)
+        .and_then(Value::as_i64)
+        .with_context(|| format!("preloaded authority provenance is missing integer {key}"))
+}
+
+fn manifest_id_from_authority_key(authority_key: &str) -> Option<i64> {
+    authority_key.split(':').nth(2)?.parse().ok()
+}
+
+fn log_index_from_authority_key(authority_key: &str) -> Option<i64> {
+    authority_key.rsplit(':').next()?.parse().ok()
+}
+
+fn decode_preload_canonicality_state(value: &str) -> Result<CanonicalityState> {
+    match value {
+        "observed" => Ok(CanonicalityState::Observed),
+        "canonical" => Ok(CanonicalityState::Canonical),
+        "safe" => Ok(CanonicalityState::Safe),
+        "finalized" => Ok(CanonicalityState::Finalized),
+        "orphaned" => Ok(CanonicalityState::Orphaned),
+        _ => bail!("unknown canonicality_state value {value}"),
+    }
+}

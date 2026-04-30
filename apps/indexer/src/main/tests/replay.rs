@@ -112,6 +112,178 @@ async fn replay_normalized_events_runs_full_persisted_raw_adapter_boundary() -> 
 }
 
 #[tokio::test]
+async fn replay_normalized_events_scoped_block_range_selects_only_requested_targets() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let chain = "ethereum-mainnet";
+    let selected_address = "0x00000000000000000000000000000000000000a1";
+    let unselected_address = "0x00000000000000000000000000000000000000b2";
+    let selected_claimed_address = "0x1111111111111111111111111111111111111111";
+    let unselected_claimed_address = "0x2222222222222222222222222222222222222222";
+    let block = provider_block(
+        "0x9393939393939393939393939393939393939393939393939393939393939393",
+        Some("0x8383838383838383838383838383838383838383838383838383838383838383"),
+        93,
+    );
+
+    insert_active_replay_watched_contract_with_source_family(
+        database.pool(),
+        11,
+        chain,
+        "ens_v1_reverse_l1",
+        Uuid::from_u128(0x911),
+        selected_address,
+        "reverse_registrar",
+    )
+    .await?;
+    insert_chain_lineage_for_block(database.pool(), chain, &block, CanonicalityState::Canonical)
+        .await?;
+    insert_raw_reverse_claimed_log_at_index(
+        database.pool(),
+        chain,
+        &block,
+        selected_address,
+        selected_claimed_address,
+        CanonicalityState::Canonical,
+        0,
+    )
+    .await?;
+    insert_raw_reverse_claimed_log_at_index(
+        database.pool(),
+        chain,
+        &block,
+        unselected_address,
+        unselected_claimed_address,
+        CanonicalityState::Canonical,
+        1,
+    )
+    .await?;
+
+    let outcome = replay_raw_fact_normalized_events(
+        database.pool(),
+        RawFactNormalizedEventReplayRequest {
+            deployment_profile: "mainnet".to_owned(),
+            chain: chain.to_owned(),
+            selection: RawFactNormalizedEventReplaySelection::ScopedBlockRange {
+                from_block: block.block_number,
+                to_block: block.block_number,
+                source_scope: vec![RawFactNormalizedEventReplaySourceScope {
+                    source_family: "ens_v1_reverse_l1".to_owned(),
+                    address: selected_address.to_owned(),
+                    from_block: block.block_number,
+                    to_block: block.block_number,
+                }],
+            },
+        },
+    )
+    .await?;
+
+    assert_eq!(outcome.source_scope_target_count, 1);
+    assert_eq!(outcome.selected_block_count, 1);
+    assert_eq!(outcome.canonical_raw_log_count, 1);
+    assert_eq!(outcome.scanned_raw_log_count, 2);
+    assert_eq!(outcome.matched_raw_log_count, 1);
+    assert_eq!(outcome.normalized_event_inserted_count, 1);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM normalized_events WHERE event_kind = 'ReverseChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT after_state->>'reverse_name' FROM normalized_events WHERE event_kind = 'ReverseChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        reverse_name_for_address(selected_claimed_address)
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM normalized_events WHERE raw_fact_ref->>'log_index' = '1'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        0
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn replay_normalized_events_scoped_generic_resolver_scope_selects_topic_scanned_logs()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let chain = "ethereum-mainnet";
+    let seed_resolver_address = "0x00000000000000000000000000000000000000c0";
+    let generic_resolver_address = "0x00000000000000000000000000000000000000c1";
+    let block = provider_block(
+        "0x9494949494949494949494949494949494949494949494949494949494949494",
+        Some("0x8484848484848484848484848484848484848484848484848484848484848484"),
+        94,
+    );
+    let node = namehash_for_dns_name(&dns_encoded_eth_name("alice"));
+
+    insert_active_replay_manifest_contract(
+        database.pool(),
+        12,
+        "ens",
+        "ens_v1_resolver_l1",
+        chain,
+        "ens_v1",
+        Uuid::from_u128(0x912),
+        seed_resolver_address,
+        "public_resolver",
+    )
+    .await?;
+    insert_raw_resolver_log(
+        database.pool(),
+        chain,
+        &block,
+        generic_resolver_address,
+        vec![
+            resolver_text_changed_with_value_topic0(),
+            node,
+            keccak256_hex(b"com.twitter"),
+        ],
+        decode_hex_string(&encode_two_dynamic_string_log_data(
+            "com.twitter",
+            "alice-twitter",
+        )),
+        0,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+
+    let outcome = replay_raw_fact_normalized_events(
+        database.pool(),
+        RawFactNormalizedEventReplayRequest {
+            deployment_profile: "mainnet".to_owned(),
+            chain: chain.to_owned(),
+            selection: RawFactNormalizedEventReplaySelection::ScopedBlockRange {
+                from_block: block.block_number,
+                to_block: block.block_number,
+                source_scope: vec![RawFactNormalizedEventReplaySourceScope {
+                    source_family: "ens_v1_resolver_l1".to_owned(),
+                    address: "*".to_owned(),
+                    from_block: block.block_number,
+                    to_block: block.block_number,
+                }],
+            },
+        },
+    )
+    .await?;
+
+    assert_eq!(outcome.source_scope_target_count, 1);
+    assert_eq!(outcome.selected_block_count, 1);
+    assert_eq!(outcome.canonical_raw_log_count, 1);
+    assert!(outcome.scanned_raw_log_count >= 1);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn replay_normalized_events_is_upsert_only_for_stale_selected_payloads() -> Result<()> {
     let database = TestDatabase::new().await?;
     let chain = "ethereum-mainnet";
@@ -290,7 +462,7 @@ async fn replay_normalized_events_is_idempotent_without_checkpoint_mutation() ->
         block.block_hash
     );
     assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM raw_blocks")
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM chain_lineage")
             .fetch_one(database.pool())
             .await?,
         1
@@ -841,9 +1013,8 @@ async fn replay_normalized_events_does_not_mutate_discovery_edges_or_scan_unsele
 }
 
 #[tokio::test]
-async fn replay_normalized_events_respects_ensv1_dynamic_resolver_watch_target_range() -> Result<()>
-{
-    assert_dynamic_resolver_replay_respects_watch_target_range(DynamicResolverReplayConfig {
+async fn replay_normalized_events_uses_generic_ensv1_dynamic_resolver_scope() -> Result<()> {
+    assert_dynamic_resolver_replay_scope_behavior(DynamicResolverReplayConfig {
         namespace: "ens",
         chain: "ethereum-mainnet",
         deployment_epoch: "ens_v1",
@@ -861,7 +1032,7 @@ async fn replay_normalized_events_respects_ensv1_dynamic_resolver_watch_target_r
 #[tokio::test]
 async fn replay_normalized_events_respects_basenames_dynamic_resolver_watch_target_range()
 -> Result<()> {
-    assert_dynamic_resolver_replay_respects_watch_target_range(DynamicResolverReplayConfig {
+    assert_dynamic_resolver_replay_scope_behavior(DynamicResolverReplayConfig {
         namespace: "basenames",
         chain: "base-mainnet",
         deployment_epoch: "basenames_v1",
@@ -908,9 +1079,10 @@ struct DynamicResolverReplayConfig {
     uuid_base: u128,
 }
 
-async fn assert_dynamic_resolver_replay_respects_watch_target_range(
+async fn assert_dynamic_resolver_replay_scope_behavior(
     config: DynamicResolverReplayConfig,
 ) -> Result<()> {
+    let generic_ensv1_resolver = config.resolver_source_family == "ens_v1_resolver_l1";
     let database = TestDatabase::new().await?;
     let reverse_manifest_id = config.manifest_id_base + 1;
     let registry_manifest_id = config.manifest_id_base + 2;
@@ -1291,7 +1463,15 @@ async fn assert_dynamic_resolver_replay_respects_watch_target_range(
         .bind(config.resolver_source_family)
         .fetch_one(database.pool())
         .await?,
-        vec![config.in_range_raw_name.to_owned()]
+        if generic_ensv1_resolver {
+            vec![
+                config.in_range_raw_name.to_owned(),
+                "pending.example".to_owned(),
+                "unsupported.example".to_owned(),
+            ]
+        } else {
+            vec![config.in_range_raw_name.to_owned()]
+        }
     );
     assert_eq!(
         sqlx::query_scalar::<_, Vec<i64>>(
@@ -1308,7 +1488,11 @@ async fn assert_dynamic_resolver_replay_respects_watch_target_range(
         .bind(config.resolver_source_family)
         .fetch_one(database.pool())
         .await?,
-        vec![7]
+        if generic_ensv1_resolver {
+            vec![7, 8, 9]
+        } else {
+            vec![7]
+        }
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
@@ -1317,29 +1501,17 @@ async fn assert_dynamic_resolver_replay_respects_watch_target_range(
         .bind(config.resolver_source_family)
         .fetch_one(database.pool())
         .await?,
-        2
+        if generic_ensv1_resolver { 6 } else { 2 }
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*)::BIGINT FROM normalized_events WHERE raw_fact_ref->>'emitting_address' = $1"
+            "SELECT COUNT(*)::BIGINT FROM normalized_events WHERE after_state->>'raw_name' = $1"
         )
-        .bind(unadmitted_resolver_address)
+        .bind("unadmitted.example")
         .fetch_one(database.pool())
         .await?,
         0
     );
-    for gated_address in [pending_resolver_address, unsupported_resolver_address] {
-        assert_eq!(
-            sqlx::query_scalar::<_, i64>(
-                "SELECT COUNT(*)::BIGINT FROM normalized_events WHERE raw_fact_ref->>'emitting_address' = $1 AND event_kind IN ('RecordChanged', 'RecordVersionChanged')"
-            )
-            .bind(gated_address)
-            .fetch_one(database.pool())
-            .await?,
-            0,
-            "{gated_address} resolver-local facts must stay gated from replay output"
-        );
-    }
     assert_eq!(
         sqlx::query_scalar::<_, Vec<String>>(
             r#"
@@ -1355,7 +1527,11 @@ async fn assert_dynamic_resolver_replay_respects_watch_target_range(
         .bind(config.closed_raw_name)
         .fetch_one(database.pool())
         .await?,
-        Vec::<String>::new()
+        if generic_ensv1_resolver {
+            vec!["pending.example".to_owned(), "unsupported.example".to_owned()]
+        } else {
+            Vec::<String>::new()
+        }
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>(

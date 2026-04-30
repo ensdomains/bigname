@@ -4606,9 +4606,13 @@ async fn get_resolution_verified_modes_keep_missing_avatar_output_stale_for_sele
 
             let payload: ErrorResponse = read_json(response).await?;
             assert_eq!(payload.error.code, "stale", "{mode} {records}");
+            let expected_message = if records == "avatar" {
+                "verified resolution RPC provider for ethereum-mainnet is not configured; set BIGNAME_API_CHAIN_RPC_URLS=ethereum-mainnet=<url>"
+            } else {
+                "persisted verified resolution output is not available for the selected snapshot"
+            };
             assert_eq!(
-                payload.error.message,
-                "persisted verified resolution output is not available for the selected snapshot",
+                payload.error.message, expected_message,
                 "{mode} {records}"
             );
         }
@@ -7152,6 +7156,162 @@ async fn get_resolution_dynamic_resolver_profile_non_graduation_keeps_ensv1_reco
 }
 
 #[tokio::test]
+async fn get_resolution_dynamic_resolver_pending_profile_returns_observed_addr_with_text_pending()
+-> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0x9d13);
+    let token_lineage_id = Uuid::from_u128(0x9d14);
+    let surface_binding_id = Uuid::from_u128(0x9d15);
+    let dynamic_resolver_address = "0x0000000000000000000000000000000000000d13";
+
+    let mut inventory_row = dynamic_resolver_unsupported_profile_record_inventory_current_row(
+        logical_name_id,
+        resource_id,
+    );
+    let record_version_boundary = inventory_row.record_version_boundary.clone();
+    inventory_row.enumeration_basis = json!({
+        "observed_selectors": true,
+        "capability_declared_families": true,
+        "globally_enumerable": false
+    });
+    inventory_row.selectors = json!([
+        {
+            "record_key": "addr:60",
+            "record_family": "addr",
+            "selector_key": "60",
+            "cacheable": true
+        }
+    ]);
+    inventory_row.explicit_gaps = json!([]);
+    inventory_row.entries = json!([
+        {
+            "record_key": "addr:60",
+            "record_family": "addr",
+            "selector_key": "60",
+            "status": "success",
+            "value": {
+                "coin_type": "60",
+                "value": "0x00000000000000000000000000000000000000a1"
+            }
+        }
+    ]);
+    inventory_row.last_change = Some(json!({
+        "normalized_event_id": 1202,
+        "event_kind": "RecordChanged",
+        "chain_position": {
+            "chain_id": "ethereum-mainnet",
+            "block_number": 21_000_004,
+            "block_hash": "0xobservedaddr",
+            "timestamp": "2026-04-17T00:00:05Z"
+        }
+    }));
+
+    database
+        .seed_name_current_binding(
+            logical_name_id,
+            "ens",
+            "alice.eth",
+            "Alice.eth",
+            "namehash:alice.eth",
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    database
+        .insert_name_current_row(name_current_row_with_current_resolver(
+            exact_name_row(
+                logical_name_id,
+                surface_binding_id,
+                resource_id,
+                token_lineage_id,
+            ),
+            "ethereum-mainnet",
+            dynamic_resolver_address,
+        ))
+        .await?;
+    database
+        .insert_record_inventory_current_row(inventory_row)
+        .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resolutions/ens/alice.eth?mode=declared&records=addr:60,text:com.twitter")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("pending dynamic resolver observed addr request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let payload: ResolutionResponse = read_json(response).await?;
+    let declared_state = payload
+        .declared_state
+        .as_ref()
+        .expect("declared_state must be present");
+    assert_eq!(
+        declared_state.pointer("/record_inventory/selectors"),
+        Some(&json!([
+            {
+                "record_key": "addr:60",
+                "record_family": "addr",
+                "selector_key": "60",
+                "cacheable": true
+            }
+        ]))
+    );
+    assert_eq!(
+        declared_state.pointer("/record_inventory/explicit_gaps"),
+        Some(&json!([]))
+    );
+    assert_eq!(
+        declared_state.pointer("/record_inventory/unsupported_families"),
+        Some(&json!([
+            {
+                "record_family": "addr",
+                "unsupported_reason": "resolver_family_pending",
+            },
+            {
+                "record_family": "text",
+                "unsupported_reason": "resolver_family_pending",
+            }
+        ]))
+    );
+    assert_eq!(
+        declared_state.get("record_cache"),
+        Some(&json!({
+            "record_version_boundary": record_version_boundary,
+            "entries": [
+                {
+                    "record_key": "addr:60",
+                    "record_family": "addr",
+                    "selector_key": "60",
+                    "status": "success",
+                    "value": {
+                        "coin_type": "60",
+                        "value": "0x00000000000000000000000000000000000000a1",
+                    }
+                },
+                {
+                    "record_key": "text:com.twitter",
+                    "record_family": "text",
+                    "selector_key": "com.twitter",
+                    "status": "unsupported",
+                    "unsupported_reason": "resolver_family_pending",
+                }
+            ]
+        }))
+    );
+    assert_eq!(payload.verified_state, None);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn get_resolution_dynamic_resolver_pending_profile_keeps_missing_verified_output_stale()
 -> Result<()> {
     let database = TestDatabase::new_with_schemas(false, true).await?;
@@ -7750,6 +7910,87 @@ async fn get_resolution_declared_records_narrow_record_cache_in_request_order() 
                     "unsupported_reason": "resolver_family_pending",
                 }
             ]
+        }))
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_resolution_declared_records_reuse_inventory_projection_for_later_checkpoint()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0x2201);
+    let token_lineage_id = Uuid::from_u128(0x1101);
+    let surface_binding_id = Uuid::from_u128(0x3301);
+
+    database
+        .seed_name_current_binding_migrated(
+            logical_name_id,
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    database
+        .insert_name_current_row(exact_name_row(
+            logical_name_id,
+            surface_binding_id,
+            resource_id,
+            token_lineage_id,
+        ))
+        .await?;
+    database
+        .insert_record_inventory_current_row(record_inventory_current_row(
+            logical_name_id,
+            resource_id,
+        ))
+        .await?;
+    database
+        .seed_snapshot_selector_chain_positions(&json!({
+            "ethereum": {
+                "chain_id": "ethereum-mainnet",
+                "block_number": 21_000_004,
+                "block_hash": "0xbinding-later",
+                "timestamp": "2026-04-17T00:00:04Z"
+            }
+        }))
+        .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resolutions/ens/alice.eth?mode=declared&records=addr:60")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("declared resolution request at later checkpoint failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let payload: ResolutionResponse = read_json(response).await?;
+    let declared_state = payload
+        .declared_state
+        .as_ref()
+        .expect("declared_state must be present");
+    assert_eq!(
+        declared_state.pointer("/record_inventory/selectors/0/record_key"),
+        Some(&json!("addr:60"))
+    );
+    assert_eq!(
+        declared_state.pointer("/record_cache/entries/0"),
+        Some(&json!({
+            "record_key": "addr:60",
+            "record_family": "addr",
+            "selector_key": "60",
+            "status": "success",
+            "value": {
+                "coin_type": "60",
+                "value": "0x0000000000000000000000000000000000000abc",
+            }
         }))
     );
 

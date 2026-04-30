@@ -792,6 +792,7 @@ async fn bootstrap_auto_backfill_drains_manifest_started_targets_and_preserves_c
         crate::backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS,
         crate::backfill::BackfillAdapterSyncMode::Inline,
         false,
+        HeaderAuditMode::Minimal,
     )
     .await?;
     assert_eq!(outcome.active_chain_count, 2);
@@ -982,6 +983,7 @@ async fn bootstrap_auto_backfill_drains_manifest_started_targets_and_preserves_c
         crate::backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS,
         crate::backfill::BackfillAdapterSyncMode::Inline,
         false,
+        HeaderAuditMode::Minimal,
     )
     .await?;
     assert_eq!(rerun.drained_job_count, 0);
@@ -1113,6 +1115,327 @@ async fn bootstrap_auto_backfill_drains_manifest_started_targets_and_preserves_c
 }
 
 #[tokio::test]
+async fn bootstrap_auto_backfill_scans_ensv1_resolver_events_by_source_family() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_bootstrap_backfill_job_tables(database.pool()).await?;
+    let manifest_root = PathBuf::from("manifests");
+    let resolver_a_contract_instance_id = Uuid::from_u128(10_001);
+    let resolver_b_contract_instance_id = Uuid::from_u128(10_002);
+    let registry_contract_instance_id = Uuid::from_u128(10_003);
+    let resolver_a_address = "0x0000000000000000000000000000000000000a01";
+    let resolver_b_address = "0x0000000000000000000000000000000000000a02";
+    let unlisted_resolver_address = "0x0000000000000000000000000000000000000a03";
+    let registry_address = "0x0000000000000000000000000000000000000b01";
+
+    insert_bootstrap_manifest_version(
+        database.pool(),
+        10_001,
+        "ens",
+        "ethereum-mainnet",
+        "ens_v1_resolver_l1",
+        json!({
+            "contracts": [
+                {
+                    "role": "public_resolver_a",
+                    "address": resolver_a_address,
+                    "start_block": 10
+                },
+                {
+                    "role": "public_resolver_b",
+                    "address": resolver_b_address,
+                    "start_block": 12
+                }
+            ],
+            "roots": []
+        }),
+    )
+    .await?;
+    insert_bootstrap_manifest_version(
+        database.pool(),
+        10_003,
+        "ens",
+        "ethereum-mainnet",
+        "ens_v1_registry_l1",
+        json!({
+            "contracts": [
+                {
+                    "role": "registry",
+                    "address": registry_address,
+                    "start_block": 10
+                }
+            ],
+            "roots": []
+        }),
+    )
+    .await?;
+    for (contract_instance_id, address, role) in [
+        (
+            resolver_a_contract_instance_id,
+            resolver_a_address,
+            "public_resolver_a",
+        ),
+        (
+            resolver_b_contract_instance_id,
+            resolver_b_address,
+            "public_resolver_b",
+        ),
+        (registry_contract_instance_id, registry_address, "registry"),
+    ] {
+        insert_contract_instance(
+            database.pool(),
+            contract_instance_id,
+            "ethereum-mainnet",
+            if role == "registry" {
+                "contract"
+            } else {
+                "resolver"
+            },
+        )
+        .await?;
+        insert_active_contract_instance_address(
+            database.pool(),
+            contract_instance_id,
+            "ethereum-mainnet",
+            address,
+            Some(if role == "registry" { 10_003 } else { 10_001 }),
+        )
+        .await?;
+        insert_manifest_contract_instance(
+            database.pool(),
+            if role == "registry" { 10_003 } else { 10_001 },
+            role,
+            contract_instance_id,
+            address,
+            "none",
+            None,
+            None,
+        )
+        .await?;
+    }
+
+    let watched_plan = load_watched_chain_plan(database.pool()).await?;
+    let intake_tasks = sync_intake_chain_tasks(database.pool(), &watched_plan).await?;
+    assert_eq!(intake_tasks.len(), 1);
+
+    let block_10 = provider_block(
+        "0x1010101010101010101010101010101010101010101010101010101010101010",
+        Some("0x0909090909090909090909090909090909090909090909090909090909090909"),
+        10,
+    );
+    let block_11 = provider_block(
+        "0x1111111111111111111111111111111111111111111111111111111111111111",
+        Some(&block_10.block_hash),
+        11,
+    );
+    let block_12 = provider_block(
+        "0x1212121212121212121212121212121212121212121212121212121212121212",
+        Some(&block_11.block_hash),
+        12,
+    );
+    let block_13 = provider_block(
+        "0x1313131313131313131313131313131313131313131313131313131313131313",
+        Some(&block_12.block_hash),
+        13,
+    );
+    let resolver_node = namehash_for_dns_name(&dns_encoded_eth_name("alice"));
+    let requests = Arc::new(Mutex::new(Vec::<BootstrapRpcRequest>::new()));
+    let (provider, server) = bootstrap_auto_backfill_provider(
+        vec![
+            ProviderBlockFixture {
+                block: block_10.clone(),
+                logs: vec![rpc_resolver_name_changed_log_payload_for_namehash(
+                    &block_10,
+                    unlisted_resolver_address,
+                    &resolver_node,
+                    "unlisted.example",
+                    0,
+                )],
+            },
+            ProviderBlockFixture {
+                block: block_11.clone(),
+                logs: vec![rpc_resolver_name_changed_log_payload_for_namehash(
+                    &block_11,
+                    resolver_a_address,
+                    &resolver_node,
+                    "resolver-a.example",
+                    0,
+                )],
+            },
+            ProviderBlockFixture {
+                block: block_12.clone(),
+                logs: vec![rpc_resolver_name_changed_log_payload_for_namehash(
+                    &block_12,
+                    resolver_b_address,
+                    &resolver_node,
+                    "resolver-b.example",
+                    0,
+                )],
+            },
+            ProviderBlockFixture {
+                block: block_13.clone(),
+                logs: vec![
+                    bootstrap_rpc_log_payload_at_address(&block_13, resolver_a_address, 0),
+                    bootstrap_rpc_log_payload_at_address(&block_13, registry_address, 1),
+                ],
+            },
+        ],
+        Arc::clone(&requests),
+    )
+    .await?;
+    let provider_registry =
+        ProviderRegistry::from_chain_rpc_urls(&[format!("ethereum-mainnet={provider}")])?;
+
+    let outcome = run_startup_bootstrap_backfills(
+        database.pool(),
+        &manifest_root,
+        &intake_tasks,
+        &provider_registry,
+        crate::backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS,
+        crate::backfill::BackfillAdapterSyncMode::RawOnly,
+        false,
+        HeaderAuditMode::Minimal,
+    )
+    .await?;
+    assert_eq!(outcome.eligible_target_count, 3);
+    assert_eq!(outcome.drained_job_count, 1);
+    assert_eq!(outcome.resolved_block_count, 4);
+    assert_eq!(outcome.raw_log_count, 4);
+
+    let source_identity =
+        sqlx::query_scalar::<_, Value>("SELECT source_identity FROM backfill_jobs")
+            .fetch_one(database.pool())
+            .await?;
+    assert_eq!(
+        source_identity.get("selector_kind").and_then(Value::as_str),
+        Some("watched_target_set")
+    );
+    assert_eq!(
+        source_identity
+            .get("source_identity_payload_format")
+            .and_then(Value::as_str),
+        Some("selected_targets_with_generic_topic_scans_v1")
+    );
+    assert_eq!(
+        source_identity
+            .get("generic_topic_scans")
+            .and_then(Value::as_array)
+            .and_then(|scans| scans.first())
+            .and_then(|scan| scan.get("source_family"))
+            .and_then(Value::as_str),
+        Some("ens_v1_resolver_l1")
+    );
+    assert_eq!(
+        source_identity
+            .get("requested_watched_targets")
+            .and_then(Value::as_array)
+            .map(Vec::len),
+        Some(3)
+    );
+    assert_eq!(
+        source_identity
+            .get("selected_targets")
+            .and_then(Value::as_array)
+            .map(Vec::len),
+        Some(1)
+    );
+    let source_identity_text = serde_json::to_string(&source_identity)?;
+    assert!(!source_identity_text.contains(resolver_a_address));
+    assert!(!source_identity_text.contains(resolver_b_address));
+
+    for (address, expected_count) in [
+        (unlisted_resolver_address, 1_i64),
+        (resolver_a_address, 1_i64),
+        (resolver_b_address, 1_i64),
+    ] {
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM raw_logs WHERE emitting_address = $1")
+                .bind(address)
+                .fetch_one(database.pool())
+                .await?,
+            expected_count
+        );
+    }
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM raw_logs WHERE emitting_address = $1")
+            .bind(registry_address)
+            .fetch_one(database.pool())
+            .await?,
+        1
+    );
+
+    let requests = requests
+        .lock()
+        .expect("request log must not be poisoned")
+        .clone();
+    let log_requests = requests
+        .iter()
+        .filter(|request| request.method == "eth_getLogs")
+        .collect::<Vec<_>>();
+    assert_eq!(log_requests.len(), 2);
+    let log_filter = log_requests[0]
+        .params
+        .first()
+        .and_then(Value::as_object)
+        .expect("log request must include a filter object");
+    assert_eq!(
+        log_filter.get("fromBlock").and_then(Value::as_str),
+        Some("0xa")
+    );
+    assert_eq!(
+        log_filter.get("toBlock").and_then(Value::as_str),
+        Some("0xd")
+    );
+    assert!(
+        !log_filter.contains_key("address"),
+        "generic ENSv1 resolver bootstrap scan must not carry a resolver address filter"
+    );
+    assert!(
+        log_filter.get("topics").is_some(),
+        "generic ENSv1 resolver bootstrap scan must still constrain to resolver event topics"
+    );
+    let address_filter = log_requests[1]
+        .params
+        .first()
+        .and_then(Value::as_object)
+        .expect("address-scoped log request must include a filter object");
+    assert_eq!(
+        address_filter.get("fromBlock").and_then(Value::as_str),
+        Some("0xa")
+    );
+    assert_eq!(
+        address_filter.get("toBlock").and_then(Value::as_str),
+        Some("0xd")
+    );
+    assert_eq!(
+        address_filter.get("address").and_then(Value::as_array),
+        Some(&vec![Value::String(registry_address.to_owned())]),
+        "mixed bootstrap scan should query non-resolver targets in the same job"
+    );
+
+    let rerun = run_startup_bootstrap_backfills(
+        database.pool(),
+        &manifest_root,
+        &intake_tasks,
+        &provider_registry,
+        crate::backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS,
+        crate::backfill::BackfillAdapterSyncMode::RawOnly,
+        false,
+        HeaderAuditMode::Minimal,
+    )
+    .await?;
+    assert_eq!(rerun.drained_job_count, 0);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM backfill_jobs")
+            .fetch_one(database.pool())
+            .await?,
+        1
+    );
+
+    server.abort();
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn bootstrap_auto_backfill_covers_declared_start_to_provider_head() -> Result<()> {
     let database = TestDatabase::new().await?;
     create_bootstrap_backfill_job_tables(database.pool()).await?;
@@ -1221,13 +1544,14 @@ async fn bootstrap_auto_backfill_covers_declared_start_to_provider_head() -> Res
         crate::backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS,
         crate::backfill::BackfillAdapterSyncMode::Inline,
         false,
+        HeaderAuditMode::Minimal,
     )
     .await?;
     assert_eq!(outcome.drained_job_count, 1);
     assert_eq!(outcome.resolved_block_count, 4);
     assert_eq!(outcome.raw_log_count, 4);
     assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM raw_blocks")
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM chain_lineage")
             .fetch_one(database.pool())
             .await?,
         4
@@ -1281,7 +1605,7 @@ async fn bootstrap_auto_backfill_covers_declared_start_to_provider_head() -> Res
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM raw_blocks WHERE block_number IN (1, 2)"
+            "SELECT COUNT(*) FROM chain_lineage WHERE block_number IN (1, 2)"
         )
         .fetch_one(database.pool())
         .await?,
@@ -1340,6 +1664,7 @@ async fn bootstrap_auto_backfill_covers_declared_start_to_provider_head() -> Res
         crate::backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS,
         crate::backfill::BackfillAdapterSyncMode::Inline,
         false,
+        HeaderAuditMode::Minimal,
     )
     .await?;
     assert_eq!(catchup.drained_job_count, 1);
@@ -1362,7 +1687,7 @@ async fn bootstrap_auto_backfill_covers_declared_start_to_provider_head() -> Res
         vec![(1, 4), (5, 6)]
     );
     assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM raw_blocks")
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM chain_lineage")
             .fetch_one(database.pool())
             .await?,
         6
@@ -1539,6 +1864,30 @@ async fn bootstrap_auto_backfill_provider(
                     .unwrap_or_else(|| panic!("unexpected receipt request: {body}"));
                 Value::Array(vec![rpc_receipt_payload(&fixture.block)])
             }
+            "eth_getTransactionByHash" => {
+                let transaction_hash = params
+                    .first()
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                let fixture = fixtures_by_hash
+                    .values()
+                    .find(|fixture| transaction_hash_for_block(&fixture.block) == transaction_hash)
+                    .unwrap_or_else(|| panic!("unexpected transaction request: {body}"));
+                rpc_transaction_payload(&fixture.block)
+            }
+            "eth_getTransactionReceipt" => {
+                let transaction_hash = params
+                    .first()
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                let fixture = fixtures_by_hash
+                    .values()
+                    .find(|fixture| transaction_hash_for_block(&fixture.block) == transaction_hash)
+                    .unwrap_or_else(|| panic!("unexpected transaction receipt request: {body}"));
+                rpc_receipt_payload(&fixture.block)
+            }
             "eth_getCode" => Value::String("0x6001600155".to_owned()),
             _ => panic!("unexpected RPC request: {body}"),
         };
@@ -1558,6 +1907,7 @@ fn bootstrap_logs_for_filter(
     hashes_by_number: &std::collections::BTreeMap<i64, String>,
 ) -> Value {
     let address_filter = bootstrap_log_filter_addresses(filter);
+    let topic0_filter = bootstrap_log_filter_topic0s(filter);
     let mut logs = Vec::new();
 
     if let Some(block_hash) = filter.get("blockHash").and_then(Value::as_str) {
@@ -1567,6 +1917,7 @@ fn bootstrap_logs_for_filter(
         logs.extend(bootstrap_filtered_fixture_logs(
             fixture,
             address_filter.as_ref(),
+            topic0_filter.as_ref(),
         ));
     } else {
         let from_block = filter
@@ -1594,6 +1945,7 @@ fn bootstrap_logs_for_filter(
             logs.extend(bootstrap_filtered_fixture_logs(
                 fixture,
                 address_filter.as_ref(),
+                topic0_filter.as_ref(),
             ));
         }
     }
@@ -1622,9 +1974,33 @@ fn bootstrap_log_filter_addresses(
     Some(addresses.into_iter().collect())
 }
 
+fn bootstrap_log_filter_topic0s(
+    filter: &serde_json::Map<String, Value>,
+) -> Option<std::collections::BTreeSet<String>> {
+    let topics = filter.get("topics")?.as_array()?;
+    let topic0 = topics.first()?;
+    let values = match topic0 {
+        Value::String(topic) => vec![topic.to_ascii_lowercase()],
+        Value::Array(topics) => topics
+            .iter()
+            .map(|topic| {
+                topic
+                    .as_str()
+                    .expect("bootstrap topic filter values must be strings")
+                    .to_ascii_lowercase()
+            })
+            .collect(),
+        Value::Null => return None,
+        value => panic!("unexpected bootstrap topic0 filter: {value:?}"),
+    };
+
+    Some(values.into_iter().collect())
+}
+
 fn bootstrap_filtered_fixture_logs(
     fixture: &ProviderBlockFixture,
     address_filter: Option<&std::collections::BTreeSet<String>>,
+    topic0_filter: Option<&std::collections::BTreeSet<String>>,
 ) -> Vec<Value> {
     fixture
         .logs
@@ -1636,6 +2012,17 @@ fn bootstrap_filtered_fixture_logs(
             log.get("address")
                 .and_then(Value::as_str)
                 .map(|address| address_filter.contains(&address.to_ascii_lowercase()))
+                .unwrap_or(false)
+        })
+        .filter(|log| {
+            let Some(topic0_filter) = topic0_filter else {
+                return true;
+            };
+            log.get("topics")
+                .and_then(Value::as_array)
+                .and_then(|topics| topics.first())
+                .and_then(Value::as_str)
+                .map(|topic0| topic0_filter.contains(&topic0.to_ascii_lowercase()))
                 .unwrap_or(false)
         })
         .cloned()

@@ -516,7 +516,7 @@ async fn orphan_range_marks_raw_block_children_orphaned() -> Result<()> {
     assert_eq!(
         counts,
         RawFactOrphanCounts {
-            block_count: 1,
+            block_count: 0,
             code_hash_count: 1,
             transaction_count: 1,
             receipt_count: 1,
@@ -528,11 +528,11 @@ async fn orphan_range_marks_raw_block_children_orphaned() -> Result<()> {
 
     assert_eq!(
         sqlx::query_scalar::<_, String>(
-            "SELECT canonicality_state::TEXT FROM raw_blocks WHERE block_hash = '0x002'"
+            "SELECT canonicality_state::TEXT FROM chain_lineage WHERE block_hash = '0x002'"
         )
         .fetch_one(database.pool())
         .await?,
-        "orphaned".to_owned()
+        "canonical".to_owned()
     );
     assert_eq!(
         sqlx::query_scalar::<_, String>(
@@ -584,7 +584,7 @@ async fn orphan_range_marks_raw_block_children_orphaned() -> Result<()> {
     );
     assert_eq!(
         sqlx::query_scalar::<_, String>(
-            "SELECT canonicality_state::TEXT FROM raw_blocks WHERE block_hash = '0x001'"
+            "SELECT canonicality_state::TEXT FROM chain_lineage WHERE block_hash = '0x001'"
         )
         .fetch_one(database.pool())
         .await?,

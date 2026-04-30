@@ -54,7 +54,7 @@ pub(in crate::inspect) fn render_canonicality_inspection(
 
 fn render_raw_fact_counts(counts: &RawFactAuditCounts) -> Value {
     json!({
-        "raw_blocks": counts.raw_block_count,
+        "chain_lineage": counts.raw_block_count,
         "raw_code_hashes": counts.raw_code_hash_count,
         "raw_transactions": counts.raw_transaction_count,
         "raw_receipts": counts.raw_receipt_count,

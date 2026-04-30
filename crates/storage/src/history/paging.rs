@@ -77,7 +77,7 @@ async fn load_history_internal(
                 '{}'::jsonb
             ) AS coverage
         FROM normalized_events ne
-        LEFT JOIN raw_blocks rb
+        LEFT JOIN chain_lineage rb
           ON rb.chain_id = ne.chain_id
          AND rb.block_hash = ne.block_hash
         WHERE

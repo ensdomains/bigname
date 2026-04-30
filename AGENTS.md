@@ -24,6 +24,7 @@ The canonical ENSv1, ENSv2, and Basenames codebases are pinned under `.refs/`. A
 - `.refs/ens_v2/` — ENSv2 contracts
 - `.refs/basenames/` — canonical Basenames Solidity
 - `.refs/ens_subgraph/`, `.refs/ensnode/` — reference indexers for cross-check only
+- `.refs/ens_app_v3/` — ENS app known-resolver metadata for first-party app admission rows only
 
 Pins live in `.refs/MANIFEST.toml`. Sync with `scripts/sync-refs`; verify with `scripts/sync-refs --check`. Rotation policy and known divergences live in `docs/upstream.md`.
 

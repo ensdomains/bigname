@@ -127,6 +127,9 @@ pub(super) fn apply_registration_renewed(
         history
             .first_name_ref
             .get_or_insert(event.reference.clone());
+    }
+
+    if history.current_registration.is_none() {
         let name = history
             .name
             .clone()
@@ -265,6 +268,53 @@ pub(super) fn apply_registration_renewed(
                 event.reference.log_index.unwrap_or_default()
             ),
         ));
+    }
+    Ok(())
+}
+
+pub(super) fn settle_due_registration_release(
+    history: &mut NameHistory,
+    boundary: &BoundaryRef,
+) -> Result<()> {
+    if history.current_wrapper_key.is_some() {
+        return Ok(());
+    }
+    let Some(lease) = history.current_registration.take() else {
+        return Ok(());
+    };
+    let Some(release_ref) = lease.release_ref.clone() else {
+        history.current_registration = Some(lease);
+        return Ok(());
+    };
+    if release_ref.block_timestamp > boundary.block_timestamp {
+        history.current_registration = Some(lease);
+        return Ok(());
+    }
+
+    emit_registration_released_event(history, &lease, &release_ref)?;
+    let registry_after =
+        registry_anchor_for_history(history, &lease.reference_chain(), &lease.labelhash);
+    transition_authority(
+        history,
+        Some(build_registrar_anchor(&lease)),
+        registry_after.clone(),
+        &release_ref,
+        release_ref.block_timestamp,
+    )?;
+    if let (Some(name), Some(anchor), Some(subject)) = (
+        history.name.as_ref(),
+        registry_after.as_ref(),
+        nonzero_address(history.current_registry_owner.as_deref()),
+    ) {
+        emit_boundary_permission_grants(
+            &mut history.events,
+            &release_ref,
+            &name.logical_name_id,
+            anchor,
+            &subject,
+            history.current_resolver.as_deref(),
+            EVENT_KIND_REGISTRATION_RELEASED,
+        );
     }
     Ok(())
 }

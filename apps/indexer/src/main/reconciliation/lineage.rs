@@ -5,13 +5,29 @@ use crate::{
     runtime::IntakeChainTask,
 };
 
-use super::types::{CanonicalReconciliation, HeadChangeSet};
+use super::types::{CanonicalReconciliation, HeadChangeSet, HeaderAuditMode};
 
+#[allow(dead_code)]
 pub(crate) fn provider_block_to_lineage(
     chain: &str,
     block: &ProviderBlock,
     canonicality_state: CanonicalityState,
 ) -> ChainLineageBlock {
+    provider_block_to_lineage_with_header_audit_mode(
+        chain,
+        block,
+        canonicality_state,
+        HeaderAuditMode::Minimal,
+    )
+}
+
+pub(crate) fn provider_block_to_lineage_with_header_audit_mode(
+    chain: &str,
+    block: &ProviderBlock,
+    canonicality_state: CanonicalityState,
+    header_audit_mode: HeaderAuditMode,
+) -> ChainLineageBlock {
+    let retain_audit_fields = header_audit_mode.retains_audit_fields();
     ChainLineageBlock {
         chain_id: chain.to_owned(),
         block_hash: block.block_hash.clone(),
@@ -21,10 +37,18 @@ pub(crate) fn provider_block_to_lineage(
             block.block_timestamp_unix_secs,
         )
         .expect("provider block timestamp must fit in OffsetDateTime"),
-        logs_bloom: block.logs_bloom.clone(),
-        transactions_root: block.transactions_root.clone(),
-        receipts_root: block.receipts_root.clone(),
-        state_root: block.state_root.clone(),
+        logs_bloom: retain_audit_fields
+            .then(|| block.logs_bloom.clone())
+            .flatten(),
+        transactions_root: retain_audit_fields
+            .then(|| block.transactions_root.clone())
+            .flatten(),
+        receipts_root: retain_audit_fields
+            .then(|| block.receipts_root.clone())
+            .flatten(),
+        state_root: retain_audit_fields
+            .then(|| block.state_root.clone())
+            .flatten(),
         canonicality_state,
     }
 }

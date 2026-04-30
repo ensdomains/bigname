@@ -25,7 +25,7 @@ use super::{
         raw_payload_candidate_hashes, retained_transaction_keys_from_raw_logs,
         selected_address_set,
     },
-    types::{CanonicalReconciliation, HeadChangeSet},
+    types::{CanonicalReconciliation, HeadChangeSet, HeaderAuditMode},
 };
 
 pub(crate) async fn persist_reconciled_raw_blocks(
@@ -33,18 +33,37 @@ pub(crate) async fn persist_reconciled_raw_blocks(
     chain: &str,
     heads: &ProviderHeadSnapshot,
     canonical: &CanonicalReconciliation,
+    header_audit_mode: HeaderAuditMode,
 ) -> Result<()> {
     let mut blocks = BTreeMap::<String, bigname_storage::RawBlock>::new();
 
     let canonical_state = canonical_raw_state(canonical.status);
     for block in &canonical.reconciled_blocks {
-        insert_raw_block_candidate(&mut blocks, chain, block, canonical_state);
+        insert_raw_block_candidate(
+            &mut blocks,
+            chain,
+            block,
+            canonical_state,
+            header_audit_mode,
+        );
     }
     if let Some(safe) = &heads.safe {
-        insert_raw_block_candidate(&mut blocks, chain, safe, CanonicalityState::Safe);
+        insert_raw_block_candidate(
+            &mut blocks,
+            chain,
+            safe,
+            CanonicalityState::Safe,
+            header_audit_mode,
+        );
     }
     if let Some(finalized) = &heads.finalized {
-        insert_raw_block_candidate(&mut blocks, chain, finalized, CanonicalityState::Finalized);
+        insert_raw_block_candidate(
+            &mut blocks,
+            chain,
+            finalized,
+            CanonicalityState::Finalized,
+            header_audit_mode,
+        );
     }
 
     upsert_raw_blocks(pool, &blocks.into_values().collect::<Vec<_>>()).await?;

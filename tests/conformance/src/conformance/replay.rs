@@ -2125,6 +2125,10 @@
             resolver_address: &str,
             case_label: &str,
         ) {
+            let resolver_family_reason = match case_label {
+                "unsupported" => "resolver_family_unsupported",
+                _ => "resolver_family_pending",
+            };
             assert_eq!(
                 payload.pointer("/declared_state/topology/resolver_path/0/address"),
                 Some(&json!(resolver_address)),
@@ -2140,11 +2144,11 @@
                 Some(&json!([
                     {
                         "record_family": "addr",
-                        "unsupported_reason": "resolver_family_pending",
+                        "unsupported_reason": resolver_family_reason,
                     },
                     {
                         "record_family": "text",
-                        "unsupported_reason": "resolver_family_pending",
+                        "unsupported_reason": resolver_family_reason,
                     }
                 ])),
                 "case {case_label}"
@@ -2157,14 +2161,14 @@
                         "record_family": "addr",
                         "selector_key": "60",
                         "status": "unsupported",
-                        "unsupported_reason": "resolver_family_pending",
+                        "unsupported_reason": resolver_family_reason,
                     },
                     {
                         "record_key": "text",
                         "record_family": "text",
                         "selector_key": null,
                         "status": "unsupported",
-                        "unsupported_reason": "resolver_family_pending",
+                        "unsupported_reason": resolver_family_reason,
                     },
                     {
                         "record_key": "contenthash",
@@ -2177,9 +2181,9 @@
             );
             assert_json_contains(
                 payload,
-                "resolver_family_pending",
+                resolver_family_reason,
                 &format!(
-                    "{case_label} profile-gated resolution must keep pending resolver-family state explicit"
+                    "{case_label} profile-gated resolution must keep resolver-family state explicit"
                 ),
             );
         }

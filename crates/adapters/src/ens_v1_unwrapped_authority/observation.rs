@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "observation/resolver_records.rs"]
+mod resolver_records;
+
 pub(super) fn build_authority_observation(
     raw_log: &AuthorityRawLogRow,
 ) -> Result<Option<AuthorityObservation>> {
@@ -13,7 +16,9 @@ pub(super) fn build_authority_observation(
     {
         let expiry_word_start = registrar_name_registered_expiry_word_start(topic0)
             .expect("checked registrar NameRegistered topic must have an expiry word");
-        let label = decode_first_dynamic_string(&raw_log.data)?;
+        let Some(label) = decode_observable_registrar_label(&raw_log.data)? else {
+            return Ok(None);
+        };
         let labelhash = normalize_hex_32(
             raw_log
                 .topics
@@ -28,7 +33,7 @@ pub(super) fn build_authority_observation(
             .first()
             .context("observed registrar name is missing labelhash")?;
         if !observed_labelhash.eq_ignore_ascii_case(&labelhash) {
-            bail!("NameRegistered labelhash does not match decoded label");
+            return Ok(None);
         }
         let registrant = normalize_topic_address(
             raw_log
@@ -59,7 +64,9 @@ pub(super) fn build_authority_observation(
     {
         let expiry_word_start = registrar_name_renewed_expiry_word_start(topic0)
             .expect("checked registrar NameRenewed topic must have an expiry word");
-        let label = decode_first_dynamic_string(&raw_log.data)?;
+        let Some(label) = decode_observable_registrar_label(&raw_log.data)? else {
+            return Ok(None);
+        };
         let labelhash = normalize_hex_32(
             raw_log
                 .topics
@@ -74,7 +81,7 @@ pub(super) fn build_authority_observation(
             .first()
             .context("observed renewed registrar name is missing labelhash")?;
         if !observed_labelhash.eq_ignore_ascii_case(&labelhash) {
-            bail!("NameRenewed labelhash does not match decoded label");
+            return Ok(None);
         }
         let expiry = abi_word_to_i64(
             raw_log
@@ -172,27 +179,24 @@ pub(super) fn build_authority_observation(
     }
 
     if matches!(profile, Some(profile) if raw_log.source_family == profile.resolver_source_family())
-        && topic0.eq_ignore_ascii_case(&text_changed_topic0())
+        && is_text_changed_topic0(topic0)
     {
-        let key = decode_first_dynamic_string(&raw_log.data)?;
-        let value = decode_second_dynamic_string_if_present(&raw_log.data)?;
-        let indexed_key_hash = normalize_hex_32(
-            raw_log
-                .topics
-                .get(2)
-                .context("TextChanged log is missing indexed key hash")?,
-        )?;
+        let Some(key) = decode_resolver_first_dynamic_string(&raw_log.data) else {
+            return Ok(None);
+        };
+        let value = decode_second_dynamic_string_if_present(&raw_log.data);
+        let Some(indexed_key_hash) = normalize_resolver_topic(raw_log.topics.get(2)) else {
+            return Ok(None);
+        };
         if indexed_key_hash != keccak256_hex(key.as_bytes()) {
-            bail!("TextChanged indexed key hash does not match decoded key");
+            return Ok(None);
         }
+        let Some(namehash) = normalize_resolver_topic(raw_log.topics.get(1)) else {
+            return Ok(None);
+        };
         return Ok(Some(AuthorityObservation::RecordChanged(
             RecordChangeObservation {
-                namehash: normalize_hex_32(
-                    raw_log
-                        .topics
-                        .get(1)
-                        .context("TextChanged log is missing indexed node")?,
-                )?,
+                namehash,
                 resolver: raw_log.emitting_address.clone(),
                 selector: RecordSelector {
                     record_key: "text".to_owned(),
@@ -209,15 +213,15 @@ pub(super) fn build_authority_observation(
     if matches!(profile, Some(profile) if raw_log.source_family == profile.resolver_source_family())
         && topic0.eq_ignore_ascii_case(&name_changed_topic0())
     {
-        let name = decode_first_dynamic_string(&raw_log.data)?;
+        let Some(name) = decode_resolver_first_dynamic_string(&raw_log.data) else {
+            return Ok(None);
+        };
+        let Some(namehash) = normalize_resolver_topic(raw_log.topics.get(1)) else {
+            return Ok(None);
+        };
         return Ok(Some(AuthorityObservation::RecordChanged(
             RecordChangeObservation {
-                namehash: normalize_hex_32(
-                    raw_log
-                        .topics
-                        .get(1)
-                        .context("NameChanged log is missing indexed node")?,
-                )?,
+                namehash,
                 resolver: raw_log.emitting_address.clone(),
                 selector: RecordSelector {
                     record_key: "name".to_owned(),
@@ -234,15 +238,15 @@ pub(super) fn build_authority_observation(
     if matches!(profile, Some(profile) if raw_log.source_family == profile.resolver_source_family())
         && topic0.eq_ignore_ascii_case(&addr_changed_topic0())
     {
-        let address = decode_owner_address(&raw_log.data)?;
+        let Some(address) = decode_resolver_owner_address(&raw_log.data) else {
+            return Ok(None);
+        };
+        let Some(namehash) = normalize_resolver_topic(raw_log.topics.get(1)) else {
+            return Ok(None);
+        };
         return Ok(Some(AuthorityObservation::RecordChanged(
             RecordChangeObservation {
-                namehash: normalize_hex_32(
-                    raw_log
-                        .topics
-                        .get(1)
-                        .context("AddrChanged log is missing indexed node")?,
-                )?,
+                namehash,
                 resolver: raw_log.emitting_address.clone(),
                 selector: RecordSelector {
                     record_key: format!("addr:{ENS_NATIVE_COIN_TYPE}"),
@@ -259,22 +263,19 @@ pub(super) fn build_authority_observation(
     if matches!(profile, Some(profile) if raw_log.source_family == profile.resolver_source_family())
         && topic0.eq_ignore_ascii_case(&address_changed_topic0())
     {
-        let coin_type = abi_word_to_i64(
-            raw_log
-                .data
-                .get(..32)
-                .context("AddressChanged log is missing coin type")?,
-        )?;
-        let address_bytes = decode_nth_dynamic_bytes(&raw_log.data, 1)?;
+        let Some(coin_type) = decode_resolver_i64_word(raw_log.data.get(..32)) else {
+            return Ok(None);
+        };
+        let Some(address_bytes) = decode_resolver_nth_dynamic_bytes(&raw_log.data, 1) else {
+            return Ok(None);
+        };
         let value = resolver_address_record_value(coin_type, &address_bytes);
+        let Some(namehash) = normalize_resolver_topic(raw_log.topics.get(1)) else {
+            return Ok(None);
+        };
         return Ok(Some(AuthorityObservation::RecordChanged(
             RecordChangeObservation {
-                namehash: normalize_hex_32(
-                    raw_log
-                        .topics
-                        .get(1)
-                        .context("AddressChanged log is missing indexed node")?,
-                )?,
+                namehash,
                 resolver: raw_log.emitting_address.clone(),
                 selector: RecordSelector {
                     record_key: format!("addr:{coin_type}"),
@@ -288,24 +289,26 @@ pub(super) fn build_authority_observation(
         )));
     }
 
+    if let Some(observation) =
+        resolver_records::build_ens_v1_generic_record_observation(raw_log, topic0)?
+    {
+        return Ok(Some(observation));
+    }
+
     if matches!(profile, Some(profile) if raw_log.source_family == profile.resolver_source_family())
         && topic0.eq_ignore_ascii_case(&version_changed_topic0())
     {
+        let Some(namehash) = normalize_resolver_topic(raw_log.topics.get(1)) else {
+            return Ok(None);
+        };
+        let Some(record_version) = decode_resolver_i64_word(raw_log.data.get(..32)) else {
+            return Ok(None);
+        };
         return Ok(Some(AuthorityObservation::RecordVersionChanged(
             RecordVersionObservation {
-                namehash: normalize_hex_32(
-                    raw_log
-                        .topics
-                        .get(1)
-                        .context("VersionChanged log is missing indexed node")?,
-                )?,
+                namehash,
                 resolver: raw_log.emitting_address.clone(),
-                record_version: abi_word_to_i64(
-                    raw_log
-                        .data
-                        .get(..32)
-                        .context("VersionChanged log is missing record version")?,
-                )?,
+                record_version,
                 reference: raw_log.reference(),
             },
         )));
@@ -461,17 +464,52 @@ pub(super) fn build_authority_observation(
     Ok(None)
 }
 
-fn decode_second_dynamic_string_if_present(data: &[u8]) -> Result<Option<String>> {
+fn decode_second_dynamic_string_if_present(data: &[u8]) -> Option<String> {
     if data.len() < 64 {
-        return Ok(None);
+        return None;
     }
 
-    let first_offset = abi_word_to_usize(&data[..32]).context("invalid TextChanged ABI offset")?;
+    let Ok(first_offset) = abi_word_to_usize(&data[..32]) else {
+        return None;
+    };
     if first_offset < 64 {
-        return Ok(None);
+        return None;
     }
 
-    decode_nth_dynamic_string(data, 1).map(Some)
+    decode_nth_dynamic_string(data, 1).ok()
+}
+
+fn decode_observable_registrar_label(data: &[u8]) -> Result<Option<String>> {
+    let Ok(label_bytes) = decode_first_dynamic_bytes(data) else {
+        return Ok(None);
+    };
+    let Ok(label) = String::from_utf8(label_bytes) else {
+        return Ok(None);
+    };
+    if !can_observe_registrar_label(&label) {
+        return Ok(None);
+    }
+    Ok(Some(label))
+}
+
+fn decode_resolver_first_dynamic_string(data: &[u8]) -> Option<String> {
+    decode_first_dynamic_string(data).ok()
+}
+
+fn decode_resolver_nth_dynamic_bytes(data: &[u8], parameter_index: usize) -> Option<Vec<u8>> {
+    decode_nth_dynamic_bytes(data, parameter_index).ok()
+}
+
+fn decode_resolver_owner_address(data: &[u8]) -> Option<String> {
+    decode_owner_address(data).ok()
+}
+
+fn decode_resolver_i64_word(word: Option<&[u8]>) -> Option<i64> {
+    abi_word_to_i64(word?).ok()
+}
+
+fn normalize_resolver_topic(topic: Option<&String>) -> Option<String> {
+    normalize_hex_32(topic?).ok()
 }
 
 fn resolver_address_record_value(coin_type: i64, address_bytes: &[u8]) -> Value {
@@ -520,5 +558,22 @@ pub(super) fn observation_namehash(observation: &AuthorityObservation) -> Option
         AuthorityObservation::WrapperExpiryExtended(value) => Some(&value.namehash),
         AuthorityObservation::WrapperTokenTransferred(value) => Some(&value.namehash),
         _ => None,
+    }
+}
+
+pub(super) fn observation_reference(observation: &AuthorityObservation) -> &ObservationRef {
+    match observation {
+        AuthorityObservation::RegistrationGranted(value) => &value.reference,
+        AuthorityObservation::RegistrationRenewed(value) => &value.reference,
+        AuthorityObservation::TokenTransferred(value) => &value.reference,
+        AuthorityObservation::RegistryOwnerChanged(value) => &value.reference,
+        AuthorityObservation::ResolverChanged(value) => &value.reference,
+        AuthorityObservation::RecordChanged(value) => &value.reference,
+        AuthorityObservation::RecordVersionChanged(value) => &value.reference,
+        AuthorityObservation::WrapperNameWrapped(value) => &value.reference,
+        AuthorityObservation::WrapperNameUnwrapped(value) => &value.reference,
+        AuthorityObservation::WrapperFusesSet(value) => &value.reference,
+        AuthorityObservation::WrapperExpiryExtended(value) => &value.reference,
+        AuthorityObservation::WrapperTokenTransferred(value) => &value.reference,
     }
 }

@@ -16,6 +16,7 @@ const SOURCE_FAMILY_BASENAMES_BASE_PRIMARY: &str = "basenames_base_primary";
 const SOURCE_FAMILY_BASENAMES_BASE_REGISTRAR: &str = "basenames_base_registrar";
 const SOURCE_FAMILY_BASENAMES_BASE_REGISTRY: &str = "basenames_base_registry";
 const SOURCE_FAMILY_BASENAMES_BASE_RESOLVER: &str = "basenames_base_resolver";
+const GENERIC_SOURCE_SCOPE_ADDRESS: &str = "*";
 
 pub(super) async fn load_live_adapter_source_scope(
     pool: &sqlx::PgPool,
@@ -33,7 +34,7 @@ pub(super) async fn load_live_adapter_source_scope(
     let (from_block, to_block, stored_count): (Option<i64>, Option<i64>, i64) = sqlx::query_as(
         r#"
         SELECT MIN(block_number), MAX(block_number), COUNT(*)::BIGINT
-        FROM raw_blocks
+        FROM chain_lineage
         WHERE chain_id = $1
           AND block_hash = ANY($2::TEXT[])
         "#,
@@ -69,13 +70,19 @@ pub(super) async fn load_live_adapter_source_scope(
             "failed to load source-scoped adapter sync plan for chain {chain} range {from_block}..={to_block}"
         )
     })?;
-    Ok(selected_target_sync_scope(&source_plan))
+    Ok(selected_target_sync_scope(
+        &source_plan,
+        from_block,
+        to_block,
+    ))
 }
 
 pub(crate) fn selected_target_sync_scope(
     source_plan: &WatchedSourceSelectorPlan,
+    from_block: i64,
+    to_block: i64,
 ) -> Vec<(String, String, i64, i64)> {
-    source_plan
+    let mut scope = source_plan
         .selected_targets
         .iter()
         .map(|target| {
@@ -86,7 +93,21 @@ pub(crate) fn selected_target_sync_scope(
                 target.effective_to_block,
             )
         })
-        .collect()
+        .collect::<Vec<_>>();
+    if source_plan.source_family.as_deref() == Some(SOURCE_FAMILY_ENS_V1_RESOLVER_L1)
+        || source_plan
+            .selected_targets
+            .iter()
+            .any(|target| target.source_family == SOURCE_FAMILY_ENS_V1_RESOLVER_L1)
+    {
+        scope.push((
+            SOURCE_FAMILY_ENS_V1_RESOLVER_L1.to_owned(),
+            GENERIC_SOURCE_SCOPE_ADDRESS.to_owned(),
+            from_block,
+            to_block,
+        ));
+    }
+    scope
 }
 
 pub(super) fn source_scope_includes_reverse_claim(

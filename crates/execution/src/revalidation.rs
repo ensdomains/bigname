@@ -42,14 +42,17 @@ pub(crate) async fn revalidate_supported_resolution_persistence_from_storage(
         .with_context(|| {
             format!("{context} requires name_current row for logical_name_id {logical_name_id}")
         })?;
-    let record_inventory_row =
-        load_supported_record_inventory_current_for_revalidation(transaction, &row)
-            .await
-            .with_context(|| {
-                format!(
-                    "{context} failed to load supported record_inventory_current for logical_name_id {logical_name_id}"
-                )
-            })?;
+    let record_inventory_row = load_supported_record_inventory_current_for_revalidation(
+        transaction,
+        &row,
+        &request.outcome.cache_key.record_version_boundary,
+    )
+    .await
+    .with_context(|| {
+        format!(
+            "{context} failed to load supported record_inventory_current for logical_name_id {logical_name_id}"
+        )
+    })?;
 
     let stored_manifest_versions = positions::normalize_manifest_versions_for_revalidation(
         row.provenance
@@ -81,6 +84,16 @@ pub(crate) async fn revalidate_supported_resolution_persistence_from_storage(
         context,
     )
     .await?;
+    if let Some(record_inventory_row) = record_inventory_row.as_ref() {
+        positions::ensure_requested_positions_are_eligible_for_record_inventory_projection(
+            transaction,
+            record_inventory_row,
+            &outcome_requested_positions,
+            request.trace.namespace == BASENAMES_NAMESPACE,
+            context,
+        )
+        .await?;
+    }
 
     let topology = build_resolution_topology_for_revalidation(&row, record_inventory_row.as_ref())?;
     let support_boundary = bigname_storage::try_resolution_verified_support_boundary(

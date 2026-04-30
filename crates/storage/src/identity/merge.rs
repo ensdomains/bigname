@@ -74,9 +74,7 @@ pub(super) fn merge_binding_active_to(
     incoming: Option<OffsetDateTime>,
 ) -> Result<Option<OffsetDateTime>> {
     match (current, incoming) {
-        (Some(current), Some(incoming)) if current != incoming => {
-            bail!("surface binding active_to mismatch: stored {current}, incoming {incoming}")
-        }
+        (Some(current), Some(incoming)) => Ok(Some(current.min(incoming))),
         (Some(current), _) => Ok(Some(current)),
         (None, incoming) => Ok(incoming),
     }

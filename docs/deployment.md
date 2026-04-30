@@ -135,7 +135,9 @@ as a fallback.
 Automatic normalized-event replay catch-up keeps its block cursor, but also caps
 each replay chunk with `BIGNAME_INDEXER_NORMALIZED_REPLAY_CATCHUP_MAX_LOGS_PER_CHUNK`
 so sparse eras can move in large block jumps while dense spans are bounded by
-the number of persisted raw logs replayed.
+the number of persisted raw logs replayed. The automatic cursor is one
+all-source chain cursor over persisted canonical raw facts; source-scoped replay
+is reserved for explicit repair/backfill runs.
 Use `RUST_LOG=info,sqlx::query=error` for these runs; otherwise SQLx slow-query
 warnings can print huge generated INSERT statements for dense chunks and waste
 time on logging instead of ingest.

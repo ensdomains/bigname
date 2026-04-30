@@ -2,6 +2,34 @@ use bigname_storage::CheckpointBlockRef;
 
 use crate::provider::ProviderBlock;
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum HeaderAuditMode {
+    #[default]
+    Minimal,
+    RetainAuditFields,
+}
+
+impl HeaderAuditMode {
+    pub(crate) fn from_retain_audit_fields(retain_audit_fields: bool) -> Self {
+        if retain_audit_fields {
+            Self::RetainAuditFields
+        } else {
+            Self::Minimal
+        }
+    }
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Minimal => "minimal",
+            Self::RetainAuditFields => "retain-audit-fields",
+        }
+    }
+
+    pub(crate) fn retains_audit_fields(self) -> bool {
+        self == Self::RetainAuditFields
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CanonicalReconciliationStatus {
     Initialized,
@@ -68,8 +96,24 @@ pub(crate) struct ChainReconciliationOutcome {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RawFactNormalizedEventReplaySourceScope {
+    pub(crate) source_family: String,
+    pub(crate) address: String,
+    pub(crate) from_block: i64,
+    pub(crate) to_block: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum RawFactNormalizedEventReplaySelection {
-    BlockRange { from_block: i64, to_block: i64 },
+    BlockRange {
+        from_block: i64,
+        to_block: i64,
+    },
+    ScopedBlockRange {
+        from_block: i64,
+        to_block: i64,
+        source_scope: Vec<RawFactNormalizedEventReplaySourceScope>,
+    },
     BlockHashes(Vec<String>),
 }
 
@@ -77,7 +121,15 @@ impl RawFactNormalizedEventReplaySelection {
     pub(super) fn as_str(&self) -> &'static str {
         match self {
             Self::BlockRange { .. } => "block_range",
+            Self::ScopedBlockRange { .. } => "scoped_block_range",
             Self::BlockHashes(_) => "block_hashes",
+        }
+    }
+
+    pub(super) fn source_scope_target_count(&self) -> usize {
+        match self {
+            Self::ScopedBlockRange { source_scope, .. } => source_scope.len(),
+            Self::BlockRange { .. } | Self::BlockHashes(_) => 0,
         }
     }
 }
@@ -94,6 +146,7 @@ pub(crate) struct RawFactNormalizedEventReplayOutcome {
     pub(crate) deployment_profile: String,
     pub(crate) chain: String,
     pub(crate) selection_kind: &'static str,
+    pub(crate) source_scope_target_count: usize,
     pub(crate) selected_block_count: usize,
     pub(crate) canonical_raw_log_count: usize,
     pub(crate) scanned_raw_log_count: usize,

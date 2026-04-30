@@ -14,7 +14,7 @@ pub(in crate::ens_v1_unwrapped_authority) async fn load_canonical_blocks(
             block_number,
             block_timestamp,
             canonicality_state::TEXT AS canonicality_state
-        FROM raw_blocks
+        FROM chain_lineage
         WHERE chain_id = $1
           AND canonicality_state IN (
               'canonical'::canonicality_state,
@@ -54,10 +54,13 @@ pub(in crate::ens_v1_unwrapped_authority) async fn load_canonical_blocks_for_res
     chain: &str,
     raw_logs: &[AuthorityRawLogRow],
 ) -> Result<Vec<RawBlockSnapshot>> {
-    let mut blocks = load_release_boundary_blocks_for_authority_logs(pool, chain, raw_logs).await?;
-    if let Some(head) = load_canonical_head_block(pool, chain).await? {
-        blocks.push(head);
-    }
+    let Some(replay_head) = restricted_replay_head_block(raw_logs) else {
+        return Ok(Vec::new());
+    };
+    let mut blocks =
+        load_release_boundary_blocks_for_authority_logs(pool, chain, raw_logs, &replay_head)
+            .await?;
+    blocks.push(replay_head);
 
     blocks.sort_by(|left, right| {
         left.block_number
@@ -72,38 +75,29 @@ pub(in crate::ens_v1_unwrapped_authority) async fn load_canonical_blocks_for_res
     Ok(blocks)
 }
 
-async fn load_canonical_head_block(pool: &PgPool, chain: &str) -> Result<Option<RawBlockSnapshot>> {
-    let row = sqlx::query(
-        r#"
-        SELECT
-            chain_id,
-            block_hash,
-            block_number,
-            block_timestamp,
-            canonicality_state::TEXT AS canonicality_state
-        FROM raw_blocks
-        WHERE chain_id = $1
-          AND canonicality_state IN (
-              'canonical'::canonicality_state,
-              'safe'::canonicality_state,
-              'finalized'::canonicality_state
-          )
-        ORDER BY block_number DESC
-        LIMIT 1
-        "#,
-    )
-    .bind(chain)
-    .fetch_optional(pool)
-    .await
-    .with_context(|| format!("failed to load canonical raw-block head for chain {chain}"))?;
-
-    row.map(raw_block_snapshot_from_row).transpose()
+fn restricted_replay_head_block(raw_logs: &[AuthorityRawLogRow]) -> Option<RawBlockSnapshot> {
+    raw_logs
+        .iter()
+        .max_by(|left, right| {
+            left.block_number
+                .cmp(&right.block_number)
+                .then(left.transaction_index.cmp(&right.transaction_index))
+                .then(left.log_index.cmp(&right.log_index))
+        })
+        .map(|raw_log| RawBlockSnapshot {
+            chain_id: raw_log.chain_id.clone(),
+            block_hash: raw_log.block_hash.clone(),
+            block_number: raw_log.block_number,
+            block_timestamp: raw_log.block_timestamp,
+            canonicality_state: raw_log.canonicality_state,
+        })
 }
 
 async fn load_release_boundary_blocks_for_authority_logs(
     pool: &PgPool,
     chain: &str,
     raw_logs: &[AuthorityRawLogRow],
+    replay_head: &RawBlockSnapshot,
 ) -> Result<Vec<RawBlockSnapshot>> {
     let mut release_timestamps = Vec::new();
     let mut release_namespaces = Vec::new();
@@ -138,9 +132,11 @@ async fn load_release_boundary_blocks_for_authority_logs(
                 block_number,
                 block_timestamp,
                 canonicality_state
-            FROM raw_blocks
+            FROM chain_lineage
             WHERE chain_id = $1
               AND block_timestamp >= requested.release_timestamp
+              AND block_timestamp <= $4
+              AND block_number <= $5
               AND canonicality_state IN (
                   'canonical'::canonicality_state,
                   'safe'::canonicality_state,
@@ -155,6 +151,8 @@ async fn load_release_boundary_blocks_for_authority_logs(
     .bind(chain)
     .bind(&release_timestamps)
     .bind(&release_namespaces)
+    .bind(replay_head.block_timestamp)
+    .bind(replay_head.block_number)
     .fetch_all(pool)
     .await
     .with_context(|| {

@@ -214,10 +214,6 @@ impl TestDatabase {
                         parent_hash TEXT,
                         block_number BIGINT NOT NULL CHECK (block_number >= 0),
                         block_timestamp TIMESTAMPTZ NOT NULL,
-                        logs_bloom BYTEA,
-                        transactions_root TEXT,
-                        receipts_root TEXT,
-                        state_root TEXT,
                         canonicality_state canonicality_state NOT NULL DEFAULT 'observed',
                         observed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                         inserted_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -228,6 +224,32 @@ impl TestDatabase {
             .execute(&pool)
             .await
             .context("failed to create chain_lineage for API tests")?;
+            sqlx::query(
+                r#"
+                    CREATE TABLE chain_header_audit (
+                        chain_id TEXT NOT NULL,
+                        block_hash TEXT NOT NULL,
+                        logs_bloom BYTEA,
+                        transactions_root TEXT,
+                        receipts_root TEXT,
+                        state_root TEXT,
+                        observed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                        PRIMARY KEY (chain_id, block_hash),
+                        FOREIGN KEY (chain_id, block_hash)
+                            REFERENCES chain_lineage (chain_id, block_hash)
+                            ON DELETE CASCADE,
+                        CHECK (
+                            logs_bloom IS NOT NULL
+                            OR transactions_root IS NOT NULL
+                            OR receipts_root IS NOT NULL
+                            OR state_root IS NOT NULL
+                        )
+                    )
+                    "#,
+            )
+            .execute(&pool)
+            .await
+            .context("failed to create chain_header_audit for API tests")?;
             sqlx::query(
                 r#"
                     CREATE TABLE name_surfaces (

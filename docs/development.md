@@ -18,6 +18,19 @@ The compose stack starts:
 
 Stop the local services with `docker compose down`. Add `-v` if you also want to remove the local data volumes.
 
+## Bootstrap Migration Hygiene
+
+During bootstrap, bigname has no active deployments or shared production
+databases that must preserve data across every intermediate schema. Migration
+findings that only affect historical data moving between pre-deployment schemas
+should be tracked as bootstrap cleanup unless a shared/staging database is
+explicitly declared non-rebuildable.
+
+Before the first stateful deployment, collapse the checked-in SQL history into a
+small baseline migration set. When collapsing, remove obsolete transition-only
+steps or re-audit them for hard preflight checks before destructive drops, such
+as the pre-deployment `raw_blocks` to `chain_header_audit` transition.
+
 ## Live Indexing Configuration
 
 `./scripts/dev-up` sources `.env`, applies migrations, starts the API, starts

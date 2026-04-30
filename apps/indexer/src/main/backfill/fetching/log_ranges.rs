@@ -14,11 +14,10 @@ use super::super::{
     BackfillBlockRange,
     selection::{
         SelectedTargetIntervalIndex, selected_log_range_requests,
-        selected_target_addresses_at_block,
+        selected_log_range_requests_without_source_family, selected_target_addresses_at_block,
     },
 };
 
-const LARGE_SOURCE_FAMILY_TOPIC_FILTER_TARGET_THRESHOLD: usize = 10_000;
 const SOURCE_FAMILY_ENS_V1_RESOLVER_L1: &str = "ens_v1_resolver_l1";
 const ENS_V1_RESOLVER_EVENT_SIGNATURES: &[&str] = &[
     "ABIChanged(bytes32,uint256)",
@@ -34,8 +33,8 @@ const ENS_V1_RESOLVER_EVENT_SIGNATURES: &[&str] = &[
     "DataChanged(bytes32,string,string,bytes)",
     "InterfaceChanged(bytes32,bytes4,address)",
     "NameChanged(bytes32,string)",
-    "PubkeyChanged(bytes32,bytes32,bytes32)",
     "TextChanged(bytes32,string,string)",
+    "TextChanged(bytes32,string,string,string)",
     "VerifierChanged(bytes,address)",
     "VersionChanged(bytes32,uint64)",
 ];
@@ -48,21 +47,51 @@ pub(super) async fn fetch_backfill_logs_by_safe_ranges(
     resolved_blocks: &[ProviderResolvedBlock],
     range: BackfillBlockRange,
 ) -> Result<BTreeMap<i64, Vec<ProviderLog>>> {
-    if let Some(topic0s) = source_family_topic0s_for_range_scan(source_plan) {
-        return fetch_topic_first_logs_by_safe_ranges(
+    if let Some(topic_scan) = source_family_topic_scan(source_plan) {
+        let mut logs_by_block = fetch_topic_first_logs_by_safe_ranges(
             provider,
             source_plan,
             selected_target_index,
             selected_target_addresses_for_chunk,
             resolved_blocks,
             range,
-            topic0s,
+            topic_scan,
         )
-        .await;
+        .await?;
+        let address_scoped_logs = fetch_address_scoped_logs_by_safe_ranges(
+            provider,
+            source_plan,
+            resolved_blocks,
+            range,
+            true,
+        )
+        .await?;
+        merge_logs_by_block(&mut logs_by_block, address_scoped_logs);
+        return Ok(logs_by_block);
     }
 
+    fetch_address_scoped_logs_by_safe_ranges(provider, source_plan, resolved_blocks, range, false)
+        .await
+}
+
+async fn fetch_address_scoped_logs_by_safe_ranges(
+    provider: &(impl ChainProviderOps + ?Sized),
+    source_plan: &WatchedSourceSelectorPlan,
+    resolved_blocks: &[ProviderResolvedBlock],
+    range: BackfillBlockRange,
+    omit_generic_resolver_targets: bool,
+) -> Result<BTreeMap<i64, Vec<ProviderLog>>> {
     let mut logs_by_block = BTreeMap::new();
-    for request in selected_log_range_requests(source_plan, resolved_blocks) {
+    let requests = if omit_generic_resolver_targets {
+        selected_log_range_requests_without_source_family(
+            source_plan,
+            resolved_blocks,
+            SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
+        )
+    } else {
+        selected_log_range_requests(source_plan, resolved_blocks)
+    };
+    for request in requests {
         let request_blocks = &resolved_blocks[request.start_index..request.end_index];
         let from_block = request_blocks
             .first()
@@ -99,16 +128,21 @@ async fn fetch_topic_first_logs_by_safe_ranges(
     selected_target_addresses_for_chunk: &[String],
     resolved_blocks: &[ProviderResolvedBlock],
     range: BackfillBlockRange,
-    topic0s: Vec<String>,
+    topic_scan: SourceFamilyTopicScan,
 ) -> Result<BTreeMap<i64, Vec<ProviderLog>>> {
-    if selected_target_addresses_for_chunk.is_empty() {
+    let address_filter = if topic_scan.scan_all_emitters {
+        &[][..]
+    } else {
+        selected_target_addresses_for_chunk
+    };
+    if address_filter.is_empty() && !topic_scan.scan_all_emitters {
         info!(
             service = "indexer",
             command = "backfill",
             chain = %source_plan.watched_chain_plan.chain,
             source_family = source_plan.source_family.as_deref(),
             selected_target_count = source_plan.selected_targets.len(),
-            topic0_count = topic0s.len(),
+            topic0_count = topic_scan.topic0s.len(),
             selected_target_address_count = 0usize,
             from_block = range.from_block,
             to_block = range.to_block,
@@ -121,8 +155,8 @@ async fn fetch_topic_first_logs_by_safe_ranges(
     let group_logs = provider
         .fetch_logs_by_block_range_for_topic0s_and_addresses(
             resolved_blocks,
-            &topic0s,
-            selected_target_addresses_for_chunk,
+            &topic_scan.topic0s,
+            address_filter,
         )
         .await
         .with_context(|| {
@@ -135,10 +169,13 @@ async fn fetch_topic_first_logs_by_safe_ranges(
     let mut selected_log_count = 0usize;
     for (block_number, logs) in group_logs {
         provider_log_count += logs.len();
-        let selected_logs = logs
-            .into_iter()
-            .filter(|log| selected_target_index.contains(&log.address, block_number))
-            .collect::<Vec<_>>();
+        let selected_logs = if topic_scan.scan_all_emitters {
+            logs
+        } else {
+            logs.into_iter()
+                .filter(|log| selected_target_index.contains(&log.address, block_number))
+                .collect::<Vec<_>>()
+        };
         selected_log_count += selected_logs.len();
         if logs_by_block.insert(block_number, selected_logs).is_some() {
             bail!("provider returned duplicate range logs for backfill block {block_number}");
@@ -150,13 +187,14 @@ async fn fetch_topic_first_logs_by_safe_ranges(
         chain = %source_plan.watched_chain_plan.chain,
         source_family = source_plan.source_family.as_deref(),
         selected_target_count = source_plan.selected_targets.len(),
-        topic0_count = topic0s.len(),
-        selected_target_address_count = selected_target_addresses_for_chunk.len(),
+        topic0_count = topic_scan.topic0s.len(),
+        selected_target_address_count = address_filter.len(),
+        scan_all_emitters = topic_scan.scan_all_emitters,
         provider_log_count,
         selected_log_count,
         from_block = range.from_block,
         to_block = range.to_block,
-        "hash-pinned topic-first range logs filtered to selected targets"
+        "hash-pinned topic-first range logs fetched"
     );
 
     Ok(logs_by_block)
@@ -169,7 +207,12 @@ pub(super) fn selected_addresses_for_materialized_block(
     block_number: i64,
     block_logs: &[ProviderLog],
 ) -> BTreeSet<String> {
-    if topic_filtered_source_family {
+    if scans_all_resolver_event_emitters(source_plan) {
+        block_logs
+            .iter()
+            .map(|log| log.address.to_ascii_lowercase())
+            .collect()
+    } else if topic_filtered_source_family {
         selected_target_index.addresses_for_logs_at_block(block_logs, block_number)
     } else {
         selected_target_addresses_at_block(source_plan, block_number)
@@ -177,28 +220,69 @@ pub(super) fn selected_addresses_for_materialized_block(
 }
 
 pub(super) fn uses_topic_first_source_family_scan(source_plan: &WatchedSourceSelectorPlan) -> bool {
-    source_family_topic0s_for_range_scan(source_plan).is_some()
+    source_family_topic_scan(source_plan).is_some()
 }
 
-fn source_family_topic0s_for_range_scan(
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SourceFamilyTopicScan {
+    topic0s: Vec<String>,
+    scan_all_emitters: bool,
+}
+
+fn source_family_topic_scan(
     source_plan: &WatchedSourceSelectorPlan,
-) -> Option<Vec<String>> {
-    if source_plan.selector_kind != WatchedSourceSelectorKind::SourceFamily {
-        return None;
-    }
-    if source_plan.source_family.as_deref() != Some(SOURCE_FAMILY_ENS_V1_RESOLVER_L1) {
-        return None;
-    }
-    if source_plan.selected_targets.len() <= LARGE_SOURCE_FAMILY_TOPIC_FILTER_TARGET_THRESHOLD {
+) -> Option<SourceFamilyTopicScan> {
+    if !includes_generic_resolver_event_scope(source_plan) {
         return None;
     }
 
-    Some(
-        ENS_V1_RESOLVER_EVENT_SIGNATURES
+    Some(SourceFamilyTopicScan {
+        topic0s: ENS_V1_RESOLVER_EVENT_SIGNATURES
             .iter()
             .map(|signature| topic0_hex(signature))
             .collect(),
-    )
+        scan_all_emitters: true,
+    })
+}
+
+fn scans_all_resolver_event_emitters(source_plan: &WatchedSourceSelectorPlan) -> bool {
+    includes_generic_resolver_event_scope(source_plan)
+}
+
+fn includes_generic_resolver_event_scope(source_plan: &WatchedSourceSelectorPlan) -> bool {
+    source_plan.selector_kind == WatchedSourceSelectorKind::SourceFamily
+        && source_plan.source_family.as_deref() == Some(SOURCE_FAMILY_ENS_V1_RESOLVER_L1)
+        || source_plan
+            .selected_targets
+            .iter()
+            .any(|target| target.source_family == SOURCE_FAMILY_ENS_V1_RESOLVER_L1)
+}
+
+fn merge_logs_by_block(
+    logs_by_block: &mut BTreeMap<i64, Vec<ProviderLog>>,
+    incoming_logs_by_block: BTreeMap<i64, Vec<ProviderLog>>,
+) {
+    for (block_number, incoming_logs) in incoming_logs_by_block {
+        let logs = logs_by_block.entry(block_number).or_default();
+        for incoming_log in incoming_logs {
+            if !logs.iter().any(|log| same_log_identity(log, &incoming_log)) {
+                logs.push(incoming_log);
+            }
+        }
+        logs.sort_by(|left, right| {
+            left.transaction_index
+                .cmp(&right.transaction_index)
+                .then_with(|| left.log_index.cmp(&right.log_index))
+        });
+    }
+}
+
+fn same_log_identity(left: &ProviderLog, right: &ProviderLog) -> bool {
+    left.block_hash.eq_ignore_ascii_case(&right.block_hash)
+        && left
+            .transaction_hash
+            .eq_ignore_ascii_case(&right.transaction_hash)
+        && left.log_index == right.log_index
 }
 
 fn topic0_hex(signature: &str) -> String {

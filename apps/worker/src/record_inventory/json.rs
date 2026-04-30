@@ -145,10 +145,10 @@ pub(super) fn gap_value(
     })
 }
 
-pub(super) fn resolver_family_pending_value(record_family: &str) -> Value {
+pub(super) fn resolver_family_status_value(record_family: &str, unsupported_reason: &str) -> Value {
     json!({
         "record_family": record_family,
-        "unsupported_reason": RESOLVER_FAMILY_PENDING_REASON,
+        "unsupported_reason": unsupported_reason,
     })
 }
 

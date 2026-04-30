@@ -1026,6 +1026,10 @@ async fn assert_ensv1_dynamic_profile_pending_or_unsupported_readback(
     record_inventory_row: &bigname_storage::RecordInventoryCurrentRow,
     case_label: &str,
 ) -> Result<()> {
+    let addr_unsupported_reason =
+        resolver_family_reason(record_inventory_row, "addr").context("missing addr reason")?;
+    let text_unsupported_reason =
+        resolver_family_reason(record_inventory_row, "text").context("missing text reason")?;
     let payload = get_resolution_payload(
         database,
         "/v1/resolutions/ens/alice.eth?mode=declared&records=addr:60,text,contenthash",
@@ -1059,11 +1063,11 @@ async fn assert_ensv1_dynamic_profile_pending_or_unsupported_readback(
             "unsupported_families": [
                 {
                     "record_family": "addr",
-                    "unsupported_reason": "resolver_family_pending",
+                    "unsupported_reason": addr_unsupported_reason.clone(),
                 },
                 {
                     "record_family": "text",
-                    "unsupported_reason": "resolver_family_pending",
+                    "unsupported_reason": text_unsupported_reason.clone(),
                 }
             ],
             "last_change": record_inventory_row.last_change.clone().unwrap_or(Value::Null),
@@ -1080,14 +1084,14 @@ async fn assert_ensv1_dynamic_profile_pending_or_unsupported_readback(
                     "record_family": "addr",
                     "selector_key": "60",
                     "status": "unsupported",
-                    "unsupported_reason": "resolver_family_pending",
+                    "unsupported_reason": addr_unsupported_reason,
                 },
                 {
                     "record_key": "text",
                     "record_family": "text",
                     "selector_key": null,
                     "status": "unsupported",
-                    "unsupported_reason": "resolver_family_pending",
+                    "unsupported_reason": text_unsupported_reason,
                 },
                 {
                     "record_key": "contenthash",
@@ -1110,6 +1114,10 @@ async fn assert_basenames_dynamic_profile_pending_or_unsupported_readback(
     record_inventory_row: &bigname_storage::RecordInventoryCurrentRow,
     case_label: &str,
 ) -> Result<()> {
+    let addr_unsupported_reason =
+        resolver_family_reason(record_inventory_row, "addr").context("missing addr reason")?;
+    let text_unsupported_reason =
+        resolver_family_reason(record_inventory_row, "text").context("missing text reason")?;
     let payload = get_resolution_payload(
         database,
         "/v1/resolutions/basenames/alice.base.eth?mode=declared&records=addr:60,text,contenthash",
@@ -1148,11 +1156,11 @@ async fn assert_basenames_dynamic_profile_pending_or_unsupported_readback(
             "unsupported_families": [
                 {
                     "record_family": "addr",
-                    "unsupported_reason": "resolver_family_pending",
+                    "unsupported_reason": addr_unsupported_reason.clone(),
                 },
                 {
                     "record_family": "text",
-                    "unsupported_reason": "resolver_family_pending",
+                    "unsupported_reason": text_unsupported_reason.clone(),
                 }
             ],
             "last_change": record_inventory_row.last_change.clone().unwrap_or(Value::Null),
@@ -1169,14 +1177,14 @@ async fn assert_basenames_dynamic_profile_pending_or_unsupported_readback(
                     "record_family": "addr",
                     "selector_key": "60",
                     "status": "unsupported",
-                    "unsupported_reason": "resolver_family_pending",
+                    "unsupported_reason": addr_unsupported_reason,
                 },
                 {
                     "record_key": "text",
                     "record_family": "text",
                     "selector_key": null,
                     "status": "unsupported",
-                    "unsupported_reason": "resolver_family_pending",
+                    "unsupported_reason": text_unsupported_reason,
                 },
                 {
                     "record_key": "contenthash",
@@ -1191,6 +1199,19 @@ async fn assert_basenames_dynamic_profile_pending_or_unsupported_readback(
     assert_eq!(payload.verified_state, None, "case {case_label}");
 
     Ok(())
+}
+
+fn resolver_family_reason(
+    record_inventory_row: &bigname_storage::RecordInventoryCurrentRow,
+    record_family: &str,
+) -> Option<Value> {
+    record_inventory_row
+        .unsupported_families
+        .as_array()?
+        .iter()
+        .find(|family| family.get("record_family").and_then(Value::as_str) == Some(record_family))?
+        .get("unsupported_reason")
+        .cloned()
 }
 
 async fn assert_basenames_dynamic_profile_pending_or_unsupported_overview(

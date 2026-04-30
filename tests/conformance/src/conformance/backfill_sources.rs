@@ -1258,13 +1258,13 @@ async fn assert_empty_historical_block_retention(
     assert_eq!(
         block_scoped_table_count(
             database,
-            "raw_blocks",
+            "chain_header_audit",
             probe.chain_id,
             probe.empty_block_hash
         )
         .await?,
-        1,
-        "empty historical block must retain its compact raw block anchor"
+        0,
+        "empty historical block without audit fields must not require a header-audit row"
     );
     for table in [
         "raw_logs",

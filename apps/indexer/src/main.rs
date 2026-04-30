@@ -95,6 +95,8 @@ async fn run(args: RunArgs) -> Result<()> {
 
     let pool = bigname_storage::connect(&args.database).await?;
     let adapter_sync_mode = BackfillAdapterSyncMode::parse(&args.hash_pinned_adapter_sync)?;
+    let header_audit_mode =
+        HeaderAuditMode::from_retain_audit_fields(args.retain_header_audit_fields);
     let runtime_watch_scope = match adapter_sync_mode {
         BackfillAdapterSyncMode::Inline => RuntimeWatchScope::ActiveWatchedChain,
         BackfillAdapterSyncMode::Auto | BackfillAdapterSyncMode::RawOnly => {
@@ -137,6 +139,7 @@ async fn run(args: RunArgs) -> Result<()> {
         args.hash_pinned_chunk_blocks,
         adapter_sync_mode.startup_hash_pinned_backfill_mode(),
         adapter_sync_mode == BackfillAdapterSyncMode::Auto,
+        header_audit_mode,
     )
     .await?;
     if adapter_sync_mode.syncs_after_startup_backfill() {
@@ -164,7 +167,8 @@ async fn run(args: RunArgs) -> Result<()> {
             args.normalized_replay_catchup_chunk_blocks,
             args.normalized_replay_catchup_max_logs_per_chunk,
             args.normalized_replay_catchup_poll_interval_secs,
-        )?;
+        )?
+        .with_defer_projection_indexes(args.normalized_replay_defer_projection_indexes);
         let catchup_pool = pool.clone();
         tokio::spawn(async move {
             if let Err(error) = run_normalized_replay_catchup(catchup_pool, catchup_config).await {
@@ -245,6 +249,7 @@ async fn run(args: RunArgs) -> Result<()> {
         bootstrap_backfill_range_policy = "manifest_declared_start_to_provider_head",
         hash_pinned_chunk_blocks = args.hash_pinned_chunk_blocks,
         hash_pinned_adapter_sync = adapter_sync_mode.as_str(),
+        header_audit_mode = header_audit_mode.as_str(),
         effective_hash_pinned_backfill_adapter_sync =
             adapter_sync_mode.startup_hash_pinned_backfill_mode().as_str(),
         live_poll_adapter_sync = live_poll_adapter_sync_enabled,
@@ -252,6 +257,7 @@ async fn run(args: RunArgs) -> Result<()> {
         normalized_replay_catchup_chunk_blocks = args.normalized_replay_catchup_chunk_blocks,
         normalized_replay_catchup_max_logs_per_chunk = args.normalized_replay_catchup_max_logs_per_chunk,
         normalized_replay_catchup_poll_interval_secs = args.normalized_replay_catchup_poll_interval_secs,
+        normalized_replay_defer_projection_indexes = args.normalized_replay_defer_projection_indexes,
         adapter_sync_on_manifest_refresh = broad_runtime_refresh_enabled,
         manifest_observation_refresh_enabled = broad_runtime_refresh_enabled,
         discovery_refresh_enabled = broad_runtime_refresh_enabled,
@@ -274,6 +280,7 @@ async fn run(args: RunArgs) -> Result<()> {
         live_poll_adapter_sync_enabled,
         broad_runtime_refresh_enabled,
         broad_runtime_refresh_enabled,
+        header_audit_mode,
     )
     .await
 }
@@ -354,6 +361,8 @@ async fn run_backfill(args: BackfillArgs) -> Result<()> {
     };
     let lease_expires_at = backfill_lease_expires_at(args.lease_duration_secs)?;
     let adapter_sync_mode = BackfillAdapterSyncMode::parse(&args.hash_pinned_adapter_sync)?;
+    let header_audit_mode =
+        HeaderAuditMode::from_retain_audit_fields(args.retain_header_audit_fields);
     let config = BackfillJobRunConfig {
         deployment_profile,
         idempotency_key: args.idempotency_key,
@@ -363,6 +372,7 @@ async fn run_backfill(args: BackfillArgs) -> Result<()> {
         lease_expires_at,
         hash_pinned_chunk_blocks: args.hash_pinned_chunk_blocks,
         adapter_sync_mode: adapter_sync_mode.hash_pinned_backfill_mode(),
+        header_audit_mode,
     };
 
     run_resumable_hash_pinned_backfill_job(&pool, &source_plan, provider, config).await?;

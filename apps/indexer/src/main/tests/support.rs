@@ -355,10 +355,6 @@ impl TestDatabase {
                     parent_hash TEXT,
                     block_number BIGINT NOT NULL,
                     block_timestamp TIMESTAMPTZ NOT NULL,
-                    logs_bloom BYTEA,
-                    transactions_root TEXT,
-                    receipts_root TEXT,
-                    state_root TEXT,
                     canonicality_state canonicality_state NOT NULL DEFAULT 'observed',
                     observed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                     inserted_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -369,6 +365,26 @@ impl TestDatabase {
         .execute(&pool)
         .await
         .context("failed to create chain_lineage table for indexer tests")?;
+        sqlx::query(
+            r#"
+                CREATE TABLE chain_header_audit (
+                    chain_id TEXT NOT NULL,
+                    block_hash TEXT NOT NULL,
+                    logs_bloom BYTEA,
+                    transactions_root TEXT,
+                    receipts_root TEXT,
+                    state_root TEXT,
+                    observed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    PRIMARY KEY (chain_id, block_hash),
+                    FOREIGN KEY (chain_id, block_hash)
+                        REFERENCES chain_lineage (chain_id, block_hash)
+                        ON DELETE CASCADE
+                )
+                "#,
+        )
+        .execute(&pool)
+        .await
+        .context("failed to create chain_header_audit table for indexer tests")?;
         sqlx::query(
             r#"
                 CREATE TABLE chain_checkpoints (
@@ -386,29 +402,6 @@ impl TestDatabase {
         .execute(&pool)
         .await
         .context("failed to create chain_checkpoints table for indexer tests")?;
-        sqlx::query(
-            r#"
-                CREATE TABLE raw_blocks (
-                    raw_block_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-                    chain_id TEXT NOT NULL,
-                    block_hash TEXT NOT NULL,
-                    parent_hash TEXT,
-                    block_number BIGINT NOT NULL,
-                    block_timestamp TIMESTAMPTZ NOT NULL,
-                    logs_bloom BYTEA,
-                    transactions_root TEXT,
-                    receipts_root TEXT,
-                    state_root TEXT,
-                    canonicality_state canonicality_state NOT NULL DEFAULT 'observed',
-                    observed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-                    fetched_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-                    UNIQUE (chain_id, block_hash)
-                )
-                "#,
-        )
-        .execute(&pool)
-        .await
-        .context("failed to create raw_blocks table for indexer tests")?;
         sqlx::query(
             r#"
                 CREATE TABLE raw_payload_cache_metadata (
@@ -1763,6 +1756,7 @@ fn support_logs_for_filter(
     hashes_by_number: &std::collections::BTreeMap<i64, String>,
 ) -> Value {
     let address_filter = support_log_filter_addresses(filter);
+    let topic0_filter = support_log_filter_topic0s(filter);
     let mut logs = Vec::new();
 
     if let Some(block_hash) = filter.get("blockHash").and_then(Value::as_str) {
@@ -1772,6 +1766,7 @@ fn support_logs_for_filter(
         logs.extend(support_filtered_fixture_logs(
             fixture,
             address_filter.as_ref(),
+            topic0_filter.as_ref(),
         ));
     } else {
         let from_block = filter
@@ -1799,6 +1794,7 @@ fn support_logs_for_filter(
             logs.extend(support_filtered_fixture_logs(
                 fixture,
                 address_filter.as_ref(),
+                topic0_filter.as_ref(),
             ));
         }
     }
@@ -1827,9 +1823,33 @@ fn support_log_filter_addresses(
     Some(addresses.into_iter().collect())
 }
 
+fn support_log_filter_topic0s(
+    filter: &serde_json::Map<String, Value>,
+) -> Option<std::collections::BTreeSet<String>> {
+    let topics = filter.get("topics")?.as_array()?;
+    let topic0 = topics.first()?;
+    let values = match topic0 {
+        Value::String(topic) => vec![topic.to_ascii_lowercase()],
+        Value::Array(topics) => topics
+            .iter()
+            .map(|topic| {
+                topic
+                    .as_str()
+                    .expect("log topic filter values must be strings")
+                    .to_ascii_lowercase()
+            })
+            .collect(),
+        Value::Null => return None,
+        value => panic!("unexpected log topic0 filter: {value:?}"),
+    };
+
+    Some(values.into_iter().collect())
+}
+
 fn support_filtered_fixture_logs(
     fixture: &ProviderBlockFixture,
     address_filter: Option<&std::collections::BTreeSet<String>>,
+    topic0_filter: Option<&std::collections::BTreeSet<String>>,
 ) -> Vec<Value> {
     fixture
         .logs
@@ -1841,6 +1861,17 @@ fn support_filtered_fixture_logs(
             log.get("address")
                 .and_then(Value::as_str)
                 .map(|address| address_filter.contains(&address.to_ascii_lowercase()))
+                .unwrap_or(false)
+        })
+        .filter(|log| {
+            let Some(topic0_filter) = topic0_filter else {
+                return true;
+            };
+            log.get("topics")
+                .and_then(Value::as_array)
+                .and_then(|topics| topics.first())
+                .and_then(Value::as_str)
+                .map(|topic0| topic0_filter.contains(&topic0.to_ascii_lowercase()))
                 .unwrap_or(false)
         })
         .cloned()
@@ -1956,6 +1987,10 @@ fn ens_v2_alias_changed_topic0() -> String {
 
 fn resolver_text_changed_topic0() -> String {
     keccak256_hex(b"TextChanged(bytes32,string,string)")
+}
+
+fn resolver_text_changed_with_value_topic0() -> String {
+    keccak256_hex(b"TextChanged(bytes32,string,string,string)")
 }
 
 fn resolver_name_changed_topic0() -> String {
@@ -2258,6 +2293,10 @@ fn encode_dynamic_string_log_data(value: &str) -> String {
     let padded_length = value_bytes.len().div_ceil(32) * 32;
     output.resize(64 + padded_length, 0);
     hex_string(&output)
+}
+
+fn encode_two_dynamic_string_log_data(left: &str, right: &str) -> String {
+    encode_two_dynamic_bytes_log_data(left.as_bytes(), right.as_bytes())
 }
 
 fn encode_resolver_addr_changed_log_data(address: &str) -> String {

@@ -30,6 +30,7 @@ pub(crate) use canonical::{
 pub(crate) use lineage::{
     checkpoint_ref_changed, head_change_set, lineage_block_to_provider,
     provider_block_to_checkpoint_ref, provider_block_to_lineage,
+    provider_block_to_lineage_with_header_audit_mode,
 };
 #[allow(unused_imports)]
 pub(crate) use logging::{
@@ -40,13 +41,13 @@ pub(crate) use payload::{
     canonical_raw_state, canonicality_rank, ensure_block_scoped_identity,
     ensure_provider_bundle_matches_raw_block, hex_string, insert_raw_block_candidate,
     keccak256_hex, parse_hex_bytes, parse_receipt_status, preferred_canonicality,
-    provider_block_to_raw_block, provider_code_observation_to_raw_code_hash,
-    provider_log_to_raw_log, provider_logs_to_live_selected_raw_logs,
-    provider_logs_to_selected_raw_logs, provider_raw_payload_cache_metadata_to_upserts,
-    provider_receipt_to_raw_receipt, provider_receipts_to_selected_raw_receipts,
-    provider_transaction_to_raw_transaction, provider_transactions_to_selected_raw_transactions,
-    raw_code_hash_candidate_hashes, raw_payload_candidate_hashes,
-    retained_transaction_keys_from_raw_logs, selected_address_set,
+    provider_block_to_raw_block, provider_block_to_raw_block_with_header_audit_mode,
+    provider_code_observation_to_raw_code_hash, provider_log_to_raw_log,
+    provider_logs_to_live_selected_raw_logs, provider_logs_to_selected_raw_logs,
+    provider_raw_payload_cache_metadata_to_upserts, provider_receipt_to_raw_receipt,
+    provider_receipts_to_selected_raw_receipts, provider_transaction_to_raw_transaction,
+    provider_transactions_to_selected_raw_transactions, raw_code_hash_candidate_hashes,
+    raw_payload_candidate_hashes, retained_transaction_keys_from_raw_logs, selected_address_set,
 };
 #[allow(unused_imports)]
 pub(crate) use persistence::{
@@ -58,6 +59,7 @@ pub(crate) use replay::replay_raw_fact_normalized_events;
 #[allow(unused_imports)]
 pub(crate) use types::{
     CanonicalReconciliation, CanonicalReconciliationStatus, ChainReconciliationOutcome,
-    HeadChangeSet, PersistedRawPayloadAdapterSyncSummary, RawFactNormalizedEventReplayOutcome,
-    RawFactNormalizedEventReplayRequest, RawFactNormalizedEventReplaySelection,
+    HeadChangeSet, HeaderAuditMode, PersistedRawPayloadAdapterSyncSummary,
+    RawFactNormalizedEventReplayOutcome, RawFactNormalizedEventReplayRequest,
+    RawFactNormalizedEventReplaySelection, RawFactNormalizedEventReplaySourceScope,
 };

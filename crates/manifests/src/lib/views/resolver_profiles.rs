@@ -6,6 +6,11 @@ use uuid::Uuid;
 
 use crate::{ResolverProfileAdmission, WatchedContract, WatchedContractSource, normalize_address};
 
+#[path = "resolver_profiles/ens_v1.rs"]
+mod ens_v1;
+
+pub use ens_v1::*;
+
 use super::{
     drift::{
         load_manifest_code_hash_observations,
@@ -18,55 +23,18 @@ use super::{
     },
 };
 
-const ENS_V1_RESOLVER_SOURCE_FAMILY: &str = "ens_v1_resolver_l1";
-const ENS_V1_PUBLIC_RESOLVER_ROLE: &str = "public_resolver";
-const ENS_V1_PUBLIC_RESOLVER_COMPATIBLE_PROFILE: &str = "public_resolver_compatible";
-const ENS_V1_PUBLIC_RESOLVER_PROFILE_FACT_FAMILIES: [&str; 3] = [
-    "resolver_record",
-    "resolver_record_version",
-    "resolver_authorization",
-];
 const BASENAMES_BASE_RESOLVER_SOURCE_FAMILY: &str = "basenames_base_resolver";
 const BASENAMES_L2_RESOLVER_ROLE: &str = "resolver";
 const BASENAMES_L2_RESOLVER_COMPATIBLE_PROFILE: &str = "l2_resolver_compatible";
 const BASENAMES_L2_RESOLVER_PROFILE_FACT_FAMILIES: [&str; 2] =
     ["resolver_record", "resolver_authorization"];
-const RESOLVER_PROFILE_STATUS_PENDING: &str = "pending";
-const RESOLVER_PROFILE_STATUS_SUPPORTED: &str = "supported";
-const RESOLVER_PROFILE_STATUS_UNSUPPORTED: &str = "unsupported";
-const RESOLVER_PROFILE_BASIS_MANIFEST_SEED: &str = "manifest_public_resolver_seed";
+pub(super) const RESOLVER_PROFILE_STATUS_PENDING: &str = "pending";
+pub(super) const RESOLVER_PROFILE_STATUS_SUPPORTED: &str = "supported";
+pub(super) const RESOLVER_PROFILE_STATUS_UNSUPPORTED: &str = "unsupported";
 const RESOLVER_PROFILE_BASIS_BASENAMES_L2_RESOLVER_SEED: &str = "manifest_l2_resolver_seed";
-const RESOLVER_PROFILE_BASIS_CODE_HASH_MATCH: &str = "code_hash_match";
-const RESOLVER_PROFILE_BASIS_CODE_HASH_PENDING: &str = "code_hash_pending";
-const RESOLVER_PROFILE_BASIS_CODE_HASH_MISMATCH: &str = "code_hash_mismatch";
-
-pub async fn load_ens_v1_public_resolver_profile_admissions(
-    pool: &PgPool,
-) -> Result<Vec<ResolverProfileAdmission>> {
-    let public_resolver_seed_ids = load_resolver_profile_seed_ids(
-        pool,
-        "ens",
-        ENS_V1_RESOLVER_SOURCE_FAMILY,
-        ENS_V1_PUBLIC_RESOLVER_ROLE,
-        "ENSv1 PublicResolver",
-    )
-    .await?;
-    let watched_contracts =
-        load_watched_contracts_by_source_family(pool, ENS_V1_RESOLVER_SOURCE_FAMILY).await?;
-    let code_hash_observations = load_manifest_code_hash_observations(pool).await?;
-
-    Ok(derive_code_hash_resolver_profile_admissions(
-        &watched_contracts,
-        &code_hash_observations,
-        &public_resolver_seed_ids,
-        ResolverProfileAdmissionConfig {
-            source_family: ENS_V1_RESOLVER_SOURCE_FAMILY,
-            profile: ENS_V1_PUBLIC_RESOLVER_COMPATIBLE_PROFILE,
-            fact_families: &ENS_V1_PUBLIC_RESOLVER_PROFILE_FACT_FAMILIES,
-            manifest_seed_basis: RESOLVER_PROFILE_BASIS_MANIFEST_SEED,
-        },
-    ))
-}
+pub(super) const RESOLVER_PROFILE_BASIS_CODE_HASH_MATCH: &str = "code_hash_match";
+pub(super) const RESOLVER_PROFILE_BASIS_CODE_HASH_PENDING: &str = "code_hash_pending";
+pub(super) const RESOLVER_PROFILE_BASIS_CODE_HASH_MISMATCH: &str = "code_hash_mismatch";
 
 pub async fn load_basenames_l2_resolver_profile_admissions(
     pool: &PgPool,
@@ -88,51 +56,6 @@ pub async fn load_basenames_l2_resolver_profile_admissions(
         &watched_contracts,
         &code_hash_observations,
         &l2_resolver_seed_ids,
-    ))
-}
-
-pub async fn load_ens_v1_public_resolver_profile_admissions_for_targets(
-    pool: &PgPool,
-    targets: &[(String, String)],
-) -> Result<Vec<ResolverProfileAdmission>> {
-    if targets.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let public_resolver_seed_contracts = load_resolver_profile_seed_watched_contracts(
-        pool,
-        "ens",
-        ENS_V1_RESOLVER_SOURCE_FAMILY,
-        ENS_V1_PUBLIC_RESOLVER_ROLE,
-        "ENSv1 PublicResolver",
-    )
-    .await?;
-    let public_resolver_seed_ids = public_resolver_seed_contracts
-        .iter()
-        .map(|contract| contract.contract_instance_id)
-        .collect::<Vec<_>>();
-    let target_contracts = load_watched_contracts_by_source_family_and_addresses(
-        pool,
-        ENS_V1_RESOLVER_SOURCE_FAMILY,
-        targets,
-    )
-    .await?;
-    let mut code_hash_targets = public_resolver_seed_contracts.clone();
-    code_hash_targets.extend(target_contracts.clone());
-    let code_hash_observations =
-        load_manifest_code_hash_observations_for_watched_contracts(pool, &code_hash_targets)
-            .await?;
-
-    Ok(derive_code_hash_resolver_profile_admissions(
-        &target_contracts,
-        &code_hash_observations,
-        &public_resolver_seed_ids,
-        ResolverProfileAdmissionConfig {
-            source_family: ENS_V1_RESOLVER_SOURCE_FAMILY,
-            profile: ENS_V1_PUBLIC_RESOLVER_COMPATIBLE_PROFILE,
-            fact_families: &ENS_V1_PUBLIC_RESOLVER_PROFILE_FACT_FAMILIES,
-            manifest_seed_basis: RESOLVER_PROFILE_BASIS_MANIFEST_SEED,
-        },
     ))
 }
 
@@ -181,24 +104,6 @@ pub async fn load_basenames_l2_resolver_profile_admissions_for_targets(
     ))
 }
 
-pub fn derive_ens_v1_public_resolver_profile_admissions(
-    watched_contracts: &[WatchedContract],
-    code_hash_observations: &[ManifestCodeHashObservation],
-    public_resolver_seed_ids: &[Uuid],
-) -> Vec<ResolverProfileAdmission> {
-    derive_code_hash_resolver_profile_admissions(
-        watched_contracts,
-        code_hash_observations,
-        public_resolver_seed_ids,
-        ResolverProfileAdmissionConfig {
-            source_family: ENS_V1_RESOLVER_SOURCE_FAMILY,
-            profile: ENS_V1_PUBLIC_RESOLVER_COMPATIBLE_PROFILE,
-            fact_families: &ENS_V1_PUBLIC_RESOLVER_PROFILE_FACT_FAMILIES,
-            manifest_seed_basis: RESOLVER_PROFILE_BASIS_MANIFEST_SEED,
-        },
-    )
-}
-
 pub fn derive_basenames_l2_resolver_profile_admissions(
     watched_contracts: &[WatchedContract],
     code_hash_observations: &[ManifestCodeHashObservation],
@@ -217,7 +122,7 @@ pub fn derive_basenames_l2_resolver_profile_admissions(
     )
 }
 
-async fn load_resolver_profile_seed_ids(
+pub(super) async fn load_resolver_profile_seed_ids(
     pool: &PgPool,
     namespace: &str,
     source_family: &str,
@@ -253,7 +158,7 @@ async fn load_resolver_profile_seed_ids(
         .collect()
 }
 
-async fn load_resolver_profile_seed_watched_contracts(
+pub(super) async fn load_resolver_profile_seed_watched_contracts(
     pool: &PgPool,
     namespace: &str,
     source_family: &str,
@@ -331,14 +236,14 @@ async fn load_resolver_profile_seed_watched_contracts(
 }
 
 #[derive(Clone, Copy, Debug)]
-struct ResolverProfileAdmissionConfig {
-    source_family: &'static str,
-    profile: &'static str,
-    fact_families: &'static [&'static str],
-    manifest_seed_basis: &'static str,
+pub(super) struct ResolverProfileAdmissionConfig {
+    pub(super) source_family: &'static str,
+    pub(super) profile: &'static str,
+    pub(super) fact_families: &'static [&'static str],
+    pub(super) manifest_seed_basis: &'static str,
 }
 
-fn derive_code_hash_resolver_profile_admissions(
+pub(super) fn derive_code_hash_resolver_profile_admissions(
     watched_contracts: &[WatchedContract],
     code_hash_observations: &[ManifestCodeHashObservation],
     resolver_seed_ids: &[Uuid],
@@ -471,7 +376,7 @@ fn classify_resolver_profile_match(
     }
 }
 
-fn latest_resolver_code_hashes_by_contract_id(
+pub(super) fn latest_resolver_code_hashes_by_contract_id(
     code_hash_observations: &[ManifestCodeHashObservation],
     source_family: &str,
 ) -> BTreeMap<Uuid, String> {

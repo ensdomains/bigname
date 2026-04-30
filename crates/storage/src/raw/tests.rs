@@ -244,6 +244,21 @@ async fn sparse_empty_block_anchors_preserve_raw_facts_and_canonicality() -> Res
     upsert_chain_lineage_blocks_without_snapshots(database.pool(), &[lineage_anchor.clone()])
         .await?;
     upsert_raw_blocks_without_snapshots(database.pool(), &[raw_anchor.clone()]).await?;
+    let initial_lineage_observed_at = sqlx::query_scalar::<_, OffsetDateTime>(
+        "SELECT observed_at FROM chain_lineage WHERE chain_id = $1 AND block_hash = $2",
+    )
+    .bind("eth-mainnet")
+    .bind("0xempty")
+    .fetch_one(database.pool())
+    .await?;
+    let initial_header_audit_count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::BIGINT FROM chain_header_audit WHERE chain_id = $1 AND block_hash = $2",
+    )
+    .bind("eth-mainnet")
+    .bind("0xempty")
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(initial_header_audit_count, 0);
 
     let mut observed_lineage_anchor = lineage_anchor.clone();
     observed_lineage_anchor.canonicality_state = CanonicalityState::Observed;
@@ -268,6 +283,90 @@ async fn sparse_empty_block_anchors_preserve_raw_facts_and_canonicality() -> Res
     assert_eq!(stored_raw.transactions_root, None);
     assert_eq!(stored_raw.receipts_root, None);
     assert_eq!(stored_raw.state_root, None);
+    let replayed_lineage_observed_at = sqlx::query_scalar::<_, OffsetDateTime>(
+        "SELECT observed_at FROM chain_lineage WHERE chain_id = $1 AND block_hash = $2",
+    )
+    .bind("eth-mainnet")
+    .bind("0xempty")
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(replayed_lineage_observed_at, initial_lineage_observed_at);
+
+    let mut audited_lineage_anchor = lineage_anchor.clone();
+    audited_lineage_anchor.logs_bloom = Some(vec![0xaa]);
+    audited_lineage_anchor.transactions_root = Some("0xtxroot-empty".to_owned());
+    audited_lineage_anchor.receipts_root = Some("0xreceipts-empty".to_owned());
+    audited_lineage_anchor.state_root = Some("0xstate-empty".to_owned());
+    let mut audited_raw_anchor = raw_anchor.clone();
+    audited_raw_anchor.logs_bloom = audited_lineage_anchor.logs_bloom.clone();
+    audited_raw_anchor.transactions_root = audited_lineage_anchor.transactions_root.clone();
+    audited_raw_anchor.receipts_root = audited_lineage_anchor.receipts_root.clone();
+    audited_raw_anchor.state_root = audited_lineage_anchor.state_root.clone();
+    upsert_chain_lineage_blocks_without_snapshots(
+        database.pool(),
+        &[audited_lineage_anchor.clone()],
+    )
+    .await?;
+    upsert_raw_blocks_without_snapshots(database.pool(), &[audited_raw_anchor.clone()]).await?;
+
+    let stored_audited_lineage =
+        load_chain_lineage_block(database.pool(), "eth-mainnet", "0xempty")
+            .await?
+            .expect("audited lineage anchor must be retained");
+    let stored_audited_raw = load_raw_block(database.pool(), "eth-mainnet", "0xempty")
+        .await?
+        .expect("audited raw anchor must be retained");
+    assert_eq!(stored_audited_lineage.logs_bloom, Some(vec![0xaa]));
+    assert_eq!(
+        stored_audited_lineage.transactions_root.as_deref(),
+        Some("0xtxroot-empty")
+    );
+    assert_eq!(
+        stored_audited_lineage.receipts_root.as_deref(),
+        Some("0xreceipts-empty")
+    );
+    assert_eq!(
+        stored_audited_lineage.state_root.as_deref(),
+        Some("0xstate-empty")
+    );
+    assert_eq!(stored_audited_raw.logs_bloom, Some(vec![0xaa]));
+    assert_eq!(
+        stored_audited_raw.transactions_root.as_deref(),
+        Some("0xtxroot-empty")
+    );
+    assert_eq!(
+        stored_audited_raw.receipts_root.as_deref(),
+        Some("0xreceipts-empty")
+    );
+    assert_eq!(
+        stored_audited_raw.state_root.as_deref(),
+        Some("0xstate-empty")
+    );
+    let audited_header_audit_count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::BIGINT FROM chain_header_audit WHERE chain_id = $1 AND block_hash = $2",
+    )
+    .bind("eth-mainnet")
+    .bind("0xempty")
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(audited_header_audit_count, 1);
+
+    upsert_chain_lineage_blocks_without_snapshots(database.pool(), &[lineage_anchor.clone()])
+        .await?;
+    upsert_raw_blocks_without_snapshots(database.pool(), &[raw_anchor.clone()]).await?;
+    let minimal_replayed_lineage =
+        load_chain_lineage_block(database.pool(), "eth-mainnet", "0xempty")
+            .await?
+            .expect("minimal replay must not clear audited lineage fields");
+    let minimal_replayed_raw = load_raw_block(database.pool(), "eth-mainnet", "0xempty")
+        .await?
+        .expect("minimal replay must not clear audited raw fields");
+    assert_eq!(minimal_replayed_lineage.logs_bloom, Some(vec![0xaa]));
+    assert_eq!(minimal_replayed_raw.logs_bloom, Some(vec![0xaa]));
+    assert_eq!(
+        minimal_replayed_raw.state_root.as_deref(),
+        Some("0xstate-empty")
+    );
 
     let mut conflicting_raw_anchor = raw_anchor.clone();
     conflicting_raw_anchor.state_root = Some("0xchanged".to_owned());
@@ -275,7 +374,7 @@ async fn sparse_empty_block_anchors_preserve_raw_facts_and_canonicality() -> Res
         .await
         .expect_err("sparse raw block anchor identity must be immutable");
     assert!(
-        error.to_string().contains("raw block identity mismatch"),
+        error.to_string().contains("header audit identity mismatch"),
         "unexpected error: {error:#}"
     );
 
@@ -307,6 +406,44 @@ async fn reobserving_orphaned_raw_block_revives_observed_state() -> Result<()> {
 }
 
 #[tokio::test]
+async fn minimal_raw_block_replay_can_be_audit_enriched_without_clearing_fields() -> Result<()> {
+    let database = TestDatabase::new().await?;
+
+    let mut minimal = raw_block(CanonicalityState::Observed);
+    minimal.logs_bloom = None;
+    minimal.transactions_root = None;
+    minimal.receipts_root = None;
+    minimal.state_root = None;
+    upsert_raw_blocks(database.pool(), &[minimal.clone()]).await?;
+
+    let audited = raw_block(CanonicalityState::Canonical);
+    let refreshed = upsert_raw_blocks(database.pool(), &[audited.clone()]).await?;
+    assert_eq!(
+        refreshed[0].canonicality_state,
+        CanonicalityState::Canonical
+    );
+    assert_eq!(refreshed[0].logs_bloom, audited.logs_bloom);
+    assert_eq!(refreshed[0].transactions_root, audited.transactions_root);
+    assert_eq!(refreshed[0].receipts_root, audited.receipts_root);
+    assert_eq!(refreshed[0].state_root, audited.state_root);
+
+    let minimal_replay = upsert_raw_blocks(database.pool(), &[minimal]).await?;
+    assert_eq!(
+        minimal_replay[0].canonicality_state,
+        CanonicalityState::Canonical
+    );
+    assert_eq!(minimal_replay[0].logs_bloom, audited.logs_bloom);
+    assert_eq!(
+        minimal_replay[0].transactions_root,
+        audited.transactions_root
+    );
+    assert_eq!(minimal_replay[0].receipts_root, audited.receipts_root);
+    assert_eq!(minimal_replay[0].state_root, audited.state_root);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn rejects_mismatched_immutable_raw_block_identity() -> Result<()> {
     let database = TestDatabase::new().await?;
 
@@ -319,9 +456,7 @@ async fn rejects_mismatched_immutable_raw_block_identity() -> Result<()> {
         .expect_err("immutable raw block identity mismatch must fail");
 
     assert!(
-        error
-            .to_string()
-            .contains("raw block identity mismatch for chain eth-mainnet block 0xaaa"),
+        error.to_string().contains("header audit identity mismatch"),
         "unexpected error: {error:#}"
     );
 

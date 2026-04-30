@@ -35,8 +35,7 @@ impl ResolverProfileGate {
         let admissions = admissions
             .into_iter()
             .filter(|admission| {
-                resolver_profile_for_source_family(&admission.source_family)
-                    .is_some_and(|profile| admission.profile == profile)
+                resolver_profile_admitted(&admission.source_family, &admission.profile)
             })
             .map(|admission| {
                 (
@@ -83,11 +82,21 @@ impl ResolverProfileGate {
     }
 }
 
-fn resolver_profile_for_source_family(source_family: &str) -> Option<&'static str> {
+fn resolver_profile_admitted(source_family: &str, profile: &str) -> bool {
     match source_family {
-        SOURCE_FAMILY_ENS_V1_RESOLVER_L1 => Some(ENS_V1_PUBLIC_RESOLVER_COMPATIBLE_PROFILE),
-        SOURCE_FAMILY_BASENAMES_BASE_RESOLVER => Some(BASENAMES_L2_RESOLVER_COMPATIBLE_PROFILE),
-        _ => None,
+        SOURCE_FAMILY_ENS_V1_RESOLVER_L1 => matches!(
+            profile,
+            ENS_V1_PUBLIC_RESOLVER_COMPATIBLE_PROFILE
+                | "public_resolver_wrapper_aware"
+                | "public_resolver_legacy_multicoin_dns"
+                | "public_resolver_legacy_multicoin"
+                | "public_resolver_legacy_eth_addr_text"
+                | "public_resolver_legacy_eth_addr"
+        ),
+        SOURCE_FAMILY_BASENAMES_BASE_RESOLVER => {
+            profile == BASENAMES_L2_RESOLVER_COMPATIBLE_PROFILE
+        }
+        _ => false,
     }
 }
 

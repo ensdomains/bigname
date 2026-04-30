@@ -189,6 +189,69 @@ async fn bulk_upserts_and_promotes_lineage_blocks() -> Result<()> {
 }
 
 #[tokio::test]
+async fn minimal_lineage_replay_can_be_audit_enriched_without_clearing_fields() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let timestamp = timestamp(1_717_171_717);
+
+    let mut minimal = block(
+        "eth-mainnet",
+        "0xaaa",
+        Some("0x999"),
+        10,
+        timestamp,
+        CanonicalityState::Observed,
+    );
+    minimal.logs_bloom = None;
+    minimal.transactions_root = None;
+    minimal.receipts_root = None;
+    minimal.state_root = None;
+    upsert_chain_lineage_blocks(database.pool(), &[minimal.clone()]).await?;
+
+    let audited = block(
+        "eth-mainnet",
+        "0xaaa",
+        Some("0x999"),
+        10,
+        timestamp,
+        CanonicalityState::Canonical,
+    );
+    let refreshed = upsert_chain_lineage_blocks(database.pool(), &[audited.clone()]).await?;
+    assert_eq!(
+        refreshed[0].canonicality_state,
+        CanonicalityState::Canonical
+    );
+    assert_eq!(refreshed[0].logs_bloom, audited.logs_bloom);
+    assert_eq!(refreshed[0].transactions_root, audited.transactions_root);
+    assert_eq!(refreshed[0].receipts_root, audited.receipts_root);
+    assert_eq!(refreshed[0].state_root, audited.state_root);
+
+    let minimal_replay = upsert_chain_lineage_blocks(database.pool(), &[minimal.clone()]).await?;
+    assert_eq!(
+        minimal_replay[0].canonicality_state,
+        CanonicalityState::Canonical
+    );
+    assert_eq!(minimal_replay[0].logs_bloom, audited.logs_bloom);
+    assert_eq!(
+        minimal_replay[0].transactions_root,
+        audited.transactions_root
+    );
+    assert_eq!(minimal_replay[0].receipts_root, audited.receipts_root);
+    assert_eq!(minimal_replay[0].state_root, audited.state_root);
+
+    let mut conflicting = audited;
+    conflicting.state_root = Some("0xconflict".to_owned());
+    let error = upsert_chain_lineage_blocks(database.pool(), &[conflicting])
+        .await
+        .expect_err("conflicting audited lineage field must fail");
+    assert!(
+        error.to_string().contains("header audit identity mismatch"),
+        "unexpected error: {error:#}"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn reobserving_orphaned_block_revives_observed_state_without_rewriting_identity() -> Result<()>
 {
     let database = TestDatabase::new().await?;

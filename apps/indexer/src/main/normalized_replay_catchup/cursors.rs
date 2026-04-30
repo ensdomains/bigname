@@ -4,10 +4,7 @@ use sqlx::types::time::OffsetDateTime;
 
 use crate::reconciliation::RawFactNormalizedEventReplayOutcome;
 
-use super::{
-    CURSOR_KIND_RAW_FACT_NORMALIZED_EVENTS, NormalizedReplayCursor, RawLogBounds,
-    ReplaySourceScope, sources::source_scope_bindings,
-};
+use super::{CURSOR_KIND_RAW_FACT_NORMALIZED_EVENTS, NormalizedReplayCursor, RawLogBounds};
 
 pub(super) async fn ensure_cursor(
     pool: &PgPool,
@@ -78,16 +75,11 @@ pub(super) async fn rewind_cursor_for_newly_observed_older_logs(
     pool: &PgPool,
     deployment_profile: &str,
     chain: &str,
-    source_scope: &ReplaySourceScope,
     cursor: NormalizedReplayCursor,
 ) -> Result<NormalizedReplayCursor> {
     let Some(last_replayed_at) = cursor.last_replayed_at else {
         return Ok(cursor);
     };
-    if source_scope.targets.is_empty() {
-        return Ok(cursor);
-    }
-    let (addresses, from_blocks, to_blocks) = source_scope_bindings(source_scope);
 
     let rewind_block = sqlx::query_scalar::<_, Option<i64>>(
         r#"
@@ -109,28 +101,16 @@ pub(super) async fn rewind_cursor_for_newly_observed_older_logs(
               'safe'::canonicality_state,
               'finalized'::canonicality_state
           )
-          AND EXISTS (
-              SELECT 1
-              FROM unnest($4::TEXT[], $5::BIGINT[], $6::BIGINT[])
-                AS source_scope(address, from_block, to_block)
-              WHERE LOWER(raw_logs.emitting_address) = source_scope.address
-                AND raw_logs.block_number >= source_scope.from_block
-                AND raw_logs.block_number <= source_scope.to_block
-          )
         "#,
     )
     .bind(chain)
     .bind(cursor.next_block_number)
     .bind(last_replayed_at)
-    .bind(&addresses)
-    .bind(&from_blocks)
-    .bind(&to_blocks)
     .fetch_one(pool)
     .await
     .with_context(|| {
         format!(
-            "failed to inspect newly observed older normalized replay work for {deployment_profile}/{chain}/{}",
-            source_scope.cursor_kind
+            "failed to inspect newly observed older normalized replay work for {deployment_profile}/{chain}/{CURSOR_KIND_RAW_FACT_NORMALIZED_EVENTS}"
         )
     })?;
 
@@ -157,14 +137,13 @@ pub(super) async fn rewind_cursor_for_newly_observed_older_logs(
     )
     .bind(deployment_profile)
     .bind(chain)
-    .bind(&source_scope.cursor_kind)
+    .bind(CURSOR_KIND_RAW_FACT_NORMALIZED_EVENTS)
     .bind(rewind_block)
     .fetch_one(pool)
     .await
     .with_context(|| {
         format!(
-            "failed to rewind normalized replay cursor for {deployment_profile}/{chain}/{} to block {rewind_block}",
-            source_scope.cursor_kind
+            "failed to rewind normalized replay cursor for {deployment_profile}/{chain}/{CURSOR_KIND_RAW_FACT_NORMALIZED_EVENTS} to block {rewind_block}"
         )
     })?;
 

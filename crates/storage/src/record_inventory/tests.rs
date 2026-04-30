@@ -137,6 +137,90 @@ async fn orphan_resource(database: &TestDatabase, resource_id: Uuid) -> Result<(
     Ok(())
 }
 
+async fn seed_chain_lineage(
+    database: &TestDatabase,
+    block_hash: &str,
+    block_number: i64,
+    timestamp: &str,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO chain_lineage (
+            chain_id,
+            block_hash,
+            block_number,
+            block_timestamp,
+            canonicality_state
+        )
+        VALUES (
+            'ethereum-mainnet',
+            $1,
+            $2,
+            $3::TIMESTAMPTZ,
+            'finalized'::canonicality_state
+        )
+        "#,
+    )
+    .bind(block_hash)
+    .bind(block_number)
+    .bind(timestamp)
+    .execute(database.pool())
+    .await?;
+    Ok(())
+}
+
+async fn seed_record_inventory_input(
+    database: &TestDatabase,
+    event_identity: &str,
+    logical_name_id: &str,
+    resource_id: Uuid,
+    block_number: i64,
+    block_hash: &str,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO normalized_events (
+            event_identity,
+            namespace,
+            logical_name_id,
+            resource_id,
+            event_kind,
+            source_family,
+            manifest_version,
+            chain_id,
+            block_number,
+            block_hash,
+            derivation_kind,
+            canonicality_state,
+            after_state
+        )
+        VALUES (
+            $1,
+            'ens',
+            $2,
+            $3,
+            'RecordChanged',
+            'ens_v1_resolver_l1',
+            1,
+            'ethereum-mainnet',
+            $4,
+            $5,
+            'record_inventory_current_test',
+            'finalized'::canonicality_state,
+            '{"record_key":"addr:60","record_family":"addr","selector_key":"60"}'::JSONB
+        )
+        "#,
+    )
+    .bind(event_identity)
+    .bind(logical_name_id)
+    .bind(resource_id)
+    .bind(block_number)
+    .bind(block_hash)
+    .execute(database.pool())
+    .await?;
+    Ok(())
+}
+
 fn record_version_boundary(
     resource_id: Uuid,
     logical_name_id: &str,
@@ -395,6 +479,80 @@ async fn record_inventory_snapshot_read_fails_stale_on_position_mismatch() -> Re
     )
     .await
     .expect_err("mismatched selected snapshot must be stale");
+    assert_eq!(error.kind(), SnapshotSelectionErrorKind::Stale);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn record_inventory_snapshot_read_covers_later_snapshot_until_new_input() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let resource_id = Uuid::from_u128(0x7111);
+    let logical_name_id = "ens:alice.eth";
+    seed_resources(&database, &[resource_id]).await?;
+
+    let expected = record_inventory_current_row(
+        resource_id,
+        logical_name_id,
+        Some(922),
+        Some("RecordsChanged"),
+        21_500_021,
+        "0xrecordinventorysnapshot",
+        4,
+    );
+
+    upsert_record_inventory_current_rows(database.pool(), std::slice::from_ref(&expected)).await?;
+    seed_chain_lineage(
+        &database,
+        "0xrecordinventorysnapshot",
+        21_500_021,
+        "2026-04-18T00:15:00Z",
+    )
+    .await?;
+    seed_chain_lineage(
+        &database,
+        "0xrecordinventorynewer",
+        21_500_022,
+        "2026-04-18T00:15:01Z",
+    )
+    .await?;
+
+    let later_selected = ChainPositions::from_value(&json!({
+        "ethereum-mainnet": {
+            "chain_id": "ethereum-mainnet",
+            "block_number": 21_500_022,
+            "block_hash": "0xrecordinventorynewer",
+            "timestamp": "2026-04-18T00:15:01Z"
+        }
+    }))?;
+    assert_eq!(
+        load_record_inventory_current_for_snapshot(
+            database.pool(),
+            resource_id,
+            &expected.record_version_boundary,
+            &later_selected,
+        )
+        .await?,
+        SnapshotProjectionRead::Found(expected.clone())
+    );
+
+    seed_record_inventory_input(
+        &database,
+        "record-inventory-newer-input",
+        logical_name_id,
+        resource_id,
+        21_500_022,
+        "0xrecordinventorynewer",
+    )
+    .await?;
+    let error = load_record_inventory_current_for_snapshot(
+        database.pool(),
+        resource_id,
+        &expected.record_version_boundary,
+        &later_selected,
+    )
+    .await
+    .expect_err("newer record inventory input must make the projection stale");
     assert_eq!(error.kind(), SnapshotSelectionErrorKind::Stale);
 
     database.cleanup().await

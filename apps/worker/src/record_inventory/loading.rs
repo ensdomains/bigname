@@ -27,7 +27,7 @@ pub(super) async fn load_all_relevant_events(pool: &PgPool) -> Result<Vec<Releva
             ne.after_state,
             LOWER(rl.emitting_address) AS emitting_address
         FROM normalized_events ne
-        LEFT JOIN raw_blocks rb
+        LEFT JOIN chain_lineage rb
           ON rb.chain_id = ne.chain_id
          AND rb.block_hash = ne.block_hash
         LEFT JOIN raw_logs rl
@@ -88,7 +88,7 @@ pub(super) async fn load_relevant_events(
             ne.after_state,
             LOWER(rl.emitting_address) AS emitting_address
         FROM normalized_events ne
-        LEFT JOIN raw_blocks rb
+        LEFT JOIN chain_lineage rb
           ON rb.chain_id = ne.chain_id
          AND rb.block_hash = ne.block_hash
         LEFT JOIN raw_logs rl

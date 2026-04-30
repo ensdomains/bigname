@@ -32,7 +32,7 @@ pub(super) fn decode_name_surface_seed(row: sqlx::postgres::PgRow) -> Result<Nam
             .context("missing name_surface block_number")?,
         block_timestamp: row
             .try_get("block_timestamp")
-            .context("missing raw_blocks.block_timestamp join for name_surface")?,
+            .context("missing chain_lineage.block_timestamp join for name_surface")?,
         canonicality_state: parse_canonicality_state(
             &row.try_get::<String, _>("canonicality_state")
                 .context("missing name_surface canonicality_state")?,

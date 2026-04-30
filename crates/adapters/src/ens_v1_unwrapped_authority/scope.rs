@@ -22,7 +22,7 @@ pub(super) fn normalized_authority_source_scope_targets(
             |(source_family, address, effective_from_block, effective_to_block)| {
                 AuthorityRawLogSourceScopeTarget {
                     source_family: source_family.clone(),
-                    address: address.to_ascii_lowercase(),
+                    address: normalize_source_scope_address(address),
                     effective_from_block: *effective_from_block,
                     effective_to_block: *effective_to_block,
                 }
@@ -75,6 +75,9 @@ pub(super) fn scoped_ranges_for_active_emitters(
 ) -> Result<Vec<AuthorityRawLogSourceScopeTarget>> {
     let mut ranges = Vec::new();
     for target in source_scope {
+        if is_generic_resolver_event_source_scope_target(target) {
+            continue;
+        }
         if target.effective_to_block < target.effective_from_block {
             bail!(
                 "ENSv1 unwrapped authority source scope range {}..={} is invalid for {} {}",
@@ -105,6 +108,21 @@ fn source_scope_target_intersects_active_emitter(
     let emitter_from = emitter.active_from_block_number.unwrap_or(0);
     let emitter_to = emitter.active_to_block_number.unwrap_or(i64::MAX);
     target.effective_from_block <= emitter_to && emitter_from <= target.effective_to_block
+}
+
+pub(super) fn is_generic_resolver_event_source_scope_target(
+    target: &AuthorityRawLogSourceScopeTarget,
+) -> bool {
+    target.source_family == SOURCE_FAMILY_ENS_V1_RESOLVER_L1
+        && target.address == GENERIC_SOURCE_SCOPE_ADDRESS
+}
+
+fn normalize_source_scope_address(address: &str) -> String {
+    if address == GENERIC_SOURCE_SCOPE_ADDRESS {
+        GENERIC_SOURCE_SCOPE_ADDRESS.to_owned()
+    } else {
+        address.to_ascii_lowercase()
+    }
 }
 
 pub(super) fn emitter_for_block_and_scope<'a>(

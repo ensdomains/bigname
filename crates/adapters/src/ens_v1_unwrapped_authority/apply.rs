@@ -5,6 +5,11 @@ pub(super) fn apply_observation(
     observation: AuthorityObservation,
     block_index: &CanonicalBlockIndex,
 ) -> Result<()> {
+    settle_due_registration_release(
+        history,
+        &observation_reference(&observation).as_boundary_ref(),
+    )?;
+
     match observation {
         AuthorityObservation::RegistrationGranted(event) => {
             apply_registration_granted(history, event, block_index)?;

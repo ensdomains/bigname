@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use tracing::{info, warn};
 
 use crate::provider::ProviderRegistry;
-use crate::reconciliation::poll_provider_heads_with_adapter_sync;
+use crate::reconciliation::{HeaderAuditMode, poll_provider_heads_with_adapter_sync};
 
 use super::adapter_sync::sync_adapter_owned_raw_log_state;
 use super::intake::{
@@ -37,6 +37,7 @@ pub(crate) async fn run_poll_loop(
     adapter_sync_on_live_poll: bool,
     manifest_observation_refresh_enabled: bool,
     discovery_refresh_enabled: bool,
+    header_audit_mode: HeaderAuditMode,
 ) -> Result<()> {
     let mut interval = tokio::time::interval(Duration::from_secs(poll_interval_secs));
     interval.tick().await;
@@ -334,6 +335,7 @@ pub(crate) async fn run_poll_loop(
                     &mut intake_chain_tasks,
                     provider_registry,
                     adapter_sync_on_live_poll,
+                    header_audit_mode,
                 )
                 .await?;
 

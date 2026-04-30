@@ -32,10 +32,6 @@ pub(super) fn decode_dynamic_bytes(data: &[u8], offset_word_index: usize) -> Res
     Ok(data[bytes_start..bytes_end].to_vec())
 }
 
-pub(super) fn decode_first_dynamic_string(data: &[u8]) -> Result<String> {
-    decode_dynamic_string(data, 0)
-}
-
 pub(super) fn decode_dynamic_string(data: &[u8], offset_word_index: usize) -> Result<String> {
     String::from_utf8(decode_dynamic_bytes(data, offset_word_index)?)
         .context("dynamic string payload is not valid UTF-8")

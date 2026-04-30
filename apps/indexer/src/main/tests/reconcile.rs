@@ -98,7 +98,7 @@ async fn reconcile_fetched_heads_initializes_chain_from_provider_heads() -> Resu
         3
     );
     assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM raw_blocks")
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM chain_lineage")
             .fetch_one(database.pool())
             .await?,
         3
@@ -173,7 +173,7 @@ async fn reconcile_fetched_heads_initializes_chain_from_provider_heads() -> Resu
     );
     assert_eq!(
         sqlx::query_scalar::<_, String>(
-            "SELECT canonicality_state::TEXT FROM raw_blocks WHERE block_number = 42"
+            "SELECT canonicality_state::TEXT FROM chain_lineage WHERE block_number = 42"
         )
         .fetch_one(database.pool())
         .await?,
@@ -181,7 +181,7 @@ async fn reconcile_fetched_heads_initializes_chain_from_provider_heads() -> Resu
     );
     assert_eq!(
         sqlx::query_scalar::<_, String>(
-            "SELECT canonicality_state::TEXT FROM raw_blocks WHERE block_number = 41"
+            "SELECT canonicality_state::TEXT FROM chain_lineage WHERE block_number = 41"
         )
         .fetch_one(database.pool())
         .await?,
@@ -189,7 +189,7 @@ async fn reconcile_fetched_heads_initializes_chain_from_provider_heads() -> Resu
     );
     assert_eq!(
         sqlx::query_scalar::<_, String>(
-            "SELECT canonicality_state::TEXT FROM raw_blocks WHERE block_number = 40"
+            "SELECT canonicality_state::TEXT FROM chain_lineage WHERE block_number = 40"
         )
         .fetch_one(database.pool())
         .await?,
@@ -3118,7 +3118,7 @@ async fn reconcile_fetched_heads_backfills_ensv2_resolver_and_permission_events(
     let pre_admission_tx = "0x0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f";
     sqlx::query(
         r#"
-            INSERT INTO raw_blocks (
+            INSERT INTO chain_lineage (
                 chain_id,
                 block_hash,
                 parent_hash,

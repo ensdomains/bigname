@@ -10,13 +10,15 @@ use tracing::{info, warn};
 
 use crate::{
     backfill::{
-        BackfillAdapterSyncMode, BackfillBlockRange, run_resumable_hash_pinned_backfill_job,
+        BackfillAdapterSyncMode, BackfillBlockRange, backfill_job_source_identity_payload,
+        run_resumable_hash_pinned_backfill_job,
     },
     backfill_lease_expires_at, default_backfill_lease_owner, deployment_profile_from_manifest_root,
     generated_backfill_lease_token,
     provider::{ChainProviderOps, ProviderRegistry},
     reconciliation::{
-        RawFactNormalizedEventReplayRequest, RawFactNormalizedEventReplaySelection,
+        HeaderAuditMode, RawFactNormalizedEventReplayRequest,
+        RawFactNormalizedEventReplaySelection, RawFactNormalizedEventReplaySourceScope,
         log_raw_fact_normalized_event_replay_outcome, replay_raw_fact_normalized_events,
     },
     runtime::{IntakeChainTask, validate_provider_registry_for_intake_tasks},
@@ -37,6 +39,8 @@ use planning::{
 };
 
 const BOOTSTRAP_BACKFILL_LEASE_DURATION_SECS: u64 = 300;
+const SOURCE_FAMILY_ENS_V1_RESOLVER_L1: &str = "ens_v1_resolver_l1";
+const GENERIC_SOURCE_SCOPE_ADDRESS: &str = "*";
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct BootstrapBackfillOutcome {
@@ -83,6 +87,7 @@ pub(crate) async fn run_startup_bootstrap_backfills(
     hash_pinned_chunk_blocks: i64,
     adapter_sync_mode: BackfillAdapterSyncMode,
     replay_completed_raw_ranges: bool,
+    header_audit_mode: HeaderAuditMode,
 ) -> Result<BootstrapBackfillOutcome> {
     validate_provider_registry_for_intake_tasks(intake_chain_tasks, provider_registry)?;
     let deployment_profile = deployment_profile_from_manifest_root(manifests_root);
@@ -303,7 +308,7 @@ pub(crate) async fn run_startup_bootstrap_backfills(
                 segment_range,
             )?;
 
-            let source_identity_hash = source_plan.source_identity_hash();
+            let source_identity_hash = source_identity_hash_for_backfill(&source_plan)?;
             let idempotency_key = bootstrap_backfill_idempotency_key(
                 &deployment_profile,
                 manifests_root,
@@ -322,6 +327,7 @@ pub(crate) async fn run_startup_bootstrap_backfills(
                 )?,
                 hash_pinned_chunk_blocks,
                 adapter_sync_mode,
+                header_audit_mode,
             };
 
             let job_outcome =
@@ -334,9 +340,10 @@ pub(crate) async fn run_startup_bootstrap_backfills(
                     RawFactNormalizedEventReplayRequest {
                         deployment_profile: deployment_profile.clone(),
                         chain: task.chain.clone(),
-                        selection: RawFactNormalizedEventReplaySelection::BlockRange {
+                        selection: RawFactNormalizedEventReplaySelection::ScopedBlockRange {
                             from_block: job_outcome.from_block,
                             to_block: job_outcome.to_block,
+                            source_scope: replay_source_scope_from_source_plan(&source_plan),
                         },
                     },
                 )
@@ -385,6 +392,57 @@ pub(crate) async fn run_startup_bootstrap_backfills(
     );
 
     Ok(outcome)
+}
+
+fn replay_source_scope_from_source_plan(
+    source_plan: &bigname_manifests::WatchedSourceSelectorPlan,
+) -> Vec<RawFactNormalizedEventReplaySourceScope> {
+    let mut scopes = Vec::new();
+    let resolver_range = source_plan
+        .selected_targets
+        .iter()
+        .filter(|target| target.source_family == SOURCE_FAMILY_ENS_V1_RESOLVER_L1)
+        .fold(None, |range: Option<(i64, i64)>, target| {
+            Some(match range {
+                Some((from_block, to_block)) => (
+                    from_block.min(target.effective_from_block),
+                    to_block.max(target.effective_to_block),
+                ),
+                None => (target.effective_from_block, target.effective_to_block),
+            })
+        });
+    if let Some((from_block, to_block)) = resolver_range {
+        scopes.push(RawFactNormalizedEventReplaySourceScope {
+            source_family: SOURCE_FAMILY_ENS_V1_RESOLVER_L1.to_owned(),
+            address: GENERIC_SOURCE_SCOPE_ADDRESS.to_owned(),
+            from_block,
+            to_block,
+        });
+    }
+
+    scopes.extend(source_plan.selected_targets.iter().filter_map(|target| {
+        if target.source_family == SOURCE_FAMILY_ENS_V1_RESOLVER_L1 {
+            return None;
+        }
+        Some(RawFactNormalizedEventReplaySourceScope {
+            source_family: target.source_family.clone(),
+            address: target.address.to_ascii_lowercase(),
+            from_block: target.effective_from_block,
+            to_block: target.effective_to_block,
+        })
+    }));
+    scopes
+}
+
+fn source_identity_hash_for_backfill(
+    source_plan: &bigname_manifests::WatchedSourceSelectorPlan,
+) -> Result<String> {
+    let payload = backfill_job_source_identity_payload(source_plan)?;
+    payload
+        .get("source_identity_hash")
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned)
+        .context("backfill source identity payload is missing source_identity_hash")
 }
 
 pub(crate) fn bootstrap_backfill_idempotency_key(

@@ -31,6 +31,10 @@ pub(super) async fn load_basenames_transport_chain_positions(
         return Ok(Vec::new());
     };
 
+    if !basenames_execution_transport_is_active(pool).await? {
+        return Ok(Vec::new());
+    }
+
     let row = sqlx::query(&format!(
         r#"
         SELECT
@@ -75,6 +79,40 @@ pub(super) async fn load_basenames_transport_chain_positions(
     .map(|candidate| candidate.into_iter().collect())
 }
 
+async fn basenames_execution_transport_is_active(pool: &PgPool) -> Result<bool> {
+    sqlx::query_scalar(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM manifest_versions mv
+            JOIN manifest_capability_flags mcf
+              ON mcf.manifest_id = mv.manifest_id
+             AND mcf.capability_name = $1
+             AND mcf.status = 'supported'::capability_support_status
+            JOIN manifest_contract_instances mci
+              ON mci.manifest_id = mv.manifest_id
+             AND mci.declaration_kind = 'contract'
+             AND mci.role = 'l1_resolver'
+             AND lower(mci.declared_address) = lower($6)
+            WHERE mv.namespace = $2
+              AND mv.source_family = $3
+              AND mv.chain = $4
+              AND mv.deployment_epoch = $5
+              AND mv.rollout_status = 'active'::manifest_rollout_status
+        )
+        "#,
+    )
+    .bind(VERIFIED_RESOLUTION_CAPABILITY)
+    .bind(BASENAMES_NAMESPACE)
+    .bind(SOURCE_FAMILY_BASENAMES_EXECUTION)
+    .bind(ETHEREUM_MAINNET_CHAIN_ID)
+    .bind(BASENAMES_V1_DEPLOYMENT_EPOCH)
+    .bind(BASENAMES_L1_RESOLVER_ADDRESS)
+    .fetch_one(pool)
+    .await
+    .context("failed to load active basenames_execution transport admission for record_inventory_current")
+}
+
 pub(super) fn collect_chain_position_events(
     boundary_anchor: &RelevantEvent,
     provenance_events: &[RelevantEvent],
@@ -105,7 +143,7 @@ pub(super) fn build_record_version_boundary(
 pub(super) fn chain_position_value(event: &RelevantEvent) -> Result<Value> {
     let timestamp = event
         .block_timestamp
-        .context("record event must have a raw_blocks timestamp for chain_position")?;
+        .context("record event must have a chain_lineage timestamp for chain_position")?;
     Ok(json!({
         "chain_id": event.chain_id,
         "block_number": event.block_number,

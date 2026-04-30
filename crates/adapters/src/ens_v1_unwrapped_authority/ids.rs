@@ -108,6 +108,10 @@ pub(super) fn new_resolver_topic0() -> String {
     keccak256_hex(NEW_RESOLVER_SIGNATURE.as_bytes())
 }
 
+pub(super) fn abi_changed_topic0() -> String {
+    keccak256_hex(ABI_CHANGED_SIGNATURE.as_bytes())
+}
+
 pub(super) fn name_changed_topic0() -> String {
     keccak256_hex(NAME_CHANGED_SIGNATURE.as_bytes())
 }
@@ -121,11 +125,78 @@ pub(super) fn address_changed_topic0() -> String {
 }
 
 pub(super) fn text_changed_topic0() -> String {
-    keccak256_hex(TEXT_CHANGED_SIGNATURE.as_bytes())
+    keccak256_hex(TEXT_CHANGED_WITHOUT_VALUE_SIGNATURE.as_bytes())
+}
+
+pub(super) fn text_changed_with_value_topic0() -> String {
+    keccak256_hex(TEXT_CHANGED_WITH_VALUE_SIGNATURE.as_bytes())
+}
+
+pub(super) fn is_text_changed_topic0(topic0: &str) -> bool {
+    topic0.eq_ignore_ascii_case(&text_changed_topic0())
+        || topic0.eq_ignore_ascii_case(&text_changed_with_value_topic0())
+}
+
+pub(super) fn content_changed_topic0() -> String {
+    keccak256_hex(CONTENT_CHANGED_SIGNATURE.as_bytes())
+}
+
+pub(super) fn contenthash_changed_topic0() -> String {
+    keccak256_hex(CONTENTHASH_CHANGED_SIGNATURE.as_bytes())
+}
+
+pub(super) fn dns_record_changed_topic0() -> String {
+    keccak256_hex(DNS_RECORD_CHANGED_SIGNATURE.as_bytes())
+}
+
+pub(super) fn dns_record_deleted_topic0() -> String {
+    keccak256_hex(DNS_RECORD_DELETED_SIGNATURE.as_bytes())
+}
+
+pub(super) fn dns_zonehash_changed_topic0() -> String {
+    keccak256_hex(DNS_ZONEHASH_CHANGED_SIGNATURE.as_bytes())
+}
+
+pub(super) fn data_changed_topic0() -> String {
+    keccak256_hex(DATA_CHANGED_SIGNATURE.as_bytes())
+}
+
+pub(super) fn interface_changed_topic0() -> String {
+    keccak256_hex(INTERFACE_CHANGED_SIGNATURE.as_bytes())
+}
+
+#[cfg(test)]
+pub(super) fn pubkey_changed_topic0() -> String {
+    keccak256_hex(PUBKEY_CHANGED_SIGNATURE.as_bytes())
 }
 
 pub(super) fn version_changed_topic0() -> String {
     keccak256_hex(VERSION_CHANGED_SIGNATURE.as_bytes())
+}
+
+pub(super) fn ens_v1_resolver_event_topic0s() -> Vec<String> {
+    [
+        ABI_CHANGED_SIGNATURE,
+        ADDR_CHANGED_SIGNATURE,
+        ADDRESS_CHANGED_SIGNATURE,
+        APPROVAL_FOR_ALL_SIGNATURE,
+        APPROVED_SIGNATURE,
+        CONTENT_CHANGED_SIGNATURE,
+        CONTENTHASH_CHANGED_SIGNATURE,
+        DNS_RECORD_CHANGED_SIGNATURE,
+        DNS_RECORD_DELETED_SIGNATURE,
+        DNS_ZONEHASH_CHANGED_SIGNATURE,
+        DATA_CHANGED_SIGNATURE,
+        INTERFACE_CHANGED_SIGNATURE,
+        NAME_CHANGED_SIGNATURE,
+        TEXT_CHANGED_WITHOUT_VALUE_SIGNATURE,
+        TEXT_CHANGED_WITH_VALUE_SIGNATURE,
+        VERIFIER_CHANGED_SIGNATURE,
+        VERSION_CHANGED_SIGNATURE,
+    ]
+    .iter()
+    .map(|signature| keccak256_hex(signature.as_bytes()))
+    .collect()
 }
 
 pub(super) fn name_wrapped_topic0() -> String {

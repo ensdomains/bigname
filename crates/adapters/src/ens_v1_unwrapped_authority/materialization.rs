@@ -135,9 +135,7 @@ fn merge_replayed_binding_active_to(
     incoming: Option<OffsetDateTime>,
 ) -> Result<Option<OffsetDateTime>> {
     match (current, incoming) {
-        (Some(current), Some(incoming)) if current != incoming => {
-            bail!("surface binding active_to mismatch: stored {current}, incoming {incoming}")
-        }
+        (Some(current), Some(incoming)) => Ok(Some(current.min(incoming))),
         (Some(current), _) => Ok(Some(current)),
         (None, incoming) => Ok(incoming),
     }
@@ -242,6 +240,36 @@ pub(super) async fn build_token_lineage(
     token_lineage_id: Uuid,
     chain: &str,
     reference: &ObservationRef,
+    provenance: serde_json::Value,
+) -> Result<TokenLineage> {
+    if let Some(existing) =
+        load_token_lineage_including_noncanonical(pool, token_lineage_id).await?
+    {
+        return Ok(TokenLineage {
+            token_lineage_id: existing.token_lineage_id,
+            chain_id: existing.chain_id,
+            block_hash: existing.block_hash,
+            block_number: existing.block_number,
+            provenance,
+            canonicality_state: reference.canonicality_state,
+        });
+    }
+
+    Ok(TokenLineage {
+        token_lineage_id,
+        chain_id: chain.to_owned(),
+        block_hash: reference.block_hash.clone(),
+        block_number: reference.block_number,
+        provenance,
+        canonicality_state: reference.canonicality_state,
+    })
+}
+
+pub(super) async fn build_token_lineage_from_boundary(
+    pool: &PgPool,
+    token_lineage_id: Uuid,
+    chain: &str,
+    reference: &BoundaryRef,
     provenance: serde_json::Value,
 ) -> Result<TokenLineage> {
     if let Some(existing) =

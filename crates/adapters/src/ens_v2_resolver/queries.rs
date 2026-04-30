@@ -184,7 +184,7 @@ pub(super) async fn load_resolver_raw_logs(
             rl.data,
             rl.canonicality_state::TEXT AS canonicality_state
         FROM raw_logs rl
-        JOIN raw_blocks rb
+        JOIN chain_lineage rb
           ON rb.chain_id = rl.chain_id
          AND rb.block_hash = rl.block_hash
         WHERE rl.chain_id = $1

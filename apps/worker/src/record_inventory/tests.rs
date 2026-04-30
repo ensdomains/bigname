@@ -392,7 +392,7 @@ async fn keyed_rebuild_keeps_visible_rows_when_projection_build_fails() -> Resul
     assert!(
         error
             .to_string()
-            .contains("record event must have a raw_blocks timestamp for chain_position")
+            .contains("record event must have a chain_lineage timestamp for chain_position")
     );
 
     let row = load_record_inventory_current(database.pool(), resource_id, &boundary)
@@ -954,6 +954,7 @@ async fn rebuild_adds_basenames_transport_position_from_lineage() -> Result<()> 
         resolver_address,
     )
     .await?;
+    insert_basenames_execution_manifest(database.pool()).await?;
     seed_basenames_resources(database.pool(), &[resource_id]).await?;
     seed_raw_blocks(
         database.pool(),
@@ -1067,6 +1068,127 @@ async fn rebuild_adds_basenames_transport_position_from_lineage() -> Result<()> 
                 "block_number": 21_000_100,
                 "block_hash": "0xeth-before-later-basenames-record",
                 "timestamp": "2026-04-14T20:54:16Z",
+            },
+        })
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn rebuild_omits_basenames_transport_position_without_execution_manifest() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let resource_id = Uuid::from_u128(0x980c);
+    let resolver_contract_instance_id = Uuid::from_u128(0x980d);
+    let resolver_address = "0x00000000000000000000000000000000000000ee";
+
+    insert_basenames_resolver_profile_seed(
+        database.pool(),
+        resolver_contract_instance_id,
+        resolver_address,
+    )
+    .await?;
+    seed_basenames_resources(database.pool(), &[resource_id]).await?;
+    seed_raw_blocks(
+        database.pool(),
+        &[
+            raw_block(BASE_MAINNET_CHAIN_ID, "0xbase-rec1065", 1065, 1_776_200_065),
+            raw_block(BASE_MAINNET_CHAIN_ID, "0xbase-rec1067", 1067, 1_776_200_067),
+        ],
+    )
+    .await?;
+    seed_raw_logs(
+        database.pool(),
+        &[
+            raw_log(
+                BASE_MAINNET_CHAIN_ID,
+                "0xbase-rec1065",
+                1065,
+                "0xbase-tx1065",
+                0,
+                resolver_address,
+            ),
+            raw_log(
+                BASE_MAINNET_CHAIN_ID,
+                "0xbase-rec1067",
+                1067,
+                "0xbase-tx1067",
+                0,
+                resolver_address,
+            ),
+        ],
+    )
+    .await?;
+    upsert_chain_lineage_blocks(
+        database.pool(),
+        &[
+            chain_lineage_block(
+                ETHEREUM_MAINNET_CHAIN_ID,
+                "0xeth-before-unadmitted-basenames-record",
+                21_000_200,
+                1_776_200_066,
+            ),
+            chain_lineage_block(
+                ETHEREUM_MAINNET_CHAIN_ID,
+                "0xeth-after-unadmitted-basenames-record",
+                21_000_201,
+                1_776_200_068,
+            ),
+        ],
+    )
+    .await?;
+    seed_events(
+        database.pool(),
+        &[
+            basenames_record_version_changed_event(
+                "base-boundary-without-transport",
+                "basenames:bob.base.eth",
+                resource_id,
+                31,
+                1065,
+                0,
+            ),
+            basenames_record_changed_event(
+                "base-record-after-unadmitted-transport-boundary",
+                "basenames:bob.base.eth",
+                resource_id,
+                "text",
+                "text",
+                None,
+                1067,
+                0,
+            ),
+        ],
+    )
+    .await?;
+
+    rebuild_record_inventory_current(database.pool(), Some(&resource_id.to_string())).await?;
+
+    let row = load_record_inventory_current(
+        database.pool(),
+        resource_id,
+        &record_version_boundary(
+            "basenames:bob.base.eth",
+            resource_id,
+            Some(1),
+            Some(EVENT_KIND_RECORD_VERSION_CHANGED),
+            1065,
+            "0xbase-rec1065",
+            1_776_200_065,
+            BASE_MAINNET_CHAIN_ID,
+        ),
+    )
+    .await?
+    .context("basenames transport-gated record_inventory_current row must exist")?;
+
+    assert_eq!(
+        row.chain_positions,
+        json!({
+            "base": {
+                "chain_id": BASE_MAINNET_CHAIN_ID,
+                "block_number": 1067,
+                "block_hash": "0xbase-rec1067",
+                "timestamp": "2026-04-14T20:54:27Z",
             },
         })
     );
@@ -1389,16 +1511,18 @@ async fn rebuild_basenames_dynamic_resolver_inventory_gates_supported_pending_an
         ])
     );
 
-    for (resource_id, logical_name_id, block_hash) in [
+    for (resource_id, logical_name_id, block_hash, unsupported_reason) in [
         (
             pending_resource_id,
             "basenames:pending.base.eth",
             "0xbase-rec1202",
+            RESOLVER_FAMILY_PENDING_REASON,
         ),
         (
             unsupported_resource_id,
             "basenames:unsupported.base.eth",
             "0xbase-rec1202",
+            RESOLVER_FAMILY_UNSUPPORTED_REASON,
         ),
     ] {
         let row = load_record_inventory_current(
@@ -1423,17 +1547,17 @@ async fn rebuild_basenames_dynamic_resolver_inventory_gates_supported_pending_an
             json!([
                 {
                     "record_family": "addr",
-                    "unsupported_reason": RESOLVER_FAMILY_PENDING_REASON,
+                    "unsupported_reason": unsupported_reason,
                 },
                 {
                     "record_family": "text",
-                    "unsupported_reason": RESOLVER_FAMILY_PENDING_REASON,
+                    "unsupported_reason": unsupported_reason,
                 }
             ])
         );
         assert_eq!(
             row.coverage["unsupported_reason"],
-            json!(RESOLVER_FAMILY_PENDING_REASON)
+            json!(unsupported_reason)
         );
         assert_eq!(
             row.last_change
@@ -1591,6 +1715,800 @@ async fn rebuild_keeps_pending_ensv1_dynamic_resolver_inventory_explicit() -> Re
             .as_ref()
             .and_then(|value| value.get("event_kind")),
         Some(&json!(EVENT_KIND_RESOLVER_CHANGED))
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn rebuild_keeps_observed_addr_record_for_unknown_ensv1_current_resolver() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let resource_id = Uuid::from_u128(0x9905);
+    let registry_contract_instance_id = Uuid::from_u128(0x9906);
+    let registry_address = "0x0000000000000000000000000000000000009906";
+    let unknown_resolver_address = "0x0000000000000000000000000000000000009907";
+
+    let registry_manifest_id = insert_manifest_version(
+        database.pool(),
+        "ens_v1_registry_l1",
+        "manifests/ens/ens_v1_registry_l1/v2.toml",
+    )
+    .await?;
+    let resolver_manifest_id = insert_manifest_version(
+        database.pool(),
+        SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
+        "manifests/ens/ens_v1_resolver_l1/v1.toml",
+    )
+    .await?;
+    insert_contract_instance(
+        database.pool(),
+        registry_contract_instance_id,
+        registry_address,
+        registry_manifest_id,
+    )
+    .await?;
+
+    let mut addr_record = record_changed_event(
+        "unknown-resolver-addr",
+        "ens:unknown-resolver.eth",
+        resource_id,
+        "addr:60",
+        "addr",
+        Some("60"),
+        1061,
+        0,
+    );
+    addr_record.source_family = SOURCE_FAMILY_ENS_V1_RESOLVER_L1.to_owned();
+    addr_record.source_manifest_id = Some(resolver_manifest_id);
+    addr_record.after_state.as_object_mut().unwrap().insert(
+        "value".to_owned(),
+        json!({
+            "coin_type": "60",
+            "value": "0x0000000000000000000000000000000000009907",
+        }),
+    );
+    let mut data_record = record_changed_event(
+        "unknown-resolver-data",
+        "ens:unknown-resolver.eth",
+        resource_id,
+        "data:avatar",
+        "data",
+        Some("avatar"),
+        1061,
+        1,
+    );
+    data_record.source_family = SOURCE_FAMILY_ENS_V1_RESOLVER_L1.to_owned();
+    data_record.source_manifest_id = Some(resolver_manifest_id);
+    data_record.after_state.as_object_mut().unwrap().insert(
+        "value".to_owned(),
+        json!({
+            "indexed_data_hash": "0x0000000000000000000000000000000000000000000000000000000000009908",
+        }),
+    );
+
+    seed_resources(database.pool(), &[resource_id]).await?;
+    seed_raw_blocks(
+        database.pool(),
+        &[
+            raw_block("ethereum-mainnet", "0xrec1060", 1060, 1_776_200_060),
+            raw_block("ethereum-mainnet", "0xrec1061", 1061, 1_776_200_061),
+        ],
+    )
+    .await?;
+    seed_raw_logs(
+        database.pool(),
+        &[
+            raw_log(
+                "ethereum-mainnet",
+                "0xrec1061",
+                1061,
+                "0xtx1061",
+                0,
+                unknown_resolver_address,
+            ),
+            raw_log(
+                "ethereum-mainnet",
+                "0xrec1061",
+                1061,
+                "0xtx1061",
+                1,
+                unknown_resolver_address,
+            ),
+        ],
+    )
+    .await?;
+    seed_events(
+        database.pool(),
+        &[
+            resolver_changed_event(
+                "unknown-current-resolver",
+                "ens:unknown-resolver.eth",
+                resource_id,
+                unknown_resolver_address,
+                registry_manifest_id,
+                1060,
+                0,
+            ),
+            addr_record,
+            data_record,
+        ],
+    )
+    .await?;
+
+    rebuild_record_inventory_current(database.pool(), Some(&resource_id.to_string())).await?;
+
+    let row = load_record_inventory_current(
+        database.pool(),
+        resource_id,
+        &record_version_boundary(
+            "ens:unknown-resolver.eth",
+            resource_id,
+            None,
+            None,
+            1060,
+            "0xrec1060",
+            1_776_200_060,
+            "ethereum-mainnet",
+        ),
+    )
+    .await?
+    .context("unknown current resolver row with observed addr event must exist")?;
+
+    assert_eq!(
+        row.selectors,
+        json!([{
+            "record_key": "addr:60",
+            "record_family": "addr",
+            "selector_key": "60",
+            "cacheable": true,
+        }])
+    );
+    assert_eq!(
+        row.entries,
+        json!([{
+            "record_key": "addr:60",
+            "record_family": "addr",
+            "selector_key": "60",
+            "status": "success",
+            "value": {
+                "coin_type": "60",
+                "value": "0x0000000000000000000000000000000000009907",
+            }
+        }])
+    );
+    assert_eq!(row.explicit_gaps, json!([]));
+    assert_eq!(
+        row.unsupported_families,
+        json!([
+            {
+                "record_family": "addr",
+                "unsupported_reason": RESOLVER_FAMILY_PENDING_REASON,
+            },
+            {
+                "record_family": "data",
+                "unsupported_reason": RESOLVER_FAMILY_PENDING_REASON,
+            },
+            {
+                "record_family": "text",
+                "unsupported_reason": RESOLVER_FAMILY_PENDING_REASON,
+            }
+        ])
+    );
+    assert_eq!(row.coverage["status"], json!("partial"));
+    assert_eq!(
+        row.coverage["unsupported_reason"],
+        json!(RESOLVER_FAMILY_PENDING_REASON)
+    );
+    assert_eq!(row.provenance["normalized_event_ids"], json!([1, 2, 3]));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn rebuild_surfaces_dataresolver_and_ignores_pubkey_for_known_ensv1_resolver() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let resource_id = Uuid::from_u128(0x9909);
+    let registry_contract_instance_id = Uuid::from_u128(0x990a);
+    let public_resolver_contract_instance_id = Uuid::from_u128(0x990b);
+    let registry_address = "0x000000000000000000000000000000000000990a";
+    let public_resolver_address = "0x000000000000000000000000000000000000990b";
+
+    let registry_manifest_id = insert_manifest_version(
+        database.pool(),
+        "ens_v1_registry_l1",
+        "manifests/ens/ens_v1_registry_l1/v3.toml",
+    )
+    .await?;
+    let resolver_manifest_id = insert_manifest_version(
+        database.pool(),
+        SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
+        "manifests/ens/ens_v1_resolver_l1/v1.toml",
+    )
+    .await?;
+    insert_contract_instance(
+        database.pool(),
+        registry_contract_instance_id,
+        registry_address,
+        registry_manifest_id,
+    )
+    .await?;
+    insert_contract_instance(
+        database.pool(),
+        public_resolver_contract_instance_id,
+        public_resolver_address,
+        resolver_manifest_id,
+    )
+    .await?;
+    insert_manifest_contract_instance(
+        database.pool(),
+        resolver_manifest_id,
+        "public_resolver",
+        public_resolver_contract_instance_id,
+        public_resolver_address,
+    )
+    .await?;
+
+    let mut data_record = record_changed_event(
+        "known-resolver-data",
+        "ens:dataresolver.eth",
+        resource_id,
+        "data:avatar",
+        "data",
+        Some("avatar"),
+        1061,
+        0,
+    );
+    data_record.source_family = SOURCE_FAMILY_ENS_V1_RESOLVER_L1.to_owned();
+    data_record.source_manifest_id = Some(resolver_manifest_id);
+    data_record.after_state.as_object_mut().unwrap().insert(
+        "value".to_owned(),
+        json!({
+            "indexed_data_hash": "0x000000000000000000000000000000000000000000000000000000000000990c",
+        }),
+    );
+    let mut pubkey_record = record_changed_event(
+        "known-resolver-pubkey",
+        "ens:dataresolver.eth",
+        resource_id,
+        "pubkey",
+        "pubkey",
+        None,
+        1061,
+        1,
+    );
+    pubkey_record.source_family = SOURCE_FAMILY_ENS_V1_RESOLVER_L1.to_owned();
+    pubkey_record.source_manifest_id = Some(resolver_manifest_id);
+
+    seed_resources(database.pool(), &[resource_id]).await?;
+    seed_raw_blocks(
+        database.pool(),
+        &[
+            raw_block("ethereum-mainnet", "0xrec1060", 1060, 1_776_200_060),
+            raw_block("ethereum-mainnet", "0xrec1061", 1061, 1_776_200_061),
+        ],
+    )
+    .await?;
+    seed_raw_logs(
+        database.pool(),
+        &[
+            raw_log(
+                "ethereum-mainnet",
+                "0xrec1061",
+                1061,
+                "0xtx1061",
+                0,
+                public_resolver_address,
+            ),
+            raw_log(
+                "ethereum-mainnet",
+                "0xrec1061",
+                1061,
+                "0xtx1061",
+                1,
+                public_resolver_address,
+            ),
+        ],
+    )
+    .await?;
+    seed_events(
+        database.pool(),
+        &[
+            resolver_changed_event(
+                "known-current-resolver",
+                "ens:dataresolver.eth",
+                resource_id,
+                public_resolver_address,
+                registry_manifest_id,
+                1060,
+                0,
+            ),
+            data_record,
+            pubkey_record,
+        ],
+    )
+    .await?;
+
+    rebuild_record_inventory_current(database.pool(), Some(&resource_id.to_string())).await?;
+
+    let row = load_record_inventory_current(
+        database.pool(),
+        resource_id,
+        &record_version_boundary(
+            "ens:dataresolver.eth",
+            resource_id,
+            None,
+            None,
+            1060,
+            "0xrec1060",
+            1_776_200_060,
+            "ethereum-mainnet",
+        ),
+    )
+    .await?
+    .context("known current resolver row with DataResolver event must exist")?;
+
+    assert_eq!(row.selectors, json!([]));
+    assert_eq!(
+        row.explicit_gaps,
+        json!([
+            {
+                "record_key": "addr:60",
+                "record_family": "addr",
+                "selector_key": "60",
+                "gap_reason": GAP_REASON_NOT_OBSERVED,
+            },
+            {
+                "record_key": "text",
+                "record_family": "text",
+                "selector_key": null,
+                "gap_reason": GAP_REASON_NOT_OBSERVED,
+            }
+        ])
+    );
+    assert_eq!(
+        row.unsupported_families,
+        json!([{
+            "record_family": "data",
+            "unsupported_reason": RESOLVER_FAMILY_UNSUPPORTED_REASON,
+        }])
+    );
+    assert_eq!(row.entries, json!([]));
+    assert_eq!(row.provenance["normalized_event_ids"], json!([1, 2]));
+    assert_eq!(
+        row.last_change
+            .as_ref()
+            .and_then(|value| value.get("event_kind")),
+        Some(&json!(EVENT_KIND_RECORD_CHANGED))
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn rebuild_supports_known_legacy_ensv1_resolver_without_latest_capabilities() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let resource_id = Uuid::from_u128(0x9910);
+    let registry_contract_instance_id = Uuid::from_u128(0x9911);
+    let legacy_resolver_contract_instance_id = Uuid::from_u128(0x9912);
+    let registry_address = "0x0000000000000000000000000000000000009911";
+    let legacy_resolver_address = "0x4976fb03C32e5B8cfe2b6cCB31c09Ba78EBaBa41";
+
+    let registry_manifest_id = insert_manifest_version(
+        database.pool(),
+        "ens_v1_registry_l1",
+        "manifests/ens/ens_v1_registry_l1/v3.toml",
+    )
+    .await?;
+    let resolver_manifest_id = insert_manifest_version(
+        database.pool(),
+        SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
+        "manifests/ens/ens_v1_resolver_l1/v1.toml",
+    )
+    .await?;
+    insert_contract_instance(
+        database.pool(),
+        registry_contract_instance_id,
+        registry_address,
+        registry_manifest_id,
+    )
+    .await?;
+    insert_contract_instance(
+        database.pool(),
+        legacy_resolver_contract_instance_id,
+        legacy_resolver_address,
+        resolver_manifest_id,
+    )
+    .await?;
+    insert_manifest_contract_instance(
+        database.pool(),
+        resolver_manifest_id,
+        "public_resolver_4976fb03",
+        legacy_resolver_contract_instance_id,
+        legacy_resolver_address,
+    )
+    .await?;
+
+    let mut addr_record = record_changed_event(
+        "legacy-addr",
+        "ens:taytems.eth",
+        resource_id,
+        "addr:60",
+        "addr",
+        Some("60"),
+        1071,
+        0,
+    );
+    addr_record.source_family = SOURCE_FAMILY_ENS_V1_RESOLVER_L1.to_owned();
+    addr_record.source_manifest_id = Some(resolver_manifest_id);
+    let mut text_record = record_changed_event(
+        "legacy-text",
+        "ens:taytems.eth",
+        resource_id,
+        "text",
+        "text",
+        None,
+        1072,
+        0,
+    );
+    text_record.source_family = SOURCE_FAMILY_ENS_V1_RESOLVER_L1.to_owned();
+    text_record.source_manifest_id = Some(resolver_manifest_id);
+    let mut name_record = record_changed_event(
+        "legacy-name",
+        "ens:taytems.eth",
+        resource_id,
+        "name",
+        "name",
+        None,
+        1073,
+        0,
+    );
+    name_record.source_family = SOURCE_FAMILY_ENS_V1_RESOLVER_L1.to_owned();
+    name_record.source_manifest_id = Some(resolver_manifest_id);
+    seed_resources(database.pool(), &[resource_id]).await?;
+    seed_raw_blocks(
+        database.pool(),
+        &[
+            raw_block("ethereum-mainnet", "0xrec1070", 1070, 1_776_200_070),
+            raw_block("ethereum-mainnet", "0xrec1071", 1071, 1_776_200_071),
+            raw_block("ethereum-mainnet", "0xrec1072", 1072, 1_776_200_072),
+            raw_block("ethereum-mainnet", "0xrec1073", 1073, 1_776_200_073),
+        ],
+    )
+    .await?;
+    seed_events(
+        database.pool(),
+        &[
+            resolver_changed_event(
+                "legacy-resolver",
+                "ens:taytems.eth",
+                resource_id,
+                legacy_resolver_address,
+                registry_manifest_id,
+                1070,
+                0,
+            ),
+            addr_record,
+            text_record,
+            name_record,
+        ],
+    )
+    .await?;
+
+    rebuild_record_inventory_current(database.pool(), Some(&resource_id.to_string())).await?;
+
+    let row = load_record_inventory_current(
+        database.pool(),
+        resource_id,
+        &record_version_boundary(
+            "ens:taytems.eth",
+            resource_id,
+            None,
+            None,
+            1070,
+            "0xrec1070",
+            1_776_200_070,
+            "ethereum-mainnet",
+        ),
+    )
+    .await?
+    .context("legacy resolver row must exist")?;
+
+    assert_eq!(
+        row.selectors,
+        json!([
+            {
+                "record_key": "addr:60",
+                "record_family": "addr",
+                "selector_key": "60",
+                "cacheable": true,
+            },
+            {
+                "record_key": "text",
+                "record_family": "text",
+                "selector_key": null,
+                "cacheable": true,
+            }
+        ])
+    );
+    assert_eq!(
+        row.unsupported_families,
+        json!([{
+            "record_family": "name",
+            "unsupported_reason": UNSUPPORTED_FAMILY_REASON,
+        }])
+    );
+    assert_eq!(row.coverage.get("unsupported_reason"), Some(&json!(null)));
+    assert_eq!(row.record_version_boundary["event_kind"], json!(null));
+    assert_eq!(row.provenance["normalized_event_ids"], json!([1, 2, 3, 4]));
+
+    let legacy_resolver_address = legacy_resolver_address.to_ascii_lowercase();
+    let admissions =
+        bigname_manifests::load_ens_v1_public_resolver_profile_admissions(database.pool()).await?;
+    let feature_statuses = admissions
+        .iter()
+        .filter(|admission| admission.address == legacy_resolver_address)
+        .map(|admission| (admission.fact_family.as_str(), admission.status.as_str()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(feature_statuses["resolver_record_version"], "unsupported");
+    assert_eq!(
+        feature_statuses["resolver_feature:name_wrapper_aware"],
+        "unsupported"
+    );
+    assert_eq!(
+        feature_statuses["resolver_feature:default_coin_type"],
+        "unsupported"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn rebuild_rejects_multicoin_addr_for_eth_only_legacy_ensv1_resolver() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let resource_id = Uuid::from_u128(0x9920);
+    let registry_contract_instance_id = Uuid::from_u128(0x9921);
+    let legacy_resolver_contract_instance_id = Uuid::from_u128(0x9922);
+    let registry_address = "0x0000000000000000000000000000000000009921";
+    let legacy_resolver_address = "0x5FfC014343cd971B7eb70732021E26C35B744cc4";
+
+    let registry_manifest_id = insert_manifest_version(
+        database.pool(),
+        "ens_v1_registry_l1",
+        "manifests/ens/ens_v1_registry_l1/v3.toml",
+    )
+    .await?;
+    let resolver_manifest_id = insert_manifest_version(
+        database.pool(),
+        SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
+        "manifests/ens/ens_v1_resolver_l1/v1.toml",
+    )
+    .await?;
+    insert_contract_instance(
+        database.pool(),
+        registry_contract_instance_id,
+        registry_address,
+        registry_manifest_id,
+    )
+    .await?;
+    insert_contract_instance(
+        database.pool(),
+        legacy_resolver_contract_instance_id,
+        legacy_resolver_address,
+        resolver_manifest_id,
+    )
+    .await?;
+    insert_manifest_contract_instance(
+        database.pool(),
+        resolver_manifest_id,
+        "public_resolver_5ffc0143",
+        legacy_resolver_contract_instance_id,
+        legacy_resolver_address,
+    )
+    .await?;
+
+    let mut unsupported_multicoin_record = record_changed_event(
+        "legacy-multicoin-unsupported",
+        "ens:eth-only.eth",
+        resource_id,
+        "addr:61",
+        "addr",
+        Some("61"),
+        1081,
+        0,
+    );
+    unsupported_multicoin_record.source_family = SOURCE_FAMILY_ENS_V1_RESOLVER_L1.to_owned();
+    unsupported_multicoin_record.source_manifest_id = Some(resolver_manifest_id);
+
+    seed_resources(database.pool(), &[resource_id]).await?;
+    seed_raw_blocks(
+        database.pool(),
+        &[
+            raw_block("ethereum-mainnet", "0xrec1080", 1080, 1_776_200_080),
+            raw_block("ethereum-mainnet", "0xrec1081", 1081, 1_776_200_081),
+        ],
+    )
+    .await?;
+    seed_events(
+        database.pool(),
+        &[
+            resolver_changed_event(
+                "eth-only-resolver",
+                "ens:eth-only.eth",
+                resource_id,
+                legacy_resolver_address,
+                registry_manifest_id,
+                1080,
+                0,
+            ),
+            unsupported_multicoin_record,
+        ],
+    )
+    .await?;
+
+    rebuild_record_inventory_current(database.pool(), Some(&resource_id.to_string())).await?;
+
+    let row = load_record_inventory_current(
+        database.pool(),
+        resource_id,
+        &record_version_boundary(
+            "ens:eth-only.eth",
+            resource_id,
+            None,
+            None,
+            1080,
+            "0xrec1080",
+            1_776_200_080,
+            "ethereum-mainnet",
+        ),
+    )
+    .await?
+    .context("ETH-only legacy resolver row must exist")?;
+
+    assert_eq!(row.selectors, json!([]));
+    assert_eq!(
+        row.explicit_gaps,
+        json!([
+            {
+                "record_key": "addr:60",
+                "record_family": "addr",
+                "selector_key": "60",
+                "gap_reason": GAP_REASON_NOT_OBSERVED,
+            },
+            {
+                "record_key": "text",
+                "record_family": "text",
+                "selector_key": null,
+                "gap_reason": GAP_REASON_NOT_OBSERVED,
+            }
+        ])
+    );
+    assert_eq!(row.provenance["normalized_event_ids"], json!([1]));
+
+    let legacy_resolver_address = legacy_resolver_address.to_ascii_lowercase();
+    let admissions =
+        bigname_manifests::load_ens_v1_public_resolver_profile_admissions(database.pool()).await?;
+    let feature_statuses = admissions
+        .iter()
+        .filter(|admission| admission.address == legacy_resolver_address)
+        .map(|admission| (admission.fact_family.as_str(), admission.status.as_str()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(
+        feature_statuses["resolver_record:multicoin_addr"],
+        "unsupported"
+    );
+    assert_eq!(feature_statuses["resolver_record:addr"], "supported");
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn rebuild_keeps_unsupported_legacy_ensv1_resolver_family_explicit() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let resource_id = Uuid::from_u128(0x9930);
+    let registry_contract_instance_id = Uuid::from_u128(0x9931);
+    let legacy_resolver_contract_instance_id = Uuid::from_u128(0x9932);
+    let registry_address = "0x0000000000000000000000000000000000009931";
+    let legacy_resolver_address = "0x1da022710dF5002339274AaDEe8D58218e9D6AB5";
+
+    let registry_manifest_id = insert_manifest_version(
+        database.pool(),
+        "ens_v1_registry_l1",
+        "manifests/ens/ens_v1_registry_l1/v3.toml",
+    )
+    .await?;
+    let resolver_manifest_id = insert_manifest_version(
+        database.pool(),
+        SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
+        "manifests/ens/ens_v1_resolver_l1/v1.toml",
+    )
+    .await?;
+    insert_contract_instance(
+        database.pool(),
+        registry_contract_instance_id,
+        registry_address,
+        registry_manifest_id,
+    )
+    .await?;
+    insert_contract_instance(
+        database.pool(),
+        legacy_resolver_contract_instance_id,
+        legacy_resolver_address,
+        resolver_manifest_id,
+    )
+    .await?;
+    insert_manifest_contract_instance(
+        database.pool(),
+        resolver_manifest_id,
+        "public_resolver_1da02271",
+        legacy_resolver_contract_instance_id,
+        legacy_resolver_address,
+    )
+    .await?;
+
+    seed_resources(database.pool(), &[resource_id]).await?;
+    seed_raw_blocks(
+        database.pool(),
+        &[raw_block(
+            "ethereum-mainnet",
+            "0xrec1090",
+            1090,
+            1_776_200_090,
+        )],
+    )
+    .await?;
+    seed_events(
+        database.pool(),
+        &[resolver_changed_event(
+            "addr-only-legacy-resolver",
+            "ens:addr-only.eth",
+            resource_id,
+            legacy_resolver_address,
+            registry_manifest_id,
+            1090,
+            0,
+        )],
+    )
+    .await?;
+
+    rebuild_record_inventory_current(database.pool(), Some(&resource_id.to_string())).await?;
+
+    let row = load_record_inventory_current(
+        database.pool(),
+        resource_id,
+        &record_version_boundary(
+            "ens:addr-only.eth",
+            resource_id,
+            None,
+            None,
+            1090,
+            "0xrec1090",
+            1_776_200_090,
+            "ethereum-mainnet",
+        ),
+    )
+    .await?
+    .context("addr-only legacy resolver row must exist")?;
+
+    assert_eq!(row.selectors, json!([]));
+    assert_eq!(
+        row.explicit_gaps,
+        json!([{
+            "record_key": "addr:60",
+            "record_family": "addr",
+            "selector_key": "60",
+            "gap_reason": GAP_REASON_NOT_OBSERVED,
+        }])
+    );
+    assert_eq!(
+        row.unsupported_families,
+        json!([{
+            "record_family": "text",
+            "unsupported_reason": RESOLVER_FAMILY_UNSUPPORTED_REASON,
+        }])
+    );
+    assert_eq!(
+        row.coverage["unsupported_reason"],
+        json!(RESOLVER_FAMILY_UNSUPPORTED_REASON)
     );
 
     database.cleanup().await
@@ -1877,6 +2795,94 @@ async fn insert_basenames_resolver_profile_seed(
     .execute(pool)
     .await
     .context("failed to insert Basenames resolver manifest_contract_instance")?;
+
+    Ok(manifest_id)
+}
+
+async fn insert_basenames_execution_manifest(pool: &PgPool) -> Result<i64> {
+    let manifest_id = sqlx::query(
+        r#"
+        INSERT INTO manifest_versions (
+            manifest_version,
+            namespace,
+            source_family,
+            chain,
+            deployment_epoch,
+            rollout_status,
+            normalizer_version,
+            file_path,
+            manifest_payload
+        )
+        VALUES (
+            1,
+            'basenames',
+            $1,
+            'ethereum-mainnet',
+            'basenames_v1',
+            'active',
+            'uts46-v1',
+            'manifests/basenames/basenames_execution/v1.toml',
+            '{}'::jsonb
+        )
+        RETURNING manifest_id
+        "#,
+    )
+    .bind(SOURCE_FAMILY_BASENAMES_EXECUTION)
+    .fetch_one(pool)
+    .await
+    .context("failed to insert Basenames execution manifest")?
+    .try_get::<i64, _>("manifest_id")
+    .context("failed to read Basenames execution manifest_id")?;
+    let contract_instance_id = Uuid::from_u128(0x98fe);
+
+    sqlx::query(
+        r#"
+        INSERT INTO manifest_capability_flags (
+            manifest_id,
+            capability_name,
+            status,
+            notes
+        )
+        VALUES ($1, $2, 'supported'::capability_support_status, NULL)
+        "#,
+    )
+    .bind(manifest_id)
+    .bind(VERIFIED_RESOLUTION_CAPABILITY)
+    .execute(pool)
+    .await
+    .context("failed to insert Basenames execution capability flag")?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO contract_instances (contract_instance_id, chain_id, contract_kind, provenance)
+        VALUES ($1, 'ethereum-mainnet', 'contract', '{}'::jsonb)
+        "#,
+    )
+    .bind(contract_instance_id)
+    .execute(pool)
+    .await
+    .context("failed to insert Basenames execution contract_instance")?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO manifest_contract_instances (
+            manifest_id,
+            declaration_kind,
+            declaration_name,
+            contract_instance_id,
+            declared_address,
+            role,
+            proxy_kind
+        )
+        VALUES ($1, 'contract', 'l1_resolver', $2, lower($3), 'l1_resolver', 'none')
+        "#,
+    )
+    .bind(manifest_id)
+    .bind(contract_instance_id)
+    .bind(BASENAMES_L1_RESOLVER_ADDRESS)
+    .execute(pool)
+    .await
+    .context("failed to insert Basenames execution manifest_contract_instance")?;
 
     Ok(manifest_id)
 }

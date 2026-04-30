@@ -180,7 +180,7 @@ Execution notes:
   resolver-profile answers, with the fixture label anchored to upstream `L2Resolver`
   (upstream: .refs/basenames/src/L2/L2Resolver.sol:L22 @ basenames@1809bbc)
   (upstream: .refs/basenames/src/L2/L2Resolver.sol:L23 @ basenames@1809bbc). Pending or
-  unsupported dynamic resolver targets remain explicit as `resolver_family_pending`; the lock does
+  pending dynamic resolver targets remain explicit as `resolver_family_pending`, unsupported dynamic resolver targets remain explicit as `resolver_family_unsupported`; the lock does
   not widen resolver support, route coverage semantics, Basenames path classes, manifest
   capabilities, verified execution support, or consumer replacement
 - the coverage contract reuses the same exact-name rebuild seed and asserts that

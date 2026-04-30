@@ -85,7 +85,7 @@ pub(super) async fn load_canonical_name_surfaces(pool: &PgPool) -> Result<Vec<Na
             rb.block_timestamp,
             ns.canonicality_state::TEXT AS canonicality_state
         FROM name_surfaces ns
-        LEFT JOIN raw_blocks rb
+        LEFT JOIN chain_lineage rb
           ON rb.chain_id = ns.chain_id
          AND rb.block_hash = ns.block_hash
         WHERE ns.canonicality_state {CANONICAL_STATE_FILTER}
@@ -117,7 +117,7 @@ pub(super) async fn load_canonical_name_surface(
             rb.block_timestamp,
             ns.canonicality_state::TEXT AS canonicality_state
         FROM name_surfaces ns
-        LEFT JOIN raw_blocks rb
+        LEFT JOIN chain_lineage rb
           ON rb.chain_id = ns.chain_id
          AND rb.block_hash = ns.block_hash
         WHERE ns.logical_name_id = $1
@@ -159,7 +159,7 @@ pub(super) async fn load_current_binding_context(
         LEFT JOIN token_lineages tl
           ON tl.token_lineage_id = r.token_lineage_id
          AND tl.canonicality_state {CANONICAL_STATE_FILTER}
-        LEFT JOIN raw_blocks rb
+        LEFT JOIN chain_lineage rb
           ON rb.chain_id = sb.chain_id
          AND rb.block_hash = sb.block_hash
         WHERE sb.logical_name_id = $1
@@ -223,7 +223,7 @@ pub(super) async fn load_relevant_events(
                 ne.canonicality_state::TEXT AS canonicality_state,
                 ne.after_state
             FROM normalized_events ne
-            LEFT JOIN raw_blocks rb
+            LEFT JOIN chain_lineage rb
               ON rb.chain_id = ne.chain_id
              AND rb.block_hash = ne.block_hash
             LEFT JOIN manifest_versions mv
@@ -275,7 +275,7 @@ pub(super) async fn load_relevant_events(
                 ne.canonicality_state::TEXT AS canonicality_state,
                 ne.after_state
             FROM normalized_events ne
-            LEFT JOIN raw_blocks rb
+            LEFT JOIN chain_lineage rb
               ON rb.chain_id = ne.chain_id
              AND rb.block_hash = ne.block_hash
             LEFT JOIN manifest_versions mv

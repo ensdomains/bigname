@@ -43,10 +43,10 @@ pub(super) async fn load_current_bindings(pool: &PgPool) -> Result<Vec<CurrentBi
         LEFT JOIN token_lineages tl
           ON tl.token_lineage_id = r.token_lineage_id
          AND tl.canonicality_state {CANONICAL_STATE_FILTER}
-        LEFT JOIN raw_blocks surface_block
+        LEFT JOIN chain_lineage surface_block
           ON surface_block.chain_id = ns.chain_id
          AND surface_block.block_hash = ns.block_hash
-        LEFT JOIN raw_blocks binding_block
+        LEFT JOIN chain_lineage binding_block
           ON binding_block.chain_id = sb.chain_id
          AND binding_block.block_hash = sb.block_hash
         WHERE sb.active_to IS NULL
@@ -93,7 +93,7 @@ pub(super) async fn load_relevant_events(
             ne.canonicality_state::TEXT AS canonicality_state,
             ne.after_state
         FROM normalized_events ne
-        LEFT JOIN raw_blocks rb
+        LEFT JOIN chain_lineage rb
           ON rb.chain_id = ne.chain_id
          AND rb.block_hash = ne.block_hash
         WHERE ne.namespace = $1

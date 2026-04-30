@@ -15,10 +15,10 @@ use super::{
     json::{
         build_canonicality_summary, build_coverage, build_entries, build_explicit_gaps,
         build_last_change, build_provenance, build_selectors, build_unsupported_families,
-        gap_value, resolver_family_pending_value,
+        gap_value, resolver_family_status_value,
     },
     loading::{load_all_relevant_events, load_relevant_events},
-    profile::{ResolverProfileGate, resolver_local_source_family},
+    profile::{ResolverProfileGate, ResolverRecordFamilyStatuses, resolver_local_source_family},
     types::{RecordInventoryCurrentRebuildSummary, RelevantEvent},
 };
 
@@ -204,8 +204,8 @@ async fn build_row_from_events(
         .iter()
         .rev()
         .find(|event| event.event_kind == EVENT_KIND_RESOLVER_CHANGED);
-    let latest_resolver_record_status = latest_resolver_event
-        .and_then(|resolver_event| profile_gate.current_record_status(resolver_event));
+    let latest_resolver_record_statuses = latest_resolver_event
+        .and_then(|resolver_event| profile_gate.current_record_family_statuses(resolver_event));
 
     let boundary_index = events.iter().rposition(|event| {
         event.event_kind == EVENT_KIND_RECORD_VERSION_CHANGED
@@ -227,30 +227,44 @@ async fn build_row_from_events(
     let record_change_events = scoped_events
         .iter()
         .filter(|event| {
-            event.event_kind == EVENT_KIND_RECORD_CHANGED && profile_gate.allows_event(event)
+            event.event_kind == EVENT_KIND_RECORD_CHANGED
+                && profile_gate.allows_event_for_current_resolver(event, latest_resolver_event)
         })
         .collect::<Vec<_>>();
     if let Some(resolver_event) = latest_resolver_event
-        && latest_resolver_record_status
-            .is_some_and(|status| status != RESOLVER_PROFILE_STATUS_SUPPORTED)
+        && latest_resolver_record_statuses
+            .as_ref()
+            .is_some_and(|statuses| !statuses.any_supported())
         && record_change_events.is_empty()
     {
-        return build_pending_profile_row(pool, resource_id, resolver_event, boundary_anchor).await;
+        return build_profile_gated_row(
+            pool,
+            resource_id,
+            resolver_event,
+            boundary_anchor,
+            latest_resolver_record_statuses.as_ref(),
+        )
+        .await;
     }
     let provenance_events = scoped_events
         .iter()
         .filter(|event| {
             event.event_kind == EVENT_KIND_RESOLVER_CHANGED
                 || resolver_local_source_family(&event.source_family).is_none()
-                || profile_gate.allows_event(event)
+                || profile_gate.allows_event_for_current_resolver(event, latest_resolver_event)
         })
         .cloned()
         .collect::<Vec<_>>();
 
     let selectors = build_selectors(&record_change_events)?;
-    let explicit_gaps = build_explicit_gaps(&selectors);
-    let unsupported_families =
-        build_row_unsupported_families(latest_resolver_record_status, &record_change_events)?;
+    let explicit_gaps = filter_explicit_gaps(
+        build_explicit_gaps(&selectors),
+        latest_resolver_record_statuses.as_ref(),
+    );
+    let unsupported_families = build_row_unsupported_families(
+        latest_resolver_record_statuses.as_ref(),
+        &record_change_events,
+    )?;
     let entries = build_entries(&record_change_events, &selectors)?;
     let last_change = provenance_events
         .last()
@@ -287,7 +301,7 @@ async fn build_row_from_events(
         entries: Value::Array(entries),
         provenance: build_provenance(&provenance_events)?,
         coverage: build_row_coverage(
-            latest_resolver_record_status,
+            latest_resolver_record_statuses.as_ref(),
             boundary_anchor,
             &provenance_events,
         ),
@@ -309,11 +323,12 @@ async fn build_row_from_events(
     }))
 }
 
-async fn build_pending_profile_row(
+async fn build_profile_gated_row(
     pool: &PgPool,
     resource_id: Uuid,
     resolver_event: &RelevantEvent,
     boundary_anchor: &RelevantEvent,
+    latest_resolver_record_statuses: Option<&ResolverRecordFamilyStatuses>,
 ) -> Result<Option<RecordInventoryCurrentRow>> {
     let provenance_events = pending_profile_events(resolver_event, boundary_anchor);
     let supplemental_chain_positions =
@@ -339,8 +354,14 @@ async fn build_pending_profile_row(
             None,
         )]),
         unsupported_families: Value::Array(vec![
-            resolver_family_pending_value(SUPPORTED_ADDR_RECORD_FAMILY),
-            resolver_family_pending_value(SUPPORTED_TEXT_RECORD_FAMILY),
+            resolver_family_value_for_status(
+                SUPPORTED_ADDR_RECORD_FAMILY,
+                latest_resolver_record_statuses.map(|statuses| statuses.addr.as_str()),
+            ),
+            resolver_family_value_for_status(
+                SUPPORTED_TEXT_RECORD_FAMILY,
+                latest_resolver_record_statuses.map(|statuses| statuses.text.as_str()),
+            ),
         ]),
         last_change: Some(build_last_change(boundary_anchor)?),
         entries: Value::Array(vec![]),
@@ -354,7 +375,7 @@ async fn build_pending_profile_row(
                 .collect::<std::collections::BTreeSet<_>>()
                 .into_iter()
                 .collect::<Vec<_>>(),
-            "unsupported_reason": RESOLVER_FAMILY_PENDING_REASON,
+            "unsupported_reason": resolver_family_coverage_reason(latest_resolver_record_statuses),
             "enumeration_basis": RECORD_INVENTORY_ENUMERATION_BASIS,
         }),
         chain_positions: build_chain_positions(&provenance_events, supplemental_chain_positions),
@@ -384,15 +405,32 @@ fn pending_profile_events(
 }
 
 fn build_row_unsupported_families(
-    latest_resolver_record_status: Option<&str>,
+    latest_resolver_record_statuses: Option<&ResolverRecordFamilyStatuses>,
     record_change_events: &[&RelevantEvent],
 ) -> Result<Vec<Value>> {
     let mut unsupported_families = build_unsupported_families(record_change_events)?;
-    if latest_resolver_record_status
-        .is_some_and(|status| status != RESOLVER_PROFILE_STATUS_SUPPORTED)
-    {
-        unsupported_families.push(resolver_family_pending_value(SUPPORTED_ADDR_RECORD_FAMILY));
-        unsupported_families.push(resolver_family_pending_value(SUPPORTED_TEXT_RECORD_FAMILY));
+    if let Some(statuses) = latest_resolver_record_statuses {
+        for unsupported_family in &mut unsupported_families {
+            let Some(record_family) = unsupported_family
+                .get("record_family")
+                .and_then(Value::as_str)
+            else {
+                continue;
+            };
+            let Some(status) = statuses.status_for_record_family(record_family) else {
+                continue;
+            };
+            if status != RESOLVER_PROFILE_STATUS_SUPPORTED {
+                unsupported_family["unsupported_reason"] =
+                    json!(resolver_family_reason(Some(status)));
+            }
+        }
+        for (record_family, status) in statuses.non_supported_families() {
+            unsupported_families.push(resolver_family_value_for_status(
+                record_family,
+                Some(status),
+            ));
+        }
     }
     unsupported_families.sort_by(|left, right| {
         left["record_family"]
@@ -404,12 +442,12 @@ fn build_row_unsupported_families(
 }
 
 fn build_row_coverage(
-    latest_resolver_record_status: Option<&str>,
+    latest_resolver_record_statuses: Option<&ResolverRecordFamilyStatuses>,
     boundary_anchor: &RelevantEvent,
     provenance_events: &[RelevantEvent],
 ) -> Value {
-    if latest_resolver_record_status
-        .is_some_and(|status| status != RESOLVER_PROFILE_STATUS_SUPPORTED)
+    if let Some(statuses) = latest_resolver_record_statuses
+        && !statuses.all_supported()
     {
         return json!({
             "status": "partial",
@@ -421,10 +459,64 @@ fn build_row_coverage(
                 .collect::<std::collections::BTreeSet<_>>()
                 .into_iter()
                 .collect::<Vec<_>>(),
-            "unsupported_reason": RESOLVER_FAMILY_PENDING_REASON,
+            "unsupported_reason": resolver_family_coverage_reason(Some(statuses)),
             "enumeration_basis": RECORD_INVENTORY_ENUMERATION_BASIS,
         });
     }
 
     build_coverage(provenance_events)
+}
+
+fn resolver_family_value_for_status(record_family: &str, status: Option<&str>) -> Value {
+    resolver_family_status_value(record_family, resolver_family_reason(status))
+}
+
+fn resolver_family_reason(status: Option<&str>) -> &'static str {
+    match status {
+        Some(RESOLVER_PROFILE_STATUS_UNSUPPORTED) => RESOLVER_FAMILY_UNSUPPORTED_REASON,
+        _ => RESOLVER_FAMILY_PENDING_REASON,
+    }
+}
+
+fn resolver_family_coverage_reason(
+    statuses: Option<&ResolverRecordFamilyStatuses>,
+) -> &'static str {
+    let Some(statuses) = statuses else {
+        return RESOLVER_FAMILY_PENDING_REASON;
+    };
+    let non_supported = statuses.non_supported_families();
+    if non_supported
+        .iter()
+        .all(|(_, status)| *status == RESOLVER_PROFILE_STATUS_UNSUPPORTED)
+    {
+        RESOLVER_FAMILY_UNSUPPORTED_REASON
+    } else {
+        RESOLVER_FAMILY_PENDING_REASON
+    }
+}
+
+fn filter_explicit_gaps(
+    explicit_gaps: Vec<Value>,
+    latest_resolver_record_statuses: Option<&ResolverRecordFamilyStatuses>,
+) -> Vec<Value> {
+    let Some(statuses) = latest_resolver_record_statuses else {
+        return explicit_gaps;
+    };
+
+    explicit_gaps
+        .into_iter()
+        .filter(|gap| {
+            gap.get("record_family")
+                .and_then(Value::as_str)
+                .is_none_or(|record_family| record_family_supported(statuses, record_family))
+        })
+        .collect()
+}
+
+fn record_family_supported(statuses: &ResolverRecordFamilyStatuses, record_family: &str) -> bool {
+    match record_family {
+        SUPPORTED_ADDR_RECORD_FAMILY => statuses.addr == RESOLVER_PROFILE_STATUS_SUPPORTED,
+        SUPPORTED_TEXT_RECORD_FAMILY => statuses.text == RESOLVER_PROFILE_STATUS_SUPPORTED,
+        _ => true,
+    }
 }

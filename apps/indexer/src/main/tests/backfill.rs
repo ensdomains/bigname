@@ -47,7 +47,7 @@ struct DynamicResolverBackfillFixture {
 fn large_source_family_backfill_source_identity_uses_compact_digest() -> Result<()> {
     let selected_targets = (0..=backfill::COMPACT_SOURCE_IDENTITY_SELECTED_TARGET_THRESHOLD)
         .map(|index| WatchedBackfillTarget {
-            source_family: "ens_v1_resolver_l1".to_owned(),
+            source_family: "ens_v1_wrapper_l1".to_owned(),
             contract_instance_id: Uuid::from_u128(index as u128 + 1),
             address: format!("0x{index:040x}"),
             effective_from_block: index as i64,
@@ -57,7 +57,7 @@ fn large_source_family_backfill_source_identity_uses_compact_digest() -> Result<
     let source_plan = WatchedSourceSelectorPlan {
         chain: "ethereum-mainnet".to_owned(),
         selector_kind: WatchedSourceSelectorKind::SourceFamily,
-        source_family: Some("ens_v1_resolver_l1".to_owned()),
+        source_family: Some("ens_v1_wrapper_l1".to_owned()),
         requested_watched_targets: Vec::new(),
         selected_targets,
         watched_chain_plan: WatchedChainPlan {
@@ -120,6 +120,49 @@ fn large_source_family_backfill_source_identity_uses_compact_digest() -> Result<
             .get("source_identity_hash")
             .and_then(Value::as_str),
         payload.get("source_identity_hash").and_then(Value::as_str)
+    );
+
+    Ok(())
+}
+
+#[test]
+fn ensv1_resolver_backfill_source_identity_uses_generic_event_topics() -> Result<()> {
+    let selected_targets = vec![WatchedBackfillTarget {
+        source_family: "ens_v1_resolver_l1".to_owned(),
+        contract_instance_id: Uuid::from_u128(1),
+        address: "0x0000000000000000000000000000000000000001".to_owned(),
+        effective_from_block: 1,
+        effective_to_block: 10,
+    }];
+    let source_plan = WatchedSourceSelectorPlan {
+        chain: "ethereum-mainnet".to_owned(),
+        selector_kind: WatchedSourceSelectorKind::SourceFamily,
+        source_family: Some("ens_v1_resolver_l1".to_owned()),
+        requested_watched_targets: Vec::new(),
+        selected_targets,
+        watched_chain_plan: WatchedChainPlan {
+            chain: "ethereum-mainnet".to_owned(),
+            addresses: Vec::new(),
+            manifest_root_entry_count: 0,
+            manifest_contract_entry_count: 0,
+            discovery_edge_entry_count: 0,
+        },
+    };
+
+    let payload = backfill::backfill_job_source_identity_payload(&source_plan)?;
+    assert_eq!(
+        payload
+            .get("source_identity_payload_format")
+            .and_then(Value::as_str),
+        Some("generic_resolver_event_topics_v1")
+    );
+    assert!(payload.get("selected_targets").is_none());
+
+    let mut drifted_source_plan = source_plan.clone();
+    drifted_source_plan.selected_targets[0].effective_to_block += 1;
+    assert_eq!(
+        backfill::backfill_job_source_identity_payload(&drifted_source_plan)?,
+        payload
     );
 
     Ok(())
@@ -320,7 +363,7 @@ async fn hash_pinned_backfill_persists_range_and_is_idempotent_without_advancing
     assert_eq!(ranges_after_conflict[0].checkpoint_block_number, 43);
     assert_eq!(ranges_after_conflict[0].attempt_count, 1);
 
-    assert_eq!(table_count(database.pool(), "raw_blocks").await?, 2);
+    assert_eq!(table_count(database.pool(), "chain_lineage").await?, 2);
     assert_eq!(table_count(database.pool(), "raw_transactions").await?, 2);
     assert_eq!(table_count(database.pool(), "raw_receipts").await?, 2);
     assert_eq!(table_count(database.pool(), "raw_logs").await?, 2);
@@ -387,7 +430,7 @@ async fn hash_pinned_backfill_persists_range_and_is_idempotent_without_advancing
     );
     assert_eq!(
         sqlx::query_scalar::<_, String>(
-            "SELECT canonicality_state::TEXT FROM raw_blocks WHERE block_number = 42"
+            "SELECT canonicality_state::TEXT FROM chain_lineage WHERE block_number = 42"
         )
         .fetch_one(database.pool())
         .await?,
@@ -738,7 +781,7 @@ async fn manual_finite_backfill_runs_full_requested_range_without_startup_cap() 
     assert_eq!(ranges.len(), 1);
     assert_eq!(ranges[0].range_start_block_number, 1);
     assert_eq!(ranges[0].range_end_block_number, 4);
-    assert_eq!(table_count(database.pool(), "raw_blocks").await?, 4);
+    assert_eq!(table_count(database.pool(), "chain_lineage").await?, 4);
     assert_eq!(table_count(database.pool(), "chain_lineage").await?, 4);
 
     server.abort();
@@ -802,7 +845,7 @@ async fn source_scoped_backfill_empty_historical_blocks_skip_payload_cache_metad
     assert_eq!(outcome.raw_receipt_count, 0);
     assert_eq!(outcome.raw_code_hash_count, 1);
     assert_eq!(table_count(database.pool(), "chain_lineage").await?, 1);
-    assert_eq!(table_count(database.pool(), "raw_blocks").await?, 1);
+    assert_eq!(table_count(database.pool(), "chain_lineage").await?, 1);
     assert_eq!(table_count(database.pool(), "raw_code_hashes").await?, 1);
     assert_eq!(table_count(database.pool(), "raw_logs").await?, 0);
     assert_eq!(table_count(database.pool(), "raw_transactions").await?, 0);
@@ -812,6 +855,132 @@ async fn source_scoped_backfill_empty_historical_blocks_skip_payload_cache_metad
         0
     );
     assert_eq!(table_count(database.pool(), "normalized_events").await?, 0);
+
+    server.abort();
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn single_block_ensv1_resolver_backfill_uses_topic_filtered_logs() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_backfill_job_tables(database.pool()).await?;
+    let resolver_contract_instance_id = Uuid::from_u128(9_210);
+    let resolver_address = "0x0000000000000000000000000000000000000a01";
+    let unrelated_address = "0x0000000000000000000000000000000000000b01";
+
+    insert_watched_manifest_contract(
+        database.pool(),
+        9_210,
+        "ens",
+        "ethereum-mainnet",
+        "ens_v1_resolver_l1",
+        resolver_contract_instance_id,
+        resolver_address,
+    )
+    .await?;
+
+    let range = BackfillBlockRange::new(42, 42)?;
+    let source_plan = load_watched_source_selector_plan(
+        database.pool(),
+        "ethereum-mainnet",
+        WatchedSourceSelector::SourceFamily("ens_v1_resolver_l1".to_owned()),
+        range.from_block,
+        range.to_block,
+    )
+    .await?;
+    let block = provider_block(
+        "0x4242424242424242424242424242424242424242424242424242424242424242",
+        Some("0x4141414141414141414141414141414141414141414141414141414141414141"),
+        42,
+    );
+    let resolver_node = namehash_for_dns_name(&dns_encoded_eth_name("alice"));
+    let requests = Arc::new(Mutex::new(Vec::<RecordedRpcRequest>::new()));
+    let (provider, server) = number_resolving_provider_with_fixtures(
+        vec![ProviderBlockFixture {
+            block: block.clone(),
+            logs: vec![
+                rpc_resolver_name_changed_log_payload_for_namehash(
+                    &block,
+                    resolver_address,
+                    &resolver_node,
+                    "alice.example",
+                    0,
+                ),
+                rpc_log_payload_at_address(&block, unrelated_address, 1),
+            ],
+        }],
+        Arc::clone(&requests),
+    )
+    .await?;
+
+    let outcome = run_resumable_hash_pinned_backfill_job(
+        database.pool(),
+        &source_plan,
+        &provider,
+        backfill_job_config(
+            range,
+            "single-block-ensv1-resolver-topic-filter",
+            "lease-single-block-resolver",
+        )?,
+    )
+    .await?;
+
+    assert_eq!(outcome.raw_log_count, 1);
+    assert_eq!(
+        sqlx::query_scalar::<_, Vec<String>>(
+            r#"
+            SELECT COALESCE(
+                ARRAY_AGG(emitting_address ORDER BY log_index),
+                ARRAY[]::TEXT[]
+            )
+            FROM raw_logs
+            "#
+        )
+        .fetch_one(database.pool())
+        .await?,
+        vec![resolver_address.to_owned()]
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM raw_logs WHERE emitting_address = $1")
+            .bind(unrelated_address)
+            .fetch_one(database.pool())
+            .await?,
+        0,
+        "single-block resolver-family backfill must not retain unrelated same-block logs"
+    );
+
+    let recorded_requests = requests
+        .lock()
+        .expect("request log must not be poisoned")
+        .clone();
+    let log_requests = recorded_requests
+        .iter()
+        .filter(|request| request.method == "eth_getLogs")
+        .collect::<Vec<_>>();
+    assert_eq!(log_requests.len(), 1);
+    let log_filter = log_requests[0]
+        .params
+        .first()
+        .and_then(Value::as_object)
+        .expect("single-block resolver lookup must include a log filter");
+    assert_eq!(
+        log_filter.get("fromBlock").and_then(Value::as_str),
+        Some("0x2a")
+    );
+    assert_eq!(
+        log_filter.get("toBlock").and_then(Value::as_str),
+        Some("0x2a")
+    );
+    assert!(
+        !log_filter.contains_key("address"),
+        "generic ENSv1 resolver lookup must scan all emitters"
+    );
+    assert!(
+        support_log_filter_topic0s(log_filter)
+            .expect("generic ENSv1 resolver lookup must constrain topic0")
+            .contains(&resolver_name_changed_topic0()),
+        "generic ENSv1 resolver lookup must retain resolver-event topic filtering"
+    );
 
     server.abort();
     database.cleanup().await
@@ -1265,10 +1434,10 @@ async fn raw_only_sparse_backfill_retains_empty_block_lineage_and_raw_anchors() 
     assert_eq!(outcome.raw_block_count, 3);
     assert_eq!(outcome.raw_log_count, 2);
     assert_eq!(table_count(database.pool(), "chain_lineage").await?, 3);
-    assert_eq!(table_count(database.pool(), "raw_blocks").await?, 3);
+    assert_eq!(table_count(database.pool(), "chain_lineage").await?, 3);
     assert_eq!(table_count(database.pool(), "raw_logs").await?, 2);
     assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM raw_blocks WHERE block_number = 41")
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM chain_lineage WHERE block_number = 41")
             .fetch_one(database.pool())
             .await?,
         1
@@ -1363,7 +1532,12 @@ async fn backfill_uses_finalized_safe_and_canonical_evidence_for_admitted_rows()
         (41, "safe".to_owned()),
         (42, "canonical".to_owned()),
     ];
-    for table in ["chain_lineage", "raw_blocks", "raw_logs", "raw_code_hashes"] {
+    for table in [
+        "chain_lineage",
+        "chain_lineage",
+        "raw_logs",
+        "raw_code_hashes",
+    ] {
         let states = sqlx::query_as::<_, (i64, String)>(&format!(
             "SELECT block_number, canonicality_state::TEXT FROM {table} ORDER BY block_number"
         ))
@@ -1859,9 +2033,9 @@ async fn frozen_source_family_backfills_lock_wrapper_resolver_and_basenames_l1_i
 }
 
 #[tokio::test]
-async fn source_scoped_backfill_dynamic_resolver_ensv1_selected_targets_are_range_locked()
--> Result<()> {
-    assert_dynamic_resolver_backfill_is_selected_target_only(DynamicResolverBackfillFixture {
+async fn source_scoped_backfill_dynamic_resolver_ensv1_scans_generic_resolver_events() -> Result<()>
+{
+    assert_dynamic_resolver_backfill_scope_behavior(DynamicResolverBackfillFixture {
         namespace: "ens",
         chain: "ethereum-mainnet",
         deployment_epoch: "ens_v1",
@@ -1877,7 +2051,7 @@ async fn source_scoped_backfill_dynamic_resolver_ensv1_selected_targets_are_rang
 #[tokio::test]
 async fn source_scoped_backfill_dynamic_resolver_basenames_selected_targets_are_range_locked()
 -> Result<()> {
-    assert_dynamic_resolver_backfill_is_selected_target_only(DynamicResolverBackfillFixture {
+    assert_dynamic_resolver_backfill_scope_behavior(DynamicResolverBackfillFixture {
         namespace: "basenames",
         chain: "base-mainnet",
         deployment_epoch: "basenames_v1",
@@ -3062,13 +3236,18 @@ fn logs_for_backfill_filter(
     hashes_by_number: &BTreeMap<i64, String>,
 ) -> Value {
     let address_filter = log_filter_addresses(filter);
+    let topic0_filter = log_filter_topic0s(filter);
     let mut logs = Vec::new();
 
     if let Some(block_hash) = filter.get("blockHash").and_then(Value::as_str) {
         let fixture = fixtures_by_hash
             .get(&block_hash.to_ascii_lowercase())
             .unwrap_or_else(|| panic!("unexpected log blockHash filter: {filter:?}"));
-        logs.extend(filtered_fixture_logs(fixture, address_filter.as_ref()));
+        logs.extend(filtered_fixture_logs(
+            fixture,
+            address_filter.as_ref(),
+            topic0_filter.as_ref(),
+        ));
     } else {
         let from_block = filter
             .get("fromBlock")
@@ -3092,7 +3271,11 @@ fn logs_for_backfill_filter(
             let fixture = fixtures_by_hash
                 .get(block_hash)
                 .expect("number index must point at a fixture block");
-            logs.extend(filtered_fixture_logs(fixture, address_filter.as_ref()));
+            logs.extend(filtered_fixture_logs(
+                fixture,
+                address_filter.as_ref(),
+                topic0_filter.as_ref(),
+            ));
         }
     }
 
@@ -3118,9 +3301,31 @@ fn log_filter_addresses(filter: &serde_json::Map<String, Value>) -> Option<BTree
     Some(addresses.into_iter().collect())
 }
 
+fn log_filter_topic0s(filter: &serde_json::Map<String, Value>) -> Option<BTreeSet<String>> {
+    let topics = filter.get("topics")?.as_array()?;
+    let topic0 = topics.first()?;
+    let values = match topic0 {
+        Value::String(topic) => vec![topic.to_ascii_lowercase()],
+        Value::Array(topics) => topics
+            .iter()
+            .map(|topic| {
+                topic
+                    .as_str()
+                    .expect("log topic filter values must be strings")
+                    .to_ascii_lowercase()
+            })
+            .collect(),
+        Value::Null => return None,
+        value => panic!("unexpected log topic0 filter: {value:?}"),
+    };
+
+    Some(values.into_iter().collect())
+}
+
 fn filtered_fixture_logs(
     fixture: &ProviderBlockFixture,
     address_filter: Option<&BTreeSet<String>>,
+    topic0_filter: Option<&BTreeSet<String>>,
 ) -> Vec<Value> {
     fixture
         .logs
@@ -3132,6 +3337,17 @@ fn filtered_fixture_logs(
             log.get("address")
                 .and_then(Value::as_str)
                 .map(|address| address_filter.contains(&address.to_ascii_lowercase()))
+                .unwrap_or(false)
+        })
+        .filter(|log| {
+            let Some(topic0_filter) = topic0_filter else {
+                return true;
+            };
+            log.get("topics")
+                .and_then(Value::as_array)
+                .and_then(|topics| topics.first())
+                .and_then(Value::as_str)
+                .map(|topic0| topic0_filter.contains(&topic0.to_ascii_lowercase()))
                 .unwrap_or(false)
         })
         .cloned()
@@ -3367,7 +3583,7 @@ fn focused_source_family_fixture(source_family: &str) -> FocusedSourceFamilyFixt
         .expect("focused source-family fixture must exist")
 }
 
-async fn assert_dynamic_resolver_backfill_is_selected_target_only(
+async fn assert_dynamic_resolver_backfill_scope_behavior(
     fixture: DynamicResolverBackfillFixture,
 ) -> Result<()> {
     let database = TestDatabase::new().await?;
@@ -3802,14 +4018,24 @@ async fn assert_dynamic_resolver_backfill_is_selected_target_only(
         backfill_job_config(range, fixture.idempotency_key, "lease-dynamic-resolver")?,
     )
     .await?;
+    let generic_ensv1_resolver = fixture.resolver_source_family == "ens_v1_resolver_l1";
     assert_eq!(outcome.resolved_block_count, 5);
-    assert_eq!(outcome.raw_log_count, 7);
-    assert_eq!(outcome.raw_code_hash_count, 6);
+    assert_eq!(
+        outcome.raw_log_count,
+        if generic_ensv1_resolver { 10 } else { 7 }
+    );
+    assert_eq!(
+        outcome.raw_code_hash_count,
+        if generic_ensv1_resolver { 7 } else { 6 }
+    );
 
     let job = load_backfill_job(database.pool(), outcome.backfill_job_id)
         .await?
         .expect("dynamic resolver backfill job must exist");
-    assert_eq!(job.source_identity, source_plan.source_identity_payload());
+    assert_eq!(
+        job.source_identity,
+        backfill::backfill_job_source_identity_payload(&source_plan)?
+    );
     let source_identity = serde_json::to_string(&job.source_identity)
         .context("dynamic resolver source identity must serialize")?;
     let forbidden_targets = vec![
@@ -3841,15 +4067,30 @@ async fn assert_dynamic_resolver_backfill_is_selected_target_only(
         )
         .fetch_one(database.pool())
         .await?,
-        vec![
-            selected_resolver_address.to_owned(),
-            selected_resolver_address.to_owned(),
-            pending_resolver_address.to_owned(),
-            pending_resolver_address.to_owned(),
-            unsupported_resolver_address.to_owned(),
-            unsupported_resolver_address.to_owned(),
-            selected_resolver_address.to_owned()
-        ]
+        if generic_ensv1_resolver {
+            vec![
+                selected_resolver_address.to_owned(),
+                selected_resolver_address.to_owned(),
+                pending_resolver_address.to_owned(),
+                pending_resolver_address.to_owned(),
+                unsupported_resolver_address.to_owned(),
+                unsupported_resolver_address.to_owned(),
+                closed_resolver_address.to_owned(),
+                deactivated_resolver_address.to_owned(),
+                orphan_equivalent_resolver_address.to_owned(),
+                selected_resolver_address.to_owned(),
+            ]
+        } else {
+            vec![
+                selected_resolver_address.to_owned(),
+                selected_resolver_address.to_owned(),
+                pending_resolver_address.to_owned(),
+                pending_resolver_address.to_owned(),
+                unsupported_resolver_address.to_owned(),
+                unsupported_resolver_address.to_owned(),
+                selected_resolver_address.to_owned(),
+            ]
+        }
     );
     assert_eq!(
         sqlx::query_scalar::<_, Vec<i64>>(
@@ -3863,7 +4104,11 @@ async fn assert_dynamic_resolver_backfill_is_selected_target_only(
         )
         .fetch_one(database.pool())
         .await?,
-        vec![42, 42, 42, 42, 42, 42, 43]
+        if generic_ensv1_resolver {
+            vec![42, 42, 42, 42, 42, 42, 42, 42, 42, 43]
+        } else {
+            vec![42, 42, 42, 42, 42, 42, 43]
+        }
     );
     assert_eq!(
         sqlx::query_scalar::<_, Vec<String>>(
@@ -3877,15 +4122,30 @@ async fn assert_dynamic_resolver_backfill_is_selected_target_only(
         )
         .fetch_one(database.pool())
         .await?,
-        vec![
-            block_42.block_hash.clone(),
-            block_42.block_hash.clone(),
-            block_42.block_hash.clone(),
-            block_42.block_hash.clone(),
-            block_42.block_hash.clone(),
-            block_42.block_hash.clone(),
-            block_43.block_hash.clone()
-        ]
+        if generic_ensv1_resolver {
+            vec![
+                block_42.block_hash.clone(),
+                block_42.block_hash.clone(),
+                block_42.block_hash.clone(),
+                block_42.block_hash.clone(),
+                block_42.block_hash.clone(),
+                block_42.block_hash.clone(),
+                block_42.block_hash.clone(),
+                block_42.block_hash.clone(),
+                block_42.block_hash.clone(),
+                block_43.block_hash.clone(),
+            ]
+        } else {
+            vec![
+                block_42.block_hash.clone(),
+                block_42.block_hash.clone(),
+                block_42.block_hash.clone(),
+                block_42.block_hash.clone(),
+                block_42.block_hash.clone(),
+                block_42.block_hash.clone(),
+                block_43.block_hash.clone(),
+            ]
+        }
     );
     assert_eq!(
         sqlx::query_scalar::<_, Vec<String>>(
@@ -3899,14 +4159,26 @@ async fn assert_dynamic_resolver_backfill_is_selected_target_only(
         )
         .fetch_one(database.pool())
         .await?,
-        vec![
-            selected_resolver_address.to_owned(),
-            pending_resolver_address.to_owned(),
-            unsupported_resolver_address.to_owned(),
-            selected_resolver_address.to_owned(),
-            pending_resolver_address.to_owned(),
-            unsupported_resolver_address.to_owned()
-        ]
+        if generic_ensv1_resolver {
+            vec![
+                selected_resolver_address.to_owned(),
+                closed_resolver_address.to_owned(),
+                deactivated_resolver_address.to_owned(),
+                orphan_equivalent_resolver_address.to_owned(),
+                pending_resolver_address.to_owned(),
+                unsupported_resolver_address.to_owned(),
+                selected_resolver_address.to_owned(),
+            ]
+        } else {
+            vec![
+                selected_resolver_address.to_owned(),
+                pending_resolver_address.to_owned(),
+                unsupported_resolver_address.to_owned(),
+                selected_resolver_address.to_owned(),
+                pending_resolver_address.to_owned(),
+                unsupported_resolver_address.to_owned(),
+            ]
+        }
     );
     assert_eq!(
         sqlx::query_scalar::<_, Vec<i64>>(
@@ -3920,7 +4192,11 @@ async fn assert_dynamic_resolver_backfill_is_selected_target_only(
         )
         .fetch_one(database.pool())
         .await?,
-        vec![42, 42, 42, 43, 43, 43]
+        if generic_ensv1_resolver {
+            vec![42, 42, 42, 42, 42, 42, 43]
+        } else {
+            vec![42, 42, 42, 43, 43, 43]
+        }
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
@@ -3931,12 +4207,17 @@ async fn assert_dynamic_resolver_backfill_is_selected_target_only(
         0,
         "source-scoped resolver-family backfill must not bypass resolver-profile replay gates"
     );
-    for excluded_address in [
-        seed_resolver_address,
-        closed_resolver_address,
-        deactivated_resolver_address,
-        orphan_equivalent_resolver_address,
-    ] {
+    let excluded_addresses = if generic_ensv1_resolver {
+        vec![seed_resolver_address]
+    } else {
+        vec![
+            seed_resolver_address,
+            closed_resolver_address,
+            deactivated_resolver_address,
+            orphan_equivalent_resolver_address,
+        ]
+    };
+    for excluded_address in excluded_addresses {
         assert_eq!(
             sqlx::query_scalar::<_, i64>(
                 "SELECT COUNT(*) FROM raw_logs WHERE emitting_address = $1"
@@ -3996,7 +4277,7 @@ async fn assert_dynamic_resolver_backfill_is_selected_target_only(
     assert_eq!(
         log_requests.len(),
         1,
-        "only the contiguous selected resolver target range should fetch logs"
+        "only one resolver-family range request should fetch logs"
     );
     assert_eq!(log_requests[0].batch_size, 1);
     let log_filter = log_requests[0]
@@ -4006,45 +4287,85 @@ async fn assert_dynamic_resolver_backfill_is_selected_target_only(
         .expect("log request must include a filter object");
     assert_eq!(
         log_filter.get("fromBlock").and_then(Value::as_str),
-        Some("0x2a")
+        if generic_ensv1_resolver {
+            Some("0x28")
+        } else {
+            Some("0x2a")
+        }
     );
     assert_eq!(
         log_filter.get("toBlock").and_then(Value::as_str),
-        Some("0x2b")
+        if generic_ensv1_resolver {
+            Some("0x2c")
+        } else {
+            Some("0x2b")
+        }
     );
     assert!(
         !log_filter.contains_key("blockHash"),
         "selected resolver log lookup should use one safe range instead of per-block blockHash filters"
     );
-    assert_eq!(
-        log_filter.get("address").and_then(Value::as_array),
-        Some(&vec![
-            Value::String(selected_resolver_address.to_owned()),
-            Value::String(pending_resolver_address.to_owned()),
-            Value::String(unsupported_resolver_address.to_owned()),
-        ]),
-        "log range must include only resolver targets effective for every block in the range"
-    );
+    if generic_ensv1_resolver {
+        assert!(
+            !log_filter.contains_key("address"),
+            "ENSv1 generic resolver event scan must not be narrowed to selected targets"
+        );
+        let topic0s = support_log_filter_topic0s(log_filter)
+            .expect("generic resolver log lookup must constrain topic0");
+        assert!(
+            topic0s.contains(&resolver_text_changed_topic0()),
+            "generic resolver log lookup must include legacy TextChanged"
+        );
+        assert!(
+            topic0s.contains(&resolver_text_changed_with_value_topic0()),
+            "generic resolver log lookup must include TextChanged with value"
+        );
+    } else {
+        assert_eq!(
+            log_filter.get("address").and_then(Value::as_array),
+            Some(&vec![
+                Value::String(selected_resolver_address.to_owned()),
+                Value::String(pending_resolver_address.to_owned()),
+                Value::String(unsupported_resolver_address.to_owned()),
+            ]),
+            "log range must include only resolver targets effective for every block in the range"
+        );
+    }
 
     let code_requests = recorded_requests
         .iter()
         .filter(|request| request.method == "eth_getCode")
         .cloned()
         .collect::<Vec<_>>();
-    assert_eq!(code_requests.len(), 6);
+    assert_eq!(
+        code_requests.len(),
+        if generic_ensv1_resolver { 7 } else { 6 }
+    );
     assert_eq!(
         code_requests
             .iter()
             .map(|request| request.params.first().and_then(Value::as_str))
             .collect::<Vec<_>>(),
-        vec![
-            Some(selected_resolver_address),
-            Some(pending_resolver_address),
-            Some(unsupported_resolver_address),
-            Some(selected_resolver_address),
-            Some(pending_resolver_address),
-            Some(unsupported_resolver_address)
-        ]
+        if generic_ensv1_resolver {
+            vec![
+                Some(selected_resolver_address),
+                Some(closed_resolver_address),
+                Some(deactivated_resolver_address),
+                Some(orphan_equivalent_resolver_address),
+                Some(pending_resolver_address),
+                Some(unsupported_resolver_address),
+                Some(selected_resolver_address),
+            ]
+        } else {
+            vec![
+                Some(selected_resolver_address),
+                Some(pending_resolver_address),
+                Some(unsupported_resolver_address),
+                Some(selected_resolver_address),
+                Some(pending_resolver_address),
+                Some(unsupported_resolver_address),
+            ]
+        }
     );
     assert_eq!(
         code_requests
@@ -4059,14 +4380,26 @@ async fn assert_dynamic_resolver_backfill_is_selected_target_only(
                     .map(str::to_owned)
             })
             .collect::<Vec<_>>(),
-        vec![
-            Some(block_42.block_hash.clone()),
-            Some(block_42.block_hash.clone()),
-            Some(block_42.block_hash.clone()),
-            Some(block_43.block_hash.clone()),
-            Some(block_43.block_hash.clone()),
-            Some(block_43.block_hash.clone())
-        ]
+        if generic_ensv1_resolver {
+            vec![
+                Some(block_42.block_hash.clone()),
+                Some(block_42.block_hash.clone()),
+                Some(block_42.block_hash.clone()),
+                Some(block_42.block_hash.clone()),
+                Some(block_42.block_hash.clone()),
+                Some(block_42.block_hash.clone()),
+                Some(block_43.block_hash.clone()),
+            ]
+        } else {
+            vec![
+                Some(block_42.block_hash.clone()),
+                Some(block_42.block_hash.clone()),
+                Some(block_42.block_hash.clone()),
+                Some(block_43.block_hash.clone()),
+                Some(block_43.block_hash.clone()),
+                Some(block_43.block_hash.clone()),
+            ]
+        }
     );
 
     server.abort();
@@ -4187,6 +4520,7 @@ fn backfill_job_config(
         lease_expires_at: backfill_lease_deadline()?,
         hash_pinned_chunk_blocks: backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS,
         adapter_sync_mode: backfill::BackfillAdapterSyncMode::Inline,
+        header_audit_mode: HeaderAuditMode::Minimal,
     })
 }
 

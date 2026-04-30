@@ -11,14 +11,8 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS chain_lineage_by_number_idx
 CREATE INDEX CONCURRENTLY IF NOT EXISTS chain_lineage_by_state_idx
   ON public.chain_lineage USING btree (chain_id, canonicality_state, block_number DESC);
 
-CREATE INDEX CONCURRENTLY IF NOT EXISTS raw_blocks_by_number_idx
-  ON public.raw_blocks USING btree (chain_id, block_number DESC);
-
-CREATE INDEX CONCURRENTLY IF NOT EXISTS raw_blocks_by_state_idx
-  ON public.raw_blocks USING btree (chain_id, canonicality_state, block_number DESC);
-
-CREATE INDEX CONCURRENTLY IF NOT EXISTS raw_blocks_chain_timestamp_canonical_idx
-  ON public.raw_blocks USING btree (chain_id, block_timestamp, block_number)
+CREATE INDEX CONCURRENTLY IF NOT EXISTS chain_lineage_chain_timestamp_canonical_idx
+  ON public.chain_lineage USING btree (chain_id, block_timestamp, block_number)
   INCLUDE (block_hash, canonicality_state)
   WHERE canonicality_state = ANY (
     ARRAY['canonical'::canonicality_state, 'safe'::canonicality_state, 'finalized'::canonicality_state]
@@ -41,6 +35,41 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS raw_logs_canonical_replay_position_idx
     transaction_index,
     log_index,
     raw_log_id
+  )
+  WHERE canonicality_state = ANY (
+    ARRAY['canonical'::canonicality_state, 'safe'::canonicality_state, 'finalized'::canonicality_state]
+  );
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS raw_logs_canonical_emitter_block_idx
+  ON public.raw_logs USING btree (
+    chain_id,
+    (lower(emitting_address)),
+    block_number,
+    transaction_index,
+    log_index
+  )
+  WHERE canonicality_state = ANY (
+    ARRAY['canonical'::canonicality_state, 'safe'::canonicality_state, 'finalized'::canonicality_state]
+  );
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS raw_logs_canonical_rewind_observed_idx
+  ON public.raw_logs USING btree (
+    chain_id,
+    observed_at,
+    block_number,
+    block_hash
+  )
+  WHERE canonicality_state = ANY (
+    ARRAY['canonical'::canonicality_state, 'safe'::canonicality_state, 'finalized'::canonicality_state]
+  );
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS raw_logs_canonical_topic_block_idx
+  ON public.raw_logs USING btree (
+    chain_id,
+    (lower(topics[1])),
+    block_number,
+    transaction_index,
+    log_index
   )
   WHERE canonicality_state = ANY (
     ARRAY['canonical'::canonicality_state, 'safe'::canonicality_state, 'finalized'::canonicality_state]

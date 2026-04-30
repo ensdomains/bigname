@@ -198,7 +198,7 @@ async fn ops_catchup_capacity_guard_fails_chunk_with_persisted_metadata_before_r
     let ranges = load_backfill_ranges(database.pool(), job_id).await?;
     assert_eq!(ranges.len(), 1);
     assert_eq!(ranges[0].status, BackfillLifecycleStatus::Failed);
-    assert_eq!(ops_table_count(database.pool(), "raw_blocks").await?, 0);
+    assert_eq!(ops_table_count(database.pool(), "chain_lineage").await?, 0);
     assert_eq!(ops_table_count(database.pool(), "raw_logs").await?, 0);
 
     server.abort();
@@ -450,6 +450,7 @@ fn ops_config(chunk_blocks: i64) -> OpsCatchupConfig {
         follow_iterations: None,
         follow_poll_interval_secs: 1,
         lease_duration_secs: 300,
+        header_audit_mode: HeaderAuditMode::Minimal,
         capacity: CapacityGuardConfig {
             postgres_max_bytes: None,
             min_writable_free_disk_bytes: 0,

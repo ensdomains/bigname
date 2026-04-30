@@ -61,3 +61,12 @@ purpose = "Alternative ENS indexer. Not authoritative by itself; used for parity
 authoritative_for = [
   "cross-check scope for consumer-capability questions",
 ]
+
+[refs.ens_app_v3]
+repo = "https://github.com/ensdomains/ens-app-v3"
+commit = "71758582017b667ba6d5a5380563dc0e1e5589d3"
+purpose = "ENS app v3 known resolver metadata. Authoritative only for first-party app-known resolver rows cited by bigname admission docs/manifests."
+authoritative_for = [
+  "first-party app known-resolver profile rows in docs/manifests.md",
+  "known PublicResolver-generation profile admission comments in manifests/ens/ens_v1_resolver_l1/v1.toml",
+]

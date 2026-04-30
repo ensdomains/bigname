@@ -138,6 +138,7 @@ mod tests {
             lease_duration_secs: 300,
             hash_pinned_chunk_blocks: crate::backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS,
             hash_pinned_adapter_sync: "inline".to_owned(),
+            retain_header_audit_fields: false,
         }
     }
 

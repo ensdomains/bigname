@@ -8,12 +8,22 @@ use bigname_manifests::{
 use bigname_storage::list_canonical_raw_log_replay_inputs_for_block_hashes;
 use sqlx::Row;
 
+#[path = "replay/scoped.rs"]
+mod scoped;
+
+const SOURCE_FAMILY_ENS_V1_RESOLVER_L1: &str = "ens_v1_resolver_l1";
+const GENERIC_SOURCE_SCOPE_ADDRESS: &str = "*";
+
 use super::{
     adapter_sync::sync_replay_normalized_events_from_persisted_raw_payloads,
     types::{
         PersistedRawPayloadAdapterSyncSummary, RawFactNormalizedEventReplayOutcome,
         RawFactNormalizedEventReplayRequest, RawFactNormalizedEventReplaySelection,
+        RawFactNormalizedEventReplaySourceScope,
     },
+};
+use scoped::{
+    load_replay_raw_log_selection_for_scoped_range, replay_source_scope_from_requested_scope,
 };
 
 pub(crate) async fn replay_raw_fact_normalized_events(
@@ -25,6 +35,7 @@ pub(crate) async fn replay_raw_fact_normalized_events(
     }
 
     let selection_kind = request.selection.as_str();
+    let source_scope_target_count = request.selection.source_scope_target_count();
     let raw_log_selection = load_replay_raw_log_selection(pool, &request).await?;
     ensure_replay_matches_deployment_profile_scope(pool, &request, raw_log_selection.range).await?;
 
@@ -66,6 +77,7 @@ pub(crate) async fn replay_raw_fact_normalized_events(
         deployment_profile: request.deployment_profile,
         chain: request.chain,
         selection_kind,
+        source_scope_target_count,
         selected_block_count: raw_log_selection.block_hashes.len(),
         canonical_raw_log_count: raw_log_selection.canonical_raw_log_count,
         scanned_raw_log_count: normalized_event_summary.scanned_log_count,
@@ -92,18 +104,24 @@ async fn load_replay_raw_log_selection(
             from_block,
             to_block,
         } => {
-            if *from_block < 0 || *to_block < 0 {
-                bail!(
-                    "raw-fact normalized-event replay range must be non-negative, got {from_block}..={to_block}"
-                );
-            }
-            if from_block > to_block {
-                bail!(
-                    "raw-fact normalized-event replay range start {from_block} is after end {to_block}"
-                );
-            }
+            validate_replay_block_range(*from_block, *to_block)?;
             load_replay_raw_log_selection_for_range(pool, &request.chain, *from_block, *to_block)
                 .await
+        }
+        RawFactNormalizedEventReplaySelection::ScopedBlockRange {
+            from_block,
+            to_block,
+            source_scope,
+        } => {
+            validate_replay_block_range(*from_block, *to_block)?;
+            load_replay_raw_log_selection_for_scoped_range(
+                pool,
+                &request.chain,
+                *from_block,
+                *to_block,
+                source_scope,
+            )
+            .await
         }
         RawFactNormalizedEventReplaySelection::BlockHashes(block_hashes) => {
             let raw_logs = list_canonical_raw_log_replay_inputs_for_block_hashes(
@@ -139,6 +157,18 @@ async fn load_replay_raw_log_selection(
             })
         }
     }
+}
+
+fn validate_replay_block_range(from_block: i64, to_block: i64) -> Result<()> {
+    if from_block < 0 || to_block < 0 {
+        bail!(
+            "raw-fact normalized-event replay range must be non-negative, got {from_block}..={to_block}"
+        );
+    }
+    if from_block > to_block {
+        bail!("raw-fact normalized-event replay range start {from_block} is after end {to_block}");
+    }
+    Ok(())
 }
 
 async fn load_replay_raw_log_selection_for_range(
@@ -317,6 +347,9 @@ async fn load_replay_adapter_source_scope(
     let Some((from_block, to_block)) = range else {
         return Ok(Vec::new());
     };
+    if let Some(source_scope) = replay_selection_source_scope(&request.selection) {
+        return replay_source_scope_from_requested_scope(source_scope, from_block, to_block);
+    }
     if address_targets.is_empty() {
         return Ok(Vec::new());
     }
@@ -329,7 +362,7 @@ async fn load_replay_adapter_source_scope(
                 request.chain, from_block, to_block
             )
         })?;
-    let source_scope = replay_source_scope_from_watched_contracts(
+    let mut source_scope = replay_source_scope_from_watched_contracts(
         &watched_contracts,
         &request.chain,
         from_block,
@@ -341,8 +374,51 @@ async fn load_replay_adapter_source_scope(
             request.chain, from_block, to_block
         )
     })?;
+    if active_ens_v1_resolver_manifest_exists(pool, &request.chain).await? {
+        source_scope.push((
+            SOURCE_FAMILY_ENS_V1_RESOLVER_L1.to_owned(),
+            GENERIC_SOURCE_SCOPE_ADDRESS.to_owned(),
+            from_block,
+            to_block,
+        ));
+        source_scope.sort();
+        source_scope.dedup();
+    }
 
     Ok(source_scope)
+}
+
+async fn active_ens_v1_resolver_manifest_exists(pool: &sqlx::PgPool, chain: &str) -> Result<bool> {
+    sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM manifest_versions
+            WHERE chain = $1
+              AND source_family = $2
+              AND rollout_status = 'active'::manifest_rollout_status
+        )
+        "#,
+    )
+    .bind(chain)
+    .bind(SOURCE_FAMILY_ENS_V1_RESOLVER_L1)
+    .fetch_one(pool)
+    .await
+    .with_context(|| {
+        format!("failed to check active ENSv1 resolver manifest for replay on chain {chain}")
+    })
+}
+
+fn replay_selection_source_scope(
+    selection: &RawFactNormalizedEventReplaySelection,
+) -> Option<&[RawFactNormalizedEventReplaySourceScope]> {
+    match selection {
+        RawFactNormalizedEventReplaySelection::ScopedBlockRange { source_scope, .. } => {
+            Some(source_scope)
+        }
+        RawFactNormalizedEventReplaySelection::BlockRange { .. }
+        | RawFactNormalizedEventReplaySelection::BlockHashes(_) => None,
+    }
 }
 
 fn replay_source_scope_from_watched_contracts(

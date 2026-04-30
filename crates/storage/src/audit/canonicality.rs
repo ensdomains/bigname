@@ -108,21 +108,24 @@ pub async fn list_stored_lineage_range(
     let rows = sqlx::query(
         r#"
         SELECT
-            chain_id,
-            block_hash,
-            parent_hash,
-            block_number,
-            block_timestamp,
-            logs_bloom,
-            transactions_root,
-            receipts_root,
-            state_root,
-            canonicality_state::TEXT AS canonicality_state
+            chain_lineage.chain_id,
+            chain_lineage.block_hash,
+            chain_lineage.parent_hash,
+            chain_lineage.block_number,
+            chain_lineage.block_timestamp,
+            audit.logs_bloom,
+            audit.transactions_root,
+            audit.receipts_root,
+            audit.state_root,
+            chain_lineage.canonicality_state::TEXT AS canonicality_state
         FROM chain_lineage
-        WHERE chain_id = $1
-          AND block_number >= $2
-          AND block_number <= $3
-        ORDER BY block_number, block_hash
+        LEFT JOIN chain_header_audit AS audit
+          ON audit.chain_id = chain_lineage.chain_id
+         AND audit.block_hash = chain_lineage.block_hash
+        WHERE chain_lineage.chain_id = $1
+          AND chain_lineage.block_number >= $2
+          AND chain_lineage.block_number <= $3
+        ORDER BY chain_lineage.block_number, chain_lineage.block_hash
         "#,
     )
     .bind(chain_id)
@@ -190,7 +193,7 @@ async fn load_raw_fact_counts(
     let row = sqlx::query(
         r#"
         SELECT
-          (SELECT COUNT(*)::BIGINT FROM raw_blocks WHERE chain_id = $1 AND block_hash = $2) AS raw_block_count,
+          (SELECT COUNT(*)::BIGINT FROM chain_lineage WHERE chain_id = $1 AND block_hash = $2) AS raw_block_count,
           (SELECT COUNT(*)::BIGINT FROM raw_code_hashes WHERE chain_id = $1 AND block_hash = $2) AS raw_code_hash_count,
           (SELECT COUNT(*)::BIGINT FROM raw_transactions WHERE chain_id = $1 AND block_hash = $2) AS raw_transaction_count,
           (SELECT COUNT(*)::BIGINT FROM raw_receipts WHERE chain_id = $1 AND block_hash = $2) AS raw_receipt_count,

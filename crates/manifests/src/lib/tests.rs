@@ -1886,7 +1886,7 @@ async fn checked_in_registry_manifests_admit_resolver_discovery() -> Result<()> 
             "ens_v1_resolver_l1",
             "v3",
             3_u64,
-            3_usize,
+            9_usize,
             "ethereum-mainnet",
             "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E",
             "0xF29100983E058B709F3D539b0c765937B804AC15",
@@ -2069,25 +2069,20 @@ async fn checked_in_registry_manifests_admit_resolver_discovery() -> Result<()> 
             resolver_range_end,
         )
         .await?;
-        assert_eq!(
-            resolver_source_plan.selected_targets,
-            vec![
-                WatchedBackfillTarget {
-                    source_family: resolver_source_family.to_owned(),
-                    contract_instance_id: resolver_contract_instance_id,
-                    address: resolver_address.clone(),
-                    effective_from_block: resolver_range_start,
-                    effective_to_block: resolver_range_end,
-                },
-                WatchedBackfillTarget {
-                    source_family: resolver_source_family.to_owned(),
-                    contract_instance_id: resolver_contract_instance_id,
-                    address: resolver_address.clone(),
-                    effective_from_block: resolver_discovery_from,
-                    effective_to_block: resolver_range_end,
-                },
-            ]
-        );
+        assert!(resolver_source_plan.selected_targets.iter().any(|target| {
+            target.source_family == resolver_source_family
+                && target.contract_instance_id == resolver_contract_instance_id
+                && target.address == resolver_address
+                && target.effective_from_block == resolver_range_start
+                && target.effective_to_block == resolver_range_end
+        }));
+        assert!(resolver_source_plan.selected_targets.iter().any(|target| {
+            target.source_family == resolver_source_family
+                && target.contract_instance_id == resolver_contract_instance_id
+                && target.address == resolver_address
+                && target.effective_from_block == resolver_discovery_from
+                && target.effective_to_block == resolver_range_end
+        }));
         let discovery_edge = sqlx::query(
             r#"
             SELECT source_manifest_id, provenance
@@ -2520,13 +2515,14 @@ async fn ens_v1_resolver_public_resolver_profile_admission_keeps_unknowns_watch_
     }
 
     let admissions = load_ens_v1_public_resolver_profile_admissions(database.pool()).await?;
-    assert_eq!(admissions.len(), 12);
+    assert_eq!(admissions.len(), 118);
 
-    assert_profile_admission_rows(
+    assert_ens_v1_profile_admission_rows_with_statuses(
         &admissions,
-        EnsV1ProfileAdmissionExpectation {
+        EnsV1ProfileAdmissionStatusExpectation {
             address: public_resolver_seed_address,
-            status: "supported",
+            profile: "public_resolver_compatible",
+            fact_statuses: latest_public_resolver_fact_statuses(),
             admission_basis: "manifest_public_resolver_seed",
             contract_instance_id: seed_contract_instance_id,
             observed_code_hash: Some(public_resolver_code_hash),
@@ -2534,11 +2530,12 @@ async fn ens_v1_resolver_public_resolver_profile_admission_keeps_unknowns_watch_
             matched_contract_instance_id: Some(seed_contract_instance_id),
         },
     );
-    assert_profile_admission_rows(
+    assert_ens_v1_profile_admission_rows_with_statuses(
         &admissions,
-        EnsV1ProfileAdmissionExpectation {
+        EnsV1ProfileAdmissionStatusExpectation {
             address: supported_resolver_address,
-            status: "supported",
+            profile: "public_resolver_compatible",
+            fact_statuses: latest_public_resolver_fact_statuses(),
             admission_basis: "code_hash_match",
             contract_instance_id: supported_contract_instance_id,
             observed_code_hash: Some(public_resolver_code_hash),
@@ -2550,6 +2547,8 @@ async fn ens_v1_resolver_public_resolver_profile_admission_keeps_unknowns_watch_
         &admissions,
         EnsV1ProfileAdmissionExpectation {
             address: pending_resolver_address,
+            profile: "public_resolver_compatible",
+            fact_families: default_public_resolver_fact_families(),
             status: "pending",
             admission_basis: "code_hash_pending",
             contract_instance_id: pending_contract_instance_id,
@@ -2562,6 +2561,8 @@ async fn ens_v1_resolver_public_resolver_profile_admission_keeps_unknowns_watch_
         &admissions,
         EnsV1ProfileAdmissionExpectation {
             address: unsupported_resolver_address,
+            profile: "public_resolver_compatible",
+            fact_families: default_public_resolver_fact_families(),
             status: "unsupported",
             admission_basis: "code_hash_mismatch",
             contract_instance_id: unsupported_contract_instance_id,
@@ -2667,12 +2668,13 @@ async fn scoped_resolver_profile_rejects_unadmitted_code_hash_target() -> Result
     )
     .await?;
 
-    assert_eq!(admissions.len(), 3);
-    assert_profile_admission_rows(
+    assert_eq!(admissions.len(), 14);
+    assert_ens_v1_profile_admission_rows_with_statuses(
         &admissions,
-        EnsV1ProfileAdmissionExpectation {
+        EnsV1ProfileAdmissionStatusExpectation {
             address: admitted_resolver_address,
-            status: "supported",
+            profile: "public_resolver_compatible",
+            fact_statuses: latest_public_resolver_fact_statuses(),
             admission_basis: "code_hash_match",
             contract_instance_id: admitted_contract_instance_id,
             observed_code_hash: Some(public_resolver_code_hash),
@@ -2685,6 +2687,76 @@ async fn scoped_resolver_profile_rejects_unadmitted_code_hash_target() -> Result
             .iter()
             .all(|admission| admission.address != normalize_address(unadmitted_resolver_address)),
         "unadmitted target must not graduate to a scoped resolver profile"
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn ens_v1_known_legacy_resolver_profile_does_not_flatten_latest_capabilities() -> Result<()> {
+    let test_dir = TestDir::new()?;
+    let database = TestDatabase::new().await?;
+    test_dir.write_manifest(
+        "ens",
+        "ens_v1_resolver_l1",
+        "v1",
+        &checked_in_manifest_contents("ens", "ens_v1_resolver_l1", "v1")?,
+    )?;
+    sync_repository(database.pool(), &load_repository(&test_dir.path)?).await?;
+
+    let legacy_resolver_address = "0x4976fb03C32e5B8cfe2b6cCB31c09Ba78EBaBa41";
+    let legacy_contract_instance_id = load_single_contract_instance_for_address(
+        database.pool(),
+        "ethereum-mainnet",
+        legacy_resolver_address,
+    )
+    .await?;
+    let admissions = load_ens_v1_public_resolver_profile_admissions(database.pool()).await?;
+    let legacy_rows = admissions
+        .iter()
+        .filter(|admission| admission.address == normalize_address(legacy_resolver_address))
+        .collect::<Vec<_>>();
+    assert_eq!(legacy_rows.len(), 14);
+    assert!(
+        legacy_rows
+            .iter()
+            .all(|row| row.profile == "public_resolver_legacy_multicoin_dns")
+    );
+    assert!(legacy_rows.iter().all(
+        |row| row.contract_instance_id == legacy_contract_instance_id
+            && row.source == WatchedContractSource::ManifestContract
+            && row.admission_basis == "first_party_known_resolver_admission"
+    ));
+    let statuses = legacy_rows
+        .iter()
+        .map(|row| (row.fact_family.as_str(), row.status.as_str()))
+        .collect::<BTreeMap<_, _>>();
+
+    assert_eq!(statuses["resolver_record"], "unsupported");
+    assert_eq!(statuses["resolver_record:addr"], "supported");
+    assert_eq!(statuses["resolver_record:multicoin_addr"], "supported");
+    assert_eq!(statuses["resolver_record:name"], "supported");
+    assert_eq!(statuses["resolver_record:text"], "supported");
+    assert_eq!(statuses["resolver_record:abi"], "supported");
+    assert_eq!(statuses["resolver_record:contenthash"], "supported");
+    assert_eq!(statuses["resolver_record:dns"], "supported");
+    assert_eq!(statuses["resolver_record:interface"], "supported");
+    assert_eq!(statuses["resolver_record:data"], "unsupported");
+    assert_eq!(statuses["resolver_authorization"], "supported");
+    assert_eq!(statuses["resolver_record_version"], "unsupported");
+    assert_eq!(
+        statuses["resolver_feature:name_wrapper_aware"],
+        "unsupported"
+    );
+    assert_eq!(
+        statuses["resolver_feature:default_coin_type"],
+        "unsupported"
+    );
+    assert!(
+        legacy_rows
+            .iter()
+            .all(|row| row.observed_code_hash.is_none())
     );
 
     database.cleanup().await?;
@@ -2707,7 +2779,20 @@ struct ProfileAdmissionExpectation<'a> {
 
 struct EnsV1ProfileAdmissionExpectation<'a> {
     address: &'a str,
+    profile: &'a str,
+    fact_families: BTreeSet<&'a str>,
     status: &'a str,
+    admission_basis: &'a str,
+    contract_instance_id: Uuid,
+    observed_code_hash: Option<&'a str>,
+    matched_code_hash: Option<&'a str>,
+    matched_contract_instance_id: Option<Uuid>,
+}
+
+struct EnsV1ProfileAdmissionStatusExpectation<'a> {
+    address: &'a str,
+    profile: &'a str,
+    fact_statuses: BTreeMap<&'a str, &'a str>,
     admission_basis: &'a str,
     contract_instance_id: Uuid,
     observed_code_hash: Option<&'a str>,
@@ -2725,12 +2810,8 @@ fn assert_profile_admission_rows(
             address: expectation.address,
             chain: "ethereum-mainnet",
             source_family: "ens_v1_resolver_l1",
-            profile: "public_resolver_compatible",
-            fact_families: BTreeSet::from([
-                "resolver_authorization",
-                "resolver_record",
-                "resolver_record_version",
-            ]),
+            profile: expectation.profile,
+            fact_families: expectation.fact_families,
             status: expectation.status,
             admission_basis: expectation.admission_basis,
             contract_instance_id: expectation.contract_instance_id,
@@ -2739,6 +2820,68 @@ fn assert_profile_admission_rows(
             matched_contract_instance_id: expectation.matched_contract_instance_id,
         },
     );
+}
+
+fn assert_ens_v1_profile_admission_rows_with_statuses(
+    admissions: &[ResolverProfileAdmission],
+    expectation: EnsV1ProfileAdmissionStatusExpectation<'_>,
+) {
+    assert_profile_admission_rows_with_statuses(
+        admissions,
+        "ethereum-mainnet",
+        "ens_v1_resolver_l1",
+        expectation.address,
+        expectation.profile,
+        expectation.fact_statuses,
+        expectation.admission_basis,
+        expectation.contract_instance_id,
+        expectation.observed_code_hash,
+        expectation.matched_code_hash,
+        expectation.matched_contract_instance_id,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn assert_profile_admission_rows_with_statuses(
+    admissions: &[ResolverProfileAdmission],
+    chain: &str,
+    source_family: &str,
+    address: &str,
+    profile: &str,
+    fact_statuses: BTreeMap<&str, &str>,
+    admission_basis: &str,
+    contract_instance_id: Uuid,
+    observed_code_hash: Option<&str>,
+    matched_code_hash: Option<&str>,
+    matched_contract_instance_id: Option<Uuid>,
+) {
+    let address = normalize_address(address);
+    let rows = admissions
+        .iter()
+        .filter(|admission| admission.address == address)
+        .collect::<Vec<_>>();
+    assert_eq!(rows.len(), fact_statuses.len());
+    assert_eq!(
+        rows.iter()
+            .map(|admission| admission.fact_family.as_str())
+            .collect::<BTreeSet<_>>(),
+        fact_statuses.keys().copied().collect::<BTreeSet<_>>()
+    );
+
+    for row in rows {
+        assert_eq!(row.chain, chain);
+        assert_eq!(row.source_family, source_family);
+        assert_eq!(row.contract_instance_id, contract_instance_id);
+        assert_eq!(row.profile, profile);
+        assert_eq!(row.status.as_str(), fact_statuses[row.fact_family.as_str()]);
+        assert_eq!(row.admission_basis, admission_basis);
+        assert_eq!(row.observed_code_hash.as_deref(), observed_code_hash);
+        assert_eq!(row.matched_code_hash.as_deref(), matched_code_hash);
+        assert_eq!(
+            row.matched_contract_instance_id,
+            matched_contract_instance_id
+        );
+    }
 }
 
 fn assert_profile_admission_rows_for_profile(
@@ -2778,6 +2921,47 @@ fn assert_profile_admission_rows_for_profile(
             expectation.matched_contract_instance_id
         );
     }
+}
+
+fn default_public_resolver_fact_families() -> BTreeSet<&'static str> {
+    BTreeSet::from([
+        "resolver_authorization",
+        "resolver_record",
+        "resolver_record_version",
+    ])
+}
+
+fn latest_public_resolver_fact_families() -> BTreeSet<&'static str> {
+    BTreeSet::from([
+        "resolver_authorization",
+        "resolver_feature:default_coin_type",
+        "resolver_feature:name_wrapper_aware",
+        "resolver_record",
+        "resolver_record:abi",
+        "resolver_record:addr",
+        "resolver_record:contenthash",
+        "resolver_record:data",
+        "resolver_record:dns",
+        "resolver_record:interface",
+        "resolver_record:multicoin_addr",
+        "resolver_record:name",
+        "resolver_record:text",
+        "resolver_record_version",
+    ])
+}
+
+fn latest_public_resolver_fact_statuses() -> BTreeMap<&'static str, &'static str> {
+    latest_public_resolver_fact_families()
+        .into_iter()
+        .map(|fact_family| {
+            let status = if fact_family == "resolver_record:data" {
+                "unsupported"
+            } else {
+                "supported"
+            };
+            (fact_family, status)
+        })
+        .collect()
 }
 
 #[tokio::test]
@@ -3912,6 +4096,19 @@ async fn checked_in_wrapper_and_resolver_manifests_admit_phase4_input_families()
             "resolver manifest is missing upstream citation {citation}"
         );
     }
+    for admission_basis in [
+        "first-party app known-resolver admissions supplied for this change",
+        "(upstream: .refs/ens_app_v3/src/constants/resolverAddressData.ts:L32 @ ens_app_v3@7175858)",
+        "public_resolver_4976fb03",
+        "0x4976fb03C32e5B8cfe2b6cCB31c09Ba78EBaBa41",
+        "no VersionableResolver",
+        "no default coin-type fallback claim",
+    ] {
+        assert!(
+            resolver_manifest.contains(admission_basis),
+            "resolver manifest is missing admission basis {admission_basis}"
+        );
+    }
 
     test_dir.write_manifest("ens", "ens_v1_wrapper_l1", "v1", &wrapper_manifest)?;
     test_dir.write_manifest("ens", "ens_v1_resolver_l1", "v1", &resolver_manifest)?;
@@ -3953,20 +4150,33 @@ async fn checked_in_wrapper_and_resolver_manifests_admit_phase4_input_families()
     assert!(resolver.roots.is_empty());
     assert!(resolver.discovery_rules.is_empty());
     assert!(resolver.capability_flags.is_empty());
-    assert_eq!(resolver.contracts.len(), 1);
-    assert_eq!(resolver.contracts[0].role, "public_resolver");
+    assert_eq!(resolver.contracts.len(), 7);
+    let resolver_contracts = resolver
+        .contracts
+        .iter()
+        .map(|contract| (contract.role.as_str(), normalize_address(&contract.address)))
+        .collect::<BTreeMap<_, _>>();
     assert_eq!(
-        normalize_address(&resolver.contracts[0].address),
+        resolver_contracts["public_resolver"],
         "0xf29100983e058b709f3d539b0c765937b804ac15"
     );
-    assert_eq!(resolver.contracts[0].proxy_kind, "none");
+    assert_eq!(
+        resolver_contracts["public_resolver_4976fb03"],
+        "0x4976fb03c32e5b8cfe2b6ccb31c09ba78ebaba41"
+    );
+    assert!(
+        resolver
+            .contracts
+            .iter()
+            .all(|contract| contract.proxy_kind == "none")
+    );
 
     let summary = sync_repository(database.pool(), &repository).await?;
     assert_eq!(summary.status, ManifestSyncStatus::Synced);
     assert_eq!(summary.synced_manifest_count, 2);
     assert_eq!(summary.active_manifest_count, 2);
     assert_eq!(summary.root_count, 0);
-    assert_eq!(summary.contract_count, 2);
+    assert_eq!(summary.contract_count, 8);
     assert_eq!(summary.capability_count, 0);
     assert_eq!(summary.discovery_rule_count, 0);
 
@@ -4003,34 +4213,55 @@ async fn checked_in_wrapper_and_resolver_manifests_admit_phase4_input_families()
     );
 
     let wrapper_address = normalize_address("0xD4416b13d2b3a9aBae7AcD5D6C2BbDBE25686401");
-    let resolver_address = normalize_address("0xF29100983E058B709F3D539b0c765937B804AC15");
+    let resolver_addresses = BTreeSet::from([
+        normalize_address("0xF29100983E058B709F3D539b0c765937B804AC15"),
+        normalize_address("0x231b0Ee14048e9dCcD1d247744d114a4EB5E8E63"),
+        normalize_address("0x4976fb03C32e5B8cfe2b6cCB31c09Ba78EBaBa41"),
+        normalize_address("0xDaaF96c344f63131acadD0Ea35170E7892d3dfBA"),
+        normalize_address("0x226159d592E2b063810a10Ebf6dcbADA94Ed68b8"),
+        normalize_address("0x5FfC014343cd971B7eb70732021E26C35B744cc4"),
+        normalize_address("0x1da022710dF5002339274AaDEe8D58218e9D6AB5"),
+    ]);
     let watched_contracts = load_watched_contracts(database.pool()).await?;
-    assert_eq!(watched_contracts.len(), 2);
+    assert_eq!(watched_contracts.len(), 8);
     assert!(watched_contracts.iter().any(|contract| {
         contract.source_family == "ens_v1_wrapper_l1"
             && contract.address == wrapper_address
             && contract.source == WatchedContractSource::ManifestContract
     }));
-    assert!(watched_contracts.iter().any(|contract| {
-        contract.source_family == "ens_v1_resolver_l1"
-            && contract.address == resolver_address
-            && contract.source == WatchedContractSource::ManifestContract
-    }));
+    let watched_resolver_addresses = watched_contracts
+        .iter()
+        .filter(|contract| contract.source_family == "ens_v1_resolver_l1")
+        .inspect(|contract| assert_eq!(contract.source, WatchedContractSource::ManifestContract))
+        .map(|contract| contract.address.clone())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(watched_resolver_addresses, resolver_addresses);
 
+    let chain_plan = load_watched_chain_plan(database.pool()).await?;
+    assert_eq!(chain_plan.len(), 1);
+    assert_eq!(chain_plan[0].chain, "ethereum-mainnet");
+    let expected_plan_addresses = resolver_addresses
+        .iter()
+        .cloned()
+        .chain(std::iter::once(wrapper_address.clone()))
+        .collect::<BTreeSet<_>>();
     assert_eq!(
-        load_watched_chain_plan(database.pool()).await?,
-        vec![WatchedChainPlan {
-            chain: "ethereum-mainnet".to_owned(),
-            addresses: vec![wrapper_address.clone(), resolver_address.clone()],
-            manifest_root_entry_count: 0,
-            manifest_contract_entry_count: 2,
-            discovery_edge_entry_count: 0,
-        }]
+        chain_plan[0]
+            .addresses
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+        expected_plan_addresses
     );
+    assert_eq!(chain_plan[0].manifest_root_entry_count, 0);
+    assert_eq!(chain_plan[0].manifest_contract_entry_count, 8);
+    assert_eq!(chain_plan[0].discovery_edge_entry_count, 0);
 
     let admission_state = load_discovery_admission_state(database.pool()).await?;
     assert!(admission_state.has_authoritative_address("ethereum-mainnet", &wrapper_address));
-    assert!(admission_state.has_authoritative_address("ethereum-mainnet", &resolver_address));
+    for resolver_address in resolver_addresses {
+        assert!(admission_state.has_authoritative_address("ethereum-mainnet", &resolver_address));
+    }
 
     database.cleanup().await?;
     Ok(())

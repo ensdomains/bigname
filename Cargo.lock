@@ -1541,6 +1541,7 @@ dependencies = [
  "sha3",
  "sqlx",
  "tokio",
+ "tracing",
  "uuid",
 ]
 

@@ -17,12 +17,13 @@ use super::constants::{
     SOURCE_FAMILY_ENS_V2_ROOT_L1,
 };
 use super::decoding::{
-    decode_dynamic_bytes, decode_dynamic_string, decode_first_dynamic_string,
-    hex_string_without_prefix, keccak_signature_hex, keccak256_hex, name_wrapped_topic0,
-    registrar_name_registered_topic0, registrar_name_renewed_topic0,
+    decode_dynamic_bytes, decode_dynamic_string, hex_string_without_prefix, keccak_signature_hex,
+    keccak256_hex, name_wrapped_topic0, registrar_name_registered_topic0,
+    registrar_name_renewed_topic0,
 };
 use super::preimage_observation::{
-    observe_dns_encoded_name, observe_registrar_eth_name, observe_single_label,
+    can_observe_dns_label, observe_dns_encoded_name, observe_registrar_eth_name,
+    observe_single_label,
 };
 use super::types::{PreimageObservation, WatchedRawLogRow};
 
@@ -123,12 +124,9 @@ fn build_registrar_preimage_observed_events(
         return Ok(Vec::new());
     };
 
-    let label = decode_first_dynamic_string(&raw_log.data).with_context(|| {
-        format!(
-            "failed to decode {source_event} string label payload for chain {} block {} log {}",
-            raw_log.chain_id, raw_log.block_hash, raw_log.log_index
-        )
-    })?;
+    let Some(label) = decode_observable_dynamic_label(raw_log, 0)? else {
+        return Ok(Vec::new());
+    };
     let observation = observe_registrar_eth_name(&label).with_context(|| {
         format!(
             "failed to derive registrar .eth preimage for chain {} block {} log {}",
@@ -182,12 +180,9 @@ fn build_ens_v2_preimage_observed_events(
             );
         }
         if topic0.eq_ignore_ascii_case(&keccak_signature_hex(ENS_V2_PARENT_UPDATED_SIGNATURE)) {
-            let label = decode_dynamic_string(&raw_log.data, 0).with_context(|| {
-                format!(
-                    "failed to decode ParentUpdated string label payload for chain {} block {} log {}",
-                    raw_log.chain_id, raw_log.block_hash, raw_log.log_index
-                )
-            })?;
+            let Some(label) = decode_observable_dynamic_label(raw_log, 0)? else {
+                return Ok(Vec::new());
+            };
             let observation = observe_single_label(&label).with_context(|| {
                 format!(
                     "failed to derive ENSv2 registry parent label preimage for chain {} block {} log {}",
@@ -263,12 +258,9 @@ fn build_ens_v2_registry_label_preimage_observed_events(
     raw_log: &WatchedRawLogRow,
     source_event: &str,
 ) -> Result<Vec<NormalizedEvent>> {
-    let label = decode_dynamic_string(&raw_log.data, 0).with_context(|| {
-        format!(
-            "failed to decode {source_event} string label payload for chain {} block {} log {}",
-            raw_log.chain_id, raw_log.block_hash, raw_log.log_index
-        )
-    })?;
+    let Some(label) = decode_observable_dynamic_label(raw_log, 0)? else {
+        return Ok(Vec::new());
+    };
     let observation = observe_single_label(&label).with_context(|| {
         format!(
             "failed to derive ENSv2 registry label preimage for chain {} block {} log {}",
@@ -304,12 +296,9 @@ fn build_ens_v2_registrar_label_preimage_observed_events(
     raw_log: &WatchedRawLogRow,
     source_event: &str,
 ) -> Result<Vec<NormalizedEvent>> {
-    let label = decode_dynamic_string(&raw_log.data, 0).with_context(|| {
-        format!(
-            "failed to decode {source_event} string label payload for chain {} block {} log {}",
-            raw_log.chain_id, raw_log.block_hash, raw_log.log_index
-        )
-    })?;
+    let Some(label) = decode_observable_dynamic_label(raw_log, 0)? else {
+        return Ok(Vec::new());
+    };
     let observation = observe_registrar_eth_name(&label).with_context(|| {
         format!(
             "failed to derive ENSv2 registrar .eth preimage for chain {} block {} log {}",
@@ -323,6 +312,21 @@ fn build_ens_v2_registrar_label_preimage_observed_events(
         observation,
         None,
     )])
+}
+
+fn decode_observable_dynamic_label(
+    raw_log: &WatchedRawLogRow,
+    offset_word_index: usize,
+) -> Result<Option<String>> {
+    let label = match decode_dynamic_string(&raw_log.data, offset_word_index) {
+        Ok(label) => label,
+        Err(_) => return Ok(None),
+    };
+    if can_observe_dns_label(&label) {
+        Ok(Some(label))
+    } else {
+        Ok(None)
+    }
 }
 
 fn build_ens_v2_alias_preimage_observed_events(

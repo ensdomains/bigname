@@ -247,7 +247,7 @@ pub async fn reconcile_discovery_observations(
                 deactivated_at = COALESCE(
                     (
                         SELECT GREATEST(discovery_edges.admitted_at, rb.block_timestamp)
-                        FROM raw_blocks rb
+                        FROM chain_lineage rb
                         WHERE rb.chain_id = $4
                           AND rb.block_hash = $3
                         LIMIT 1

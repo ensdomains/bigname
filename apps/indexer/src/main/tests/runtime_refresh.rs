@@ -204,7 +204,7 @@ async fn ethereum_only_provider_leaves_active_base_watch_state_idle() -> Result<
 
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*)::BIGINT FROM raw_blocks WHERE chain_id = 'base-mainnet'"
+            "SELECT COUNT(*)::BIGINT FROM chain_lineage WHERE chain_id = 'base-mainnet'"
         )
         .fetch_one(database.pool())
         .await?,
@@ -212,7 +212,7 @@ async fn ethereum_only_provider_leaves_active_base_watch_state_idle() -> Result<
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*)::BIGINT FROM raw_blocks WHERE chain_id = 'ethereum-mainnet'"
+            "SELECT COUNT(*)::BIGINT FROM chain_lineage WHERE chain_id = 'ethereum-mainnet'"
         )
         .fetch_one(database.pool())
         .await?,

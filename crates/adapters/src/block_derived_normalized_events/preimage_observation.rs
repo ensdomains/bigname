@@ -3,6 +3,12 @@ use anyhow::{Context, Result, bail};
 use super::decoding::{hex_string, keccak256_hex, namehash_hex};
 use super::types::PreimageObservation;
 
+const MAX_DNS_LABEL_OCTETS: usize = u8::MAX as usize;
+
+pub(super) fn can_observe_dns_label(label: &str) -> bool {
+    !label.is_empty() && label.len() <= MAX_DNS_LABEL_OCTETS
+}
+
 pub(super) fn observe_dns_encoded_name(bytes: &[u8]) -> Result<PreimageObservation> {
     if bytes.is_empty() {
         bail!("dns-encoded name payload must not be empty");

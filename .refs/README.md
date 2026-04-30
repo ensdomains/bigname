@@ -1,6 +1,6 @@
 # Upstream references
 
-Pinned checkouts of the canonical ENSv1, ENSv2, and Basenames codebases (plus two reference indexers). Anchors bigname docs, manifests, agent reviews, and task design to real upstream behavior instead of vendored memory.
+Pinned checkouts of the canonical ENSv1, ENSv2, and Basenames codebases, reference indexers, and app metadata used by checked-in admissions. Anchors bigname docs, manifests, agent reviews, and task design to real upstream behavior instead of vendored memory.
 
 ## Layout
 

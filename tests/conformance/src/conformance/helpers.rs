@@ -1606,7 +1606,7 @@ async fn set_raw_blocks_canonicality(
         .collect::<Vec<_>>();
     let updated = sqlx::query(
         r#"
-                UPDATE raw_blocks
+                UPDATE chain_lineage
                 SET canonicality_state = $1::canonicality_state
                 WHERE chain_id = $2
                   AND block_hash = ANY($3::TEXT[])
@@ -1617,12 +1617,12 @@ async fn set_raw_blocks_canonicality(
     .bind(&block_hashes)
     .execute(&database.pool)
     .await
-    .context("failed to update raw_blocks canonicality for conformance")?
+    .context("failed to update chain_lineage canonicality for conformance")?
     .rows_affected();
 
     anyhow::ensure!(
         updated == block_hashes.len() as u64,
-        "expected to update {} raw_blocks rows to {}, updated {updated}",
+        "expected to update {} chain_lineage rows to {}, updated {updated}",
         block_hashes.len(),
         state.as_str()
     );

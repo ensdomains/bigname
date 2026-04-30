@@ -39,7 +39,7 @@ pub async fn mark_raw_block_range_orphaned(
         .collect::<Vec<_>>();
     sqlx::query(
         r#"
-        UPDATE raw_blocks
+        UPDATE chain_lineage
         SET canonicality_state = 'orphaned'::canonicality_state
         WHERE chain_id = $1
           AND block_hash = ANY($2::TEXT[])
@@ -84,14 +84,14 @@ where
         r#"
         WITH RECURSIVE raw_block_path AS (
             SELECT chain_id, block_hash, parent_hash, 0 AS depth
-            FROM raw_blocks
+            FROM chain_lineage
             WHERE chain_id = $1
               AND block_hash = $2
 
             UNION ALL
 
             SELECT parent.chain_id, parent.block_hash, parent.parent_hash, raw_block_path.depth + 1
-            FROM raw_blocks AS parent
+            FROM chain_lineage AS parent
             JOIN raw_block_path
               ON parent.chain_id = raw_block_path.chain_id
              AND parent.block_hash = raw_block_path.parent_hash
@@ -104,15 +104,18 @@ where
             raw.parent_hash,
             raw.block_number,
             raw.block_timestamp,
-            raw.logs_bloom,
-            raw.transactions_root,
-            raw.receipts_root,
-            raw.state_root,
+            audit.logs_bloom,
+            audit.transactions_root,
+            audit.receipts_root,
+            audit.state_root,
             raw.canonicality_state::TEXT AS canonicality_state
         FROM raw_block_path
-        JOIN raw_blocks AS raw
+        JOIN chain_lineage AS raw
           ON raw.chain_id = raw_block_path.chain_id
          AND raw.block_hash = raw_block_path.block_hash
+        LEFT JOIN chain_header_audit AS audit
+          ON audit.chain_id = raw.chain_id
+         AND audit.block_hash = raw.block_hash
         ORDER BY raw_block_path.depth
         "#,
     )

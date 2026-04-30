@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 use bigname_manifests::WatchedSourceSelectorPlan;
 use bigname_storage::{
     RawCodeHash, RawLog, RawReceipt, RawTransaction, upsert_chain_lineage_blocks_without_snapshots,
-    upsert_raw_blocks_without_snapshots, upsert_raw_code_hashes, upsert_raw_logs_without_snapshots,
+    upsert_raw_code_hashes, upsert_raw_logs_without_snapshots,
     upsert_raw_receipts_without_snapshots, upsert_raw_transactions_without_snapshots,
 };
 use tracing::info;
@@ -18,7 +18,8 @@ use crate::{
         ProviderTransactionReceiptRequest,
     },
     reconciliation::{
-        provider_block_to_lineage, provider_block_to_raw_block,
+        HeaderAuditMode, provider_block_to_lineage_with_header_audit_mode,
+        provider_block_to_raw_block_with_header_audit_mode,
         provider_code_observation_to_raw_code_hash, provider_log_to_raw_log,
         provider_receipt_to_raw_receipt, provider_transaction_to_raw_transaction,
     },
@@ -136,6 +137,7 @@ pub(super) async fn run_split_hash_pinned_raw_only_sparse_backfill_range(
     canonicality_evidence: BackfillCanonicalityEvidence,
     materializations: Vec<RawOnlySparseMaterialization>,
     timing: RawOnlySparseBackfillTiming,
+    header_audit_mode: HeaderAuditMode,
 ) -> Result<BackfillOutcome> {
     let mut merged = BackfillOutcome {
         chain: source_plan.watched_chain_plan.chain.clone(),
@@ -163,6 +165,7 @@ pub(super) async fn run_split_hash_pinned_raw_only_sparse_backfill_range(
                 resolve_ms: 0,
                 range_logs_ms: 0,
             },
+            header_audit_mode,
         )
         .await?;
         merged.resolved_block_count += outcome.resolved_block_count;
@@ -203,6 +206,7 @@ pub(super) async fn run_hash_pinned_raw_only_sparse_backfill_range(
     resolved_blocks: Vec<ProviderResolvedBlock>,
     mut ranged_logs_by_block: BTreeMap<i64, Vec<ProviderLog>>,
     timing: RawOnlySparseBackfillTiming,
+    header_audit_mode: HeaderAuditMode,
 ) -> Result<BackfillOutcome> {
     let watched_chain = &source_plan.watched_chain_plan;
     ranged_logs_by_block.retain(|_, logs| !logs.is_empty());
@@ -222,7 +226,6 @@ pub(super) async fn run_hash_pinned_raw_only_sparse_backfill_range(
     let headers_ms = headers_started.elapsed().as_millis();
 
     let materialize_started = Instant::now();
-    let mut raw_blocks = Vec::with_capacity(resolved_blocks.len());
     let mut transactions = Vec::<RawTransaction>::new();
     let mut receipts = Vec::<RawReceipt>::new();
     let mut logs = Vec::<RawLog>::new();
@@ -250,12 +253,17 @@ pub(super) async fn run_hash_pinned_raw_only_sparse_backfill_range(
         }
 
         let canonicality_state = canonicality_evidence.state_for_block(block);
-        let raw_block =
-            provider_block_to_raw_block(&watched_chain.chain, block, canonicality_state);
-        lineage_blocks.push(provider_block_to_lineage(
+        let raw_block = provider_block_to_raw_block_with_header_audit_mode(
             &watched_chain.chain,
             block,
             canonicality_state,
+            header_audit_mode,
+        );
+        lineage_blocks.push(provider_block_to_lineage_with_header_audit_mode(
+            &watched_chain.chain,
+            block,
+            canonicality_state,
+            header_audit_mode,
         ));
         let block_logs = ranged_logs_by_block
             .remove(&resolved_block.block_number)
@@ -282,7 +290,6 @@ pub(super) async fn run_hash_pinned_raw_only_sparse_backfill_range(
         }
 
         raw_blocks_by_hash.insert(raw_block.block_hash.clone(), raw_block.clone());
-        raw_blocks.push(raw_block);
     }
     if !ranged_logs_by_block.is_empty() {
         bail!("provider returned range logs for unprocessed backfill blocks");
@@ -359,12 +366,9 @@ pub(super) async fn run_hash_pinned_raw_only_sparse_backfill_range(
     }
     let code_materialize_ms = code_materialize_started.elapsed().as_millis();
 
-    let lineage_upsert_started = Instant::now();
+    let header_anchor_upsert_started = Instant::now();
     upsert_chain_lineage_blocks_without_snapshots(pool, &lineage_blocks).await?;
-    let lineage_upsert_ms = lineage_upsert_started.elapsed().as_millis();
-    let raw_blocks_upsert_started = Instant::now();
-    upsert_raw_blocks_without_snapshots(pool, &raw_blocks).await?;
-    let raw_blocks_upsert_ms = raw_blocks_upsert_started.elapsed().as_millis();
+    let header_anchor_upsert_ms = header_anchor_upsert_started.elapsed().as_millis();
     let transactions_upsert_started = Instant::now();
     upsert_raw_transactions_without_snapshots(pool, &transactions).await?;
     let transactions_upsert_ms = transactions_upsert_started.elapsed().as_millis();
@@ -396,7 +400,7 @@ pub(super) async fn run_hash_pinned_raw_only_sparse_backfill_range(
         from_block = range.from_block,
         to_block = range.to_block,
         resolved_block_count = resolved_blocks.len(),
-        raw_block_count = raw_blocks.len(),
+        raw_block_count = resolved_blocks.len(),
         raw_log_count = logs.len(),
         raw_transaction_count = transactions.len(),
         resolve_ms = timing.resolve_ms,
@@ -407,8 +411,7 @@ pub(super) async fn run_hash_pinned_raw_only_sparse_backfill_range(
         transaction_materialize_ms,
         code_fetch_ms,
         code_materialize_ms,
-        lineage_upsert_ms,
-        raw_blocks_upsert_ms,
+        header_anchor_upsert_ms,
         transactions_upsert_ms,
         receipts_upsert_ms,
         logs_upsert_ms,
@@ -422,7 +425,7 @@ pub(super) async fn run_hash_pinned_raw_only_sparse_backfill_range(
         from_block: range.from_block,
         to_block: range.to_block,
         resolved_block_count: resolved_blocks.len(),
-        raw_block_count: raw_blocks.len(),
+        raw_block_count: resolved_blocks.len(),
         raw_transaction_count: transactions.len(),
         raw_receipt_count: receipts.len(),
         raw_log_count: logs.len(),

@@ -1,4 +1,7 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    time::Instant,
+};
 
 use crate::registry_migration_cache::MigratedRegistryNodes;
 use anyhow::{Context, Result, bail};
@@ -24,6 +27,7 @@ const SOURCE_FAMILY_BASENAMES_BASE_REGISTRAR: &str = "basenames_base_registrar";
 const SOURCE_FAMILY_BASENAMES_BASE_REGISTRY: &str = "basenames_base_registry";
 const SOURCE_FAMILY_BASENAMES_BASE_RESOLVER: &str = "basenames_base_resolver";
 const CONTRACT_ROLE_REGISTRY_OLD: &str = "registry_old";
+const GENERIC_SOURCE_SCOPE_ADDRESS: &str = "*";
 
 const DERIVATION_KIND_ENS_V1_UNWRAPPED_AUTHORITY: &str = "ens_v1_unwrapped_authority";
 const EVENT_KIND_AUTHORITY_EPOCH_CHANGED: &str = "AuthorityEpochChanged";
@@ -53,7 +57,21 @@ const ADDR_CHANGED_SIGNATURE: &str = "AddrChanged(bytes32,address)";
 const ADDRESS_CHANGED_SIGNATURE: &str = "AddressChanged(bytes32,uint256,bytes)";
 const NAME_CHANGED_SIGNATURE: &str = "NameChanged(bytes32,string)";
 const NEW_RESOLVER_SIGNATURE: &str = "NewResolver(bytes32,address)";
-const TEXT_CHANGED_SIGNATURE: &str = "TextChanged(bytes32,string,string)";
+const ABI_CHANGED_SIGNATURE: &str = "ABIChanged(bytes32,uint256)";
+const TEXT_CHANGED_WITHOUT_VALUE_SIGNATURE: &str = "TextChanged(bytes32,string,string)";
+const TEXT_CHANGED_WITH_VALUE_SIGNATURE: &str = "TextChanged(bytes32,string,string,string)";
+const CONTENT_CHANGED_SIGNATURE: &str = "ContentChanged(bytes32,bytes32)";
+const CONTENTHASH_CHANGED_SIGNATURE: &str = "ContenthashChanged(bytes32,bytes)";
+const DNS_RECORD_CHANGED_SIGNATURE: &str = "DNSRecordChanged(bytes32,bytes,uint16,bytes)";
+const DNS_RECORD_DELETED_SIGNATURE: &str = "DNSRecordDeleted(bytes32,bytes,uint16)";
+const DNS_ZONEHASH_CHANGED_SIGNATURE: &str = "DNSZonehashChanged(bytes32,bytes,bytes)";
+const DATA_CHANGED_SIGNATURE: &str = "DataChanged(bytes32,string,string,bytes)";
+const INTERFACE_CHANGED_SIGNATURE: &str = "InterfaceChanged(bytes32,bytes4,address)";
+#[cfg(test)]
+const PUBKEY_CHANGED_SIGNATURE: &str = "PubkeyChanged(bytes32,bytes32,bytes32)";
+const APPROVAL_FOR_ALL_SIGNATURE: &str = "ApprovalForAll(address,address,bool)";
+const APPROVED_SIGNATURE: &str = "Approved(address,bytes32,address,bool)";
+const VERIFIER_CHANGED_SIGNATURE: &str = "VerifierChanged(bytes,address)";
 const TRANSFER_SIGNATURE: &str = "Transfer(address,address,uint256)";
 const REGISTRY_TRANSFER_SIGNATURE: &str = "Transfer(bytes32,address)";
 const NEW_OWNER_SIGNATURE: &str = "NewOwner(bytes32,bytes32,address)";
@@ -111,6 +129,17 @@ struct ActiveManifestMetadata {
     source_family: String,
     manifest_version: i64,
     normalizer_version: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct GenericResolverEventSource {
+    source_manifest_id: i64,
+    namespace: String,
+    source_family: String,
+    manifest_version: i64,
+    normalizer_version: String,
+    effective_from_block: Option<i64>,
+    effective_to_block: Option<i64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -478,6 +507,7 @@ mod migration_guard;
 mod names;
 mod observation;
 mod permissions;
+mod preload;
 mod profiles;
 mod release_events;
 mod resolver_gate;
@@ -490,8 +520,8 @@ pub use self::pipeline::sync_ens_v1_unwrapped_authority;
 use self::{
     abi::*, apply::*, apply_registrar::*, apply_registry::*, apply_resolver::*, apply_wrapper::*,
     event_builders::*, event_state::*, finalization::*, ids::*, loading::*, materialization::*,
-    migration_guard::*, names::*, observation::*, permissions::*, profiles::*, release_events::*,
-    resolver_gate::*, reverse_claims::*, scope::*, transition::*,
+    migration_guard::*, names::*, observation::*, permissions::*, preload::*, profiles::*,
+    release_events::*, resolver_gate::*, reverse_claims::*, scope::*, transition::*,
 };
 
 mod pipeline;

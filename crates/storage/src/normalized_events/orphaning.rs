@@ -71,14 +71,14 @@ where
         r#"
         WITH RECURSIVE raw_block_path AS (
             SELECT block_hash, parent_hash, 0 AS depth
-            FROM raw_blocks
+            FROM chain_lineage
             WHERE chain_id = $1
               AND block_hash = $2
 
             UNION ALL
 
             SELECT parent.block_hash, parent.parent_hash, raw_block_path.depth + 1
-            FROM raw_blocks parent
+            FROM chain_lineage parent
             JOIN raw_block_path
               ON parent.chain_id = $1
              AND parent.block_hash = raw_block_path.parent_hash

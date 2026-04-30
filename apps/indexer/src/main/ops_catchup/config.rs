@@ -4,6 +4,7 @@ use anyhow::{Result, bail};
 
 use crate::{
     backfill::BackfillJobRunOutcome, cli::OpsCatchupArgs, deployment_profile_from_manifest_root,
+    reconciliation::HeaderAuditMode,
 };
 
 pub(crate) const DEFAULT_OPS_CATCHUP_CHUNK_BLOCKS: i64 = 32;
@@ -12,7 +13,7 @@ pub(crate) const DEFAULT_OPS_CATCHUP_LEASE_DURATION_SECS: u64 = 300;
 
 #[rustfmt::skip]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct OpsCatchupConfig { pub(crate) deployment_profile: String, pub(crate) manifests_root: PathBuf, pub(crate) chunk_blocks: i64, pub(crate) follow: bool, pub(crate) follow_iterations: Option<u64>, pub(crate) follow_poll_interval_secs: u64, pub(crate) lease_duration_secs: u64, pub(crate) capacity: CapacityGuardConfig }
+pub(crate) struct OpsCatchupConfig { pub(crate) deployment_profile: String, pub(crate) manifests_root: PathBuf, pub(crate) chunk_blocks: i64, pub(crate) follow: bool, pub(crate) follow_iterations: Option<u64>, pub(crate) follow_poll_interval_secs: u64, pub(crate) lease_duration_secs: u64, pub(crate) header_audit_mode: HeaderAuditMode, pub(crate) capacity: CapacityGuardConfig }
 
 #[rustfmt::skip]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -51,6 +52,9 @@ impl OpsCatchupConfig {
             follow_iterations: args.follow_iterations,
             follow_poll_interval_secs: args.follow_poll_interval_secs,
             lease_duration_secs: args.lease_duration_secs,
+            header_audit_mode: HeaderAuditMode::from_retain_audit_fields(
+                args.retain_header_audit_fields,
+            ),
             capacity: CapacityGuardConfig {
                 postgres_max_bytes: args.postgres_max_bytes,
                 min_writable_free_disk_bytes: args.min_writable_free_disk_bytes,

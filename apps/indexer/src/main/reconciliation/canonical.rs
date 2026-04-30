@@ -17,14 +17,17 @@ use crate::{
 use super::{
     lineage::{
         head_change_set, lineage_block_to_provider, provider_block_to_checkpoint_ref,
-        provider_block_to_lineage,
+        provider_block_to_lineage_with_header_audit_mode,
     },
     logging::log_chain_reconciliation_outcome,
     persistence::{
         ensure_losing_branch_raw_blocks_exist, persist_reconciled_raw_blocks,
         persist_reconciled_raw_code_hashes, persist_reconciled_raw_payloads,
     },
-    types::{CanonicalReconciliation, CanonicalReconciliationStatus, ChainReconciliationOutcome},
+    types::{
+        CanonicalReconciliation, CanonicalReconciliationStatus, ChainReconciliationOutcome,
+        HeaderAuditMode,
+    },
 };
 
 #[allow(dead_code)]
@@ -33,7 +36,14 @@ pub(crate) async fn poll_provider_heads(
     tasks: &mut Vec<IntakeChainTask>,
     provider_registry: &ProviderRegistry,
 ) -> Result<()> {
-    poll_provider_heads_with_adapter_sync(pool, tasks, provider_registry, true).await
+    poll_provider_heads_with_adapter_sync(
+        pool,
+        tasks,
+        provider_registry,
+        true,
+        HeaderAuditMode::Minimal,
+    )
+    .await
 }
 
 pub(crate) async fn poll_provider_heads_with_adapter_sync(
@@ -41,6 +51,7 @@ pub(crate) async fn poll_provider_heads_with_adapter_sync(
     tasks: &mut Vec<IntakeChainTask>,
     provider_registry: &ProviderRegistry,
     adapter_sync_enabled: bool,
+    header_audit_mode: HeaderAuditMode,
 ) -> Result<()> {
     let mut next_tasks = tasks.clone();
     let mut any_change = false;
@@ -55,6 +66,7 @@ pub(crate) async fn poll_provider_heads_with_adapter_sync(
             task,
             provider,
             adapter_sync_enabled,
+            header_audit_mode,
         )
         .await
         {
@@ -89,7 +101,14 @@ pub(crate) async fn reconcile_intake_chain_task(
     task: &IntakeChainTask,
     provider: &(impl ChainProviderOps + ?Sized),
 ) -> Result<Option<(IntakeChainTask, ChainReconciliationOutcome)>> {
-    reconcile_intake_chain_task_with_adapter_sync(pool, task, provider, true).await
+    reconcile_intake_chain_task_with_adapter_sync(
+        pool,
+        task,
+        provider,
+        true,
+        HeaderAuditMode::Minimal,
+    )
+    .await
 }
 
 pub(crate) async fn reconcile_intake_chain_task_with_adapter_sync(
@@ -97,10 +116,18 @@ pub(crate) async fn reconcile_intake_chain_task_with_adapter_sync(
     task: &IntakeChainTask,
     provider: &(impl ChainProviderOps + ?Sized),
     adapter_sync_enabled: bool,
+    header_audit_mode: HeaderAuditMode,
 ) -> Result<Option<(IntakeChainTask, ChainReconciliationOutcome)>> {
     let heads = provider.fetch_chain_heads().await?;
-    reconcile_fetched_heads_with_adapter_sync(pool, task, provider, &heads, adapter_sync_enabled)
-        .await
+    reconcile_fetched_heads_with_adapter_sync(
+        pool,
+        task,
+        provider,
+        &heads,
+        adapter_sync_enabled,
+        header_audit_mode,
+    )
+    .await
 }
 
 #[allow(dead_code)]
@@ -110,7 +137,15 @@ pub(crate) async fn reconcile_fetched_heads(
     provider: &(impl ChainProviderOps + ?Sized),
     heads: &ProviderHeadSnapshot,
 ) -> Result<Option<(IntakeChainTask, ChainReconciliationOutcome)>> {
-    reconcile_fetched_heads_with_adapter_sync(pool, task, provider, heads, true).await
+    reconcile_fetched_heads_with_adapter_sync(
+        pool,
+        task,
+        provider,
+        heads,
+        true,
+        HeaderAuditMode::Minimal,
+    )
+    .await
 }
 
 pub(crate) async fn reconcile_fetched_heads_with_adapter_sync(
@@ -119,6 +154,7 @@ pub(crate) async fn reconcile_fetched_heads_with_adapter_sync(
     provider: &(impl ChainProviderOps + ?Sized),
     heads: &ProviderHeadSnapshot,
     adapter_sync_enabled: bool,
+    header_audit_mode: HeaderAuditMode,
 ) -> Result<Option<(IntakeChainTask, ChainReconciliationOutcome)>> {
     let canonical = reconcile_canonical_head(
         pool,
@@ -126,6 +162,7 @@ pub(crate) async fn reconcile_fetched_heads_with_adapter_sync(
         &task.chain,
         &task.checkpoint,
         &heads.canonical,
+        header_audit_mode,
     )
     .await?;
     let head_change_set = head_change_set(task, heads, &canonical);
@@ -199,7 +236,7 @@ pub(crate) async fn reconcile_fetched_heads_with_adapter_sync(
         }
     }
 
-    persist_reconciled_raw_blocks(pool, &task.chain, heads, &canonical).await?;
+    persist_reconciled_raw_blocks(pool, &task.chain, heads, &canonical, header_audit_mode).await?;
     if head_change_set.requires_raw_payload_refresh(canonical.status) {
         persist_reconciled_raw_payloads(
             pool,
@@ -219,10 +256,11 @@ pub(crate) async fn reconcile_fetched_heads_with_adapter_sync(
     if let Some(safe_head) = &heads.safe {
         upsert_chain_lineage_blocks(
             pool,
-            &[provider_block_to_lineage(
+            &[provider_block_to_lineage_with_header_audit_mode(
                 &task.chain,
                 safe_head,
                 CanonicalityState::Safe,
+                header_audit_mode,
             )],
         )
         .await?;
@@ -230,10 +268,11 @@ pub(crate) async fn reconcile_fetched_heads_with_adapter_sync(
     if let Some(finalized_head) = &heads.finalized {
         upsert_chain_lineage_blocks(
             pool,
-            &[provider_block_to_lineage(
+            &[provider_block_to_lineage_with_header_audit_mode(
                 &task.chain,
                 finalized_head,
                 CanonicalityState::Finalized,
+                header_audit_mode,
             )],
         )
         .await?;
@@ -287,6 +326,7 @@ pub(crate) async fn reconcile_canonical_head(
     chain: &str,
     checkpoint: &ChainCheckpoint,
     latest_head: &ProviderBlock,
+    header_audit_mode: HeaderAuditMode,
 ) -> Result<CanonicalReconciliation> {
     let latest_hash = latest_head.block_hash.as_str();
     let current_canonical_hash = checkpoint.canonical_block_hash.as_deref();
@@ -295,10 +335,11 @@ pub(crate) async fn reconcile_canonical_head(
     if current_canonical_hash.is_none() {
         upsert_chain_lineage_blocks(
             pool,
-            &[provider_block_to_lineage(
+            &[provider_block_to_lineage_with_header_audit_mode(
                 chain,
                 latest_head,
                 CanonicalityState::Canonical,
+                header_audit_mode,
             )],
         )
         .await?;
@@ -315,10 +356,11 @@ pub(crate) async fn reconcile_canonical_head(
     if current_canonical_hash == Some(latest_hash) {
         upsert_chain_lineage_blocks(
             pool,
-            &[provider_block_to_lineage(
+            &[provider_block_to_lineage_with_header_audit_mode(
                 chain,
                 latest_head,
                 CanonicalityState::Canonical,
+                header_audit_mode,
             )],
         )
         .await?;
@@ -376,10 +418,11 @@ pub(crate) async fn reconcile_canonical_head(
         for block in &path {
             upsert_chain_lineage_blocks(
                 pool,
-                &[provider_block_to_lineage(
+                &[provider_block_to_lineage_with_header_audit_mode(
                     chain,
                     block,
                     CanonicalityState::Observed,
+                    header_audit_mode,
                 )],
             )
             .await?;
@@ -417,10 +460,11 @@ pub(crate) async fn reconcile_canonical_head(
     for block in path.iter().rev() {
         upsert_chain_lineage_blocks(
             pool,
-            &[provider_block_to_lineage(
+            &[provider_block_to_lineage_with_header_audit_mode(
                 chain,
                 block,
                 CanonicalityState::Canonical,
+                header_audit_mode,
             )],
         )
         .await?;

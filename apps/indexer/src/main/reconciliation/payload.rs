@@ -13,7 +13,9 @@ use crate::provider::{
     ProviderRawPayloadCacheMetadata, ProviderReceipt, ProviderTransaction,
 };
 
-use super::types::{CanonicalReconciliation, CanonicalReconciliationStatus, HeadChangeSet};
+use super::types::{
+    CanonicalReconciliation, CanonicalReconciliationStatus, HeadChangeSet, HeaderAuditMode,
+};
 
 pub(crate) fn raw_payload_candidate_hashes(
     heads: &ProviderHeadSnapshot,
@@ -69,20 +71,24 @@ pub(crate) fn ensure_provider_bundle_matches_raw_block(
     raw_block: &RawBlock,
     bundle: &ProviderBlockBundle,
 ) -> Result<()> {
-    let candidate = provider_block_to_raw_block(
+    let candidate = provider_block_to_raw_block_with_header_audit_mode(
         raw_block.chain_id.as_str(),
         &bundle.block,
         raw_block.canonicality_state,
+        HeaderAuditMode::RetainAuditFields,
     );
 
     if candidate.block_hash != raw_block.block_hash
         || candidate.parent_hash != raw_block.parent_hash
         || candidate.block_number != raw_block.block_number
         || candidate.block_timestamp != raw_block.block_timestamp
-        || candidate.logs_bloom != raw_block.logs_bloom
-        || candidate.transactions_root != raw_block.transactions_root
-        || candidate.receipts_root != raw_block.receipts_root
-        || candidate.state_root != raw_block.state_root
+        || optional_audit_field_conflicts(&candidate.logs_bloom, &raw_block.logs_bloom)
+        || optional_audit_field_conflicts(
+            &candidate.transactions_root,
+            &raw_block.transactions_root,
+        )
+        || optional_audit_field_conflicts(&candidate.receipts_root, &raw_block.receipts_root)
+        || optional_audit_field_conflicts(&candidate.state_root, &raw_block.state_root)
     {
         bail!(
             "provider bundle block {} does not match stored raw block facts for chain {}",
@@ -92,6 +98,10 @@ pub(crate) fn ensure_provider_bundle_matches_raw_block(
     }
 
     Ok(())
+}
+
+fn optional_audit_field_conflicts<T: Eq>(left: &Option<T>, right: &Option<T>) -> bool {
+    matches!((left, right), (Some(left), Some(right)) if left != right)
 }
 
 pub(crate) fn selected_address_set(addresses: &[String]) -> BTreeSet<String> {
@@ -214,8 +224,14 @@ pub(crate) fn insert_raw_block_candidate(
     chain: &str,
     block: &ProviderBlock,
     canonicality_state: CanonicalityState,
+    header_audit_mode: HeaderAuditMode,
 ) {
-    let candidate = provider_block_to_raw_block(chain, block, canonicality_state);
+    let candidate = provider_block_to_raw_block_with_header_audit_mode(
+        chain,
+        block,
+        canonicality_state,
+        header_audit_mode,
+    );
     blocks
         .entry(candidate.block_hash.clone())
         .and_modify(|existing| {
@@ -322,7 +338,7 @@ pub(crate) fn provider_log_to_raw_log(
         transaction_hash: log.transaction_hash.clone(),
         transaction_index: log.transaction_index,
         log_index: log.log_index,
-        emitting_address: log.address.clone(),
+        emitting_address: log.address.to_ascii_lowercase(),
         topics: log.topics.clone(),
         data: parse_hex_bytes(&log.data)?,
         canonicality_state: raw_block.canonicality_state,
@@ -424,11 +440,27 @@ pub(crate) fn hex_string(bytes: &[u8]) -> String {
     output
 }
 
+#[allow(dead_code)]
 pub(crate) fn provider_block_to_raw_block(
     chain: &str,
     block: &ProviderBlock,
     canonicality_state: CanonicalityState,
 ) -> bigname_storage::RawBlock {
+    provider_block_to_raw_block_with_header_audit_mode(
+        chain,
+        block,
+        canonicality_state,
+        HeaderAuditMode::Minimal,
+    )
+}
+
+pub(crate) fn provider_block_to_raw_block_with_header_audit_mode(
+    chain: &str,
+    block: &ProviderBlock,
+    canonicality_state: CanonicalityState,
+    header_audit_mode: HeaderAuditMode,
+) -> bigname_storage::RawBlock {
+    let retain_audit_fields = header_audit_mode.retains_audit_fields();
     bigname_storage::RawBlock {
         chain_id: chain.to_owned(),
         block_hash: block.block_hash.clone(),
@@ -438,10 +470,18 @@ pub(crate) fn provider_block_to_raw_block(
             block.block_timestamp_unix_secs,
         )
         .expect("provider block timestamp must fit in OffsetDateTime"),
-        logs_bloom: block.logs_bloom.clone(),
-        transactions_root: block.transactions_root.clone(),
-        receipts_root: block.receipts_root.clone(),
-        state_root: block.state_root.clone(),
+        logs_bloom: retain_audit_fields
+            .then(|| block.logs_bloom.clone())
+            .flatten(),
+        transactions_root: retain_audit_fields
+            .then(|| block.transactions_root.clone())
+            .flatten(),
+        receipts_root: retain_audit_fields
+            .then(|| block.receipts_root.clone())
+            .flatten(),
+        state_root: retain_audit_fields
+            .then(|| block.state_root.clone())
+            .flatten(),
         canonicality_state,
     }
 }

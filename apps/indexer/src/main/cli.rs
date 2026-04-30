@@ -8,6 +8,7 @@ use crate::normalized_replay_catchup::{
     DEFAULT_NORMALIZED_REPLAY_CATCHUP_CHUNK_BLOCKS,
     DEFAULT_NORMALIZED_REPLAY_CATCHUP_MAX_LOGS_PER_CHUNK,
     DEFAULT_NORMALIZED_REPLAY_CATCHUP_POLL_INTERVAL_SECS,
+    DEFAULT_NORMALIZED_REPLAY_DEFER_PROJECTION_INDEXES,
 };
 use crate::ops_catchup::{
     DEFAULT_OPS_CATCHUP_CHUNK_BLOCKS, DEFAULT_OPS_CATCHUP_FOLLOW_POLL_INTERVAL_SECS,
@@ -96,6 +97,18 @@ pub(crate) struct RunArgs {
         default_value_t = DEFAULT_NORMALIZED_REPLAY_CATCHUP_POLL_INTERVAL_SECS
     )]
     pub(crate) normalized_replay_catchup_poll_interval_secs: u64,
+    #[arg(
+        long = "normalized-replay-defer-projection-indexes",
+        env = "BIGNAME_INDEXER_NORMALIZED_REPLAY_DEFER_PROJECTION_INDEXES",
+        default_value_t = DEFAULT_NORMALIZED_REPLAY_DEFER_PROJECTION_INDEXES
+    )]
+    pub(crate) normalized_replay_defer_projection_indexes: bool,
+    #[arg(
+        long = "retain-header-audit-fields",
+        env = "BIGNAME_INDEXER_RETAIN_HEADER_AUDIT_FIELDS",
+        default_value_t = false
+    )]
+    pub(crate) retain_header_audit_fields: bool,
 }
 
 #[derive(Args, Debug)]
@@ -156,6 +169,12 @@ pub(crate) struct BackfillArgs {
         default_value = "auto"
     )]
     pub(crate) hash_pinned_adapter_sync: String,
+    #[arg(
+        long = "retain-header-audit-fields",
+        env = "BIGNAME_INDEXER_RETAIN_HEADER_AUDIT_FIELDS",
+        default_value_t = false
+    )]
+    pub(crate) retain_header_audit_fields: bool,
 }
 
 #[derive(Args, Debug)]
@@ -232,6 +251,12 @@ pub(crate) struct OpsCatchupArgs {
         default_value_t = 0_u64
     )]
     pub(crate) estimated_bytes_per_block: u64,
+    #[arg(
+        long = "retain-header-audit-fields",
+        env = "BIGNAME_INDEXER_RETAIN_HEADER_AUDIT_FIELDS",
+        default_value_t = false
+    )]
+    pub(crate) retain_header_audit_fields: bool,
 }
 
 #[derive(Args, Debug)]

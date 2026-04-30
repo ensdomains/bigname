@@ -323,6 +323,69 @@ async fn persists_canonical_surface_round_trip_with_resource_and_token_lineage()
 }
 
 #[tokio::test]
+async fn upsert_surface_binding_tightens_replayed_active_to() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let resource_id = Uuid::from_u128(0x2010);
+    let surface_binding_id = Uuid::from_u128(0x3010);
+    let earlier_close = timestamp(1_717_171_900);
+    let later_close = timestamp(1_717_172_100);
+
+    upsert_resources(
+        database.pool(),
+        &[resource(
+            resource_id,
+            None,
+            "ens",
+            "resource_tighten",
+            112,
+            CanonicalityState::Canonical,
+        )],
+    )
+    .await?;
+    upsert_name_surfaces(
+        database.pool(),
+        &[name_surface(
+            "ens:tighten.eth",
+            "tighten.eth",
+            "tighten.eth",
+            "surface_tighten",
+            113,
+            CanonicalityState::Finalized,
+        )],
+    )
+    .await?;
+
+    let initial_binding = binding(BindingSeed {
+        surface_binding_id,
+        logical_name_id: "ens:tighten.eth",
+        resource_id,
+        binding_kind: SurfaceBindingKind::DeclaredRegistryPath,
+        active_from: timestamp(1_717_171_700),
+        active_to: Some(later_close),
+        source: "declared_registry_path",
+        chain_label: "binding_tighten",
+        block_number: 114,
+        canonicality_state: CanonicalityState::Canonical,
+    });
+    upsert_surface_bindings(database.pool(), std::slice::from_ref(&initial_binding)).await?;
+
+    let tightened_binding = SurfaceBinding {
+        active_to: Some(earlier_close),
+        ..initial_binding
+    };
+    assert_eq!(
+        upsert_surface_bindings(database.pool(), std::slice::from_ref(&tightened_binding)).await?,
+        vec![tightened_binding.clone()]
+    );
+    assert_eq!(
+        load_surface_binding(database.pool(), surface_binding_id).await?,
+        Some(tightened_binding)
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn closes_open_binding_interval_on_rebind_and_preserves_history_continuity() -> Result<()> {
     let database = TestDatabase::new().await?;
     let old_token_lineage_id = Uuid::from_u128(0x4000);

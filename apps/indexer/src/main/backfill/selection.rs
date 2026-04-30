@@ -1,8 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use bigname_manifests::WatchedSourceSelectorPlan;
+use bigname_manifests::{WatchedBackfillTarget, WatchedSourceSelectorPlan};
 
 use crate::provider::{ProviderLog, ProviderResolvedBlock};
+
+const GENERIC_SOURCE_SCOPE_ADDRESS: &str = "*";
+const SOURCE_FAMILY_ENS_V1_RESOLVER_L1: &str = "ens_v1_resolver_l1";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct BackfillLogRangeRequest {
@@ -15,12 +18,34 @@ pub(super) fn selected_log_range_requests(
     source_plan: &WatchedSourceSelectorPlan,
     resolved_blocks: &[ProviderResolvedBlock],
 ) -> Vec<BackfillLogRangeRequest> {
+    selected_log_range_requests_with_filter(source_plan, resolved_blocks, |_| true)
+}
+
+pub(super) fn selected_log_range_requests_without_source_family(
+    source_plan: &WatchedSourceSelectorPlan,
+    resolved_blocks: &[ProviderResolvedBlock],
+    excluded_source_family: &str,
+) -> Vec<BackfillLogRangeRequest> {
+    selected_log_range_requests_with_filter(source_plan, resolved_blocks, |target| {
+        target.source_family != excluded_source_family
+    })
+}
+
+fn selected_log_range_requests_with_filter(
+    source_plan: &WatchedSourceSelectorPlan,
+    resolved_blocks: &[ProviderResolvedBlock],
+    include_target: impl Fn(&WatchedBackfillTarget) -> bool,
+) -> Vec<BackfillLogRangeRequest> {
     let mut requests = Vec::new();
     let mut active_start = None;
     let mut active_addresses = BTreeSet::<String>::new();
 
     for (index, block) in resolved_blocks.iter().enumerate() {
-        let addresses = selected_target_addresses_at_block(source_plan, block.block_number);
+        let addresses = selected_target_addresses_at_block_with_filter(
+            source_plan,
+            block.block_number,
+            &include_target,
+        );
         if addresses.is_empty() {
             if let Some(start_index) = active_start.take() {
                 requests.push(BackfillLogRangeRequest {
@@ -68,9 +93,18 @@ pub(super) fn selected_target_addresses_at_block(
     source_plan: &WatchedSourceSelectorPlan,
     block_number: i64,
 ) -> BTreeSet<String> {
+    selected_target_addresses_at_block_with_filter(source_plan, block_number, &|_| true)
+}
+
+fn selected_target_addresses_at_block_with_filter(
+    source_plan: &WatchedSourceSelectorPlan,
+    block_number: i64,
+    include_target: &impl Fn(&WatchedBackfillTarget) -> bool,
+) -> BTreeSet<String> {
     source_plan
         .selected_targets
         .iter()
+        .filter(|target| include_target(target))
         .filter(|target| {
             target.effective_from_block <= block_number && block_number <= target.effective_to_block
         })
@@ -196,21 +230,43 @@ impl SelectedTargetRangeCursor {
     }
 }
 
-pub(super) fn selected_target_sync_scope(
+pub(super) fn backfill_adapter_sync_scope(
     source_plan: &WatchedSourceSelectorPlan,
+    from_block: i64,
+    to_block: i64,
 ) -> Vec<(String, String, i64, i64)> {
-    source_plan
-        .selected_targets
-        .iter()
-        .map(|target| {
-            (
-                target.source_family.clone(),
-                target.address.to_ascii_lowercase(),
-                target.effective_from_block,
-                target.effective_to_block,
-            )
-        })
-        .collect()
+    let has_generic_resolver_scope = source_plan.source_family.as_deref()
+        == Some(SOURCE_FAMILY_ENS_V1_RESOLVER_L1)
+        || source_plan
+            .selected_targets
+            .iter()
+            .any(|target| target.source_family == SOURCE_FAMILY_ENS_V1_RESOLVER_L1);
+
+    let mut scopes = Vec::new();
+    if has_generic_resolver_scope {
+        scopes.push((
+            SOURCE_FAMILY_ENS_V1_RESOLVER_L1.to_owned(),
+            GENERIC_SOURCE_SCOPE_ADDRESS.to_owned(),
+            from_block,
+            to_block,
+        ));
+    }
+
+    scopes.extend(
+        source_plan
+            .selected_targets
+            .iter()
+            .filter(|target| target.source_family != SOURCE_FAMILY_ENS_V1_RESOLVER_L1)
+            .map(|target| {
+                (
+                    target.source_family.clone(),
+                    target.address.to_ascii_lowercase(),
+                    target.effective_from_block,
+                    target.effective_to_block,
+                )
+            }),
+    );
+    scopes
 }
 
 #[cfg(test)]

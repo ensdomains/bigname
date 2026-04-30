@@ -5,7 +5,7 @@ use bigname_manifests::{WatchedSourceSelectorKind, WatchedSourceSelectorPlan};
 use bigname_storage::{
     CanonicalityState, ChainCheckpoint, RawCodeHash, RawLog, RawPayloadCacheMetadataUpsert,
     RawReceipt, RawTransaction, load_chain_checkpoint, upsert_chain_lineage_blocks,
-    upsert_raw_blocks, upsert_raw_code_hashes, upsert_raw_logs, upsert_raw_payload_cache_metadata,
+    upsert_raw_code_hashes, upsert_raw_logs, upsert_raw_payload_cache_metadata,
     upsert_raw_receipts, upsert_raw_transactions,
 };
 use tracing::info;
@@ -16,10 +16,11 @@ use crate::{
         ProviderLog,
     },
     reconciliation::{
-        ensure_provider_bundle_matches_raw_block, provider_block_to_lineage,
-        provider_block_to_raw_block, provider_code_observation_to_raw_code_hash,
-        provider_logs_to_selected_raw_logs, provider_raw_payload_cache_metadata_to_upserts,
-        provider_receipts_to_selected_raw_receipts,
+        HeaderAuditMode, ensure_provider_bundle_matches_raw_block,
+        provider_block_to_lineage_with_header_audit_mode,
+        provider_block_to_raw_block_with_header_audit_mode,
+        provider_code_observation_to_raw_code_hash, provider_logs_to_selected_raw_logs,
+        provider_raw_payload_cache_metadata_to_upserts, provider_receipts_to_selected_raw_receipts,
         provider_transactions_to_selected_raw_transactions,
         retained_transaction_keys_from_raw_logs, sync_adapter_state_from_persisted_raw_payloads,
         sync_adapter_state_from_scoped_persisted_raw_payloads,
@@ -35,7 +36,8 @@ use super::{
     BackfillAdapterSyncMode, BackfillBlockRange, BackfillOutcome,
     range_resolution::resolve_backfill_range,
     selection::{
-        SelectedTargetIntervalIndex, selected_target_addresses_at_block, selected_target_sync_scope,
+        SelectedTargetIntervalIndex, backfill_adapter_sync_scope,
+        selected_target_addresses_at_block,
     },
 };
 
@@ -131,9 +133,10 @@ pub(crate) async fn run_hash_pinned_backfill_range(
     range: BackfillBlockRange,
     canonicality_evidence: BackfillCanonicalityEvidence,
     adapter_sync_mode: BackfillAdapterSyncMode,
+    header_audit_mode: HeaderAuditMode,
 ) -> Result<BackfillOutcome> {
     let watched_chain = &source_plan.watched_chain_plan;
-    let source_scope = selected_target_sync_scope(source_plan);
+    let source_scope = backfill_adapter_sync_scope(source_plan, range.from_block, range.to_block);
     let total_started = Instant::now();
     let resolve_started = Instant::now();
     let resolved_blocks = resolve_backfill_range(provider, range).await?;
@@ -142,7 +145,8 @@ pub(crate) async fn run_hash_pinned_backfill_range(
         .iter()
         .map(|block| block.block_hash.clone())
         .collect::<Vec<_>>();
-    let fetch_logs_by_safe_ranges = resolved_blocks.len() > 1;
+    let topic_filtered_source_family = uses_topic_first_source_family_scan(source_plan);
+    let fetch_logs_by_safe_ranges = resolved_blocks.len() > 1 || topic_filtered_source_family;
     let range_logs_started = Instant::now();
     let mut ranged_logs_by_block = if fetch_logs_by_safe_ranges {
         fetch_backfill_logs_by_safe_ranges(
@@ -191,6 +195,7 @@ pub(crate) async fn run_hash_pinned_backfill_range(
                     resolve_ms,
                     range_logs_ms,
                 },
+                header_audit_mode,
             )
             .await;
         }
@@ -212,21 +217,17 @@ pub(crate) async fn run_hash_pinned_backfill_range(
                 resolve_ms,
                 range_logs_ms,
             },
+            header_audit_mode,
         )
         .await;
     }
-    let topic_filtered_source_family = uses_topic_first_source_family_scan(source_plan);
-    let single_block_has_selected_addresses = if topic_filtered_source_family {
-        true
-    } else {
-        resolved_blocks
-            .first()
-            .map(|block| {
-                !selected_target_addresses_at_block(source_plan, block.block_number).is_empty()
-            })
-            .unwrap_or(false)
-    };
-    let bundles = if fetch_logs_by_safe_ranges || !single_block_has_selected_addresses {
+    let single_block_needs_bundle_logs = resolved_blocks
+        .first()
+        .map(|block| {
+            !selected_target_addresses_at_block(source_plan, block.block_number).is_empty()
+        })
+        .unwrap_or(false);
+    let bundles = if fetch_logs_by_safe_ranges || !single_block_needs_bundle_logs {
         provider
             .fetch_block_bundles_without_logs_by_hashes(&resolved_blocks)
             .await
@@ -263,14 +264,19 @@ pub(crate) async fn run_hash_pinned_backfill_range(
         }
 
         let canonicality_state = canonicality_evidence.state_for_block(&bundle.block);
-        let raw_block =
-            provider_block_to_raw_block(&watched_chain.chain, &bundle.block, canonicality_state);
-        ensure_provider_bundle_matches_raw_block(&raw_block, bundle)?;
-
-        lineage_blocks.push(provider_block_to_lineage(
+        let raw_block = provider_block_to_raw_block_with_header_audit_mode(
             &watched_chain.chain,
             &bundle.block,
             canonicality_state,
+            header_audit_mode,
+        );
+        ensure_provider_bundle_matches_raw_block(&raw_block, bundle)?;
+
+        lineage_blocks.push(provider_block_to_lineage_with_header_audit_mode(
+            &watched_chain.chain,
+            &bundle.block,
+            canonicality_state,
+            header_audit_mode,
         ));
         let block_logs = if fetch_logs_by_safe_ranges {
             ranged_logs_by_block
@@ -360,7 +366,6 @@ pub(crate) async fn run_hash_pinned_backfill_range(
     }
 
     upsert_chain_lineage_blocks(pool, &lineage_blocks).await?;
-    upsert_raw_blocks(pool, &raw_blocks).await?;
     upsert_raw_payload_cache_metadata(pool, &cache_metadata).await?;
     upsert_raw_transactions(pool, &transactions).await?;
     upsert_raw_receipts(pool, &receipts).await?;
