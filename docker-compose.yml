@@ -2,7 +2,33 @@ services:
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
-    shm_size: ${POSTGRES_SHM_SIZE:-2gb}
+    shm_size: ${POSTGRES_SHM_SIZE:-8gb}
+    command:
+      - postgres
+      - -c
+      - shared_buffers=${POSTGRES_SHARED_BUFFERS:-8GB}
+      - -c
+      - effective_cache_size=${POSTGRES_EFFECTIVE_CACHE_SIZE:-96GB}
+      - -c
+      - maintenance_work_mem=${POSTGRES_MAINTENANCE_WORK_MEM:-1GB}
+      - -c
+      - work_mem=${POSTGRES_WORK_MEM:-16MB}
+      - -c
+      - wal_buffers=${POSTGRES_WAL_BUFFERS:-64MB}
+      - -c
+      - max_wal_size=${POSTGRES_MAX_WAL_SIZE:-32GB}
+      - -c
+      - min_wal_size=${POSTGRES_MIN_WAL_SIZE:-4GB}
+      - -c
+      - checkpoint_timeout=${POSTGRES_CHECKPOINT_TIMEOUT:-15min}
+      - -c
+      - checkpoint_completion_target=${POSTGRES_CHECKPOINT_COMPLETION_TARGET:-0.9}
+      - -c
+      - wal_compression=${POSTGRES_WAL_COMPRESSION:-on}
+      - -c
+      - effective_io_concurrency=${POSTGRES_EFFECTIVE_IO_CONCURRENCY:-256}
+      - -c
+      - random_page_cost=${POSTGRES_RANDOM_PAGE_COST:-1.1}
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-bigname}
       POSTGRES_USER: ${POSTGRES_USER:-bigname}
