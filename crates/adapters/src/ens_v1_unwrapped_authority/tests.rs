@@ -2648,6 +2648,8 @@ async fn block_hash_replay_defers_preloaded_same_transaction_namehash_logs_until
     let registrar_address = "0x00000000000000000000000000000000000000aa";
     let registry_address = "0x00000000000000000000000000000000000000bb";
     let resolver_address = "0x00000000000000000000000000000000000000cc";
+    let registry_owner = "0x00000000000000000000000000000000000000dd";
+    let registrant = "0x00000000000000000000000000000000000000ee";
     let block_hash = "0x7474747474747474747474747474747474747474747474747474747474747474";
     let transaction_hash = "0xtx74747474747474747474747474747474747474747474747474747474747474";
 
@@ -2692,6 +2694,18 @@ async fn block_hash_replay_defers_preloaded_same_transaction_namehash_logs_until
                 transaction_index: 0,
                 log_index: 0,
                 emitting_address: registry_address.to_owned(),
+                topics: vec![new_owner_topic0(), eth_node(), alice.labelhashes[0].clone()],
+                data: abi_word_address(registry_owner).to_vec(),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            RawLog {
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: block_hash.to_owned(),
+                block_number: 74,
+                transaction_hash: transaction_hash.to_owned(),
+                transaction_index: 0,
+                log_index: 1,
+                emitting_address: registry_address.to_owned(),
                 topics: vec![new_resolver_topic0(), alice.namehash.clone()],
                 data: encode_registry_new_resolver_log_data(resolver_address),
                 canonicality_state: CanonicalityState::Canonical,
@@ -2702,14 +2716,12 @@ async fn block_hash_replay_defers_preloaded_same_transaction_namehash_logs_until
                 block_number: 74,
                 transaction_hash: transaction_hash.to_owned(),
                 transaction_index: 0,
-                log_index: 1,
+                log_index: 2,
                 emitting_address: registrar_address.to_owned(),
                 topics: vec![
                     name_registered_topic0(),
                     alice.labelhashes[0].clone(),
-                    hex_string(&abi_word_address(
-                        "0x00000000000000000000000000000000000000dd",
-                    )),
+                    hex_string(&abi_word_address(registrant)),
                 ],
                 data: encode_registrar_name_registered_log_data("alice", 1_800_000_000),
                 canonicality_state: CanonicalityState::Canonical,
@@ -2724,8 +2736,8 @@ async fn block_hash_replay_defers_preloaded_same_transaction_namehash_logs_until
         &[block_hash.to_owned()],
     )
     .await?;
-    assert_eq!(first.scanned_log_count, 2);
-    assert_eq!(first.matched_log_count, 2);
+    assert_eq!(first.scanned_log_count, 3);
+    assert_eq!(first.matched_log_count, 3);
 
     let registration_resource_id = sqlx::query_scalar::<_, Uuid>(
         "SELECT resource_id FROM normalized_events WHERE event_kind = 'RegistrationGranted'",
@@ -2745,8 +2757,8 @@ async fn block_hash_replay_defers_preloaded_same_transaction_namehash_logs_until
         &[block_hash.to_owned()],
     )
     .await?;
-    assert_eq!(second.scanned_log_count, 2);
-    assert_eq!(second.matched_log_count, 2);
+    assert_eq!(second.scanned_log_count, 3);
+    assert_eq!(second.matched_log_count, 3);
     assert_eq!(second.total_normalized_event_inserted_count, 0);
 
     database.cleanup().await

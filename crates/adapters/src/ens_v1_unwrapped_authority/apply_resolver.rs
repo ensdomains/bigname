@@ -15,7 +15,7 @@ pub(super) fn apply_resolver_changed(
     let Some(name) = history.name.clone() else {
         return Ok(());
     };
-    let authority = active_anchor_for_history(history, &event.reference.chain_id);
+    let authority = active_anchor_for_observation(history, &event.reference);
     history.events.push(build_normalized_event(
         &event.reference,
         Some(name.logical_name_id.clone()),
@@ -109,7 +109,7 @@ pub(super) fn apply_record_changed(
     if !current_resolver_matches(history, &event.resolver) {
         return Ok(());
     }
-    let Some(authority) = active_anchor_for_history(history, &event.reference.chain_id) else {
+    let Some(authority) = active_anchor_for_observation(history, &event.reference) else {
         return Ok(());
     };
     history.events.push(build_normalized_event(
@@ -143,7 +143,7 @@ pub(super) fn apply_record_version_changed(
     if !current_resolver_matches(history, &event.resolver) {
         return Ok(());
     }
-    let Some(authority) = active_anchor_for_history(history, &event.reference.chain_id) else {
+    let Some(authority) = active_anchor_for_observation(history, &event.reference) else {
         return Ok(());
     };
     let before_version = history.current_record_version;

@@ -353,7 +353,21 @@ fn history_has_authority_at_observation(
         }
         return true;
     }
-    registry_anchor_for_history(history, &reference.chain_id, &history.labelhash).is_some()
+    if registry_anchor_for_history(history, &reference.chain_id, &history.labelhash).is_none() {
+        return false;
+    }
+    registry_authority_started_before_observation(history, reference)
+}
+
+fn registry_authority_started_before_observation(
+    history: &NameHistory,
+    reference: &ObservationRef,
+) -> bool {
+    history
+        .registry_resource_anchor
+        .as_ref()
+        .is_some_and(|anchor| anchor.block_number < reference.block_number)
+        || nonzero_address(history.current_resolver.as_deref()).is_some()
 }
 
 pub(super) fn name_intro_positions_for_raw_logs(

@@ -222,6 +222,28 @@ pub(super) fn active_anchor_for_history(
     registry_anchor_for_history(history, chain, &history.labelhash)
 }
 
+pub(super) fn active_anchor_for_observation(
+    history: &NameHistory,
+    reference: &ObservationRef,
+) -> Option<AuthorityAnchor> {
+    if let Some(wrapper_key) = history.current_wrapper_key.as_ref()
+        && let Some(wrapper) = history.wrapper_authorities.get(wrapper_key)
+    {
+        return Some(build_wrapper_anchor(wrapper));
+    }
+    if let Some(registration) = history.current_registration.as_ref() {
+        if registration
+            .release_ref
+            .as_ref()
+            .is_some_and(|release_ref| release_ref.block_timestamp <= reference.block_timestamp)
+        {
+            return registry_anchor_for_history(history, &reference.chain_id, &history.labelhash);
+        }
+        return Some(build_registrar_anchor(registration));
+    }
+    registry_anchor_for_history(history, &reference.chain_id, &history.labelhash)
+}
+
 pub(super) fn current_resolver_matches(history: &NameHistory, resolver: &str) -> bool {
     nonzero_address(history.current_resolver.as_deref())
         .is_some_and(|current| current.eq_ignore_ascii_case(resolver))
