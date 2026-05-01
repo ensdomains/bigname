@@ -1922,6 +1922,13 @@ CREATE INDEX raw_logs_canonical_topic_block_idx ON public.raw_logs USING btree (
 
 
 --
+-- Name: raw_logs_canonical_topic_node_emitter_block_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX raw_logs_canonical_topic_node_emitter_block_idx ON public.raw_logs USING btree (chain_id, (topics[1]), lower((topics[2])), emitting_address, block_number DESC, transaction_index DESC, log_index DESC, raw_log_id DESC) WHERE (canonicality_state = ANY (ARRAY['canonical'::public.canonicality_state, 'safe'::public.canonicality_state, 'finalized'::public.canonicality_state]));
+
+
+--
 -- Name: raw_logs_noncanonical_replay_guard_idx; Type: INDEX; Schema: public; Owner: -
 --
 
