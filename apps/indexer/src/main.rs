@@ -131,6 +131,8 @@ async fn run(args: RunArgs) -> Result<()> {
         ProviderRegistry::from_sources(&args.chain_rpc_urls, &args.chain_reth_db_sources)?;
     validate_provider_registry_for_intake_tasks(&intake_chain_tasks, &provider_registry)?;
     log_provider_registry("startup", &intake_chain_tasks, &provider_registry);
+    // Automatic normalized catch-up replays bounded chunks after raw bootstrap drains.
+    let replay_completed_startup_raw_ranges = false;
     let bootstrap_backfill_outcome = run_startup_bootstrap_backfills(
         &pool,
         &args.manifests_root,
@@ -138,7 +140,7 @@ async fn run(args: RunArgs) -> Result<()> {
         &provider_registry,
         args.hash_pinned_chunk_blocks,
         adapter_sync_mode.startup_hash_pinned_backfill_mode(),
-        adapter_sync_mode == BackfillAdapterSyncMode::Auto,
+        replay_completed_startup_raw_ranges,
         header_audit_mode,
         args.bootstrap_backfill_workers,
         args.bootstrap_backfill_range_blocks,
