@@ -255,6 +255,21 @@ async fn replay_normalized_events_scoped_generic_resolver_scope_selects_topic_sc
         CanonicalityState::Canonical,
     )
     .await?;
+    insert_raw_resolver_log(
+        database.pool(),
+        chain,
+        &block,
+        "0x00000000000000000000000000000000000000c2",
+        vec![
+            keccak256_hex(b"ApprovalForAll(address,address,bool)"),
+            "0x0000000000000000000000000000000000000000000000000000000000000000".to_owned(),
+            "0x0000000000000000000000000000000000000000000000000000000000000000".to_owned(),
+        ],
+        Vec::new(),
+        1,
+        CanonicalityState::Canonical,
+    )
+    .await?;
 
     let outcome = replay_raw_fact_normalized_events(
         database.pool(),

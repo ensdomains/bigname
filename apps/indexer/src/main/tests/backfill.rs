@@ -4320,6 +4320,10 @@ async fn assert_dynamic_resolver_backfill_scope_behavior(
             topic0s.contains(&resolver_text_changed_with_value_topic0()),
             "generic resolver log lookup must include TextChanged with value"
         );
+        assert!(
+            !topic0s.contains(&keccak256_hex(b"ApprovalForAll(address,address,bool)")),
+            "generic resolver log lookup must not include common permission topics globally"
+        );
     } else {
         assert_eq!(
             log_filter.get("address").and_then(Value::as_array),

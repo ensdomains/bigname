@@ -179,8 +179,6 @@ pub(super) fn ens_v1_resolver_event_topic0s() -> Vec<String> {
         ABI_CHANGED_SIGNATURE,
         ADDR_CHANGED_SIGNATURE,
         ADDRESS_CHANGED_SIGNATURE,
-        APPROVAL_FOR_ALL_SIGNATURE,
-        APPROVED_SIGNATURE,
         CONTENT_CHANGED_SIGNATURE,
         CONTENTHASH_CHANGED_SIGNATURE,
         DNS_RECORD_CHANGED_SIGNATURE,
@@ -191,7 +189,6 @@ pub(super) fn ens_v1_resolver_event_topic0s() -> Vec<String> {
         NAME_CHANGED_SIGNATURE,
         TEXT_CHANGED_WITHOUT_VALUE_SIGNATURE,
         TEXT_CHANGED_WITH_VALUE_SIGNATURE,
-        VERIFIER_CHANGED_SIGNATURE,
         VERSION_CHANGED_SIGNATURE,
     ]
     .iter()

@@ -10,12 +10,10 @@ use crate::reconciliation::types::RawFactNormalizedEventReplaySourceScope;
 
 const SOURCE_FAMILY_ENS_V1_RESOLVER_L1: &str = "ens_v1_resolver_l1";
 const GENERIC_SOURCE_SCOPE_ADDRESS: &str = "*";
-const ENS_V1_RESOLVER_EVENT_SIGNATURES: &[&str] = &[
+const ENS_V1_GENERIC_RESOLVER_RECORD_EVENT_SIGNATURES: &[&str] = &[
     "ABIChanged(bytes32,uint256)",
     "AddrChanged(bytes32,address)",
     "AddressChanged(bytes32,uint256,bytes)",
-    "ApprovalForAll(address,address,bool)",
-    "Approved(address,bytes32,address,bool)",
     "ContentChanged(bytes32,bytes32)",
     "ContenthashChanged(bytes32,bytes)",
     "DNSRecordChanged(bytes32,bytes,uint16,bytes)",
@@ -26,7 +24,6 @@ const ENS_V1_RESOLVER_EVENT_SIGNATURES: &[&str] = &[
     "NameChanged(bytes32,string)",
     "TextChanged(bytes32,string,string)",
     "TextChanged(bytes32,string,string,string)",
-    "VerifierChanged(bytes,address)",
     "VersionChanged(bytes32,uint64)",
 ];
 
@@ -323,7 +320,7 @@ fn source_scope_filter_bindings(
 }
 
 fn ens_v1_resolver_event_topic0s() -> Vec<String> {
-    ENS_V1_RESOLVER_EVENT_SIGNATURES
+    ENS_V1_GENERIC_RESOLVER_RECORD_EVENT_SIGNATURES
         .iter()
         .map(|signature| topic0_hex(signature))
         .collect()

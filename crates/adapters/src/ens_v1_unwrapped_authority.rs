@@ -69,9 +69,6 @@ const DATA_CHANGED_SIGNATURE: &str = "DataChanged(bytes32,string,string,bytes)";
 const INTERFACE_CHANGED_SIGNATURE: &str = "InterfaceChanged(bytes32,bytes4,address)";
 #[cfg(test)]
 const PUBKEY_CHANGED_SIGNATURE: &str = "PubkeyChanged(bytes32,bytes32,bytes32)";
-const APPROVAL_FOR_ALL_SIGNATURE: &str = "ApprovalForAll(address,address,bool)";
-const APPROVED_SIGNATURE: &str = "Approved(address,bytes32,address,bool)";
-const VERIFIER_CHANGED_SIGNATURE: &str = "VerifierChanged(bytes,address)";
 const TRANSFER_SIGNATURE: &str = "Transfer(address,address,uint256)";
 const REGISTRY_TRANSFER_SIGNATURE: &str = "Transfer(bytes32,address)";
 const NEW_OWNER_SIGNATURE: &str = "NewOwner(bytes32,bytes32,address)";
