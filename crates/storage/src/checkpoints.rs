@@ -149,31 +149,43 @@ pub async fn advance_chain_checkpoints(
     }
 
     if let Some(canonical) = &update.canonical {
-        promote_chain_lineage_path(
-            &mut transaction,
-            &update.chain_id,
-            &canonical.block_hash,
-            CanonicalityState::Canonical,
-        )
-        .await?;
+        let stop_before_hash = current.canonical_block_hash.as_deref();
+        if checkpoint_target_needs_promotion(stop_before_hash, canonical) {
+            promote_chain_lineage_path(
+                &mut transaction,
+                &update.chain_id,
+                &canonical.block_hash,
+                stop_before_hash,
+                CanonicalityState::Canonical,
+            )
+            .await?;
+        }
     }
     if let Some(safe) = &update.safe {
-        promote_chain_lineage_path(
-            &mut transaction,
-            &update.chain_id,
-            &safe.block_hash,
-            CanonicalityState::Safe,
-        )
-        .await?;
+        let stop_before_hash = current.safe_block_hash.as_deref();
+        if checkpoint_target_needs_promotion(stop_before_hash, safe) {
+            promote_chain_lineage_path(
+                &mut transaction,
+                &update.chain_id,
+                &safe.block_hash,
+                stop_before_hash,
+                CanonicalityState::Safe,
+            )
+            .await?;
+        }
     }
     if let Some(finalized) = &update.finalized {
-        promote_chain_lineage_path(
-            &mut transaction,
-            &update.chain_id,
-            &finalized.block_hash,
-            CanonicalityState::Finalized,
-        )
-        .await?;
+        let stop_before_hash = current.finalized_block_hash.as_deref();
+        if checkpoint_target_needs_promotion(stop_before_hash, finalized) {
+            promote_chain_lineage_path(
+                &mut transaction,
+                &update.chain_id,
+                &finalized.block_hash,
+                stop_before_hash,
+                CanonicalityState::Finalized,
+            )
+            .await?;
+        }
     }
 
     let checkpoint = if update.is_no_op() {
@@ -188,6 +200,13 @@ pub async fn advance_chain_checkpoints(
         .context("failed to commit checkpoint advancement")?;
 
     Ok(checkpoint)
+}
+
+fn checkpoint_target_needs_promotion(
+    current_hash: Option<&str>,
+    target: &CheckpointBlockRef,
+) -> bool {
+    current_hash != Some(target.block_hash.as_str())
 }
 
 async fn ensure_chain_checkpoint_rows<'e, E>(executor: E, chain_ids: &[String]) -> Result<u64>

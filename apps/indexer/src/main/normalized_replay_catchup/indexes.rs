@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 use tracing::info;
 
 use super::{CURSOR_KIND_RAW_FACT_NORMALIZED_EVENTS, NormalizedReplayCursor};
@@ -28,6 +28,7 @@ const DEFERRED_NORMALIZED_EVENT_INDEXES: &[&str] = &[
 const TEMPORARY_REPLAY_INDEXES: &[&str] = &[
     "normalized_events_replay_latest_resolver_tmp_idx",
     "normalized_events_replay_latest_record_version_tmp_idx",
+    "normalized_events_replay_latest_registrar_tmp_idx",
 ];
 
 pub(super) async fn prepare_deferred_projection_indexes_for_fresh_replay(
@@ -124,54 +125,86 @@ async fn all_configured_cursors_complete(
     deployment_profile: &str,
     chains: &[String],
 ) -> Result<bool> {
-    let complete = sqlx::query_scalar::<_, Option<bool>>(
+    let cursor_rows = sqlx::query(
         r#"
         WITH configured_chains AS (
             SELECT DISTINCT UNNEST($3::TEXT[]) AS chain_id
-        ),
-        chain_completion AS (
-            SELECT
-                configured_chains.chain_id,
-                cursor.next_block_number > cursor.target_block_number AS cursor_complete,
-                EXISTS (
-                    SELECT 1
-                    FROM raw_logs
-                    JOIN chain_lineage AS lineage
-                      ON lineage.chain_id = raw_logs.chain_id
-                     AND lineage.block_hash = raw_logs.block_hash
-                    WHERE raw_logs.chain_id = configured_chains.chain_id
-                      AND lineage.canonicality_state IN (
-                          'canonical'::canonicality_state,
-                          'safe'::canonicality_state,
-                          'finalized'::canonicality_state
-                      )
-                      AND raw_logs.canonicality_state IN (
-                          'canonical'::canonicality_state,
-                          'safe'::canonicality_state,
-                          'finalized'::canonicality_state
-                      )
-                    LIMIT 1
-                ) AS has_canonical_raw_logs
-            FROM configured_chains
-            LEFT JOIN normalized_replay_cursors AS cursor
-              ON cursor.deployment_profile = $1
-             AND cursor.cursor_kind = $2
-             AND cursor.chain_id = configured_chains.chain_id
         )
-        SELECT BOOL_AND(COALESCE(cursor_complete, NOT has_canonical_raw_logs))
-        FROM chain_completion
+        SELECT
+            configured_chains.chain_id,
+            cursor.next_block_number,
+            cursor.target_block_number
+        FROM configured_chains
+        LEFT JOIN normalized_replay_cursors AS cursor
+          ON cursor.deployment_profile = $1
+         AND cursor.cursor_kind = $2
+         AND cursor.chain_id = configured_chains.chain_id
         "#,
     )
     .bind(deployment_profile)
     .bind(CURSOR_KIND_RAW_FACT_NORMALIZED_EVENTS)
     .bind(chains)
-    .fetch_one(pool)
+    .fetch_all(pool)
     .await
     .with_context(|| {
         format!("failed to inspect normalized replay cursor completion for {deployment_profile}")
     })?;
 
-    Ok(complete.unwrap_or(false))
+    let mut missing_cursor_chains = Vec::new();
+    for row in cursor_rows {
+        let chain_id = row
+            .try_get::<String, _>("chain_id")
+            .context("missing configured chain id")?;
+        let next_block_number = row
+            .try_get::<Option<i64>, _>("next_block_number")
+            .context("missing normalized replay next block number")?;
+        let target_block_number = row
+            .try_get::<Option<i64>, _>("target_block_number")
+            .context("missing normalized replay target block number")?;
+        match (next_block_number, target_block_number) {
+            (Some(next), Some(target)) if next > target => {}
+            (Some(_), Some(_)) => return Ok(false),
+            _ => missing_cursor_chains.push(chain_id),
+        }
+    }
+
+    for chain in missing_cursor_chains {
+        if chain_has_canonical_raw_logs(pool, &chain).await? {
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
+}
+
+async fn chain_has_canonical_raw_logs(pool: &PgPool, chain: &str) -> Result<bool> {
+    sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM raw_logs
+            JOIN chain_lineage AS lineage
+              ON lineage.chain_id = raw_logs.chain_id
+             AND lineage.block_hash = raw_logs.block_hash
+            WHERE raw_logs.chain_id = $1
+              AND lineage.canonicality_state IN (
+                  'canonical'::canonicality_state,
+                  'safe'::canonicality_state,
+                  'finalized'::canonicality_state
+              )
+              AND raw_logs.canonicality_state IN (
+                  'canonical'::canonicality_state,
+                  'safe'::canonicality_state,
+                  'finalized'::canonicality_state
+              )
+            LIMIT 1
+        )
+        "#,
+    )
+    .bind(chain)
+    .fetch_one(pool)
+    .await
+    .with_context(|| format!("failed to inspect canonical raw logs for {chain}"))
 }
 
 async fn relation_exists(pool: &PgPool, relation: &str) -> Result<bool> {
@@ -231,6 +264,29 @@ async fn ensure_temporary_replay_indexes(pool: &PgPool) -> Result<()> {
          )
          WHERE logical_name_id IS NOT NULL
            AND event_kind = 'RecordVersionChanged'
+           AND canonicality_state IN (
+               'canonical'::canonicality_state,
+               'safe'::canonicality_state,
+               'finalized'::canonicality_state
+           )",
+    )
+    .await?;
+    execute_ddl(
+        pool,
+        "CREATE INDEX IF NOT EXISTS normalized_events_replay_latest_registrar_tmp_idx
+         ON normalized_events (
+             logical_name_id,
+             block_number DESC NULLS LAST,
+             log_index DESC NULLS LAST,
+             normalized_event_id DESC
+         )
+         WHERE logical_name_id IS NOT NULL
+           AND event_kind IN (
+               'RegistrationGranted',
+               'RegistrationRenewed',
+               'ExpiryChanged',
+               'TokenControlTransferred'
+           )
            AND canonicality_state IN (
                'canonical'::canonicality_state,
                'safe'::canonicality_state,

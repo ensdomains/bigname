@@ -47,7 +47,9 @@ pub(super) fn transition_authority(
                 BoundaryEventSource {
                     source_family: open_binding.authority.binding_source_family.clone(),
                     manifest_version: open_binding.authority.binding_manifest_version,
-                    source_manifest_id: Some(open_binding.authority.binding_manifest_id),
+                    source_manifest_id: source_manifest_id_if_known(
+                        open_binding.authority.binding_manifest_id,
+                    ),
                     canonicality_state: reference.canonicality_state,
                 },
             ));
@@ -88,7 +90,9 @@ pub(super) fn transition_authority(
                 BoundaryEventSource {
                     source_family: after_anchor.binding_source_family.clone(),
                     manifest_version: after_anchor.binding_manifest_version,
-                    source_manifest_id: Some(after_anchor.binding_manifest_id),
+                    source_manifest_id: source_manifest_id_if_known(
+                        after_anchor.binding_manifest_id,
+                    ),
                     canonicality_state: reference.canonicality_state,
                 },
             ));
@@ -150,7 +154,7 @@ pub(super) fn transition_authority(
             BoundaryEventSource {
                 source_family,
                 manifest_version,
-                source_manifest_id: Some(manifest_id).filter(|value| *value > 0),
+                source_manifest_id: source_manifest_id_if_known(manifest_id),
                 canonicality_state: reference.canonicality_state,
             },
         ));
@@ -186,7 +190,7 @@ pub(super) fn transition_authority(
             BoundaryEventSource {
                 source_family: after_anchor.binding_source_family.clone(),
                 manifest_version: after_anchor.binding_manifest_version,
-                source_manifest_id: Some(after_anchor.binding_manifest_id),
+                source_manifest_id: source_manifest_id_if_known(after_anchor.binding_manifest_id),
                 canonicality_state: reference.canonicality_state,
             },
         ));

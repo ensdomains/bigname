@@ -30,8 +30,8 @@ use indexes::{
 };
 use sources::{load_canonical_raw_log_bounds, select_log_bounded_replay_to_block};
 
-pub(crate) const DEFAULT_NORMALIZED_REPLAY_CATCHUP_CHUNK_BLOCKS: i64 = 65_536;
-pub(crate) const DEFAULT_NORMALIZED_REPLAY_CATCHUP_MAX_LOGS_PER_CHUNK: usize = 10_000;
+pub(crate) const DEFAULT_NORMALIZED_REPLAY_CATCHUP_CHUNK_BLOCKS: i64 = 262_144;
+pub(crate) const DEFAULT_NORMALIZED_REPLAY_CATCHUP_MAX_LOGS_PER_CHUNK: usize = 100_000;
 pub(crate) const DEFAULT_NORMALIZED_REPLAY_CATCHUP_POLL_INTERVAL_SECS: u64 = 5;
 pub(crate) const DEFAULT_NORMALIZED_REPLAY_DEFER_PROJECTION_INDEXES: bool = true;
 

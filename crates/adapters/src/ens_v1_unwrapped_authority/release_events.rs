@@ -33,7 +33,7 @@ pub(super) fn emit_registration_released_event(
         BoundaryEventSource {
             source_family: lease.start_ref.source_family.clone(),
             manifest_version: lease.start_ref.manifest_version,
-            source_manifest_id: Some(lease.start_ref.source_manifest_id),
+            source_manifest_id: source_manifest_id_if_known(lease.start_ref.source_manifest_id),
             canonicality_state: release_ref.canonicality_state,
         },
     ));

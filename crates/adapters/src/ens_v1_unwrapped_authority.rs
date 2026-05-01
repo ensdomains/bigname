@@ -486,6 +486,10 @@ struct NameHistory {
     latest_registry_owner_before_registration: Option<ObservationRef>,
 }
 
+fn source_manifest_id_if_known(source_manifest_id: i64) -> Option<i64> {
+    (source_manifest_id > 0).then_some(source_manifest_id)
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AuthorityProfile {
     Ens,

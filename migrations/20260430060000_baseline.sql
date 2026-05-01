@@ -1753,6 +1753,12 @@ CREATE INDEX manifest_versions_rollout_manifest_idx ON public.manifest_versions 
 
 CREATE INDEX name_surfaces_lower_namehash_idx ON public.name_surfaces USING btree (lower(namehash)) WHERE ((labelhashes[1] IS NOT NULL) AND (canonicality_state = ANY (ARRAY['canonical'::public.canonicality_state, 'safe'::public.canonicality_state, 'finalized'::public.canonicality_state])));
 
+--
+-- Name: name_surfaces_lower_labelhash_replay_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX name_surfaces_lower_labelhash_replay_idx ON public.name_surfaces USING btree (lower(labelhashes[1]), logical_name_id) WHERE ((labelhashes[1] IS NOT NULL) AND (canonicality_state = ANY (ARRAY['canonical'::public.canonicality_state, 'safe'::public.canonicality_state, 'finalized'::public.canonicality_state])));
+
 
 --
 -- Name: normalized_events_chain_position_idx; Type: INDEX; Schema: public; Owner: -
@@ -2283,4 +2289,3 @@ ALTER TABLE ONLY public.surface_bindings
 --
 -- PostgreSQL database dump complete
 --
-

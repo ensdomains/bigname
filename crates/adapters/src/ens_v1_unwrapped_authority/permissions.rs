@@ -168,7 +168,7 @@ fn build_boundary_permission_change_event(
         BoundaryEventSource {
             source_family: anchor.binding_source_family.clone(),
             manifest_version: anchor.binding_manifest_version,
-            source_manifest_id: Some(anchor.binding_manifest_id),
+            source_manifest_id: source_manifest_id_if_known(anchor.binding_manifest_id),
             canonicality_state: reference.canonicality_state,
         },
     )

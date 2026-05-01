@@ -1062,6 +1062,7 @@ fn preload_registrar_history_recovers_binding_authority_provenance() -> Result<(
         &boundary_ref,
         Uuid::nil(),
         Some(release),
+        None,
         &CanonicalBlockIndex {
             blocks: vec![release_block],
         },
@@ -1999,6 +2000,205 @@ async fn block_hash_replay_preloads_open_registrar_before_renewal() -> Result<()
     assert_eq!(bindings.len(), 1);
     assert_eq!(bindings[0].resource_id, grant_resource_id);
     assert!(bindings[0].active_to.is_none());
+
+    sqlx::query(
+        "DELETE FROM normalized_events
+         WHERE logical_name_id = 'ens:alice.eth'
+           AND block_number < 43",
+    )
+    .execute(database.pool())
+    .await?;
+
+    let third = EnsV1UnwrappedAuthoritySyncSummary::sync_for_block_hashes(
+        database.pool(),
+        "ethereum-mainnet",
+        &[renewal_block_hash.to_owned()],
+    )
+    .await?;
+    assert_eq!(third.matched_log_count, 1);
+    assert_eq!(third.total_normalized_event_inserted_count, 0);
+    let replayed_renewal_before_state = sqlx::query_scalar::<_, Value>(
+        "SELECT before_state FROM normalized_events
+         WHERE logical_name_id = 'ens:alice.eth'
+           AND event_kind = 'RegistrationRenewed'
+           AND block_number = 43
+           AND log_index = 1",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(
+        replayed_renewal_before_state["expiry"].as_i64(),
+        Some(registration_expiry)
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn block_hash_replay_preload_ignores_prior_registration_epoch() -> Result<()> {
+    let _permit = crate::acquire_test_db_permit().await;
+    let database = TestDatabase::new().await?;
+
+    let registrar_address = "0x00000000000000000000000000000000000000aa";
+    insert_active_contract_fixture(
+        database.pool(),
+        SOURCE_FAMILY_ENS_V1_REGISTRAR_L1,
+        "registrar",
+        registrar_address,
+        Some("registrar"),
+        "manifests/ens/ens_v1_registrar_l1/v1.toml",
+    )
+    .await?;
+
+    let labelhash = keccak256_hex(b"alice");
+    let old_grant_block_hash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let current_grant_block_hash =
+        "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let renewal_block_hash = "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+    let old_expiry = 1_700_010_000;
+    let current_grant_timestamp =
+        release_after_grace(OffsetDateTime::from_unix_timestamp(old_expiry)?)?.unix_timestamp() + 1;
+    let current_expiry = current_grant_timestamp + 86_400;
+    let renewal_expiry = current_expiry + 86_400;
+
+    upsert_raw_blocks(
+        database.pool(),
+        &[
+            raw_block(
+                old_grant_block_hash,
+                Some("0x9999999999999999999999999999999999999999999999999999999999999999"),
+                42,
+                1_700_000_042,
+            ),
+            raw_block(
+                current_grant_block_hash,
+                Some(old_grant_block_hash),
+                43,
+                current_grant_timestamp,
+            ),
+            raw_block(
+                renewal_block_hash,
+                Some(current_grant_block_hash),
+                44,
+                current_grant_timestamp + 1,
+            ),
+        ],
+    )
+    .await?;
+    upsert_raw_logs(
+        database.pool(),
+        &[
+            RawLog {
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: old_grant_block_hash.to_owned(),
+                block_number: 42,
+                transaction_hash:
+                    "0xtxaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+                transaction_index: 0,
+                log_index: 0,
+                emitting_address: registrar_address.to_owned(),
+                topics: vec![
+                    name_registered_topic0(),
+                    labelhash.clone(),
+                    hex_string(&abi_word_address(
+                        "0x0000000000000000000000000000000000000001",
+                    )),
+                ],
+                data: encode_registrar_name_registered_log_data("alice", old_expiry),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            RawLog {
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: current_grant_block_hash.to_owned(),
+                block_number: 43,
+                transaction_hash:
+                    "0xtxbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
+                transaction_index: 0,
+                log_index: 1,
+                emitting_address: registrar_address.to_owned(),
+                topics: vec![
+                    name_registered_topic0(),
+                    labelhash.clone(),
+                    hex_string(&abi_word_address(
+                        "0x0000000000000000000000000000000000000002",
+                    )),
+                ],
+                data: encode_registrar_name_registered_log_data("alice", current_expiry),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            RawLog {
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: renewal_block_hash.to_owned(),
+                block_number: 44,
+                transaction_hash:
+                    "0xtxcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_owned(),
+                transaction_index: 0,
+                log_index: 2,
+                emitting_address: registrar_address.to_owned(),
+                topics: vec![unwrapped_name_renewed_topic0(), labelhash],
+                data: encode_controller_label_event_log_data(
+                    "alice",
+                    &[1, renewal_expiry as u64, 3],
+                ),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+        ],
+    )
+    .await?;
+
+    let seeded = EnsV1UnwrappedAuthoritySyncSummary::sync_for_block_hashes(
+        database.pool(),
+        "ethereum-mainnet",
+        &[
+            old_grant_block_hash.to_owned(),
+            current_grant_block_hash.to_owned(),
+        ],
+    )
+    .await?;
+    assert_eq!(seeded.matched_log_count, 2);
+    assert_eq!(
+        seeded.by_kind.get(EVENT_KIND_REGISTRATION_GRANTED),
+        Some(&2_usize)
+    );
+
+    let current_resource_id = sqlx::query_scalar::<_, Uuid>(
+        "SELECT resource_id FROM surface_bindings
+         WHERE logical_name_id = 'ens:alice.eth'
+           AND block_number = 43",
+    )
+    .fetch_one(database.pool())
+    .await?;
+
+    sqlx::query(
+        "DELETE FROM normalized_events
+         WHERE logical_name_id = 'ens:alice.eth'
+           AND block_number = 43",
+    )
+    .execute(database.pool())
+    .await?;
+
+    let replayed = EnsV1UnwrappedAuthoritySyncSummary::sync_for_block_hashes(
+        database.pool(),
+        "ethereum-mainnet",
+        &[renewal_block_hash.to_owned()],
+    )
+    .await?;
+    assert_eq!(replayed.matched_log_count, 1);
+
+    let (renewal_resource_id, renewal_before_state) = sqlx::query_as::<_, (Uuid, Value)>(
+        "SELECT resource_id, before_state FROM normalized_events
+         WHERE logical_name_id = 'ens:alice.eth'
+           AND event_kind = 'RegistrationRenewed'
+           AND block_number = 44
+           AND log_index = 2",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(renewal_resource_id, current_resource_id);
+    assert_eq!(
+        renewal_before_state["expiry"].as_i64(),
+        Some(current_expiry)
+    );
 
     database.cleanup().await
 }

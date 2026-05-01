@@ -97,6 +97,7 @@ async fn sync_ens_v1_unwrapped_authority_with_scope(
     let resolver_profile_gate_ms;
     let mut same_tx_name_intro_ms = 0;
     let mut preload_name_metadata_ms = 0;
+    let mut preload_restricted_histories_ms = 0;
     let mut migrated_registry_nodes_ms = 0;
     let apply_ms;
 
@@ -198,6 +199,7 @@ async fn sync_ens_v1_unwrapped_authority_with_scope(
                 namehash_to_labelhash.insert(name.namehash.clone(), labelhash.clone());
             }
         }
+        let preload_restricted_histories_started = Instant::now();
         preload_restricted_name_histories(
             pool,
             chain,
@@ -209,6 +211,8 @@ async fn sync_ens_v1_unwrapped_authority_with_scope(
             &block_index,
         )
         .await?;
+        preload_restricted_histories_ms =
+            preload_restricted_histories_started.elapsed().as_millis();
 
         let preload_migrated_registry_nodes = raw_logs
             .iter()
@@ -486,6 +490,7 @@ async fn sync_ens_v1_unwrapped_authority_with_scope(
         resolver_profile_gate_ms,
         same_tx_name_intro_ms,
         preload_name_metadata_ms,
+        preload_restricted_histories_ms,
         migrated_registry_nodes_ms,
         apply_ms,
         materialization_ms,

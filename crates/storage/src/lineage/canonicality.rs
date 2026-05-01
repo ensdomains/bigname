@@ -65,9 +65,10 @@ pub(crate) async fn promote_chain_lineage_path(
     executor: &mut sqlx::Transaction<'_, Postgres>,
     chain_id: &str,
     from_hash: &str,
+    stop_before_hash: Option<&str>,
     target_state: CanonicalityState,
 ) -> Result<Vec<ChainLineageBlock>> {
-    let path = load_chain_lineage_path(&mut **executor, chain_id, from_hash, None)
+    let path = load_chain_lineage_path(&mut **executor, chain_id, from_hash, stop_before_hash)
         .await
         .with_context(|| {
             format!(

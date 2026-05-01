@@ -36,7 +36,7 @@ pub(super) fn build_normalized_event(
         event_kind: event_kind.to_owned(),
         source_family: reference.source_family.clone(),
         manifest_version: reference.manifest_version,
-        source_manifest_id: Some(reference.source_manifest_id),
+        source_manifest_id: source_manifest_id_if_known(reference.source_manifest_id),
         chain_id: Some(reference.chain_id.clone()),
         block_number: Some(reference.block_number),
         block_hash: Some(reference.block_hash.clone()),
