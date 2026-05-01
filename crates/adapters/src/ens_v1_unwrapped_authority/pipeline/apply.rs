@@ -145,8 +145,12 @@ fn apply_authority_observation(
     }
 
     let labelhash = if let Some(namehash) = observation_namehash(&observation) {
-        let defer_to_same_tx_intro =
-            should_defer_preloaded_namehash_observation(&observation, same_tx_name_intro_positions);
+        let defer_to_same_tx_intro = should_defer_preloaded_namehash_observation(
+            &observation,
+            same_tx_name_intro_positions,
+            histories,
+            namehash_to_labelhash,
+        );
         if !defer_to_same_tx_intro
             && let Some(labelhash) = namehash_to_labelhash.get(namehash).cloned()
         {
@@ -299,6 +303,8 @@ fn learn_record_raw_name_preimage(
 fn should_defer_preloaded_namehash_observation(
     observation: &AuthorityObservation,
     same_tx_name_intro_positions: &HashMap<String, Vec<RawLogPosition>>,
+    histories: &BTreeMap<String, NameHistory>,
+    namehash_to_labelhash: &HashMap<String, String>,
 ) -> bool {
     let Some(namehash) = observation_namehash(observation) else {
         return false;
@@ -306,15 +312,48 @@ fn should_defer_preloaded_namehash_observation(
     let Some(position) = observation_raw_log_position(observation) else {
         return false;
     };
-    same_tx_name_intro_positions
-        .get(&namehash.to_ascii_lowercase())
+    let normalized_namehash = namehash.to_ascii_lowercase();
+    let has_later_same_tx_intro = same_tx_name_intro_positions
+        .get(&normalized_namehash)
         .is_some_and(|positions| {
             positions.iter().any(|intro| {
                 intro.block_hash == position.block_hash
                     && intro.transaction_hash == position.transaction_hash
                     && position.log_index < intro.log_index
             })
-        })
+        });
+    if !has_later_same_tx_intro {
+        return false;
+    }
+    if let Some(labelhash) = namehash_to_labelhash.get(&normalized_namehash)
+        && let Some(history) = histories.get(labelhash)
+        && history_has_authority_at_observation(history, observation)
+    {
+        return false;
+    }
+    true
+}
+
+fn history_has_authority_at_observation(
+    history: &NameHistory,
+    observation: &AuthorityObservation,
+) -> bool {
+    let reference = observation_reference(observation);
+    if history.current_wrapper_key.is_some() {
+        return active_anchor_for_history(history, &reference.chain_id).is_some();
+    }
+    if let Some(registration) = history.current_registration.as_ref() {
+        if registration
+            .release_ref
+            .as_ref()
+            .is_some_and(|release_ref| release_ref.block_timestamp <= reference.block_timestamp)
+        {
+            return registry_anchor_for_history(history, &reference.chain_id, &history.labelhash)
+                .is_some();
+        }
+        return true;
+    }
+    registry_anchor_for_history(history, &reference.chain_id, &history.labelhash).is_some()
 }
 
 pub(super) fn name_intro_positions_for_raw_logs(

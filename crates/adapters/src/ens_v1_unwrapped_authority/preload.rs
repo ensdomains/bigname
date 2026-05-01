@@ -66,7 +66,7 @@ pub(super) async fn preload_restricted_name_histories(
           AND binding.block_number < $4
           AND (
               binding.active_to IS NULL
-              OR binding.active_to > $3
+              OR binding.active_to >= $3
           )
           AND surface.canonicality_state IN (
               'canonical'::canonicality_state,
