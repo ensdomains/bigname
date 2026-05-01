@@ -817,37 +817,36 @@ async fn load_latest_registry_resolver_raw_state_before_block(
               ON manifest.manifest_id = address.source_manifest_id
             WHERE address.chain_id = $1
               AND address.deactivated_at IS NULL
-        ),
-        candidates AS (
+        )
+        SELECT DISTINCT ON (scope.logical_name_id)
+            scope.logical_name_id,
+            resolver_log.data
+        FROM scope
+        JOIN LATERAL (
             SELECT
-                scope.logical_name_id,
                 log.data,
                 log.block_number,
                 log.transaction_index,
                 log.log_index,
                 log.raw_log_id
-            FROM scope
+            FROM registry_emitters emitter
             JOIN raw_logs log
               ON log.chain_id = $1
-             AND lower(log.topics[2]) = scope.namehash
-            JOIN registry_emitters emitter
-              ON emitter.address = lower(log.emitting_address)
-             AND emitter.source_family = scope.registry_source_family
+             AND log.emitting_address = emitter.address
+             AND log.topics[1] = $6
              AND log.block_number BETWEEN emitter.active_from_block_number
-                 AND emitter.active_to_block_number
-            WHERE log.block_number < $5
-              AND lower(log.topics[1]) = lower($6)
+                 AND LEAST(emitter.active_to_block_number, $5 - 1)
+            WHERE emitter.source_family = scope.registry_source_family
+              AND lower(log.topics[2]) = scope.namehash
               AND log.canonicality_state IN (
                   'canonical'::canonicality_state,
                   'safe'::canonicality_state,
                   'finalized'::canonicality_state
               )
-        )
-        SELECT DISTINCT ON (logical_name_id)
-            logical_name_id,
-            data
-        FROM candidates
-        ORDER BY logical_name_id, block_number DESC, transaction_index DESC, log_index DESC, raw_log_id DESC
+            ORDER BY log.block_number DESC, log.transaction_index DESC, log.log_index DESC, log.raw_log_id DESC
+            LIMIT 1
+        ) resolver_log ON TRUE
+        ORDER BY scope.logical_name_id, resolver_log.block_number DESC, resolver_log.transaction_index DESC, resolver_log.log_index DESC, resolver_log.raw_log_id DESC
         "#,
     )
     .bind(chain)
