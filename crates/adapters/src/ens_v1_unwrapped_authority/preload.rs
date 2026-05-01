@@ -126,8 +126,14 @@ pub(super) async fn preload_restricted_name_histories(
             state.registrant = selected_state.registrant;
         }
     }
-    let resolver_state =
+    let mut resolver_state =
         load_latest_resolver_state_before_block(pool, &logical_name_ids, boundary_block).await?;
+    let selected_resolver_state =
+        load_selected_registry_resolver_state_before_replay(pool, &logical_name_ids, raw_logs)
+            .await?;
+    for (logical_name_id, resolver) in selected_resolver_state {
+        resolver_state.entry(logical_name_id).or_insert(resolver);
+    }
     let record_versions =
         load_latest_record_versions_before_block(pool, &logical_name_ids, boundary_block).await?;
     let preload_block_index = block_index_with_preloaded_registrar_release_boundaries(
@@ -635,6 +641,67 @@ async fn load_latest_resolver_state_before_block(
     .fetch_all(pool)
     .await
     .context("failed to preload latest resolver state before restricted replay")?;
+
+    let mut state = HashMap::new();
+    for row in rows {
+        let Some(resolver) = row.try_get::<Option<String>, _>("resolver")? else {
+            continue;
+        };
+        state.insert(row.try_get("logical_name_id")?, resolver);
+    }
+    Ok(state)
+}
+
+async fn load_selected_registry_resolver_state_before_replay(
+    pool: &PgPool,
+    logical_name_ids: &[String],
+    raw_logs: &[AuthorityRawLogRow],
+) -> Result<HashMap<String, String>> {
+    if logical_name_ids.is_empty() || raw_logs.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let block_hashes = raw_logs
+        .iter()
+        .map(|raw_log| raw_log.block_hash.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let rows = sqlx::query(
+        r#"
+        SELECT DISTINCT ON (event.logical_name_id)
+            event.logical_name_id,
+            event.after_state->>'resolver' AS resolver
+        FROM normalized_events event
+        JOIN resources resource
+          ON resource.resource_id = event.resource_id
+        WHERE event.logical_name_id = ANY($1::TEXT[])
+          AND event.block_hash = ANY($2::TEXT[])
+          AND event.event_kind = $3
+          AND event.transaction_hash IS NULL
+          AND event.log_index IS NULL
+          AND event.after_state->>'source_event' = $4
+          AND resource.provenance->>'authority_kind' = 'registry_only'
+          AND event.canonicality_state IN (
+              'canonical'::canonicality_state,
+              'safe'::canonicality_state,
+              'finalized'::canonicality_state
+          )
+          AND resource.canonicality_state IN (
+              'canonical'::canonicality_state,
+              'safe'::canonicality_state,
+              'finalized'::canonicality_state
+          )
+        ORDER BY event.logical_name_id, event.block_number DESC, event.normalized_event_id DESC
+        "#,
+    )
+    .bind(logical_name_ids)
+    .bind(&block_hashes)
+    .bind(EVENT_KIND_RESOLVER_CHANGED)
+    .bind(EVENT_KIND_AUTHORITY_EPOCH_CHANGED)
+    .fetch_all(pool)
+    .await
+    .context("failed to preload selected registry resolver state before restricted replay")?;
 
     let mut state = HashMap::new();
     for row in rows {
