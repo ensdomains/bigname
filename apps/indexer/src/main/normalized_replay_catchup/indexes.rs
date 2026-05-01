@@ -42,7 +42,7 @@ pub(super) async fn prepare_deferred_projection_indexes_for_fresh_replay(
     let already_deferred = any_index_missing(pool, DEFERRED_NORMALIZED_EVENT_INDEXES).await?
         || any_index_exists(pool, TEMPORARY_REPLAY_INDEXES).await?;
     let projection_tables_empty = current_projection_tables_empty(pool).await?;
-    if !already_deferred && !projection_tables_empty {
+    if !should_defer_projection_indexes(cursor, already_deferred, projection_tables_empty) {
         return Ok(());
     }
 
@@ -102,6 +102,14 @@ pub(super) async fn ensure_projection_indexes_after_catchup(
     Ok(())
 }
 
+fn should_defer_projection_indexes(
+    cursor: &NormalizedReplayCursor,
+    already_deferred: bool,
+    projection_tables_empty: bool,
+) -> bool {
+    already_deferred || (projection_tables_empty && cursor.last_replayed_at.is_none())
+}
+
 async fn current_projection_tables_empty(pool: &PgPool) -> Result<bool> {
     for table in CURRENT_PROJECTION_TABLES {
         if !relation_exists(pool, table).await? {
@@ -118,6 +126,45 @@ async fn current_projection_tables_empty(pool: &PgPool) -> Result<bool> {
         }
     }
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use sqlx::types::time::OffsetDateTime;
+
+    use super::*;
+
+    fn cursor(last_replayed_at: Option<OffsetDateTime>) -> NormalizedReplayCursor {
+        NormalizedReplayCursor {
+            range_start_block_number: 1,
+            next_block_number: 10,
+            target_block_number: 20,
+            last_replayed_at,
+        }
+    }
+
+    #[test]
+    fn defers_indexes_when_already_deferred() {
+        assert!(should_defer_projection_indexes(
+            &cursor(Some(OffsetDateTime::UNIX_EPOCH)),
+            true,
+            false
+        ));
+    }
+
+    #[test]
+    fn defers_indexes_for_initial_empty_projection_replay() {
+        assert!(should_defer_projection_indexes(&cursor(None), false, true));
+    }
+
+    #[test]
+    fn keeps_projection_indexes_after_initial_replay_completed() {
+        assert!(!should_defer_projection_indexes(
+            &cursor(Some(OffsetDateTime::UNIX_EPOCH)),
+            false,
+            true
+        ));
+    }
 }
 
 async fn all_configured_cursors_complete(
