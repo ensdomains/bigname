@@ -1,4 +1,5 @@
 mod address_names;
+mod automatic_projection_replay;
 mod children;
 mod cli;
 mod commands;

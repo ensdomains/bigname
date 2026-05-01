@@ -3,13 +3,13 @@ use tracing::info;
 
 use crate::cli::*;
 use crate::{
-    address_names, children, execution, inspect, manifest_drift, name_current, permissions,
-    primary_name, record_inventory, replay, resolver,
+    address_names, automatic_projection_replay, children, execution, inspect, manifest_drift,
+    name_current, permissions, primary_name, record_inventory, replay, resolver,
 };
 
 pub(crate) async fn dispatch(command: Command) -> Result<()> {
     match command {
-        Command::Run(args) => run(args).await,
+        Command::Run(args) => automatic_projection_replay::run_worker(args).await,
         Command::Migrate(args) => migrate(args).await,
         Command::AddressNamesCurrent(args) => address_names_current(args).await,
         Command::ChildrenCurrent(args) => children_current(args).await,
@@ -23,24 +23,6 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
         Command::RecordInventoryCurrent(args) => record_inventory_current(args).await,
         Command::ResolverCurrent(args) => resolver_current(args).await,
     }
-}
-
-async fn run(args: RunArgs) -> Result<()> {
-    let _pool = bigname_storage::connect(&args.database).await?;
-
-    info!(
-        service = "worker",
-        phase = bigname_domain::bootstrap_phase(),
-        execution_status = bigname_execution::bootstrap_status(),
-        poll_interval_secs = args.poll_interval_secs,
-        "worker booted"
-    );
-
-    tokio::signal::ctrl_c()
-        .await
-        .context("failed to listen for shutdown signal")?;
-    info!(service = "worker", "shutdown signal received");
-    Ok(())
 }
 
 async fn migrate(args: MigrateArgs) -> Result<()> {
@@ -426,7 +408,9 @@ async fn rebuild_primary_names_current(args: PrimaryNamesCurrentRebuildArgs) -> 
 }
 
 async fn replay_all_current_projections(args: AllCurrentProjectionsArgs) -> Result<()> {
-    let pool = bigname_storage::connect(&args.database).await?;
+    let database =
+        automatic_projection_replay::all_current_projections_database_config(args.database);
+    let pool = bigname_storage::connect(&database).await?;
     let summary = replay::rebuild_all_current_projections(&pool).await?;
 
     if args.json {

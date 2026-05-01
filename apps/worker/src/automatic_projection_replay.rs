@@ -1,0 +1,320 @@
+use anyhow::{Context, Result};
+use bigname_storage::DatabaseConfig;
+use sqlx::{PgPool, Postgres, pool::PoolConnection};
+use tokio::time::{Duration, sleep};
+use tracing::{debug, info, warn};
+
+use crate::{cli::RunArgs, replay};
+
+const CURSOR_KIND_RAW_FACT_NORMALIZED_EVENTS: &str = "raw_fact_normalized_events";
+const ALL_CURRENT_PROJECTIONS_MIN_DATABASE_CONNECTIONS: u32 = 64;
+const ALL_CURRENT_PROJECTIONS_REPLAY_LOCK_KEY: i64 = 0x4249474e414d4501_i64;
+const DEFERRED_NORMALIZED_EVENT_INDEXES: &[&str] = &[
+    "normalized_events_namespace_idx",
+    "normalized_events_kind_idx",
+    "normalized_events_manifest_idx",
+    "normalized_events_chain_position_idx",
+    "normalized_events_name_projection_replay_idx",
+    "normalized_events_resource_projection_replay_idx",
+    "normalized_events_name_relevant_projection_idx",
+    "normalized_events_record_inventory_resource_replay_idx",
+];
+
+pub(crate) fn all_current_projections_database_config(
+    mut database: DatabaseConfig,
+) -> DatabaseConfig {
+    database.max_connections = database
+        .max_connections
+        .max(ALL_CURRENT_PROJECTIONS_MIN_DATABASE_CONNECTIONS);
+    database
+}
+
+pub(crate) async fn run_worker(args: RunArgs) -> Result<()> {
+    let database = all_current_projections_database_config(args.database);
+    let pool = bigname_storage::connect(&database).await?;
+
+    info!(
+        service = "worker",
+        phase = bigname_domain::bootstrap_phase(),
+        execution_status = bigname_execution::bootstrap_status(),
+        poll_interval_secs = args.poll_interval_secs,
+        database_max_connections = database.max_connections,
+        automatic_projection_replay = true,
+        "worker booted"
+    );
+
+    tokio::select! {
+        () = run_automatic_current_projection_replay(pool, args.poll_interval_secs) => {}
+        signal = tokio::signal::ctrl_c() => {
+            signal.context("failed to listen for shutdown signal")?;
+        }
+    }
+
+    info!(service = "worker", "shutdown signal received");
+    Ok(())
+}
+
+pub(crate) async fn run_automatic_current_projection_replay(pool: PgPool, poll_interval_secs: u64) {
+    let poll_interval = Duration::from_secs(poll_interval_secs.max(1));
+    let mut replay_completed = false;
+
+    loop {
+        if !replay_completed {
+            match replay_all_current_projections_when_ready(&pool).await {
+                Ok(true) => replay_completed = true,
+                Ok(false) => {}
+                Err(error) => {
+                    warn!(
+                        service = "worker",
+                        replay = "all_current_projections",
+                        error = %format!("{error:#}"),
+                        "automatic all-current projection replay failed"
+                    );
+                }
+            }
+        }
+
+        sleep(poll_interval).await;
+    }
+}
+
+async fn replay_all_current_projections_when_ready(pool: &PgPool) -> Result<bool> {
+    let readiness = load_projection_replay_readiness(pool).await?;
+    if !readiness.is_ready() {
+        debug!(
+            service = "worker",
+            replay = "all_current_projections",
+            normalized_replay_cursor_count = readiness.normalized_replay_cursor_count,
+            incomplete_normalized_replay_cursor_count =
+                readiness.incomplete_normalized_replay_cursor_count,
+            failed_normalized_replay_cursor_count = readiness.failed_normalized_replay_cursor_count,
+            active_index_build_count = readiness.active_index_build_count,
+            missing_projection_index_count = readiness.missing_projection_index_count,
+            "automatic all-current projection replay is waiting for normalized replay readiness"
+        );
+        return Ok(false);
+    }
+
+    let Some(mut replay_lock) = try_acquire_replay_lock(pool).await? else {
+        debug!(
+            service = "worker",
+            replay = "all_current_projections",
+            "automatic all-current projection replay skipped because another worker holds the replay lock"
+        );
+        return Ok(false);
+    };
+
+    let readiness = load_projection_replay_readiness(pool).await?;
+    if !readiness.is_ready() {
+        release_replay_lock(&mut replay_lock).await?;
+        return Ok(false);
+    }
+
+    info!(
+        service = "worker",
+        replay = "all_current_projections",
+        normalized_replay_cursor_count = readiness.normalized_replay_cursor_count,
+        normalized_replay_max_target_block = readiness.normalized_replay_max_target_block,
+        "automatic all-current projection replay started"
+    );
+
+    let replay_result = replay::rebuild_all_current_projections(pool).await;
+    release_replay_lock(&mut replay_lock).await?;
+
+    let summary =
+        replay_result.context("failed to automatically replay all current projections")?;
+    info!(
+        service = "worker",
+        replay = "all_current_projections",
+        projection_order = ?summary.projection_order(),
+        projection_count = summary.steps.len(),
+        total_upserted_row_count = summary.total_upserted_row_count(),
+        total_deleted_row_count = summary.total_deleted_row_count(),
+        "automatic all-current projection replay completed"
+    );
+
+    Ok(true)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ProjectionReplayReadiness {
+    normalized_replay_cursor_count: i64,
+    incomplete_normalized_replay_cursor_count: i64,
+    failed_normalized_replay_cursor_count: i64,
+    active_index_build_count: i64,
+    missing_projection_index_count: i64,
+    normalized_replay_max_target_block: Option<i64>,
+}
+
+impl ProjectionReplayReadiness {
+    fn is_ready(&self) -> bool {
+        self.normalized_replay_cursor_count > 0
+            && self.incomplete_normalized_replay_cursor_count == 0
+            && self.failed_normalized_replay_cursor_count == 0
+            && self.active_index_build_count == 0
+            && self.missing_projection_index_count == 0
+    }
+}
+
+async fn load_projection_replay_readiness(pool: &PgPool) -> Result<ProjectionReplayReadiness> {
+    let cursor_status = sqlx::query_as::<_, (i64, i64, i64, Option<i64>)>(
+        r#"
+        SELECT
+            COUNT(*)::bigint AS cursor_count,
+            COUNT(*) FILTER (
+                WHERE next_block_number <= target_block_number
+            )::bigint AS incomplete_cursor_count,
+            COUNT(*) FILTER (
+                WHERE last_failure_reason IS NOT NULL
+            )::bigint AS failed_cursor_count,
+            MAX(target_block_number) AS max_target_block
+        FROM normalized_replay_cursors
+        WHERE cursor_kind = $1
+        "#,
+    )
+    .bind(CURSOR_KIND_RAW_FACT_NORMALIZED_EVENTS)
+    .fetch_one(pool)
+    .await
+    .context("failed to inspect normalized replay cursor readiness")?;
+
+    let active_index_build_count =
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::bigint FROM pg_stat_progress_create_index")
+            .fetch_one(pool)
+            .await
+            .context("failed to inspect active PostgreSQL index builds")?;
+
+    let missing_projection_index_count = missing_projection_index_count(pool).await?;
+
+    Ok(ProjectionReplayReadiness {
+        normalized_replay_cursor_count: cursor_status.0,
+        incomplete_normalized_replay_cursor_count: cursor_status.1,
+        failed_normalized_replay_cursor_count: cursor_status.2,
+        active_index_build_count,
+        missing_projection_index_count,
+        normalized_replay_max_target_block: cursor_status.3,
+    })
+}
+
+async fn missing_projection_index_count(pool: &PgPool) -> Result<i64> {
+    let required_indexes = DEFERRED_NORMALIZED_EVENT_INDEXES
+        .iter()
+        .map(|index| format!("('{index}')"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let query = format!(
+        "SELECT COUNT(*)::bigint \
+         FROM (VALUES {required_indexes}) AS required(index_name) \
+         WHERE to_regclass(required.index_name) IS NULL"
+    );
+
+    sqlx::query_scalar::<_, i64>(&query)
+        .fetch_one(pool)
+        .await
+        .context("failed to inspect deferred normalized-event projection indexes")
+}
+
+async fn try_acquire_replay_lock(pool: &PgPool) -> Result<Option<PoolConnection<Postgres>>> {
+    let mut connection = pool
+        .acquire()
+        .await
+        .context("failed to acquire all-current replay lock connection")?;
+    let acquired = sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_lock($1)")
+        .bind(ALL_CURRENT_PROJECTIONS_REPLAY_LOCK_KEY)
+        .fetch_one(&mut *connection)
+        .await
+        .context("failed to acquire all-current replay advisory lock")?;
+
+    Ok(acquired.then_some(connection))
+}
+
+async fn release_replay_lock(connection: &mut PoolConnection<Postgres>) -> Result<()> {
+    let released = sqlx::query_scalar::<_, bool>("SELECT pg_advisory_unlock($1)")
+        .bind(ALL_CURRENT_PROJECTIONS_REPLAY_LOCK_KEY)
+        .fetch_one(&mut **connection)
+        .await
+        .context("failed to release all-current replay advisory lock")?;
+    if !released {
+        warn!(
+            service = "worker",
+            replay = "all_current_projections",
+            "all-current projection replay advisory lock was already released"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ready_status() -> ProjectionReplayReadiness {
+        ProjectionReplayReadiness {
+            normalized_replay_cursor_count: 1,
+            incomplete_normalized_replay_cursor_count: 0,
+            failed_normalized_replay_cursor_count: 0,
+            active_index_build_count: 0,
+            missing_projection_index_count: 0,
+            normalized_replay_max_target_block: Some(42),
+        }
+    }
+
+    #[test]
+    fn all_current_projection_pool_size_raises_low_default() {
+        let database = all_current_projections_database_config(DatabaseConfig {
+            database_url: None,
+            max_connections: 10,
+        });
+
+        assert_eq!(database.max_connections, 64);
+    }
+
+    #[test]
+    fn all_current_projection_pool_size_preserves_higher_override() {
+        let database = all_current_projections_database_config(DatabaseConfig {
+            database_url: None,
+            max_connections: 96,
+        });
+
+        assert_eq!(database.max_connections, 96);
+    }
+
+    #[test]
+    fn projection_replay_waits_for_normalized_replay_cursor() {
+        let status = ProjectionReplayReadiness {
+            normalized_replay_cursor_count: 0,
+            ..ready_status()
+        };
+
+        assert!(!status.is_ready());
+    }
+
+    #[test]
+    fn projection_replay_waits_for_complete_normalized_replay() {
+        let status = ProjectionReplayReadiness {
+            incomplete_normalized_replay_cursor_count: 1,
+            ..ready_status()
+        };
+
+        assert!(!status.is_ready());
+    }
+
+    #[test]
+    fn projection_replay_waits_for_projection_indexes() {
+        let status = ProjectionReplayReadiness {
+            active_index_build_count: 1,
+            ..ready_status()
+        };
+        assert!(!status.is_ready());
+
+        let status = ProjectionReplayReadiness {
+            missing_projection_index_count: 1,
+            ..ready_status()
+        };
+        assert!(!status.is_ready());
+    }
+
+    #[test]
+    fn projection_replay_runs_when_normalized_replay_and_indexes_are_ready() {
+        assert!(ready_status().is_ready());
+    }
+}
