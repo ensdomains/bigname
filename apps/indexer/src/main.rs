@@ -157,10 +157,13 @@ async fn run(args: RunArgs) -> Result<()> {
         );
         sync_adapter_owned_raw_log_state(&pool, &manifest_runtime_state.watched_chain_plan).await?;
     }
-    let live_poll_adapter_sync_enabled = adapter_sync_mode != BackfillAdapterSyncMode::RawOnly;
-    let broad_runtime_refresh_enabled = adapter_sync_mode == BackfillAdapterSyncMode::Inline;
     let normalized_replay_catchup_enabled = args.normalized_replay_catchup_enabled
         && adapter_sync_mode == BackfillAdapterSyncMode::Auto;
+    let live_poll_adapter_sync_enabled = live_poll_adapter_sync_enabled_for_run_mode(
+        adapter_sync_mode,
+        normalized_replay_catchup_enabled,
+    );
+    let broad_runtime_refresh_enabled = adapter_sync_mode == BackfillAdapterSyncMode::Inline;
     if normalized_replay_catchup_enabled {
         let catchup_config = NormalizedReplayCatchupConfig::new(
             deployment_profile_from_manifest_root(&args.manifests_root),
@@ -290,6 +293,40 @@ async fn run(args: RunArgs) -> Result<()> {
         header_audit_mode,
     )
     .await
+}
+
+fn live_poll_adapter_sync_enabled_for_run_mode(
+    adapter_sync_mode: BackfillAdapterSyncMode,
+    normalized_replay_catchup_enabled: bool,
+) -> bool {
+    adapter_sync_mode != BackfillAdapterSyncMode::RawOnly
+        && !(adapter_sync_mode == BackfillAdapterSyncMode::Auto
+            && normalized_replay_catchup_enabled)
+}
+
+#[cfg(test)]
+mod run_mode_tests {
+    use super::*;
+
+    #[test]
+    fn auto_normalized_replay_catchup_owns_live_adapter_sync() {
+        assert!(!live_poll_adapter_sync_enabled_for_run_mode(
+            BackfillAdapterSyncMode::Auto,
+            true
+        ));
+        assert!(live_poll_adapter_sync_enabled_for_run_mode(
+            BackfillAdapterSyncMode::Auto,
+            false
+        ));
+        assert!(live_poll_adapter_sync_enabled_for_run_mode(
+            BackfillAdapterSyncMode::Inline,
+            true
+        ));
+        assert!(!live_poll_adapter_sync_enabled_for_run_mode(
+            BackfillAdapterSyncMode::RawOnly,
+            false
+        ));
+    }
 }
 
 async fn run_backfill(args: BackfillArgs) -> Result<()> {
