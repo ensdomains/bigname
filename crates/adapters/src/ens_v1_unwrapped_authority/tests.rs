@@ -3026,6 +3026,174 @@ async fn block_hash_replay_preserves_same_transaction_registry_resolver_before_r
 }
 
 #[tokio::test]
+async fn block_hash_replay_preloads_latent_registry_resolver_before_same_tx_registration()
+-> Result<()> {
+    let _permit = crate::acquire_test_db_permit().await;
+    let database = TestDatabase::new().await?;
+    let registrar_address = "0x00000000000000000000000000000000000000aa";
+    let registry_address = "0x00000000000000000000000000000000000000bb";
+    let old_resolver = "0x00000000000000000000000000000000000000cc";
+    let new_resolver = "0x00000000000000000000000000000000000000dd";
+    let registry_owner = "0x00000000000000000000000000000000000000ee";
+    let registrant = "0x0000000000000000000000000000000000000001";
+    let resolver_block_hash = "0x7979797979797979797979797979797979797979797979797979797979797979";
+    let selected_block_hash = "0x7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a";
+    let resolver_tx_hash = "0xtx79797979797979797979797979797979797979797979797979797979797979";
+    let selected_tx_hash = "0xtx7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a";
+
+    insert_active_contract_fixture(
+        database.pool(),
+        SOURCE_FAMILY_ENS_V1_REGISTRAR_L1,
+        "registrar",
+        registrar_address,
+        Some("registrar"),
+        "manifests/ens/ens_v1_registrar_l1/v1.toml",
+    )
+    .await?;
+    insert_active_contract_fixture(
+        database.pool(),
+        SOURCE_FAMILY_ENS_V1_REGISTRY_L1,
+        "registry",
+        registry_address,
+        Some("registry"),
+        "manifests/ens/ens_v1_registry_l1/v3.toml",
+    )
+    .await?;
+
+    let alice = observe_registrar_eth_name_with_version("alice", ENS_NORMALIZER_VERSION)?;
+    upsert_raw_blocks(
+        database.pool(),
+        &[
+            raw_block(
+                resolver_block_hash,
+                Some("0x7878787878787878787878787878787878787878787878787878787878787878"),
+                79,
+                1_700_000_079,
+            ),
+            raw_block(
+                selected_block_hash,
+                Some(resolver_block_hash),
+                80,
+                1_700_000_080,
+            ),
+        ],
+    )
+    .await?;
+    upsert_raw_logs(
+        database.pool(),
+        &[
+            RawLog {
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: resolver_block_hash.to_owned(),
+                block_number: 79,
+                transaction_hash: resolver_tx_hash.to_owned(),
+                transaction_index: 0,
+                log_index: 0,
+                emitting_address: registry_address.to_owned(),
+                topics: vec![new_resolver_topic0(), alice.namehash.clone()],
+                data: encode_registry_new_resolver_log_data(old_resolver),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            RawLog {
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: selected_block_hash.to_owned(),
+                block_number: 80,
+                transaction_hash: selected_tx_hash.to_owned(),
+                transaction_index: 0,
+                log_index: 0,
+                emitting_address: registry_address.to_owned(),
+                topics: vec![new_owner_topic0(), eth_node(), alice.labelhashes[0].clone()],
+                data: abi_word_address(registry_owner).to_vec(),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            RawLog {
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: selected_block_hash.to_owned(),
+                block_number: 80,
+                transaction_hash: selected_tx_hash.to_owned(),
+                transaction_index: 0,
+                log_index: 1,
+                emitting_address: registry_address.to_owned(),
+                topics: vec![new_resolver_topic0(), alice.namehash.clone()],
+                data: encode_registry_new_resolver_log_data(new_resolver),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            RawLog {
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: selected_block_hash.to_owned(),
+                block_number: 80,
+                transaction_hash: selected_tx_hash.to_owned(),
+                transaction_index: 0,
+                log_index: 2,
+                emitting_address: registrar_address.to_owned(),
+                topics: vec![
+                    name_registered_topic0(),
+                    alice.labelhashes[0].clone(),
+                    hex_string(&abi_word_address(registrant)),
+                ],
+                data: encode_registrar_name_registered_log_data("alice", 1_800_000_000),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+        ],
+    )
+    .await?;
+
+    let first = EnsV1UnwrappedAuthoritySyncSummary::sync_for_block_hashes(
+        database.pool(),
+        "ethereum-mainnet",
+        &[selected_block_hash.to_owned()],
+    )
+    .await?;
+    assert_eq!(first.scanned_log_count, 3);
+    assert_eq!(first.matched_log_count, 3);
+
+    let registry_resource_id = sqlx::query_scalar::<_, Uuid>(
+        "SELECT resource_id
+         FROM resources
+         WHERE provenance->>'authority_kind' = 'registry_only'",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    let registration_resource_id = sqlx::query_scalar::<_, Uuid>(
+        "SELECT resource_id
+         FROM normalized_events
+         WHERE logical_name_id = 'ens:alice.eth'
+           AND event_kind = 'RegistrationGranted'
+           AND block_number = 80",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    let (resolver_resource_id, resolver_before_state) = sqlx::query_as::<_, (Uuid, Value)>(
+        "SELECT resource_id, before_state
+         FROM normalized_events
+         WHERE logical_name_id = 'ens:alice.eth'
+           AND event_kind = 'ResolverChanged'
+           AND block_number = 80
+           AND log_index = 1",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(resolver_resource_id, registry_resource_id);
+    assert_ne!(resolver_resource_id, registration_resource_id);
+    assert_eq!(
+        resolver_before_state["resolver"].as_str(),
+        Some(old_resolver)
+    );
+
+    let replayed = EnsV1UnwrappedAuthoritySyncSummary::sync_for_block_hashes(
+        database.pool(),
+        "ethereum-mainnet",
+        &[selected_block_hash.to_owned()],
+    )
+    .await?;
+    assert_eq!(replayed.scanned_log_count, 3);
+    assert_eq!(replayed.matched_log_count, 3);
+    assert_eq!(replayed.total_normalized_event_inserted_count, 0);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn sync_ens_v1_unwrapped_authority_emits_resolver_changed_idempotently() -> Result<()> {
     let _permit = crate::acquire_test_db_permit().await;
     let database = TestDatabase::new().await?;
