@@ -26,6 +26,7 @@ pub(crate) enum Command {
     NameCurrent(NameCurrentArgs),
     PermissionsCurrent(PermissionsCurrentArgs),
     PrimaryNamesCurrent(PrimaryNamesCurrentArgs),
+    RawFacts(RawFactsArgs),
     Replay(ReplayArgs),
     RecordInventoryCurrent(RecordInventoryCurrentArgs),
     ResolverCurrent(ResolverCurrentArgs),
@@ -92,6 +93,12 @@ pub(crate) struct PrimaryNamesCurrentArgs {
 }
 
 #[derive(Args, Debug)]
+pub(crate) struct RawFactsArgs {
+    #[command(subcommand)]
+    pub(crate) command: RawFactsCommand,
+}
+
+#[derive(Args, Debug)]
 pub(crate) struct ReplayArgs {
     #[command(subcommand)]
     pub(crate) command: ReplayCommand,
@@ -148,6 +155,11 @@ pub(crate) enum PermissionsCurrentCommand {
 #[derive(Subcommand, Debug)]
 pub(crate) enum PrimaryNamesCurrentCommand {
     Rebuild(PrimaryNamesCurrentRebuildArgs),
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum RawFactsCommand {
+    CompactLogStaging(CompactLogStagingArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -304,6 +316,16 @@ pub(crate) struct PrimaryNamesCurrentRebuildArgs {
 }
 
 #[derive(Args, Debug)]
+pub(crate) struct CompactLogStagingArgs {
+    #[command(flatten)]
+    pub(crate) database: DatabaseConfig,
+    #[arg(long)]
+    pub(crate) dry_run: bool,
+    #[arg(long)]
+    pub(crate) json: bool,
+}
+
+#[derive(Args, Debug)]
 pub(crate) struct AllCurrentProjectionsArgs {
     #[command(flatten)]
     pub(crate) database: DatabaseConfig,
@@ -336,6 +358,12 @@ impl Cli {
             Command::Inspect(_)
                 | Command::ManifestDrift(ManifestDriftArgs {
                     command: ManifestDriftCommand::Audit(ManifestDriftAuditArgs { json: true, .. })
+                })
+                | Command::RawFacts(RawFactsArgs {
+                    command: RawFactsCommand::CompactLogStaging(CompactLogStagingArgs {
+                        json: true,
+                        ..
+                    })
                 })
                 | Command::Replay(ReplayArgs {
                     command: ReplayCommand::AllCurrentProjections(AllCurrentProjectionsArgs {

@@ -407,7 +407,7 @@ Use this object for `declared_state.bindings.items[*]` and `declared_state.alias
 - `count`
 - `items`
 
-Use this object for supported `declared_state.bindings` and `declared_state.aliases` on `GET /v1/resolvers/{chain_id}/{resolver_address}`. `count` equals `items.length`. `status=supported` with `count=0` and `items=[]` is valid. `declared_state.aliases` reuses this exact shape but narrows `items` to the `binding_kind=resolver_alias_path` subset of the same current resolver-linked binding rows.
+Use this object for supported enumerable `declared_state.bindings` and `declared_state.aliases` on `GET /v1/resolvers/{chain_id}/{resolver_address}`. `count` equals `items.length`. `status=supported` with `count=0` and `items=[]` is valid. `declared_state.aliases` reuses this exact shape but narrows `items` to the `binding_kind=resolver_alias_path` subset of the same current resolver-linked binding rows.
 
 ### `ResultStatus`
 
@@ -731,7 +731,10 @@ Each item includes:
 Rules:
 
 - `resource_id` is the truth anchor; surface names or resolver addresses may appear only as explanatory context
+- `effective_powers` is the server-computed, post-scope-modifier result. Clients must not apply NameWrapper fuse masks themselves or treat raw ownership / grant evidence as an unmasked permission.
 - resolver-scoped permissions remain rows in this same collection with resolver-specific scope detail; they are not a separate truth system
+- For ENSv1 wrapper-backed resources, current NameWrapper fuses are folded into `effective_powers`: a burned fuse removes any public power that depends on the prohibited wrapper operation, and a subject/scope row whose powers are all masked is omitted from the collection. Upstream exposes wrapper fuse values in `NameWrapped` and `FusesSet`, and gates wrapper operations such as resolver-target mutation, transfer, unwrap, subname creation, TTL mutation, fuse burning, and approval through those fuse bits (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L31 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L37 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L421 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L427 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L647 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L666 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L669 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L679 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L723 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L827 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1023 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L132 @ ens_v1@91c966f).
+- A wrapper-backed permission answer may be `full` only when the current fuse modifier for the selected resource snapshot has been applied. If the projection cannot prove the current fuse state, the API must fail closed rather than return unmasked powers with full coverage.
 - `GET /v1/addresses/{address}/names?include=role_summary` is the per-resource summary form of this same collection: it groups current rows by `subject`, retains each grouped subject's `scope` plus `effective_powers`, and leaves row-granular lineage on this dedicated route
 - `cursor` and `page_size` page over the frozen `subject_scope_asc` order only; they do not alter row shape, supported filters, or route-level coverage meaning
 - this route is declared-state only and `verified_state` remains `null`
@@ -825,7 +828,7 @@ This route ships as the resolver-overview read.
 `data` identifies the resolver target. `declared_state` groups:
 
 - current bindings: `ResolverOverviewBindingSummary | UnsupportedSummary`
-- alias mappings: `ResolverOverviewBindingSummary`
+- alias mappings: `ResolverOverviewBindingSummary | UnsupportedSummary`
 - resolver-scoped permissions
 - role-holder summary
 - resolver event summary
@@ -837,10 +840,11 @@ Supported query parameters:
 Rules:
 
 - resolver overview is declared-state only and `verified_state` remains `null`
-- supported `declared_state.bindings` includes every current resolver-linked binding whose current resolver target matches the route target, regardless of `binding_kind`
-- supported `declared_state.aliases` ships in the initial resolver-overview contract and reuses the same `{status, count, items}` summary envelope as `bindings`, but `items` is only the current `binding_kind=resolver_alias_path` subset of those same resolver-linked bindings
+- supported enumerable `declared_state.bindings` includes every current resolver-linked binding whose current resolver target matches the route target, regardless of `binding_kind`
+- supported enumerable `declared_state.aliases` ships in the initial resolver-overview contract and reuses the same `{status, count, items}` summary envelope as `bindings`, but `items` is only the current `binding_kind=resolver_alias_path` subset of those same resolver-linked bindings
 - `declared_state.aliases` is sourced from current resolver-linked bindings only; it does not enumerate historical alias rows or create a second alias ledger
-- when no current alias binding exists for the target resolver, `declared_state.aliases` returns `{status:"supported", count:0, items:[]}`
+- for enumerable resolver targets, when no current alias binding exists for the target resolver, `declared_state.aliases` returns `{status:"supported", count:0, items:[]}`
+- for ENSv1 PublicResolver-generation targets admitted through the supported resolver-profile gate, `declared_state.bindings`, `declared_state.aliases`, and resolver event fan-in summaries return `UnsupportedSummary` with `unsupported_reason="resolver_binding_enumeration_not_projected"` rather than enumerating all names currently pointing at that shared resolver address; exact-name resolver state remains available on exact-name and resolution routes
 - for ENSv1, supported resolver overview over a dynamically discovered target requires that target's resolver-profile state be `supported` for the requested summary family on an admitted ENS Labs PublicResolver-generation profile; a watched resolver with `pending` or `unsupported` profile state, or an admitted legacy generation without the requested summary family, returns explicit `UnsupportedSummary` sections rather than zero-count latest-PublicResolver summaries (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L20 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L31 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L131 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L150 @ ens_v1@91c966f)
 - for Basenames, supported resolver overview over a dynamically discovered Base-side target requires that target's resolver-profile state be `L2Resolver`-compatible and `supported` for the requested summary family; a watched resolver with `pending` or `unsupported` profile state returns explicit `UnsupportedSummary` sections rather than zero-count supported summaries, and the ENSv1 PublicResolver-generation profile gate, Ethereum Mainnet `L1Resolver` transport, and offchain gateways do not satisfy this Base-side resolver-profile gate (upstream: .refs/basenames/src/L2/L2Resolver.sol:L22 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/L2Resolver.sol:L182 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/L2Resolver.sol:L193 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/L2Resolver.sol:L209 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/L2Resolver.sol:L225 @ basenames@1809bbc)
 - counts for nodes, aliases, and role holders live inside those declared summaries rather than as a separate truth system
@@ -1132,6 +1136,7 @@ Rules:
 - `claimed_primary_name` and `verified_primary_name` always include `status` when their containing section is populated
 - the declared `claimed_primary_name` contract stays exact-tuple and claim-local: `status` is always present, the admitted claimed-local fields beyond bare status are exact-tuple declared `claimed_primary_name.name`, exact-tuple declared `claimed_primary_name.provenance`, and `claimed_primary_name.raw_claim_name` for exact-tuple `status=invalid_name`
 - when `claimed_primary_name.status=invalid_name` for the exact requested `(address, namespace, coin_type)` tuple, the route may publish `claimed_primary_name.raw_claim_name`; when present, it is copied verbatim from `primary_names_current.raw_claim_name` for that same tuple and must not be synthesized from normalized name identity, resolver-backed name data, verification-derived identity, or a different tuple's stored claim text
+- blank or whitespace-only raw claim names are declared `not_found`; `invalid_name` is limited to nonblank raw claim names that fail normalization
 - for every other declared status, and for every tuple other than the exact requested `(address, namespace, coin_type)`, the route does not publish `claimed_primary_name.raw_claim_name`
 - `claimed_primary_name.provenance` is the first public claim-local section provenance on this route: it reuses `Provenance` as exact-tuple declared provenance from the requested `primary_names_current(address, coin_type, namespace)` row, stays limited to that row's claim-side inputs for the requested tuple, and must not be synthesized from fallback claim sources, resolver-backed name data, verification-derived identity, or a different tuple
 - `claimed_primary_name.provenance` must strip any `verified_primary_name_lookup` / `verified_primary_name_invalidation` hook material before publication and must omit `execution_trace_id`

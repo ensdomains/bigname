@@ -10,6 +10,7 @@ pub use reads::{
 };
 pub use sources::{
     load_canonical_declared_child_sources, load_canonical_ens_v1_declared_child_sources,
+    stream_canonical_declared_child_sources,
 };
 pub use types::{
     ChildrenCurrentKeysetCursor, ChildrenCurrentPage, ChildrenCurrentRow, ChildrenCurrentSummary,

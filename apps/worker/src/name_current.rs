@@ -10,7 +10,7 @@ mod wildcard;
 
 use anyhow::Result;
 use bigname_storage::{
-    NameCurrentRow, delete_name_current, replace_name_current_rows, upsert_name_current_rows,
+    NameCurrentReplacement, NameCurrentRow, delete_name_current, upsert_name_current_rows,
 };
 use coverage::build_exact_name_coverage;
 use json::{build_declared_summary, build_provenance};
@@ -76,6 +76,7 @@ const EVENT_KIND_RECORD_VERSION_CHANGED: &str = "RecordVersionChanged";
 const RECORD_INVENTORY_UNSUPPORTED_REASON: &str =
     "record_inventory remains unsupported in the ENSv1 name_current rebuild";
 const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
+const NAME_CURRENT_REBUILD_STAGE_BATCH_SIZE: usize = 2_000;
 const RELEVANT_EVENT_KINDS: &[&str] = &[
     "AuthorityEpochChanged",
     "AuthorityTransferred",
@@ -120,11 +121,8 @@ pub async fn rebuild_name_current(
 async fn rebuild_all_name_current(pool: &PgPool) -> Result<NameCurrentRebuildSummary> {
     let names = load_canonical_name_surfaces(pool).await?;
     let requested_name_count = names.len();
-    let logical_name_ids = names
-        .iter()
-        .map(|name| name.logical_name_id.clone())
-        .collect::<Vec<_>>();
-    let mut rows = Vec::with_capacity(requested_name_count);
+    let mut replacement = NameCurrentReplacement::begin(pool).await?;
+    let mut rows = Vec::with_capacity(NAME_CURRENT_REBUILD_STAGE_BATCH_SIZE);
     let mut completed_name_count = 0usize;
     let mut names = names.into_iter();
     let mut tasks = JoinSet::new();
@@ -139,11 +137,16 @@ async fn rebuild_all_name_current(pool: &PgPool) -> Result<NameCurrentRebuildSum
     while let Some(result) = tasks.join_next().await {
         rows.push(result??);
         completed_name_count += 1;
+        if rows.len() >= NAME_CURRENT_REBUILD_STAGE_BATCH_SIZE {
+            replacement.stage_rows(&rows).await?;
+            rows.clear();
+        }
         if completed_name_count % 5_000 == 0 {
             tracing::info!(
                 projection = "name_current",
                 requested_name_count,
                 completed_name_count,
+                staged_row_count = replacement.staged_row_count(),
                 "name_current rebuild rows built"
             );
         }
@@ -152,9 +155,11 @@ async fn rebuild_all_name_current(pool: &PgPool) -> Result<NameCurrentRebuildSum
         }
     }
 
-    rows.sort_by(|left, right| left.logical_name_id.cmp(&right.logical_name_id));
-    let (upserted_row_count, deleted_row_count) =
-        replace_name_current_rows(pool, &rows, &logical_name_ids).await?;
+    if !rows.is_empty() {
+        replacement.stage_rows(&rows).await?;
+        rows.clear();
+    }
+    let (upserted_row_count, deleted_row_count) = replacement.publish().await?;
     tracing::info!(
         projection = "name_current",
         requested_name_count,

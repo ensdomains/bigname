@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
-use sqlx::PgPool;
+use futures_util::{Stream, StreamExt};
+use sqlx::{PgPool, Postgres, postgres::PgArguments, query::Query};
 
 use super::{
     BASENAMES_BASE_SUBREGISTRY_SOURCE_FAMILY, ENSV1_SUBREGISTRY_SOURCE_FAMILY,
@@ -14,7 +15,34 @@ pub async fn load_canonical_declared_child_sources(
     pool: &PgPool,
     parent_logical_name_id: Option<&str>,
 ) -> Result<Vec<DeclaredChildEventSource>> {
-    let rows = sqlx::query(
+    let rows = canonical_declared_child_sources_query(parent_logical_name_id)
+        .fetch_all(pool)
+        .await
+        .with_context(|| declared_child_sources_context(parent_logical_name_id))?;
+
+    rows.into_iter()
+        .map(decode_declared_child_event_source)
+        .collect()
+}
+
+/// Stream the latest canonical declared-child subregistry event per child surface.
+pub fn stream_canonical_declared_child_sources<'a>(
+    pool: &'a PgPool,
+    parent_logical_name_id: Option<&'a str>,
+) -> impl Stream<Item = Result<DeclaredChildEventSource>> + 'a {
+    let context = declared_child_sources_context(parent_logical_name_id);
+    canonical_declared_child_sources_query(parent_logical_name_id)
+        .fetch(pool)
+        .map(move |row| {
+            row.with_context(|| context.clone())
+                .and_then(decode_declared_child_event_source)
+        })
+}
+
+fn canonical_declared_child_sources_query<'a>(
+    parent_logical_name_id: Option<&'a str>,
+) -> Query<'a, Postgres, PgArguments> {
+    sqlx::query(
         r#"
         WITH ranked_v1_sources AS (
             SELECT
@@ -439,18 +467,15 @@ pub async fn load_canonical_declared_child_sources(
     .bind(REGISTRATION_GRANTED_EVENT_KIND)
     .bind(REGISTRATION_RENEWED_EVENT_KIND)
     .bind(REGISTRATION_RELEASED_EVENT_KIND)
-    .fetch_all(pool)
-    .await
-    .with_context(|| match parent_logical_name_id {
+}
+
+fn declared_child_sources_context(parent_logical_name_id: Option<&str>) -> String {
+    match parent_logical_name_id {
         Some(parent_logical_name_id) => format!(
             "failed to load canonical declared child sources for parent_logical_name_id {parent_logical_name_id}"
         ),
         None => "failed to load canonical declared child sources".to_owned(),
-    })?;
-
-    rows.into_iter()
-        .map(decode_declared_child_event_source)
-        .collect()
+    }
 }
 
 /// Back-compat alias for the generalized declared-child source loader.

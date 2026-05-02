@@ -1,11 +1,62 @@
 use anyhow::{Context, Result};
-use sqlx::{PgPool, Postgres, QueryBuilder};
+use sqlx::{PgPool, Postgres, QueryBuilder, Transaction};
 
 use crate::SurfaceBindingKind;
 
 use super::row::{NameCurrentRow, decode_name_current_row, validate_name_current_row};
 
 const NAME_CURRENT_REPLACEMENT_BATCH_SIZE: usize = 2_000;
+
+/// Transaction-scoped staging area for atomically replacing `name_current`.
+///
+/// Callers can stage bounded batches as they rebuild rows, then publish the staged replacement in
+/// one transaction. If the caller is dropped before `publish`, Postgres rolls back the temp table
+/// and the public projection is left untouched.
+pub struct NameCurrentReplacement {
+    transaction: Transaction<'static, Postgres>,
+    staged_row_count: usize,
+}
+
+impl NameCurrentReplacement {
+    pub async fn begin(pool: &PgPool) -> Result<Self> {
+        let mut transaction = pool
+            .begin()
+            .await
+            .context("failed to open transaction for name_current replacement")?;
+        create_name_current_replacement_table(&mut transaction).await?;
+
+        Ok(Self {
+            transaction,
+            staged_row_count: 0,
+        })
+    }
+
+    pub async fn stage_rows(&mut self, rows: &[NameCurrentRow]) -> Result<()> {
+        for chunk in rows.chunks(NAME_CURRENT_REPLACEMENT_BATCH_SIZE) {
+            insert_name_current_replacement_chunk(&mut self.transaction, chunk).await?;
+        }
+        self.staged_row_count += rows.len();
+        Ok(())
+    }
+
+    pub fn staged_row_count(&self) -> usize {
+        self.staged_row_count
+    }
+
+    pub async fn publish(mut self) -> Result<(usize, u64)> {
+        index_name_current_replacement_rows(&mut self.transaction).await?;
+        let upserted_row_count =
+            publish_name_current_replacement_rows(&mut self.transaction).await?;
+        let deleted_row_count =
+            delete_stale_name_current_rows_from_replacement(&mut self.transaction).await?;
+        self.transaction
+            .commit()
+            .await
+            .context("failed to commit name_current replacement")?;
+
+        Ok((upserted_row_count, deleted_row_count))
+    }
+}
 
 /// Insert or replace projection rows for exact-name current reads.
 pub async fn upsert_name_current_rows(
@@ -35,25 +86,13 @@ pub async fn replace_name_current_rows(
     rows: &[NameCurrentRow],
     _logical_name_ids: &[String],
 ) -> Result<(usize, u64)> {
-    let mut transaction = pool
-        .begin()
-        .await
-        .context("failed to open transaction for name_current replacement")?;
-    stage_name_current_replacement_rows(&mut transaction, rows).await?;
-    let upserted_row_count = publish_name_current_replacement_rows(&mut transaction).await?;
-    let deleted_row_count =
-        delete_stale_name_current_rows_from_replacement(&mut transaction).await?;
-    transaction
-        .commit()
-        .await
-        .context("failed to commit name_current replacement")?;
-
-    Ok((upserted_row_count, deleted_row_count))
+    let mut replacement = NameCurrentReplacement::begin(pool).await?;
+    replacement.stage_rows(rows).await?;
+    replacement.publish().await
 }
 
-async fn stage_name_current_replacement_rows(
+async fn create_name_current_replacement_table(
     executor: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    rows: &[NameCurrentRow],
 ) -> Result<()> {
     sqlx::query(
         r#"
@@ -66,10 +105,12 @@ async fn stage_name_current_replacement_rows(
     .await
     .context("failed to create temporary name_current replacement table")?;
 
-    for chunk in rows.chunks(NAME_CURRENT_REPLACEMENT_BATCH_SIZE) {
-        insert_name_current_replacement_chunk(executor, chunk).await?;
-    }
+    Ok(())
+}
 
+async fn index_name_current_replacement_rows(
+    executor: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<()> {
     sqlx::query(
         "CREATE INDEX name_current_replacement_logical_name_id_idx
          ON name_current_replacement (logical_name_id)",

@@ -16,6 +16,7 @@ use super::{
 #[derive(Clone, Debug)]
 pub(super) struct ResolverProfileGate {
     admissions: BTreeMap<(String, String, String, String), String>,
+    binding_enumeration_skipped_targets: BTreeSet<(String, String)>,
 }
 
 impl ResolverProfileGate {
@@ -32,17 +33,23 @@ impl ResolverProfileGate {
                 .context("failed to load Basenames L2Resolver profile admissions")?,
         );
 
+        let mut binding_enumeration_skipped_targets = BTreeSet::new();
         let admissions = admissions
             .into_iter()
             .filter(|admission| {
                 resolver_profile_admitted(&admission.source_family, &admission.profile)
             })
             .map(|admission| {
+                let normalized_address = normalize_resolver_address(&admission.address);
+                if admission.source_family == SOURCE_FAMILY_ENS_V1_RESOLVER_L1 {
+                    binding_enumeration_skipped_targets
+                        .insert((admission.chain.clone(), normalized_address.clone()));
+                }
                 (
                     (
                         admission.chain,
                         admission.source_family,
-                        normalize_resolver_address(&admission.address),
+                        normalized_address,
                         admission.fact_family,
                     ),
                     admission.status,
@@ -50,7 +57,10 @@ impl ResolverProfileGate {
             })
             .collect();
 
-        Ok(Self { admissions })
+        Ok(Self {
+            admissions,
+            binding_enumeration_skipped_targets,
+        })
     }
 
     pub(super) fn target_status_for_bindings(
@@ -61,6 +71,19 @@ impl ResolverProfileGate {
         resolver_profile_source_family_for_bindings(bindings)
             .map(|source_family| self.target_status(target, source_family))
             .unwrap_or(RESOLVER_PROFILE_STATUS_SUPPORTED)
+    }
+
+    pub(super) fn target_status_for_source_family(
+        &self,
+        target: &ResolverTarget,
+        source_family: &str,
+    ) -> &str {
+        self.target_status(target, source_family)
+    }
+
+    pub(super) fn skips_binding_enumeration(&self, target: &ResolverTarget) -> bool {
+        self.binding_enumeration_skipped_targets
+            .contains(&(target.chain_id.clone(), target.resolver_address.clone()))
     }
 
     fn target_status(&self, target: &ResolverTarget, source_family: &str) -> &str {

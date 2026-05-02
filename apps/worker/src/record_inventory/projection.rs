@@ -2,8 +2,10 @@ use anyhow::{Context, Result};
 use bigname_storage::{
     RecordInventoryCurrentRow, clear_record_inventory_current, upsert_record_inventory_current_rows,
 };
+use futures_util::{TryStreamExt, pin_mut};
 use serde_json::{Value, json};
 use sqlx::{PgPool, types::time::OffsetDateTime};
+use tokio::task::JoinSet;
 use uuid::Uuid;
 
 use super::{
@@ -17,10 +19,13 @@ use super::{
         build_last_change, build_provenance, build_selectors, build_unsupported_families,
         gap_value, resolver_family_status_value,
     },
-    loading::{load_all_relevant_events, load_relevant_events},
+    loading::{load_relevant_events, stream_target_resource_ids},
     profile::{ResolverProfileGate, ResolverRecordFamilyStatuses, resolver_local_source_family},
     types::{RecordInventoryCurrentRebuildSummary, RelevantEvent},
 };
+
+const RECORD_INVENTORY_CURRENT_REBUILD_BATCH_SIZE: usize = 500;
+const RECORD_INVENTORY_CURRENT_REBUILD_CONCURRENCY: usize = 8;
 
 pub(super) async fn rebuild_record_inventory_current(
     pool: &PgPool,
@@ -33,36 +38,85 @@ pub(super) async fn rebuild_record_inventory_current(
 }
 
 async fn rebuild_all_resources(pool: &PgPool) -> Result<RecordInventoryCurrentRebuildSummary> {
-    let events = load_all_relevant_events(pool).await?;
-    let profile_gate = ResolverProfileGate::load_for_events(pool, &events).await?;
+    let deleted_row_count = clear_record_inventory_current(pool).await?;
+    let mut rows = Vec::with_capacity(RECORD_INVENTORY_CURRENT_REBUILD_BATCH_SIZE);
+    let mut requested_resource_count = 0usize;
+    let mut completed_resource_count = 0usize;
+    let mut upserted_row_count = 0usize;
 
-    let mut rows = Vec::new();
-    let mut requested_resource_count = 0;
-    let mut index = 0;
-    while index < events.len() {
-        let resource_id = events[index].resource_id;
-        let start = index;
-        while index < events.len() && events[index].resource_id == resource_id {
-            index += 1;
-        }
+    let resource_ids = stream_target_resource_ids(pool);
+    pin_mut!(resource_ids);
+    let mut tasks = JoinSet::new();
+
+    while tasks.len() < RECORD_INVENTORY_CURRENT_REBUILD_CONCURRENCY {
+        let Some(resource_id) = resource_ids.try_next().await? else {
+            break;
+        };
         requested_resource_count += 1;
+        spawn_record_inventory_rebuild_task(&mut tasks, pool, resource_id);
+    }
 
-        if let Some(row) =
-            build_row_from_events(pool, &profile_gate, resource_id, &events[start..index]).await?
-        {
+    while let Some(result) = tasks.join_next().await {
+        completed_resource_count += 1;
+        if let Some(row) = result?? {
             rows.push(row);
+        }
+
+        if rows.len() >= RECORD_INVENTORY_CURRENT_REBUILD_BATCH_SIZE {
+            upserted_row_count += upsert_record_inventory_current_rows(pool, &rows)
+                .await?
+                .len();
+            rows.clear();
+        }
+
+        if completed_resource_count % 5_000 == 0 {
+            tracing::info!(
+                projection = "record_inventory_current",
+                queued_resource_count = requested_resource_count,
+                completed_resource_count,
+                upserted_row_count,
+                "record_inventory_current rebuild resources processed"
+            );
+        }
+
+        while tasks.len() < RECORD_INVENTORY_CURRENT_REBUILD_CONCURRENCY {
+            let Some(resource_id) = resource_ids.try_next().await? else {
+                break;
+            };
+            requested_resource_count += 1;
+            spawn_record_inventory_rebuild_task(&mut tasks, pool, resource_id);
         }
     }
 
-    let upserted_row_count = upsert_record_inventory_current_rows(pool, &rows)
-        .await?
-        .len();
-    let deleted_row_count = delete_stale_record_inventory_current_rows(pool, &rows).await?;
+    if !rows.is_empty() {
+        upserted_row_count += upsert_record_inventory_current_rows(pool, &rows)
+            .await?
+            .len();
+    }
+
     Ok(RecordInventoryCurrentRebuildSummary {
         requested_resource_count,
         upserted_row_count,
         deleted_row_count,
     })
+}
+
+fn spawn_record_inventory_rebuild_task(
+    tasks: &mut JoinSet<Result<Option<RecordInventoryCurrentRow>>>,
+    pool: &PgPool,
+    resource_id: Uuid,
+) {
+    let pool = pool.clone();
+    tasks.spawn(async move { build_row_for_resource(&pool, resource_id).await });
+}
+
+async fn build_row_for_resource(
+    pool: &PgPool,
+    resource_id: Uuid,
+) -> Result<Option<RecordInventoryCurrentRow>> {
+    let events = load_relevant_events(pool, resource_id).await?;
+    let profile_gate = ResolverProfileGate::load_for_events(pool, &events).await?;
+    build_row_from_events(pool, &profile_gate, resource_id, &events).await
 }
 
 async fn rebuild_one_resource(
@@ -121,45 +175,6 @@ async fn delete_record_inventory_rows_for_resource(
     .with_context(|| {
         format!("failed to delete record_inventory_current rows for resource_id {resource_id}")
     })
-    .map(|result| result.rows_affected())
-}
-
-async fn delete_stale_record_inventory_current_rows(
-    pool: &PgPool,
-    rows: &[RecordInventoryCurrentRow],
-) -> Result<u64> {
-    if rows.is_empty() {
-        return clear_record_inventory_current(pool).await;
-    }
-
-    let resource_ids = rows.iter().map(|row| row.resource_id).collect::<Vec<_>>();
-    let record_version_boundaries = rows
-        .iter()
-        .map(|row| {
-            serde_json::to_string(&row.record_version_boundary)
-                .context("failed to serialize record_inventory_current boundary for cleanup")
-        })
-        .collect::<Result<Vec<_>>>()?;
-
-    sqlx::query(
-        r#"
-        DELETE FROM record_inventory_current current
-        WHERE NOT EXISTS (
-            SELECT 1
-            FROM UNNEST($1::UUID[], $2::TEXT[]) AS replacement(
-                resource_id,
-                record_version_boundary
-            )
-            WHERE replacement.resource_id = current.resource_id
-              AND replacement.record_version_boundary::JSONB = current.record_version_boundary
-        )
-        "#,
-    )
-    .bind(&resource_ids)
-    .bind(&record_version_boundaries)
-    .execute(pool)
-    .await
-    .context("failed to delete stale record_inventory_current rows after rebuild")
     .map(|result| result.rows_affected())
 }
 

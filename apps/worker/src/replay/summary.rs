@@ -12,6 +12,10 @@ impl AllCurrentProjectionsReplaySummary {
         self.steps.iter().map(|step| step.upserted_row_count).sum()
     }
 
+    pub fn total_requested_key_count(&self) -> usize {
+        self.steps.iter().map(|step| step.requested_key_count).sum()
+    }
+
     pub fn total_deleted_row_count(&self) -> u64 {
         self.steps.iter().map(|step| step.deleted_row_count).sum()
     }

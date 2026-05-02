@@ -11,7 +11,8 @@ pub use row::NameCurrentRow;
 use row::decode_name_current_row;
 pub use snapshot::load_name_current_for_snapshot;
 pub use write::{
-    clear_name_current, delete_name_current, replace_name_current_rows, upsert_name_current_rows,
+    NameCurrentReplacement, clear_name_current, delete_name_current, replace_name_current_rows,
+    upsert_name_current_rows,
 };
 
 const DEFAULT_NAME_CURRENT_READ_FILTER: &str = r#"

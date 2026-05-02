@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use futures_util::{Stream, StreamExt};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
@@ -6,25 +7,29 @@ use super::canonicality::parse_canonicality_state;
 use super::types::RelevantEvent;
 use super::{CANONICAL_STATE_FILTER, EVENT_KIND_PERMISSION_CHANGED};
 
-pub(super) async fn load_target_resource_ids(pool: &PgPool) -> Result<Vec<Uuid>> {
-    let rows = sqlx::query(&format!(
+pub(super) fn stream_target_resource_ids<'a>(
+    pool: &'a PgPool,
+) -> impl Stream<Item = Result<Uuid>> + 'a {
+    sqlx::query(
         r#"
         SELECT DISTINCT resource_id
         FROM normalized_events
         WHERE event_kind = $1
           AND resource_id IS NOT NULL
-          AND canonicality_state {CANONICAL_STATE_FILTER}
+          AND canonicality_state IN (
+              'canonical'::canonicality_state,
+              'safe'::canonicality_state,
+              'finalized'::canonicality_state
+          )
         ORDER BY resource_id
-        "#
-    ))
+        "#,
+    )
     .bind(EVENT_KIND_PERMISSION_CHANGED)
-    .fetch_all(pool)
-    .await
-    .context("failed to load resource_ids for permissions_current rebuild")?;
-
-    rows.into_iter()
-        .map(|row| row.try_get("resource_id").context("missing resource_id"))
-        .collect()
+    .fetch(pool)
+    .map(|row| {
+        row.context("failed to stream resource_ids for permissions_current rebuild")
+            .and_then(|row| row.try_get("resource_id").context("missing resource_id"))
+    })
 }
 
 pub(super) async fn load_permission_events(

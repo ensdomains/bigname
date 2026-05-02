@@ -470,6 +470,7 @@ struct NameHistory {
     labelhash: String,
     first_name_ref: Option<ObservationRef>,
     current_registration: Option<RegistrationLease>,
+    superseded_registration: Option<RegistrationLease>,
     current_wrapper_key: Option<String>,
     wrapper_authorities: BTreeMap<String, WrapperAuthority>,
     current_registry_owner: Option<String>,

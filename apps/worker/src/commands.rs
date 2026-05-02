@@ -4,7 +4,7 @@ use tracing::info;
 use crate::cli::*;
 use crate::{
     address_names, automatic_projection_replay, children, execution, inspect, manifest_drift,
-    name_current, permissions, primary_name, record_inventory, replay, resolver,
+    name_current, permissions, primary_name, raw_facts, record_inventory, replay, resolver,
 };
 
 pub(crate) async fn dispatch(command: Command) -> Result<()> {
@@ -19,6 +19,7 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
         Command::NameCurrent(args) => name_current(args).await,
         Command::PermissionsCurrent(args) => permissions_current(args).await,
         Command::PrimaryNamesCurrent(args) => primary_names_current(args).await,
+        Command::RawFacts(args) => raw_facts_command(args).await,
         Command::Replay(args) => replay_command(args).await,
         Command::RecordInventoryCurrent(args) => record_inventory_current(args).await,
         Command::ResolverCurrent(args) => resolver_current(args).await,
@@ -96,6 +97,12 @@ async fn record_inventory_current(args: RecordInventoryCurrentArgs) -> Result<()
 async fn primary_names_current(args: PrimaryNamesCurrentArgs) -> Result<()> {
     match args.command {
         PrimaryNamesCurrentCommand::Rebuild(args) => rebuild_primary_names_current(args).await,
+    }
+}
+
+async fn raw_facts_command(args: RawFactsArgs) -> Result<()> {
+    match args.command {
+        RawFactsCommand::CompactLogStaging(args) => raw_facts::compact_log_staging(args).await,
     }
 }
 
@@ -426,6 +433,7 @@ async fn replay_all_current_projections(args: AllCurrentProjectionsArgs) -> Resu
         replay = "all_current_projections",
         projection_order = ?summary.projection_order(),
         projection_count = summary.steps.len(),
+        total_requested_key_count = summary.total_requested_key_count(),
         total_upserted_row_count = summary.total_upserted_row_count(),
         total_deleted_row_count = summary.total_deleted_row_count(),
         "all current projections replay completed"

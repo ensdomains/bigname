@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use futures_util::{Stream, StreamExt};
 use sqlx::{PgPool, Row};
 
 use super::{
@@ -59,6 +60,77 @@ pub(super) async fn load_current_bindings(pool: &PgPool) -> Result<Vec<CurrentBi
     .context("failed to load current bindings for address_names_current rebuild")?;
 
     rows.into_iter().map(decode_current_binding_seed).collect()
+}
+
+pub(super) fn stream_current_bindings<'a>(
+    pool: &'a PgPool,
+) -> impl Stream<Item = Result<CurrentBindingSeed>> + 'a {
+    sqlx::query(
+        r#"
+        SELECT
+            ns.logical_name_id,
+            ns.namespace,
+            ns.canonical_display_name,
+            ns.normalized_name,
+            ns.namehash,
+            ns.chain_id AS surface_chain_id,
+            ns.block_hash AS surface_block_hash,
+            ns.block_number AS surface_block_number,
+            surface_block.block_timestamp AS surface_block_timestamp,
+            ns.canonicality_state::TEXT AS surface_state,
+            sb.surface_binding_id,
+            sb.resource_id,
+            r.token_lineage_id,
+            sb.binding_kind::TEXT AS binding_kind,
+            sb.chain_id AS binding_chain_id,
+            sb.block_hash AS binding_block_hash,
+            sb.block_number AS binding_block_number,
+            binding_block.block_timestamp AS binding_block_timestamp,
+            sb.canonicality_state::TEXT AS binding_state,
+            r.canonicality_state::TEXT AS resource_state,
+            tl.canonicality_state::TEXT AS token_lineage_state
+        FROM surface_bindings sb
+        JOIN name_surfaces ns
+          ON ns.logical_name_id = sb.logical_name_id
+         AND ns.canonicality_state IN (
+             'canonical'::canonicality_state,
+             'safe'::canonicality_state,
+             'finalized'::canonicality_state
+         )
+        JOIN resources r
+          ON r.resource_id = sb.resource_id
+         AND r.canonicality_state IN (
+             'canonical'::canonicality_state,
+             'safe'::canonicality_state,
+             'finalized'::canonicality_state
+         )
+        LEFT JOIN token_lineages tl
+          ON tl.token_lineage_id = r.token_lineage_id
+         AND tl.canonicality_state IN (
+             'canonical'::canonicality_state,
+             'safe'::canonicality_state,
+             'finalized'::canonicality_state
+         )
+        LEFT JOIN chain_lineage surface_block
+          ON surface_block.chain_id = ns.chain_id
+         AND surface_block.block_hash = ns.block_hash
+        LEFT JOIN chain_lineage binding_block
+          ON binding_block.chain_id = sb.chain_id
+         AND binding_block.block_hash = sb.block_hash
+        WHERE sb.active_to IS NULL
+          AND sb.canonicality_state IN (
+              'canonical'::canonicality_state,
+              'safe'::canonicality_state,
+              'finalized'::canonicality_state
+          )
+        ORDER BY ns.logical_name_id
+        "#,
+    )
+    .fetch(pool)
+    .map(|row| {
+        row.context("failed to stream current bindings for address_names_current rebuild")
+            .and_then(decode_current_binding_seed)
+    })
 }
 
 pub(super) async fn load_relevant_events(

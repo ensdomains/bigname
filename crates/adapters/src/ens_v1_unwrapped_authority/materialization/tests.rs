@@ -72,6 +72,33 @@ fn trim_incoming_bindings_at_existing_starts_closes_historical_open_interval() {
 }
 
 #[test]
+fn stale_overlap_candidates_only_include_adapter_rows_without_matching_binding_id() {
+    let incoming = vec![test_binding(
+        Uuid::from_u128(0x100),
+        "ens:retry.eth",
+        1_695_230_399,
+        None,
+    )];
+    let mut stale = test_binding(Uuid::from_u128(0x200), "ens:retry.eth", 1_695_230_399, None);
+    stale.provenance = json!({"adapter": DERIVATION_KIND_ENS_V1_UNWRAPPED_AUTHORITY});
+    let mut same_id = stale.clone();
+    same_id.surface_binding_id = incoming[0].surface_binding_id;
+    let unrelated_adapter =
+        test_binding(Uuid::from_u128(0x300), "ens:retry.eth", 1_695_230_399, None);
+
+    let candidates = stale_overlapping_surface_binding_candidates(
+        &incoming,
+        &[stale.clone(), same_id, unrelated_adapter],
+    );
+
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(
+        candidates.get(&stale.surface_binding_id),
+        Some(&stale.resource_id)
+    );
+}
+
+#[test]
 fn normalize_surface_bindings_tightens_duplicate_active_to() -> Result<()> {
     let earlier_close =
         OffsetDateTime::from_unix_timestamp(1_695_284_247).expect("test timestamp is valid");

@@ -40,6 +40,22 @@ pub(super) async fn build_rows(
     Ok(rows)
 }
 
+pub(super) async fn build_rows_for_binding(
+    pool: &PgPool,
+    binding: &CurrentBindingSeed,
+    address_filter: Option<&str>,
+) -> Result<Vec<AddressNameCurrentRow>> {
+    let events = load_relevant_events(
+        pool,
+        &binding.namespace,
+        &binding.logical_name_id,
+        &binding.surface_chain_id,
+    )
+    .await?;
+    let relations = project_relations(binding, &events);
+    build_relation_rows(binding, &events, relations, address_filter)
+}
+
 fn build_relation_rows(
     binding: &CurrentBindingSeed,
     events: &[RelevantEvent],

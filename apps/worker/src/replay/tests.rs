@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 
 use anyhow::{Context, Result};
 use serde_json::Value;
+use sqlx::PgPool;
 
 use super::*;
 use support::*;
@@ -165,5 +166,90 @@ async fn all_current_projection_replay_clears_stale_rows_and_is_idempotent() -> 
     assert_eq!(second_snapshot.row_counts(), third_snapshot.row_counts());
     assert_eq!(second_snapshot, third_snapshot);
 
+    let target_block = Some(108);
+    let skipped_after_force_summary =
+        rebuild_pending_all_current_projections(database.pool(), target_block).await?;
+    assert_eq!(
+        skipped_after_force_summary.projection_order(),
+        ALL_CURRENT_PROJECTION_ORDER
+    );
+    assert_eq!(skipped_after_force_summary.total_requested_key_count(), 0);
+    assert_eq!(skipped_after_force_summary.total_upserted_row_count(), 0);
+    assert_eq!(skipped_after_force_summary.total_deleted_row_count(), 0);
+
+    clear_replay_status_rows(database.pool()).await?;
+    let targeted_summary =
+        rebuild_pending_all_current_projections(database.pool(), target_block).await?;
+    assert_eq!(
+        targeted_summary.projection_order(),
+        ALL_CURRENT_PROJECTION_ORDER
+    );
+    assert!(targeted_summary.total_requested_key_count() > 0);
+    assert_eq!(
+        third_snapshot,
+        load_api_visible_projection_snapshot(database.pool()).await?
+    );
+
+    let status_rows = load_replay_status_rows(database.pool()).await?;
+    assert_eq!(status_rows.len(), ALL_CURRENT_PROJECTION_ORDER.len());
+    for projection in ALL_CURRENT_PROJECTION_ORDER {
+        let (version, completed_target_block) = status_rows
+            .get(*projection)
+            .with_context(|| format!("missing replay status row for {projection}"))?;
+        assert_eq!(*version, super::progress::CURRENT_PROJECTION_REPLAY_VERSION);
+        assert_eq!(*completed_target_block, target_block);
+    }
+
+    let skipped_summary =
+        rebuild_pending_all_current_projections(database.pool(), target_block).await?;
+    assert_eq!(
+        skipped_summary.projection_order(),
+        ALL_CURRENT_PROJECTION_ORDER
+    );
+    assert_eq!(skipped_summary.total_requested_key_count(), 0);
+    assert_eq!(skipped_summary.total_upserted_row_count(), 0);
+    assert_eq!(skipped_summary.total_deleted_row_count(), 0);
+    assert_eq!(
+        third_snapshot,
+        load_api_visible_projection_snapshot(database.pool()).await?
+    );
+
+    let advanced_summary =
+        rebuild_pending_all_current_projections(database.pool(), Some(109)).await?;
+    assert_eq!(
+        advanced_summary.projection_order(),
+        ALL_CURRENT_PROJECTION_ORDER
+    );
+    assert_eq!(advanced_summary.total_requested_key_count(), 0);
+    assert_eq!(advanced_summary.total_upserted_row_count(), 0);
+    assert_eq!(advanced_summary.total_deleted_row_count(), 0);
+
     database.cleanup().await
+}
+
+async fn load_replay_status_rows(pool: &PgPool) -> Result<BTreeMap<String, (i32, Option<i64>)>> {
+    let rows = sqlx::query_as::<_, (String, i32, Option<i64>)>(
+        r#"
+        SELECT projection, replay_version, completed_normalized_target_block
+        FROM current_projection_replay_status
+        ORDER BY projection
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .context("failed to load current projection replay status rows")?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(projection, version, target_block)| (projection, (version, target_block)))
+        .collect())
+}
+
+async fn clear_replay_status_rows(pool: &PgPool) -> Result<()> {
+    sqlx::query("DELETE FROM current_projection_replay_status")
+        .execute(pool)
+        .await
+        .context("failed to clear current projection replay status rows")?;
+
+    Ok(())
 }

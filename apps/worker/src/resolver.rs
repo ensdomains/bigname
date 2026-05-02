@@ -1,9 +1,10 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use bigname_storage::{
     ResolverCurrentRow, clear_resolver_current, delete_resolver_current,
     upsert_resolver_current_rows,
 };
 use sqlx::PgPool;
+use tokio::task::JoinSet;
 
 mod profile;
 mod state_helpers;
@@ -36,6 +37,11 @@ const ENS_V1_PUBLIC_RESOLVER_COMPATIBLE_PROFILE: &str = "public_resolver_compati
 const BASENAMES_L2_RESOLVER_COMPATIBLE_PROFILE: &str = "l2_resolver_compatible";
 const RESOLVER_CURRENT_DERIVATION_KIND: &str = "resolver_current_rebuild";
 const RESOLVER_CURRENT_ENUMERATION_BASIS: &str = "resolver_overview";
+const RESOLVER_CURRENT_REBUILD_BATCH_SIZE: usize = 1_000;
+const RESOLVER_CURRENT_REBUILD_CONCURRENCY: usize = 1;
+const RESOLVER_CURRENT_REBUILD_LOG_INTERVAL: usize = 100;
+const RESOLVER_BINDING_ENUMERATION_NOT_PROJECTED_REASON: &str =
+    "resolver_binding_enumeration_not_projected";
 const RESOLVER_PROFILE_STATUS_PENDING: &str = "pending";
 const RESOLVER_PROFILE_STATUS_SUPPORTED: &str = "supported";
 const RESOLVER_PROFILE_FACT_FAMILY_AUTHORIZATION: &str = "resolver_authorization";
@@ -77,21 +83,73 @@ pub async fn rebuild_resolver_current(
 async fn rebuild_all_resolvers(pool: &PgPool) -> Result<ResolverCurrentRebuildSummary> {
     let profile_gate = ResolverProfileGate::load(pool).await?;
     let targets = load_target_resolvers(pool).await?;
+    let requested_resolver_count = targets.len();
+    tracing::info!(
+        projection = "resolver_current",
+        requested_resolver_count,
+        rebuild_concurrency = RESOLVER_CURRENT_REBUILD_CONCURRENCY,
+        "resolver_current rebuild targets loaded"
+    );
+    let deleted_row_count = clear_resolver_current(pool).await?;
 
-    let mut rows = Vec::with_capacity(targets.len());
-    for target in &targets {
-        if let Some(row) = build_resolver_current_row(pool, &profile_gate, target).await? {
+    let mut rows = Vec::with_capacity(RESOLVER_CURRENT_REBUILD_BATCH_SIZE);
+    let mut completed_resolver_count = 0usize;
+    let mut upserted_row_count = 0usize;
+    let mut targets = targets.into_iter();
+    let mut tasks = JoinSet::new();
+
+    for _ in 0..RESOLVER_CURRENT_REBUILD_CONCURRENCY {
+        let Some(target) = targets.next() else {
+            break;
+        };
+        spawn_resolver_rebuild_task(&mut tasks, pool, profile_gate.clone(), target);
+    }
+
+    while let Some(result) = tasks.join_next().await {
+        completed_resolver_count += 1;
+        if let Some(row) = result?? {
             rows.push(row);
+        }
+
+        if rows.len() >= RESOLVER_CURRENT_REBUILD_BATCH_SIZE {
+            upserted_row_count += upsert_resolver_current_rows(pool, &rows).await?.len();
+            rows.clear();
+        }
+
+        if completed_resolver_count % RESOLVER_CURRENT_REBUILD_LOG_INTERVAL == 0 {
+            tracing::info!(
+                projection = "resolver_current",
+                requested_resolver_count,
+                completed_resolver_count,
+                upserted_row_count,
+                "resolver_current rebuild resolvers processed"
+            );
+        }
+
+        if let Some(target) = targets.next() {
+            spawn_resolver_rebuild_task(&mut tasks, pool, profile_gate.clone(), target);
         }
     }
 
-    let upserted_row_count = upsert_resolver_current_rows(pool, &rows).await?.len();
-    let deleted_row_count = delete_stale_resolver_current_rows(pool, &rows).await?;
+    if !rows.is_empty() {
+        upserted_row_count += upsert_resolver_current_rows(pool, &rows).await?.len();
+    }
+
     Ok(ResolverCurrentRebuildSummary {
-        requested_resolver_count: targets.len(),
+        requested_resolver_count,
         upserted_row_count,
         deleted_row_count,
     })
+}
+
+fn spawn_resolver_rebuild_task(
+    tasks: &mut JoinSet<Result<Option<ResolverCurrentRow>>>,
+    pool: &PgPool,
+    profile_gate: ResolverProfileGate,
+    target: ResolverTarget,
+) {
+    let pool = pool.clone();
+    tasks.spawn(async move { build_resolver_current_row(&pool, &profile_gate, &target).await });
 }
 
 async fn rebuild_one_resolver(
@@ -103,6 +161,8 @@ async fn rebuild_one_resolver(
     let target = ResolverTarget {
         chain_id: chain_id.to_owned(),
         resolver_address: normalize_resolver_address(resolver_address),
+        profile_source_family: None,
+        enumerate_bindings: true,
     };
     let Some(row) = build_resolver_current_row(pool, &profile_gate, &target).await? else {
         let deleted_row_count =
@@ -120,42 +180,6 @@ async fn rebuild_one_resolver(
         upserted_row_count,
         deleted_row_count: 0,
     })
-}
-
-async fn delete_stale_resolver_current_rows(
-    pool: &PgPool,
-    rows: &[ResolverCurrentRow],
-) -> Result<u64> {
-    if rows.is_empty() {
-        return clear_resolver_current(pool).await;
-    }
-
-    let chain_ids = rows
-        .iter()
-        .map(|row| row.chain_id.clone())
-        .collect::<Vec<_>>();
-    let resolver_addresses = rows
-        .iter()
-        .map(|row| row.resolver_address.clone())
-        .collect::<Vec<_>>();
-
-    sqlx::query(
-        r#"
-        DELETE FROM resolver_current current
-        WHERE NOT EXISTS (
-            SELECT 1
-            FROM UNNEST($1::TEXT[], $2::TEXT[]) AS replacement(chain_id, resolver_address)
-            WHERE replacement.chain_id = current.chain_id
-              AND replacement.resolver_address = current.resolver_address
-        )
-        "#,
-    )
-    .bind(&chain_ids)
-    .bind(&resolver_addresses)
-    .execute(pool)
-    .await
-    .context("failed to delete stale resolver_current rows after rebuild")
-    .map(|result| result.rows_affected())
 }
 
 #[cfg(test)]

@@ -1087,6 +1087,442 @@ fn preload_registrar_history_recovers_binding_authority_provenance() -> Result<(
 }
 
 #[test]
+fn preload_registrar_history_prefers_selected_replay_authority() -> Result<()> {
+    let labelhash = keccak256_hex(b"beyonce");
+    let active_block_hash = "0xc21ecb3c75618295892c04d9e3ee4303818f8948b981b01fed25c20c222362e8";
+    let selected_block_hash = "0x89f845f7fb05afb691159bb6269de1aaf50bc9e6f035a9ff2b321f0db1813e59";
+    let active_authority_key =
+        format!("registrar:ethereum-mainnet:10:{labelhash}:{active_block_hash}:149");
+    let selected_authority_key =
+        format!("registrar:ethereum-mainnet:10:{labelhash}:{selected_block_hash}:126");
+    let boundary_ref = BoundaryRef {
+        chain_id: "ethereum-mainnet".to_owned(),
+        block_hash: active_block_hash.to_owned(),
+        block_number: 25_004_504,
+        block_timestamp: OffsetDateTime::from_unix_timestamp(1_777_691_531)?,
+        canonicality_state: CanonicalityState::Finalized,
+        namespace: "ens".to_owned(),
+    };
+    let selected_start_ref = ObservationRef {
+        chain_id: "ethereum-mainnet".to_owned(),
+        block_hash: selected_block_hash.to_owned(),
+        block_number: 9_818_673,
+        block_timestamp: OffsetDateTime::from_unix_timestamp(1_586_178_402)?,
+        transaction_hash: None,
+        transaction_index: None,
+        log_index: Some(126),
+        canonicality_state: CanonicalityState::Finalized,
+        namespace: "ens".to_owned(),
+        source_manifest_id: 10,
+        source_family: SOURCE_FAMILY_ENS_V1_REGISTRAR_L1.to_owned(),
+        manifest_version: 1,
+    };
+    let mut history = empty_preloaded_history(labelhash.clone(), None);
+
+    preload_registrar_history(
+        &mut history,
+        &json!({
+            "authority_kind": "registrar",
+            "authority_key": active_authority_key,
+            "labelhash": labelhash,
+        }),
+        &boundary_ref,
+        Uuid::nil(),
+        None,
+        Some(&PreloadedRegistrarState {
+            expiry: Some(OffsetDateTime::from_unix_timestamp(1_777_850_208)?),
+            registrant: None,
+            authority_key: Some(selected_authority_key.clone()),
+            labelhash: None,
+            start_ref: Some(selected_start_ref),
+        }),
+        &CanonicalBlockIndex { blocks: Vec::new() },
+    )?;
+
+    let lease = history
+        .current_registration
+        .context("selected registrar authority should be preloaded")?;
+    assert_eq!(lease.authority_key, selected_authority_key);
+    assert_eq!(lease.start_ref.block_hash, selected_block_hash);
+    assert_eq!(
+        history
+            .open_binding
+            .map(|binding| binding.authority.resource_id),
+        Some(deterministic_uuid(&format!(
+            "resource:{selected_authority_key}"
+        )))
+    );
+
+    Ok(())
+}
+
+#[test]
+fn selected_registrar_preload_restores_released_lease_for_renewal_replay() -> Result<()> {
+    let name = observe_registrar_eth_name_with_version("beyonce", ENS_NORMALIZER_VERSION)?;
+    let labelhash = name.labelhashes[0].clone();
+    let original_block_hash = "0x89f845f7fb05afb691159bb6269de1aaf50bc9e6f035a9ff2b321f0db1813e59";
+    let original_authority_key =
+        format!("registrar:ethereum-mainnet:10:{labelhash}:{original_block_hash}:126");
+    let start_ref = ObservationRef {
+        chain_id: "ethereum-mainnet".to_owned(),
+        block_hash: original_block_hash.to_owned(),
+        block_number: 9_818_673,
+        block_timestamp: OffsetDateTime::from_unix_timestamp(1_586_178_402)?,
+        transaction_hash: None,
+        transaction_index: None,
+        log_index: Some(126),
+        canonicality_state: CanonicalityState::Finalized,
+        namespace: "ens".to_owned(),
+        source_manifest_id: 10,
+        source_family: SOURCE_FAMILY_ENS_V1_REGISTRAR_L1.to_owned(),
+        manifest_version: 1,
+    };
+    let registry_ref = BoundaryRef {
+        chain_id: "ethereum-mainnet".to_owned(),
+        block_hash: "0xdbc12fa03fec3d2173f369d4541b0c264b6c30055b7d5746fa3da6232b84b9f2".to_owned(),
+        block_number: 25_004_424,
+        block_timestamp: OffsetDateTime::from_unix_timestamp(1_777_690_571)?,
+        canonicality_state: CanonicalityState::Finalized,
+        namespace: "ens".to_owned(),
+    };
+    let renewal_ref = ObservationRef {
+        chain_id: "ethereum-mainnet".to_owned(),
+        block_hash: "0xc21ecb3c75618295892c04d9e3ee4303818f8948b981b01fed25c20c222362e8".to_owned(),
+        block_number: 25_004_504,
+        block_timestamp: OffsetDateTime::from_unix_timestamp(1_777_691_531)?,
+        transaction_hash: Some(
+            "0xd6daf4412b9ea2a119917068c12b4392492112365ccf0fff6bf508880386da47".to_owned(),
+        ),
+        transaction_index: None,
+        log_index: Some(149),
+        canonicality_state: CanonicalityState::Finalized,
+        namespace: "ens".to_owned(),
+        source_manifest_id: 10,
+        source_family: SOURCE_FAMILY_ENS_V1_REGISTRAR_L1.to_owned(),
+        manifest_version: 1,
+    };
+    let before_expiry = OffsetDateTime::from_unix_timestamp(1_777_850_208)?;
+    let after_expiry = OffsetDateTime::from_unix_timestamp(1_809_386_208)?;
+    let mut history = empty_preloaded_history(labelhash.clone(), Some(name));
+    let registry_anchor = AuthorityAnchor {
+        kind: AuthorityKind::RegistryOnly,
+        authority_key: format!("registry-only:ethereum-mainnet:{labelhash}"),
+        resource_id: deterministic_uuid(&format!(
+            "resource:registry-only:ethereum-mainnet:{labelhash}"
+        )),
+        token_lineage_id: None,
+        binding_source_family: SOURCE_FAMILY_ENS_V1_REGISTRY_L1.to_owned(),
+        binding_manifest_version: 1,
+        binding_manifest_id: 1,
+    };
+    history.open_binding = Some(OpenBinding {
+        surface_binding_id: Uuid::nil(),
+        authority: registry_anchor,
+        active_from: registry_ref.block_timestamp,
+        anchor_ref: registry_ref,
+    });
+
+    preload_selected_registrar_lease(
+        &mut history,
+        Some(&PreloadedRegistrarState {
+            expiry: Some(before_expiry),
+            registrant: Some("0x2a1ee6d0d13a7a37ba04717ff234eac30fd6b394".to_owned()),
+            authority_key: Some(original_authority_key.clone()),
+            labelhash: Some(labelhash.clone()),
+            start_ref: Some(start_ref),
+        }),
+        &CanonicalBlockIndex { blocks: Vec::new() },
+    )?;
+    apply_registration_renewed(
+        &mut history,
+        NameRenewalObservation {
+            label: "beyonce".to_owned(),
+            labelhash: labelhash.clone(),
+            expiry: after_expiry,
+            reference: renewal_ref,
+        },
+        &CanonicalBlockIndex { blocks: Vec::new() },
+    )?;
+
+    let renewal = history
+        .events
+        .iter()
+        .find(|event| event.event_kind == EVENT_KIND_REGISTRATION_RENEWED)
+        .context("renewal event should be emitted")?;
+    assert_eq!(
+        renewal.resource_id,
+        Some(deterministic_uuid(&format!(
+            "resource:{original_authority_key}"
+        )))
+    );
+    assert_eq!(
+        renewal.before_state["expiry"],
+        json!(before_expiry.unix_timestamp())
+    );
+    assert_eq!(
+        renewal.after_state["expiry"],
+        json!(after_expiry.unix_timestamp())
+    );
+    assert!(
+        !history
+            .events
+            .iter()
+            .any(|event| event.event_kind == EVENT_KIND_REGISTRATION_GRANTED)
+    );
+
+    Ok(())
+}
+
+#[test]
+fn wrapper_wrap_after_released_registrar_uses_registry_authority_before_state() -> Result<()> {
+    let alice = observe_registrar_eth_name_with_version("alice", ENS_NORMALIZER_VERSION)?;
+    let labelhash = alice.labelhashes[0].clone();
+    let registration_ref = registrar_raw_log(Vec::new(), Vec::new(), 0).reference();
+    let registry_ref = AuthorityRawLogRow {
+        source_family: SOURCE_FAMILY_ENS_V1_REGISTRY_L1.to_owned(),
+        source_manifest_id: 2,
+        contract_role: Some("registry".to_owned()),
+        ..registrar_raw_log(Vec::new(), Vec::new(), 1)
+    }
+    .reference();
+    let wrapper_ref = AuthorityRawLogRow {
+        block_number: 44,
+        block_timestamp: OffsetDateTime::from_unix_timestamp(1_700_000_200)?,
+        log_index: 543,
+        source_family: SOURCE_FAMILY_ENS_V1_WRAPPER_L1.to_owned(),
+        source_manifest_id: 4,
+        contract_role: Some("name_wrapper".to_owned()),
+        ..wrapper_raw_log(Vec::new(), Vec::new(), 543)
+    }
+    .reference();
+    let release_ref = BoundaryRef {
+        chain_id: "ethereum-mainnet".to_owned(),
+        block_hash: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
+        block_number: 43,
+        block_timestamp: OffsetDateTime::from_unix_timestamp(1_700_000_100)?,
+        canonicality_state: CanonicalityState::Canonical,
+        namespace: "ens".to_owned(),
+    };
+    let mut history = empty_preloaded_history(labelhash.clone(), Some(alice.clone()));
+    history.current_registration = Some(RegistrationLease {
+        authority_key: format!(
+            "registrar:ethereum-mainnet:1:{labelhash}:{}:0",
+            registration_ref.block_hash
+        ),
+        labelhash,
+        registrant: "0x0000000000000000000000000000000000000001".to_owned(),
+        expiry: OffsetDateTime::from_unix_timestamp(1_690_000_000)?,
+        release_ref: Some(release_ref),
+        start_ref: registration_ref,
+    });
+    history.current_registry_owner = Some("0x0000000000000000000000000000000000000002".to_owned());
+    history.latest_registry_owner_ref = Some(registry_ref);
+
+    apply_wrapper_name_wrapped(
+        &mut history,
+        WrapperNameWrappedObservation {
+            name: alice,
+            owner: "0x0000000000000000000000000000000000000003".to_owned(),
+            fuses: 0,
+            expiry: OffsetDateTime::from_unix_timestamp(1_800_000_000)?,
+            reference: wrapper_ref,
+        },
+    )?;
+
+    let wrapped_event = history
+        .events
+        .iter()
+        .find(|event| event.event_kind == EVENT_KIND_TOKEN_CONTROL_TRANSFERRED)
+        .context("wrapper transfer event should be emitted")?;
+    assert_eq!(
+        wrapped_event.before_state.get("authority_kind"),
+        Some(&json!("registry_only"))
+    );
+
+    Ok(())
+}
+
+#[test]
+fn registry_owner_divergence_supersedes_live_registrar_before_wrap() -> Result<()> {
+    let alice = observe_registrar_eth_name_with_version("alice", ENS_NORMALIZER_VERSION)?;
+    let labelhash = alice.labelhashes[0].clone();
+    let registrant = "0x0000000000000000000000000000000000000001";
+    let registry_owner = "0x0000000000000000000000000000000000000002";
+    let wrapper_owner = "0x0000000000000000000000000000000000000003";
+    let registration_ref = AuthorityRawLogRow {
+        block_number: 42,
+        block_timestamp: OffsetDateTime::from_unix_timestamp(1_700_000_042)?,
+        source_family: SOURCE_FAMILY_ENS_V1_REGISTRAR_L1.to_owned(),
+        source_manifest_id: 1,
+        contract_role: Some("registrar_controller".to_owned()),
+        ..registrar_raw_log(Vec::new(), Vec::new(), 0)
+    }
+    .reference();
+    let registry_ref = AuthorityRawLogRow {
+        block_number: 43,
+        block_timestamp: OffsetDateTime::from_unix_timestamp(1_700_000_043)?,
+        source_family: SOURCE_FAMILY_ENS_V1_REGISTRY_L1.to_owned(),
+        source_manifest_id: 2,
+        contract_role: Some("registry".to_owned()),
+        ..registrar_raw_log(Vec::new(), Vec::new(), 1)
+    }
+    .reference();
+    let wrapper_ref = AuthorityRawLogRow {
+        block_number: 44,
+        block_timestamp: OffsetDateTime::from_unix_timestamp(1_700_000_044)?,
+        source_family: SOURCE_FAMILY_ENS_V1_WRAPPER_L1.to_owned(),
+        source_manifest_id: 4,
+        contract_role: Some("name_wrapper".to_owned()),
+        ..wrapper_raw_log(Vec::new(), Vec::new(), 2)
+    }
+    .reference();
+    let mut history = empty_preloaded_history(labelhash.clone(), Some(alice.clone()));
+
+    apply_registration_granted(
+        &mut history,
+        NameRegistrationObservation {
+            label: "alice".to_owned(),
+            labelhash: labelhash.clone(),
+            registrant: registrant.to_owned(),
+            expiry: OffsetDateTime::from_unix_timestamp(1_800_000_000)?,
+            reference: registration_ref,
+        },
+        &CanonicalBlockIndex { blocks: Vec::new() },
+    )?;
+    apply_registry_owner_changed(
+        &mut history,
+        RegistryOwnerObservation {
+            labelhash,
+            owner: registry_owner.to_owned(),
+            reference: registry_ref,
+        },
+    )?;
+    assert!(history.current_registration.is_none());
+    assert!(history.superseded_registration.is_some());
+
+    apply_wrapper_name_wrapped(
+        &mut history,
+        WrapperNameWrappedObservation {
+            name: alice,
+            owner: wrapper_owner.to_owned(),
+            fuses: 0,
+            expiry: OffsetDateTime::from_unix_timestamp(1_800_000_000)?,
+            reference: wrapper_ref,
+        },
+    )?;
+
+    let wrapped_event = history
+        .events
+        .iter()
+        .find(|event| event.event_kind == EVENT_KIND_TOKEN_CONTROL_TRANSFERRED)
+        .context("wrapper transfer event should be emitted")?;
+    assert_eq!(
+        wrapped_event.before_state.get("authority_kind"),
+        Some(&json!("registry_only"))
+    );
+
+    Ok(())
+}
+
+#[test]
+fn registrar_renewal_restores_superseded_registrar_after_registry_divergence() -> Result<()> {
+    let alice = observe_registrar_eth_name_with_version("alice", ENS_NORMALIZER_VERSION)?;
+    let labelhash = alice.labelhashes[0].clone();
+    let registrant = "0x0000000000000000000000000000000000000001";
+    let registry_owner = "0x0000000000000000000000000000000000000002";
+    let registration_ref = AuthorityRawLogRow {
+        block_number: 42,
+        block_timestamp: OffsetDateTime::from_unix_timestamp(1_700_000_042)?,
+        block_hash: "0x1000000000000000000000000000000000000000000000000000000000000042".to_owned(),
+        source_family: SOURCE_FAMILY_ENS_V1_REGISTRAR_L1.to_owned(),
+        source_manifest_id: 1,
+        contract_role: Some("registrar_controller".to_owned()),
+        ..registrar_raw_log(Vec::new(), Vec::new(), 0)
+    }
+    .reference();
+    let registry_ref = AuthorityRawLogRow {
+        block_number: 43,
+        block_timestamp: OffsetDateTime::from_unix_timestamp(1_700_000_043)?,
+        source_family: SOURCE_FAMILY_ENS_V1_REGISTRY_L1.to_owned(),
+        source_manifest_id: 2,
+        contract_role: Some("registry".to_owned()),
+        ..registrar_raw_log(Vec::new(), Vec::new(), 1)
+    }
+    .reference();
+    let renewal_ref = AuthorityRawLogRow {
+        block_number: 44,
+        block_timestamp: OffsetDateTime::from_unix_timestamp(1_700_000_044)?,
+        block_hash: "0x1000000000000000000000000000000000000000000000000000000000000044".to_owned(),
+        transaction_hash: "0x2000000000000000000000000000000000000000000000000000000000000044"
+            .to_owned(),
+        log_index: 44,
+        source_family: SOURCE_FAMILY_ENS_V1_REGISTRAR_L1.to_owned(),
+        source_manifest_id: 1,
+        contract_role: Some("registrar_controller".to_owned()),
+        ..registrar_raw_log(Vec::new(), Vec::new(), 2)
+    }
+    .reference();
+    let mut history = empty_preloaded_history(labelhash.clone(), Some(alice.clone()));
+    let before_expiry = OffsetDateTime::from_unix_timestamp(1_800_000_000)?;
+    let after_expiry = OffsetDateTime::from_unix_timestamp(1_900_000_000)?;
+
+    apply_registration_granted(
+        &mut history,
+        NameRegistrationObservation {
+            label: "alice".to_owned(),
+            labelhash: labelhash.clone(),
+            registrant: registrant.to_owned(),
+            expiry: before_expiry,
+            reference: registration_ref.clone(),
+        },
+        &CanonicalBlockIndex { blocks: Vec::new() },
+    )?;
+    let registrar_resource_id = deterministic_uuid(&format!(
+        "resource:registrar:ethereum-mainnet:1:{labelhash}:{}:0",
+        registration_ref.block_hash
+    ));
+    apply_registry_owner_changed(
+        &mut history,
+        RegistryOwnerObservation {
+            labelhash: labelhash.clone(),
+            owner: registry_owner.to_owned(),
+            reference: registry_ref,
+        },
+    )?;
+
+    apply_registration_renewed(
+        &mut history,
+        NameRenewalObservation {
+            label: "alice".to_owned(),
+            labelhash,
+            expiry: after_expiry,
+            reference: renewal_ref,
+        },
+        &CanonicalBlockIndex { blocks: Vec::new() },
+    )?;
+
+    let renewal = history
+        .events
+        .iter()
+        .find(|event| event.event_kind == EVENT_KIND_REGISTRATION_RENEWED)
+        .context("renewal event should be emitted")?;
+    assert_eq!(renewal.resource_id, Some(registrar_resource_id));
+    assert_eq!(
+        renewal.before_state["expiry"],
+        json!(before_expiry.unix_timestamp())
+    );
+    assert!(
+        !history
+            .events
+            .iter()
+            .any(|event| event.event_kind == EVENT_KIND_REGISTRATION_GRANTED
+                && event.block_number == Some(44))
+    );
+
+    Ok(())
+}
+
+#[test]
 fn registrar_renewal_observation_replaces_same_label_subdomain_preload_name() -> Result<()> {
     let labelhash = keccak256_hex(b"palimpsest");
     let raw_log = registrar_raw_log(
@@ -3937,6 +4373,119 @@ async fn sync_ens_v1_unwrapped_authority_translates_wrapper_events_idempotently_
             .await?,
         14
     );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn block_hash_replay_preloads_wrapper_state_before_selected_transfer() -> Result<()> {
+    let _permit = crate::acquire_test_db_permit().await;
+    let database = TestDatabase::new().await?;
+
+    let wrapper_address = "0x00000000000000000000000000000000000000dd";
+    insert_active_contract_fixture(
+        database.pool(),
+        SOURCE_FAMILY_ENS_V1_WRAPPER_L1,
+        "name_wrapper",
+        wrapper_address,
+        Some("name_wrapper"),
+        "manifests/ens/ens_v1_wrapper_l1/v1.toml",
+    )
+    .await?;
+
+    let wrap_block_hash = "0xadadadadadadadadadadadadadadadadadadadadadadadadadadadadadadadad";
+    let transfer_block_hash = "0xaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeae";
+    let wrap_tx_hash = "0xtxadadadadadadadadadadadadadadadadadadadadadadadadadadadadadadad";
+    let transfer_tx_hash = "0xtxaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeae";
+    let first_owner = "0x0000000000000000000000000000000000000001";
+    let second_owner = "0x0000000000000000000000000000000000000002";
+    let alice = observe_registrar_eth_name_with_version("alice", ENS_NORMALIZER_VERSION)?;
+    let dns_name = dns_encoded_name(&["alice", "eth"]);
+
+    upsert_raw_blocks(
+        database.pool(),
+        &[
+            raw_block(
+                wrap_block_hash,
+                Some("0xacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacac"),
+                42,
+                1_700_000_042,
+            ),
+            raw_block(
+                transfer_block_hash,
+                Some(wrap_block_hash),
+                43,
+                1_700_000_043,
+            ),
+        ],
+    )
+    .await?;
+    upsert_raw_logs(
+        database.pool(),
+        &[
+            RawLog {
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: wrap_block_hash.to_owned(),
+                block_number: 42,
+                transaction_hash: wrap_tx_hash.to_owned(),
+                transaction_index: 0,
+                log_index: 0,
+                emitting_address: wrapper_address.to_owned(),
+                topics: vec![name_wrapped_topic0(), alice.namehash.clone()],
+                data: encode_name_wrapped_log_data(&dns_name, first_owner, 0, 1_800_000_000),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            RawLog {
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: transfer_block_hash.to_owned(),
+                block_number: 43,
+                transaction_hash: transfer_tx_hash.to_owned(),
+                transaction_index: 0,
+                log_index: 0,
+                emitting_address: wrapper_address.to_owned(),
+                topics: vec![
+                    transfer_single_topic0(),
+                    hex_string(&abi_word_address(
+                        "0x00000000000000000000000000000000000000ff",
+                    )),
+                    hex_string(&abi_word_address(first_owner)),
+                    hex_string(&abi_word_address(second_owner)),
+                ],
+                data: encode_transfer_single_log_data(&alice.namehash, 1),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+        ],
+    )
+    .await?;
+
+    let seeded = EnsV1UnwrappedAuthoritySyncSummary::sync_for_block_hashes(
+        database.pool(),
+        "ethereum-mainnet",
+        &[wrap_block_hash.to_owned(), transfer_block_hash.to_owned()],
+    )
+    .await?;
+    assert_eq!(seeded.matched_log_count, 2);
+
+    let replayed = EnsV1UnwrappedAuthoritySyncSummary::sync_for_block_hashes(
+        database.pool(),
+        "ethereum-mainnet",
+        &[transfer_block_hash.to_owned()],
+    )
+    .await?;
+    assert_eq!(replayed.matched_log_count, 1);
+    assert_eq!(replayed.total_normalized_event_inserted_count, 0);
+
+    let replayed_before_owner = sqlx::query_scalar::<_, String>(
+        "SELECT before_state->>'from'
+         FROM normalized_events
+         WHERE logical_name_id = 'ens:alice.eth'
+           AND event_kind = 'TokenControlTransferred'
+           AND block_number = 43
+           AND log_index = 0",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(replayed_before_owner, first_owner);
 
     database.cleanup().await
 }

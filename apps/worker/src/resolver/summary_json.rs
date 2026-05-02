@@ -8,8 +8,9 @@ use sqlx::types::time::OffsetDateTime;
 
 use super::{
     EVENT_KIND_ALIAS_CHANGED, EVENT_KIND_PERMISSION_CHANGED, EVENT_KIND_RESOLVER_CHANGED,
-    RESOLVER_CURRENT_DERIVATION_KIND, RESOLVER_CURRENT_ENUMERATION_BASIS,
-    RESOLVER_FAMILY_PENDING_REASON, RESOLVER_PROFILE_STATUS_SUPPORTED,
+    RESOLVER_BINDING_ENUMERATION_NOT_PROJECTED_REASON, RESOLVER_CURRENT_DERIVATION_KIND,
+    RESOLVER_CURRENT_ENUMERATION_BASIS, RESOLVER_FAMILY_PENDING_REASON,
+    RESOLVER_PROFILE_STATUS_SUPPORTED, SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
     profile::ResolverProfileGate,
     state_helpers::{build_canonicality_summary, build_chain_positions},
     target_loading::{
@@ -23,10 +24,43 @@ pub(super) async fn build_resolver_current_row(
     profile_gate: &ResolverProfileGate,
     target: &ResolverTarget,
 ) -> Result<Option<ResolverCurrentRow>> {
-    let bindings = load_current_bindings(pool, target).await?;
-    let aliases = load_alias_events(pool, target).await?;
-    let permissions = load_resolver_permissions(pool, target).await?;
-    if bindings.is_empty() && aliases.is_empty() && permissions.is_empty() {
+    let skip_known_binding_enumeration = profile_gate.skips_binding_enumeration(target);
+    let hinted_target_status = target
+        .profile_source_family
+        .as_deref()
+        .map(|source_family| {
+            profile_gate
+                .target_status_for_source_family(target, source_family)
+                .to_owned()
+        });
+    let skip_pending_binding_enumeration = hinted_target_status
+        .as_deref()
+        .is_some_and(|status| status != RESOLVER_PROFILE_STATUS_SUPPORTED);
+    let skip_full_rebuild_binding_enumeration = !target.enumerate_bindings;
+    let skip_binding_enumeration = skip_known_binding_enumeration
+        || skip_pending_binding_enumeration
+        || skip_full_rebuild_binding_enumeration;
+    let skip_permission_enumeration = skip_full_rebuild_binding_enumeration;
+    let bindings = if skip_binding_enumeration {
+        Vec::new()
+    } else {
+        load_current_bindings(pool, target).await?
+    };
+    let aliases = if skip_binding_enumeration {
+        Vec::new()
+    } else {
+        load_alias_events(pool, target).await?
+    };
+    let permissions = if skip_permission_enumeration {
+        Vec::new()
+    } else {
+        load_resolver_permissions(pool, target).await?
+    };
+    if bindings.is_empty()
+        && aliases.is_empty()
+        && permissions.is_empty()
+        && !skip_binding_enumeration
+    {
         return Ok(None);
     }
 
@@ -35,11 +69,28 @@ pub(super) async fn build_resolver_current_row(
     let canonicality_summary = build_canonicality_summary(&bindings, &aliases, &permissions)?;
     let manifest_version = manifest_version(&bindings, &aliases, &permissions);
     let last_recomputed_at = last_recomputed_at(&bindings, &aliases, &permissions);
-    let target_status = profile_gate.target_status_for_bindings(target, &bindings);
+    let target_status = if skip_known_binding_enumeration {
+        profile_gate.target_status_for_source_family(target, SOURCE_FAMILY_ENS_V1_RESOLVER_L1)
+    } else if let Some(status) = hinted_target_status.as_deref() {
+        status
+    } else {
+        profile_gate.target_status_for_bindings(target, &bindings)
+    };
     let (declared_summary, coverage) = if target_status != RESOLVER_PROFILE_STATUS_SUPPORTED {
         (
             build_unsupported_declared_summary(RESOLVER_FAMILY_PENDING_REASON),
             build_unsupported_coverage(&bindings, &aliases, &permissions),
+        )
+    } else if skip_binding_enumeration {
+        (
+            build_binding_enumeration_not_projected_declared_summary(
+                &permissions,
+                skip_permission_enumeration,
+            ),
+            build_binding_enumeration_not_projected_coverage(
+                &permissions,
+                binding_enumeration_source_family(target, skip_known_binding_enumeration),
+            ),
         )
     } else {
         (
@@ -59,6 +110,17 @@ pub(super) async fn build_resolver_current_row(
         manifest_version,
         last_recomputed_at,
     }))
+}
+
+fn binding_enumeration_source_family(
+    target: &ResolverTarget,
+    skip_known_binding_enumeration: bool,
+) -> Option<&str> {
+    if skip_known_binding_enumeration {
+        Some(SOURCE_FAMILY_ENS_V1_RESOLVER_L1)
+    } else {
+        target.profile_source_family.as_deref()
+    }
 }
 
 fn manifest_version(
@@ -105,24 +167,52 @@ fn build_declared_summary(
     json!({
         "bindings": build_binding_summary(bindings.iter()),
         "aliases": build_alias_summary(bindings, aliases),
-        "permissions": {
-            "status": "supported",
-            "count": permissions.len(),
-            "items": permissions
-                .iter()
-                .map(|permission| {
-                    json!({
-                        "resource_id": permission.resource_id,
-                        "subject": permission.subject,
-                        "effective_powers": permission.effective_powers,
-                        "grant_source": permission.grant_source,
-                        "revocation_source": permission.revocation_source,
-                    })
-                })
-                .collect::<Vec<_>>(),
-        },
+        "permissions": build_permissions_summary(permissions),
         "role_holders": build_role_holders_summary(permissions),
         "event_summary": build_event_summary(bindings, aliases, permissions),
+    })
+}
+
+fn build_binding_enumeration_not_projected_declared_summary(
+    permissions: &[PermissionsCurrentRow],
+    skip_permission_enumeration: bool,
+) -> Value {
+    let permissions_summary = if skip_permission_enumeration {
+        unsupported_summary(RESOLVER_BINDING_ENUMERATION_NOT_PROJECTED_REASON)
+    } else {
+        build_permissions_summary(permissions)
+    };
+    let role_holders_summary = if skip_permission_enumeration {
+        unsupported_summary(RESOLVER_BINDING_ENUMERATION_NOT_PROJECTED_REASON)
+    } else {
+        build_role_holders_summary(permissions)
+    };
+
+    json!({
+        "bindings": unsupported_summary(RESOLVER_BINDING_ENUMERATION_NOT_PROJECTED_REASON),
+        "aliases": unsupported_summary(RESOLVER_BINDING_ENUMERATION_NOT_PROJECTED_REASON),
+        "permissions": permissions_summary,
+        "role_holders": role_holders_summary,
+        "event_summary": unsupported_summary(RESOLVER_BINDING_ENUMERATION_NOT_PROJECTED_REASON),
+    })
+}
+
+fn build_permissions_summary(permissions: &[PermissionsCurrentRow]) -> Value {
+    json!({
+        "status": "supported",
+        "count": permissions.len(),
+        "items": permissions
+            .iter()
+            .map(|permission| {
+                json!({
+                    "resource_id": permission.resource_id,
+                    "subject": permission.subject,
+                    "effective_powers": permission.effective_powers,
+                    "grant_source": permission.grant_source,
+                    "revocation_source": permission.revocation_source,
+                })
+            })
+            .collect::<Vec<_>>(),
     })
 }
 
@@ -378,6 +468,24 @@ fn build_unsupported_coverage(
     coverage["status"] = json!("partial");
     coverage["exhaustiveness"] = json!("best_effort");
     coverage["unsupported_reason"] = json!(RESOLVER_FAMILY_PENDING_REASON);
+    coverage
+}
+
+fn build_binding_enumeration_not_projected_coverage(
+    permissions: &[PermissionsCurrentRow],
+    source_family: Option<&str>,
+) -> Value {
+    let mut coverage = build_coverage(&[], &[], permissions);
+    let mut source_classes = extract_json_string_array(&coverage, "source_classes_considered")
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    if let Some(source_family) = source_family {
+        source_classes.insert(source_family.to_owned());
+    }
+    coverage["status"] = json!("partial");
+    coverage["exhaustiveness"] = json!("non_enumerable");
+    coverage["source_classes_considered"] = json!(source_classes.into_iter().collect::<Vec<_>>());
+    coverage["unsupported_reason"] = json!(RESOLVER_BINDING_ENUMERATION_NOT_PROJECTED_REASON);
     coverage
 }
 

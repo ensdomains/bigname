@@ -7,7 +7,7 @@ use clap::Parser;
 use serde_json::json;
 use sqlx::types::time::OffsetDateTime;
 
-use crate::cli::{Cli, Command, ManifestDriftCommand, ReplayCommand};
+use crate::cli::{Cli, Command, ManifestDriftCommand, RawFactsCommand, ReplayCommand};
 use crate::inspect;
 use crate::manifest_drift::{
     enforce_manifest_drift_audit_exit_policy, manifest_proxy_implementation_candidate_observation,
@@ -71,6 +71,28 @@ fn replay_all_current_projections_json_flag_is_available() {
             }
         },
         other => panic!("expected replay command, got {other:?}"),
+    }
+}
+
+#[test]
+fn raw_facts_compact_log_staging_cli_is_available() {
+    let cli = Cli::parse_from([
+        "bigname-worker",
+        "raw-facts",
+        "compact-log-staging",
+        "--dry-run",
+        "--json",
+    ]);
+    assert!(cli.writes_machine_json());
+
+    match cli.command {
+        Command::RawFacts(args) => match args.command {
+            RawFactsCommand::CompactLogStaging(args) => {
+                assert!(args.dry_run);
+                assert!(args.json);
+            }
+        },
+        other => panic!("expected raw-facts command, got {other:?}"),
     }
 }
 

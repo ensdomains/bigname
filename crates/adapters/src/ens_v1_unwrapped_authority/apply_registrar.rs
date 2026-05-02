@@ -16,7 +16,7 @@ pub(super) fn apply_registration_granted(
     history.name = Some(name.clone());
     history.latest_registry_owner_before_registration = history.latest_registry_owner_ref.clone();
 
-    let before_anchor = active_anchor_for_history(history, &event.reference.chain_id);
+    let before_anchor = active_anchor_for_observation(history, &event.reference);
     let authority_key = format!(
         "registrar:{}:{}:{}:{}:{}",
         event.reference.chain_id,
@@ -42,6 +42,7 @@ pub(super) fn apply_registration_granted(
         .as_ref()
         .map(|value| value.expiry);
     history.current_registration = Some(lease.clone());
+    history.superseded_registration = None;
 
     history.events.push(build_normalized_event(
         &event.reference,
@@ -128,6 +129,8 @@ pub(super) fn apply_registration_renewed(
         .first_name_ref
         .get_or_insert(event.reference.clone());
 
+    restore_superseded_registration_for_renewal(history, &event)?;
+
     if history.current_registration.is_none() {
         let name = history
             .name
@@ -156,6 +159,7 @@ pub(super) fn apply_registration_renewed(
             start_ref: event.reference.clone(),
         };
         history.current_registration = Some(lease.clone());
+        history.superseded_registration = None;
         let anchor = Some(build_registrar_anchor(&lease));
         transition_authority(
             history,
@@ -275,6 +279,13 @@ pub(super) fn settle_due_registration_release(
     history: &mut NameHistory,
     boundary: &BoundaryRef,
 ) -> Result<()> {
+    if history
+        .superseded_registration
+        .as_ref()
+        .is_some_and(|lease| registration_released_at_or_before(lease, boundary.block_timestamp))
+    {
+        history.superseded_registration = None;
+    }
     if history.current_wrapper_key.is_some() {
         return Ok(());
     }
@@ -326,9 +337,20 @@ pub(super) fn apply_token_transferred(
         return Ok(());
     };
     let current_resolver = history.current_resolver.clone();
-    let Some(current_registration) = history.current_registration.as_mut() else {
-        return Ok(());
-    };
+    let current_registration =
+        if let Some(current_registration) = history.current_registration.as_mut() {
+            current_registration
+        } else if let Some(superseded_registration) = history.superseded_registration.as_mut() {
+            if registration_released_at_or_before(
+                superseded_registration,
+                event.reference.block_timestamp,
+            ) {
+                return Ok(());
+            }
+            superseded_registration
+        } else {
+            return Ok(());
+        };
     if event.from_address == ZERO_ADDRESS || event.to_address == ZERO_ADDRESS {
         return Ok(());
     }
@@ -371,4 +393,43 @@ pub(super) fn apply_token_transferred(
         },
     );
     Ok(())
+}
+
+fn restore_superseded_registration_for_renewal(
+    history: &mut NameHistory,
+    event: &NameRenewalObservation,
+) -> Result<()> {
+    if history.current_registration.is_some() {
+        return Ok(());
+    }
+    let Some(lease) = history.superseded_registration.take() else {
+        return Ok(());
+    };
+    if !lease.labelhash.eq_ignore_ascii_case(&event.labelhash)
+        || registration_released_at_or_before(&lease, event.reference.block_timestamp)
+    {
+        history.superseded_registration = Some(lease);
+        return Ok(());
+    }
+
+    let before_anchor = active_anchor_for_observation(history, &event.reference);
+    let after_anchor = Some(build_registrar_anchor(&lease));
+    history.current_registration = Some(lease);
+    transition_authority(
+        history,
+        before_anchor,
+        after_anchor,
+        &event.reference.as_boundary_ref(),
+        event.reference.block_timestamp,
+    )
+}
+
+fn registration_released_at_or_before(
+    lease: &RegistrationLease,
+    timestamp: OffsetDateTime,
+) -> bool {
+    lease
+        .release_ref
+        .as_ref()
+        .is_some_and(|release_ref| release_ref.block_timestamp <= timestamp)
 }

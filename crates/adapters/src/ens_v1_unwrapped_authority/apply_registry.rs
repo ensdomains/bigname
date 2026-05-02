@@ -4,15 +4,24 @@ pub(super) fn apply_registry_owner_changed(
     history: &mut NameHistory,
     event: RegistryOwnerObservation,
 ) -> Result<()> {
-    let before_anchor = active_anchor_for_history(history, &event.reference.chain_id);
+    let before_anchor = active_anchor_for_observation(history, &event.reference);
     let before_owner = history.current_registry_owner.clone();
+    let registry_owner_supersedes_registrar = history.current_wrapper_key.is_none()
+        && nonzero_address(Some(event.owner.as_str())).is_some()
+        && history
+            .current_registration
+            .as_ref()
+            .is_some_and(|lease| !event.owner.eq_ignore_ascii_case(&lease.registrant));
     history.current_registry_owner = Some(event.owner.clone());
     history.latest_registry_owner_ref = Some(event.reference.clone());
     history
         .registry_resource_anchor
         .get_or_insert_with(|| event.reference.as_boundary_ref());
+    if registry_owner_supersedes_registrar {
+        history.superseded_registration = history.current_registration.take();
+    }
 
-    let after_anchor = active_anchor_for_history(history, &event.reference.chain_id);
+    let after_anchor = active_anchor_for_observation(history, &event.reference);
     if matches!(
         (&before_anchor, &after_anchor),
         (Some(left), Some(right))

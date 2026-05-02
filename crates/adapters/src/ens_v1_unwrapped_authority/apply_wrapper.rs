@@ -8,7 +8,7 @@ pub(super) fn apply_wrapper_name_wrapped(
         .first_name_ref
         .get_or_insert(event.reference.clone());
     history.name = Some(event.name.clone());
-    let before_anchor = active_anchor_for_history(history, &event.reference.chain_id);
+    let before_anchor = active_anchor_for_observation(history, &event.reference);
     let before_owner = history
         .current_wrapper_key
         .as_ref()
@@ -128,13 +128,13 @@ pub(super) fn apply_wrapper_name_unwrapped(
     if history.name.is_none() {
         return Ok(());
     };
-    let before_anchor = active_anchor_for_history(history, &event.reference.chain_id);
+    let before_anchor = active_anchor_for_observation(history, &event.reference);
     if let Some(wrapper_key) = history.current_wrapper_key.take()
         && let Some(wrapper) = history.wrapper_authorities.get_mut(&wrapper_key)
     {
         wrapper.end_ref = Some(event.reference.clone());
     }
-    let after_anchor = active_anchor_for_history(history, &event.reference.chain_id);
+    let after_anchor = active_anchor_for_observation(history, &event.reference);
     transition_authority(
         history,
         before_anchor,

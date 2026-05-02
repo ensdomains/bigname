@@ -132,7 +132,11 @@ pub(super) fn finalize_history(
         });
     }
 
-    let registrar_leases = history.current_registration.into_iter().collect::<Vec<_>>();
+    let registrar_leases = history
+        .current_registration
+        .into_iter()
+        .chain(history.superseded_registration)
+        .collect::<Vec<_>>();
     let wrapper_authorities = history
         .wrapper_authorities
         .into_values()

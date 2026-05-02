@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, bail};
 use bigname_storage::{
@@ -10,14 +10,18 @@ use sqlx::{PgPool, Row, types::time::OffsetDateTime};
 use uuid::Uuid;
 
 use super::{
-    CANONICAL_STATE_FILTER, EVENT_KIND_ALIAS_CHANGED, EVENT_KIND_RESOLVER_CHANGED, ZERO_ADDRESS,
+    CANONICAL_STATE_FILTER, EVENT_KIND_ALIAS_CHANGED, EVENT_KIND_RESOLVER_CHANGED,
+    SOURCE_FAMILY_BASENAMES_BASE_REGISTRY, SOURCE_FAMILY_BASENAMES_BASE_RESOLVER,
+    SOURCE_FAMILY_ENS_V1_REGISTRY_L1, SOURCE_FAMILY_ENS_V1_RESOLVER_L1, ZERO_ADDRESS,
     state_helpers::parse_canonicality_state,
 };
 
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct ResolverTarget {
     pub(super) chain_id: String,
     pub(super) resolver_address: String,
+    pub(super) profile_source_family: Option<String>,
+    pub(super) enumerate_bindings: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -73,6 +77,7 @@ pub(super) async fn load_target_resolvers(pool: &PgPool) -> Result<Vec<ResolverT
                 ne.logical_name_id,
                 ne.resource_id,
                 ne.chain_id,
+                ne.source_family,
                 LOWER(ne.after_state->>'resolver') AS resolver_address
             FROM normalized_events ne
             WHERE ne.event_kind = $1
@@ -87,11 +92,12 @@ pub(super) async fn load_target_resolvers(pool: &PgPool) -> Result<Vec<ResolverT
                 ne.log_index DESC NULLS LAST,
                 ne.normalized_event_id DESC
         )
-        SELECT DISTINCT chain_id, resolver_address
+        SELECT DISTINCT chain_id, resolver_address, source_family
         FROM (
             SELECT
                 lre.chain_id,
-                lre.resolver_address
+                lre.resolver_address,
+                lre.source_family
             FROM latest_resolver_events lre
             INNER JOIN current_bindings cb
               ON cb.logical_name_id = lre.logical_name_id
@@ -109,30 +115,48 @@ pub(super) async fn load_target_resolvers(pool: &PgPool) -> Result<Vec<ResolverT
     .await
     .context("failed to load resolver_current rebuild targets")?;
 
-    let mut targets = rows
-        .into_iter()
-        .map(|row| {
-            Ok(ResolverTarget {
-                chain_id: row.try_get("chain_id").context("missing chain_id")?,
-                resolver_address: normalize_resolver_address(
-                    &row.try_get::<String, _>("resolver_address")
-                        .context("missing resolver_address")?,
-                ),
-            })
-        })
-        .collect::<Result<BTreeSet<_>>>()?;
-
-    for (chain_id, resolver_address) in load_permissions_current_resolver_targets(pool).await? {
-        targets.insert(ResolverTarget {
+    let mut targets = BTreeMap::<(String, String), BTreeSet<String>>::new();
+    for row in rows {
+        let chain_id = row.try_get("chain_id").context("missing chain_id")?;
+        let resolver_address = normalize_resolver_address(
+            &row.try_get::<String, _>("resolver_address")
+                .context("missing resolver_address")?,
+        );
+        let source_family = row
+            .try_get::<String, _>("source_family")
+            .context("missing source_family")?;
+        insert_target(
+            &mut targets,
             chain_id,
             resolver_address,
-        });
-    }
-    for target in load_alias_target_resolvers(pool).await? {
-        targets.insert(target);
+            resolver_profile_source_family_for_event_source(&source_family),
+        );
     }
 
-    Ok(targets.into_iter().collect())
+    for (chain_id, resolver_address) in load_permissions_current_resolver_targets(pool).await? {
+        insert_target(&mut targets, chain_id, resolver_address, None);
+    }
+    for target in load_alias_target_resolvers(pool).await? {
+        let profile_source_family = target.profile_source_family;
+        insert_target(
+            &mut targets,
+            target.chain_id,
+            target.resolver_address,
+            profile_source_family.as_deref(),
+        );
+    }
+
+    Ok(targets
+        .into_iter()
+        .map(
+            |((chain_id, resolver_address), source_families)| ResolverTarget {
+                chain_id,
+                resolver_address,
+                profile_source_family: unique_source_family(source_families),
+                enumerate_bindings: false,
+            },
+        )
+        .collect())
 }
 
 async fn load_alias_target_resolvers(pool: &PgPool) -> Result<Vec<ResolverTarget>> {
@@ -140,7 +164,8 @@ async fn load_alias_target_resolvers(pool: &PgPool) -> Result<Vec<ResolverTarget
         r#"
         SELECT DISTINCT
             chain_id,
-            LOWER(after_state->>'resolver') AS resolver_address
+            LOWER(after_state->>'resolver') AS resolver_address,
+            source_family
         FROM normalized_events
         WHERE event_kind = $1
           AND chain_id IS NOT NULL
@@ -162,9 +187,48 @@ async fn load_alias_target_resolvers(pool: &PgPool) -> Result<Vec<ResolverTarget
                     &row.try_get::<String, _>("resolver_address")
                         .context("missing resolver_address")?,
                 ),
+                profile_source_family: row
+                    .try_get::<String, _>("source_family")
+                    .context("missing source_family")
+                    .ok()
+                    .and_then(|source_family| {
+                        resolver_profile_source_family_for_event_source(&source_family)
+                            .map(str::to_owned)
+                    }),
+                enumerate_bindings: false,
             })
         })
         .collect()
+}
+
+fn insert_target(
+    targets: &mut BTreeMap<(String, String), BTreeSet<String>>,
+    chain_id: String,
+    resolver_address: String,
+    profile_source_family: Option<&str>,
+) {
+    let source_families = targets.entry((chain_id, resolver_address)).or_default();
+    if let Some(profile_source_family) = profile_source_family {
+        source_families.insert(profile_source_family.to_owned());
+    }
+}
+
+fn unique_source_family(source_families: BTreeSet<String>) -> Option<String> {
+    let mut source_families = source_families.into_iter();
+    let source_family = source_families.next()?;
+    source_families.next().is_none().then_some(source_family)
+}
+
+fn resolver_profile_source_family_for_event_source(source_family: &str) -> Option<&'static str> {
+    match source_family {
+        SOURCE_FAMILY_ENS_V1_REGISTRY_L1 | SOURCE_FAMILY_ENS_V1_RESOLVER_L1 => {
+            Some(SOURCE_FAMILY_ENS_V1_RESOLVER_L1)
+        }
+        SOURCE_FAMILY_BASENAMES_BASE_REGISTRY | SOURCE_FAMILY_BASENAMES_BASE_RESOLVER => {
+            Some(SOURCE_FAMILY_BASENAMES_BASE_RESOLVER)
+        }
+        _ => None,
+    }
 }
 
 pub(super) async fn load_current_bindings(

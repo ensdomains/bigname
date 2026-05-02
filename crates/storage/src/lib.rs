@@ -59,7 +59,8 @@ pub use children::{
     DeclaredChildEventSource, clear_children_current, delete_children_current,
     load_canonical_declared_child_sources, load_canonical_ens_v1_declared_child_sources,
     load_children_current, load_children_current_including_noncanonical,
-    load_children_current_page, load_children_current_summaries, upsert_children_current_rows,
+    load_children_current_page, load_children_current_summaries,
+    stream_canonical_declared_child_sources, upsert_children_current_rows,
 };
 pub use execution::{
     ExecutionBoundaryInvalidation, ExecutionCacheKey, ExecutionManifestInvalidation,
@@ -98,8 +99,8 @@ pub use lineage::{
     upsert_chain_lineage_blocks_without_snapshots,
 };
 pub use name_current::{
-    NameCurrentRow, clear_name_current, delete_name_current, load_name_current,
-    load_name_current_by_logical_name_ids, load_name_current_for_snapshot,
+    NameCurrentReplacement, NameCurrentRow, clear_name_current, delete_name_current,
+    load_name_current, load_name_current_by_logical_name_ids, load_name_current_for_snapshot,
     replace_name_current_rows, upsert_name_current_rows,
 };
 pub use normalized_events::{

@@ -96,7 +96,7 @@ Rules:
 - the route keeps claimed state separate from the execution-derived verification result
 - `claimed_primary_name` and `verified_primary_name` both use the shared `ResultStatus` vocabulary
 - `claimed_primary_name` is limited to `success`, `not_found`, `unsupported`, and `invalid_name`; `verified_primary_name` is limited to `success`, `not_found`, `mismatch`, `unsupported`, `invalid_name`, and `execution_failed`
-- a raw claim that cannot be normalized surfaces `status=invalid_name`; it is not silently treated as missing
+- a nonblank raw claim that cannot be normalized surfaces `status=invalid_name`; blank or whitespace-only raw claim names are treated as `not_found`
 - `raw_claim_name` is claim-local state: it may be preserved to explain `claimed_primary_name.status=invalid_name`, but it does not migrate into `verified_primary_name`
 - `mismatch` and `execution_failed` are verified-only outcomes; when emitted, any `failure_reason` stays verification-local and does not duplicate declared claim identity
 - `mismatch` means the claim normalized, resolved for the requested `coin_type`, and produced a concrete target address that did not equal the requested address

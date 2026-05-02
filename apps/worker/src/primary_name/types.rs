@@ -19,3 +19,9 @@ pub(super) struct NameClaimObservation {
     pub(super) raw_name: Option<String>,
     pub(super) primary_claim_source: Value,
 }
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct PrimaryNameRebuildInput {
+    pub(super) tuple: ReverseClaimTuple,
+    pub(super) claim_observation: Option<NameClaimObservation>,
+}

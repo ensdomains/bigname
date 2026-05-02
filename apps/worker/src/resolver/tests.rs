@@ -3,7 +3,7 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use bigname_storage::{
     NameSurface, NormalizedEvent, RawBlock, RawCodeHash, RawLog, Resource, SurfaceBinding,
     default_database_url, load_resolver_current, upsert_name_surfaces, upsert_normalized_events,
@@ -93,30 +93,7 @@ async fn resolver_current_keyed_rebuild_projects_bindings_permissions_and_unsupp
     let surface_binding_id = Uuid::from_u128(0x8200);
     let alias_resource_id = Uuid::from_u128(0x8101);
     let alias_surface_binding_id = Uuid::from_u128(0x8201);
-    let resolver_contract_instance_id = Uuid::from_u128(0x8202);
     let resolver_address = "0x0000000000000000000000000000000000000aaa";
-
-    let resolver_manifest_id = insert_manifest_version(
-        database.pool(),
-        SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
-        "manifests/ens/ens_v1_resolver_l1/v1.toml",
-    )
-    .await?;
-    insert_contract_instance(
-        database.pool(),
-        resolver_contract_instance_id,
-        resolver_address,
-        resolver_manifest_id,
-    )
-    .await?;
-    insert_manifest_contract_instance(
-        database.pool(),
-        resolver_manifest_id,
-        "public_resolver",
-        resolver_contract_instance_id,
-        resolver_address,
-    )
-    .await?;
 
     seed_identity(
         database.pool(),
@@ -368,24 +345,17 @@ async fn resolver_current_ignores_suppressed_old_registry_raw_facts_after_migrat
         .context("current resolver_current row should exist")?;
     assert_eq!(
         current_row.declared_summary["bindings"]["status"],
-        json!("supported")
-    );
-    assert_eq!(current_row.declared_summary["bindings"]["count"], json!(1));
-    assert_eq!(
-        current_row.declared_summary["bindings"]["items"][0]["logical_name_id"],
-        json!("ens:migrated.eth")
+        json!("unsupported")
     );
     assert_eq!(
-        current_row.declared_summary["event_summary"]["by_kind"][EVENT_KIND_RESOLVER_CHANGED],
-        json!(1)
+        current_row.declared_summary["bindings"]["unsupported_reason"],
+        json!(RESOLVER_BINDING_ENUMERATION_NOT_PROJECTED_REASON)
     );
+    assert_eq!(current_row.coverage["status"], json!("partial"));
     assert_eq!(
-        current_row.chain_positions["ethereum-mainnet"]["block_number"],
-        json!(150)
+        current_row.coverage["unsupported_reason"],
+        json!(RESOLVER_BINDING_ENUMERATION_NOT_PROJECTED_REASON)
     );
-    assert_eq!(current_row.coverage["status"], json!("full"));
-    assert_eq!(current_row.coverage["unsupported_reason"], Value::Null);
-    assert_eq!(current_row.provenance["normalized_event_ids"], json!([1]));
 
     let suppressed_summary = rebuild_resolver_current(
         database.pool(),
@@ -410,6 +380,140 @@ async fn resolver_current_ignores_suppressed_old_registry_raw_facts_after_migrat
     assert!(!projection_json.contains("0xensold-resolver-suppressed"));
     assert!(!projection_json.contains(suppressed_resolver));
     assert!(!projection_json.contains("suppressed-resolver-overview"));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn resolver_current_skips_known_ensv1_public_resolver_binding_enumeration() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let resource_id = Uuid::from_u128(0x8130);
+    let surface_binding_id = Uuid::from_u128(0x8230);
+    let alias_resource_id = Uuid::from_u128(0x8131);
+    let alias_surface_binding_id = Uuid::from_u128(0x8231);
+    let resolver_contract_instance_id = Uuid::from_u128(0x8132);
+    let resolver_address = "0x0000000000000000000000000000000000008132";
+
+    let registry_manifest_id = insert_manifest_version(
+        database.pool(),
+        SOURCE_FAMILY_ENS_V1_REGISTRY_L1,
+        "manifests/ens/ens_v1_registry_l1/v3.toml",
+    )
+    .await?;
+    let resolver_manifest_id = insert_manifest_version(
+        database.pool(),
+        SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
+        "manifests/ens/ens_v1_resolver_l1/v1.toml",
+    )
+    .await?;
+    insert_contract_instance(
+        database.pool(),
+        resolver_contract_instance_id,
+        resolver_address,
+        resolver_manifest_id,
+    )
+    .await?;
+    insert_manifest_contract_instance(
+        database.pool(),
+        resolver_manifest_id,
+        "public_resolver",
+        resolver_contract_instance_id,
+        resolver_address,
+    )
+    .await?;
+
+    seed_identity(
+        database.pool(),
+        "ens:shared-alpha.eth",
+        resource_id,
+        surface_binding_id,
+        "shared-alpha.eth",
+        SurfaceBindingKind::DeclaredRegistryPath,
+    )
+    .await?;
+    seed_identity(
+        database.pool(),
+        "ens:shared-alias.eth",
+        alias_resource_id,
+        alias_surface_binding_id,
+        "shared-alias.eth",
+        SurfaceBindingKind::ResolverAliasPath,
+    )
+    .await?;
+    seed_raw_blocks(
+        database.pool(),
+        &[raw_block(
+            "ethereum-mainnet",
+            "0xres0160",
+            160,
+            1_776_302_160,
+        )],
+    )
+    .await?;
+    seed_resolver_events(
+        database.pool(),
+        &[
+            resolver_event_with_manifest(
+                "shared-current-resolver-alpha",
+                "ens:shared-alpha.eth",
+                resource_id,
+                resolver_address,
+                SOURCE_FAMILY_ENS_V1_REGISTRY_L1,
+                registry_manifest_id,
+                160,
+                0,
+            ),
+            resolver_event_with_manifest(
+                "shared-current-resolver-alias",
+                "ens:shared-alias.eth",
+                alias_resource_id,
+                resolver_address,
+                SOURCE_FAMILY_ENS_V1_REGISTRY_L1,
+                registry_manifest_id,
+                160,
+                1,
+            ),
+        ],
+    )
+    .await?;
+
+    let summary = rebuild_resolver_current(
+        database.pool(),
+        Some("ethereum-mainnet"),
+        Some(resolver_address),
+    )
+    .await?;
+    assert_eq!(summary.requested_resolver_count, 1);
+    assert_eq!(summary.upserted_row_count, 1);
+
+    let row = load_resolver_current(database.pool(), "ethereum-mainnet", resolver_address)
+        .await?
+        .context("known public resolver_current row should exist")?;
+    for section in ["bindings", "aliases", "event_summary"] {
+        assert_eq!(
+            row.declared_summary[section]["status"],
+            json!("unsupported")
+        );
+        assert_eq!(
+            row.declared_summary[section]["unsupported_reason"],
+            json!(RESOLVER_BINDING_ENUMERATION_NOT_PROJECTED_REASON)
+        );
+    }
+    assert_eq!(
+        row.declared_summary["permissions"],
+        json!({"status": "supported", "count": 0, "items": []})
+    );
+    assert_eq!(
+        row.declared_summary["role_holders"],
+        json!({"status": "supported", "count": 0, "items": []})
+    );
+    assert_eq!(row.coverage["status"], json!("partial"));
+    assert_eq!(row.coverage["exhaustiveness"], json!("non_enumerable"));
+    assert_eq!(
+        row.coverage["unsupported_reason"],
+        json!(RESOLVER_BINDING_ENUMERATION_NOT_PROJECTED_REASON)
+    );
+    assert_eq!(row.provenance["normalized_event_ids"], json!([]));
 
     database.cleanup().await
 }
@@ -586,11 +690,14 @@ async fn resolver_current_full_rebuild_clears_stale_rows_and_rebuilds_all_target
     assert!(binding_row.is_some());
     assert!(permission_row.is_some());
     assert!(stale_row.is_none());
+    let permission_row = permission_row.context("permission-only resolver row should exist")?;
     assert_eq!(
-        permission_row
-            .context("permission-only resolver row should exist")?
-            .declared_summary["bindings"]["count"],
-        json!(0)
+        permission_row.declared_summary["bindings"]["unsupported_reason"],
+        json!(RESOLVER_BINDING_ENUMERATION_NOT_PROJECTED_REASON)
+    );
+    assert_eq!(
+        permission_row.declared_summary["permissions"]["unsupported_reason"],
+        json!(RESOLVER_BINDING_ENUMERATION_NOT_PROJECTED_REASON)
     );
 
     database.cleanup().await

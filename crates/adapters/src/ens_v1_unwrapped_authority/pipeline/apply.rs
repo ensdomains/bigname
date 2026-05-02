@@ -332,6 +332,7 @@ fn apply_authority_observation_for_history_key(
             labelhash: labelhash.to_owned(),
             first_name_ref: known_name_ref.clone(),
             current_registration: None,
+            superseded_registration: None,
             current_wrapper_key: None,
             wrapper_authorities: BTreeMap::new(),
             current_registry_owner: None,

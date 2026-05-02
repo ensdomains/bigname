@@ -667,6 +667,104 @@ async fn name_current_replacement_rolls_back_when_one_row_is_invalid() -> Result
 }
 
 #[tokio::test]
+async fn name_current_replacement_stages_batches_before_atomic_publish() -> Result<()> {
+    let database = test_database().await?;
+    let first_logical_name_id = "ens:alice.eth";
+    let second_logical_name_id = "ens:bob.eth";
+    let stale_logical_name_id = "ens:carol.eth";
+
+    seed_binding_references(
+        &database,
+        first_logical_name_id,
+        "alice.eth",
+        Uuid::from_u128(0x9110),
+        Uuid::from_u128(0x9010),
+        Uuid::from_u128(0x9210),
+    )
+    .await?;
+    seed_binding_references(
+        &database,
+        second_logical_name_id,
+        "bob.eth",
+        Uuid::from_u128(0x9120),
+        Uuid::from_u128(0x9020),
+        Uuid::from_u128(0x9220),
+    )
+    .await?;
+    seed_binding_references(
+        &database,
+        stale_logical_name_id,
+        "carol.eth",
+        Uuid::from_u128(0x9130),
+        Uuid::from_u128(0x9030),
+        Uuid::from_u128(0x9230),
+    )
+    .await?;
+
+    let first = name_current_row(
+        first_logical_name_id,
+        Uuid::from_u128(0x9210),
+        Uuid::from_u128(0x9110),
+        Uuid::from_u128(0x9010),
+    );
+    let mut stale = name_current_row(
+        stale_logical_name_id,
+        Uuid::from_u128(0x9230),
+        Uuid::from_u128(0x9130),
+        Uuid::from_u128(0x9030),
+    );
+    stale.canonical_display_name = "carol.eth".to_owned();
+    stale.normalized_name = "carol.eth".to_owned();
+    stale.namehash = "namehash:carol.eth".to_owned();
+    upsert_name_current_rows(database.pool(), &[first.clone(), stale.clone()]).await?;
+
+    let mut replacement_first = first.clone();
+    replacement_first.declared_summary = json!({"status": "replacement"});
+    let mut replacement_second = name_current_row(
+        second_logical_name_id,
+        Uuid::from_u128(0x9220),
+        Uuid::from_u128(0x9120),
+        Uuid::from_u128(0x9020),
+    );
+    replacement_second.canonical_display_name = "bob.eth".to_owned();
+    replacement_second.normalized_name = "bob.eth".to_owned();
+    replacement_second.namehash = "namehash:bob.eth".to_owned();
+
+    let mut replacement = NameCurrentReplacement::begin(database.pool()).await?;
+    replacement
+        .stage_rows(std::slice::from_ref(&replacement_first))
+        .await?;
+    assert_eq!(replacement.staged_row_count(), 1);
+    assert_eq!(
+        load_name_current(database.pool(), first_logical_name_id).await?,
+        Some(first)
+    );
+
+    replacement
+        .stage_rows(std::slice::from_ref(&replacement_second))
+        .await?;
+    assert_eq!(replacement.staged_row_count(), 2);
+    let (upserted_row_count, deleted_row_count) = replacement.publish().await?;
+
+    assert_eq!(upserted_row_count, 2);
+    assert_eq!(deleted_row_count, 1);
+    assert_eq!(
+        load_name_current(database.pool(), first_logical_name_id).await?,
+        Some(replacement_first)
+    );
+    assert_eq!(
+        load_name_current(database.pool(), second_logical_name_id).await?,
+        Some(replacement_second)
+    );
+    assert_eq!(
+        load_name_current(database.pool(), stale_logical_name_id).await?,
+        None
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn name_current_delete_and_clear_support_rebuild_workflows() -> Result<()> {
     let database = test_database().await?;
     let first_logical_name_id = "ens:alice.eth";

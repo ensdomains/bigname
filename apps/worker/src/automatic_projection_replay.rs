@@ -118,7 +118,11 @@ async fn replay_all_current_projections_when_ready(pool: &PgPool) -> Result<bool
         "automatic all-current projection replay started"
     );
 
-    let replay_result = replay::rebuild_all_current_projections(pool).await;
+    let replay_result = replay::rebuild_pending_all_current_projections(
+        pool,
+        readiness.normalized_replay_max_target_block,
+    )
+    .await;
     release_replay_lock(&mut replay_lock).await?;
 
     let summary =
@@ -128,6 +132,7 @@ async fn replay_all_current_projections_when_ready(pool: &PgPool) -> Result<bool
         replay = "all_current_projections",
         projection_order = ?summary.projection_order(),
         projection_count = summary.steps.len(),
+        total_requested_key_count = summary.total_requested_key_count(),
         total_upserted_row_count = summary.total_upserted_row_count(),
         total_deleted_row_count = summary.total_deleted_row_count(),
         "automatic all-current projection replay completed"

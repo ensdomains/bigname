@@ -1,18 +1,24 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use anyhow::{Context, Result};
 use bigname_storage::{
     CanonicalityState, ChildrenCurrentRow, clear_children_current, delete_children_current,
-    load_canonical_declared_child_sources, load_raw_block, upsert_children_current_rows,
+    load_canonical_declared_child_sources, load_raw_block, stream_canonical_declared_child_sources,
+    upsert_children_current_rows,
 };
+use futures_util::{TryStreamExt, pin_mut};
 use serde_json::{Value, json};
 use sqlx::{
     PgPool,
     types::time::{OffsetDateTime, UtcOffset},
 };
+use tokio::task::JoinSet;
 
 const DECLARED_SURFACE_CLASS: &str = "declared";
 const CHILDREN_CURRENT_DERIVATION_KIND: &str = "children_current_rebuild";
+const CHILDREN_CURRENT_REBUILD_BATCH_SIZE: usize = 2_000;
+const CHILDREN_CURRENT_BLOCK_CACHE_LIMIT: usize = 4_096;
+const CHILDREN_CURRENT_REBUILD_CONCURRENCY: usize = 8;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ChildrenCurrentRebuildSummary {
@@ -32,21 +38,74 @@ pub async fn rebuild_children_current(
 }
 
 async fn rebuild_all_parents(pool: &PgPool) -> Result<ChildrenCurrentRebuildSummary> {
-    let sources = load_canonical_declared_child_sources(pool, None).await?;
-    let requested_parent_count = sources
-        .iter()
-        .map(|source| source.parent_logical_name_id.clone())
-        .collect::<BTreeSet<_>>()
-        .len();
-    let rows = build_children_rows(pool, &sources).await?;
-    let upserted_row_count = upsert_children_current_rows(pool, &rows).await?.len();
-    let deleted_row_count = delete_stale_children_current_rows(pool, &rows).await?;
+    let deleted_row_count = clear_children_current(pool).await?;
+    let mut rows = Vec::with_capacity(CHILDREN_CURRENT_REBUILD_BATCH_SIZE);
+    let mut queued_source_count = 0usize;
+    let mut completed_source_count = 0usize;
+    let mut upserted_row_count = 0usize;
+
+    let sources = stream_canonical_declared_child_sources(pool, None);
+    pin_mut!(sources);
+    let mut tasks = JoinSet::new();
+
+    while tasks.len() < CHILDREN_CURRENT_REBUILD_CONCURRENCY {
+        let Some(source) = sources.try_next().await? else {
+            break;
+        };
+        queued_source_count += 1;
+        spawn_children_rebuild_task(&mut tasks, pool, source);
+    }
+
+    while let Some(result) = tasks.join_next().await {
+        completed_source_count += 1;
+        rows.push(result??);
+        if rows.len() >= CHILDREN_CURRENT_REBUILD_BATCH_SIZE {
+            upserted_row_count += upsert_children_current_rows(pool, &rows).await?.len();
+            rows.clear();
+        }
+
+        if completed_source_count % 5_000 == 0 {
+            tracing::info!(
+                projection = "children_current",
+                queued_source_count,
+                completed_source_count,
+                upserted_row_count,
+                "children_current rebuild sources processed"
+            );
+        }
+
+        while tasks.len() < CHILDREN_CURRENT_REBUILD_CONCURRENCY {
+            let Some(source) = sources.try_next().await? else {
+                break;
+            };
+            queued_source_count += 1;
+            spawn_children_rebuild_task(&mut tasks, pool, source);
+        }
+    }
+
+    if !rows.is_empty() {
+        upserted_row_count += upsert_children_current_rows(pool, &rows).await?.len();
+    }
+
+    let requested_parent_count = count_children_current_parents(pool).await?;
 
     Ok(ChildrenCurrentRebuildSummary {
         requested_parent_count,
         upserted_row_count,
         deleted_row_count,
     })
+}
+
+fn spawn_children_rebuild_task(
+    tasks: &mut JoinSet<Result<ChildrenCurrentRow>>,
+    pool: &PgPool,
+    source: bigname_storage::DeclaredChildEventSource,
+) {
+    let pool = pool.clone();
+    tasks.spawn(async move {
+        let mut block_cache = BTreeMap::new();
+        build_children_row(&pool, &source, &mut block_cache).await
+    });
 }
 
 async fn rebuild_one_parent(
@@ -78,47 +137,6 @@ async fn build_children_rows(
     }
 
     Ok(rows)
-}
-
-async fn delete_stale_children_current_rows(
-    pool: &PgPool,
-    rows: &[ChildrenCurrentRow],
-) -> Result<u64> {
-    if rows.is_empty() {
-        return clear_children_current(pool).await;
-    }
-
-    let parent_logical_name_ids = rows
-        .iter()
-        .map(|row| row.parent_logical_name_id.clone())
-        .collect::<Vec<_>>();
-    let child_logical_name_ids = rows
-        .iter()
-        .map(|row| row.child_logical_name_id.clone())
-        .collect::<Vec<_>>();
-
-    sqlx::query(
-        r#"
-        DELETE FROM children_current current
-        WHERE current.surface_class = $1
-          AND NOT EXISTS (
-            SELECT 1
-            FROM UNNEST($2::TEXT[], $3::TEXT[]) AS replacement(
-                parent_logical_name_id,
-                child_logical_name_id
-            )
-            WHERE replacement.parent_logical_name_id = current.parent_logical_name_id
-              AND replacement.child_logical_name_id = current.child_logical_name_id
-          )
-        "#,
-    )
-    .bind(DECLARED_SURFACE_CLASS)
-    .bind(&parent_logical_name_ids)
-    .bind(&child_logical_name_ids)
-    .execute(pool)
-    .await
-    .context("failed to delete stale children_current rows after rebuild")
-    .map(|result| result.rows_affected())
 }
 
 async fn delete_stale_children_current_rows_for_parent(
@@ -209,7 +227,27 @@ async fn load_source_block(
         })?;
 
     block_cache.insert(cache_key, block.clone());
+    if block_cache.len() > CHILDREN_CURRENT_BLOCK_CACHE_LIMIT
+        && let Some(first_key) = block_cache.keys().next().cloned()
+    {
+        block_cache.remove(&first_key);
+    }
     Ok(block)
+}
+
+async fn count_children_current_parents(pool: &PgPool) -> Result<usize> {
+    sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(DISTINCT parent_logical_name_id)
+        FROM children_current
+        WHERE surface_class = $1
+        "#,
+    )
+    .bind(DECLARED_SURFACE_CLASS)
+    .fetch_one(pool)
+    .await
+    .context("failed to count children_current rebuilt parents")
+    .map(|count| count as usize)
 }
 
 fn build_provenance(source: &bigname_storage::DeclaredChildEventSource) -> Value {

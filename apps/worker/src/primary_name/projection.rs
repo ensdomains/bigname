@@ -5,17 +5,20 @@ use bigname_storage::{
     clear_primary_names_current, delete_primary_name_current,
     upsert_primary_name_current_snapshots,
 };
+use futures_util::{TryStreamExt, pin_mut};
 use serde_json::{Map, Value, json};
 use sqlx::PgPool;
 
 use super::{
     PrimaryNamesCurrentRebuildSummary,
     query::{
-        load_latest_name_claim_observation, load_latest_name_claim_observations,
-        load_reverse_claim_tuple, load_reverse_claim_tuples,
+        load_latest_name_claim_observation, load_reverse_claim_tuple,
+        stream_primary_name_rebuild_inputs,
     },
     types::{NameClaimObservation, PrimaryNameTupleKey, ReverseClaimTuple},
 };
+
+const PRIMARY_NAMES_CURRENT_REBUILD_BATCH_SIZE: usize = 2_000;
 
 pub async fn rebuild_primary_names_current(
     pool: &PgPool,
@@ -35,27 +38,47 @@ pub async fn rebuild_primary_names_current(
 }
 
 async fn rebuild_all_primary_names(pool: &PgPool) -> Result<PrimaryNamesCurrentRebuildSummary> {
-    let tuples = load_reverse_claim_tuples(pool).await?;
-    let claim_observations = load_latest_name_claim_observations(pool).await?;
-    let projections = tuples
-        .iter()
-        .map(|tuple| {
-            let observation = claim_observations.get(&tuple.key);
-            primary_name_row(tuple, observation)
-        })
-        .collect::<Result<Vec<PrimaryNameCurrentSnapshot>>>()?;
-    let rows = projections
-        .iter()
-        .map(|projection| projection.row.clone())
-        .collect::<Vec<_>>();
-    let upserted_row_count = upsert_primary_name_current_snapshots(pool, &projections)
-        .await?
-        .len();
-    let deleted_row_count = delete_stale_primary_name_current_rows(pool, &projections).await?;
-    let status_counts = count_statuses(&rows);
+    let deleted_row_count = clear_primary_names_current(pool).await?;
+    let mut projections = Vec::with_capacity(PRIMARY_NAMES_CURRENT_REBUILD_BATCH_SIZE);
+    let mut status_counts = StatusCounts::default();
+    let mut requested_tuple_count = 0usize;
+    let mut upserted_row_count = 0usize;
+
+    let inputs = stream_primary_name_rebuild_inputs(pool);
+    pin_mut!(inputs);
+
+    while let Some(input) = inputs.try_next().await? {
+        requested_tuple_count += 1;
+        let projection = primary_name_row(&input.tuple, input.claim_observation.as_ref())?;
+        add_status(&mut status_counts, &projection.row);
+        projections.push(projection);
+
+        if projections.len() >= PRIMARY_NAMES_CURRENT_REBUILD_BATCH_SIZE {
+            upserted_row_count += upsert_primary_name_current_snapshots(pool, &projections)
+                .await?
+                .len();
+            projections.clear();
+        }
+
+        if requested_tuple_count % 5_000 == 0 {
+            tracing::info!(
+                projection = "primary_names_current",
+                queued_tuple_count = requested_tuple_count,
+                completed_tuple_count = requested_tuple_count,
+                upserted_row_count,
+                "primary_names_current rebuild tuples processed"
+            );
+        }
+    }
+
+    if !projections.is_empty() {
+        upserted_row_count += upsert_primary_name_current_snapshots(pool, &projections)
+            .await?
+            .len();
+    }
 
     Ok(PrimaryNamesCurrentRebuildSummary {
-        requested_tuple_count: tuples.len(),
+        requested_tuple_count,
         upserted_row_count,
         deleted_row_count,
         success_row_count: status_counts.success_row_count,
@@ -113,67 +136,23 @@ async fn rebuild_one_primary_name(
     })
 }
 
-async fn delete_stale_primary_name_current_rows(
-    pool: &PgPool,
-    projections: &[PrimaryNameCurrentSnapshot],
-) -> Result<u64> {
-    if projections.is_empty() {
-        return clear_primary_names_current(pool).await;
-    }
-
-    let addresses = projections
-        .iter()
-        .map(|projection| projection.row.address.clone())
-        .collect::<Vec<_>>();
-    let namespaces = projections
-        .iter()
-        .map(|projection| projection.row.namespace.clone())
-        .collect::<Vec<_>>();
-    let coin_types = projections
-        .iter()
-        .map(|projection| projection.row.coin_type.clone())
-        .collect::<Vec<_>>();
-
-    sqlx::query(
-        r#"
-        DELETE FROM primary_names_current current
-        WHERE NOT EXISTS (
-            SELECT 1
-            FROM UNNEST($1::TEXT[], $2::TEXT[], $3::TEXT[]) AS replacement(
-                address,
-                namespace,
-                coin_type
-            )
-            WHERE replacement.address = current.address
-              AND replacement.namespace = current.namespace
-              AND replacement.coin_type = current.coin_type
-        )
-        "#,
-    )
-    .bind(&addresses)
-    .bind(&namespaces)
-    .bind(&coin_types)
-    .execute(pool)
-    .await
-    .context("failed to delete stale primary_names_current rows after rebuild")
-    .map(|result| result.rows_affected())
-}
-
 fn primary_name_row(
     tuple: &ReverseClaimTuple,
     claim_observation: Option<&NameClaimObservation>,
 ) -> Result<PrimaryNameCurrentSnapshot> {
-    let (claim_status, raw_claim_name) =
-        match claim_observation.and_then(|observation| observation.raw_name.as_deref()) {
-            Some(raw_name) if claim_name_looks_normalizable(raw_name) => {
-                (PrimaryNameClaimStatus::Success, None)
-            }
-            Some(raw_name) => (
-                PrimaryNameClaimStatus::InvalidName,
-                Some(raw_name.to_owned()),
-            ),
-            None => (PrimaryNameClaimStatus::NotFound, None),
-        };
+    let (claim_status, raw_claim_name) = match claim_observation
+        .and_then(|observation| observation.raw_name.as_deref())
+    {
+        Some(raw_name) if raw_name.trim().is_empty() => (PrimaryNameClaimStatus::NotFound, None),
+        Some(raw_name) if claim_name_looks_normalizable(raw_name) => {
+            (PrimaryNameClaimStatus::Success, None)
+        }
+        Some(raw_name) => (
+            PrimaryNameClaimStatus::InvalidName,
+            Some(raw_name.to_owned()),
+        ),
+        None => (PrimaryNameClaimStatus::NotFound, None),
+    };
 
     let normalized_claim_name = claim_observation
         .and_then(|observation| observation.raw_name.as_deref())
@@ -266,16 +245,20 @@ struct StatusCounts {
     invalid_name_row_count: usize,
 }
 
+fn add_status(counts: &mut StatusCounts, row: &PrimaryNameCurrentRow) {
+    match row.claim_status {
+        PrimaryNameClaimStatus::Success => counts.success_row_count += 1,
+        PrimaryNameClaimStatus::NotFound => counts.not_found_row_count += 1,
+        PrimaryNameClaimStatus::InvalidName => counts.invalid_name_row_count += 1,
+        PrimaryNameClaimStatus::Unsupported => {}
+    }
+}
+
 fn count_statuses(rows: &[PrimaryNameCurrentRow]) -> StatusCounts {
     let mut counts = StatusCounts::default();
 
     for row in rows {
-        match row.claim_status {
-            PrimaryNameClaimStatus::Success => counts.success_row_count += 1,
-            PrimaryNameClaimStatus::NotFound => counts.not_found_row_count += 1,
-            PrimaryNameClaimStatus::InvalidName => counts.invalid_name_row_count += 1,
-            PrimaryNameClaimStatus::Unsupported => {}
-        }
+        add_status(&mut counts, row);
     }
 
     counts
