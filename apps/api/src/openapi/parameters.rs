@@ -247,6 +247,14 @@ pub(super) fn history_scope_query_parameter() -> JsonValue {
     )
 }
 
+pub(super) fn history_view_query_parameter() -> JsonValue {
+    view_query_parameter("full")
+}
+
+pub(super) fn history_meta_query_parameter() -> JsonValue {
+    meta_query_parameter("summary")
+}
+
 pub(super) fn resolution_mode_query_parameter() -> JsonValue {
     query_parameter(
         "mode",
@@ -271,6 +279,8 @@ pub(super) fn primary_name_mode_query_parameter() -> JsonValue {
     )
 }
 
+include!("app_facing_parameters.rs");
+
 pub(super) fn required_coin_type_query_parameter() -> JsonValue {
     required_query_parameter(
         "coin_type",
@@ -278,6 +288,30 @@ pub(super) fn required_coin_type_query_parameter() -> JsonValue {
         json!({
             "type": "string",
             "pattern": "^[0-9]+$",
+        }),
+    )
+}
+
+pub(super) fn view_query_parameter(default: &'static str) -> JsonValue {
+    query_parameter(
+        "view",
+        "Response view selector.",
+        json!({
+            "type": "string",
+            "enum": ["compact", "full"],
+            "default": default,
+        }),
+    )
+}
+
+pub(super) fn meta_query_parameter(default: &'static str) -> JsonValue {
+    query_parameter(
+        "meta",
+        "Compact response metadata selector.",
+        json!({
+            "type": "string",
+            "enum": ["none", "summary", "full"],
+            "default": default,
         }),
     )
 }

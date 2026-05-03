@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+log() {
+  printf '[apps-monorepo-reference] %s\n' "$*"
+}
+
+fail() {
+  printf '[apps-monorepo-reference] ERROR: %s\n' "$*" >&2
+  exit 1
+}
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || fail "missing required command: $1"
+}
+
+zip_path=".refs/apps-monorepo-main.zip"
+dest_dir=".refs/apps_monorepo"
+nested_root="apps-monorepo-main"
+
+if [ ! -f "$zip_path" ]; then
+  fail "missing ${zip_path}; place the apps monorepo zip there, then rerun scripts/apps-monorepo-reference"
+fi
+
+require_command unzip
+mkdir -p .refs
+
+tmp_dir="$(mktemp -d ".refs/.apps_monorepo_extract.XXXXXX")"
+cleanup() {
+  rm -rf "$tmp_dir"
+}
+trap cleanup EXIT INT TERM
+
+log "extracting ${zip_path}"
+unzip -q "$zip_path" -d "$tmp_dir"
+
+src_dir="$tmp_dir"
+if [ -d "$tmp_dir/$nested_root" ]; then
+  src_dir="$tmp_dir/$nested_root"
+  log "stripping nested zip root ${nested_root}/"
+fi
+
+if [ -L "$dest_dir" ]; then
+  fail "refusing to replace symlink ${dest_dir}"
+fi
+if [ -e "$dest_dir" ] && [ ! -d "$dest_dir" ]; then
+  fail "refusing to replace non-directory ${dest_dir}"
+fi
+
+rm -rf "$dest_dir"
+mv "$src_dir" "$dest_dir"
+log "extracted ${zip_path} -> ${dest_dir}"

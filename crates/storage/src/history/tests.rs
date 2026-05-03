@@ -667,6 +667,141 @@ async fn name_history_scope_uses_logical_name_and_resource_filters() -> Result<(
 }
 
 #[tokio::test]
+async fn event_history_filter_composes_projection_anchors_and_event_filters() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0xa105);
+    let surface_binding_id = Uuid::from_u128(0xb105);
+
+    upsert_raw_blocks(
+        database.pool(),
+        &[
+            raw_block("ethereum-mainnet", "0x250", None, 250, 1_700_000_250),
+            raw_block(
+                "ethereum-mainnet",
+                "0x251",
+                Some("0x250"),
+                251,
+                1_700_000_251,
+            ),
+            raw_block(
+                "ethereum-mainnet",
+                "0x252",
+                Some("0x251"),
+                252,
+                1_700_000_252,
+            ),
+        ],
+    )
+    .await?;
+    upsert_name_surfaces(database.pool(), &[name_surface(logical_name_id)]).await?;
+    upsert_resources(database.pool(), &[resource(resource_id)]).await?;
+    upsert_surface_bindings(
+        database.pool(),
+        &[surface_binding(
+            surface_binding_id,
+            logical_name_id,
+            resource_id,
+            timestamp(1_700_000_240),
+        )],
+    )
+    .await?;
+    upsert_address_names_current_rows(
+        database.pool(),
+        &[address_name_current_row(
+            address,
+            logical_name_id,
+            AddressNameRelation::Registrant,
+            surface_binding_id,
+            resource_id,
+            None,
+            250,
+        )],
+    )
+    .await?;
+
+    upsert_normalized_events(
+        database.pool(),
+        &[
+            NormalizedEvent {
+                event_kind: "RecordChanged".to_owned(),
+                after_state: json!({"key": "avatar"}),
+                ..history_event(
+                    "events:surface-record",
+                    Some(logical_name_id),
+                    None,
+                    Some("ethereum-mainnet"),
+                    Some(250),
+                    Some("0x250"),
+                    Some("0xtx250"),
+                    Some(0),
+                    CanonicalityState::Canonical,
+                )
+            },
+            NormalizedEvent {
+                event_kind: "RegistrationGranted".to_owned(),
+                after_state: json!({"registrant": address.to_ascii_uppercase()}),
+                ..history_event(
+                    "events:resource-registration",
+                    None,
+                    Some(resource_id),
+                    Some("ethereum-mainnet"),
+                    Some(251),
+                    Some("0x251"),
+                    Some("0xtx251"),
+                    Some(0),
+                    CanonicalityState::Canonical,
+                )
+            },
+            NormalizedEvent {
+                event_kind: "RegistrationGranted".to_owned(),
+                after_state: json!({"registrant": address}),
+                ..history_event(
+                    "events:observed-registration",
+                    None,
+                    Some(resource_id),
+                    Some("ethereum-mainnet"),
+                    Some(252),
+                    Some("0x252"),
+                    Some("0xtx252"),
+                    Some(0),
+                    CanonicalityState::Observed,
+                )
+            },
+        ],
+    )
+    .await?;
+
+    let rows = load_event_history(
+        database.pool(),
+        EventHistoryFilter {
+            namespace: Some("ens".to_owned()),
+            logical_name_id: Some(logical_name_id.to_owned()),
+            address: Some(EventHistoryAddressFilter {
+                address: address.to_owned(),
+                relation: Some(AddressNameRelation::Registrant),
+            }),
+            event_kinds: vec!["RegistrationGranted".to_owned()],
+            from_block: Some(251),
+            to_block: Some(251),
+            ..EventHistoryFilter::default()
+        },
+        true,
+    )
+    .await?;
+
+    assert_eq!(
+        rows.iter()
+            .map(|row| row.event_identity.as_str())
+            .collect::<Vec<_>>(),
+        vec!["events:resource-registration"]
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn name_history_resource_scope_preserves_rebound_resource_ids() -> Result<()> {
     let database = TestDatabase::new().await?;
     let logical_name_id = "ens:alice.eth";

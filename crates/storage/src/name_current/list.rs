@@ -1,0 +1,507 @@
+use anyhow::{Context, Result};
+use sqlx::{PgPool, Postgres, QueryBuilder, Row, postgres::PgRow, types::time::OffsetDateTime};
+
+use super::{NameCurrentRow, decode_name_current_row};
+use crate::{
+    AddressNameRelation,
+    projection_helpers::{checked_page_limit_i64_from_usize, checked_page_size_usize},
+};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NameCurrentListSort {
+    Name,
+    ExpiryDate,
+    RegistrationDate,
+    CreatedAt,
+}
+
+impl NameCurrentListSort {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Name => "name",
+            Self::ExpiryDate => "expiry_date",
+            Self::RegistrationDate => "registration_date",
+            Self::CreatedAt => "created_at",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NameCurrentListOrder {
+    Asc,
+    Desc,
+}
+
+impl NameCurrentListOrder {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Asc => "asc",
+            Self::Desc => "desc",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NameCurrentAddressRelationFilter {
+    Relation(AddressNameRelation),
+    Any,
+}
+
+impl NameCurrentAddressRelationFilter {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Relation(relation) => relation.as_str(),
+            Self::Any => "any",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NameCurrentAddressFilter {
+    pub address: String,
+    pub relation: NameCurrentAddressRelationFilter,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct NameCurrentListFilter {
+    pub namespace: Option<String>,
+    pub name: Option<String>,
+    pub prefix: Option<String>,
+    pub contains: Option<String>,
+    pub contains_nocase: Option<String>,
+    pub resolver: Option<String>,
+    pub address: Option<NameCurrentAddressFilter>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum NameCurrentListCursorValue {
+    Name(String),
+    Timestamp(Option<OffsetDateTime>),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NameCurrentListCursor {
+    pub sort_value: NameCurrentListCursorValue,
+    pub namespace: String,
+    pub normalized_name: String,
+    pub namehash: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NameCurrentListRow {
+    pub row: NameCurrentRow,
+    pub labelhash: Option<String>,
+    pub token_id: Option<String>,
+    pub owner: Option<String>,
+    pub registrant: Option<String>,
+    pub created_at: Option<OffsetDateTime>,
+    pub registration_date: Option<OffsetDateTime>,
+    pub expiry_date: Option<OffsetDateTime>,
+    pub resolver_address: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NameCurrentListPage {
+    pub rows: Vec<NameCurrentListRow>,
+    pub next_cursor: Option<NameCurrentListCursor>,
+    pub total_count: u64,
+}
+
+const DEFAULT_NAME_CURRENT_LIST_READ_FILTER: &str = r#"
+  AND surface.canonicality_state IN (
+      'canonical'::canonicality_state,
+      'safe'::canonicality_state,
+      'finalized'::canonicality_state
+  )
+  AND (
+      nc.surface_binding_id IS NULL
+      OR (
+          resource.canonicality_state IN (
+              'canonical'::canonicality_state,
+              'safe'::canonicality_state,
+              'finalized'::canonicality_state
+          )
+          AND binding.canonicality_state IN (
+              'canonical'::canonicality_state,
+              'safe'::canonicality_state,
+              'finalized'::canonicality_state
+          )
+          AND (
+              nc.token_lineage_id IS NULL
+              OR token_lineage.canonicality_state IN (
+                  'canonical'::canonicality_state,
+                  'safe'::canonicality_state,
+                  'finalized'::canonicality_state
+              )
+          )
+      )
+  )
+"#;
+
+const DEFAULT_ADDRESS_NAMES_MEMBERSHIP_READ_FILTER: &str = r#"
+  AND membership_surface.canonicality_state IN (
+      'canonical'::canonicality_state,
+      'safe'::canonicality_state,
+      'finalized'::canonicality_state
+  )
+  AND membership_resource.canonicality_state IN (
+      'canonical'::canonicality_state,
+      'safe'::canonicality_state,
+      'finalized'::canonicality_state
+  )
+  AND membership_binding.canonicality_state IN (
+      'canonical'::canonicality_state,
+      'safe'::canonicality_state,
+      'finalized'::canonicality_state
+  )
+  AND (
+      anc.token_lineage_id IS NULL
+      OR membership_token_lineage.canonicality_state IN (
+          'canonical'::canonicality_state,
+          'safe'::canonicality_state,
+          'finalized'::canonicality_state
+      )
+  )
+"#;
+
+pub async fn load_name_current_list_page(
+    pool: &PgPool,
+    filter: &NameCurrentListFilter,
+    sort: NameCurrentListSort,
+    order: NameCurrentListOrder,
+    cursor: Option<&NameCurrentListCursor>,
+    page_size: u64,
+) -> Result<NameCurrentListPage> {
+    let page_size = checked_page_size_usize(
+        page_size,
+        "name_current list page_size must be positive",
+        "name_current list page_size does not fit in usize",
+    )?;
+    let page_limit = checked_page_limit_i64_from_usize(
+        page_size,
+        "name_current list page_size is too large",
+        "name_current list page_size exceeds SQL limit",
+    )?;
+    let total_count = count_name_current_list(pool, filter).await?;
+
+    let mut builder = QueryBuilder::<Postgres>::new("");
+    push_filtered_name_current_cte(&mut builder, filter);
+    builder.push(
+        r#"
+        SELECT
+            logical_name_id,
+            namespace,
+            canonical_display_name,
+            normalized_name,
+            namehash,
+            surface_binding_id,
+            resource_id,
+            token_lineage_id,
+            binding_kind,
+            declared_summary,
+            provenance,
+            coverage,
+            chain_positions,
+            canonicality_summary,
+            manifest_version,
+            last_recomputed_at,
+            labelhash,
+            token_id,
+            owner,
+            registrant,
+            created_at,
+            registration_date,
+            expiry_date,
+            resolver_address
+        FROM filtered_names
+        WHERE TRUE
+        "#,
+    );
+    if let Some(cursor) = cursor {
+        push_name_current_list_cursor_after(&mut builder, sort, order, cursor);
+    }
+    push_name_current_list_order(&mut builder, sort, order);
+    builder.push(" LIMIT ");
+    builder.push_bind(page_limit);
+
+    let rows = builder
+        .build()
+        .fetch_all(pool)
+        .await
+        .with_context(|| format!("failed to load name_current compact page for {filter:?}"))?;
+    let mut rows = rows
+        .into_iter()
+        .map(decode_name_current_list_row)
+        .collect::<Result<Vec<_>>>()?;
+    let next_cursor = if rows.len() > page_size {
+        rows.truncate(page_size);
+        rows.last()
+            .map(|row| name_current_list_cursor_from_row(row, sort))
+    } else {
+        None
+    };
+
+    Ok(NameCurrentListPage {
+        rows,
+        next_cursor,
+        total_count,
+    })
+}
+
+pub async fn count_name_current_list(pool: &PgPool, filter: &NameCurrentListFilter) -> Result<u64> {
+    let mut builder = QueryBuilder::<Postgres>::new("");
+    push_filtered_name_current_cte(&mut builder, filter);
+    builder.push(
+        r#"
+        SELECT COUNT(*)::BIGINT AS total_count
+        FROM filtered_names
+        "#,
+    );
+
+    let row = builder
+        .build()
+        .fetch_one(pool)
+        .await
+        .with_context(|| format!("failed to count name_current compact rows for {filter:?}"))?;
+    let total_count = row
+        .try_get::<i64, _>("total_count")
+        .context("missing total_count")?;
+    u64::try_from(total_count).context("negative name_current compact total_count")
+}
+
+fn push_filtered_name_current_cte<'a>(
+    builder: &mut QueryBuilder<'a, Postgres>,
+    filter: &'a NameCurrentListFilter,
+) {
+    builder.push("WITH ");
+    if let Some(address_filter) = filter.address.as_ref() {
+        push_address_membership_cte(builder, address_filter, filter.namespace.as_deref());
+        builder.push(", ");
+    }
+    builder.push(
+        r#"
+        filtered_names AS (
+            SELECT
+                nc.logical_name_id,
+                nc.namespace,
+                nc.canonical_display_name,
+                nc.normalized_name,
+                nc.namehash,
+                nc.surface_binding_id,
+                nc.resource_id,
+                nc.token_lineage_id,
+                nc.binding_kind,
+                nc.declared_summary,
+                nc.provenance,
+                nc.coverage,
+                nc.chain_positions,
+                nc.canonicality_summary,
+                nc.manifest_version,
+                nc.last_recomputed_at,
+                surface.labelhashes[1] AS labelhash,
+                NULLIF(COALESCE(
+                    nc.declared_summary #>> '{authority,token_id}',
+                    nc.declared_summary #>> '{registration,token_id}',
+                    nc.declared_summary #>> '{registration,upstream_resource}',
+                    nc.declared_summary #>> '{control,token_id}'
+                ), '') AS token_id,
+                NULLIF(LOWER(COALESCE(
+                    nc.declared_summary #>> '{control,registry_owner}',
+                    nc.declared_summary #>> '{control,owner}'
+                )), '') AS owner,
+                NULLIF(LOWER(COALESCE(
+                    nc.declared_summary #>> '{control,registrant}',
+                    nc.declared_summary #>> '{registration,registrant}'
+                )), '') AS registrant,
+                COALESCE(
+                    "#,
+    );
+    push_json_timestamp_expr(builder, &["registration", "created_at"]);
+    builder.push(", ");
+    push_json_timestamp_expr(builder, &["history", "created_at"]);
+    builder.push(
+        r#",
+                    surface_block.block_timestamp
+                ) AS created_at,
+                COALESCE(
+                    "#,
+    );
+    push_json_timestamp_expr(builder, &["registration", "registration_date"]);
+    builder.push(", ");
+    push_json_timestamp_expr(builder, &["registration", "registered_at"]);
+    builder.push(
+        r#"
+                ) AS registration_date,
+                COALESCE(
+                    "#,
+    );
+    push_json_timestamp_expr(builder, &["registration", "expiry_date"]);
+    builder.push(", ");
+    push_json_timestamp_expr(builder, &["registration", "expiry"]);
+    builder.push(", ");
+    push_json_timestamp_expr(builder, &["control", "expiry_date"]);
+    builder.push(", ");
+    push_json_timestamp_expr(builder, &["control", "expiry"]);
+    builder.push(
+        r#"
+                ) AS expiry_date,
+                NULLIF(LOWER(nc.declared_summary #>> '{resolver,address}'), '') AS resolver_address
+            FROM name_current nc
+            JOIN name_surfaces surface
+              ON surface.logical_name_id = nc.logical_name_id
+            LEFT JOIN chain_lineage surface_block
+              ON surface_block.chain_id = surface.chain_id
+             AND surface_block.block_hash = surface.block_hash
+            LEFT JOIN resources resource
+              ON resource.resource_id = nc.resource_id
+            LEFT JOIN surface_bindings binding
+              ON binding.surface_binding_id = nc.surface_binding_id
+            LEFT JOIN token_lineages token_lineage
+              ON token_lineage.token_lineage_id = nc.token_lineage_id
+        "#,
+    );
+    if filter.address.is_some() {
+        builder.push(
+            r#"
+            JOIN address_membership
+              ON address_membership.logical_name_id = nc.logical_name_id
+            "#,
+        );
+    }
+    builder.push(" WHERE TRUE ");
+    builder.push(DEFAULT_NAME_CURRENT_LIST_READ_FILTER);
+    push_name_current_filter_predicates(builder, filter);
+    builder.push(")");
+}
+
+fn push_address_membership_cte<'a>(
+    builder: &mut QueryBuilder<'a, Postgres>,
+    address_filter: &'a NameCurrentAddressFilter,
+    namespace: Option<&'a str>,
+) {
+    builder.push(
+        r#"
+        address_membership AS (
+            SELECT DISTINCT anc.logical_name_id
+            FROM address_names_current anc
+            JOIN name_surfaces membership_surface
+              ON membership_surface.logical_name_id = anc.logical_name_id
+            JOIN resources membership_resource
+              ON membership_resource.resource_id = anc.resource_id
+            JOIN surface_bindings membership_binding
+              ON membership_binding.surface_binding_id = anc.surface_binding_id
+            LEFT JOIN token_lineages membership_token_lineage
+              ON membership_token_lineage.token_lineage_id = anc.token_lineage_id
+            WHERE anc.address =
+        "#,
+    );
+    builder.push_bind(&address_filter.address);
+    if let Some(namespace) = namespace {
+        builder.push(" AND anc.namespace = ");
+        builder.push_bind(namespace);
+    }
+    if let NameCurrentAddressRelationFilter::Relation(relation) = address_filter.relation {
+        builder.push(" AND anc.relation = ");
+        builder.push_bind(relation.as_str());
+    }
+    builder.push(DEFAULT_ADDRESS_NAMES_MEMBERSHIP_READ_FILTER);
+    builder.push(")");
+}
+
+fn push_name_current_filter_predicates<'a>(
+    builder: &mut QueryBuilder<'a, Postgres>,
+    filter: &'a NameCurrentListFilter,
+) {
+    if let Some(namespace) = filter.namespace.as_deref() {
+        builder.push(" AND nc.namespace = ");
+        builder.push_bind(namespace);
+    }
+    if let Some(name) = filter.name.as_deref() {
+        builder.push(" AND nc.normalized_name = ");
+        builder.push_bind(name);
+    }
+    if let Some(prefix) = filter.prefix.as_deref() {
+        builder.push(" AND nc.normalized_name LIKE ");
+        builder.push_bind(format!("{}%", escape_like_pattern(prefix)));
+        builder.push(" ESCAPE '\\'");
+    }
+    if let Some(contains) = filter.contains.as_deref() {
+        builder.push(" AND nc.normalized_name LIKE ");
+        builder.push_bind(format!("%{}%", escape_like_pattern(contains)));
+        builder.push(" ESCAPE '\\'");
+    }
+    if let Some(contains_nocase) = filter.contains_nocase.as_deref() {
+        builder.push(" AND LOWER(nc.normalized_name) LIKE ");
+        builder.push_bind(format!(
+            "%{}%",
+            escape_like_pattern(&contains_nocase.to_ascii_lowercase())
+        ));
+        builder.push(" ESCAPE '\\'");
+    }
+    if let Some(resolver) = filter.resolver.as_deref() {
+        builder.push(" AND LOWER(nc.declared_summary #>> '{resolver,address}') = ");
+        builder.push_bind(resolver);
+    }
+}
+
+include!("list_paging.rs");
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+    use sqlx::types::time::OffsetDateTime;
+    use uuid::Uuid;
+
+    use super::*;
+    use crate::SurfaceBindingKind;
+
+    #[test]
+    fn name_current_list_cursor_uses_sort_specific_value() {
+        let row = NameCurrentListRow {
+            row: NameCurrentRow {
+                logical_name_id: "ens:alice.eth".to_owned(),
+                namespace: "ens".to_owned(),
+                canonical_display_name: "Alice.eth".to_owned(),
+                normalized_name: "alice.eth".to_owned(),
+                namehash: "namehash:alice.eth".to_owned(),
+                surface_binding_id: Some(Uuid::from_u128(1)),
+                resource_id: Some(Uuid::from_u128(2)),
+                token_lineage_id: Some(Uuid::from_u128(3)),
+                binding_kind: Some(SurfaceBindingKind::DeclaredRegistryPath),
+                declared_summary: json!({}),
+                provenance: json!({}),
+                coverage: json!({}),
+                chain_positions: json!({}),
+                canonicality_summary: json!({}),
+                manifest_version: 1,
+                last_recomputed_at: timestamp(1_717_171_717),
+            },
+            labelhash: None,
+            token_id: None,
+            owner: None,
+            registrant: None,
+            created_at: Some(timestamp(1_717_171_700)),
+            registration_date: Some(timestamp(1_717_171_701)),
+            expiry_date: Some(timestamp(1_900_000_000)),
+            resolver_address: None,
+        };
+
+        assert_eq!(
+            name_current_list_cursor_from_row(&row, NameCurrentListSort::Name).sort_value,
+            NameCurrentListCursorValue::Name("Alice.eth".to_owned())
+        );
+        assert_eq!(
+            name_current_list_cursor_from_row(&row, NameCurrentListSort::ExpiryDate).sort_value,
+            NameCurrentListCursorValue::Timestamp(Some(timestamp(1_900_000_000)))
+        );
+    }
+
+    #[test]
+    fn name_current_list_like_filters_escape_wildcards() {
+        assert_eq!(escape_like_pattern(r"al%_ice\eth"), r"al\%\_ice\\eth");
+    }
+
+    fn timestamp(seconds: i64) -> OffsetDateTime {
+        OffsetDateTime::from_unix_timestamp(seconds).expect("test timestamp must be valid")
+    }
+}

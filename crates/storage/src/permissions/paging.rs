@@ -6,10 +6,11 @@ use crate::projection_helpers::{checked_page_limit_i64, checked_page_size_usize}
 
 use super::{
     decode::{decode_permissions_current_full_filter_summary, decode_permissions_current_row},
-    reads::push_permissions_current_filters,
+    reads::{DEFAULT_PERMISSIONS_CURRENT_READ_FILTER, push_permissions_current_filters},
     types::{
-        PermissionScope, PermissionsCurrentFullFilterSummary, PermissionsCurrentKeysetCursor,
-        PermissionsCurrentPage,
+        PermissionScope, PermissionsCurrentAccountResourceCursor,
+        PermissionsCurrentAccountResourcePage, PermissionsCurrentFullFilterSummary,
+        PermissionsCurrentKeysetCursor, PermissionsCurrentPage,
     },
 };
 
@@ -105,6 +106,88 @@ pub async fn load_permissions_current_page(
     })
 }
 
+/// Load one bounded keyset page for app-facing account/resource role rows.
+pub async fn load_permissions_current_account_resource_page(
+    pool: &PgPool,
+    subject: Option<&str>,
+    resource_id: Option<Uuid>,
+    cursor: Option<&PermissionsCurrentAccountResourceCursor>,
+    page_size: u64,
+) -> Result<PermissionsCurrentAccountResourcePage> {
+    let limit = checked_page_limit_i64(
+        page_size,
+        "permissions_current page_size must be positive",
+        "permissions_current page_size is too large",
+    )?;
+    let page_size_usize = checked_page_size_usize(
+        page_size,
+        "permissions_current page_size must be positive",
+        "permissions_current page_size must fit in usize",
+    )?;
+
+    let page_rows = {
+        let mut page_builder = QueryBuilder::<Postgres>::new(
+            r#"
+            SELECT
+                pc.resource_id,
+                pc.subject,
+                pc.scope,
+                pc.scope_kind,
+                pc.scope_detail,
+                pc.effective_powers,
+                pc.grant_source,
+                pc.revocation_source,
+                pc.inheritance_path,
+                pc.transfer_behavior,
+                pc.provenance,
+                pc.coverage,
+                pc.chain_positions,
+                pc.canonicality_summary,
+                pc.manifest_version,
+                pc.last_recomputed_at
+            FROM permissions_current pc
+            JOIN resources resource
+              ON resource.resource_id = pc.resource_id
+            WHERE TRUE
+            "#,
+        );
+        push_permissions_current_account_resource_filters(&mut page_builder, subject, resource_id);
+        push_permissions_current_account_resource_cursor(&mut page_builder, cursor);
+        page_builder.push(" ORDER BY pc.subject ASC, pc.resource_id ASC, pc.scope ASC LIMIT ");
+        page_builder.push_bind(limit);
+
+        page_builder
+            .build()
+            .fetch_all(pool)
+            .await
+            .context("failed to load permissions_current account/resource page")?
+    };
+
+    let mut rows = page_rows
+        .into_iter()
+        .map(decode_permissions_current_row)
+        .collect::<Result<Vec<_>>>()?;
+    let has_next_page = rows.len() > page_size_usize;
+    if has_next_page {
+        rows.truncate(page_size_usize);
+    }
+    let next_cursor = has_next_page
+        .then(|| {
+            rows.last()
+                .map(PermissionsCurrentAccountResourceCursor::from)
+        })
+        .flatten();
+
+    let summary =
+        load_permissions_current_account_resource_summary(pool, subject, resource_id).await?;
+
+    Ok(PermissionsCurrentAccountResourcePage {
+        rows,
+        next_cursor,
+        summary,
+    })
+}
+
 async fn load_permissions_current_full_filter_summary(
     pool: &PgPool,
     resource_id: Uuid,
@@ -134,6 +217,37 @@ async fn load_permissions_current_full_filter_summary(
     decode_permissions_current_full_filter_summary(row)
 }
 
+async fn load_permissions_current_account_resource_summary(
+    pool: &PgPool,
+    subject: Option<&str>,
+    resource_id: Option<Uuid>,
+) -> Result<PermissionsCurrentFullFilterSummary> {
+    let mut builder = QueryBuilder::<Postgres>::new(
+        r#"
+        SELECT
+            COUNT(*)::BIGINT AS row_count,
+            COALESCE(jsonb_agg(pc.provenance ORDER BY pc.subject ASC, pc.resource_id ASC, pc.scope ASC), '[]'::jsonb) AS provenance,
+            (jsonb_agg(pc.coverage ORDER BY pc.subject ASC, pc.resource_id ASC, pc.scope ASC)->0) AS coverage,
+            COALESCE(jsonb_agg(pc.chain_positions ORDER BY pc.subject ASC, pc.resource_id ASC, pc.scope ASC), '[]'::jsonb) AS chain_positions,
+            COALESCE(jsonb_agg(pc.canonicality_summary ORDER BY pc.subject ASC, pc.resource_id ASC, pc.scope ASC), '[]'::jsonb) AS canonicality_summaries,
+            MAX(pc.last_recomputed_at) AS last_recomputed_at
+        FROM permissions_current pc
+        JOIN resources resource
+          ON resource.resource_id = pc.resource_id
+        WHERE TRUE
+        "#,
+    );
+    push_permissions_current_account_resource_filters(&mut builder, subject, resource_id);
+
+    let row = builder
+        .build()
+        .fetch_one(pool)
+        .await
+        .context("failed to summarize permissions_current account/resource rows")?;
+
+    decode_permissions_current_full_filter_summary(row)
+}
+
 fn push_permissions_current_keyset_cursor<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
     cursor: Option<&'a PermissionsCurrentKeysetCursor>,
@@ -141,6 +255,39 @@ fn push_permissions_current_keyset_cursor<'a>(
     if let Some(cursor) = cursor {
         builder.push(" AND (pc.subject, pc.scope) > (");
         builder.push_bind(&cursor.subject);
+        builder.push(", ");
+        builder.push_bind(&cursor.scope);
+        builder.push(")");
+    }
+}
+
+fn push_permissions_current_account_resource_filters<'a>(
+    builder: &mut QueryBuilder<'a, Postgres>,
+    subject: Option<&'a str>,
+    resource_id: Option<Uuid>,
+) {
+    if let Some(subject) = subject {
+        builder.push(" AND pc.subject = ");
+        builder.push_bind(subject);
+    }
+
+    if let Some(resource_id) = resource_id {
+        builder.push(" AND pc.resource_id = ");
+        builder.push_bind(resource_id);
+    }
+
+    builder.push(DEFAULT_PERMISSIONS_CURRENT_READ_FILTER);
+}
+
+fn push_permissions_current_account_resource_cursor<'a>(
+    builder: &mut QueryBuilder<'a, Postgres>,
+    cursor: Option<&'a PermissionsCurrentAccountResourceCursor>,
+) {
+    if let Some(cursor) = cursor {
+        builder.push(" AND (pc.subject, pc.resource_id, pc.scope) > (");
+        builder.push_bind(&cursor.subject);
+        builder.push(", ");
+        builder.push_bind(cursor.resource_id);
         builder.push(", ");
         builder.push_bind(&cursor.scope);
         builder.push(")");

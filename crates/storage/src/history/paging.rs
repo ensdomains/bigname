@@ -2,14 +2,26 @@ use anyhow::{Context, Result};
 use sqlx::{PgPool, Postgres, QueryBuilder};
 use uuid::Uuid;
 
-use super::{HistoryEvent, decoders::decode_history_event, selectors::HistorySelector};
+use super::{
+    EventHistoryReadFilter, HistoryEvent, decoders::decode_history_event,
+    selectors::HistorySelector,
+};
 
 pub(super) async fn load_history(
     pool: &PgPool,
     selector: HistorySelector,
     canonical_only: bool,
 ) -> Result<Vec<HistoryEvent>> {
-    load_history_internal(pool, selector, canonical_only, false).await
+    load_history_internal(
+        pool,
+        EventHistoryReadFilter {
+            selectors: vec![selector],
+            ..EventHistoryReadFilter::default()
+        },
+        canonical_only,
+        false,
+    )
+    .await
 }
 
 pub(super) async fn load_history_head(
@@ -17,17 +29,38 @@ pub(super) async fn load_history_head(
     selector: HistorySelector,
     canonical_only: bool,
 ) -> Result<Option<HistoryEvent>> {
-    let mut rows = load_history_internal(pool, selector, canonical_only, true).await?;
+    let mut rows = load_history_internal(
+        pool,
+        EventHistoryReadFilter {
+            selectors: vec![selector],
+            ..EventHistoryReadFilter::default()
+        },
+        canonical_only,
+        true,
+    )
+    .await?;
     Ok(rows.drain(..).next())
+}
+
+pub(super) async fn load_event_history_rows(
+    pool: &PgPool,
+    filter: EventHistoryReadFilter,
+    canonical_only: bool,
+) -> Result<Vec<HistoryEvent>> {
+    load_history_internal(pool, filter, canonical_only, false).await
 }
 
 async fn load_history_internal(
     pool: &PgPool,
-    selector: HistorySelector,
+    filter: EventHistoryReadFilter,
     canonical_only: bool,
     head_only: bool,
 ) -> Result<Vec<HistoryEvent>> {
-    if matches!(selector, HistorySelector::None) {
+    if filter
+        .selectors
+        .iter()
+        .any(|selector| matches!(selector, HistorySelector::None))
+    {
         return Ok(Vec::new());
     }
 
@@ -80,28 +113,33 @@ async fn load_history_internal(
         LEFT JOIN chain_lineage rb
           ON rb.chain_id = ne.chain_id
          AND rb.block_hash = ne.block_hash
-        WHERE
+        WHERE TRUE
         "#,
     );
 
-    match &selector {
-        HistorySelector::LogicalNames(logical_name_ids) => {
-            push_string_filter(&mut builder, "ne.logical_name_id", logical_name_ids);
-        }
-        HistorySelector::Resources(resource_ids) => {
-            push_uuid_filter(&mut builder, "ne.resource_id", resource_ids);
-        }
-        HistorySelector::LogicalNamesOrResources {
-            logical_name_ids,
-            resource_ids,
-        } => {
-            builder.push("(");
-            push_string_filter(&mut builder, "ne.logical_name_id", logical_name_ids);
-            builder.push(" OR ");
-            push_uuid_filter(&mut builder, "ne.resource_id", resource_ids);
-            builder.push(")");
-        }
-        HistorySelector::None => unreachable!("none selector handled before query build"),
+    for selector in &filter.selectors {
+        builder.push(" AND ");
+        push_selector_filter(&mut builder, selector);
+    }
+
+    if let Some(namespace) = filter.namespace.as_ref() {
+        builder.push(" AND ne.namespace = ");
+        builder.push_bind(namespace);
+    }
+
+    if !filter.event_kinds.is_empty() {
+        builder.push(" AND ");
+        push_string_filter(&mut builder, "ne.event_kind", &filter.event_kinds);
+    }
+
+    if let Some(from_block) = filter.from_block {
+        builder.push(" AND ne.block_number >= ");
+        builder.push_bind(from_block);
+    }
+
+    if let Some(to_block) = filter.to_block {
+        builder.push(" AND ne.block_number <= ");
+        builder.push_bind(to_block);
     }
 
     if canonical_only {
@@ -143,6 +181,33 @@ async fn load_history_internal(
         .context("failed to fetch normalized-event history rows")?;
 
     rows.into_iter().map(decode_history_event).collect()
+}
+
+fn push_selector_filter<'a>(
+    builder: &mut QueryBuilder<'a, Postgres>,
+    selector: &'a HistorySelector,
+) {
+    match selector {
+        HistorySelector::LogicalNames(logical_name_ids) => {
+            push_string_filter(builder, "ne.logical_name_id", logical_name_ids);
+        }
+        HistorySelector::Resources(resource_ids) => {
+            push_uuid_filter(builder, "ne.resource_id", resource_ids);
+        }
+        HistorySelector::LogicalNamesOrResources {
+            logical_name_ids,
+            resource_ids,
+        } => {
+            builder.push("(");
+            push_string_filter(builder, "ne.logical_name_id", logical_name_ids);
+            builder.push(" OR ");
+            push_uuid_filter(builder, "ne.resource_id", resource_ids);
+            builder.push(")");
+        }
+        HistorySelector::None => {
+            builder.push("FALSE");
+        }
+    }
 }
 
 fn push_string_filter<'a>(

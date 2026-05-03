@@ -17,6 +17,9 @@ use crate::ops_catchup::{
     DEFAULT_OPS_CATCHUP_CHUNK_BLOCKS, DEFAULT_OPS_CATCHUP_FOLLOW_POLL_INTERVAL_SECS,
     DEFAULT_OPS_CATCHUP_LEASE_DURATION_SECS,
 };
+use crate::repair::{
+    DEFAULT_ENS_V1_TEXT_RECORD_REPAIR_CHUNK_BLOCKS, DEFAULT_ENS_V1_TEXT_RECORD_REPAIR_PAGE_SIZE,
+};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -34,6 +37,7 @@ pub(crate) enum Command {
     Backfill(BackfillArgs),
     OpsCatchup(OpsCatchupArgs),
     Replay(ReplayArgs),
+    Repair(RepairArgs),
 }
 
 #[derive(Args, Debug)]
@@ -280,9 +284,20 @@ pub(crate) struct ReplayArgs {
     pub(crate) command: ReplayCommand,
 }
 
+#[derive(Args, Debug)]
+pub(crate) struct RepairArgs {
+    #[command(subcommand)]
+    pub(crate) command: RepairCommand,
+}
+
 #[derive(Subcommand, Debug)]
 pub(crate) enum ReplayCommand {
     NormalizedEvents(ReplayNormalizedEventsArgs),
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum RepairCommand {
+    EnsV1TextRecords(RepairEnsV1TextRecordsArgs),
 }
 
 #[derive(Args, Debug)]
@@ -299,4 +314,38 @@ pub(crate) struct ReplayNormalizedEventsArgs {
     pub(crate) to_block: Option<i64>,
     #[arg(long = "block-hash", value_name = "BLOCK_HASH")]
     pub(crate) block_hashes: Vec<String>,
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct RepairEnsV1TextRecordsArgs {
+    #[command(flatten)]
+    pub(crate) database: DatabaseConfig,
+    #[arg(
+        long = "chain-rpc-url",
+        env = "BIGNAME_INDEXER_CHAIN_RPC_URLS",
+        value_delimiter = ','
+    )]
+    pub(crate) chain_rpc_urls: Vec<String>,
+    #[arg(
+        long = "chain-reth-db-source",
+        env = "BIGNAME_INDEXER_CHAIN_RETH_DB_SOURCES",
+        value_delimiter = ','
+    )]
+    pub(crate) chain_reth_db_sources: Vec<String>,
+    #[arg(long)]
+    pub(crate) chain: String,
+    #[arg(long, requires = "to_block")]
+    pub(crate) from_block: Option<i64>,
+    #[arg(long, requires = "from_block")]
+    pub(crate) to_block: Option<i64>,
+    #[arg(
+        long = "chunk-blocks",
+        default_value_t = DEFAULT_ENS_V1_TEXT_RECORD_REPAIR_CHUNK_BLOCKS
+    )]
+    pub(crate) chunk_blocks: i64,
+    #[arg(
+        long = "candidate-page-size",
+        default_value_t = DEFAULT_ENS_V1_TEXT_RECORD_REPAIR_PAGE_SIZE
+    )]
+    pub(crate) candidate_page_size: i64,
 }

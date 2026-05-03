@@ -186,6 +186,33 @@ pub(super) fn openapi_components() -> JsonValue {
                 }),
                 schema_ref("JsonObject"),
             ),
+            "CompactMeta": compact_meta_schema(),
+            "CompactDomainSummary": compact_domain_summary_schema(),
+            "CompactRecordSummary": compact_record_summary_schema(),
+            "CompactHistoryEvent": compact_history_event_schema(),
+            "RoleRow": role_row_schema(),
+            "ResourceLookupData": resource_lookup_data_schema(),
+            "AddressNamesCountData": address_names_count_data_schema(),
+            "ResolverOverviewCompact": resolver_overview_compact_schema(),
+            "CompactNamesResponse": compact_collection_response_schema(
+                schema_ref("CompactDomainSummary"),
+            ),
+            "AddressNamesCountResponse": compact_single_response_schema(
+                schema_ref("AddressNamesCountData"),
+            ),
+            "CompactNameRecordsResponse": compact_single_response_schema(
+                schema_ref("CompactRecordSummary"),
+            ),
+            "CompactEventsResponse": compact_collection_response_schema(
+                schema_ref("CompactHistoryEvent"),
+            ),
+            "CompactRolesResponse": compact_collection_response_schema(schema_ref("RoleRow")),
+            "ResourceLookupResponse": compact_single_response_schema(
+                schema_ref("ResourceLookupData"),
+            ),
+            "CompactResolverOverviewResponse": compact_single_response_schema(
+                schema_ref("ResolverOverviewCompact"),
+            ),
             "NamespaceData": json!({
                 "type": "object",
                 "required": ["namespace"],
@@ -426,6 +453,76 @@ fn primary_name_verified_result_provenance_schema() -> JsonValue {
         "additionalProperties": false,
     })
 }
+
+#[rustfmt::skip]
+fn compact_collection_response_schema(item_schema: JsonValue) -> JsonValue {
+    json!({ "type": "object", "required": ["data", "page"], "properties": { "data": { "type": "array", "items": item_schema }, "page": schema_ref("HistoryPageResponse"), "meta": schema_ref("CompactMeta") } })
+}
+
+#[rustfmt::skip]
+fn compact_single_response_schema(data_schema: JsonValue) -> JsonValue {
+    json!({ "type": "object", "required": ["data"], "properties": { "data": data_schema, "meta": schema_ref("CompactMeta") } })
+}
+
+#[rustfmt::skip]
+fn compact_meta_schema() -> JsonValue {
+    json!({ "type": "object", "properties": { "support_status": { "type": "string" }, "unsupported_filters": { "type": "array", "items": { "type": "string" } }, "unsupported_fields": { "type": "array", "items": { "type": "string" } }, "total_count": { "type": ["integer", "null"], "minimum": 0 }, "value_source": {}, "inventory_source": {} } })
+}
+
+#[rustfmt::skip]
+fn compact_domain_summary_schema() -> JsonValue {
+    compact_object_schema(&["namespace", "name", "normalized_name", "namehash"], &["namespace", "name", "normalized_name", "namehash", "labelhash", "token_id", "owner", "registrant", "created_at", "registration_date", "expiry_date", "resolver_address", "record_summaries", "subname_count", "record_count"])
+}
+
+#[rustfmt::skip]
+fn compact_record_summary_schema() -> JsonValue {
+    let fields = ["resolver_address", "text_records", "known_text_keys", "avatar", "content_hash", "coin_addresses"];
+    compact_object_schema(&fields, &fields)
+}
+
+#[rustfmt::skip]
+fn compact_history_event_schema() -> JsonValue {
+    compact_object_schema(&["type", "name", "namespace", "block_number", "timestamp", "data"], &["type", "name", "namespace", "resource_id", "block_number", "timestamp", "transaction_hash", "log_index", "data"])
+}
+
+#[rustfmt::skip]
+fn role_row_schema() -> JsonValue {
+    compact_object_schema(&["account", "resource_id", "effective_powers"], &["account", "resource_hex", "resource_id", "name", "role_bitmap", "effective_powers", "provenance"])
+}
+
+#[rustfmt::skip]
+fn resource_lookup_data_schema() -> JsonValue {
+    compact_object_schema(&["namespace", "name", "normalized_name", "resource_id", "resource_hex"], &["namespace", "name", "normalized_name", "resource_id", "resource_hex"])
+}
+
+#[rustfmt::skip]
+fn address_names_count_data_schema() -> JsonValue {
+    compact_object_schema(&["address", "count"], &["address", "namespace", "relation", "count"])
+}
+
+#[rustfmt::skip]
+fn resolver_overview_compact_schema() -> JsonValue {
+    compact_object_schema(&["chain_id", "resolver_address", "counts"], &["chain_id", "resolver_address", "counts", "nodes", "aliases", "roles", "events"])
+}
+
+#[rustfmt::skip]
+fn compact_object_schema(required: &[&str], fields: &[&str]) -> JsonValue {
+    json!({ "type": "object", "required": required, "properties": compact_object_properties(fields) })
+}
+
+fn compact_object_properties(fields: &[&str]) -> JsonValue {
+    let mut properties = serde_json::Map::new();
+    for field in fields {
+        properties.insert(
+            (*field).to_owned(),
+            json!({
+                "type": ["object", "array", "string", "integer", "boolean", "null"],
+            }),
+        );
+    }
+    JsonValue::Object(properties)
+}
+
 pub(super) fn schema_ref(schema_name: &str) -> JsonValue {
     json!({
         "$ref": format!("#/components/schemas/{schema_name}"),

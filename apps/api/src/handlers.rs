@@ -1,5 +1,15 @@
 #[path = "handlers/collections.rs"]
 mod handler_collections;
+#[path = "handlers/app_facing/events.rs"]
+mod handler_app_facing_events;
+#[path = "handlers/app_facing/names_collection.rs"]
+mod handler_app_facing_names_collection;
+#[path = "handlers/app_facing/records.rs"]
+mod handler_app_facing_records;
+#[path = "handlers/app_facing/resolver_overview.rs"]
+mod handler_app_facing_resolver_overview;
+#[path = "handlers/app_facing/roles.rs"]
+mod handler_app_facing_roles;
 #[path = "handlers/exact_name.rs"]
 mod handler_exact_name;
 #[path = "handlers/health.rs"]
@@ -18,6 +28,13 @@ mod handler_resolution_on_demand;
 mod handler_resolvers;
 
 use self::{
+    handler_app_facing_events::events,
+    handler_app_facing_names_collection::{address_names_count, names},
+    handler_app_facing_records::{
+        name_records, resolve_records, warm_compact_records_route_sql_path,
+    },
+    handler_app_facing_resolver_overview::resolver_overview,
+    handler_app_facing_roles::{name_roles, resource_lookup, roles},
     handler_collections::{address_names, name_children, resource_permissions},
     handler_exact_name::{
         coverage_current, explain_authority_control_current, explain_surface_binding_current,
@@ -28,7 +45,8 @@ use self::{
     handler_namespaces::{namespace_manifests, namespace_metadata},
     handler_primary_names::primary_names,
     handler_resolution::{
-        explain_resolution_execution_current, resolution_current, resolve_current,
+        explain_resolution_execution_current, infer_resolution_namespace, resolution_current,
+        resolve_current,
     },
     handler_resolvers::resolver_current,
 };

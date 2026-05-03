@@ -1,0 +1,39 @@
+{
+  "capability_group": "resource lookup",
+  "conformance_owner": "apps/api tests::roles resource lookup",
+  "fixture_id": "resource-lookup",
+  "request": {
+    "method": "GET",
+    "path": "/v1/resources/lookup",
+    "query": {}
+  },
+  "response": {
+    "coverage": {
+      "enumeration_basis": "name_current",
+      "exhaustiveness": "projection_backed",
+      "status": "partial",
+      "unsupported_reason": null
+    },
+    "data": {
+      "fixture_version": 1,
+      "stable_identity": "capability-golden:resource-lookup"
+    },
+    "provenance": {
+      "boundary": "local_route_conformance",
+      "source": "checked_in_fixture"
+    }
+  },
+  "rollback_gate": [
+    "scripts/rollback-smoke",
+    "stable name-current resource identity lookup behavior"
+  ],
+  "rollout_gate": [
+    "OpenAPI route owner guard",
+    "focused resource lookup API route tests",
+    "scripts/release-smoke"
+  ],
+  "route_owner": [
+    "/v1/resources/lookup"
+  ],
+  "scope": "local_cutover_evidence"
+}

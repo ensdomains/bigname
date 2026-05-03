@@ -1636,9 +1636,9 @@ fn build_authority_observation_decodes_resolver_record_logs() -> Result<()> {
             namehash: alice.namehash.clone(),
             resolver: resolver_address.to_owned(),
             selector: RecordSelector {
-                record_key: "text".to_owned(),
+                record_key: "text:com.twitter".to_owned(),
                 record_family: "text".to_owned(),
-                selector_key: None,
+                selector_key: Some("com.twitter".to_owned()),
             },
             value: None,
             raw_name: None,
@@ -1663,9 +1663,9 @@ fn build_authority_observation_decodes_resolver_record_logs() -> Result<()> {
             namehash: alice.namehash.clone(),
             resolver: resolver_address.to_owned(),
             selector: RecordSelector {
-                record_key: "text".to_owned(),
+                record_key: "text:com.twitter".to_owned(),
                 record_family: "text".to_owned(),
-                selector_key: None,
+                selector_key: Some("com.twitter".to_owned()),
             },
             value: Some(json!("alice-twitter")),
             raw_name: None,
@@ -5765,7 +5765,7 @@ async fn sync_ens_v1_unwrapped_authority_emits_supported_record_change_events_id
             )
             .fetch_one(database.pool())
             .await?,
-            vec!["text".to_owned(), "addr:60".to_owned()]
+            vec!["text:com.twitter".to_owned(), "addr:60".to_owned()]
         );
     assert_eq!(
             sqlx::query_scalar::<_, Vec<Option<String>>>(
@@ -5773,7 +5773,7 @@ async fn sync_ens_v1_unwrapped_authority_emits_supported_record_change_events_id
             )
             .fetch_one(database.pool())
             .await?,
-            vec![None, Some("60".to_owned())]
+            vec![Some("com.twitter".to_owned()), Some("60".to_owned())]
         );
     assert_eq!(
             sqlx::query_scalar::<_, String>(

@@ -7,6 +7,8 @@ pub(super) async fn execute_ens_verified_resolution_cache_miss(
     records: &[ResolutionRecordKey],
     record_inventory_row: Option<&RecordInventoryCurrentRow>,
     selected_snapshot: &SelectedSnapshot,
+    use_latest_block_tag: bool,
+    persist_execution: bool,
 ) -> std::result::Result<ExecutionOutcome, SnapshotSelectionError> {
     if row.namespace != bigname_storage::ENS_NAMESPACE {
         return Err(SnapshotSelectionError::stale(
@@ -33,6 +35,8 @@ pub(super) async fn execute_ens_verified_resolution_cache_miss(
             record_inventory_row,
             chain_positions: selected_snapshot.chain_positions_value(),
             chain_rpc_urls,
+            use_latest_block_tag,
+            persist_execution,
         },
     )
     .await

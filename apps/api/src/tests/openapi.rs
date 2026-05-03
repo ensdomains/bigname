@@ -79,6 +79,37 @@ fn assert_exact_name_snapshot_parameters(
     );
 }
 
+fn assert_view_meta_parameters(operation: &Value, expected_view: &str, expected_meta: &str) {
+    let view = openapi_parameter(operation, "view");
+    assert_eq!(
+        view.get("schema"),
+        Some(&json!({
+            "type": "string",
+            "enum": ["compact", "full"],
+            "default": expected_view,
+        }))
+    );
+
+    let meta = openapi_parameter(operation, "meta");
+    assert_eq!(
+        meta.get("schema"),
+        Some(&json!({
+            "type": "string",
+            "enum": ["none", "summary", "full"],
+            "default": expected_meta,
+        }))
+    );
+}
+
+fn assert_no_not_implemented_response(operation: &Value) {
+    assert!(
+        operation
+            .get("responses")
+            .and_then(|responses| responses.get("501"))
+            .is_none()
+    );
+}
+
 fn openapi_schema<'a>(document: &'a Value, name: &str) -> &'a Value {
     document
         .get("components")
@@ -111,7 +142,9 @@ fn openapi_document_publishes_only_shipped_routes() {
         actual,
         vec![
             "/v1/addresses/{address}/names".to_owned(),
+            "/v1/addresses/{address}/names/count".to_owned(),
             "/v1/coverage/{namespace}/{name}".to_owned(),
+            "/v1/events".to_owned(),
             "/v1/explain/names/{namespace}/{name}/authority-control".to_owned(),
             "/v1/explain/names/{namespace}/{name}/surface-binding".to_owned(),
             "/v1/explain/resolutions/{namespace}/{name}/execution".to_owned(),
@@ -119,14 +152,21 @@ fn openapi_document_publishes_only_shipped_routes() {
             "/v1/history/names/{namespace}/{name}".to_owned(),
             "/v1/history/resources/{resource_id}".to_owned(),
             "/v1/manifests/{namespace}".to_owned(),
+            "/v1/names".to_owned(),
             "/v1/names/{namespace}/{name}".to_owned(),
             "/v1/names/{namespace}/{name}/children".to_owned(),
+            "/v1/names/{namespace}/{name}/records".to_owned(),
+            "/v1/names/{namespace}/{name}/roles".to_owned(),
             "/v1/namespaces/{namespace}".to_owned(),
             "/v1/primary-names/{address}".to_owned(),
             "/v1/resolutions/{namespace}/{name}".to_owned(),
             "/v1/resolve/{name}".to_owned(),
+            "/v1/resolve/{name}/records".to_owned(),
             "/v1/resolvers/{chain_id}/{resolver_address}".to_owned(),
+            "/v1/resolvers/{chain_id}/{resolver_address}/overview".to_owned(),
+            "/v1/resources/lookup".to_owned(),
             "/v1/resources/{resource_id}/permissions".to_owned(),
+            "/v1/roles".to_owned(),
         ]
     );
     assert!(!openapi_paths(&document).contains_key("/healthz"));
@@ -156,7 +196,77 @@ fn openapi_document_freezes_query_params_and_shared_envelopes() {
         }))
     );
 
+    let names = openapi_operation(&document, "/v1/names");
+    assert_eq!(
+        openapi_parameter_names(names),
+        vec![
+            "namespace",
+            "name",
+            "prefix",
+            "contains",
+            "contains_nocase",
+            "owner",
+            "account",
+            "registrant",
+            "resolver",
+            "resolved_address",
+            "relation",
+            "sort",
+            "order",
+            "include",
+            "view",
+            "meta",
+            "cursor",
+            "page_size",
+        ]
+    );
+    assert_eq!(
+        openapi_parameter(names, "relation").get("schema"),
+        Some(&json!({
+            "type": "string",
+            "enum": ["token_holder", "registrant", "effective_controller", "any"],
+        }))
+    );
+    assert_eq!(
+        openapi_parameter(names, "sort").get("schema"),
+        Some(&json!({
+            "type": "string",
+            "enum": ["name", "expiry_date", "registration_date", "created_at"],
+            "default": "name",
+        }))
+    );
+    assert_view_meta_parameters(names, "compact", "summary");
+    assert_no_not_implemented_response(names);
+
+    let address_names_count = openapi_operation(&document, "/v1/addresses/{address}/names/count");
+    assert_eq!(
+        openapi_parameter_names(address_names_count),
+        vec![
+            "address",
+            "namespace",
+            "relation",
+            "prefix",
+            "contains",
+            "contains_nocase",
+            "resolver",
+        ]
+    );
+    assert_no_not_implemented_response(address_names_count);
+
     let address_history = openapi_operation(&document, "/v1/history/addresses/{address}");
+    assert_eq!(
+        openapi_parameter_names(address_history),
+        vec![
+            "address",
+            "namespace",
+            "relation",
+            "scope",
+            "view",
+            "meta",
+            "cursor",
+            "page_size",
+        ]
+    );
     let history_scope = openapi_parameter(address_history, "scope");
     assert_eq!(
         history_scope.get("schema"),
@@ -166,8 +276,23 @@ fn openapi_document_freezes_query_params_and_shared_envelopes() {
             "default": "both",
         }))
     );
+    assert_view_meta_parameters(address_history, "full", "summary");
 
     let children = openapi_operation(&document, "/v1/names/{namespace}/{name}/children");
+    assert_eq!(
+        openapi_parameter_names(children),
+        vec![
+            "namespace",
+            "name",
+            "surface_classes",
+            "include",
+            "view",
+            "meta",
+            "cursor",
+            "page_size"
+        ]
+    );
+    assert_view_meta_parameters(children, "compact", "summary");
     let surface_classes = openapi_parameter(children, "surface_classes");
     assert_eq!(
         surface_classes.get("schema"),
@@ -179,8 +304,7 @@ fn openapi_document_freezes_query_params_and_shared_envelopes() {
     assert_eq!(surface_classes.get("style"), Some(&json!("form")));
     assert_eq!(surface_classes.get("explode"), Some(&json!(false)));
 
-    let exact_name_at_description =
-        "Point-in-time selector for the exact-name snapshot. Mutually exclusive with `chain_positions`.";
+    let exact_name_at_description = "Point-in-time selector for the exact-name snapshot. Mutually exclusive with `chain_positions`.";
     for exact_name_path in [
         "/v1/names/{namespace}/{name}",
         "/v1/coverage/{namespace}/{name}",
@@ -234,6 +358,69 @@ fn openapi_document_freezes_query_params_and_shared_envelopes() {
     assert_eq!(records.get("style"), Some(&json!("form")));
     assert_eq!(records.get("explode"), Some(&json!(false)));
 
+    let name_records = openapi_operation(&document, "/v1/names/{namespace}/{name}/records");
+    assert_eq!(
+        openapi_parameter_names(name_records),
+        vec![
+            "namespace",
+            "name",
+            "mode",
+            "texts",
+            "known_text_keys",
+            "avatar",
+            "content_hash",
+            "coin_types",
+            "include",
+            "view",
+            "meta",
+        ]
+    );
+    assert_eq!(
+        openapi_parameter(name_records, "mode").get("schema"),
+        Some(&json!({
+            "type": "string",
+            "enum": ["auto", "declared", "verified", "both"],
+            "default": "declared",
+        }))
+    );
+    assert_eq!(
+        openapi_parameter(name_records, "include").get("style"),
+        Some(&json!("form"))
+    );
+    assert_view_meta_parameters(name_records, "compact", "summary");
+    assert_no_not_implemented_response(name_records);
+
+    let inferred_name_records = openapi_operation(&document, "/v1/resolve/{name}/records");
+    assert_eq!(
+        openapi_parameter_names(inferred_name_records),
+        vec![
+            "name",
+            "mode",
+            "texts",
+            "known_text_keys",
+            "avatar",
+            "content_hash",
+            "coin_types",
+            "include",
+            "view",
+            "meta",
+        ]
+    );
+    assert_eq!(
+        openapi_parameter(inferred_name_records, "mode").get("schema"),
+        Some(&json!({
+            "type": "string",
+            "enum": ["auto", "declared", "verified", "both"],
+            "default": "auto",
+        }))
+    );
+    assert_eq!(
+        openapi_parameter(inferred_name_records, "include").get("style"),
+        Some(&json!("form"))
+    );
+    assert_view_meta_parameters(inferred_name_records, "compact", "summary");
+    assert_no_not_implemented_response(inferred_name_records);
+
     let inferred_resolutions = openapi_operation(&document, "/v1/resolve/{name}");
     assert_eq!(
         openapi_parameter_names(inferred_resolutions),
@@ -253,6 +440,90 @@ fn openapi_document_freezes_query_params_and_shared_envelopes() {
             .and_then(|content_type| content_type.get("schema")),
         Some(&json!({ "$ref": "#/components/schemas/ResolutionResponse" }))
     );
+
+    let events = openapi_operation(&document, "/v1/events");
+    assert_eq!(
+        openapi_parameter_names(events),
+        vec![
+            "namespace",
+            "name",
+            "address",
+            "resource",
+            "resource_id",
+            "type",
+            "relation",
+            "from_block",
+            "to_block",
+            "view",
+            "meta",
+            "cursor",
+            "page_size",
+        ]
+    );
+    assert_view_meta_parameters(events, "compact", "summary");
+    assert_no_not_implemented_response(events);
+
+    let roles = openapi_operation(&document, "/v1/roles");
+    assert_eq!(
+        openapi_parameter_names(roles),
+        vec![
+            "account",
+            "resource_id",
+            "namespace",
+            "name",
+            "role_bitmap",
+            "view",
+            "meta",
+            "cursor",
+            "page_size",
+        ]
+    );
+    assert_view_meta_parameters(roles, "compact", "summary");
+    assert_no_not_implemented_response(roles);
+
+    let name_roles = openapi_operation(&document, "/v1/names/{namespace}/{name}/roles");
+    assert_eq!(
+        openapi_parameter_names(name_roles),
+        vec![
+            "namespace",
+            "name",
+            "account",
+            "role_bitmap",
+            "view",
+            "meta",
+            "cursor",
+            "page_size",
+        ]
+    );
+    assert_view_meta_parameters(name_roles, "compact", "summary");
+    assert_no_not_implemented_response(name_roles);
+
+    let resource_lookup = openapi_operation(&document, "/v1/resources/lookup");
+    assert_eq!(
+        openapi_parameter_names(resource_lookup),
+        vec!["namespace", "name", "view", "meta"]
+    );
+    assert_eq!(
+        openapi_parameter(resource_lookup, "namespace").get("required"),
+        Some(&json!(true))
+    );
+    assert_eq!(
+        openapi_parameter(resource_lookup, "name").get("required"),
+        Some(&json!(true))
+    );
+    assert_view_meta_parameters(resource_lookup, "compact", "summary");
+    assert_no_not_implemented_response(resource_lookup);
+
+    let resolver_overview = openapi_operation(
+        &document,
+        "/v1/resolvers/{chain_id}/{resolver_address}/overview",
+    );
+    assert_eq!(
+        openapi_parameter_names(resolver_overview),
+        vec!["chain_id", "resolver_address", "include", "view", "meta"]
+    );
+    assert_view_meta_parameters(resolver_overview, "compact", "summary");
+    assert_no_not_implemented_response(resolver_overview);
 
     let resolution_execution = openapi_operation(
         &document,
@@ -352,6 +623,45 @@ fn openapi_document_freezes_query_params_and_shared_envelopes() {
             .and_then(Value::as_object)
             .and_then(|properties| properties.get("page")),
         Some(&json!({ "$ref": "#/components/schemas/HistoryPageResponse" }))
+    );
+
+    let compact_names = openapi_schema(&document, "CompactNamesResponse");
+    assert_eq!(required_fields(compact_names), vec!["data", "page"]);
+    assert_eq!(
+        compact_names
+            .get("properties")
+            .and_then(Value::as_object)
+            .and_then(|properties| properties.get("data"))
+            .and_then(|data| data.get("items")),
+        Some(&json!({ "$ref": "#/components/schemas/CompactDomainSummary" }))
+    );
+    assert_eq!(
+        compact_names
+            .get("properties")
+            .and_then(Value::as_object)
+            .and_then(|properties| properties.get("meta")),
+        Some(&json!({ "$ref": "#/components/schemas/CompactMeta" }))
+    );
+
+    let compact_roles = openapi_schema(&document, "CompactRolesResponse");
+    assert_eq!(required_fields(compact_roles), vec!["data", "page"]);
+    assert_eq!(
+        compact_roles
+            .get("properties")
+            .and_then(Value::as_object)
+            .and_then(|properties| properties.get("data"))
+            .and_then(|data| data.get("items")),
+        Some(&json!({ "$ref": "#/components/schemas/RoleRow" }))
+    );
+
+    let resource_lookup = openapi_schema(&document, "ResourceLookupResponse");
+    assert_eq!(required_fields(resource_lookup), vec!["data"]);
+    assert_eq!(
+        resource_lookup
+            .get("properties")
+            .and_then(Value::as_object)
+            .and_then(|properties| properties.get("data")),
+        Some(&json!({ "$ref": "#/components/schemas/ResourceLookupData" }))
     );
 
     let resolution = openapi_schema(&document, "ResolutionResponse");

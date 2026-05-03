@@ -1,6 +1,6 @@
 {
   "capability_group": "declared child subnames and counts",
-  "conformance_owner": "collections.rs::name_children_contract_*",
+  "conformance_owner": "collections.rs::name_children_contract_* and apps/api tests::collections child compact default",
   "fixture_id": "declared-child-subnames-and-counts",
   "request": {
     "method": "GET",
@@ -29,7 +29,7 @@
   ],
   "rollout_gate": [
     "OpenAPI route owner guard",
-    "focused children conformance",
+    "focused children conformance and compact-default API route tests",
     "scripts/release-smoke"
   ],
   "route_owner": [

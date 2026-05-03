@@ -3,7 +3,10 @@ use serde_json::{Map as JsonMap, json};
 use sqlx::types::JsonValue;
 use tracing::info;
 
-use crate::{API_ROUTE_DEFINITIONS, AppState, Router, ServeArgs, shutdown_signal};
+use crate::{
+    API_ROUTE_DEFINITIONS, AppState, Router, ServeArgs, shutdown_signal,
+    warm_compact_records_route_sql_path,
+};
 
 use super::schemas::openapi_components;
 
@@ -15,6 +18,9 @@ pub(crate) async fn serve(args: ServeArgs) -> Result<()> {
         pool,
         chain_rpc_urls,
     };
+    warm_compact_records_route_sql_path(&state, args.database.max_connections)
+        .await
+        .context("failed to warm compact records route SQL path")?;
     let router = app_router(state);
     let listener = tokio::net::TcpListener::bind(args.bind_addr)
         .await

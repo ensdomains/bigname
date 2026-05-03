@@ -26,6 +26,42 @@ pub(super) fn parse_resolution_mode(mode: Option<&str>) -> ApiResult<ResolutionM
     }
 }
 
+pub(super) fn parse_response_view(
+    view: Option<&str>,
+    default: ResponseView,
+) -> ApiResult<ResponseView> {
+    let Some(view) = view.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(default);
+    };
+
+    match view {
+        "compact" => Ok(ResponseView::Compact),
+        "full" => Ok(ResponseView::Full),
+        _ => Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            code: "invalid_input",
+            message: "view must be one of: compact, full".to_owned(),
+        }),
+    }
+}
+
+pub(super) fn parse_meta_mode(meta: Option<&str>, default: MetaMode) -> ApiResult<MetaMode> {
+    let Some(meta) = meta.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(default);
+    };
+
+    match meta {
+        "none" => Ok(MetaMode::None),
+        "summary" => Ok(MetaMode::Summary),
+        "full" => Ok(MetaMode::Full),
+        _ => Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            code: "invalid_input",
+            message: "meta must be one of: none, summary, full".to_owned(),
+        }),
+    }
+}
+
 pub(super) fn parse_primary_name_address(address: &str) -> ApiResult<String> {
     let normalized = normalize_address(address.trim());
     let is_valid = normalized.len() == 42

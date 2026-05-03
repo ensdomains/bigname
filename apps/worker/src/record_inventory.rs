@@ -1,5 +1,6 @@
 mod chain_position;
 mod constants;
+mod hydration;
 mod json;
 mod loading;
 mod profile;
@@ -9,13 +10,22 @@ mod types;
 use anyhow::Result;
 use sqlx::PgPool;
 
-pub use types::RecordInventoryCurrentRebuildSummary;
+pub use hydration::RecordInventoryTextHydrationConfig;
+pub use types::{RecordInventoryCurrentRebuildSummary, RecordInventoryTextHydrationSummary};
 
 pub async fn rebuild_record_inventory_current(
     pool: &PgPool,
     resource_id: Option<&str>,
 ) -> Result<RecordInventoryCurrentRebuildSummary> {
     projection::rebuild_record_inventory_current(pool, resource_id).await
+}
+
+pub async fn hydrate_record_inventory_text_values(
+    pool: &PgPool,
+    resource_id: Option<&str>,
+    config: RecordInventoryTextHydrationConfig,
+) -> Result<RecordInventoryTextHydrationSummary> {
+    hydration::hydrate_record_inventory_text_values(pool, resource_id, config).await
 }
 
 #[cfg(test)]

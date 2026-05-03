@@ -72,12 +72,41 @@
                 ],
             },
             CapabilityCutoverEvidence {
-                capability_group: "declared child subnames and counts",
-                route_owner: &["/v1/names/{namespace}/{name}/children"],
-                conformance_owner: "collections.rs::name_children_contract_*",
+                capability_group: "compact names collection",
+                route_owner: &["/v1/names"],
+                conformance_owner: "apps/api tests::names_collection",
                 rollout_gate: &[
                     OPENAPI_ROUTE_OWNER_GATE,
-                    "focused children conformance",
+                    "focused names collection API route tests",
+                    RELEASE_SMOKE_GATE,
+                ],
+                rollback_gate: &[
+                    ROLLBACK_SMOKE_GATE,
+                    "stable compact names pagination and explicit unsupported filter behavior",
+                ],
+            },
+            CapabilityCutoverEvidence {
+                capability_group: "address names count",
+                route_owner: &["/v1/addresses/{address}/names/count"],
+                conformance_owner: "apps/api tests::names_collection address count",
+                rollout_gate: &[
+                    OPENAPI_ROUTE_OWNER_GATE,
+                    "focused address names count API route tests",
+                    RELEASE_SMOKE_GATE,
+                ],
+                rollback_gate: &[
+                    ROLLBACK_SMOKE_GATE,
+                    "stable count filters without changing address-name collection rows",
+                ],
+            },
+            CapabilityCutoverEvidence {
+                capability_group: "declared child subnames and counts",
+                route_owner: &["/v1/names/{namespace}/{name}/children"],
+                conformance_owner:
+                    "collections.rs::name_children_contract_* and apps/api tests::collections child compact default",
+                rollout_gate: &[
+                    OPENAPI_ROUTE_OWNER_GATE,
+                    "focused children conformance and compact-default API route tests",
                     RELEASE_SMOKE_GATE,
                 ],
                 rollback_gate: &[
@@ -101,6 +130,20 @@
                 ],
             },
             CapabilityCutoverEvidence {
+                capability_group: "compact name records",
+                route_owner: &["/v1/names/{namespace}/{name}/records"],
+                conformance_owner: "apps/api tests::records",
+                rollout_gate: &[
+                    OPENAPI_ROUTE_OWNER_GATE,
+                    "focused compact records API route tests",
+                    RELEASE_SMOKE_GATE,
+                ],
+                rollback_gate: &[
+                    ROLLBACK_SMOKE_GATE,
+                    "stable compact record summary and explicit unsupported verified mode",
+                ],
+            },
+            CapabilityCutoverEvidence {
                 capability_group: "verified record reads",
                 route_owner: &[
                     "/v1/resolutions/{namespace}/{name}",
@@ -121,10 +164,11 @@
             CapabilityCutoverEvidence {
                 capability_group: "name history",
                 route_owner: &["/v1/history/names/{namespace}/{name}"],
-                conformance_owner: "history.rs::name_history_contract_*",
+                conformance_owner:
+                    "history.rs::name_history_contract_* and apps/api tests::history compact view",
                 rollout_gate: &[
                     OPENAPI_ROUTE_OWNER_GATE,
-                    "focused history conformance",
+                    "focused history conformance and compact-view API route tests",
                     "replay stability checks",
                     RELEASE_SMOKE_GATE,
                 ],
@@ -136,16 +180,31 @@
             CapabilityCutoverEvidence {
                 capability_group: "address history across names",
                 route_owner: &["/v1/history/addresses/{address}"],
-                conformance_owner: "history.rs::address_history_contract_*",
+                conformance_owner:
+                    "history.rs::address_history_contract_* and apps/api tests::history compact view",
                 rollout_gate: &[
                     OPENAPI_ROUTE_OWNER_GATE,
-                    "focused address-history conformance",
+                    "focused address-history conformance and compact-view API route tests",
                     "replay stability checks",
                     RELEASE_SMOKE_GATE,
                 ],
                 rollback_gate: &[
                     ROLLBACK_SMOKE_GATE,
                     "stable address-anchor selection and pagination behavior",
+                ],
+            },
+            CapabilityCutoverEvidence {
+                capability_group: "event stream",
+                route_owner: &["/v1/events"],
+                conformance_owner: "apps/api tests::events",
+                rollout_gate: &[
+                    OPENAPI_ROUTE_OWNER_GATE,
+                    "focused events API route tests",
+                    RELEASE_SMOKE_GATE,
+                ],
+                rollback_gate: &[
+                    ROLLBACK_SMOKE_GATE,
+                    "stable canonical event filters, pagination, and reserved-filter errors",
                 ],
             },
             CapabilityCutoverEvidence {
@@ -163,12 +222,55 @@
                 ],
             },
             CapabilityCutoverEvidence {
-                capability_group: "role change history",
-                route_owner: &["/v1/history/resources/{resource_id}"],
-                conformance_owner: "history.rs::resource_history_contract_*",
+                capability_group: "role rows by filter",
+                route_owner: &["/v1/roles"],
+                conformance_owner: "apps/api tests::roles",
                 rollout_gate: &[
                     OPENAPI_ROUTE_OWNER_GATE,
-                    "focused history conformance",
+                    "focused roles API route tests",
+                    RELEASE_SMOKE_GATE,
+                ],
+                rollback_gate: &[
+                    ROLLBACK_SMOKE_GATE,
+                    "stable role filters and missing-primary-filter errors",
+                ],
+            },
+            CapabilityCutoverEvidence {
+                capability_group: "name role holders",
+                route_owner: &["/v1/names/{namespace}/{name}/roles"],
+                conformance_owner: "apps/api tests::roles name roles",
+                rollout_gate: &[
+                    OPENAPI_ROUTE_OWNER_GATE,
+                    "focused name roles API route tests",
+                    RELEASE_SMOKE_GATE,
+                ],
+                rollback_gate: &[
+                    ROLLBACK_SMOKE_GATE,
+                    "stable name role pagination and resource resolution",
+                ],
+            },
+            CapabilityCutoverEvidence {
+                capability_group: "resource lookup",
+                route_owner: &["/v1/resources/lookup"],
+                conformance_owner: "apps/api tests::roles resource lookup",
+                rollout_gate: &[
+                    OPENAPI_ROUTE_OWNER_GATE,
+                    "focused resource lookup API route tests",
+                    RELEASE_SMOKE_GATE,
+                ],
+                rollback_gate: &[
+                    ROLLBACK_SMOKE_GATE,
+                    "stable name-current resource identity lookup behavior",
+                ],
+            },
+            CapabilityCutoverEvidence {
+                capability_group: "role change history",
+                route_owner: &["/v1/history/resources/{resource_id}"],
+                conformance_owner:
+                    "history.rs::resource_history_contract_* and apps/api tests::history compact view",
+                rollout_gate: &[
+                    OPENAPI_ROUTE_OWNER_GATE,
+                    "focused history conformance and compact-view API route tests",
                     RELEASE_SMOKE_GATE,
                 ],
                 rollback_gate: &[ROLLBACK_SMOKE_GATE, "stable resource-history cursor behavior"],
@@ -186,6 +288,20 @@
                 rollback_gate: &[
                     ROLLBACK_SMOKE_GATE,
                     "UnsupportedSummary for pending / unsupported resolver profiles",
+                ],
+            },
+            CapabilityCutoverEvidence {
+                capability_group: "compact resolver overview",
+                route_owner: &["/v1/resolvers/{chain_id}/{resolver_address}/overview"],
+                conformance_owner: "apps/api tests::resolvers",
+                rollout_gate: &[
+                    OPENAPI_ROUTE_OWNER_GATE,
+                    "focused compact resolver overview API route tests",
+                    RELEASE_SMOKE_GATE,
+                ],
+                rollback_gate: &[
+                    ROLLBACK_SMOKE_GATE,
+                    "stable compact resolver sections and explicit unprojected fields",
                 ],
             },
             CapabilityCutoverEvidence {
@@ -235,6 +351,20 @@
                 )),
             },
             CapabilityGoldenFixtureDocument {
+                fixture_path: "fixtures/capabilities/compact-names-collection.json",
+                body: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/fixtures/capabilities/compact-names-collection.json"
+                )),
+            },
+            CapabilityGoldenFixtureDocument {
+                fixture_path: "fixtures/capabilities/address-names-count.json",
+                body: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/fixtures/capabilities/address-names-count.json"
+                )),
+            },
+            CapabilityGoldenFixtureDocument {
                 fixture_path: "fixtures/capabilities/declared-child-subnames-and-counts.json",
                 body: include_str!(concat!(
                     env!("CARGO_MANIFEST_DIR"),
@@ -246,6 +376,13 @@
                 body: include_str!(concat!(
                     env!("CARGO_MANIFEST_DIR"),
                     "/fixtures/capabilities/record-inventory-for-editing.json"
+                )),
+            },
+            CapabilityGoldenFixtureDocument {
+                fixture_path: "fixtures/capabilities/compact-name-records.json",
+                body: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/fixtures/capabilities/compact-name-records.json"
                 )),
             },
             CapabilityGoldenFixtureDocument {
@@ -270,10 +407,38 @@
                 )),
             },
             CapabilityGoldenFixtureDocument {
+                fixture_path: "fixtures/capabilities/event-stream.json",
+                body: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/fixtures/capabilities/event-stream.json"
+                )),
+            },
+            CapabilityGoldenFixtureDocument {
                 fixture_path: "fixtures/capabilities/role-holders-for-a-resource.json",
                 body: include_str!(concat!(
                     env!("CARGO_MANIFEST_DIR"),
                     "/fixtures/capabilities/role-holders-for-a-resource.json"
+                )),
+            },
+            CapabilityGoldenFixtureDocument {
+                fixture_path: "fixtures/capabilities/role-rows-by-filter.json",
+                body: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/fixtures/capabilities/role-rows-by-filter.json"
+                )),
+            },
+            CapabilityGoldenFixtureDocument {
+                fixture_path: "fixtures/capabilities/name-role-holders.json",
+                body: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/fixtures/capabilities/name-role-holders.json"
+                )),
+            },
+            CapabilityGoldenFixtureDocument {
+                fixture_path: "fixtures/capabilities/resource-lookup.json",
+                body: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/fixtures/capabilities/resource-lookup.json"
                 )),
             },
             CapabilityGoldenFixtureDocument {
@@ -288,6 +453,13 @@
                 body: include_str!(concat!(
                     env!("CARGO_MANIFEST_DIR"),
                     "/fixtures/capabilities/resolver-centric-overview.json"
+                )),
+            },
+            CapabilityGoldenFixtureDocument {
+                fixture_path: "fixtures/capabilities/compact-resolver-overview.json",
+                body: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/fixtures/capabilities/compact-resolver-overview.json"
                 )),
             },
             CapabilityGoldenFixtureDocument {
@@ -327,14 +499,22 @@
                 "exact name profile",
                 "names owned / controlled by address",
                 "names owned / controlled by address with role summary",
+                "compact names collection",
+                "address names count",
                 "declared child subnames and counts",
                 "record inventory for editing",
+                "compact name records",
                 "verified record reads",
                 "name history",
                 "address history across names",
+                "event stream",
                 "role holders for a resource",
+                "role rows by filter",
+                "name role holders",
+                "resource lookup",
                 "role change history",
                 "resolver-centric overview",
+                "compact resolver overview",
                 "claimed vs verified primary name",
             ];
             let openapi_owned_paths = OPENAPI_CONFORMANCE_COVERAGE

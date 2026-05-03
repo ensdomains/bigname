@@ -19,6 +19,8 @@ mod ops_catchup_tests;
 mod provider;
 #[path = "main/reconciliation.rs"]
 mod reconciliation;
+#[path = "main/repair.rs"]
+mod repair;
 #[path = "main/replay.rs"]
 mod replay;
 #[path = "main/runtime.rs"]
@@ -30,7 +32,7 @@ mod tests;
 #[cfg(test)]
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use backfill::{
     BackfillAdapterSyncMode, BackfillBlockRange, BackfillJobRunConfig,
     run_resumable_hash_pinned_backfill_job,
@@ -52,8 +54,8 @@ use bigname_storage::{
 use bootstrap_backfill::*;
 use clap::Parser;
 use cli::{
-    BackfillArgs, Cli, Command, OpsCatchupArgs, ReplayArgs, ReplayCommand,
-    ReplayNormalizedEventsArgs, RunArgs,
+    BackfillArgs, Cli, Command, OpsCatchupArgs, RepairArgs, RepairCommand, ReplayArgs,
+    ReplayCommand, ReplayNormalizedEventsArgs, RunArgs,
 };
 use normalized_replay_catchup::{NormalizedReplayCatchupConfig, run_normalized_replay_catchup};
 #[allow(unused_imports)]
@@ -62,6 +64,7 @@ use provider::{
 };
 #[allow(unused_imports)]
 use reconciliation::*;
+use repair::{EnsV1TextRecordRepairConfig, repair_ens_v1_text_records_from_provider};
 pub(crate) use replay::{
     backfill_lease_expires_at, default_backfill_lease_owner, deployment_profile_from_manifest_root,
     generated_backfill_lease_token,
@@ -84,6 +87,7 @@ async fn main() -> Result<()> {
         Command::Backfill(args) => run_backfill(args).await,
         Command::OpsCatchup(args) => run_ops_catchup(args).await,
         Command::Replay(args) => run_replay(args).await,
+        Command::Repair(args) => run_repair(args).await,
     }
 }
 
@@ -450,6 +454,49 @@ async fn run_ops_catchup(args: OpsCatchupArgs) -> Result<()> {
 async fn run_replay(args: ReplayArgs) -> Result<()> {
     match args.command {
         ReplayCommand::NormalizedEvents(args) => run_replay_normalized_events(args).await,
+    }
+}
+
+async fn run_repair(args: RepairArgs) -> Result<()> {
+    match args.command {
+        RepairCommand::EnsV1TextRecords(args) => {
+            let pool = bigname_storage::connect(&args.database).await?;
+            let provider_registry =
+                ProviderRegistry::from_sources(&args.chain_rpc_urls, &args.chain_reth_db_sources)?;
+            let provider = provider_registry.provider_for(&args.chain).with_context(|| {
+                format!(
+                    "no provider source configured for {}; pass --chain-reth-db-source {}=<datadir> or --chain-rpc-url {}=<url>",
+                    args.chain, args.chain, args.chain
+                )
+            })?;
+            let outcome = repair_ens_v1_text_records_from_provider(
+                &pool,
+                provider,
+                EnsV1TextRecordRepairConfig {
+                    chain: args.chain,
+                    from_block: args.from_block,
+                    to_block: args.to_block,
+                    chunk_blocks: args.chunk_blocks,
+                    candidate_page_size: args.candidate_page_size,
+                },
+            )
+            .await?;
+            tracing::info!(
+                service = "indexer",
+                command = "repair ens-v1-text-records",
+                chain = %outcome.chain,
+                from_block = outcome.from_block,
+                to_block = outcome.to_block,
+                candidate_count = outcome.candidate_count,
+                fetched_log_count = outcome.fetched_log_count,
+                matched_log_count = outcome.matched_log_count,
+                repaired_event_count = outcome.repaired_event_count,
+                missing_log_count = outcome.missing_log_count,
+                skipped_decode_count = outcome.skipped_decode_count,
+                "ENSv1 text record normalized-event repair completed"
+            );
+            Ok(())
+        }
     }
 }
 

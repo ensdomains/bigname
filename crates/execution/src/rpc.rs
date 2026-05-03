@@ -71,6 +71,7 @@ pub(crate) struct JsonRpcCallResult {
 pub(crate) struct JsonRpcCallError {
     pub(crate) code: Option<i64>,
     pub(crate) message: String,
+    pub(crate) data: Option<Value>,
 }
 
 impl JsonRpcHttpClient {
@@ -104,11 +105,13 @@ impl JsonRpcHttpClient {
             Err(JsonRpcCallError {
                 code: Some(error.code),
                 message: error.message,
+                data: error.data,
             })
         } else {
             response.result.ok_or_else(|| JsonRpcCallError {
                 code: None,
                 message: "JSON-RPC response omitted result".to_owned(),
+                data: None,
             })
         };
 
@@ -180,4 +183,5 @@ impl<'de> serde::Deserialize<'de> for JsonRpcResponse {
 struct JsonRpcError {
     code: i64,
     message: String,
+    data: Option<Value>,
 }

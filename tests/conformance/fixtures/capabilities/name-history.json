@@ -1,6 +1,6 @@
 {
   "capability_group": "name history",
-  "conformance_owner": "history.rs::name_history_contract_*",
+  "conformance_owner": "history.rs::name_history_contract_* and apps/api tests::history compact view",
   "fixture_id": "name-history",
   "request": {
     "method": "GET",
@@ -29,7 +29,7 @@
   ],
   "rollout_gate": [
     "OpenAPI route owner guard",
-    "focused history conformance",
+    "focused history conformance and compact-view API route tests",
     "replay stability checks",
     "scripts/release-smoke"
   ],

@@ -8,7 +8,9 @@ pub(crate) struct ApiRouteDefinition {
 #[derive(Clone, Copy)]
 pub(crate) enum ApiRouteId {
     Health,
+    Names,
     AddressNames,
+    AddressNamesCount,
     AddressHistory,
     PrimaryNames,
     Coverage,
@@ -18,9 +20,16 @@ pub(crate) enum ApiRouteId {
     NamespaceMetadata,
     NameChildren,
     NameCurrent,
+    NameRecords,
+    NameRoles,
+    Events,
+    Roles,
+    ResourceLookup,
     ResolveCurrent,
+    ResolveRecords,
     ResolutionCurrent,
     ResolverCurrent,
+    ResolverOverview,
     NameHistory,
     ResourceHistory,
     ResourcePermissions,
@@ -34,8 +43,18 @@ pub(crate) const API_ROUTE_DEFINITIONS: &[ApiRouteDefinition] = &[
         published_in_contract: false,
     },
     ApiRouteDefinition {
+        id: ApiRouteId::Names,
+        path: "/v1/names",
+        published_in_contract: true,
+    },
+    ApiRouteDefinition {
         id: ApiRouteId::AddressNames,
         path: "/v1/addresses/{address}/names",
+        published_in_contract: true,
+    },
+    ApiRouteDefinition {
+        id: ApiRouteId::AddressNamesCount,
+        path: "/v1/addresses/{address}/names/count",
         published_in_contract: true,
     },
     ApiRouteDefinition {
@@ -79,13 +98,43 @@ pub(crate) const API_ROUTE_DEFINITIONS: &[ApiRouteDefinition] = &[
         published_in_contract: true,
     },
     ApiRouteDefinition {
+        id: ApiRouteId::NameRecords,
+        path: "/v1/names/{namespace}/{name}/records",
+        published_in_contract: true,
+    },
+    ApiRouteDefinition {
+        id: ApiRouteId::NameRoles,
+        path: "/v1/names/{namespace}/{name}/roles",
+        published_in_contract: true,
+    },
+    ApiRouteDefinition {
         id: ApiRouteId::NameCurrent,
         path: "/v1/names/{namespace}/{name}",
         published_in_contract: true,
     },
     ApiRouteDefinition {
+        id: ApiRouteId::Events,
+        path: "/v1/events",
+        published_in_contract: true,
+    },
+    ApiRouteDefinition {
+        id: ApiRouteId::Roles,
+        path: "/v1/roles",
+        published_in_contract: true,
+    },
+    ApiRouteDefinition {
+        id: ApiRouteId::ResourceLookup,
+        path: "/v1/resources/lookup",
+        published_in_contract: true,
+    },
+    ApiRouteDefinition {
         id: ApiRouteId::ResolveCurrent,
         path: "/v1/resolve/{name}",
+        published_in_contract: true,
+    },
+    ApiRouteDefinition {
+        id: ApiRouteId::ResolveRecords,
+        path: "/v1/resolve/{name}/records",
         published_in_contract: true,
     },
     ApiRouteDefinition {
@@ -96,6 +145,11 @@ pub(crate) const API_ROUTE_DEFINITIONS: &[ApiRouteDefinition] = &[
     ApiRouteDefinition {
         id: ApiRouteId::ResolverCurrent,
         path: "/v1/resolvers/{chain_id}/{resolver_address}",
+        published_in_contract: true,
+    },
+    ApiRouteDefinition {
+        id: ApiRouteId::ResolverOverview,
+        path: "/v1/resolvers/{chain_id}/{resolver_address}/overview",
         published_in_contract: true,
     },
     ApiRouteDefinition {

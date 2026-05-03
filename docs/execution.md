@@ -43,10 +43,12 @@ Verified resolution follows this sequence:
 
 For `GET /v1/resolutions/{namespace}/{name}` and `GET /v1/resolve/{name}`, `mode=verified|both` is a cache-or-live-execute read path for supported ENS Universal Resolver selectors. The route first looks for matching persisted execution output at the selected exact-name snapshot; when it is absent, the API performs on-demand Universal Resolver execution against that selected chain position, persists the trace and outcome, and returns the persisted outcome in the same response (upstream: .refs/ens_v1/contracts/universalResolver/IUniversalResolver.sol:L44 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/universalResolver/IUniversalResolver.sol:L52 @ ens_v1@91c966f).
 
+The compact app-facing records routes, `GET /v1/names/{namespace}/{name}/records` and `GET /v1/resolve/{name}/records`, use the same supported selector boundary but are current UI reads rather than exact-snapshot explain surfaces. When those compact routes need on-demand ENS verified values, they call the Universal Resolver with the provider `latest` block tag, return the result inline, and do not persist exact-snapshot execution cache rows or exact block-anchored `raw_call_snapshots`.
+
 Rules for live resolution execution:
 
 - the execution target is the exact `ChainPositions` selected by the route before verified support checks; no `at` and no `chain_positions` means `consistency=head` and the latest stored checkpoint for the required chain
-- execution never retargets to provider latest, a newer checkpoint, or a different snapshot while serving the request
+- full resolution and explain/audit execution never retargets to provider latest, a newer checkpoint, or a different snapshot while serving the request; the compact records routes are the explicit exception and use provider `latest` only for non-persisted app-facing verified fallback
 - the API Ethereum RPC provider must be configured and must be able to serve the selected Ethereum block; missing configuration or provider unavailability fails closed with `409 stale` and a configuration message rather than falling back to declared cache
 - unsupported selector families and unsupported verified path classes remain selector-local `status=unsupported`; on-demand execution does not widen the support boundary
 - `GET /v1/explain/resolutions/{namespace}/{name}/execution` remains persisted-trace readback unless a later doc-first route contract explicitly broadens it

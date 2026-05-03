@@ -27,7 +27,9 @@ pub(super) fn build_selectors(
 
 pub(super) fn build_explicit_gaps(selectors: &BTreeMap<String, RecordSelector>) -> Vec<Value> {
     let mut gaps = Vec::new();
-    let has_text = selectors.contains_key(SUPPORTED_TEXT_RECORD_KEY);
+    let has_text = selectors
+        .values()
+        .any(|selector| selector.record_family == SUPPORTED_TEXT_RECORD_FAMILY);
     let has_native_addr = selectors.contains_key(&supported_native_addr_record_key());
 
     if !has_native_addr {
@@ -154,9 +156,11 @@ pub(super) fn resolver_family_status_value(record_family: &str, unsupported_reas
 
 fn is_supported_selector(selector: &RecordSelector) -> bool {
     match selector.record_family.as_str() {
-        SUPPORTED_TEXT_RECORD_FAMILY => {
-            selector.record_key == SUPPORTED_TEXT_RECORD_KEY && selector.selector_key.is_none()
-        }
+        SUPPORTED_TEXT_RECORD_FAMILY => selector
+            .selector_key
+            .as_ref()
+            .map(|selector_key| selector.record_key == format!("text:{selector_key}"))
+            .unwrap_or_else(|| selector.record_key == SUPPORTED_TEXT_RECORD_KEY),
         SUPPORTED_ADDR_RECORD_FAMILY => selector
             .selector_key
             .as_ref()

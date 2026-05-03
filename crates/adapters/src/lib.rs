@@ -31,7 +31,8 @@ pub use ens_v1_subregistry_discovery::{
     EnsV1SubregistryDiscoverySyncSummary, sync_ens_v1_subregistry_discovery,
 };
 pub use ens_v1_unwrapped_authority::{
-    EnsV1UnwrappedAuthoritySyncSummary, sync_ens_v1_unwrapped_authority,
+    EnsV1TextRecordChange, EnsV1UnwrappedAuthoritySyncSummary, decode_ens_v1_text_record_change,
+    sync_ens_v1_unwrapped_authority,
 };
 pub use ens_v2_permissions::{
     EnsV2PermissionsKindSyncSummary, EnsV2PermissionsSyncSummary, sync_ens_v2_permissions,

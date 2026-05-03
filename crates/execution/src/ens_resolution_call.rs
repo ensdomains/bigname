@@ -11,6 +11,7 @@ use crate::ens_resolution_abi::{
     decode_selector_result, decode_universal_resolver_result, digest_json, hex_string,
     hex_to_bytes, resolver_calldata, selector_hex, universal_resolver_calldata,
 };
+use crate::ens_resolution_ccip::{CcipReadSummary, follow_ccip_read};
 use crate::rpc::{JsonRpcCallError, JsonRpcCallResult, JsonRpcHttpClient};
 use crate::{ENS_UNIVERSAL_RESOLVER_ADDRESS, ETHEREUM_MAINNET_CHAIN_ID};
 
@@ -22,6 +23,8 @@ pub(super) struct SelectorCall {
     pub(super) contract_call: Value,
     pub(super) universal_calldata: String,
     pub(super) resolver_selector: String,
+    pub(super) block_selector: Value,
+    pub(super) ccip_summary: Option<CcipReadSummary>,
 }
 
 enum SelectorStatus {
@@ -65,6 +68,7 @@ pub(super) async fn execute_record_call(
     node: [u8; 32],
     block: &ExecutionBlock,
     rpc: &JsonRpcHttpClient,
+    use_latest_block_tag: bool,
 ) -> Result<SelectorCall> {
     let selector = parse_supported_verified_resolution_record_key(&record.record_key)?;
     let resolver_data = resolver_calldata(&selector, &record.record_key, node)?;
@@ -82,12 +86,34 @@ pub(super) async fn execute_record_call(
         "to": ENS_UNIVERSAL_RESOLVER_ADDRESS,
         "data": universal_calldata_hex,
     });
-    let block_selector = json!({
-        "blockHash": block.block_hash,
-        "requireCanonical": true,
-    });
+    let block_selector = if use_latest_block_tag {
+        json!("latest")
+    } else {
+        json!({
+            "blockHash": block.block_hash,
+            "requireCanonical": true,
+        })
+    };
 
-    let result = rpc.call("eth_call", vec![call, block_selector]).await?;
+    let mut ccip_summary = None;
+    let result = rpc
+        .call("eth_call", vec![call, block_selector.clone()])
+        .await?;
+    let result = if use_latest_block_tag {
+        match &result.result {
+            Err(error) => match follow_ccip_read(rpc, error, &block_selector).await {
+                Ok(Some(outcome)) => {
+                    ccip_summary = Some(outcome.summary);
+                    outcome.result
+                }
+                Ok(None) => result,
+                Err(_) => result,
+            },
+            Ok(_) => result,
+        }
+    } else {
+        result
+    };
     selector_call_from_rpc_result(
         row,
         record,
@@ -97,6 +123,9 @@ pub(super) async fn execute_record_call(
         contract_call,
         resolver_selector,
         universal_calldata_hex,
+        block_selector,
+        !use_latest_block_tag,
+        ccip_summary,
     )
 }
 
@@ -109,20 +138,28 @@ fn selector_call_from_rpc_result(
     contract_call: Value,
     resolver_selector: String,
     universal_calldata: String,
+    block_selector: Value,
+    persist_raw_call_snapshot: bool,
+    ccip_summary: Option<CcipReadSummary>,
 ) -> Result<SelectorCall> {
-    let request_hash = digest_json(&result.request_payload);
-    let response_hash = digest_json(&result.response_payload);
-    let raw_call_snapshot = RawCallSnapshot {
+    let JsonRpcCallResult {
+        request_payload,
+        response_payload,
+        result,
+    } = result;
+    let request_hash = digest_json(&request_payload);
+    let response_hash = digest_json(&response_payload);
+    let raw_call_snapshot = persist_raw_call_snapshot.then(|| RawCallSnapshot {
         chain_id: block.chain_id.clone(),
         block_hash: block.block_hash.clone(),
         block_number: block.block_number,
         request_hash: request_hash.clone(),
-        request_payload: result.request_payload,
+        request_payload,
         response_hash: response_hash.clone(),
-        response_payload: result.response_payload,
+        response_payload,
         canonicality_state: CanonicalityState::Canonical,
-    };
-    let status = match result.result {
+    });
+    let status = match result {
         Ok(value) => decode_rpc_success(row, record, selector, value),
         Err(error) => Ok(decode_rpc_error(&error)),
     }?;
@@ -131,10 +168,12 @@ fn selector_call_from_rpc_result(
         status,
         request_hash: Some(request_hash),
         response_hash: Some(response_hash),
-        raw_call_snapshot: Some(raw_call_snapshot),
+        raw_call_snapshot,
         contract_call,
         universal_calldata,
         resolver_selector,
+        block_selector,
+        ccip_summary,
     })
 }
 
@@ -149,8 +188,22 @@ fn decode_rpc_success(
             failure_reason: "resolver_return_data_malformed",
         });
     };
-    let return_data = hex_to_bytes(hex)?;
-    let selector_return = decode_universal_resolver_result(&return_data)?;
+    let return_data = match hex_to_bytes(hex) {
+        Ok(value) => value,
+        Err(_) => {
+            return Ok(SelectorStatus::ExecutionFailed {
+                failure_reason: "resolver_return_data_malformed",
+            });
+        }
+    };
+    let selector_return = match decode_universal_resolver_result(&return_data) {
+        Ok(value) => value,
+        Err(_) => {
+            return Ok(SelectorStatus::ExecutionFailed {
+                failure_reason: "resolver_return_data_malformed",
+            });
+        }
+    };
     let decoded = match decode_selector_result(selector, &selector_return) {
         Ok(decoded) => decoded,
         Err(_) => {
@@ -173,6 +226,7 @@ fn decode_rpc_success(
 fn decode_rpc_error(error: &JsonRpcCallError) -> SelectorStatus {
     let _ = error.code;
     let _ = &error.message;
+    let _ = &error.data;
     SelectorStatus::ExecutionFailed {
         failure_reason: "resolver_call_failed",
     }
@@ -212,4 +266,103 @@ fn first_selector(data: &[u8]) -> Result<[u8; 4]> {
     let mut selector = [0_u8; 4];
     selector.copy_from_slice(&data[..4]);
     Ok(selector)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bigname_storage::ENS_NAMESPACE;
+    use sqlx::types::time::OffsetDateTime;
+
+    #[test]
+    fn malformed_universal_resolver_success_is_selector_failure_for_latest_calls() -> Result<()> {
+        let row = test_name_current_row();
+        let record = EnsResolutionRecord::new("avatar", "text", Some("avatar".to_owned()));
+        let selector = parse_supported_verified_resolution_record_key(&record.record_key)?;
+        let block = ExecutionBlock {
+            chain_id: ETHEREUM_MAINNET_CHAIN_ID.to_owned(),
+            block_number: 21_000_000,
+            block_hash: "0xabc123".to_owned(),
+        };
+        let selector_call = selector_call_from_rpc_result(
+            &row,
+            &record,
+            &selector,
+            JsonRpcCallResult {
+                request_payload: json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "eth_call",
+                    "params": [
+                        {
+                            "to": ENS_UNIVERSAL_RESOLVER_ADDRESS,
+                            "data": "0x9061b923"
+                        },
+                        "latest"
+                    ]
+                }),
+                response_payload: json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": "0x"
+                }),
+                result: Ok(json!("0x")),
+            },
+            &block,
+            json!({
+                "chain_id": ETHEREUM_MAINNET_CHAIN_ID,
+                "contract_address": ENS_UNIVERSAL_RESOLVER_ADDRESS,
+                "selector": "0x9061b923",
+                "record_key": "avatar",
+                "resolver_selector": "0x59d1d43c"
+            }),
+            "0x59d1d43c".to_owned(),
+            "0x9061b923".to_owned(),
+            json!("latest"),
+            false,
+            None,
+        )?;
+
+        assert_eq!(selector_call.block_selector, json!("latest"));
+        assert!(selector_call.request_hash.is_some());
+        assert!(selector_call.response_hash.is_some());
+        assert!(selector_call.raw_call_snapshot.is_none());
+
+        let verified_query = selector_call.verified_query(Uuid::from_u128(1));
+        assert_eq!(
+            verified_query.get("status").and_then(Value::as_str),
+            Some("execution_failed")
+        );
+        assert_eq!(
+            verified_query.get("failure_reason").and_then(Value::as_str),
+            Some("resolver_return_data_malformed")
+        );
+        assert_eq!(
+            verified_query.get("record_key").and_then(Value::as_str),
+            Some("avatar")
+        );
+        Ok(())
+    }
+
+    fn test_name_current_row() -> NameCurrentRow {
+        NameCurrentRow {
+            logical_name_id: "ens:alice.eth".to_owned(),
+            namespace: ENS_NAMESPACE.to_owned(),
+            canonical_display_name: "alice.eth".to_owned(),
+            normalized_name: "alice.eth".to_owned(),
+            namehash: "namehash:alice.eth".to_owned(),
+            surface_binding_id: None,
+            resource_id: None,
+            token_lineage_id: None,
+            binding_kind: None,
+            declared_summary: json!({}),
+            provenance: json!({}),
+            coverage: json!({}),
+            chain_positions: json!({}),
+            canonicality_summary: json!({}),
+            manifest_version: 1,
+            last_recomputed_at: OffsetDateTime::from_unix_timestamp(1)
+                .expect("test timestamp must be valid"),
+        }
+    }
 }

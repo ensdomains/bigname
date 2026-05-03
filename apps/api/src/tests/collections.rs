@@ -1009,6 +1009,254 @@ async fn get_resolver_overview_summarizes_basenames_permissions_current_projecti
 }
 
 #[tokio::test]
+async fn get_name_children_compact_default_returns_rows_with_summary_meta() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let parent_logical_name_id = "ens:parent.eth";
+    let owner = "0x0000000000000000000000000000000000000ABC";
+    let registrant = "0x0000000000000000000000000000000000000DEF";
+
+    bigname_storage::upsert_name_surfaces(
+        &database.pool,
+        &[
+            collection_name_surface(parent_logical_name_id, "parent.eth", "node:parent.eth", 10),
+            collection_name_surface(
+                "ens:bob.parent.eth",
+                "bob.parent.eth",
+                "node:bob.parent.eth",
+                11,
+            ),
+            collection_name_surface(
+                "ens:alice.parent.eth",
+                "alice.parent.eth",
+                "node:alice.parent.eth",
+                12,
+            ),
+        ],
+    )
+    .await?;
+    bigname_storage::upsert_children_current_rows(
+        &database.pool,
+        &[
+            declared_child_row(
+                parent_logical_name_id,
+                "ens:bob.parent.eth",
+                "bob.parent.eth",
+                "node:bob.parent.eth",
+                201,
+                11,
+            ),
+            declared_child_row(
+                parent_logical_name_id,
+                "ens:alice.parent.eth",
+                "alice.parent.eth",
+                "node:alice.parent.eth",
+                202,
+                12,
+            ),
+        ],
+    )
+    .await?;
+    database
+        .insert_name_current_row(compact_child_name_current_row(
+            "ens:alice.parent.eth",
+            "alice.parent.eth",
+            "node:alice.parent.eth",
+            12,
+            json!({
+                "control": {
+                    "registry_owner": owner,
+                    "registrant": registrant,
+                }
+            }),
+        ))
+        .await?;
+    database
+        .insert_name_current_row(compact_child_name_current_row(
+            "ens:bob.parent.eth",
+            "bob.parent.eth",
+            "node:bob.parent.eth",
+            11,
+            json!({
+                "control": {
+                    "owner": "0x0000000000000000000000000000000000000b0b",
+                },
+                "registration": {
+                    "registrant": "0x0000000000000000000000000000000000000b0c",
+                }
+            }),
+        ))
+        .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/names/ens/parent.eth/children")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("compact children request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let payload: Value = read_json(response).await?;
+    assert_eq!(
+        payload["data"],
+        json!([
+            {
+                "name": "alice.parent.eth",
+                "normalized_name": "alice.parent.eth",
+                "label_name": "alice",
+                "labelhash": "labelhash:alice.parent.eth",
+                "namehash": "node:alice.parent.eth",
+                "owner": owner.to_ascii_lowercase(),
+                "registrant": registrant.to_ascii_lowercase(),
+            },
+            {
+                "name": "bob.parent.eth",
+                "normalized_name": "bob.parent.eth",
+                "label_name": "bob",
+                "labelhash": "labelhash:bob.parent.eth",
+                "namehash": "node:bob.parent.eth",
+                "owner": "0x0000000000000000000000000000000000000b0b",
+                "registrant": "0x0000000000000000000000000000000000000b0c",
+            },
+        ])
+    );
+    assert_eq!(payload["meta"]["support_status"], json!("supported"));
+    assert_eq!(payload["meta"]["unsupported_fields"], json!([]));
+    assert_eq!(payload["meta"]["unsupported_filters"], json!([]));
+    assert_eq!(payload["meta"]["total_count"], json!(2));
+    assert!(payload["meta"].get("provenance").is_none());
+    assert_eq!(payload["page"]["sort"], json!("display_name_asc"));
+    assert_eq!(payload["page"]["page_size"], json!(50));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_name_children_compact_include_counts_returns_row_subname_counts() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let parent_logical_name_id = "ens:parent.eth";
+    let child_logical_name_id = "ens:alice.parent.eth";
+
+    bigname_storage::upsert_name_surfaces(
+        &database.pool,
+        &[
+            collection_name_surface(parent_logical_name_id, "parent.eth", "node:parent.eth", 20),
+            collection_name_surface(
+                child_logical_name_id,
+                "alice.parent.eth",
+                "node:alice.parent.eth",
+                21,
+            ),
+            collection_name_surface(
+                "ens:one.alice.parent.eth",
+                "one.alice.parent.eth",
+                "node:one.alice.parent.eth",
+                22,
+            ),
+        ],
+    )
+    .await?;
+    bigname_storage::upsert_children_current_rows(
+        &database.pool,
+        &[
+            declared_child_row(
+                parent_logical_name_id,
+                child_logical_name_id,
+                "alice.parent.eth",
+                "node:alice.parent.eth",
+                301,
+                21,
+            ),
+            declared_child_row(
+                child_logical_name_id,
+                "ens:one.alice.parent.eth",
+                "one.alice.parent.eth",
+                "node:one.alice.parent.eth",
+                302,
+                22,
+            ),
+        ],
+    )
+    .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/names/ens/parent.eth/children?include=counts")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("compact children counts request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["data"][0]["subname_count"], json!(1));
+    assert_eq!(payload["meta"]["total_count"], json!(1));
+    assert_eq!(payload["meta"]["unsupported_fields"], json!([]));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_name_children_compact_meta_none_omits_meta() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let parent_logical_name_id = "ens:parent.eth";
+
+    bigname_storage::upsert_name_surfaces(
+        &database.pool,
+        &[
+            collection_name_surface(parent_logical_name_id, "parent.eth", "node:parent.eth", 30),
+            collection_name_surface(
+                "ens:alice.parent.eth",
+                "alice.parent.eth",
+                "node:alice.parent.eth",
+                31,
+            ),
+        ],
+    )
+    .await?;
+    bigname_storage::upsert_children_current_rows(
+        &database.pool,
+        &[declared_child_row(
+            parent_logical_name_id,
+            "ens:alice.parent.eth",
+            "alice.parent.eth",
+            "node:alice.parent.eth",
+            401,
+            31,
+        )],
+    )
+    .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/names/ens/parent.eth/children?meta=none")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("compact children meta=none request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let payload: Value = read_json(response).await?;
+    assert!(payload.get("meta").is_none());
+    assert!(payload.get("data").is_some());
+    assert!(payload.get("page").is_some());
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn get_name_children_returns_declared_rows_sorted_with_declared_only_coverage() -> Result<()>
 {
     let database = TestDatabase::new_migrated().await?;
@@ -1059,7 +1307,7 @@ async fn get_name_children_returns_declared_rows_sorted_with_declared_only_cover
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/names/ens/parent.eth/children")
+                .uri("/v1/names/ens/parent.eth/children?view=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -1144,7 +1392,7 @@ async fn get_name_children_returns_declared_rows_sorted_with_declared_only_cover
     let first_page_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/names/ens/parent.eth/children?page_size=1")
+                .uri("/v1/names/ens/parent.eth/children?view=full&page_size=1")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -1162,7 +1410,7 @@ async fn get_name_children_returns_declared_rows_sorted_with_declared_only_cover
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v1/names/ens/parent.eth/children?page_size=1&cursor={cursor}"
+                    "/v1/names/ens/parent.eth/children?view=full&page_size=1&cursor={cursor}"
                 ))
                 .body(Body::empty())
                 .expect("request must build"),
@@ -1176,7 +1424,7 @@ async fn get_name_children_returns_declared_rows_sorted_with_declared_only_cover
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v1/names/ens/parent.eth/children?page_size=1&cursor={cursor}"
+                    "/v1/names/ens/parent.eth/children?view=full&page_size=1&cursor={cursor}"
                 ))
                 .body(Body::empty())
                 .expect("request must build"),
@@ -1247,7 +1495,7 @@ async fn get_name_children_defaults_to_first_page_of_fifty_rows() -> Result<()> 
     let first_page_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/names/ens/default-limit.eth/children")
+                .uri("/v1/names/ens/default-limit.eth/children?view=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -1290,7 +1538,7 @@ async fn get_name_children_defaults_to_first_page_of_fifty_rows() -> Result<()> 
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v1/names/ens/default-limit.eth/children?cursor={cursor}"
+                    "/v1/names/ens/default-limit.eth/children?view=full&cursor={cursor}"
                 ))
                 .body(Body::empty())
                 .expect("request must build"),
@@ -1381,7 +1629,7 @@ async fn get_name_children_rejects_malformed_wrong_route_filter_and_stale_cursor
     let first_page_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/names/ens/cursor-parent.eth/children?page_size=1")
+                .uri("/v1/names/ens/cursor-parent.eth/children?view=full&page_size=1")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -1497,7 +1745,7 @@ async fn get_name_children_returns_ensv2_declared_children_without_widening_rout
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/names/ens/subregistry.eth/children?surface_classes=declared&include=counts")
+                .uri("/v1/names/ens/subregistry.eth/children?surface_classes=declared&include=counts&view=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -1619,7 +1867,7 @@ async fn get_name_children_include_counts_returns_declared_subname_count() -> Re
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/names/ens/parent.eth/children?include=counts")
+                .uri("/v1/names/ens/parent.eth/children?include=counts&view=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -1686,7 +1934,7 @@ async fn get_name_children_returns_basenames_rows_from_base_authority() -> Resul
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/names/basenames/base.eth/children")
+                .uri("/v1/names/basenames/base.eth/children?view=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -4446,4 +4694,69 @@ fn ensv2_declared_child_row(
     });
     row.manifest_version = 7;
     row
+}
+
+fn compact_child_name_current_row(
+    logical_name_id: &str,
+    display_name: &str,
+    namehash: &str,
+    block_number: i64,
+    declared_summary: Value,
+) -> bigname_storage::NameCurrentRow {
+    let namespace = logical_name_id
+        .split_once(':')
+        .map(|(namespace, _)| namespace)
+        .expect("logical_name_id must include namespace");
+    let chain_id = chain_id_for_namespace(namespace);
+    let chain_slot = chain_slot_for_namespace(namespace);
+
+    bigname_storage::NameCurrentRow {
+        logical_name_id: logical_name_id.to_owned(),
+        namespace: namespace.to_owned(),
+        canonical_display_name: display_name.to_owned(),
+        normalized_name: display_name.to_owned(),
+        namehash: namehash.to_owned(),
+        surface_binding_id: None,
+        resource_id: None,
+        token_lineage_id: None,
+        binding_kind: None,
+        declared_summary,
+        provenance: json!({
+            "normalized_event_ids": [block_number],
+            "raw_fact_refs": [{
+                "kind": "raw_log",
+                "block_number": block_number,
+            }],
+            "manifest_versions": [{
+                "manifest_version": 1,
+                "source_family": source_family_for_namespace(namespace),
+                "source_manifest_id": null,
+            }],
+            "execution_trace_id": null,
+            "derivation_kind": "name_current_rebuild",
+        }),
+        coverage: json!({
+            "status": "full",
+            "exhaustiveness": "authoritative",
+            "source_classes_considered": [source_family_for_namespace(namespace)],
+            "enumeration_basis": "exact_name",
+            "unsupported_reason": null,
+        }),
+        chain_positions: json!({
+            chain_slot: {
+                "chain_id": chain_id,
+                "block_number": block_number,
+                "block_hash": format!("0xname{block_number:02x}"),
+                "timestamp": format!("2026-04-17T00:00:{:02}Z", block_number % 60),
+            }
+        }),
+        canonicality_summary: json!({
+            "status": "finalized",
+            "chains": {
+                chain_id: "finalized"
+            }
+        }),
+        manifest_version: 1,
+        last_recomputed_at: timestamp(1_717_173_000 + block_number),
+    }
 }

@@ -350,7 +350,9 @@ fn ens_v1_resolver_profile_admitted(profile: &str) -> bool {
 
 fn resolver_source_family_for_resolver_event(source_family: &str) -> Option<&'static str> {
     match source_family {
-        SOURCE_FAMILY_ENS_V1_REGISTRY_L1 => Some(SOURCE_FAMILY_ENS_V1_RESOLVER_L1),
+        SOURCE_FAMILY_ENS_V1_REGISTRY_L1 | SOURCE_FAMILY_ENS_V1_REGISTRAR_L1 => {
+            Some(SOURCE_FAMILY_ENS_V1_RESOLVER_L1)
+        }
         SOURCE_FAMILY_BASENAMES_BASE_REGISTRY => Some(SOURCE_FAMILY_BASENAMES_BASE_RESOLVER),
         _ => None,
     }

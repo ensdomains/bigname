@@ -4,10 +4,12 @@ pub(super) async fn address_history(
     Path(address): Path<String>,
     Query(query): Query<AddressHistoryQuery>,
     State(state): State<AppState>,
-) -> ApiResult<Json<HistoryResponse>> {
+) -> ApiResult<Json<JsonValue>> {
     let namespace = parse_address_names_namespace(query.namespace.as_deref())?;
     let relation = parse_address_name_relation(query.relation.as_deref())?;
     let scope = parse_history_scope(query.scope.as_deref())?;
+    let view = parse_response_view(query.view.as_deref(), ResponseView::Full)?;
+    let meta = parse_meta_mode(query.meta.as_deref(), MetaMode::Summary)?;
     let pagination = parse_pagination(query.cursor.as_deref(), query.page_size)?;
     let normalized_address = normalize_address(&address);
 
@@ -55,11 +57,13 @@ pub(super) async fn address_history(
         history_cursor_fields,
     )?;
 
-    Ok(Json(build_history_response(
+    Ok(Json(build_history_route_response(
         &rows,
         &rows[page.start..page.end],
         scope,
         page.page,
+        view,
+        meta,
     )))
 }
 
@@ -67,10 +71,12 @@ pub(super) async fn name_history(
     Path((namespace, name)): Path<(String, String)>,
     Query(query): Query<HistoryQuery>,
     State(state): State<AppState>,
-) -> ApiResult<Json<HistoryResponse>> {
+) -> ApiResult<Json<JsonValue>> {
     ensure_public_namespace(&namespace)?;
 
     let scope = parse_history_scope(query.scope.as_deref())?;
+    let view = parse_response_view(query.view.as_deref(), ResponseView::Full)?;
+    let meta = parse_meta_mode(query.meta.as_deref(), MetaMode::Summary)?;
     let pagination = parse_pagination(query.cursor.as_deref(), query.page_size)?;
     let logical_name_id = format!("{namespace}:{name}");
     let surface = load_name_surface(&state.pool, &logical_name_id)
@@ -130,11 +136,13 @@ pub(super) async fn name_history(
         history_cursor_fields,
     )?;
 
-    Ok(Json(build_history_response(
+    Ok(Json(build_history_route_response(
         &rows,
         &rows[page.start..page.end],
         scope,
         page.page,
+        view,
+        meta,
     )))
 }
 
@@ -142,8 +150,10 @@ pub(super) async fn resource_history(
     Path(resource_id): Path<String>,
     Query(query): Query<HistoryQuery>,
     State(state): State<AppState>,
-) -> ApiResult<Json<HistoryResponse>> {
+) -> ApiResult<Json<JsonValue>> {
     let scope = parse_history_scope(query.scope.as_deref())?;
+    let view = parse_response_view(query.view.as_deref(), ResponseView::Full)?;
+    let meta = parse_meta_mode(query.meta.as_deref(), MetaMode::Summary)?;
     let pagination = parse_pagination(query.cursor.as_deref(), query.page_size)?;
     let resource_id = Uuid::parse_str(&resource_id).map_err(|_| ApiError {
         status: StatusCode::BAD_REQUEST,
@@ -200,10 +210,12 @@ pub(super) async fn resource_history(
         history_cursor_fields,
     )?;
 
-    Ok(Json(build_history_response(
+    Ok(Json(build_history_route_response(
         &rows,
         &rows[page.start..page.end],
         scope,
         page.page,
+        view,
+        meta,
     )))
 }

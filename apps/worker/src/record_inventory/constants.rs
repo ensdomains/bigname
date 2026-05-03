@@ -6,6 +6,7 @@ pub(super) const DERIVATION_KIND_ENS_V2_RESOLVER: &str = "ens_v2_resolver";
 pub(super) const ENS_NAMESPACE: &str = "ens";
 pub(super) const BASENAMES_NAMESPACE: &str = "basenames";
 pub(super) const SOURCE_FAMILY_ENS_V1_REGISTRY_L1: &str = "ens_v1_registry_l1";
+pub(super) const SOURCE_FAMILY_ENS_V1_REGISTRAR_L1: &str = "ens_v1_registrar_l1";
 pub(super) const SOURCE_FAMILY_ENS_V1_RESOLVER_L1: &str = "ens_v1_resolver_l1";
 pub(super) const SOURCE_FAMILY_BASENAMES_BASE_REGISTRY: &str = "basenames_base_registry";
 pub(super) const SOURCE_FAMILY_BASENAMES_BASE_RESOLVER: &str = "basenames_base_resolver";

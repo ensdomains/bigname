@@ -1,3 +1,4 @@
+mod list;
 mod row;
 mod snapshot;
 mod write;
@@ -7,6 +8,12 @@ use std::collections::BTreeMap;
 use anyhow::{Context, Result};
 use sqlx::PgPool;
 
+pub use list::{
+    NameCurrentAddressFilter, NameCurrentAddressRelationFilter, NameCurrentListCursor,
+    NameCurrentListCursorValue, NameCurrentListFilter, NameCurrentListOrder, NameCurrentListPage,
+    NameCurrentListRow, NameCurrentListSort, count_name_current_list, load_name_current_list_page,
+    name_current_list_cursor_from_row,
+};
 pub use row::NameCurrentRow;
 use row::decode_name_current_row;
 pub use snapshot::load_name_current_for_snapshot;

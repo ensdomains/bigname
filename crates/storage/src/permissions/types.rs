@@ -29,6 +29,14 @@ pub struct PermissionsCurrentKeysetCursor {
     pub scope: String,
 }
 
+/// Keyset cursor fields for account/resource app-facing role rows.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PermissionsCurrentAccountResourceCursor {
+    pub subject: String,
+    pub resource_id: Uuid,
+    pub scope: String,
+}
+
 /// Compact summary over the full filtered permissions collection.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PermissionsCurrentFullFilterSummary {
@@ -45,6 +53,14 @@ pub struct PermissionsCurrentFullFilterSummary {
 pub struct PermissionsCurrentPage {
     pub rows: Vec<PermissionsCurrentRow>,
     pub next_cursor: Option<PermissionsCurrentKeysetCursor>,
+    pub summary: PermissionsCurrentFullFilterSummary,
+}
+
+/// Bounded account/resource role page plus full-filter summary data.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PermissionsCurrentAccountResourcePage {
+    pub rows: Vec<PermissionsCurrentRow>,
+    pub next_cursor: Option<PermissionsCurrentAccountResourceCursor>,
     pub summary: PermissionsCurrentFullFilterSummary,
 }
 
@@ -182,6 +198,16 @@ impl From<&PermissionsCurrentRow> for PermissionsCurrentKeysetCursor {
     fn from(row: &PermissionsCurrentRow) -> Self {
         Self {
             subject: row.subject.clone(),
+            scope: row.scope.storage_key(),
+        }
+    }
+}
+
+impl From<&PermissionsCurrentRow> for PermissionsCurrentAccountResourceCursor {
+    fn from(row: &PermissionsCurrentRow) -> Self {
+        Self {
+            subject: row.subject.clone(),
+            resource_id: row.resource_id,
             scope: row.scope.storage_key(),
         }
     }

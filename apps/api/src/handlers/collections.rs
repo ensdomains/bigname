@@ -99,10 +99,12 @@ pub(super) async fn name_children(
     Path((namespace, name)): Path<(String, String)>,
     Query(query): Query<ChildrenQuery>,
     State(state): State<AppState>,
-) -> ApiResult<Json<ChildrenResponse>> {
+) -> ApiResult<Json<JsonValue>> {
     ensure_public_namespace(&namespace)?;
 
     let include_counts = parse_children_query(&query)?;
+    let view = parse_response_view(query.view.as_deref(), ResponseView::Compact)?;
+    let meta = parse_meta_mode(query.meta.as_deref(), MetaMode::Summary)?;
     let pagination = parse_pagination(query.cursor.as_deref(), query.page_size)?;
     let logical_name_id = format!("{namespace}:{name}");
     let surface = load_name_surface(&state.pool, &logical_name_id)
@@ -121,7 +123,7 @@ pub(super) async fn name_children(
             ))
         })?;
 
-    let Some(_surface) = surface else {
+    let Some(surface) = surface else {
         return Err(ApiError {
             status: StatusCode::NOT_FOUND,
             code: "not_found",
@@ -166,12 +168,116 @@ pub(super) async fn name_children(
         storage_page.next_cursor.as_ref().map(children_cursor_item),
     );
 
-    Ok(Json(build_children_response_from_summary(
-        &storage_page.summary,
-        &storage_page.rows,
-        include_counts,
-        page,
-    )))
+    match view {
+        ResponseView::Full => serde_json::to_value(build_children_response_from_summary(
+            &storage_page.summary,
+            &storage_page.rows,
+            include_counts,
+            page,
+        ))
+        .map(Json)
+        .map_err(|serialize_error| {
+            error!(
+                service = "api",
+                namespace = %namespace,
+                name = %name,
+                logical_name_id = %logical_name_id,
+                error = ?serialize_error,
+                "failed to serialize full children response"
+            );
+            ApiError::internal_error(format!(
+                "failed to serialize child collection for name {namespace}/{name}"
+            ))
+        }),
+        ResponseView::Compact => {
+            let child_logical_name_ids = storage_page
+                .rows
+                .iter()
+                .map(|row| row.child_logical_name_id.clone())
+                .collect::<Vec<_>>();
+            let child_name_rows =
+                bigname_storage::load_name_current_by_logical_name_ids(
+                    &state.pool,
+                    &child_logical_name_ids,
+                )
+                .await
+                .map_err(|load_error| {
+                    error!(
+                        service = "api",
+                        namespace = %namespace,
+                        name = %name,
+                        logical_name_id = %logical_name_id,
+                        error = ?load_error,
+                        "failed to batch load name_current rows for compact children route"
+                    );
+                    ApiError::internal_error(format!(
+                        "failed to load compact child collection for name {namespace}/{name}"
+                    ))
+                })?;
+            let child_summaries = if include_counts {
+                let summaries = bigname_storage::load_children_current_summaries(
+                    &state.pool,
+                    &child_logical_name_ids,
+                )
+                .await
+                .map_err(|load_error| {
+                    error!(
+                        service = "api",
+                        namespace = %namespace,
+                        name = %name,
+                        logical_name_id = %logical_name_id,
+                        error = ?load_error,
+                        "failed to batch load children_current summaries for compact children route"
+                    );
+                    ApiError::internal_error(format!(
+                        "failed to load compact child counts for name {namespace}/{name}"
+                    ))
+                })?;
+
+                summaries
+                    .into_iter()
+                    .map(|summary| (summary.parent_logical_name_id.clone(), summary))
+                    .collect()
+            } else {
+                BTreeMap::new()
+            };
+            let mut child_labelhashes = BTreeMap::new();
+            for child_logical_name_id in &child_logical_name_ids {
+                let child_surface = load_name_surface(&state.pool, child_logical_name_id)
+                    .await
+                    .map_err(|load_error| {
+                        error!(
+                            service = "api",
+                            namespace = %namespace,
+                            name = %name,
+                            logical_name_id = %logical_name_id,
+                            child_logical_name_id = %child_logical_name_id,
+                            error = ?load_error,
+                            "failed to load name surface for compact child row"
+                        );
+                        ApiError::internal_error(format!(
+                            "failed to load compact child collection for name {namespace}/{name}"
+                        ))
+                    })?;
+                child_labelhashes.insert(
+                    child_logical_name_id.clone(),
+                    child_surface.and_then(|surface| surface.labelhashes.into_iter().next()),
+                );
+            }
+
+            Ok(Json(build_compact_children_response(
+                &storage_page.summary,
+                &storage_page.rows,
+                &surface.normalized_name,
+                &child_labelhashes,
+                &child_name_rows,
+                &child_summaries,
+                include_counts,
+                meta,
+                page,
+            )))
+        }
+    }
 }
 
 pub(super) async fn resource_permissions(

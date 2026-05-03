@@ -249,6 +249,55 @@ async fn get_name_history_returns_canonical_only_rows_with_provenance_and_covera
         }))
     );
 
+    let compact_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/history/names/ens/alice.eth?view=compact&page_size=1")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("compact name history request failed")?;
+    assert_eq!(compact_response.status(), StatusCode::OK);
+    let compact_payload: Value = read_json(compact_response).await?;
+    assert!(compact_payload.get("declared_state").is_none());
+    assert!(compact_payload.get("provenance").is_none());
+    assert!(compact_payload.get("coverage").is_none());
+    assert_eq!(
+        compact_payload
+            .get("meta")
+            .and_then(|meta| meta.get("support_status"))
+        .and_then(Value::as_str),
+        Some("supported")
+    );
+    let compact_row = compact_payload
+        .get("data")
+        .and_then(Value::as_array)
+        .and_then(|rows| rows.first())
+        .and_then(Value::as_object)
+        .expect("compact history row must be an object");
+    assert_eq!(
+        compact_row.get("type").and_then(Value::as_str),
+        Some("HistoryEvent")
+    );
+    assert_eq!(
+        compact_row.get("name").and_then(Value::as_str),
+        Some("alice.eth")
+    );
+    assert_eq!(compact_row.get("block_number"), Some(&json!(102)));
+    assert_eq!(
+        compact_row.get("timestamp").and_then(Value::as_str),
+        Some("2023-11-14T22:15:02Z")
+    );
+    assert_eq!(
+        compact_row.get("transaction_hash").and_then(Value::as_str),
+        Some("0xtx102")
+    );
+    assert!(compact_row.get("normalized_event_id").is_none());
+    assert!(compact_row.get("raw_fact_ref").is_none());
+    assert!(compact_row.get("provenance").is_none());
+    assert!(compact_row.get("coverage").is_none());
+
     let first_page_response = app_router(database.app_state())
         .oneshot(
             Request::builder()

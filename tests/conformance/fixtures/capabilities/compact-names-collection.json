@@ -1,0 +1,39 @@
+{
+  "capability_group": "compact names collection",
+  "conformance_owner": "apps/api tests::names_collection",
+  "fixture_id": "compact-names-collection",
+  "request": {
+    "method": "GET",
+    "path": "/v1/names",
+    "query": {}
+  },
+  "response": {
+    "coverage": {
+      "enumeration_basis": "name_current",
+      "exhaustiveness": "projection_backed",
+      "status": "partial",
+      "unsupported_reason": null
+    },
+    "data": {
+      "fixture_version": 1,
+      "stable_identity": "capability-golden:compact-names-collection"
+    },
+    "provenance": {
+      "boundary": "local_route_conformance",
+      "source": "checked_in_fixture"
+    }
+  },
+  "rollback_gate": [
+    "scripts/rollback-smoke",
+    "stable compact names pagination and explicit unsupported filter behavior"
+  ],
+  "rollout_gate": [
+    "OpenAPI route owner guard",
+    "focused names collection API route tests",
+    "scripts/release-smoke"
+  ],
+  "route_owner": [
+    "/v1/names"
+  ],
+  "scope": "local_cutover_evidence"
+}

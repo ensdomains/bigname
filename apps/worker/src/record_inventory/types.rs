@@ -10,6 +10,17 @@ pub struct RecordInventoryCurrentRebuildSummary {
     pub deleted_row_count: u64,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RecordInventoryTextHydrationSummary {
+    pub candidate_row_count: usize,
+    pub candidate_entry_count: usize,
+    pub hydrated_entry_count: usize,
+    pub not_found_entry_count: usize,
+    pub skipped_entry_count: usize,
+    pub failed_entry_count: usize,
+    pub updated_row_count: usize,
+}
+
 #[derive(Clone, Debug)]
 pub(super) struct RelevantEvent {
     pub(super) normalized_event_id: i64,

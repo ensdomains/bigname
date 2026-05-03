@@ -30,12 +30,13 @@ use sqlx::{PgPool, postgres::PgPoolOptions};
 use tracing::info;
 
 pub use address_names::{
-    AddressNameCurrentEntry, AddressNameCurrentRow, AddressNameRelation, AddressNamesCurrentCursor,
-    AddressNamesCurrentDedupe, AddressNamesCurrentPage, AddressNamesCurrentProvenanceSummary,
-    AddressNamesCurrentSummary, clear_address_names_current, collapse_address_name_current_rows,
-    delete_address_names_current, load_address_names_current,
-    load_address_names_current_including_noncanonical, load_address_names_current_page,
-    upsert_address_names_current_rows,
+    AddressNameCurrentEntry, AddressNameCurrentRow, AddressNameRelation,
+    AddressNamesCurrentCountFilter, AddressNamesCurrentCursor, AddressNamesCurrentDedupe,
+    AddressNamesCurrentPage, AddressNamesCurrentProvenanceSummary, AddressNamesCurrentSummary,
+    clear_address_names_current, collapse_address_name_current_rows,
+    count_address_names_current_for_app_filter, delete_address_names_current,
+    load_address_names_current, load_address_names_current_including_noncanonical,
+    load_address_names_current_page, upsert_address_names_current_rows,
 };
 pub use audit::{
     CanonicalityInspection, CanonicalityInspectionStatus, ManifestDriftAlertInspection,
@@ -78,7 +79,8 @@ pub use execution::{
     upsert_execution_trace_in_transaction,
 };
 pub use history::{
-    HistoryEvent, HistoryScope, load_address_history, load_name_history, load_name_history_head,
+    EventHistoryAddressFilter, EventHistoryFilter, HistoryEvent, HistoryScope,
+    load_address_history, load_event_history, load_name_history, load_name_history_head,
     load_resource_history,
 };
 pub use identity::{
@@ -99,9 +101,13 @@ pub use lineage::{
     upsert_chain_lineage_blocks_without_snapshots,
 };
 pub use name_current::{
-    NameCurrentReplacement, NameCurrentRow, clear_name_current, delete_name_current,
-    load_name_current, load_name_current_by_logical_name_ids, load_name_current_for_snapshot,
-    replace_name_current_rows, upsert_name_current_rows,
+    NameCurrentAddressFilter, NameCurrentAddressRelationFilter, NameCurrentListCursor,
+    NameCurrentListCursorValue, NameCurrentListFilter, NameCurrentListOrder, NameCurrentListPage,
+    NameCurrentListRow, NameCurrentListSort, NameCurrentReplacement, NameCurrentRow,
+    clear_name_current, count_name_current_list, delete_name_current, load_name_current,
+    load_name_current_by_logical_name_ids, load_name_current_for_snapshot,
+    load_name_current_list_page, name_current_list_cursor_from_row, replace_name_current_rows,
+    upsert_name_current_rows,
 };
 pub use normalized_events::{
     NormalizedEvent, NormalizedEventUpsertSummary, load_normalized_event_counts_by_kind,
@@ -109,9 +115,11 @@ pub use normalized_events::{
     upsert_normalized_events, upsert_normalized_events_with_summary,
 };
 pub use permissions::{
-    PermissionScope, PermissionsCurrentFullFilterSummary, PermissionsCurrentKeysetCursor,
-    PermissionsCurrentPage, PermissionsCurrentRow, clear_permissions_current,
-    delete_permissions_current, load_permissions_current, load_permissions_current_by_resource_ids,
+    PermissionScope, PermissionsCurrentAccountResourceCursor,
+    PermissionsCurrentAccountResourcePage, PermissionsCurrentFullFilterSummary,
+    PermissionsCurrentKeysetCursor, PermissionsCurrentPage, PermissionsCurrentRow,
+    clear_permissions_current, delete_permissions_current, load_permissions_current,
+    load_permissions_current_account_resource_page, load_permissions_current_by_resource_ids,
     load_permissions_current_for_resolver_scope, load_permissions_current_page,
     load_permissions_current_resolver_targets, upsert_permissions_current_rows,
 };

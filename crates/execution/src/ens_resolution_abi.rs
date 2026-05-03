@@ -2,6 +2,8 @@ use anyhow::{Context, Result, bail};
 use bigname_storage::SupportedVerifiedResolutionRecordKey;
 use sha3::{Digest, Keccak256};
 
+// TODO(alloy): retire the remaining custom Ethereum ABI/address/hex helpers in favor of
+// Alloy primitives and sol-types as execution support widens.
 pub(crate) const UNIVERSAL_RESOLVER_RESOLVE_SELECTOR: [u8; 4] = [0x90, 0x61, 0xb9, 0x23];
 pub(crate) const ADDR_SELECTOR: [u8; 4] = [0x3b, 0x3b, 0x57, 0xde];
 pub(crate) const MULTICOIN_ADDR_SELECTOR: [u8; 4] = [0xf1, 0xcb, 0x7e, 0x06];

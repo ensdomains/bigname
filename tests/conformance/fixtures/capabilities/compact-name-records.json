@@ -1,0 +1,39 @@
+{
+  "capability_group": "compact name records",
+  "conformance_owner": "apps/api tests::records",
+  "fixture_id": "compact-name-records",
+  "request": {
+    "method": "GET",
+    "path": "/v1/names/{namespace}/{name}/records",
+    "query": {}
+  },
+  "response": {
+    "coverage": {
+      "enumeration_basis": "record_inventory_current",
+      "exhaustiveness": "projection_backed",
+      "status": "partial",
+      "unsupported_reason": null
+    },
+    "data": {
+      "fixture_version": 1,
+      "stable_identity": "capability-golden:compact-name-records"
+    },
+    "provenance": {
+      "boundary": "local_route_conformance",
+      "source": "checked_in_fixture"
+    }
+  },
+  "rollback_gate": [
+    "scripts/rollback-smoke",
+    "stable compact record summary and auto declared/verified selection"
+  ],
+  "rollout_gate": [
+    "OpenAPI route owner guard",
+    "focused compact records API route tests",
+    "scripts/release-smoke"
+  ],
+  "route_owner": [
+    "/v1/names/{namespace}/{name}/records"
+  ],
+  "scope": "local_cutover_evidence"
+}

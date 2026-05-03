@@ -3,6 +3,8 @@
 mod ens_resolution;
 mod ens_resolution_abi;
 mod ens_resolution_call;
+mod ens_resolution_ccip;
+mod ens_text_records;
 mod json_helpers;
 mod persistence;
 mod primary_name;
@@ -17,6 +19,10 @@ pub use bigname_storage::{
 pub use ens_resolution::{
     EnsResolutionRecord, OnDemandEnsResolutionError, OnDemandEnsResolutionErrorKind,
     OnDemandEnsResolutionRequest, execute_ens_universal_resolver_verified_resolution,
+};
+pub use ens_text_records::{
+    EnsTextRecordMulticallRequest, EnsTextRecordMulticallResult, MULTICALL3_ADDRESS,
+    ens_namehash_hex, execute_ens_text_record_multicall,
 };
 pub use persistence::{
     LoadedEnsVerifiedPrimaryName, PersistEnsExactNameVerifiedResolutionRequest,

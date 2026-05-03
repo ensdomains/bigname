@@ -181,29 +181,19 @@ pub(super) fn build_authority_observation(
     if matches!(profile, Some(profile) if raw_log.source_family == profile.resolver_source_family())
         && is_text_changed_topic0(topic0)
     {
-        let Some(key) = decode_resolver_first_dynamic_string(&raw_log.data) else {
+        let Some(text_record) = decode_text_record_change(&raw_log.topics, &raw_log.data)? else {
             return Ok(None);
         };
-        let value = decode_second_dynamic_string_if_present(&raw_log.data);
-        let Some(indexed_key_hash) = normalize_resolver_topic(raw_log.topics.get(2)) else {
-            return Ok(None);
-        };
-        if indexed_key_hash != keccak256_hex(key.as_bytes()) {
-            return Ok(None);
-        }
         let Some(namehash) = normalize_resolver_topic(raw_log.topics.get(1)) else {
             return Ok(None);
         };
+        let selector = text_record_selector(&text_record.selector_key);
         return Ok(Some(AuthorityObservation::RecordChanged(
             RecordChangeObservation {
                 namehash,
                 resolver: raw_log.emitting_address.clone(),
-                selector: RecordSelector {
-                    record_key: "text".to_owned(),
-                    record_family: "text".to_owned(),
-                    selector_key: None,
-                },
-                value: value.map(Value::String),
+                selector,
+                value: text_record.value.map(Value::String),
                 raw_name: None,
                 reference: raw_log.reference(),
             },
@@ -464,6 +454,37 @@ pub(super) fn build_authority_observation(
     Ok(None)
 }
 
+pub(super) fn decode_text_record_change(
+    topics: &[String],
+    data: &[u8],
+) -> Result<Option<EnsV1TextRecordChange>> {
+    let Some(topic0) = topics.first() else {
+        return Ok(None);
+    };
+    if !is_text_changed_topic0(topic0) {
+        return Ok(None);
+    }
+    let Some(key) = decode_resolver_first_dynamic_string(data) else {
+        return Ok(None);
+    };
+    if key.trim().is_empty() {
+        return Ok(None);
+    }
+    let Some(indexed_key_hash) = normalize_resolver_topic(topics.get(2)) else {
+        return Ok(None);
+    };
+    if indexed_key_hash != keccak256_hex(key.as_bytes()) {
+        return Ok(None);
+    }
+    let value = decode_second_dynamic_string_if_present(data);
+    Ok(Some(EnsV1TextRecordChange {
+        record_key: format!("text:{key}"),
+        record_family: "text".to_owned(),
+        selector_key: key,
+        value,
+    }))
+}
+
 fn decode_second_dynamic_string_if_present(data: &[u8]) -> Option<String> {
     if data.len() < 64 {
         return None;
@@ -522,6 +543,14 @@ fn resolver_address_record_value(coin_type: i64, address_bytes: &[u8]) -> Value 
         "encoding": "hex",
         "bytes": hex_value,
     })
+}
+
+fn text_record_selector(key: &str) -> RecordSelector {
+    RecordSelector {
+        record_key: format!("text:{key}"),
+        record_family: "text".to_owned(),
+        selector_key: Some(key.to_owned()),
+    }
 }
 
 pub(super) fn observation_labelhash(observation: &AuthorityObservation) -> String {

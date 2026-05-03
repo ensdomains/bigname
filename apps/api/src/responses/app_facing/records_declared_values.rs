@@ -1,0 +1,783 @@
+fn compact_requested_records(
+    record_inventory_row: Option<&RecordInventoryCurrentRow>,
+    request: &CompactNameRecordsRequest,
+) -> Vec<ResolutionRecordKey> {
+    let mut records = Vec::new();
+    let mut seen = BTreeSet::new();
+    for text_key in compact_requested_text_keys(record_inventory_row, request) {
+        compact_push_record_key(&mut records, &mut seen, &format!("text:{text_key}"));
+    }
+    if request.avatar {
+        compact_push_record_key(&mut records, &mut seen, "avatar");
+    }
+    if request.content_hash {
+        compact_push_record_key(&mut records, &mut seen, "contenthash");
+    }
+    for coin_type in compact_requested_coin_types(record_inventory_row, request) {
+        compact_push_record_key(&mut records, &mut seen, &format!("addr:{coin_type}"));
+    }
+    records
+}
+
+const COMPACT_BASIC_TEXT_KEYS: &[&str] = &["description", "url", "email"];
+
+const COMPACT_BASIC_COIN_TYPES: &[&str] = &["60"];
+
+fn compact_requested_text_keys(
+    record_inventory_row: Option<&RecordInventoryCurrentRow>,
+    request: &CompactNameRecordsRequest,
+) -> Vec<String> {
+    let mut keys = request.texts.clone();
+    let mut seen = keys.iter().cloned().collect::<BTreeSet<_>>();
+    if compact_should_include_known_or_basic_texts(request) {
+        for key in compact_known_text_keys_from_inventory(record_inventory_row) {
+            if seen.insert(key.clone()) {
+                keys.push(key);
+            }
+        }
+        if compact_should_probe_basic_records(record_inventory_row, request) {
+            for key in COMPACT_BASIC_TEXT_KEYS {
+                if seen.insert((*key).to_owned()) {
+                    keys.push((*key).to_owned());
+                }
+            }
+        }
+    }
+    keys
+}
+
+fn compact_should_include_known_or_basic_texts(request: &CompactNameRecordsRequest) -> bool {
+    request.include.known_text_keys
+        && matches!(
+            request.mode,
+            CompactNameRecordsMode::Auto
+                | CompactNameRecordsMode::Verified
+                | CompactNameRecordsMode::Both
+        )
+}
+
+fn compact_should_probe_basic_records(
+    record_inventory_row: Option<&RecordInventoryCurrentRow>,
+    request: &CompactNameRecordsRequest,
+) -> bool {
+    matches!(
+        request.mode,
+        CompactNameRecordsMode::Auto | CompactNameRecordsMode::Verified | CompactNameRecordsMode::Both
+    ) && !compact_has_declared_record_selectors(record_inventory_row)
+}
+
+fn compact_has_declared_record_selectors(
+    record_inventory_row: Option<&RecordInventoryCurrentRow>,
+) -> bool {
+    record_inventory_row
+        .and_then(|row| row.selectors.as_array())
+        .is_some_and(|selectors| !selectors.is_empty())
+}
+
+fn compact_push_record_key(
+    records: &mut Vec<ResolutionRecordKey>,
+    seen: &mut BTreeSet<String>,
+    record_key: &str,
+) {
+    if !seen.insert(record_key.to_owned()) {
+        return;
+    }
+    let record = parse_resolution_record_key(record_key)
+        .expect("compact record request builder must produce valid record selectors");
+    records.push(record);
+}
+
+fn compact_verified_record_cache_entries(
+    records: &[ResolutionRecordKey],
+    verified_outcome: Option<&ExecutionOutcome>,
+) -> BTreeMap<String, JsonValue> {
+    let verified_queries = verified_outcome
+        .and_then(|outcome| outcome.outcome_payload.as_ref())
+        .and_then(|payload| provenance_field(payload, "verified_queries"))
+        .and_then(JsonValue::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|query| {
+            let record_key = string_field(provenance_field(query, "record_key"))?;
+            Some((record_key, query.clone()))
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    records
+        .iter()
+        .map(|record| {
+            let entry = verified_queries
+                .get(&record.record_key)
+                .map(|query| compact_verified_record_entry(record, query))
+                .unwrap_or_else(|| {
+                    compact_synthetic_record_entry(
+                        record,
+                        "unsupported",
+                        Some(COMPACT_RECORDS_VERIFIED_UNSUPPORTED_REASON),
+                    )
+                });
+            (record.record_key.clone(), entry)
+        })
+        .collect()
+}
+
+fn compact_verified_record_entry(record: &ResolutionRecordKey, query: &JsonValue) -> JsonValue {
+    let status = string_field(provenance_field(query, "status")).unwrap_or_else(|| {
+        "unsupported".to_owned()
+    });
+    let mut entry = compact_synthetic_record_entry(
+        record,
+        verified_compact_status(&status),
+        verified_compact_unsupported_reason(query, &status).as_deref(),
+    );
+    if status == "success"
+        && let Some(value) = provenance_field(query, "value").cloned()
+    {
+        insert_value_field(&mut entry, "value", value);
+    }
+    if status == "not_found"
+        && let Some(failure_reason) = string_field(provenance_field(query, "failure_reason"))
+    {
+        insert_string_field(&mut entry, "failure_reason", failure_reason);
+    }
+    entry
+}
+
+fn verified_compact_status(status: &str) -> &str {
+    match status {
+        "success" | "not_found" => status,
+        _ => "unsupported",
+    }
+}
+
+fn verified_compact_unsupported_reason(query: &JsonValue, status: &str) -> Option<String> {
+    match status {
+        "success" | "not_found" => None,
+        "unsupported" => string_field(provenance_field(query, "unsupported_reason"))
+            .or_else(|| Some(COMPACT_RECORDS_VERIFIED_UNSUPPORTED_REASON.to_owned())),
+        "execution_failed" => string_field(provenance_field(query, "failure_reason"))
+            .or_else(|| Some("verified_execution_failed".to_owned())),
+        _ => Some(COMPACT_RECORDS_VERIFIED_UNSUPPORTED_REASON.to_owned()),
+    }
+}
+
+fn compact_declared_record_cache_entries(
+    row: &NameCurrentRow,
+    record_inventory_row: Option<&RecordInventoryCurrentRow>,
+    records: &[ResolutionRecordKey],
+) -> BTreeMap<String, JsonValue> {
+    let record_cache = build_record_cache_section_for_name(
+        row,
+        record_inventory_row,
+        records,
+        COMPACT_RECORDS_DECLARED_CACHE_UNSUPPORTED_REASON,
+    );
+    let Some(entries) = provenance_field(&record_cache, "entries").and_then(JsonValue::as_array)
+    else {
+        return records
+            .iter()
+            .map(|record| {
+                (
+                    record.record_key.clone(),
+                    compact_synthetic_record_entry(
+                        record,
+                        "unsupported",
+                        Some(COMPACT_RECORDS_DECLARED_CACHE_UNSUPPORTED_REASON),
+                    ),
+                )
+            })
+            .collect();
+    };
+
+    let mut value_entries = entries
+        .iter()
+        .filter_map(|entry| {
+            let record_key = string_field(provenance_field(entry, "record_key"))?;
+            Some((record_key, entry.clone()))
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    add_declared_compact_alias_entries(record_inventory_row, records, &mut value_entries);
+    value_entries
+}
+
+fn add_declared_compact_alias_entries(
+    record_inventory_row: Option<&RecordInventoryCurrentRow>,
+    records: &[ResolutionRecordKey],
+    value_entries: &mut BTreeMap<String, JsonValue>,
+) {
+    if !records.iter().any(|record| record.record_key == "avatar") {
+        return;
+    }
+    if compact_value_entry_is_success(value_entries.get("avatar")) {
+        return;
+    }
+
+    let Some(text_avatar_entry) = record_inventory_row
+        .and_then(|row| row.entries.as_array())
+        .into_iter()
+        .flatten()
+        .find(|entry| {
+            string_field(provenance_field(entry, "record_key")).as_deref() == Some("text:avatar")
+        })
+    else {
+        return;
+    };
+    value_entries.insert("avatar".to_owned(), text_avatar_entry.clone());
+}
+
+fn compact_record_inventory_lookup(
+    row: Option<&RecordInventoryCurrentRow>,
+) -> CompactRecordInventoryLookup {
+    let Some(row) = row else {
+        return CompactRecordInventoryLookup::default();
+    };
+
+    CompactRecordInventoryLookup {
+        selectors: compact_record_items_by_key(&row.selectors),
+        explicit_gaps: compact_record_items_by_key(&row.explicit_gaps),
+        unsupported_families: row
+            .unsupported_families
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|family| {
+                Some((
+                    string_field(provenance_field(family, "record_family"))?,
+                    string_field(provenance_field(family, "unsupported_reason"))?,
+                ))
+            })
+            .collect(),
+    }
+}
+
+fn compact_record_items_by_key(value: &JsonValue) -> BTreeMap<String, JsonValue> {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            let record_key = string_field(provenance_field(item, "record_key"))?;
+            Some((record_key, item.clone()))
+        })
+        .collect()
+}
+
+fn compact_resolver_address(row: &NameCurrentRow) -> JsonValue {
+    provenance_field(&row.declared_summary, "resolver")
+        .and_then(|resolver| provenance_field(resolver, "address"))
+        .and_then(|value| match value {
+            JsonValue::String(address) => Some(JsonValue::String(address.clone())),
+            JsonValue::Null => Some(JsonValue::Null),
+            _ => None,
+        })
+        .unwrap_or(JsonValue::Null)
+}
+
+fn compact_text_records(
+    record_inventory_row: Option<&RecordInventoryCurrentRow>,
+    request: &CompactNameRecordsRequest,
+    value_entries: &BTreeMap<String, JsonValue>,
+    inventory_lookup: &CompactRecordInventoryLookup,
+) -> JsonValue {
+    let mut text_records = JsonMap::new();
+    for text_key in compact_requested_text_keys(record_inventory_row, request) {
+        let record_key = format!("text:{text_key}");
+        let record = parse_resolution_record_key(&record_key)
+            .expect("compact text selector must be a valid record key");
+        let value_entry = value_entries.get(&record_key);
+        if compact_is_basic_fallback_text_key(record_inventory_row, request, &text_key)
+            && !compact_value_entry_is_success(value_entry)
+        {
+            continue;
+        }
+        text_records.insert(
+            text_key,
+            compact_record_payload(&record, value_entry, inventory_lookup),
+        );
+    }
+    JsonValue::Object(text_records)
+}
+
+fn compact_is_basic_fallback_text_key(
+    record_inventory_row: Option<&RecordInventoryCurrentRow>,
+    request: &CompactNameRecordsRequest,
+    text_key: &str,
+) -> bool {
+    compact_should_probe_basic_records(record_inventory_row, request)
+        && COMPACT_BASIC_TEXT_KEYS.contains(&text_key)
+        && !request.texts.iter().any(|requested| requested == text_key)
+}
+
+fn compact_value_entry_is_success(value_entry: Option<&JsonValue>) -> bool {
+    value_entry
+        .and_then(|entry| provenance_field(entry, "status"))
+        .and_then(JsonValue::as_str)
+        .is_some_and(|status| status == "success")
+}
+
+fn compact_known_text_keys(
+    row: &NameCurrentRow,
+    record_inventory_row: Option<&RecordInventoryCurrentRow>,
+    request: &CompactNameRecordsRequest,
+    inventory_lookup: &CompactRecordInventoryLookup,
+) -> JsonValue {
+    if !request.known_text_keys {
+        return JsonValue::Null;
+    }
+    if record_inventory_row.is_none() && !compact_name_has_terminal_no_declared_resolver(row) {
+        if request.meta == MetaMode::None {
+            return JsonValue::Null;
+        }
+        return unsupported_section(COMPACT_RECORDS_DECLARED_INVENTORY_UNSUPPORTED_REASON);
+    }
+    if let Some(reason) = inventory_lookup.unsupported_families.get("text") {
+        if request.meta == MetaMode::None {
+            return JsonValue::Null;
+        }
+        return unsupported_section(reason);
+    }
+
+    let keys = inventory_lookup
+        .selectors
+        .values()
+        .filter(|selector| {
+            string_field(provenance_field(selector, "record_family")).as_deref() == Some("text")
+        })
+        .filter_map(|selector| string_field(provenance_field(selector, "selector_key")))
+        .map(JsonValue::String)
+        .collect::<Vec<_>>();
+
+    json!({
+        "status": "supported",
+        "keys": keys,
+    })
+}
+
+fn compact_optional_record(
+    requested: bool,
+    record_key: &str,
+    value_entries: &BTreeMap<String, JsonValue>,
+    inventory_lookup: &CompactRecordInventoryLookup,
+) -> JsonValue {
+    if !requested {
+        return JsonValue::Null;
+    }
+    let record = parse_resolution_record_key(record_key)
+        .expect("compact optional selector must be a valid record key");
+    compact_record_payload(
+        &record,
+        value_entries.get(record_key),
+        inventory_lookup,
+    )
+}
+
+fn compact_coin_addresses(
+    request: &CompactNameRecordsRequest,
+    record_inventory_row: Option<&RecordInventoryCurrentRow>,
+    value_entries: &BTreeMap<String, JsonValue>,
+    inventory_lookup: &CompactRecordInventoryLookup,
+) -> JsonValue {
+    let mut coin_addresses = JsonMap::new();
+    for coin_type in compact_requested_coin_types(record_inventory_row, request) {
+        let record_key = format!("addr:{coin_type}");
+        let record = parse_resolution_record_key(&record_key)
+            .expect("compact coin selector must be a valid record key");
+        coin_addresses.insert(
+            coin_type,
+            compact_record_payload(
+                &record,
+                value_entries.get(&record_key),
+                inventory_lookup,
+            ),
+        );
+    }
+    JsonValue::Object(coin_addresses)
+}
+
+fn compact_requested_coin_types(
+    record_inventory_row: Option<&RecordInventoryCurrentRow>,
+    request: &CompactNameRecordsRequest,
+) -> Vec<String> {
+    if !request.coin_types.is_empty() {
+        return request.coin_types.clone();
+    }
+    if !request.include.coins {
+        return Vec::new();
+    }
+
+    let known_coin_types = compact_known_coin_types(record_inventory_row);
+    if !known_coin_types.is_empty() {
+        return known_coin_types;
+    }
+    if compact_should_probe_basic_records(record_inventory_row, request) {
+        return COMPACT_BASIC_COIN_TYPES
+            .iter()
+            .map(|coin_type| (*coin_type).to_owned())
+            .collect();
+    }
+
+    Vec::new()
+}
+
+fn compact_known_coin_types(
+    record_inventory_row: Option<&RecordInventoryCurrentRow>,
+) -> Vec<String> {
+    record_inventory_row
+        .and_then(|row| row.selectors.as_array())
+        .into_iter()
+        .flatten()
+        .filter(|selector| {
+            string_field(provenance_field(selector, "record_family")).as_deref() == Some("addr")
+        })
+        .filter_map(|selector| string_field(provenance_field(selector, "selector_key")))
+        .collect()
+}
+
+fn compact_known_text_keys_from_inventory(
+    record_inventory_row: Option<&RecordInventoryCurrentRow>,
+) -> Vec<String> {
+    record_inventory_row
+        .and_then(|row| row.selectors.as_array())
+        .into_iter()
+        .flatten()
+        .filter(|selector| {
+            string_field(provenance_field(selector, "record_family")).as_deref() == Some("text")
+        })
+        .filter_map(|selector| string_field(provenance_field(selector, "selector_key")))
+        .collect()
+}
+
+fn compact_record_payload(
+    record: &ResolutionRecordKey,
+    value_entry: Option<&JsonValue>,
+    inventory_lookup: &CompactRecordInventoryLookup,
+) -> JsonValue {
+    let payload = value_entry
+        .cloned()
+        .unwrap_or_else(|| compact_record_payload_from_inventory(record, inventory_lookup));
+    compact_record_public_payload(payload)
+}
+
+fn compact_record_payload_from_inventory(
+    record: &ResolutionRecordKey,
+    inventory_lookup: &CompactRecordInventoryLookup,
+) -> JsonValue {
+    let inventory = compact_inventory_status(record, inventory_lookup);
+    if string_field(provenance_field(&inventory, "status")).as_deref() == Some("unsupported_family")
+    {
+        let mut entry = empty_object();
+        insert_string_field(&mut entry, "status", "unsupported".to_owned());
+        if let Some(reason) = string_field(provenance_field(&inventory, "unsupported_reason")) {
+            insert_string_field(&mut entry, "unsupported_reason", reason);
+        }
+        return entry;
+    }
+    if string_field(provenance_field(&inventory, "status")).as_deref() == Some("explicit_gap") {
+        let mut entry = empty_object();
+        insert_string_field(&mut entry, "status", "not_found".to_owned());
+        if let Some(reason) = string_field(provenance_field(&inventory, "gap_reason")) {
+            insert_string_field(&mut entry, "failure_reason", reason);
+        }
+        return entry;
+    }
+
+    compact_synthetic_record_entry(record, "not_found", None)
+}
+
+fn compact_record_public_payload(payload: JsonValue) -> JsonValue {
+    let mut public = empty_object();
+    let status =
+        string_field(provenance_field(&payload, "status")).unwrap_or_else(|| "unsupported".to_owned());
+    insert_string_field(&mut public, "status", status.clone());
+    if status == "success"
+        && let Some(value) = provenance_field(&payload, "value").cloned()
+    {
+        insert_value_field(&mut public, "value", compact_record_value(value));
+    }
+    if let Some(reason) = string_field(provenance_field(&payload, "failure_reason")) {
+        insert_string_field(&mut public, "failure_reason", reason);
+    }
+    if let Some(reason) = string_field(provenance_field(&payload, "unsupported_reason")) {
+        insert_string_field(&mut public, "unsupported_reason", reason);
+    }
+    public
+}
+
+fn compact_synthetic_record_entry(
+    record: &ResolutionRecordKey,
+    status: &str,
+    unsupported_reason: Option<&str>,
+) -> JsonValue {
+    let mut entry = empty_object();
+    insert_string_field(&mut entry, "record_key", record.record_key.clone());
+    insert_string_field(&mut entry, "record_family", record.record_family.clone());
+    insert_nullable_string_field(&mut entry, "selector_key", record.selector_key.clone());
+    insert_string_field(&mut entry, "status", status.to_owned());
+    if let Some(unsupported_reason) = unsupported_reason {
+        insert_string_field(
+            &mut entry,
+            "unsupported_reason",
+            unsupported_reason.to_owned(),
+        );
+    }
+    entry
+}
+
+fn compact_record_value(value: JsonValue) -> JsonValue {
+    provenance_field(&value, "value")
+        .cloned()
+        .unwrap_or(value)
+}
+
+fn compact_inventory_status(
+    record: &ResolutionRecordKey,
+    inventory_lookup: &CompactRecordInventoryLookup,
+) -> JsonValue {
+    if let Some(selector) = inventory_lookup.selectors.get(&record.record_key) {
+        return json!({
+            "status": "known",
+            "cacheable": provenance_field(selector, "cacheable")
+                .and_then(JsonValue::as_bool)
+                .unwrap_or(false),
+        });
+    }
+    if let Some(gap) = inventory_lookup.explicit_gaps.get(&record.record_key) {
+        return json!({
+            "status": "explicit_gap",
+            "gap_reason": string_field(provenance_field(gap, "gap_reason")),
+        });
+    }
+    if let Some(reason) = inventory_lookup
+        .unsupported_families
+        .get(&record.record_family)
+    {
+        return json!({
+            "status": "unsupported_family",
+            "unsupported_reason": reason,
+        });
+    }
+
+    json!({ "status": "unknown" })
+}
+
+fn compact_inventory_source(
+    row: &NameCurrentRow,
+    record_inventory_row: Option<&RecordInventoryCurrentRow>,
+    inventory_lookup: &CompactRecordInventoryLookup,
+) -> JsonValue {
+    let Some(record_inventory_row) = record_inventory_row else {
+        if compact_name_has_terminal_no_declared_resolver(row) {
+            return json!({
+                "status": "supported",
+                "known_selector_count": 0,
+                "explicit_gaps": [],
+                "unsupported_families": [],
+            });
+        }
+        return unsupported_section(COMPACT_RECORDS_DECLARED_INVENTORY_UNSUPPORTED_REASON);
+    };
+
+    json!({
+        "status": "supported",
+        "coverage_status": string_field(provenance_field(&record_inventory_row.coverage, "status")),
+        "known_selector_count": inventory_lookup.selectors.len(),
+        "explicit_gaps": record_inventory_row.explicit_gaps,
+        "unsupported_families": record_inventory_row.unsupported_families,
+    })
+}
+
+fn compact_value_source(
+    row: &NameCurrentRow,
+    record_inventory_row: Option<&RecordInventoryCurrentRow>,
+    request: &CompactNameRecordsRequest,
+    value_source: CompactNameRecordsValueSource,
+    verified_outcome: Option<&ExecutionOutcome>,
+) -> JsonValue {
+    let declared_status = if request.mode.includes_declared() {
+        if record_inventory_row.is_some() || compact_name_has_terminal_no_declared_resolver(row) {
+            "supported"
+        } else {
+            "unsupported"
+        }
+    } else {
+        "not_requested"
+    };
+    let verified_requested = value_source == CompactNameRecordsValueSource::Verified
+        || matches!(
+            request.mode,
+            CompactNameRecordsMode::Verified | CompactNameRecordsMode::Both
+        );
+    let verified_status = if verified_requested {
+        compact_verified_status(verified_outcome)
+    } else {
+        "not_requested"
+    };
+    let mut value_source = json!({
+        "mode": compact_resolution_mode_label(request.mode),
+        "declared_status": declared_status,
+        "source": compact_value_source_label(value_source),
+    });
+
+    if declared_status == "unsupported" {
+        insert_string_field(
+            &mut value_source,
+            "declared_unsupported_reason",
+            COMPACT_RECORDS_DECLARED_CACHE_UNSUPPORTED_REASON.to_owned(),
+        );
+    }
+    if verified_requested {
+        insert_string_field(&mut value_source, "verified_status", verified_status.to_owned());
+        if verified_status != "supported" {
+            insert_string_field(
+                &mut value_source,
+                "verified_unsupported_reason",
+                COMPACT_RECORDS_VERIFIED_UNSUPPORTED_REASON.to_owned(),
+            );
+        }
+    }
+
+    value_source
+}
+
+fn compact_value_source_label(value_source: CompactNameRecordsValueSource) -> &'static str {
+    match value_source {
+        CompactNameRecordsValueSource::Declared => "record_inventory_current",
+        CompactNameRecordsValueSource::Verified => "verified_resolution",
+    }
+}
+
+fn compact_verified_status(verified_outcome: Option<&ExecutionOutcome>) -> &'static str {
+    if verified_outcome.is_some() {
+        "supported"
+    } else {
+        "unsupported"
+    }
+}
+
+fn compact_verified_records_summary(
+    requested_records: &[ResolutionRecordKey],
+    verified_outcome: Option<&ExecutionOutcome>,
+) -> JsonValue {
+    let entries = compact_verified_record_cache_entries(requested_records, verified_outcome)
+        .into_values()
+        .collect::<Vec<_>>();
+    json!({
+        "status": compact_verified_status(verified_outcome),
+        "entries": entries,
+    })
+}
+
+fn compact_name_records_meta(
+    row: &NameCurrentRow,
+    record_inventory_row: Option<&RecordInventoryCurrentRow>,
+    request: &CompactNameRecordsRequest,
+    value_source: CompactNameRecordsValueSource,
+    verified_outcome: Option<&ExecutionOutcome>,
+) -> JsonValue {
+    let unsupported_fields =
+        compact_name_records_unsupported_fields(
+            row,
+            record_inventory_row,
+            request,
+            value_source,
+            verified_outcome,
+        );
+    let support_status = if unsupported_fields.is_empty() {
+        "supported"
+    } else if record_inventory_row.is_none()
+        && !compact_name_has_terminal_no_declared_resolver(row)
+        && !request.mode.includes_declared()
+    {
+        "unsupported"
+    } else {
+        "partial"
+    };
+
+    let mut meta = json!({
+        "support_status": support_status,
+        "unsupported_filters": [],
+        "unsupported_fields": unsupported_fields,
+        "value_source": compact_value_source(row, record_inventory_row, request, value_source, verified_outcome),
+    });
+    if request.meta == MetaMode::Full {
+        insert_value_field(
+            &mut meta,
+            "inventory_source",
+            compact_inventory_source(
+                row,
+                record_inventory_row,
+                &compact_record_inventory_lookup(record_inventory_row),
+            ),
+        );
+        insert_value_field(&mut meta, "coverage", build_name_coverage(&row.coverage));
+        insert_value_field(&mut meta, "chain_positions", ensure_object(&row.chain_positions));
+        insert_string_field(
+            &mut meta,
+            "consistency",
+            canonicality_consistency(&row.canonicality_summary).to_owned(),
+        );
+        insert_string_field(
+            &mut meta,
+            "last_updated",
+            format_timestamp(row.last_recomputed_at),
+        );
+        insert_value_field(&mut meta, "provenance", build_name_provenance(&row.provenance));
+    }
+
+    meta
+}
+
+fn compact_name_records_unsupported_fields(
+    row: &NameCurrentRow,
+    record_inventory_row: Option<&RecordInventoryCurrentRow>,
+    _request: &CompactNameRecordsRequest,
+    value_source: CompactNameRecordsValueSource,
+    verified_outcome: Option<&ExecutionOutcome>,
+) -> Vec<String> {
+    let mut fields = BTreeSet::new();
+    if record_inventory_row.is_none() && !compact_name_has_terminal_no_declared_resolver(row) {
+        fields.insert("record_inventory");
+        fields.insert("record_cache");
+    }
+    if value_source == CompactNameRecordsValueSource::Verified && verified_outcome.is_none() {
+        fields.insert("verified_records");
+    }
+
+    fields.into_iter().map(str::to_owned).collect()
+}
+
+fn compact_resolution_mode_label(mode: CompactNameRecordsMode) -> &'static str {
+    mode.label()
+}
+
+fn compact_declared_records_are_authoritative(
+    row: &NameCurrentRow,
+    record_inventory_row: Option<&RecordInventoryCurrentRow>,
+) -> bool {
+    if compact_name_has_terminal_no_declared_resolver(row) {
+        return true;
+    }
+    let Some(record_inventory_row) = record_inventory_row else {
+        return false;
+    };
+    string_field(provenance_field(&record_inventory_row.coverage, "unsupported_reason")).is_none()
+        && string_field(provenance_field(&record_inventory_row.coverage, "status"))
+            .is_some_and(|status| status == "full")
+}
+
+fn compact_name_has_terminal_no_declared_resolver(row: &NameCurrentRow) -> bool {
+    let Some(resolver_summary) = provenance_field(&row.declared_summary, "resolver")
+        .filter(|value| value.is_object())
+    else {
+        return false;
+    };
+    if string_field(provenance_field(resolver_summary, "status"))
+        .is_some_and(|status| status == "unsupported")
+    {
+        return false;
+    }
+
+    string_field(provenance_field(resolver_summary, "chain_id")).is_none()
+        && string_field(provenance_field(resolver_summary, "address")).is_none()
+}

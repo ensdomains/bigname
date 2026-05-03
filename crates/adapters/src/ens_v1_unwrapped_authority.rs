@@ -104,6 +104,14 @@ pub struct EnsV1UnwrappedAuthoritySyncSummary {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EnsV1TextRecordChange {
+    pub record_key: String,
+    pub record_family: String,
+    pub selector_key: String,
+    pub value: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct ActiveEmitter {
     address: String,
     contract_instance_id: Uuid,
@@ -525,6 +533,13 @@ use self::{
     migration_guard::*, names::*, observation::*, permissions::*, preload::*, profiles::*,
     release_events::*, resolver_gate::*, reverse_claims::*, scope::*, transition::*,
 };
+
+pub fn decode_ens_v1_text_record_change(
+    topics: &[String],
+    data: &[u8],
+) -> Result<Option<EnsV1TextRecordChange>> {
+    observation::decode_text_record_change(topics, data)
+}
 
 mod pipeline;
 

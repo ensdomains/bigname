@@ -1,4 +1,5 @@
 mod collapse;
+mod count;
 mod decode;
 mod page;
 mod query;
@@ -7,6 +8,7 @@ mod types;
 mod write;
 
 pub use collapse::collapse_address_name_current_rows;
+pub use count::{AddressNamesCurrentCountFilter, count_address_names_current_for_app_filter};
 pub use page::load_address_names_current_page;
 pub use read::{load_address_names_current, load_address_names_current_including_noncanonical};
 pub use types::{

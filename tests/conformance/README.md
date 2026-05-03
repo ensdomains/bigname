@@ -4,9 +4,16 @@ Bootstrap supported-read contract harness for already-shipped routes and collect
 
 - `GET /v1/namespaces/{namespace}`
 - `GET /v1/manifests/{namespace}`
+- `GET /v1/names`
 - `GET /v1/names/{namespace}/{name}/children`
+- `GET /v1/names/{namespace}/{name}/records`
+- `GET /v1/names/{namespace}/{name}/roles`
 - `GET /v1/addresses/{address}/names`
+- `GET /v1/addresses/{address}/names/count`
 - `GET /v1/names/{namespace}/{name}`
+- `GET /v1/events`
+- `GET /v1/roles`
+- `GET /v1/resources/lookup`
 - `GET /v1/explain/names/{namespace}/{name}/surface-binding`
 - `GET /v1/explain/names/{namespace}/{name}/authority-control`
 - `GET /v1/resolutions/{namespace}/{name}`
@@ -16,6 +23,7 @@ Bootstrap supported-read contract harness for already-shipped routes and collect
 - `GET /v1/primary-names/{address}`
 - `GET /v1/resources/{resource_id}/permissions`
 - `GET /v1/resolvers/{chain_id}/{resolver_address}`
+- `GET /v1/resolvers/{chain_id}/{resolver_address}/overview`
 - `GET /v1/history/addresses/{address}`
 - `GET /v1/history/names/{namespace}/{name}`
 - `GET /v1/history/resources/{resource_id}`
@@ -37,7 +45,7 @@ cargo test
 Focused OpenAPI publication coverage guard, from the repository root:
 
 ```sh
-cargo test --manifest-path tests/conformance/Cargo.toml openapi
+cargo test --manifest-path tests/conformance/Cargo.toml openapi --locked
 ```
 
 This no-Postgres guard reads `docs/api-v1.openapi.json` and fails if a published
@@ -91,8 +99,8 @@ cargo test --manifest-path tests/conformance/Cargo.toml basenames_deferred_path_
 Focused capability golden fixture pack guards, from the repository root:
 
 ```sh
-cargo test --manifest-path tests/conformance/Cargo.toml capability
-cargo test --manifest-path tests/conformance/Cargo.toml capability_golden_response_fixtures
+cargo test --manifest-path tests/conformance/Cargo.toml capability --locked
+cargo test --manifest-path tests/conformance/Cargo.toml capability_golden_response_fixtures --locked
 ```
 
 Execution notes:
@@ -115,7 +123,10 @@ Execution notes:
   include `data` and `coverage`, and route, conformance, rollout, and rollback owners match the
   native conformance table. This is a local-only/no app-parity guard: the fixtures are not
   imported app call-site replacement, external app parity, first-party app replacement, legacy
-  schema parity, or consumer-replacement evidence
+  schema parity, or consumer-replacement evidence. The static pack now includes focused local
+  route evidence for the implemented compact names, count, records, events, roles, resource
+  lookup, and compact resolver overview routes; full first-party cutover still needs app call-site
+  mapping
 - the child collection contract seeds `children_current` rows and covers both the base
   `GET /v1/names/{namespace}/{name}/children` response and the shipped `include=counts`
   variant; the harness also asserts that unsupported non-`declared` `surface_classes` are

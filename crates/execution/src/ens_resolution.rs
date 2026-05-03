@@ -4,6 +4,7 @@ use bigname_storage::{
     RecordInventoryCurrentRow, VerifiedResolutionPathClass, VerifiedResolutionRecord,
     build_resolution_execution_cache_key,
 };
+use futures_util::future::join_all;
 use serde_json::{Value, json};
 use sqlx::{PgPool, types::time::OffsetDateTime};
 use uuid::Uuid;
@@ -59,6 +60,8 @@ pub struct OnDemandEnsResolutionRequest<'a> {
     pub record_inventory_row: Option<&'a RecordInventoryCurrentRow>,
     pub chain_positions: Value,
     pub chain_rpc_urls: &'a ChainRpcUrls,
+    pub use_latest_block_tag: bool,
+    pub persist_execution: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -155,21 +158,30 @@ pub async fn execute_ens_universal_resolver_verified_resolution(
         ))
     })?;
 
-    let built = build_on_demand_request(request.row, &supported_records, cache_key, block, &rpc)
-        .await
-        .map_err(|error| {
-            OnDemandEnsResolutionError::configuration(format!(
-                "failed to execute on-demand ENS verified resolution RPC call: {error}"
-            ))
-        })?;
+    let built = build_on_demand_request(
+        request.row,
+        &supported_records,
+        cache_key,
+        block,
+        &rpc,
+        request.use_latest_block_tag,
+    )
+    .await
+    .map_err(|error| {
+        OnDemandEnsResolutionError::configuration(format!(
+            "failed to execute on-demand ENS verified resolution RPC call: {error}"
+        ))
+    })?;
 
-    persist_ens_exact_name_verified_resolution_direct(pool, &built)
-        .await
-        .map_err(|error| {
-            OnDemandEnsResolutionError::persistence(format!(
-                "failed to persist on-demand ENS verified resolution execution result: {error}"
-            ))
-        })?;
+    if request.persist_execution {
+        persist_ens_exact_name_verified_resolution_direct(pool, &built)
+            .await
+            .map_err(|error| {
+                OnDemandEnsResolutionError::persistence(format!(
+                    "failed to persist on-demand ENS verified resolution execution result: {error}"
+                ))
+            })?;
+    }
 
     Ok(built.outcome)
 }
@@ -216,6 +228,7 @@ async fn build_on_demand_request(
     cache_key: ExecutionCacheKey,
     block: ExecutionBlock,
     rpc: &JsonRpcHttpClient,
+    use_latest_block_tag: bool,
 ) -> Result<PersistEnsExactNameVerifiedResolutionRequest> {
     let execution_trace_id = Uuid::new_v4();
     let now = OffsetDateTime::now_utc();
@@ -225,11 +238,25 @@ async fn build_on_demand_request(
     let node = namehash(&row.normalized_name)?;
     let mut raw_call_snapshots = Vec::new();
     let mut calls = Vec::new();
+    let mut gateway_digests = Vec::new();
     let mut verified_queries = Vec::new();
     let mut steps = vec![declared_topology_step(row, &cache_key, &block)];
 
-    for record in records {
-        let selector_call = execute_record_call(row, record, &dns_name, node, &block, rpc).await?;
+    let selector_calls = join_all(records.iter().map(|record| {
+        execute_record_call(
+            row,
+            record,
+            &dns_name,
+            node,
+            &block,
+            rpc,
+            use_latest_block_tag,
+        )
+    }))
+    .await;
+
+    for (record, selector_call) in records.iter().zip(selector_calls) {
+        let selector_call = selector_call?;
         steps.push(call_step(
             steps.len() as i64,
             row,
@@ -238,6 +265,9 @@ async fn build_on_demand_request(
             &block,
         ));
         verified_queries.push(selector_call.verified_query(execution_trace_id));
+        if let Some(summary) = &selector_call.ccip_summary {
+            gateway_digests.extend(summary.gateway_digests.iter().cloned());
+        }
         raw_call_snapshots.extend(selector_call.raw_call_snapshot);
         calls.push(selector_call.contract_call);
     }
@@ -279,7 +309,7 @@ async fn build_on_demand_request(
         }),
         manifest_context: manifest_context(row),
         contracts_called: Value::Array(calls),
-        gateway_digests: json!([]),
+        gateway_digests: json!(gateway_digests),
         final_payload,
         failure_payload,
         request_metadata: request_metadata(row, records),
@@ -361,15 +391,22 @@ fn call_step(
     call: &SelectorCall,
     block: &ExecutionBlock,
 ) -> ExecutionTraceStep {
-    let payload = json!({
+    let mut payload = json!({
         "entrypoint": ENS_UNIVERSAL_RESOLVER_ROLE,
         "resolver": declared_resolver_address(row),
         "name": row.normalized_name,
         "record_key": record.record_key,
         "selector": "0x9061b923",
         "resolver_selector": call.resolver_selector,
+        "block_selector": call.block_selector.clone(),
         "calldata": call.universal_calldata,
     });
+    if let Some(summary) = &call.ccip_summary {
+        payload["ccip_read"] = json!({
+            "gateway_count": summary.gateway_digests.len(),
+            "steps": summary.step_payloads.clone(),
+        });
+    }
     ExecutionTraceStep {
         step_index,
         step_kind: "call_universal_resolver".to_owned(),

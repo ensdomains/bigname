@@ -12,7 +12,7 @@ This document freezes the external `v1` read contract strongly enough for API, p
 - semantic identities are strings; opaque internal IDs are never inferred by clients
 - `namespace` is always explicit for canonical name-based reads; any documented namespace-inferred convenience route still returns the inferred namespace in identity fields
 - names in path segments are normalized names, URL-encoded as plain text
-- every externally visible answer includes provenance, coverage, chain position context, and consistency
+- full-envelope answers include provenance, coverage, chain position context, and consistency; compact app-facing routes document narrower default metadata and keep full provenance/coverage opt-in
 
 ### Common query parameters
 
@@ -21,6 +21,10 @@ This document freezes the external `v1` read contract strongly enough for API, p
 - `consistency`: `head`, `safe`, or `finalized`
 - `mode`: `declared`, `verified`, or `both`
 - `include`: comma-separated expansions; default is route-specific
+- `view`: `compact` or `full`; default is route-specific
+- `meta`: `none`, `summary`, or `full`; default is route-specific
+- `sort`: route-specific stable sort key
+- `order`: `asc` or `desc`
 - `cursor`: opaque pagination cursor
 - `page_size`: default `50`, max `200`
 
@@ -78,7 +82,7 @@ The exact-name snapshot selector applies to:
 - `GET /v1/explain/names/{namespace}/{name}/authority-control`
 - `GET /v1/resolutions/{namespace}/{name}` for its exact-name data row, declared topology, declared record inventory/cache joins, route-level coverage, verified support checks, and verified execution target selection
 
-Rules:
+Full-envelope rules:
 
 - resolve `at`, explicit `chain_positions`, and `consistency` once for the request, before exact-name lookup, coverage lookup, declared topology construction, explain construction, persisted execution lookup, or on-demand execution
 - all exact-name route sections in the same response use that one selected `ChainPositions` object; a response must not combine the current binding from one snapshot with coverage, topology, resolver summaries, record inventory/cache, permission summaries, history pointers, or execution output from another snapshot
@@ -96,7 +100,7 @@ Rules:
 
 ## 2. Shared Response Envelope
 
-Single-resource reads return:
+Full-envelope single-resource reads return:
 
 ```json
 {
@@ -111,7 +115,7 @@ Single-resource reads return:
 }
 ```
 
-Collection reads replace `data` with an array and add:
+Full-envelope collection reads replace `data` with an array and add:
 
 ```json
 {
@@ -124,7 +128,35 @@ Collection reads replace `data` with an array and add:
 }
 ```
 
-Rules:
+Compact app-facing reads are a narrower response view for Manager / Explorer indexer replacement work. Routes that declare `view=compact` default to `meta=summary` unless they say otherwise. Compact responses keep `data` and, for collections, `page`; they do not include `declared_state`, `verified_state`, top-level `provenance`, full `coverage`, internal projection identifiers, or raw normalized-event IDs by default.
+
+```json
+{
+  "data": [],
+  "page": {
+    "cursor": null,
+    "next_cursor": null,
+    "page_size": 50,
+    "sort": "name_asc"
+  },
+  "meta": {
+    "support_status": "partial",
+    "unsupported_filters": [],
+    "unsupported_fields": [],
+    "total_count": null
+  }
+}
+```
+
+Compact metadata rules:
+
+- `meta=none` omits `meta`; collection `page` stays present because pagination is part of the data contract. App-facing `data` must still stay compact and must not carry provenance, source summaries, unsupported field lists, or projection bookkeeping as a substitute for `meta`.
+- `meta=summary` may include only route-level support state, unsupported filters or fields, count metadata, and selected snapshot summary; it must not include raw facts or full provenance
+- `meta=full` is opt-in and may include the same top-level `coverage`, `chain_positions`, `consistency`, `last_updated`, and route-level `provenance` summaries used by full-envelope routes
+- `view=full` returns the route's full envelope when the route documents one; otherwise it is reserved and returns `400 invalid_input`
+- explain/audit detail remains on the explicit explain/audit routes; compact app-facing routes must not expose hidden projection internals through default metadata
+
+Full-envelope rules:
 
 - `declared_state` and `verified_state` are always present in the response envelope
 - routes without declared or verified semantics return `null` for that top-level section
@@ -389,6 +421,77 @@ Rules:
 
 Use this object when a declared-state subdocument is part of the route contract but is not yet projected. The field stays present; unsupported detail is never omitted silently.
 
+### `CompactDomainSummary`
+
+- `namespace`
+- `name`
+- `normalized_name`
+- `namehash`
+- `labelhash`
+- `token_id`
+- `owner`
+- `registrant`
+- `created_at`
+- `registration_date`
+- `expiry_date`
+- `resolver_address`
+- `record_summaries`
+- `subname_count`
+- `record_count`
+
+Use this object for app-facing name collections and exact compact lookup on `GET /v1/names`. `name` is the display name selected by the projection, and `normalized_name` is the normalized lookup value. `labelhash` and `token_id` are present only when the namespace projection exposes a stable namespace-local token identity. `record_summaries`, `subname_count`, and `record_count` are optional compact fields; when a requested field is not projected, the field is `null` or omitted according to its route rule and `meta.unsupported_fields` must identify the unsupported field unless `meta=none`.
+
+This object intentionally omits full provenance, full coverage, `logical_name_id`, `resource_id`, `surface_binding_id`, projection version, and raw normalized-event identifiers by default. Routes that need those fields use `view=full` where documented, the canonical exact-name route, or an explain/audit route.
+
+### `CompactRecordSummary`
+
+- `resolver_address`
+- `text_records`
+- `known_text_keys`
+- `avatar`
+- `content_hash`
+- `coin_addresses`
+
+Use this object for `GET /v1/names/{namespace}/{name}/records` and namespace-inferred `GET /v1/resolve/{name}/records`. `known_text_keys` is declared inventory/cache metadata, never a verified enumeration result. `text_records`, `avatar`, `content_hash`, and `coin_addresses` use the selected compact value source recorded in `meta.value_source`: declared cache for `mode=declared`, verified resolution output for `mode=verified`, and automatic declared-or-verified selection for `mode=auto`. Declared ENSv1 text records are selector-specific when the resolver event carries a key, for example `avatar` is backed by `text:avatar` rather than a generic `text` selector (upstream: .refs/ens_v1/contracts/resolvers/profiles/ITextResolver.sol:L5 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/profiles/TextResolver.sol:L21 @ ens_v1@91c966f). Record value objects expose only compact `status`, `value`, and failure/unsupported reason fields; selector identity, inventory, provenance, and source bookkeeping stay out of `data`. When `mode=auto|verified|both` has no declared record selectors to work from, compact routes may probe the bounded basic app profile set (`addr:60`, `avatar`, `contenthash`, and text keys `description`, `url`, `email`) so a current UI read can still return useful verified records; fallback text keys that resolve to `not_found` are omitted from `text_records` unless the caller requested them explicitly.
+
+### `CompactHistoryEvent`
+
+- `type`
+- `name`
+- `namespace`
+- `resource_id`
+- `block_number`
+- `timestamp`
+- `transaction_hash`
+- `log_index`
+- `data`
+
+Use this object for `view=compact` on history routes and for `GET /v1/events`. `data` is a route-owned compact payload for the event type; raw log bodies, raw calldata, and full normalized-event rows stay out of the compact default.
+
+### `RoleRow`
+
+- `account`
+- `resource_hex`
+- `resource_id`
+- `name`
+- `role_bitmap`
+- `effective_powers`
+- `provenance`
+
+Use this object for app-facing role reads. `resource_id` is the stable internal resource identity surfaced by the API; clients must treat it as opaque. `resource_hex` is nullable and appears only when a stable projected resource hex exists for the row. `provenance` is compact section provenance, not the full normalized-event lineage; full lineage remains on `GET /v1/resources/{resource_id}/permissions` or explain/audit routes.
+
+### `ResolverOverviewCompact`
+
+- `chain_id`
+- `resolver_address`
+- `counts`
+- `nodes`
+- `aliases`
+- `roles`
+- `events`
+
+Use this object for `GET /v1/resolvers/{chain_id}/{resolver_address}/overview`. `counts` reports only sections backed by `resolver_current` or another declared projection family named by the route. Unsupported sections are named in `meta.unsupported_fields`; unsupported projected fan-in must not be rendered as a supported zero count.
+
 ### `ResolverOverviewBindingItem`
 
 - `logical_name_id`
@@ -474,24 +577,33 @@ Each position object contains:
 
 These routes define the baseline `v1` surface. Later additions must be additive within `v1`.
 
-The current API binary ships the routes marked `shipped` below. Queued routes remain part of the frozen `v1` contract so projection and SDK work can proceed without changing wire semantics later.
+The current API binary ships the routes marked `shipped` below. Compact app-facing routes that were previously prose-frozen are now implemented; future route additions must remain additive within `v1`.
 
 | Route | Purpose | Contract state |
 | --- | --- | --- |
 | `GET /v1/namespaces/{namespace}` | Namespace metadata and support status | shipped declared-state |
+| `GET /v1/names` | App-facing compact name search, exact lookup, address relation lists, and suggestions | shipped compact declared-state |
 | `GET /v1/names/{namespace}/{name}` | Exact name lookup | shipped declared-state |
 | `GET /v1/explain/names/{namespace}/{name}/surface-binding` | Current surface-binding explain view for one exact name | shipped declared-state |
 | `GET /v1/explain/names/{namespace}/{name}/authority-control` | Current authority/control explain view for one exact name | shipped declared-state |
-| `GET /v1/names/{namespace}/{name}/children` | Declared child collection by default | shipped declared-state |
+| `GET /v1/names/{namespace}/{name}/children` | Compact declared child collection by default, with full envelope available through `view=full` | shipped compact/full declared-state |
+| `GET /v1/names/{namespace}/{name}/records` | App-facing compact resolver records over declared inventory/cache and optional verified selectors | shipped compact mixed declared+verified |
+| `GET /v1/names/{namespace}/{name}/roles` | App-facing role rows for a name's current resource | shipped compact declared-state |
 | `GET /v1/history/names/{namespace}/{name}` | Surface or combined history | shipped declared-state |
 | `GET /v1/history/resources/{resource_id}` | Resource history | shipped declared-state |
 | `GET /v1/history/addresses/{address}` | Address activity across related surfaces and resources | shipped declared-state |
+| `GET /v1/events` | App-facing compact event search across name, address, resource, type, and block filters | shipped compact declared-state |
 | `GET /v1/manifests/{namespace}` | Active manifest versions and capabilities | shipped declared-state |
 | `GET /v1/addresses/{address}/names` | Address-to-surface collection | shipped declared-state |
+| `GET /v1/addresses/{address}/names/count` | App-facing count for address relation filters | shipped compact declared-state |
+| `GET /v1/roles` | App-facing role rows by account, resource, or name lookup filters | shipped compact declared-state |
+| `GET /v1/resources/lookup` | App-facing lookup from namespace/name to the current opaque resource identity | shipped compact declared-state |
 | `GET /v1/resources/{resource_id}/permissions` | Resource-centric effective permissions | shipped declared-state |
 | `GET /v1/resolvers/{chain_id}/{resolver_address}` | Resolver overview | shipped declared-state |
+| `GET /v1/resolvers/{chain_id}/{resolver_address}/overview` | App-facing compact resolver overview with projected counts, nested lists, and events | shipped compact declared-state |
 | `GET /v1/resolutions/{namespace}/{name}` | Resolution topology, inventory, and verified reads | shipped mixed declared+verified |
 | `GET /v1/resolve/{name}` | Namespace-inferred convenience route for the same resolution response | shipped mixed declared+verified |
+| `GET /v1/resolve/{name}/records` | Namespace-inferred compact resolver records over declared inventory/cache and optional verified selectors | shipped compact mixed declared+verified |
 | `GET /v1/explain/resolutions/{namespace}/{name}/execution` | Persisted verified execution explain for one exact-name resolution request | shipped verified-state explain |
 | `GET /v1/primary-names/{address}` | Exact-tuple claimed and verified primary-name answer | shipped mixed declared+verified with local exact-tuple coverage |
 | `GET /v1/coverage/{namespace}/{name}` | Single-name coverage and explain details | shipped declared-state |
@@ -502,13 +614,13 @@ Phase 6 freezes `docs/api-v1.openapi.json` as the publication location for futur
 
 When generated, that artifact covers only the `v1` routes currently shipped by `apps/api/src/main.rs`.
 
-Queued routes stay prose-frozen in this document until their handlers ship.
+No prose-only app-facing REST routes remain in the table above. The app-facing compact handlers have shipped; this document remains the source of truth for route names, defaults, DTO fields, coverage, unsupported behavior, and pagination.
 
 `GET /v1/explain/resolutions/{namespace}/{name}/execution` is now shipped and published in `docs/api-v1.openapi.json`. Its generated contract matches the current handler surface: path parameters `{namespace}` and `{name}` plus required `records`.
 
 `GET /v1/primary-names/{address}` remains published in `docs/api-v1.openapi.json` on the same route envelope. The shipped ENS exact-tuple persisted `verified_primary_name` readback slice and the now-shipped Basenames exact-tuple persisted `verified_primary_name` readback slice keep published query parameters and the top-level response shell shape stable; they now also freeze route-level coverage as a local exact-tuple primary-name coverage object: `partial` only for the supported persisted-readback classes and `unsupported` outside those classes.
 
-`GET /v1/resolve/{name}` is shipped and published in `docs/api-v1.openapi.json` as the namespace-inferred convenience route for the same resolution response envelope.
+`GET /v1/resolve/{name}` and `GET /v1/resolve/{name}/records` are shipped and published in `docs/api-v1.openapi.json` as namespace-inferred convenience routes for the same resolution and compact records contracts.
 
 ## 5. Route-Level Semantics
 
@@ -567,6 +679,58 @@ Rules:
 - the only exact-name explain routes in Phase 6 are `GET /v1/explain/names/{namespace}/{name}/surface-binding` and `GET /v1/explain/names/{namespace}/{name}/authority-control`; they are thin views over this same exact-name target, current binding, and declared summary contract, while history explanation stays on the shipped `GET /v1/history/...` routes plus `declared_state.history.{surface_head,resource_head}` and does not introduce a separate exact-name history-explain endpoint or truth system
 - the shipped exact-name route does not support `include` expansions; history, permissions, resolution, and primary-name reads stay on their dedicated routes
 - `verified_state` is `null` for the shipped exact-name route
+
+### `GET /v1/names`
+
+This shipped route is the compact app-facing collection for Manager / Explorer indexer replacement. It covers exact name lookup, address-owned lists, owner / registrant relation lists, name search, and suggestions without exposing full projection lineage by default.
+
+Supported query parameters:
+
+- `namespace`
+- `name`
+- `prefix`
+- `contains`
+- `contains_nocase`
+- `owner`
+- `account`
+- `registrant`
+- `resolver`
+- `resolved_address`
+- `relation=token_holder|registrant|effective_controller|any`
+- `sort=name|expiry_date|registration_date|created_at`
+- `order=asc|desc`
+- `include=record_summaries,total_count`
+- `view=compact|full`
+- `meta=none|summary|full`
+- `cursor`
+- `page_size`
+
+Defaults:
+
+- `view=compact`
+- `meta=summary`
+- `relation=any` when `account` is supplied
+- `sort=name`
+- `order=asc`
+
+Each compact item is `CompactDomainSummary`.
+
+Rules:
+
+- `namespace` limits the collection to one public namespace; when omitted, the route may return rows across supported public namespaces and every item must include `namespace`
+- `name` is exact lookup by normalized name; when paired with `namespace`, the collection contains zero or one item for that namespace
+- `prefix`, `contains`, and `contains_nocase` are mutually compatible with `namespace`, address relation filters, and pagination; they are not availability checks
+- `owner` is the token-holder / owner address filter and is equivalent to `account` with `relation=token_holder`; supplying both `owner` and `account` returns `400 invalid_input`
+- `registrant` filters the projected registrant relation directly
+- `account` filters by the requested `relation`; `relation=any` returns the union of token-holder, registrant, and effective-controller matches and dedupes by `(namespace, normalized_name)`
+- `resolver` filters by the current declared resolver address where the exact-name resolver summary is projected
+- `resolved_address` is supported only when the implementation has a declared, replay-stable record-value equality projection for the requested namespace and selector family; otherwise the route returns a non-2xx `unsupported` error for that filter rather than scanning raw facts or verified execution output
+- `sort=expiry_date`, `sort=registration_date`, and `sort=created_at` sort by projected timestamp fields; rows with `null` sort values are ordered after non-null values for `asc` and before non-null values for `desc`
+- all sort orders break ties by `(namespace, normalized_name, namehash)`
+- `include=record_summaries` may add compact record counts, known text-key hints, avatar/content-hash presence, and known coin-type hints from declared inventory/cache; it must not run verified execution
+- `include=total_count` asks the API to return `meta.total_count` for the filtered set before cursor slicing when the filter set is count-supported; unsupported count combinations leave `total_count=null` and add `total_count` to `meta.unsupported_fields`
+- compact responses omit provenance, full coverage, internal projection metadata, `logical_name_id`, and `resource_id` by default
+- `view=full` returns a full-envelope collection only after a later implementation documents the full item shape; until then `view=full` is reserved and returns `400 invalid_input`
 
 ### `GET /v1/coverage/{namespace}/{name}`
 
@@ -704,6 +868,43 @@ Rules:
 - `record_count` counts the distinct stable declared record selectors for the item `resource_id` at its current version boundary; in the first shipped slice this is the number of selectors that belong to the same declared record-inventory answer shape used by `Resolution.record_inventory`, not a count of raw resolver slots, cached values, or verified query results
 - the added fields `role_summary`, `subname_count`, `record_count`, `status`, and `expiry` are optional expansion fields only and do not replace the required surface identity and relation facets
 
+### `GET /v1/addresses/{address}/names/count`
+
+This shipped route returns the count used by app dashboard owned-name lists and registrant lists. It is the count-only companion to address relation filters on `GET /v1/names`.
+
+Supported query parameters:
+
+- `namespace`
+- `relation=token_holder|registrant|effective_controller|any`
+- `prefix`
+- `contains`
+- `contains_nocase`
+- `resolver`
+
+Returns:
+
+```json
+{
+  "data": {
+    "address": "0x0000000000000000000000000000000000000000",
+    "namespace": "ens",
+    "relation": "token_holder",
+    "count": 0
+  },
+  "meta": {
+    "support_status": "partial",
+    "unsupported_filters": []
+  }
+}
+```
+
+Rules:
+
+- `relation=any` counts the deduped union of token-holder, registrant, and effective-controller matches for the address
+- count filters use the same support and unsupported semantics as `GET /v1/names`; unsupported filters return a non-2xx `unsupported` error rather than scanning raw facts
+- `count` is computed over the filtered set before any cursor pagination that would be applied by `GET /v1/names`
+- this route does not expose item rows, provenance, coverage detail, or projection internals by default
+
 ### `GET /v1/resources/{resource_id}/permissions`
 
 This route ships as the resource-centric declared permissions read.
@@ -739,6 +940,91 @@ Rules:
 - `cursor` and `page_size` page over the frozen `subject_scope_asc` order only; they do not alter row shape, supported filters, or route-level coverage meaning
 - this route is declared-state only and `verified_state` remains `null`
 
+### `GET /v1/resources/lookup`
+
+This shipped route resolves app-facing name identity to the current opaque resource identity used by role and permission routes.
+
+Supported query parameters:
+
+- `namespace`
+- `name`
+- `view=compact|full`
+- `meta=none|summary|full`
+
+Returns:
+
+```json
+{
+  "data": {
+    "namespace": "ens",
+    "name": "alice.eth",
+    "normalized_name": "alice.eth",
+    "resource_id": "00000000-0000-0000-0000-000000000000",
+    "resource_hex": null
+  }
+}
+```
+
+Rules:
+
+- `namespace` and `name` are required
+- `resource_id` is opaque and is the stable API key for resource-scoped roles and permissions
+- `resource_hex` is deferred unless an existing stable projected field is explicitly documented for the namespace; callers must not derive `resource_hex` from `resource_id`, `namehash`, token ID, or calldata
+- the route reads the same current exact-name projection as `GET /v1/names/{namespace}/{name}` and must not synthesize identities from raw facts
+
+### `GET /v1/roles`
+
+This shipped route returns compact app-facing role rows by account, resource, or name lookup filters.
+
+Supported query parameters:
+
+- `account`
+- `resource_id`
+- `namespace`
+- `name`
+- `role_bitmap`
+- `view=compact|full`
+- `meta=none|summary|full`
+- `cursor`
+- `page_size`
+
+Defaults:
+
+- `view=compact`
+- `meta=summary`
+- default sort `account_resource_scope_asc`
+
+Each compact item is `RoleRow`.
+
+Rules:
+
+- at least one of `account`, `resource_id`, or the pair `{namespace, name}` is required
+- `{namespace, name}` first resolves through `GET /v1/resources/lookup` semantics, then reads current effective permission rows for that resource
+- `account` filters by effective permission subject; it does not search owner, registrant, or address-name relation rows unless those subjects also exist in `permissions_current`
+- `role_bitmap` filters only when the projection exposes `role_bitmap`; otherwise the route returns a non-2xx `unsupported` error for that filter
+- `effective_powers` remains the API-owned post-scope effective power list; clients must not infer powers from `role_bitmap` alone
+- `provenance` is compact section provenance; row-granular grant lineage remains on `GET /v1/resources/{resource_id}/permissions`
+
+### `GET /v1/names/{namespace}/{name}/roles`
+
+This shipped route is the name-scoped compact role collection for the current resource behind one exact name.
+
+Supported query parameters:
+
+- `account`
+- `role_bitmap`
+- `view=compact|full`
+- `meta=none|summary|full`
+- `cursor`
+- `page_size`
+
+Rules:
+
+- the route resolves the current `resource_id` for `{namespace, name}` using the exact-name snapshot and returns `RoleRow` items for that resource
+- if the name exists but role projection support for its current resource is unavailable, the compact response returns an empty `data` array only when the route can prove there are no current rows; otherwise it returns a non-2xx `unsupported` or `409 stale` according to the shared error model
+- `resource_hex` follows the same nullable/deferred rule as `GET /v1/resources/lookup`
+- this route is a compact view of `GET /v1/resources/{resource_id}/permissions`, not a second permissions ledger
+
 ### `GET /v1/names/{namespace}/{name}/children`
 
 Defaults to declared direct children only.
@@ -747,14 +1033,73 @@ Optional query parameters:
 
 - `surface_classes=declared`
 - `include=counts`
+- `view=compact|full`
+- `meta=none|summary|full`
 - `cursor`
 - `page_size`
 
+Each compact item includes:
+
+- `name`
+- `normalized_name`
+- `label_name`
+- `labelhash`
+- `namehash`
+- `owner`
+- `registrant`
+- `subname_count`
+
 Rules:
 
+- `view=compact` is the app-facing default for this route; noisy provenance and coverage detail stay suppressed unless requested through `meta=full`, `view=full`, or existing explain/audit routes
+- `view=full` returns the existing full-envelope declared child collection shape for callers that need provenance, coverage, chain position context, or consistency metadata
+- `name` is the child display name, `normalized_name` is the child normalized name, and `label_name` is the single child label relative to the requested parent
+- `labelhash` appears when the child projection carries a stable label hash; otherwise it is `null`
+- `owner` and `registrant` are included when projected for the child surface; missing projected values are `null` and do not imply route-level unsupported
+- `include=counts` adds `subname_count` for each child where the direct-child count is projected; if a count is not projected, the field is `null` and `meta.unsupported_fields` includes `subname_count` unless `meta=none`
 - requesting `linked`, `alias`, or `wildcard` surface classes is reserved for additive expansion and currently returns `unsupported`
 - for `namespace=basenames`, declared direct child surfaces come from the admitted Base authority split only; `basenames_base_primary` claim intake, `basenames_l1_compat` transport, and `basenames_execution` verified-resolution support do not create child rows or widen supported `surface_classes` because upstream places `*.base.eth` subdomain registration on the Base registry / registrar stack while the reverse registrar and L1 resolver remain separate surfaces (upstream: .refs/basenames/README.md:L8 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L69 @ basenames@1809bbc) (upstream: .refs/basenames/README.md:L70 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L12 @ basenames@1809bbc)
 - `cursor` and `page_size` page over the frozen `display_name_asc` order only; they do not alter supported `surface_classes`, row shape, or coverage meaning
+
+### `GET /v1/names/{namespace}/{name}/records`
+
+This shipped route is the compact app-facing resolver record endpoint. It is a convenience read over current exact-name resolver summary projections, declared record inventory/cache projections, and optional verified selector execution. Unlike `GET /v1/resolutions/{namespace}/{name}`, this compact route does not select a later checkpoint and then prove projection catch-up by scanning normalized events. `GET /v1/resolve/{name}/records` is the namespace-inferred counterpart for callers that do not already have a namespace.
+
+Supported query parameters:
+
+- `mode=auto|declared|verified|both`
+- `texts`
+- `known_text_keys=true|false`
+- `avatar=true|false`
+- `content_hash=true|false`
+- `coin_types`
+- `include=resolver_address,known_text_keys,avatar,content_hash,coins`
+- `view=compact|full`
+- `meta=none|summary|full`
+
+Defaults:
+
+- `mode=declared`
+- `view=compact`
+- `meta=summary`
+- `include=resolver_address`
+
+Returns `CompactRecordSummary` in `data` for `view=compact`.
+
+Rules:
+
+- `resolver_address` is the current declared resolver target from exact-name state; `null` means no declared resolver at the selected snapshot, not a verified failure
+- `texts` is a comma-separated list of requested text keys; requested text keys are returned in `text_records` from the selected compact value source
+- `known_text_keys=true` returns the projected known text-key inventory; it is inventory/cache metadata and must not be represented as a verified enumeration
+- `avatar=true` is a compact alias for requesting the `avatar` text key and may also populate the top-level `avatar` convenience field from declared cache
+- `content_hash=true` requests the declared content-hash selector
+- `coin_types` is a comma-separated list of textual coin-type selector keys; numeric selector domains stay textual on the wire
+- in `mode=declared`, values come from `record_cache` and inventory comes from `record_inventory`; no live execution is performed
+- in `mode=verified|both`, requested selectors follow the same supported verified-resolution boundary, selector ordering, and unsupported result semantics as `GET /v1/resolutions/{namespace}/{name}`; supported ENS cache misses may execute live through the configured API Ethereum RPC provider using the provider `latest` block tag for this compact UI route
+- in `mode=auto`, an authoritative declared resolver profile uses local `record_inventory_current` / record cache values; observed ENSv1 PublicResolver-compatible text selectors may be worker-hydrated into that declared cache after rebuild. Otherwise supported requested selectors use verified resolution output, including non-persisted on-demand Universal Resolver execution with provider `latest` when no persisted exact-snapshot output exists
+- when no declared record selectors are available and `mode=auto|verified|both` requests app-facing record sections, the compact route probes only the bounded basic app profile set (`addr:60`, `avatar`, `contenthash`, and text keys `description`, `url`, `email`); this is a convenience fallback, not verified record enumeration
+- compact route on-demand `latest` calls return inline selector results and do not create exact-snapshot execution cache rows or exact block-anchored `raw_call_snapshots`; callers that need persisted exact-block provenance use `GET /v1/resolutions/{namespace}/{name}` and explain/audit routes
+- selector-specific record history is not part of this route; callers use `GET /v1/events` or history routes with event-type filters, and selector-exact record history remains deferred until a projection-backed selector-history contract is added
 
 ### `GET /v1/history/names/{namespace}/{name}`
 
@@ -763,6 +1108,8 @@ Returns canonical normalized-event history for one logical name anchor.
 Supported query parameters:
 
 - `scope=surface|resource|both` with default `both`
+- `view=compact|full`
+- `meta=none|summary|full`
 - `cursor`
 - `page_size`
 
@@ -772,6 +1119,7 @@ Rules:
 - `scope=resource` returns events anchored by any `resource_id` ever bound to that surface
 - `scope=both` returns the union of those anchor sets
 - observed and orphaned events are excluded from the shipped history routes
+- `view=compact` returns `CompactHistoryEvent` rows with default `meta=summary`; `view=full` returns the existing normalized-event history row shape
 - `cursor` and `page_size` page over the frozen `chain_position_desc` order only; they do not alter row shape, scope semantics, or coverage meaning
 - `declared_state` is `{}` for history routes; the normalized-event rows themselves are the declared answer
 
@@ -782,6 +1130,8 @@ Returns canonical normalized-event history for one resource anchor.
 Supported query parameters:
 
 - `scope=surface|resource|both` with default `both`
+- `view=compact|full`
+- `meta=none|summary|full`
 - `cursor`
 - `page_size`
 
@@ -792,6 +1142,7 @@ Rules:
 - `scope=surface` returns events anchored by any `logical_name_id` ever bound to that resource
 - `scope=both` returns the union of those anchor sets
 - observed and orphaned events are excluded from the shipped history routes
+- `view=compact` returns `CompactHistoryEvent` rows with default `meta=summary`; `view=full` returns the existing normalized-event history row shape
 - `cursor` and `page_size` page over the frozen `chain_position_desc` order only; they do not alter row shape, scope semantics, or coverage meaning
 - `GET /v1/history/addresses/{address}` reuses these same anchor and coverage semantics rather than inventing a second history contract
 
@@ -806,6 +1157,8 @@ Supported query parameters:
 - `namespace`
 - `relation=registrant|token_holder|effective_controller`
 - `scope=surface|resource|both` with default `both`
+- `view=compact|full`
+- `meta=none|summary|full`
 - `cursor`
 - `page_size`
 
@@ -817,9 +1170,48 @@ Rules:
 - `scope=resource` returns events anchored by any `resource_id` selected for the requested address across current and historical matches under the active filters
 - `scope=both` returns the union of those anchor sets
 - observed and orphaned events are excluded from this route
+- `view=compact` returns `CompactHistoryEvent` rows with default `meta=summary`; `view=full` returns the existing normalized-event history row shape
 - this route follows the shared history default sort `chain_position_desc`
 - `cursor` and `page_size` page over that frozen default sort only; they do not alter row shape, anchor semantics, or coverage meaning
 - `declared_state` is `{}` for history routes; the normalized-event rows themselves are the declared answer
+
+### `GET /v1/events`
+
+This shipped route is the app-facing compact event search across name, address, resource, type, relation, and block range filters. It reuses the normalized-event history truth family and does not introduce a second event ledger.
+
+Supported query parameters:
+
+- `namespace`
+- `name`
+- `address`
+- `resource`
+- `resource_id`
+- `type`
+- `relation=token_holder|registrant|effective_controller|any`
+- `from_block`
+- `to_block`
+- `view=compact|full`
+- `meta=none|summary|full`
+- `cursor`
+- `page_size`
+
+Defaults:
+
+- `view=compact`
+- `meta=summary`
+- default sort `chain_position_desc`
+
+Each compact row is `CompactHistoryEvent`.
+
+Rules:
+
+- `name` is interpreted with `namespace`; supplying `name` without `namespace` returns `400 invalid_input`
+- `address` selects events whose projected surface or resource anchor is related to the address under the requested relation filter; it follows the same anchor selection as `GET /v1/history/addresses/{address}`
+- `resource` and `resource_id` select events anchored to the requested opaque resource ID; supplying both returns `400 invalid_input`, and this route does not accept `resource_hex`
+- `type` filters by normalized event type or route-owned compact type alias; unsupported type aliases return a non-2xx `unsupported` error
+- `from_block` and `to_block` apply to the event's canonical chain position and must not force raw fact scans
+- observed and orphaned events are excluded from the default app-facing route
+- `view=full` returns the existing normalized-event history row shape only after that full shape is documented for this route; until then it is reserved and returns `400 invalid_input`
 
 ### `GET /v1/resolvers/{chain_id}/{resolver_address}`
 
@@ -849,6 +1241,34 @@ Rules:
 - for Basenames, supported resolver overview over a dynamically discovered Base-side target requires that target's resolver-profile state be `L2Resolver`-compatible and `supported` for the requested summary family; a watched resolver with `pending` or `unsupported` profile state returns explicit `UnsupportedSummary` sections rather than zero-count supported summaries, and the ENSv1 PublicResolver-generation profile gate, Ethereum Mainnet `L1Resolver` transport, and offchain gateways do not satisfy this Base-side resolver-profile gate (upstream: .refs/basenames/src/L2/L2Resolver.sol:L22 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/L2Resolver.sol:L182 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/L2Resolver.sol:L193 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/L2Resolver.sol:L209 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/L2Resolver.sol:L225 @ basenames@1809bbc)
 - counts for nodes, aliases, and role holders live inside those declared summaries rather than as a separate truth system
 - any other declared summary that is not yet projected returns `UnsupportedSummary`
+
+### `GET /v1/resolvers/{chain_id}/{resolver_address}/overview`
+
+This shipped route is the compact app-facing resolver overview. It uses the same declared resolver target and `resolver_current` ownership boundary as `GET /v1/resolvers/{chain_id}/{resolver_address}`, but defaults to a compact DTO suitable for Explorer resolver pages.
+
+Supported query parameters:
+
+- `include=nodes,aliases,roles,events`
+- `view=compact|full`
+- `meta=none|summary|full`
+
+Defaults:
+
+- `view=compact`
+- `meta=summary`
+- `include=nodes,aliases,roles,events`
+
+Returns `ResolverOverviewCompact` in `data` for `view=compact`.
+
+Rules:
+
+- `counts.nodes`, `counts.aliases`, `counts.role_holders`, and `counts.events` are present only when the corresponding section is projected; unsupported sections are named in `meta.unsupported_fields` unless `meta=none`
+- `nodes` is the compact current-name binding list when resolver binding fan-in is projected; if resolver binding fan-in is not projected, `nodes` is `null` and `meta.unsupported_fields` includes `nodes` unless `meta=none`
+- `aliases` is the compact current alias list when alias fan-in is projected; if alias fan-in is not projected, `aliases` is `null` and `meta.unsupported_fields` includes `aliases` unless `meta=none`
+- `roles` is the compact role-holder list derived from resolver-scoped permission rows when projected; row-granular lineage remains on permissions routes
+- `events` is a compact event list derived from canonical normalized events for the resolver target when projected; selector-specific record history remains deferred unless a later route documents selector-backed event filters
+- unsupported projected fan-in returns explicit unsupported metadata and must not be rendered as a supported zero count
+- `view=full` delegates to the existing `GET /v1/resolvers/{chain_id}/{resolver_address}` envelope when supported; otherwise it is reserved and returns `400 invalid_input`
 
 ### `GET /v1/resolutions/{namespace}/{name}`
 
@@ -1056,6 +1476,38 @@ Rules:
 - exact `base.eth` follows the inferred `namespace=ens` canonical route and therefore uses ENS support and selector semantics
 - inferred ENS requests in `mode=verified|both` share the canonical route's cache-or-live-execute behavior for supported verified-resolution selectors and the same fail-closed API Ethereum RPC provider requirement
 
+### `GET /v1/resolve/{name}/records`
+
+This route is the namespace-inferred compact records convenience endpoint. Unlike the namespaced endpoint, its default mode is `auto`: if the current resolver profile is authoritative, values come from local declared record inventory/cache, including worker-hydrated ENSv1 PublicResolver text values for observed selectors when that post-rebuild step has run; otherwise supported requested selectors use verified resolution output from persisted execution or on-demand Universal Resolver execution. The route is a current-projection read: it must not perform normalized-event catch-up scans to prove a newer chain checkpoint before returning compact UI records.
+
+Supported query parameters:
+
+- `mode=auto|declared|verified|both`
+- `texts`
+- `known_text_keys=true|false`
+- `avatar=true|false`
+- `content_hash=true|false`
+- `coin_types`
+- `include=resolver_address,known_text_keys,avatar,content_hash,coins`
+- `view=compact|full`
+- `meta=none|summary|full`
+
+Defaults:
+
+- `mode=auto`
+- `view=compact`
+- `meta=summary`
+- `include=resolver_address,known_text_keys,avatar,content_hash,coins`
+
+Rules:
+
+- namespace inference is identical to `GET /v1/resolve/{name}`: exact `base.eth` uses `namespace=ens`, names matching `*.base.eth` use `namespace=basenames`, and other supported ENS names use `namespace=ens`
+- after inference, the route returns the same `CompactRecordSummary` contract and verified support boundary as `GET /v1/names/{namespace}/{name}/records`; its `mode=auto` default also turns on the common app-facing sections so one request can return resolver address, known text-key inventory, avatar, content hash, and known coin-address records when those selectors are available
+- if the inferred current name or wildcard source has no declared record selectors, the default `mode=auto` read probes the bounded basic app profile set and returns successful fallback text rows plus the ETH coin row when available; it does not claim `known_text_keys` inventory support from those verified probes
+- this convenience route does not expose `at`, `chain_positions`, or `consistency`; the inferred canonical tuple uses current exact-name and record-inventory projections rather than the full route's selectable snapshot join
+- supported ENS verified fallback for this convenience route uses the provider `latest` block tag and returns non-persisted selector results inline; it does not create exact-snapshot execution cache rows or exact block-anchored `raw_call_snapshots`
+- persisted identity, support status, unsupported fields, and error messages remain namespace-local after inference; the route must not fall back from Basenames to ENS when the inferred Basenames tuple is missing or unsupported
+
 ### `GET /v1/explain/resolutions/{namespace}/{name}/execution`
 
 This route is the shipped exact-name resolution execution explain read.
@@ -1173,15 +1625,91 @@ Rules:
 - requests against supported public namespaces whose tuple, deployment profile, or verified entrypoint falls outside the namespace-local exact-tuple persisted-readback support class return route-level `coverage.status=unsupported`, `exhaustiveness=not_applicable`, `source_classes_considered=[]`, `enumeration_basis=primary_name_lookup`, and `unsupported_reason="primary-name exact-tuple persisted readback is not supported for the requested tuple"`; out-of-class verified objects still use `verified_primary_name.status=unsupported`
 - tuple presence, tuple absence, a verified mismatch, or resolver-backed verification detail does not by itself change these coverage states; support-class membership chooses route-level coverage, while result-object `status` describes the tuple answer inside that class
 
+### App-Facing Request Examples
+
+Dashboard owned names:
+
+`GET /v1/names?namespace=ens&account=0x0000000000000000000000000000000000000000&relation=token_holder&contains=ali&sort=expiry_date&order=asc&page_size=50`
+
+Name search suggestions:
+
+`GET /v1/names?namespace=ens&prefix=alic&sort=name&order=asc&page_size=10&meta=none`
+
+Exact compact profile lookup:
+
+`GET /v1/names?namespace=ens&name=alice.eth&include=record_summaries`
+
+Subnames list:
+
+`GET /v1/names/ens/alice.eth/children?include=counts&page_size=50`
+
+Resolver records:
+
+`GET /v1/resolve/alice.eth/records`
+
+Targeted resolver records:
+
+`GET /v1/resolve/alice.eth/records?include=resolver_address,known_text_keys,avatar,content_hash,coins&texts=avatar,com.twitter&coin_types=60,0`
+
+Name history:
+
+`GET /v1/history/names/ens/alice.eth?view=compact&scope=both&page_size=25`
+
+Address history:
+
+`GET /v1/events?address=0x0000000000000000000000000000000000000000&relation=any&namespace=ens&page_size=25`
+
+Roles by account:
+
+`GET /v1/roles?account=0x0000000000000000000000000000000000000000&page_size=50`
+
+Roles by resource:
+
+`GET /v1/roles?resource_id=00000000-0000-0000-0000-000000000000&page_size=50`
+
+Roles by name:
+
+`GET /v1/names/ens/alice.eth/roles?page_size=50`
+
+Resolver overview:
+
+`GET /v1/resolvers/ethereum-mainnet/0x0000000000000000000000000000000000000000/overview?include=nodes,aliases,roles,events`
+
+### Apps-Monorepo Indexer Coverage Report
+
+| Area | Coverage class | Route behavior |
+| --- | --- | --- |
+| exact full profile lookup | covered by existing routes | `GET /v1/names/{namespace}/{name}` remains the canonical full-envelope profile route with provenance, coverage, chain position context, and declared summary sections |
+| full resolution inventory/cache and verified selectors | covered by existing routes | `GET /v1/resolutions/{namespace}/{name}` remains the full mixed declared+verified route; compact record reads do not replace its full envelope |
+| direct child collections, address-name collections, resource permissions, resolver overview, and primary-name exact tuple | covered by existing routes | existing shipped routes remain the full-envelope source of truth for those capabilities |
+| exact compact profile lookup | covered by implemented compact route | `GET /v1/names?namespace=...&name=...` returns `CompactDomainSummary`; canonical full detail remains on `GET /v1/names/{namespace}/{name}` |
+| dashboard owned names and owner / registrant / effective-controller lists | covered by implemented compact route over existing address relation projections | `GET /v1/names` supports `owner`, `account`, `registrant`, and `relation`; `GET /v1/addresses/{address}/names/count` provides count-only readback |
+| name search suggestions | covered by implemented compact route | `prefix`, `contains`, and `contains_nocase` are search filters, not availability or pricing checks |
+| resolver records | covered by implemented compact records routes plus existing resolution route | `GET /v1/resolve/{name}/records` infers namespace for app callers and defaults to `mode=auto`, choosing authoritative declared cache or verified execution for requested supported selectors; `GET /v1/names/{namespace}/{name}/records` remains available when namespace is already known and defaults to declared cache |
+| child rows and counts | covered by expanded children route | compact child rows include label/name identity, owner/registrant where projected, and direct-child counts where projected; `view=full` keeps the existing full-envelope route shape |
+| name/address history and compact event search | covered by expanded history routes and implemented events route | history routes support `view=compact`, and `GET /v1/events` exposes compact canonical events without raw normalized-event payloads |
+| roles by account/resource/name | covered by implemented compact roles routes over permissions | `RoleRow` exposes `resource_id`, nullable `resource_hex`, `role_bitmap` where projected, and `effective_powers` |
+| resolver overview | covered by implemented compact overview route where `resolver_current` has sections | unsupported resolver fan-in sections are explicit and are not represented as zero counts |
+| resolved-address listing | deferred due projection gap | `resolved_address` is accepted only where a declared record-value equality projection exists; otherwise the filter is unsupported |
+| `resource_hex` lookup | deferred unless a stable projected field is documented | `resource_hex` is nullable on role/resource lookup responses and must not be derived by clients |
+| selector-specific record history beyond event filters | deferred due projection gap | event type filters are supported; selector-exact record history waits for a selector-history contract |
+| linked, alias, and wildcard child buckets | deferred | `surface_classes=linked|alias|wildcard` stays unsupported until those buckets are projection-backed |
+| unprojected resolver fan-in | deferred per resolver section | compact overview sections backed by unprojected fan-in return explicit unsupported metadata rather than supported zero counts |
+| direct-chain and local app services | out of scope | favorites/local services, availability, pricing, direct contract workflows, DNSSEC, app images, faucet, and direct reverse checks are not part of this indexer coverage unless backed by projections |
+
 ## 6. Sorting And Pagination Defaults
 
+- `GET /v1/names` defaults to `name_asc` and honors route-specific `sort`, `order`, `cursor`, and `page_size`
 - `GET /v1/addresses/{address}/names` defaults to `display_name_asc` and honors replay-stable `cursor` and `page_size`
 - `GET /v1/names/{namespace}/{name}/children` defaults to `display_name_asc` and honors replay-stable `cursor` and `page_size`
 - `GET /v1/resources/{resource_id}/permissions` defaults to `subject_scope_asc` and honors replay-stable `cursor` and `page_size`
+- `GET /v1/roles` defaults to `account_resource_scope_asc` and honors replay-stable `cursor` and `page_size`
+- `GET /v1/names/{namespace}/{name}/roles` defaults to `account_scope_asc` and honors replay-stable `cursor` and `page_size`
 - `GET /v1/history/names/{namespace}/{name}` defaults to `chain_position_desc` and honors replay-stable `cursor` and `page_size`
 - `GET /v1/history/resources/{resource_id}` defaults to `chain_position_desc` and honors replay-stable `cursor` and `page_size`
 - `GET /v1/history/addresses/{address}` defaults to `chain_position_desc` and honors replay-stable `cursor` and `page_size`
-- no other shipped route honors `cursor` or `page_size` in the initial contract
+- `GET /v1/events` defaults to `chain_position_desc` and honors replay-stable `cursor` and `page_size`
+- no other route honors `cursor` or `page_size` in this contract
 - ties break on `logical_name_id` for surface-first views and `resource_id` for resource-grouped address views
 
 Cursor pagination must be stable under replay for the same requested chain positions. `page.cursor` echoes the applied cursor or `null` on the first page, and `page.next_cursor=null` means there are no further rows at the requested snapshot.

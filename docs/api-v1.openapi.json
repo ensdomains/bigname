@@ -1,6 +1,69 @@
 {
   "components": {
     "schemas": {
+      "AddressNamesCountData": {
+        "properties": {
+          "address": {
+            "type": [
+              "object",
+              "array",
+              "string",
+              "integer",
+              "boolean",
+              "null"
+            ]
+          },
+          "count": {
+            "type": [
+              "object",
+              "array",
+              "string",
+              "integer",
+              "boolean",
+              "null"
+            ]
+          },
+          "namespace": {
+            "type": [
+              "object",
+              "array",
+              "string",
+              "integer",
+              "boolean",
+              "null"
+            ]
+          },
+          "relation": {
+            "type": [
+              "object",
+              "array",
+              "string",
+              "integer",
+              "boolean",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "address",
+          "count"
+        ],
+        "type": "object"
+      },
+      "AddressNamesCountResponse": {
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/AddressNamesCountData"
+          },
+          "meta": {
+            "$ref": "#/components/schemas/CompactMeta"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "type": "object"
+      },
       "CapabilityFlag": {
         "properties": {
           "notes": {
@@ -97,6 +160,463 @@
           "chain_positions",
           "consistency",
           "last_updated",
+          "page"
+        ],
+        "type": "object"
+      },
+      "CompactDomainSummary": {
+        "properties": {
+          "created_at": {
+            "type": [
+              "object",
+              "array",
+              "string",
+              "integer",
+              "boolean",
+              "null"
+            ]
+          },
+          "expiry_date": {
+            "type": [
+              "object",
+              "array",
+              "string",
+              "integer",
+              "boolean",
+              "null"
+            ]
+          },
+          "labelhash": {
+            "type": [
+              "object",
+              "array",
+              "string",
+              "integer",
+              "boolean",
+              "null"
+            ]
+          },
+          "name": {
+            "type": [
+              "object",
+              "array",
+              "string",
+              "integer",
+              "boolean",
+              "null"
+            ]
+          },
+          "namehash": {
+            "type": [
+              "object",
+              "array",
+              "string",
+              "integer",
+              "boolean",
+              "null"
+            ]
+          },
+          "namespace": {
+            "type": [
+              "object",
+              "array",
+              "string",
+              "integer",
+              "boolean",
+              "null"
+            ]
+          },
+          "normalized_name": {
+            "type": [
+              "object",
+              "array",
+              "string",
+              "integer",
+              "boolean",
+              "null"
+            ]
+          },
+          "owner": {
+            "type": [
+              "object",
+              "array",
+              "string",
+              "integer",
+              "boolean",
+              "null"
+            ]
+          },
+          "record_count": {
+            "type": [
+              "object",
+              "array",
+              "string",
+              "integer",
+              "boolean",
+              "null"
+            ]
+          },
+          "record_summaries": {
+            "type": [
+              "object",
+              "array",
+              "string",
+              "integer",
+              "boolean",
+              "null"
+            ]
+          },
+          "registrant": {
+            "type": [
+              "object",
+              "array",
+              "string",
+              "integer",
+              "boolean",
+              "null"
+            ]
+          },
+          "registration_date": {
+            "type": [
+              "object",
+              "array",
+              "string",
+              "integer",
+              "boolean",
+              "null"
+            ]
+          },
+          "resolver_address": {
+            "type": [
+              "object",
+              "array",
+              "string",
+              "integer",
+              "boolean",
+              "null"
+            ]
+          },
+          "subname_count": {
+            "type": [
+              "object",
+              "array",
+              "string",
+              "integer",
+              "boolean",
+              "null"
+            ]
+          },
+          "token_id": {
+            "type": [
+              "object",
+              "array",
+              "string",
+              "integer",
+              "boolean",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "namespace",
+          "name",
+          "normalized_name",
+          "namehash"
+        ],
+        "type": "object"
+      },
+      "CompactEventsResponse": {
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/CompactHistoryEvent"
+            },
+            "type": "array"
+          },
+          "meta": {
+            "$ref": "#/components/schemas/CompactMeta"
+          },
+          "page": {
+            "$ref": "#/components/schemas/HistoryPageResponse"
+          }
+        },
+        "required": [
+          "data",
+          "page"
+        ],
+        "type": "object"
+      },
+      "CompactHistoryEvent": {
+        "properties": {
+          "block_number": {
+            "type": [
+              "object",
+              "array",
+              "string",
+              "integer",
+              "boolean",
+              "null"
+            ]
+          },
+          "data": {
+            "type": [
+              "object",
+              "array",
+              "string",
+              "integer",
+              "boolean",
+              "null"
+            ]
+          },
+          "log_index": {
+            "type": [
+              "object",
+              "array",
+              "string",
+              "integer",
+              "boolean",
+              "null"
+            ]
+          },
+          "name": {
+            "type": [
+              "object",
+              "array",
+              "string",
+              "integer",
+              "boolean",
+              "null"
+            ]
+          },
+          "namespace": {
+            "type": [
+              "object",
+              "array",
+              "string",
+              "integer",
+              "boolean",
+              "null"
+            ]
+          },
+          "resource_id": {
+            "type": [
+              "object",
+              "array",
+              "string",
+              "integer",
+              "boolean",
+              "null"
+            ]
+          },
+          "timestamp": {
+            "type": [
+              "object",
+              "array",
+              "string",
+              "integer",
+              "boolean",
+              "null"
+            ]
+          },
+          "transaction_hash": {
+            "type": [
+              "object",
+              "array",
+              "string",
+              "integer",
+              "boolean",
+              "null"
+            ]
+          },
+          "type": {
+            "type": [
+              "object",
+              "array",
+              "string",
+              "integer",
+              "boolean",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "type",
+          "name",
+          "namespace",
+          "block_number",
+          "timestamp",
+          "data"
+        ],
+        "type": "object"
+      },
+      "CompactMeta": {
+        "properties": {
+          "inventory_source": {},
+          "support_status": {
+            "type": "string"
+          },
+          "total_count": {
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "unsupported_fields": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "unsupported_filters": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "value_source": {}
+        },
+        "type": "object"
+      },
+      "CompactNameRecordsResponse": {
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/CompactRecordSummary"
+          },
+          "meta": {
+            "$ref": "#/components/schemas/CompactMeta"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "type": "object"
+      },
+      "CompactNamesResponse": {
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/CompactDomainSummary"
+            },
+            "type": "array"
+          },
+          "meta": {
+            "$ref": "#/components/schemas/CompactMeta"
+          },
+          "page": {
+            "$ref": "#/components/schemas/HistoryPageResponse"
+          }
+        },
+        "required": [
+          "data",
+          "page"
+        ],
+        "type": "object"
+      },
+      "CompactRecordSummary": {
+        "properties": {
+          "avatar": {
+            "type": [
+              "object",
+              "array",
+              "string",
+              "integer",
+              "boolean",
+              "null"
+            ]
+          },
+          "coin_addresses": {
+            "type": [
+              "object",
+              "array",
+              "string",
+              "integer",
+              "boolean",
+              "null"
+            ]
+          },
+          "content_hash": {
+            "type": [
+              "object",
+              "array",
+              "string",
+              "integer",
+              "boolean",
+              "null"
+            ]
+          },
+          "known_text_keys": {
+            "type": [
+              "object",
+              "array",
+              "string",
+              "integer",
+              "boolean",
+              "null"
+            ]
+          },
+          "resolver_address": {
+            "type": [
+              "object",
+              "array",
+              "string",
+              "integer",
+              "boolean",
+              "null"
+            ]
+          },
+          "text_records": {
+            "type": [
+              "object",
+              "array",
+              "string",
+              "integer",
+              "boolean",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "resolver_address",
+          "text_records",
+          "known_text_keys",
+          "avatar",
+          "content_hash",
+          "coin_addresses"
+        ],
+        "type": "object"
+      },
+      "CompactResolverOverviewResponse": {
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/ResolverOverviewCompact"
+          },
+          "meta": {
+            "$ref": "#/components/schemas/CompactMeta"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "type": "object"
+      },
+      "CompactRolesResponse": {
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/RoleRow"
+            },
+            "type": "array"
+          },
+          "meta": {
+            "$ref": "#/components/schemas/CompactMeta"
+          },
+          "page": {
+            "$ref": "#/components/schemas/HistoryPageResponse"
+          }
+        },
+        "required": [
+          "data",
           "page"
         ],
         "type": "object"
@@ -837,6 +1357,86 @@
         ],
         "type": "object"
       },
+      "ResolverOverviewCompact": {
+        "properties": {
+          "aliases": {
+            "type": [
+              "object",
+              "array",
+              "string",
+              "integer",
+              "boolean",
+              "null"
+            ]
+          },
+          "chain_id": {
+            "type": [
+              "object",
+              "array",
+              "string",
+              "integer",
+              "boolean",
+              "null"
+            ]
+          },
+          "counts": {
+            "type": [
+              "object",
+              "array",
+              "string",
+              "integer",
+              "boolean",
+              "null"
+            ]
+          },
+          "events": {
+            "type": [
+              "object",
+              "array",
+              "string",
+              "integer",
+              "boolean",
+              "null"
+            ]
+          },
+          "nodes": {
+            "type": [
+              "object",
+              "array",
+              "string",
+              "integer",
+              "boolean",
+              "null"
+            ]
+          },
+          "resolver_address": {
+            "type": [
+              "object",
+              "array",
+              "string",
+              "integer",
+              "boolean",
+              "null"
+            ]
+          },
+          "roles": {
+            "type": [
+              "object",
+              "array",
+              "string",
+              "integer",
+              "boolean",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "chain_id",
+          "resolver_address",
+          "counts"
+        ],
+        "type": "object"
+      },
       "ResolverResponse": {
         "properties": {
           "chain_positions": {
@@ -874,6 +1474,162 @@
           "chain_positions",
           "consistency",
           "last_updated"
+        ],
+        "type": "object"
+      },
+      "ResourceLookupData": {
+        "properties": {
+          "name": {
+            "type": [
+              "object",
+              "array",
+              "string",
+              "integer",
+              "boolean",
+              "null"
+            ]
+          },
+          "namespace": {
+            "type": [
+              "object",
+              "array",
+              "string",
+              "integer",
+              "boolean",
+              "null"
+            ]
+          },
+          "normalized_name": {
+            "type": [
+              "object",
+              "array",
+              "string",
+              "integer",
+              "boolean",
+              "null"
+            ]
+          },
+          "resource_hex": {
+            "type": [
+              "object",
+              "array",
+              "string",
+              "integer",
+              "boolean",
+              "null"
+            ]
+          },
+          "resource_id": {
+            "type": [
+              "object",
+              "array",
+              "string",
+              "integer",
+              "boolean",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "namespace",
+          "name",
+          "normalized_name",
+          "resource_id",
+          "resource_hex"
+        ],
+        "type": "object"
+      },
+      "ResourceLookupResponse": {
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/ResourceLookupData"
+          },
+          "meta": {
+            "$ref": "#/components/schemas/CompactMeta"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "type": "object"
+      },
+      "RoleRow": {
+        "properties": {
+          "account": {
+            "type": [
+              "object",
+              "array",
+              "string",
+              "integer",
+              "boolean",
+              "null"
+            ]
+          },
+          "effective_powers": {
+            "type": [
+              "object",
+              "array",
+              "string",
+              "integer",
+              "boolean",
+              "null"
+            ]
+          },
+          "name": {
+            "type": [
+              "object",
+              "array",
+              "string",
+              "integer",
+              "boolean",
+              "null"
+            ]
+          },
+          "provenance": {
+            "type": [
+              "object",
+              "array",
+              "string",
+              "integer",
+              "boolean",
+              "null"
+            ]
+          },
+          "resource_hex": {
+            "type": [
+              "object",
+              "array",
+              "string",
+              "integer",
+              "boolean",
+              "null"
+            ]
+          },
+          "resource_id": {
+            "type": [
+              "object",
+              "array",
+              "string",
+              "integer",
+              "boolean",
+              "null"
+            ]
+          },
+          "role_bitmap": {
+            "type": [
+              "object",
+              "array",
+              "string",
+              "integer",
+              "boolean",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "account",
+          "resource_id",
+          "effective_powers"
         ],
         "type": "object"
       }
@@ -1013,6 +1769,122 @@
         ]
       }
     },
+    "/v1/addresses/{address}/names/count": {
+      "get": {
+        "operationId": "address_names_count",
+        "parameters": [
+          {
+            "description": "Address anchor for the collection or history read. Addresses are normalized to lowercase.",
+            "in": "path",
+            "name": "address",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional namespace filter.",
+            "in": "query",
+            "name": "namespace",
+            "required": false,
+            "schema": {
+              "enum": [
+                "ens",
+                "basenames"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional app-facing relation facet filter.",
+            "in": "query",
+            "name": "relation",
+            "required": false,
+            "schema": {
+              "enum": [
+                "token_holder",
+                "registrant",
+                "effective_controller",
+                "any"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Normalized-name prefix search filter.",
+            "in": "query",
+            "name": "prefix",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Normalized-name contains search filter.",
+            "in": "query",
+            "name": "contains",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Case-insensitive normalized-name contains search filter.",
+            "in": "query",
+            "name": "contains_nocase",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Current declared resolver address filter.",
+            "in": "query",
+            "name": "resolver",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AddressNamesCountResponse"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "summary": "App-facing count for address relation filters",
+        "tags": [
+          "Collections"
+        ]
+      }
+    },
     "/v1/coverage/{namespace}/{name}": {
       "get": {
         "operationId": "coverage_current",
@@ -1128,6 +2000,193 @@
         "summary": "Single-name coverage and explain details",
         "tags": [
           "Coverage"
+        ]
+      }
+    },
+    "/v1/events": {
+      "get": {
+        "operationId": "events",
+        "parameters": [
+          {
+            "description": "Optional namespace filter.",
+            "in": "query",
+            "name": "namespace",
+            "required": false,
+            "schema": {
+              "enum": [
+                "ens",
+                "basenames"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Normalized name event anchor filter.",
+            "in": "query",
+            "name": "name",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Address relation event filter.",
+            "in": "query",
+            "name": "address",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Opaque resource identifier filter.",
+            "in": "query",
+            "name": "resource",
+            "required": false,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Opaque resource identifier filter.",
+            "in": "query",
+            "name": "resource_id",
+            "required": false,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Normalized event type or compact type alias filter.",
+            "in": "query",
+            "name": "type",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional app-facing relation facet filter.",
+            "in": "query",
+            "name": "relation",
+            "required": false,
+            "schema": {
+              "enum": [
+                "token_holder",
+                "registrant",
+                "effective_controller",
+                "any"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Inclusive canonical block lower bound.",
+            "in": "query",
+            "name": "from_block",
+            "required": false,
+            "schema": {
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Inclusive canonical block upper bound.",
+            "in": "query",
+            "name": "to_block",
+            "required": false,
+            "schema": {
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Response view selector.",
+            "in": "query",
+            "name": "view",
+            "required": false,
+            "schema": {
+              "default": "compact",
+              "enum": [
+                "compact",
+                "full"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Compact response metadata selector.",
+            "in": "query",
+            "name": "meta",
+            "required": false,
+            "schema": {
+              "default": "summary",
+              "enum": [
+                "none",
+                "summary",
+                "full"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Replay-stable pagination cursor.",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional page size. When supplied it must be between 1 and 200.",
+            "in": "query",
+            "name": "page_size",
+            "required": false,
+            "schema": {
+              "maximum": 200,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompactEventsResponse"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "summary": "App-facing compact event search",
+        "tags": [
+          "History"
         ]
       }
     },
@@ -1509,6 +2568,35 @@
             }
           },
           {
+            "description": "Response view selector.",
+            "in": "query",
+            "name": "view",
+            "required": false,
+            "schema": {
+              "default": "full",
+              "enum": [
+                "compact",
+                "full"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Compact response metadata selector.",
+            "in": "query",
+            "name": "meta",
+            "required": false,
+            "schema": {
+              "default": "summary",
+              "enum": [
+                "none",
+                "summary",
+                "full"
+              ],
+              "type": "string"
+            }
+          },
+          {
             "description": "Replay-stable pagination cursor.",
             "in": "query",
             "name": "cursor",
@@ -1609,6 +2697,35 @@
             }
           },
           {
+            "description": "Response view selector.",
+            "in": "query",
+            "name": "view",
+            "required": false,
+            "schema": {
+              "default": "full",
+              "enum": [
+                "compact",
+                "full"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Compact response metadata selector.",
+            "in": "query",
+            "name": "meta",
+            "required": false,
+            "schema": {
+              "default": "summary",
+              "enum": [
+                "none",
+                "summary",
+                "full"
+              ],
+              "type": "string"
+            }
+          },
+          {
             "description": "Replay-stable pagination cursor.",
             "in": "query",
             "name": "cursor",
@@ -1702,6 +2819,35 @@
                 "surface",
                 "resource",
                 "both"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Response view selector.",
+            "in": "query",
+            "name": "view",
+            "required": false,
+            "schema": {
+              "default": "full",
+              "enum": [
+                "compact",
+                "full"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Compact response metadata selector.",
+            "in": "query",
+            "name": "meta",
+            "required": false,
+            "schema": {
+              "default": "summary",
+              "enum": [
+                "none",
+                "summary",
+                "full"
               ],
               "type": "string"
             }
@@ -1828,6 +2974,252 @@
         "summary": "Active manifest versions and capabilities",
         "tags": [
           "Namespaces"
+        ]
+      }
+    },
+    "/v1/names": {
+      "get": {
+        "operationId": "names",
+        "parameters": [
+          {
+            "description": "Optional namespace filter.",
+            "in": "query",
+            "name": "namespace",
+            "required": false,
+            "schema": {
+              "enum": [
+                "ens",
+                "basenames"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Exact normalized-name lookup filter.",
+            "in": "query",
+            "name": "name",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Normalized-name prefix search filter.",
+            "in": "query",
+            "name": "prefix",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Normalized-name contains search filter.",
+            "in": "query",
+            "name": "contains",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Case-insensitive normalized-name contains search filter.",
+            "in": "query",
+            "name": "contains_nocase",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Token-holder / owner address filter.",
+            "in": "query",
+            "name": "owner",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Address relation filter anchor.",
+            "in": "query",
+            "name": "account",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Registrant address filter.",
+            "in": "query",
+            "name": "registrant",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Current declared resolver address filter.",
+            "in": "query",
+            "name": "resolver",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Declared record-value equality filter when projected.",
+            "in": "query",
+            "name": "resolved_address",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional app-facing relation facet filter.",
+            "in": "query",
+            "name": "relation",
+            "required": false,
+            "schema": {
+              "enum": [
+                "token_holder",
+                "registrant",
+                "effective_controller",
+                "any"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Stable compact names sort key.",
+            "in": "query",
+            "name": "sort",
+            "required": false,
+            "schema": {
+              "default": "name",
+              "enum": [
+                "name",
+                "expiry_date",
+                "registration_date",
+                "created_at"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Stable sort order.",
+            "in": "query",
+            "name": "order",
+            "required": false,
+            "schema": {
+              "default": "asc",
+              "enum": [
+                "asc",
+                "desc"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional compact name expansions.",
+            "explode": false,
+            "in": "query",
+            "name": "include",
+            "required": false,
+            "schema": {
+              "enum": [
+                "record_summaries",
+                "total_count"
+              ],
+              "type": "string"
+            },
+            "style": "form"
+          },
+          {
+            "description": "Response view selector.",
+            "in": "query",
+            "name": "view",
+            "required": false,
+            "schema": {
+              "default": "compact",
+              "enum": [
+                "compact",
+                "full"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Compact response metadata selector.",
+            "in": "query",
+            "name": "meta",
+            "required": false,
+            "schema": {
+              "default": "summary",
+              "enum": [
+                "none",
+                "summary",
+                "full"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Replay-stable pagination cursor.",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional page size. When supplied it must be between 1 and 200.",
+            "in": "query",
+            "name": "page_size",
+            "required": false,
+            "schema": {
+              "maximum": 200,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompactNamesResponse"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "summary": "App-facing compact name search and exact lookup",
+        "tags": [
+          "Names"
         ]
       }
     },
@@ -1988,7 +3380,7 @@
             "style": "form"
           },
           {
-            "description": "Optional collection expansions. `counts` includes `declared_state.subname_count`.",
+            "description": "Optional collection expansions. `counts` includes compact row `subname_count` or full-envelope `declared_state.subname_count`.",
             "explode": false,
             "in": "query",
             "name": "include",
@@ -2000,6 +3392,35 @@
               "type": "string"
             },
             "style": "form"
+          },
+          {
+            "description": "Response view selector.",
+            "in": "query",
+            "name": "view",
+            "required": false,
+            "schema": {
+              "default": "compact",
+              "enum": [
+                "compact",
+                "full"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Compact response metadata selector.",
+            "in": "query",
+            "name": "meta",
+            "required": false,
+            "schema": {
+              "default": "summary",
+              "enum": [
+                "none",
+                "summary",
+                "full"
+              ],
+              "type": "string"
+            }
           },
           {
             "description": "Replay-stable pagination cursor.",
@@ -2065,6 +3486,336 @@
           }
         },
         "summary": "Declared child collection by default",
+        "tags": [
+          "Collections"
+        ]
+      }
+    },
+    "/v1/names/{namespace}/{name}/records": {
+      "get": {
+        "operationId": "name_records",
+        "parameters": [
+          {
+            "description": "Supported namespace identifier.",
+            "in": "path",
+            "name": "namespace",
+            "required": true,
+            "schema": {
+              "enum": [
+                "ens",
+                "basenames"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Normalized name within the namespace.",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Compact records read mode. `auto` uses declared cache when the resolver profile is authoritative, otherwise verified resolution for requested selectors. When no declared selectors are available, app-facing defaults probe only a bounded basic profile set.",
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "default": "declared",
+              "enum": [
+                "auto",
+                "declared",
+                "verified",
+                "both"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Requested text record keys.",
+            "explode": false,
+            "in": "query",
+            "name": "texts",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "style": "form"
+          },
+          {
+            "description": "Whether to return projected known text-key inventory.",
+            "in": "query",
+            "name": "known_text_keys",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "Whether to request the avatar text convenience field.",
+            "in": "query",
+            "name": "avatar",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "Whether to request the content-hash selector.",
+            "in": "query",
+            "name": "content_hash",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "Requested textual coin-type selector keys.",
+            "explode": false,
+            "in": "query",
+            "name": "coin_types",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "style": "form"
+          },
+          {
+            "description": "Optional compact record sections.",
+            "explode": false,
+            "in": "query",
+            "name": "include",
+            "required": false,
+            "schema": {
+              "default": "resolver_address",
+              "enum": [
+                "resolver_address",
+                "known_text_keys",
+                "avatar",
+                "content_hash",
+                "coins"
+              ],
+              "type": "string"
+            },
+            "style": "form"
+          },
+          {
+            "description": "Response view selector.",
+            "in": "query",
+            "name": "view",
+            "required": false,
+            "schema": {
+              "default": "compact",
+              "enum": [
+                "compact",
+                "full"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Compact response metadata selector.",
+            "in": "query",
+            "name": "meta",
+            "required": false,
+            "schema": {
+              "default": "summary",
+              "enum": [
+                "none",
+                "summary",
+                "full"
+              ],
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompactNameRecordsResponse"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Requested resource was not found"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "summary": "App-facing compact resolver records",
+        "tags": [
+          "Resolution"
+        ]
+      }
+    },
+    "/v1/names/{namespace}/{name}/roles": {
+      "get": {
+        "operationId": "name_roles",
+        "parameters": [
+          {
+            "description": "Supported namespace identifier.",
+            "in": "path",
+            "name": "namespace",
+            "required": true,
+            "schema": {
+              "enum": [
+                "ens",
+                "basenames"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Normalized name within the namespace.",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Effective permission subject filter.",
+            "in": "query",
+            "name": "account",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Projected role bitmap filter when supported.",
+            "in": "query",
+            "name": "role_bitmap",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Response view selector.",
+            "in": "query",
+            "name": "view",
+            "required": false,
+            "schema": {
+              "default": "compact",
+              "enum": [
+                "compact",
+                "full"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Compact response metadata selector.",
+            "in": "query",
+            "name": "meta",
+            "required": false,
+            "schema": {
+              "default": "summary",
+              "enum": [
+                "none",
+                "summary",
+                "full"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Replay-stable pagination cursor.",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional page size. When supplied it must be between 1 and 200.",
+            "in": "query",
+            "name": "page_size",
+            "required": false,
+            "schema": {
+              "maximum": 200,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompactRolesResponse"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Requested resource was not found"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "summary": "App-facing role rows for a name's current resource",
         "tags": [
           "Collections"
         ]
@@ -2458,6 +4209,181 @@
         ]
       }
     },
+    "/v1/resolve/{name}/records": {
+      "get": {
+        "operationId": "resolve_records",
+        "parameters": [
+          {
+            "description": "Normalized name within the namespace.",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Compact records read mode. `auto` uses declared cache when the resolver profile is authoritative, otherwise verified resolution for requested selectors. When no declared selectors are available, app-facing defaults probe only a bounded basic profile set.",
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "default": "auto",
+              "enum": [
+                "auto",
+                "declared",
+                "verified",
+                "both"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Requested text record keys.",
+            "explode": false,
+            "in": "query",
+            "name": "texts",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "style": "form"
+          },
+          {
+            "description": "Whether to return projected known text-key inventory.",
+            "in": "query",
+            "name": "known_text_keys",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "Whether to request the avatar text convenience field.",
+            "in": "query",
+            "name": "avatar",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "Whether to request the content-hash selector.",
+            "in": "query",
+            "name": "content_hash",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "Requested textual coin-type selector keys.",
+            "explode": false,
+            "in": "query",
+            "name": "coin_types",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "style": "form"
+          },
+          {
+            "description": "Optional compact record sections.",
+            "explode": false,
+            "in": "query",
+            "name": "include",
+            "required": false,
+            "schema": {
+              "default": "resolver_address,known_text_keys,avatar,content_hash,coins",
+              "enum": [
+                "resolver_address",
+                "known_text_keys",
+                "avatar",
+                "content_hash",
+                "coins"
+              ],
+              "type": "string"
+            },
+            "style": "form"
+          },
+          {
+            "description": "Response view selector.",
+            "in": "query",
+            "name": "view",
+            "required": false,
+            "schema": {
+              "default": "compact",
+              "enum": [
+                "compact",
+                "full"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Compact response metadata selector.",
+            "in": "query",
+            "name": "meta",
+            "required": false,
+            "schema": {
+              "default": "summary",
+              "enum": [
+                "none",
+                "summary",
+                "full"
+              ],
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompactNameRecordsResponse"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Requested resource was not found"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "summary": "Namespace-inferred compact resolver records",
+        "tags": [
+          "Resolution"
+        ]
+      }
+    },
     "/v1/resolvers/{chain_id}/{resolver_address}": {
       "get": {
         "operationId": "resolver_current",
@@ -2516,6 +4442,228 @@
         "summary": "Resolver overview",
         "tags": [
           "Resolvers"
+        ]
+      }
+    },
+    "/v1/resolvers/{chain_id}/{resolver_address}/overview": {
+      "get": {
+        "operationId": "resolver_overview",
+        "parameters": [
+          {
+            "description": "Resolver chain identifier.",
+            "in": "path",
+            "name": "chain_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Resolver address anchor. Addresses are normalized to lowercase.",
+            "in": "path",
+            "name": "resolver_address",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Requested compact resolver overview sections.",
+            "explode": false,
+            "in": "query",
+            "name": "include",
+            "required": false,
+            "schema": {
+              "default": "nodes,aliases,roles,events",
+              "enum": [
+                "nodes",
+                "aliases",
+                "roles",
+                "events"
+              ],
+              "type": "string"
+            },
+            "style": "form"
+          },
+          {
+            "description": "Response view selector.",
+            "in": "query",
+            "name": "view",
+            "required": false,
+            "schema": {
+              "default": "compact",
+              "enum": [
+                "compact",
+                "full"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Compact response metadata selector.",
+            "in": "query",
+            "name": "meta",
+            "required": false,
+            "schema": {
+              "default": "summary",
+              "enum": [
+                "none",
+                "summary",
+                "full"
+              ],
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompactResolverOverviewResponse"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Requested resource was not found"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "summary": "App-facing compact resolver overview",
+        "tags": [
+          "Resolvers"
+        ]
+      }
+    },
+    "/v1/resources/lookup": {
+      "get": {
+        "operationId": "resource_lookup",
+        "parameters": [
+          {
+            "description": "Required namespace identifier for the requested primary-name tuple.",
+            "in": "query",
+            "name": "namespace",
+            "required": true,
+            "schema": {
+              "enum": [
+                "ens",
+                "basenames"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Required normalized name to resolve to a current resource identity.",
+            "in": "query",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Response view selector.",
+            "in": "query",
+            "name": "view",
+            "required": false,
+            "schema": {
+              "default": "compact",
+              "enum": [
+                "compact",
+                "full"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Compact response metadata selector.",
+            "in": "query",
+            "name": "meta",
+            "required": false,
+            "schema": {
+              "default": "summary",
+              "enum": [
+                "none",
+                "summary",
+                "full"
+              ],
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceLookupResponse"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Requested resource was not found"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "summary": "App-facing lookup from name to current resource identity",
+        "tags": [
+          "Resources"
         ]
       }
     },
@@ -2605,6 +4753,148 @@
           }
         },
         "summary": "Resource-centric effective permissions",
+        "tags": [
+          "Collections"
+        ]
+      }
+    },
+    "/v1/roles": {
+      "get": {
+        "operationId": "roles",
+        "parameters": [
+          {
+            "description": "Effective permission subject filter.",
+            "in": "query",
+            "name": "account",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Opaque resource identifier filter.",
+            "in": "query",
+            "name": "resource_id",
+            "required": false,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional namespace filter.",
+            "in": "query",
+            "name": "namespace",
+            "required": false,
+            "schema": {
+              "enum": [
+                "ens",
+                "basenames"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Normalized name lookup filter paired with namespace.",
+            "in": "query",
+            "name": "name",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Projected role bitmap filter when supported.",
+            "in": "query",
+            "name": "role_bitmap",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Response view selector.",
+            "in": "query",
+            "name": "view",
+            "required": false,
+            "schema": {
+              "default": "compact",
+              "enum": [
+                "compact",
+                "full"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Compact response metadata selector.",
+            "in": "query",
+            "name": "meta",
+            "required": false,
+            "schema": {
+              "default": "summary",
+              "enum": [
+                "none",
+                "summary",
+                "full"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Replay-stable pagination cursor.",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional page size. When supplied it must be between 1 and 200.",
+            "in": "query",
+            "name": "page_size",
+            "required": false,
+            "schema": {
+              "maximum": 200,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompactRolesResponse"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "summary": "App-facing role rows by account, resource, or name filters",
         "tags": [
           "Collections"
         ]

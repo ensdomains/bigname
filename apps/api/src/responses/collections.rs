@@ -150,6 +150,8 @@ fn build_children_response_from_summary(
     }
 }
 
+include!("collections_children.rs");
+
 fn build_child_item(row: &ChildrenCurrentRow) -> JsonValue {
     let mut value = empty_object();
     insert_string_field(

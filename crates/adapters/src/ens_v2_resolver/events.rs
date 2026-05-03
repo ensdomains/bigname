@@ -49,7 +49,11 @@ pub(super) async fn build_resolver_events(
             )])
         }
         ResolverObservation::TextChanged { node, key, value } => {
+            if key.trim().is_empty() {
+                return Ok(Vec::new());
+            }
             let link = load_name_link_by_namehash(pool, raw_log, &node).await?;
+            let value_length = value.len();
             Ok(vec![normalized_event(
                 raw_log,
                 link.logical_name_id,
@@ -61,12 +65,13 @@ pub(super) async fn build_resolver_events(
                     "resolver": raw_log.emitting_address,
                     "resolver_contract_instance_id": raw_log.emitting_contract_instance_id.to_string(),
                     "node": node,
-                    "record_key": "text",
+                    "record_key": format!("text:{key}"),
                     "record_family": "text",
-                    "selector_key": Value::Null,
+                    "selector_key": key.clone(),
                     "text_key": key,
-                    "value_retained": false,
-                    "value_length": value.len(),
+                    "value_retained": true,
+                    "value": value,
+                    "value_length": value_length,
                 }),
                 "text-changed",
             )])

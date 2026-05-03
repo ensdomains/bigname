@@ -1,0 +1,1092 @@
+#[tokio::test]
+async fn get_name_records_returns_declared_compact_summary() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0x2200);
+    let token_lineage_id = Uuid::from_u128(0x1100);
+    let surface_binding_id = Uuid::from_u128(0x3300);
+
+    database
+        .seed_name_current_binding(
+            logical_name_id,
+            "ens",
+            "alice.eth",
+            "Alice.eth",
+            "namehash:alice.eth",
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    database
+        .insert_name_current_row(exact_name_row(
+            logical_name_id,
+            surface_binding_id,
+            resource_id,
+            token_lineage_id,
+        ))
+        .await?;
+    database
+        .insert_record_inventory_current_row(compact_records_inventory_current_row(
+            logical_name_id,
+            resource_id,
+        ))
+        .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/names/ens/alice.eth/records?texts=com.twitter&known_text_keys=true&avatar=true&content_hash=true&coin_types=60,0&mode=declared")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("compact records request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let payload: Value = read_json(response).await?;
+    assert_eq!(
+        payload.pointer("/data/resolver_address"),
+        Some(&json!("0x0000000000000000000000000000000000000abc"))
+    );
+    assert_eq!(
+        payload.pointer("/data/text_records/com.twitter/status"),
+        Some(&json!("success"))
+    );
+    assert_eq!(
+        payload.pointer("/data/text_records/com.twitter/value"),
+        Some(&json!("@alice"))
+    );
+    assert!(
+        payload
+            .pointer("/data/text_records/com.twitter/inventory")
+            .is_none()
+    );
+    assert_eq!(
+        payload.pointer("/data/known_text_keys"),
+        Some(&json!({
+            "status": "supported",
+            "keys": ["com.twitter"],
+        }))
+    );
+    assert_eq!(payload.pointer("/data/avatar/status"), Some(&json!("success")));
+    assert_eq!(
+        payload.pointer("/data/avatar/value"),
+        Some(&json!("ipfs://avatar"))
+    );
+    assert_eq!(
+        payload.pointer("/data/content_hash/status"),
+        Some(&json!("success"))
+    );
+    assert_eq!(
+        payload.pointer("/data/content_hash/value"),
+        Some(&json!("ipfs://content"))
+    );
+    assert_eq!(
+        payload.pointer("/data/coin_addresses/60/status"),
+        Some(&json!("success"))
+    );
+    assert_eq!(
+        payload.pointer("/data/coin_addresses/60/value"),
+        Some(&json!("0x0000000000000000000000000000000000000abc"))
+    );
+    assert_eq!(
+        payload.pointer("/data/coin_addresses/0/status"),
+        Some(&json!("not_found"))
+    );
+    assert!(payload.pointer("/data/inventory_source").is_none());
+    assert!(payload.pointer("/data/value_source").is_none());
+    assert_eq!(
+        payload.pointer("/meta"),
+        Some(&json!({
+            "support_status": "supported",
+            "unsupported_filters": [],
+            "unsupported_fields": [],
+            "value_source": {
+                "mode": "declared",
+                "declared_status": "supported",
+                "source": "record_inventory_current",
+            },
+        }))
+    );
+
+    let lean_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/names/ens/alice.eth/records?texts=com.twitter&coin_types=60&mode=declared&meta=none")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("compact records meta=none request failed")?;
+    assert_eq!(lean_response.status(), StatusCode::OK);
+    let lean_payload: Value = read_json(lean_response).await?;
+    assert!(lean_payload.get("meta").is_none());
+    assert!(lean_payload.pointer("/data/value_source").is_none());
+    assert!(lean_payload.pointer("/data/inventory_source").is_none());
+    assert!(
+        lean_payload
+            .pointer("/data/text_records/com.twitter/inventory")
+            .is_none()
+    );
+    assert_eq!(
+        lean_payload.pointer("/data/text_records/com.twitter/value"),
+        Some(&json!("@alice"))
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_name_records_maps_declared_text_avatar_to_avatar_field() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0x2207);
+    let token_lineage_id = Uuid::from_u128(0x1107);
+    let surface_binding_id = Uuid::from_u128(0x3307);
+
+    database
+        .seed_name_current_binding(
+            logical_name_id,
+            "ens",
+            "alice.eth",
+            "Alice.eth",
+            "namehash:alice.eth",
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    database
+        .insert_name_current_row(exact_name_row(
+            logical_name_id,
+            surface_binding_id,
+            resource_id,
+            token_lineage_id,
+        ))
+        .await?;
+    let mut inventory = compact_records_inventory_current_row(logical_name_id, resource_id);
+    inventory.selectors = json!([{
+        "record_key": "text:avatar",
+        "record_family": "text",
+        "selector_key": "avatar",
+        "cacheable": true,
+    }]);
+    inventory.entries = json!([{
+        "record_key": "text:avatar",
+        "record_family": "text",
+        "selector_key": "avatar",
+        "status": "success",
+        "value": {
+            "key": "avatar",
+            "value": "https://cdn.example.test/alice.png",
+        },
+    }]);
+    database
+        .insert_record_inventory_current_row(inventory)
+        .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resolve/alice.eth/records?avatar=true&mode=declared")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("declared compact text-avatar request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload.pointer("/data/avatar/status"), Some(&json!("success")));
+    assert_eq!(
+        payload.pointer("/data/avatar/value"),
+        Some(&json!("https://cdn.example.test/alice.png"))
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_resolve_records_infers_basenames_namespace() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    let logical_name_id = "basenames:alice.base.eth";
+    let resource_id = Uuid::from_u128(0x2201);
+    let token_lineage_id = Uuid::from_u128(0x1101);
+    let surface_binding_id = Uuid::from_u128(0x3301);
+
+    database
+        .seed_name_current_binding(
+            logical_name_id,
+            "basenames",
+            "alice.base.eth",
+            "alice.base.eth",
+            "namehash:alice.base.eth",
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    let mut row = exact_name_row(
+        logical_name_id,
+        surface_binding_id,
+        resource_id,
+        token_lineage_id,
+    );
+    row.namespace = "basenames".to_owned();
+    row.canonical_display_name = "alice.base.eth".to_owned();
+    row.normalized_name = "alice.base.eth".to_owned();
+    row.namehash = "namehash:alice.base.eth".to_owned();
+    row.declared_summary = json!({
+        "registration": {
+            "status": "active",
+            "authority_kind": "registrar"
+        },
+        "resolver": {
+            "chain_id": "base-mainnet",
+            "address": "0x0000000000000000000000000000000000000abc",
+            "latest_event_kind": "ResolverChanged"
+        }
+    });
+    row.chain_positions = json!({
+        "base-mainnet": {
+            "chain_id": "base-mainnet",
+            "block_number": 21_000_003,
+            "block_hash": "0xbase-binding",
+            "timestamp": "2026-04-17T00:00:03Z"
+        }
+    });
+    row.canonicality_summary = json!({
+        "status": "finalized",
+        "chains": {
+            "base-mainnet": "finalized"
+        }
+    });
+    database.insert_name_current_row(row).await?;
+    let mut inventory =
+        compact_records_inventory_current_row(logical_name_id, resource_id);
+    inventory.record_version_boundary =
+        basenames_dynamic_resolver_record_inventory_boundary(
+            logical_name_id,
+            resource_id,
+            None,
+            None,
+        );
+    inventory.chain_positions = json!({
+        "base-mainnet": {
+            "chain_id": "base-mainnet",
+            "block_number": 21_000_003,
+            "block_hash": "0xbase-binding",
+            "timestamp": "2026-04-17T00:00:03Z"
+        }
+    });
+    inventory.canonicality_summary = json!({
+        "status": "finalized",
+        "chains": {
+            "base-mainnet": "finalized"
+        }
+    });
+    database
+        .insert_record_inventory_current_row(inventory)
+        .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resolve/alice.base.eth/records?texts=com.twitter&known_text_keys=true&mode=declared")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("inferred compact records request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let payload: Value = read_json(response).await?;
+    assert_eq!(
+        payload.pointer("/data/text_records/com.twitter/value"),
+        Some(&json!("@alice"))
+    );
+    assert_eq!(
+        payload.pointer("/data/known_text_keys/keys"),
+        Some(&json!(["com.twitter"]))
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_resolve_records_defaults_auto_to_declared_all_available_records() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0x2210);
+    let token_lineage_id = Uuid::from_u128(0x1110);
+    let surface_binding_id = Uuid::from_u128(0x3310);
+
+    database
+        .seed_name_current_binding(
+            logical_name_id,
+            "ens",
+            "alice.eth",
+            "Alice.eth",
+            "namehash:alice.eth",
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    database
+        .insert_name_current_row(exact_name_row(
+            logical_name_id,
+            surface_binding_id,
+            resource_id,
+            token_lineage_id,
+        ))
+        .await?;
+    database
+        .insert_record_inventory_current_row(compact_records_inventory_current_row(
+            logical_name_id,
+            resource_id,
+        ))
+        .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resolve/alice.eth/records")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("auto compact records request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let payload: Value = read_json(response).await?;
+    assert_eq!(
+        payload.pointer("/data/text_records/com.twitter/value"),
+        Some(&json!("@alice"))
+    );
+    assert_eq!(
+        payload.pointer("/data/known_text_keys/keys"),
+        Some(&json!(["com.twitter"]))
+    );
+    assert_eq!(
+        payload.pointer("/data/avatar/value"),
+        Some(&json!("ipfs://avatar"))
+    );
+    assert_eq!(
+        payload.pointer("/data/content_hash/value"),
+        Some(&json!("ipfs://content"))
+    );
+    assert_eq!(
+        payload.pointer("/data/coin_addresses/60/value"),
+        Some(&json!("0x0000000000000000000000000000000000000abc"))
+    );
+    assert_eq!(
+        payload.pointer("/meta/value_source"),
+        Some(&json!({
+            "mode": "auto",
+            "declared_status": "supported",
+            "source": "record_inventory_current",
+        }))
+    );
+    assert_eq!(
+        payload.pointer("/meta/unsupported_fields"),
+        Some(&json!([]))
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_resolve_records_uses_current_projection_without_snapshot_catchup() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0x2211);
+    let token_lineage_id = Uuid::from_u128(0x1111);
+    let surface_binding_id = Uuid::from_u128(0x3311);
+
+    database
+        .seed_name_current_binding(
+            logical_name_id,
+            "ens",
+            "alice.eth",
+            "Alice.eth",
+            "namehash:alice.eth",
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    database
+        .insert_name_current_row(exact_name_row(
+            logical_name_id,
+            surface_binding_id,
+            resource_id,
+            token_lineage_id,
+        ))
+        .await?;
+    database
+        .insert_record_inventory_current_row(compact_records_inventory_current_row(
+            logical_name_id,
+            resource_id,
+        ))
+        .await?;
+    sqlx::query(
+        r#"
+        UPDATE chain_checkpoints
+        SET
+            canonical_block_hash = '0xlater-not-in-lineage',
+            canonical_block_number = 21_000_100,
+            safe_block_hash = '0xlater-not-in-lineage',
+            safe_block_number = 21_000_100,
+            finalized_block_hash = '0xlater-not-in-lineage',
+            finalized_block_number = 21_000_100
+        WHERE chain_id = 'ethereum-mainnet'
+        "#,
+    )
+    .execute(&database.pool)
+    .await
+    .context("failed to move test chain checkpoint past projection")?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resolve/alice.eth/records")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("current compact records request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let payload: Value = read_json(response).await?;
+    assert_eq!(
+        payload.pointer("/meta/value_source"),
+        Some(&json!({
+            "mode": "auto",
+            "declared_status": "supported",
+            "source": "record_inventory_current",
+        }))
+    );
+    assert_eq!(
+        payload.pointer("/data/coin_addresses/60/value"),
+        Some(&json!("0x0000000000000000000000000000000000000abc"))
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_resolve_records_auto_uses_verified_for_pending_resolver_profile() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0x2220);
+    let token_lineage_id = Uuid::from_u128(0x1120);
+    let surface_binding_id = Uuid::from_u128(0x3320);
+    let dynamic_resolver_address = "0x0000000000000000000000000000000000000d51";
+    let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000061);
+    let request_key = resolution_execution_request_key(&["addr:60"]);
+    let persisted_verified_queries = json!([
+        {
+            "record_key": "addr:60",
+            "status": "success",
+            "value": {
+                "coin_type": "60",
+                "value": "0x00000000000000000000000000000000000000ee"
+            },
+            "provenance": {
+                "execution_trace_id": execution_trace_id.to_string()
+            }
+        }
+    ]);
+
+    database
+        .seed_name_current_binding(
+            logical_name_id,
+            "ens",
+            "alice.eth",
+            "Alice.eth",
+            "namehash:alice.eth",
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    database
+        .insert_name_current_row(name_current_row_with_current_resolver(
+            exact_name_row(
+                logical_name_id,
+                surface_binding_id,
+                resource_id,
+                token_lineage_id,
+            ),
+            "ethereum-mainnet",
+            dynamic_resolver_address,
+        ))
+        .await?;
+    database
+        .insert_record_inventory_current_row(
+            dynamic_resolver_unsupported_profile_record_inventory_current_row(
+                logical_name_id,
+                resource_id,
+            ),
+        )
+        .await?;
+    let trace = resolution_execution_trace(
+        execution_trace_id,
+        &request_key,
+        &["addr:60"],
+        persisted_verified_queries.clone(),
+    );
+    let outcome = resolution_execution_outcome(
+        execution_trace_id,
+        &request_key,
+        persisted_verified_queries,
+        logical_name_id,
+        resource_id,
+    );
+    upsert_execution_trace(&database.pool, &trace).await?;
+    upsert_execution_outcome(&database.pool, &outcome).await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resolve/alice.eth/records?include=coins&coin_types=60")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("auto verified compact records request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let payload: Value = read_json(response).await?;
+    assert_eq!(
+        payload.pointer("/data/coin_addresses/60/status"),
+        Some(&json!("success"))
+    );
+    assert_eq!(
+        payload.pointer("/data/coin_addresses/60/value"),
+        Some(&json!("0x00000000000000000000000000000000000000ee"))
+    );
+    assert!(
+        payload
+            .pointer("/data/coin_addresses/60/inventory")
+            .is_none()
+    );
+    assert_eq!(
+        payload.pointer("/meta/value_source/source"),
+        Some(&json!("verified_resolution"))
+    );
+    assert_eq!(
+        payload.pointer("/meta/value_source/verified_status"),
+        Some(&json!("supported"))
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_resolve_records_auto_probes_basic_verified_records_without_declared_inventory(
+) -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0x2221);
+    let token_lineage_id = Uuid::from_u128(0x1121);
+    let surface_binding_id = Uuid::from_u128(0x3321);
+    let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000062);
+    let fallback_record_keys = [
+        "addr:60",
+        "avatar",
+        "contenthash",
+        "text:description",
+        "text:url",
+        "text:email",
+    ];
+    let request_key = resolution_execution_request_key(&fallback_record_keys);
+    let mut persisted_verified_queries = Vec::new();
+    for record_key in fallback_record_keys {
+        persisted_verified_queries.push(match record_key {
+            "addr:60" => json!({
+                "record_key": "addr:60",
+                "status": "success",
+                "value": {
+                    "coin_type": "60",
+                    "value": "0x00000000000000000000000000000000000000ef"
+                },
+                "provenance": {
+                    "execution_trace_id": execution_trace_id.to_string()
+                }
+            }),
+            "contenthash" => json!({
+                "record_key": "contenthash",
+                "status": "success",
+                "value": {
+                    "value": "ipfs://fallback-content"
+                },
+                "provenance": {
+                    "execution_trace_id": execution_trace_id.to_string()
+                }
+            }),
+            "text:email" => json!({
+                "record_key": "text:email",
+                "status": "success",
+                "value": {
+                    "value": "nick@example.test"
+                },
+                "provenance": {
+                    "execution_trace_id": execution_trace_id.to_string()
+                }
+            }),
+            record_key => json!({
+                "record_key": record_key,
+                "status": "not_found",
+                "failure_reason": "no_record",
+            }),
+        });
+    }
+    let persisted_verified_queries = Value::Array(persisted_verified_queries);
+
+    database
+        .seed_name_current_binding(
+            logical_name_id,
+            "ens",
+            "alice.eth",
+            "Alice.eth",
+            "namehash:alice.eth",
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    database
+        .insert_name_current_row(exact_name_row(
+            logical_name_id,
+            surface_binding_id,
+            resource_id,
+            token_lineage_id,
+        ))
+        .await?;
+    let trace = resolution_execution_trace(
+        execution_trace_id,
+        &request_key,
+        &fallback_record_keys,
+        persisted_verified_queries.clone(),
+    );
+    let outcome = resolution_execution_outcome(
+        execution_trace_id,
+        &request_key,
+        persisted_verified_queries,
+        logical_name_id,
+        resource_id,
+    );
+    upsert_execution_trace(&database.pool, &trace).await?;
+    upsert_execution_outcome(&database.pool, &outcome).await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/resolve/alice.eth/records")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("auto basic fallback compact records request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let payload: Value = read_json(response).await?;
+    assert_eq!(
+        payload.pointer("/data/coin_addresses/60/value"),
+        Some(&json!("0x00000000000000000000000000000000000000ef"))
+    );
+    assert_eq!(
+        payload.pointer("/data/text_records/email/value"),
+        Some(&json!("nick@example.test"))
+    );
+    assert!(payload.pointer("/data/text_records/description").is_none());
+    assert_eq!(
+        payload.pointer("/data/content_hash/value"),
+        Some(&json!("ipfs://fallback-content"))
+    );
+    assert_eq!(
+        payload.pointer("/meta/value_source/source"),
+        Some(&json!("verified_resolution"))
+    );
+    assert_eq!(
+        payload.pointer("/meta/value_source/verified_status"),
+        Some(&json!("supported"))
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_name_records_returns_persisted_verified_compact_summary() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0x2200);
+    let token_lineage_id = Uuid::from_u128(0x1100);
+    let surface_binding_id = Uuid::from_u128(0x3300);
+    let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000060);
+    let request_key = resolution_execution_request_key(&["text:com.twitter", "addr:60"]);
+    let persisted_verified_queries = json!([
+        {
+            "record_key": "avatar",
+            "status": "success",
+            "value": {
+                "value": "https://cdn.example.test/alice.png"
+            },
+            "provenance": {
+                "execution_trace_id": execution_trace_id.to_string()
+            }
+        },
+        {
+            "record_key": "text:com.twitter",
+            "status": "success",
+            "value": {
+                "value": "@alice-verified"
+            },
+            "provenance": {
+                "execution_trace_id": execution_trace_id.to_string()
+            }
+        },
+        {
+            "record_key": "addr:60",
+            "status": "success",
+            "value": {
+                "coin_type": "60",
+                "value": "0x00000000000000000000000000000000000000dd"
+            },
+            "provenance": {
+                "execution_trace_id": execution_trace_id.to_string()
+            }
+        }
+    ]);
+
+    database
+        .seed_name_current_binding(
+            logical_name_id,
+            "ens",
+            "alice.eth",
+            "Alice.eth",
+            "namehash:alice.eth",
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    database
+        .insert_name_current_row(exact_name_row(
+            logical_name_id,
+            surface_binding_id,
+            resource_id,
+            token_lineage_id,
+        ))
+        .await?;
+    database
+        .insert_record_inventory_current_row(compact_records_inventory_current_row(
+            logical_name_id,
+            resource_id,
+        ))
+        .await?;
+    let trace = resolution_execution_trace(
+        execution_trace_id,
+        &request_key,
+        &["avatar", "text:com.twitter", "addr:60"],
+        persisted_verified_queries.clone(),
+    );
+    let outcome = resolution_execution_outcome(
+        execution_trace_id,
+        &request_key,
+        persisted_verified_queries,
+        logical_name_id,
+        resource_id,
+    );
+    upsert_execution_trace(&database.pool, &trace).await?;
+    upsert_execution_outcome(&database.pool, &outcome).await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/names/ens/alice.eth/records?mode=verified&texts=com.twitter&avatar=true&coin_types=60")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("verified compact records request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let payload: Value = read_json(response).await?;
+    assert_eq!(
+        payload.pointer("/data/text_records/com.twitter/status"),
+        Some(&json!("success"))
+    );
+    assert_eq!(
+        payload.pointer("/data/text_records/com.twitter/value"),
+        Some(&json!("@alice-verified"))
+    );
+    assert!(
+        payload
+            .pointer("/data/text_records/com.twitter/inventory")
+            .is_none()
+    );
+    assert_eq!(
+        payload.pointer("/data/avatar/status"),
+        Some(&json!("success"))
+    );
+    assert_eq!(
+        payload.pointer("/data/avatar/value"),
+        Some(&json!("https://cdn.example.test/alice.png"))
+    );
+    assert_eq!(
+        payload.pointer("/data/coin_addresses/60/status"),
+        Some(&json!("success"))
+    );
+    assert_eq!(
+        payload.pointer("/data/coin_addresses/60/value"),
+        Some(&json!("0x00000000000000000000000000000000000000dd"))
+    );
+    assert_eq!(
+        payload.pointer("/meta/value_source/declared_status"),
+        Some(&json!("not_requested"))
+    );
+    assert_eq!(
+        payload.pointer("/meta/value_source/verified_status"),
+        Some(&json!("supported"))
+    );
+    assert_eq!(
+        payload.pointer("/meta/value_source/source"),
+        Some(&json!("verified_resolution"))
+    );
+    assert_eq!(
+        payload.pointer("/meta/unsupported_fields"),
+        Some(&json!([]))
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_name_records_surfaces_missing_inventory_as_unsupported_metadata() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0x2200);
+    let token_lineage_id = Uuid::from_u128(0x1100);
+    let surface_binding_id = Uuid::from_u128(0x3300);
+
+    database
+        .seed_name_current_binding(
+            logical_name_id,
+            "ens",
+            "alice.eth",
+            "Alice.eth",
+            "namehash:alice.eth",
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    database
+        .insert_name_current_row(exact_name_row(
+            logical_name_id,
+            surface_binding_id,
+            resource_id,
+            token_lineage_id,
+        ))
+        .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/names/ens/alice.eth/records?texts=com.twitter&known_text_keys=true&avatar=true")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("missing inventory compact records request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let payload: Value = read_json(response).await?;
+    assert_eq!(
+        payload.pointer("/data/text_records/com.twitter/status"),
+        Some(&json!("unsupported"))
+    );
+    assert_eq!(
+        payload.pointer("/data/text_records/com.twitter/unsupported_reason"),
+        Some(&json!("declared compact record cache is not yet projected"))
+    );
+    assert_eq!(
+        payload.pointer("/data/known_text_keys"),
+        Some(&json!({
+            "status": "unsupported",
+            "unsupported_reason": "declared compact record inventory is not yet projected",
+        }))
+    );
+    assert!(payload.pointer("/data/inventory_source").is_none());
+    assert!(payload.pointer("/data/value_source").is_none());
+    assert_eq!(
+        payload.pointer("/meta/value_source/declared_status"),
+        Some(&json!("unsupported"))
+    );
+    assert_eq!(
+        payload.pointer("/meta"),
+        Some(&json!({
+            "support_status": "partial",
+            "unsupported_filters": [],
+            "unsupported_fields": ["record_cache", "record_inventory"],
+            "value_source": {
+                "mode": "declared",
+                "declared_status": "unsupported",
+                "source": "record_inventory_current",
+                "declared_unsupported_reason": "declared compact record cache is not yet projected",
+            },
+        }))
+    );
+
+    let lean_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/names/ens/alice.eth/records?texts=com.twitter&known_text_keys=true&avatar=true&meta=none")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("missing inventory compact records meta=none request failed")?;
+    assert_eq!(lean_response.status(), StatusCode::OK);
+    let lean_payload: Value = read_json(lean_response).await?;
+    assert!(lean_payload.get("meta").is_none());
+    assert_eq!(lean_payload.pointer("/data/known_text_keys"), Some(&Value::Null));
+    assert!(lean_payload.pointer("/data/value_source").is_none());
+    assert!(lean_payload.pointer("/data/inventory_source").is_none());
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_name_records_rejects_full_view_until_full_envelope_is_documented_here() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/names/ens/alice.eth/records?view=full")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("full-view compact records request failed")?;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let payload: ErrorResponse = read_json(response).await?;
+    assert_eq!(payload.error.code, "invalid_input");
+    assert_eq!(
+        payload.error.message,
+        "view=full is not supported for compact name records"
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+fn compact_records_inventory_current_row(
+    logical_name_id: &str,
+    resource_id: Uuid,
+) -> bigname_storage::RecordInventoryCurrentRow {
+    let mut row = record_inventory_current_row(logical_name_id, resource_id);
+    row.selectors = json!([
+        {
+            "record_key": "addr:0",
+            "record_family": "addr",
+            "selector_key": "0",
+            "cacheable": true,
+        },
+        {
+            "record_key": "addr:60",
+            "record_family": "addr",
+            "selector_key": "60",
+            "cacheable": true,
+        },
+        {
+            "record_key": "avatar",
+            "record_family": "avatar",
+            "selector_key": null,
+            "cacheable": true,
+        },
+        {
+            "record_key": "contenthash",
+            "record_family": "contenthash",
+            "selector_key": null,
+            "cacheable": true,
+        },
+        {
+            "record_key": "text:com.twitter",
+            "record_family": "text",
+            "selector_key": "com.twitter",
+            "cacheable": true,
+        },
+    ]);
+    row.explicit_gaps = json!([]);
+    row.entries = json!([
+        {
+            "record_key": "addr:0",
+            "record_family": "addr",
+            "selector_key": "0",
+            "status": "not_found",
+        },
+        {
+            "record_key": "addr:60",
+            "record_family": "addr",
+            "selector_key": "60",
+            "status": "success",
+            "value": {
+                "coin_type": "60",
+                "value": "0x0000000000000000000000000000000000000abc",
+            },
+        },
+        {
+            "record_key": "avatar",
+            "record_family": "avatar",
+            "selector_key": null,
+            "status": "success",
+            "value": {
+                "value": "ipfs://avatar",
+            },
+        },
+        {
+            "record_key": "contenthash",
+            "record_family": "contenthash",
+            "selector_key": null,
+            "status": "success",
+            "value": {
+                "value": "ipfs://content",
+            },
+        },
+        {
+            "record_key": "text:com.twitter",
+            "record_family": "text",
+            "selector_key": "com.twitter",
+            "status": "success",
+            "value": {
+                "key": "com.twitter",
+                "value": "@alice",
+            },
+        },
+    ]);
+    row
+}

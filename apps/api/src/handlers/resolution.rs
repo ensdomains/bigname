@@ -229,6 +229,8 @@ async fn resolution_response_for_name(
                     &records,
                     record_inventory_current.as_ref(),
                     &selected_snapshot,
+                    false,
+                    true,
                 )
                 .await
                 .map_err(snapshot_selection_api_error)?,
@@ -544,7 +546,7 @@ async fn load_explicit_unsupported_record_inventory_current(
     )
 }
 
-fn infer_resolution_namespace(name: &str) -> &'static str {
+pub(super) fn infer_resolution_namespace(name: &str) -> &'static str {
     if name == "base.eth" {
         return "ens";
     }

@@ -1,0 +1,39 @@
+{
+  "capability_group": "compact resolver overview",
+  "conformance_owner": "apps/api tests::resolvers",
+  "fixture_id": "compact-resolver-overview",
+  "request": {
+    "method": "GET",
+    "path": "/v1/resolvers/{chain_id}/{resolver_address}/overview",
+    "query": {}
+  },
+  "response": {
+    "coverage": {
+      "enumeration_basis": "resolver_current",
+      "exhaustiveness": "projection_backed",
+      "status": "partial",
+      "unsupported_reason": null
+    },
+    "data": {
+      "fixture_version": 1,
+      "stable_identity": "capability-golden:compact-resolver-overview"
+    },
+    "provenance": {
+      "boundary": "local_route_conformance",
+      "source": "checked_in_fixture"
+    }
+  },
+  "rollback_gate": [
+    "scripts/rollback-smoke",
+    "stable compact resolver sections and explicit unprojected fields"
+  ],
+  "rollout_gate": [
+    "OpenAPI route owner guard",
+    "focused compact resolver overview API route tests",
+    "scripts/release-smoke"
+  ],
+  "route_owner": [
+    "/v1/resolvers/{chain_id}/{resolver_address}/overview"
+  ],
+  "scope": "local_cutover_evidence"
+}

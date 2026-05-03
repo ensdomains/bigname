@@ -1,0 +1,39 @@
+{
+  "capability_group": "event stream",
+  "conformance_owner": "apps/api tests::events",
+  "fixture_id": "event-stream",
+  "request": {
+    "method": "GET",
+    "path": "/v1/events",
+    "query": {}
+  },
+  "response": {
+    "coverage": {
+      "enumeration_basis": "normalized_events",
+      "exhaustiveness": "canonical_projection",
+      "status": "partial",
+      "unsupported_reason": null
+    },
+    "data": {
+      "fixture_version": 1,
+      "stable_identity": "capability-golden:event-stream"
+    },
+    "provenance": {
+      "boundary": "local_route_conformance",
+      "source": "checked_in_fixture"
+    }
+  },
+  "rollback_gate": [
+    "scripts/rollback-smoke",
+    "stable canonical event filters, pagination, and reserved-filter errors"
+  ],
+  "rollout_gate": [
+    "OpenAPI route owner guard",
+    "focused events API route tests",
+    "scripts/release-smoke"
+  ],
+  "route_owner": [
+    "/v1/events"
+  ],
+  "scope": "local_cutover_evidence"
+}

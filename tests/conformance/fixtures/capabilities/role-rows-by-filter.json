@@ -1,0 +1,39 @@
+{
+  "capability_group": "role rows by filter",
+  "conformance_owner": "apps/api tests::roles",
+  "fixture_id": "role-rows-by-filter",
+  "request": {
+    "method": "GET",
+    "path": "/v1/roles",
+    "query": {}
+  },
+  "response": {
+    "coverage": {
+      "enumeration_basis": "permissions_current",
+      "exhaustiveness": "projection_backed",
+      "status": "partial",
+      "unsupported_reason": null
+    },
+    "data": {
+      "fixture_version": 1,
+      "stable_identity": "capability-golden:role-rows-by-filter"
+    },
+    "provenance": {
+      "boundary": "local_route_conformance",
+      "source": "checked_in_fixture"
+    }
+  },
+  "rollback_gate": [
+    "scripts/rollback-smoke",
+    "stable role filters and missing-primary-filter errors"
+  ],
+  "rollout_gate": [
+    "OpenAPI route owner guard",
+    "focused roles API route tests",
+    "scripts/release-smoke"
+  ],
+  "route_owner": [
+    "/v1/roles"
+  ],
+  "scope": "local_cutover_evidence"
+}

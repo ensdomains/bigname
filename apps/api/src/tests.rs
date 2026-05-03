@@ -84,6 +84,16 @@ include!("tests/resolution.rs");
 
 include!("tests/collections.rs");
 
+include!("tests/names_collection.rs");
+
+include!("tests/records.rs");
+
+include!("tests/events.rs");
+
+include!("tests/roles.rs");
+
+include!("tests/resolvers.rs");
+
 include!("tests/history.rs");
 
 include!("tests/namespaces.rs");

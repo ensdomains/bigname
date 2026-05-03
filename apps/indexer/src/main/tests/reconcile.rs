@@ -1932,7 +1932,7 @@ async fn reconcile_fetched_heads_backfills_unwrapped_ensv1_authority_identity_ro
         .bind(&canonical_head.block_hash)
         .fetch_one(database.pool())
         .await?,
-        vec!["addr:60".to_owned(), "text".to_owned()]
+        vec!["addr:60".to_owned(), "text:com.twitter".to_owned()]
     );
     assert_eq!(
         sqlx::query_scalar::<_, String>(

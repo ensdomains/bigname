@@ -714,6 +714,90 @@ async fn rebuild_limits_cache_entries_to_cacheable_selectors() -> Result<()> {
 }
 
 #[tokio::test]
+async fn rebuild_retains_selector_specific_text_record_values() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let resource_id = Uuid::from_u128(0x9702);
+
+    seed_resources(database.pool(), &[resource_id]).await?;
+    seed_raw_blocks(
+        database.pool(),
+        &[
+            raw_block("ethereum-mainnet", "0xrec1045", 1045, 1_776_200_045),
+            raw_block("ethereum-mainnet", "0xrec1046", 1046, 1_776_200_046),
+        ],
+    )
+    .await?;
+    seed_events(
+        database.pool(),
+        &[
+            record_version_changed_event("boundary", "ens:alice.eth", resource_id, 14, 1045, 0),
+            record_changed_event_with_value(
+                "avatar",
+                "ens:alice.eth",
+                resource_id,
+                "text:avatar",
+                "text",
+                Some("avatar"),
+                json!("https://euc.li/alice.eth"),
+                1046,
+                0,
+            ),
+        ],
+    )
+    .await?;
+
+    rebuild_record_inventory_current(database.pool(), Some(&resource_id.to_string())).await?;
+
+    let row = load_record_inventory_current(
+        database.pool(),
+        resource_id,
+        &record_version_boundary(
+            "ens:alice.eth",
+            resource_id,
+            Some(1),
+            Some(EVENT_KIND_RECORD_VERSION_CHANGED),
+            1045,
+            "0xrec1045",
+            1_776_200_045,
+            "ethereum-mainnet",
+        ),
+    )
+    .await?
+    .context("row must exist")?;
+
+    assert_eq!(
+        row.selectors,
+        json!([{
+            "record_key": "text:avatar",
+            "record_family": "text",
+            "selector_key": "avatar",
+            "cacheable": true,
+        }])
+    );
+    assert_eq!(
+        row.entries,
+        json!([{
+            "record_key": "text:avatar",
+            "record_family": "text",
+            "selector_key": "avatar",
+            "status": "success",
+            "value": "https://euc.li/alice.eth",
+        }])
+    );
+    assert_eq!(
+        row.explicit_gaps,
+        json!([{
+            "record_key": "addr:60",
+            "record_family": "addr",
+            "selector_key": "60",
+            "gap_reason": GAP_REASON_NOT_OBSERVED,
+        }])
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn rebuild_consumes_ensv2_resolver_record_events() -> Result<()> {
     let database = TestDatabase::new().await?;
     let resource_id = Uuid::from_u128(0x9701);
@@ -2263,6 +2347,265 @@ async fn rebuild_supports_known_legacy_ensv1_resolver_without_latest_capabilitie
 }
 
 #[tokio::test]
+async fn rebuild_uses_ensv1_registrar_resolver_binding_without_raw_logs() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let resource_id = Uuid::from_u128(0x9915);
+    let resolver_contract_instance_id = Uuid::from_u128(0x9916);
+    let resolver_address = "0x4976fb03C32e5B8cfe2b6cCB31c09Ba78EBaBa41";
+
+    let registrar_manifest_id = insert_manifest_version(
+        database.pool(),
+        SOURCE_FAMILY_ENS_V1_REGISTRAR_L1,
+        "manifests/ens/ens_v1_registrar_l1/v1.toml",
+    )
+    .await?;
+    let resolver_manifest_id = insert_manifest_version(
+        database.pool(),
+        SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
+        "manifests/ens/ens_v1_resolver_l1/v1.toml",
+    )
+    .await?;
+    insert_contract_instance(
+        database.pool(),
+        resolver_contract_instance_id,
+        resolver_address,
+        resolver_manifest_id,
+    )
+    .await?;
+    insert_manifest_contract_instance(
+        database.pool(),
+        resolver_manifest_id,
+        "public_resolver_4976fb03",
+        resolver_contract_instance_id,
+        resolver_address,
+    )
+    .await?;
+
+    let mut resolver_event = resolver_changed_event(
+        "registrar-resolver",
+        "ens:taytems.eth",
+        resource_id,
+        resolver_address,
+        registrar_manifest_id,
+        1075,
+        0,
+    );
+    resolver_event.source_family = SOURCE_FAMILY_ENS_V1_REGISTRAR_L1.to_owned();
+    let mut text_record = record_changed_event_with_value(
+        "registrar-resolver-avatar",
+        "ens:taytems.eth",
+        resource_id,
+        "text:avatar",
+        "text",
+        Some("avatar"),
+        json!("https://euc.li/taytems.eth"),
+        1076,
+        0,
+    );
+    text_record.source_family = SOURCE_FAMILY_ENS_V1_RESOLVER_L1.to_owned();
+    text_record.source_manifest_id = Some(resolver_manifest_id);
+
+    seed_resources(database.pool(), &[resource_id]).await?;
+    seed_raw_blocks(
+        database.pool(),
+        &[
+            raw_block("ethereum-mainnet", "0xrec1075", 1075, 1_776_200_075),
+            raw_block("ethereum-mainnet", "0xrec1076", 1076, 1_776_200_076),
+        ],
+    )
+    .await?;
+    seed_events(database.pool(), &[resolver_event, text_record]).await?;
+
+    rebuild_record_inventory_current(database.pool(), Some(&resource_id.to_string())).await?;
+
+    let row = load_record_inventory_current(
+        database.pool(),
+        resource_id,
+        &record_version_boundary(
+            "ens:taytems.eth",
+            resource_id,
+            None,
+            None,
+            1075,
+            "0xrec1075",
+            1_776_200_075,
+            "ethereum-mainnet",
+        ),
+    )
+    .await?
+    .context("registrar resolver row must exist")?;
+
+    assert_eq!(
+        row.selectors,
+        json!([{
+            "record_key": "text:avatar",
+            "record_family": "text",
+            "selector_key": "avatar",
+            "cacheable": true,
+        }])
+    );
+    assert_eq!(
+        row.entries,
+        json!([{
+            "record_key": "text:avatar",
+            "record_family": "text",
+            "selector_key": "avatar",
+            "status": "success",
+            "value": "https://euc.li/taytems.eth",
+        }])
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM raw_logs")
+            .fetch_one(database.pool())
+            .await?,
+        0
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn hydrate_text_values_fills_selectorized_ensv1_public_resolver_cache() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let resource_id = Uuid::from_u128(0x9917);
+    let resolver_contract_instance_id = Uuid::from_u128(0x9918);
+    let resolver_address = "0x4976fb03C32e5B8cfe2b6cCB31c09Ba78EBaBa41";
+
+    let registry_manifest_id = insert_manifest_version(
+        database.pool(),
+        SOURCE_FAMILY_ENS_V1_REGISTRY_L1,
+        "manifests/ens/ens_v1_registry_l1/v3.toml",
+    )
+    .await?;
+    let resolver_manifest_id = insert_manifest_version(
+        database.pool(),
+        SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
+        "manifests/ens/ens_v1_resolver_l1/v1.toml",
+    )
+    .await?;
+    insert_contract_instance(
+        database.pool(),
+        resolver_contract_instance_id,
+        resolver_address,
+        resolver_manifest_id,
+    )
+    .await?;
+    insert_manifest_contract_instance(
+        database.pool(),
+        resolver_manifest_id,
+        "public_resolver_4976fb03",
+        resolver_contract_instance_id,
+        resolver_address,
+    )
+    .await?;
+
+    let mut text_record = record_changed_event(
+        "hydrated-avatar",
+        "ens:taytems.eth",
+        resource_id,
+        "text:avatar",
+        "text",
+        Some("avatar"),
+        1077,
+        0,
+    );
+    text_record.source_family = SOURCE_FAMILY_ENS_V1_RESOLVER_L1.to_owned();
+    text_record.source_manifest_id = Some(resolver_manifest_id);
+
+    seed_resources(database.pool(), &[resource_id]).await?;
+    seed_raw_blocks(
+        database.pool(),
+        &[
+            raw_block("ethereum-mainnet", "0xrec1076", 1076, 1_776_200_076),
+            raw_block("ethereum-mainnet", "0xrec1077", 1077, 1_776_200_077),
+        ],
+    )
+    .await?;
+    seed_events(
+        database.pool(),
+        &[
+            resolver_changed_event(
+                "hydrated-resolver",
+                "ens:taytems.eth",
+                resource_id,
+                resolver_address,
+                registry_manifest_id,
+                1076,
+                0,
+            ),
+            text_record,
+        ],
+    )
+    .await?;
+
+    rebuild_record_inventory_current(database.pool(), Some(&resource_id.to_string())).await?;
+
+    let boundary = record_version_boundary(
+        "ens:taytems.eth",
+        resource_id,
+        None,
+        None,
+        1076,
+        "0xrec1076",
+        1_776_200_076,
+        "ethereum-mainnet",
+    );
+    let row = load_record_inventory_current(database.pool(), resource_id, &boundary)
+        .await?
+        .context("record_inventory_current row before hydration must exist")?;
+    assert_eq!(
+        row.entries,
+        json!([{
+            "record_key": "text:avatar",
+            "record_family": "text",
+            "selector_key": "avatar",
+            "status": "unsupported",
+            "unsupported_reason": CACHE_UNSUPPORTED_REASON_VALUE_NOT_RETAINED,
+        }])
+    );
+
+    let summary = hydration::tests_support::hydrate_with_values(
+        database.pool(),
+        Some(&resource_id.to_string()),
+        &[(
+            resolver_address,
+            "taytems.eth",
+            "avatar",
+            "https://euc.li/taytems.eth",
+        )],
+    )
+    .await?;
+    assert_eq!(
+        summary,
+        RecordInventoryTextHydrationSummary {
+            candidate_row_count: 1,
+            candidate_entry_count: 1,
+            hydrated_entry_count: 1,
+            not_found_entry_count: 0,
+            skipped_entry_count: 0,
+            failed_entry_count: 0,
+            updated_row_count: 1,
+        }
+    );
+
+    let hydrated_row = load_record_inventory_current(database.pool(), resource_id, &boundary)
+        .await?
+        .context("record_inventory_current row after hydration must exist")?;
+    assert_eq!(
+        hydrated_row.entries,
+        json!([{
+            "record_key": "text:avatar",
+            "record_family": "text",
+            "selector_key": "avatar",
+            "status": "success",
+            "value": "https://euc.li/taytems.eth",
+        }])
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn rebuild_rejects_multicoin_addr_for_eth_only_legacy_ensv1_resolver() -> Result<()> {
     let database = TestDatabase::new().await?;
     let resource_id = Uuid::from_u128(0x9920);
@@ -3099,6 +3442,32 @@ fn record_changed_event(
             "selector_key": selector_key,
         }),
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_changed_event_with_value(
+    event_identity: &str,
+    logical_name_id: &str,
+    resource_id: Uuid,
+    record_key: &str,
+    record_family: &str,
+    selector_key: Option<&str>,
+    value: Value,
+    block_number: i64,
+    log_index: i64,
+) -> NormalizedEvent {
+    let mut event = record_changed_event(
+        event_identity,
+        logical_name_id,
+        resource_id,
+        record_key,
+        record_family,
+        selector_key,
+        block_number,
+        log_index,
+    );
+    event.after_state["value"] = value;
+    event
 }
 
 fn resolver_changed_event(

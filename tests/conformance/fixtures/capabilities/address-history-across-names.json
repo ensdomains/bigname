@@ -1,6 +1,6 @@
 {
   "capability_group": "address history across names",
-  "conformance_owner": "history.rs::address_history_contract_*",
+  "conformance_owner": "history.rs::address_history_contract_* and apps/api tests::history compact view",
   "fixture_id": "address-history-across-names",
   "request": {
     "method": "GET",
@@ -29,7 +29,7 @@
   ],
   "rollout_gate": [
     "OpenAPI route owner guard",
-    "focused address-history conformance",
+    "focused address-history conformance and compact-view API route tests",
     "replay stability checks",
     "scripts/release-smoke"
   ],

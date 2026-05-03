@@ -73,6 +73,12 @@
                 ),
             },
             OpenApiConformanceCoverage {
+                path: "/v1/addresses/{address}/names/count",
+                scope: OpenApiConformanceScope::HarnessOwner(
+                    "apps/api tests::names_collection address count; full first-party cutover still needs app call-site mapping",
+                ),
+            },
+            OpenApiConformanceCoverage {
                 path: "/v1/coverage/{namespace}/{name}",
                 scope: OpenApiConformanceScope::HarnessOwner(
                     "exact_name.rs::coverage_contract_*",
@@ -99,25 +105,37 @@
             OpenApiConformanceCoverage {
                 path: "/v1/history/addresses/{address}",
                 scope: OpenApiConformanceScope::HarnessOwner(
-                    "history.rs::address_history_contract_*",
+                    "history.rs::address_history_contract_* and apps/api tests::history compact view; full first-party cutover still needs app call-site mapping",
                 ),
             },
             OpenApiConformanceCoverage {
                 path: "/v1/history/names/{namespace}/{name}",
                 scope: OpenApiConformanceScope::HarnessOwner(
-                    "history.rs::name_history_contract_*",
+                    "history.rs::name_history_contract_* and apps/api tests::history compact view; full first-party cutover still needs app call-site mapping",
                 ),
             },
             OpenApiConformanceCoverage {
                 path: "/v1/history/resources/{resource_id}",
                 scope: OpenApiConformanceScope::HarnessOwner(
-                    "history.rs::resource_history_contract_*",
+                    "history.rs::resource_history_contract_* and apps/api tests::history compact view; full first-party cutover still needs app call-site mapping",
+                ),
+            },
+            OpenApiConformanceCoverage {
+                path: "/v1/events",
+                scope: OpenApiConformanceScope::HarnessOwner(
+                    "apps/api tests::events; full first-party cutover still needs app call-site mapping",
                 ),
             },
             OpenApiConformanceCoverage {
                 path: "/v1/manifests/{namespace}",
                 scope: OpenApiConformanceScope::HarnessOwner(
                     "collections.rs::namespace_manifests_contract_*",
+                ),
+            },
+            OpenApiConformanceCoverage {
+                path: "/v1/names",
+                scope: OpenApiConformanceScope::HarnessOwner(
+                    "apps/api tests::names_collection; full first-party cutover still needs app call-site mapping",
                 ),
             },
             OpenApiConformanceCoverage {
@@ -129,7 +147,19 @@
             OpenApiConformanceCoverage {
                 path: "/v1/names/{namespace}/{name}/children",
                 scope: OpenApiConformanceScope::HarnessOwner(
-                    "collections.rs::name_children_contract_*",
+                    "collections.rs::name_children_contract_* and apps/api tests::collections child compact default; full first-party cutover still needs app call-site mapping",
+                ),
+            },
+            OpenApiConformanceCoverage {
+                path: "/v1/names/{namespace}/{name}/records",
+                scope: OpenApiConformanceScope::HarnessOwner(
+                    "apps/api tests::records; full first-party cutover still needs app call-site mapping",
+                ),
+            },
+            OpenApiConformanceCoverage {
+                path: "/v1/names/{namespace}/{name}/roles",
+                scope: OpenApiConformanceScope::HarnessOwner(
+                    "apps/api tests::roles name roles; full first-party cutover still needs app call-site mapping",
                 ),
             },
             OpenApiConformanceCoverage {
@@ -163,9 +193,27 @@
                 ),
             },
             OpenApiConformanceCoverage {
+                path: "/v1/resolvers/{chain_id}/{resolver_address}/overview",
+                scope: OpenApiConformanceScope::HarnessOwner(
+                    "apps/api tests::resolvers; full first-party cutover still needs app call-site mapping",
+                ),
+            },
+            OpenApiConformanceCoverage {
+                path: "/v1/resources/lookup",
+                scope: OpenApiConformanceScope::HarnessOwner(
+                    "apps/api tests::roles resource lookup; full first-party cutover still needs app call-site mapping",
+                ),
+            },
+            OpenApiConformanceCoverage {
                 path: "/v1/resources/{resource_id}/permissions",
                 scope: OpenApiConformanceScope::HarnessOwner(
                     "resolution_and_permissions.rs::resource_permissions_contract_*",
+                ),
+            },
+            OpenApiConformanceCoverage {
+                path: "/v1/roles",
+                scope: OpenApiConformanceScope::HarnessOwner(
+                    "apps/api tests::roles; full first-party cutover still needs app call-site mapping",
                 ),
             },
         ];

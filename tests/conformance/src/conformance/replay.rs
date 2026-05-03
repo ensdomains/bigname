@@ -2097,26 +2097,39 @@
                 payload.pointer("/data/resolver_address"),
                 Some(&json!(corpus.winning_resolver_address))
             );
-            assert_eq!(
-                payload.pointer("/declared_state/bindings/status"),
-                Some(&json!("supported"))
-            );
-            assert_eq!(
-                payload.pointer("/declared_state/bindings/count"),
-                Some(&json!(1))
-            );
-            assert_eq!(
-                payload.pointer("/declared_state/bindings/items/0/logical_name_id"),
-                Some(&json!(corpus.logical_name_id))
-            );
+            for section in [
+                "bindings",
+                "aliases",
+                "permissions",
+                "role_holders",
+                "event_summary",
+            ] {
+                assert_eq!(
+                    payload.pointer(&format!("/declared_state/{section}/status")),
+                    Some(&json!("unsupported")),
+                    "supported profile-gated full resolver rebuild section {section}"
+                );
+                assert_eq!(
+                    payload.pointer(&format!(
+                        "/declared_state/{section}/unsupported_reason"
+                    )),
+                    Some(&json!("resolver_binding_enumeration_not_projected")),
+                    "supported profile-gated full resolver rebuild section {section}"
+                );
+            }
             assert_eq!(
                 payload.pointer("/coverage/unsupported_reason"),
-                Some(&Value::Null)
+                Some(&json!("resolver_binding_enumeration_not_projected"))
             );
             assert_json_not_contains(
                 payload,
                 "resolver_family_pending",
                 "supported profile-gated resolver overview must not expose pending sections",
+            );
+            assert_json_not_contains(
+                payload,
+                "resolver_family_unsupported",
+                "supported profile-gated resolver overview must not expose unsupported-profile sections",
             );
         }
 
