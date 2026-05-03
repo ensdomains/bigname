@@ -5,7 +5,11 @@
 		X-Content-Type-Options nosniff
 		Referrer-Policy no-referrer
 		X-Frame-Options DENY
+		Strict-Transport-Security "max-age=31536000"
 	}
+
+	@docs path /docs /docs/ /openapi.json
+	header @docs Cache-Control "public, max-age=300"
 
 	reverse_proxy {$BIGNAME_PUBLIC_UPSTREAM}
 }

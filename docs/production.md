@@ -85,7 +85,10 @@ For hostname/TLS deployments, replace `127.0.0.1` with the public hostname and
 - Keep PostgreSQL and MinIO unexposed at the host/network edge.
 - Keep JSON-RPC providers reachable only from the containers that need them.
 - Use host firewall or cloud security groups to allow public `80/tcp` and
-  `443/tcp`; do not publish database, object-store, or execution-node admin
-  ports.
+  `443/tcp`. Allow `443/udp` when HTTP/3 should be available. Do not publish
+  database, object-store, or execution-node admin ports.
 - Caddy data lives in the `caddy-data` Docker volume. Preserve it across
   container recreates so certificate state survives restarts.
+- Caddy sends HSTS and advertises HTTP/3 when the UDP port is published. The
+  docs page and OpenAPI JSON are cacheable for a short window; the `v1` API
+  responses are not edge-cached by this configuration.
