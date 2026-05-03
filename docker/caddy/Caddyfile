@@ -1,0 +1,11 @@
+{$BIGNAME_PUBLIC_SITE_ADDRESS} {
+	encode zstd gzip
+
+	header {
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+		X-Frame-Options DENY
+	}
+
+	reverse_proxy {$BIGNAME_PUBLIC_UPSTREAM}
+}

@@ -35,7 +35,10 @@ docker compose --env-file .env.server -f docker-compose.server.yml up -d
 
 The server compose file starts PostgreSQL, MinIO, a one-shot migration service,
 the API, the indexer, and the worker. The API listens on the host port from
-`BIGNAME_API_PORT` and answers readiness at `/healthz`.
+`BIGNAME_API_PORT` and answers readiness at `/healthz`. Set
+`BIGNAME_API_HOST` to control the host bind address; production public-edge
+deployments normally set it to `127.0.0.1` and expose traffic through the Caddy
+override documented in `docs/production.md`.
 
 The indexer loads exactly one manifest root. Use `/app/manifests` for the
 mainnet profile or `/app/manifests-sepolia-dev` for the ENSv2 Sepolia dev

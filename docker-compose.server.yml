@@ -94,7 +94,7 @@ services:
     <<: *bigname-service
     command: api
     ports:
-      - "${BIGNAME_API_PORT:-3000}:3000"
+      - "${BIGNAME_API_HOST:-0.0.0.0}:${BIGNAME_API_PORT:-3000}:3000"
     depends_on:
       postgres:
         condition: service_healthy
