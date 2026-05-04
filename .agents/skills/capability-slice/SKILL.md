@@ -12,7 +12,7 @@ Start with `docs/consumer-capabilities.md`. Then read only the contract docs nee
 - `docs/api-v1.md` for routes and query semantics
 - `docs/projections.md` for declared-state reads
 - `docs/execution.md` for verified behavior
-- `docs/development-plan.md` for milestone fit
+- `docs/internal/development-plan.md` for milestone fit
 
 ## Scope one capability at a time
 

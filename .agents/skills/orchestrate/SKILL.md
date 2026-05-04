@@ -18,7 +18,7 @@ metadata:
 
 See `AGENTS.md` for Guardrails, Boundaries, and High Conflict. Apply them on every delegation.
 
-Split work along `docs/workstreams.md` boundaries when possible.
+Split work along `docs/internal/workstreams.md` boundaries when possible.
 
 ## Modes
 

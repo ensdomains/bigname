@@ -18,7 +18,7 @@ Use this skill to decide whether a task is a frozen-interface change or an imple
 - Projection families or collection semantics: `docs/projections.md`
 - Verified execution or explain traces: `docs/execution.md`
 - Consumer replacement or parity claims: `docs/consumer-capabilities.md`
-- Delivery order or workstream ownership: `docs/development-plan.md`, `docs/workstreams.md`
+- Delivery order or workstream ownership: `docs/internal/development-plan.md`, `docs/internal/workstreams.md`
 - Upstream anchors for ENSv1, ENSv2, Basenames: `AGENTS.md` § Upstream anchors, `.refs/MANIFEST.toml`, `docs/upstream.md`
 
 ## Classify the change

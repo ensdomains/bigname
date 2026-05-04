@@ -16,7 +16,7 @@ Apply `$orchestrate` with the fan-out extras below.
 1. Form a short top-level plan before delegating.
 2. Keep the immediate blocking task local whenever the next step depends on it.
 3. Run `$change-gate` first if the task may touch shared semantics, manifests, migrations, `crates/domain`, or parity claims.
-4. Split work along `docs/workstreams.md` boundaries.
+4. Split work along `docs/internal/workstreams.md` boundaries.
 5. Log each dispatched slice via the orchestrate slice-log helper (`./.agents/skills/orchestrate/scripts/slice-log '{…}'`) so continuation loops see in-flight work.
 
 See `AGENTS.md` High Conflict for surfaces that must not be parallelized casually, plus any unresolved shared-interface change.

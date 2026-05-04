@@ -12,7 +12,7 @@ Start with:
 - `docs/storage.md`
 - `docs/projections.md`
 - `docs/execution.md`
-- `docs/workstreams.md`
+- `docs/internal/workstreams.md`
 
 ## What to verify
 

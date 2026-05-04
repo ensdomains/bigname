@@ -1,12 +1,8 @@
 # Development Plan
 
-Status: Phase 0 baseline
+Internal reference. This is the phased implementation plan that drove bigname's bootstrap and first vertical slices. It is preserved as historical record and forward-looking structure for work that hasn't shipped yet. The shipped behavior of the system is described in the top-level `docs/` files; this plan is not the source of truth for what works today.
 
-Normative scope: milestone goals, phase deliverables, exit criteria, and the companion docs referenced here are normative for repository bootstrap and the first vertical slices.
-
-This document translates the revised architecture into an implementation sequence.
-
-It keeps early work ordered around the decisions that are hardest to change later:
+It orders work around the decisions that are hardest to change later:
 
 - public semantics
 - surface / resource identity
@@ -15,10 +11,7 @@ It keeps early work ordered around the decisions that are hardest to change late
 - replay model
 - verified execution model
 
-The plan assumes a modular monolith for the first production version.
-Parallel execution and ownership boundaries live in [Parallel Workstreams](./workstreams.md).
-
-Implementation detail should stay subordinate to one rule: build the native `v1` contract we actually want, not a disguised legacy indexer.
+The plan assumes a modular monolith for the first production version. Parallel execution and ownership boundaries live in [`workstreams.md`](./workstreams.md).
 
 ---
 
@@ -57,7 +50,7 @@ The system can serve verified resolution and primary-name answers with full prov
 
 The first-party apps can switch to the native `v1` contract without relying on the existing ENSv1/v2 indexer API shape.
 
-Implementation should use the workstream overlay in `docs/workstreams.md` once the Phase 0 docs and ADRs are frozen.
+Implementation should use the workstream overlay in `docs/internal/workstreams.md` once the Phase 0 docs and ADRs are frozen.
 
 ---
 
@@ -121,7 +114,7 @@ Create the implementation structure without committing to too much behavior yet.
 - the repo can boot an API process, an indexer process, and a worker process
 - local development can create the database schema and run tests
 - docs and ADR folders are wired into the repo structure
-- repo ownership matches `docs/workstreams.md`
+- repo ownership matches `docs/internal/workstreams.md`
 
 ---
 
@@ -631,6 +624,6 @@ These docs should exist and be treated as the interface baseline before reposito
 - `docs/projections.md` for collection semantics and indexes
 - `docs/execution.md` for verified resolution and primary-name verification
 - `docs/consumer-capabilities.md` for the checked-in consumer capability baseline
-- `docs/workstreams.md` for parallel delivery boundaries and ownership
+- `docs/internal/workstreams.md` for parallel delivery boundaries and ownership
 - `docs/adrs/0001-stack.md` for the implementation stack decision
 - `docs/adrs/0002-surface-resource-identity.md` for the surface / resource split

@@ -15,7 +15,7 @@ Workflow:
 - Consume the slice envelope(s) (see `.agents/skills/orchestrate/references/slice-envelope.md`) as the input contract. Every task you produce must reference its originating envelope's `slice_id`, inherit a subset of that envelope's `owned_paths`, and respect its `change_class`.
 - If the request may affect semantics, shared IDs or enums, coverage meaning, manifest schema, workstream ownership, or consumer-replacement meaning, apply `$change-gate` thinking before proposing implementation slices.
 - If the envelope declared `upstream_refs` (ENSv1 / ENSv2 / Basenames source anchors), propagate the relevant entries into each dependent task's reading list alongside our docs. Workers inherit that as their source-of-truth set per `AGENTS.md` § Upstream anchors; citations are required in any resulting docs, manifests, or code comments.
-- Use `docs/workstreams.md` to split work by ownership boundaries.
+- Use `docs/internal/workstreams.md` to split work by ownership boundaries.
 - Emit tasks grouped into `concurrent_wave` numbers. Tasks within a wave run in parallel; later waves wait for earlier waves to complete. Aim to saturate `max_threads=6` across the full in-flight set without manufacturing splits whose coordination cost exceeds the parallel gain.
 - Bundle code + tests + wiring into a single task. Split into separate tasks only along ownership boundaries (different directories, different surfaces) or when two genuinely independent capabilities can progress simultaneously. One task doing three layers of the same capability is the target; three tasks doing three layers of the same capability is the failure mode.
 
