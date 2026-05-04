@@ -7,7 +7,7 @@ metadata:
 
 # Manifest Rollout
 
-Start with `docs/manifests.md`. Read `docs/storage.md`, `docs/execution.md`, and `docs/workstreams.md` only if the task reaches storage ownership, invalidation, or parallel-delivery questions.
+Start with `docs/manifests.md`. Read `docs/storage.md`, `docs/execution.md`, and `docs/internal/workstreams.md` only if the task reaches storage ownership, invalidation, or parallel-delivery questions.
 
 ## Required manifest shape
 

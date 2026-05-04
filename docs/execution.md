@@ -23,7 +23,7 @@ Unsupported record families surface explicit `status=unsupported`; they never si
 
 For ENS on Ethereum Mainnet, the entrypoint is `ens_execution` with contract role `universal_resolver` at the official ENS Universal Resolver proxy `0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe`.[^ens-docs-univ] The pinned ENSv1 deployment artifact is the implementation/ABI anchor behind that source family rather than the route-facing proxy.[^v1-ur-deploy][^v1-ursol-l8]
 
-For Basenames on the shipped mainnet profile, the entrypoint is `basenames_execution` with contract role `l1_resolver` at `0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31`.[^bn-readme-l22][^bn-l1resolver-l13] `basenames_execution` is currently `shadow`; public Basenames verified reads return `unsupported`. The same L1 Resolver address is also referenced by `basenames_l1_compat`, but ownership stays split: `basenames_l1_compat` owns transport attribution; `basenames_execution` owns verified-resolution entrypoint selection. Declared exact-name, address-name, and children reads remain on the Base registry/registrar/resolver families. `basenames_base_primary` is claim intake only.[^bn-readme-l70][^bn-revreg-l12][^bn-revreg-l150]
+For Basenames on the shipped mainnet profile, the entrypoint is active `basenames_execution` v2 with contract role `l1_resolver` at `0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31` for the exact-surface transport-assisted direct-path class only.[^bn-readme-l22][^bn-l1resolver-l13] The same L1 Resolver address is also referenced by `basenames_l1_compat`, but ownership stays split: `basenames_l1_compat` owns transport attribution; `basenames_execution` owns verified-resolution entrypoint selection. Declared exact-name, address-name, and children reads remain on the Base registry/registrar/resolver families. `basenames_base_primary` is claim intake only.[^bn-readme-l70][^bn-revreg-l12][^bn-revreg-l150]
 
 ### On-demand execution
 
@@ -162,7 +162,7 @@ All three flow through the same persisted execution trace and explain contract: 
 
 ENS requests outside these classes — including non-alias ancestor-selected paths, linked-subregistry ancestor-selected paths, any transport-assisted path, and any request whose persisted execution used CCIP-Read — return selector-local `status=unsupported`. The explain route does not synthesize public traces for them.
 
-Basenames verified resolution on the shipped mainnet profile uses `basenames_execution` at the L1 Resolver. While that source family is `shadow`, public Basenames verified reads return `unsupported`. The first promotion target is the exact-surface transport-assisted direct-path class:[^bn-readme-l22][^bn-readme-l69][^bn-readme-l70][^bn-l1resolver-l13]
+Basenames verified resolution on the shipped mainnet profile uses active `basenames_execution` v2 at the L1 Resolver for the exact-surface transport-assisted direct-path class:[^bn-readme-l22][^bn-readme-l69][^bn-readme-l70][^bn-l1resolver-l13]
 
 - `resolver_path[0].logical_name_id` equals top-level `data.logical_name_id`
 - `wildcard.source=null`, `matched_labels=[]`

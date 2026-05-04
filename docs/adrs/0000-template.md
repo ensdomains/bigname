@@ -29,7 +29,7 @@ What changes as a result — both positive and negative. Which docs become load-
 
 ## Rollout
 
-How the rule ships: is it doc-first, code-concurrent, or retroactive? Which workstreams own the code, fixture, and manifest updates? Reference `docs/workstreams.md` where relevant.
+How the rule ships: is it doc-first, code-concurrent, or retroactive? Which workstreams own the code, fixture, and manifest updates? Reference `docs/internal/workstreams.md` where relevant.
 
 ## Alternatives considered
 

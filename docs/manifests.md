@@ -89,9 +89,9 @@ Capability ownership attaches to the declaring `source_family`. It is never impl
 
 ### ENS mainnet
 
-`ens_execution` owns verified resolution at the ENS Universal Resolver proxy `0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe` with `verified_resolution = "shadow"`.[^ens-docs-univ][^v1-ur-deploy][^v1-ursol-l8] The pinned `.refs/` artifact is the implementation/ABI anchor; the route-facing entry is the proxy address. Shadow execution traces and cache ownership do not enable public verified-resolution reads.
+`ens_execution` owns verified resolution at the ENS Universal Resolver proxy `0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe` with `verified_resolution = "shadow"`.[^ens-docs-univ][^v1-ur-deploy][^v1-ursol-l8] The pinned `.refs/` artifact is the implementation/ABI anchor; the route-facing entry is the proxy address. The shadow flag records manifest ownership for the execution substrate; public ENS verified-resolution support is gated by the route-level support classes in `docs/api-v1-routes.md` and `docs/execution.md`, not by widening this manifest flag.
 
-The ENS primary-name route does not introduce a second manifest capability. `ens_execution` remains the execution owner for exact-tuple persisted `verified_primary_name` readback through the existing `verified_resolution = "shadow"` flag.
+The ENS primary-name route does not introduce a second manifest capability. `ens_execution` remains the execution owner for exact-tuple persisted `verified_primary_name` readback under the same execution-owner manifest, without turning `verified_resolution = "shadow"` into a route-level primary-name support flag.
 
 `ens_v1_reverse_l1` owns declared reverse-claim intake at the Mainnet `addr.reverse` Reverse Registrar `0xa58E81fe9b61B5c3fE2AFD33CF304c454AbFc7Cb`.[^v1-revreg-deploy][^v1-revreg-l15][^v1-revreg-l19] No dedicated `claimed_primary_name` flag is needed for the exact-tuple persisted-readback contract.
 

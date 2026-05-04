@@ -302,7 +302,7 @@ Public verified support is narrower than the topology model. ENS supports:
 
 Other ENS classes (non-alias ancestor-selected, linked-subregistry ancestor-selected, transport-assisted, CCIP-participating) return selector-local `unsupported`.
 
-Basenames: while `basenames_execution` is `shadow`, public Basenames verified reads return `unsupported`. The first promotion target is exact-surface transport-assisted direct path through the L1 Resolver.[^bn-readme-l69][^bn-readme-l70][^bn-l1resolver-l154][^bn-l1resolver-l173][^bn-l1resolver-l191]
+Basenames supports the exact-surface transport-assisted direct path through active `basenames_execution` v2 at the L1 Resolver. Other Basenames verified path classes return selector-local `unsupported`.[^bn-readme-l69][^bn-readme-l70][^bn-l1resolver-l154][^bn-l1resolver-l173][^bn-l1resolver-l191]
 
 Verified answers persist an `ExecutionTrace`. `ExplainResolution` shows resolver selection, wildcard traversal, alias rewriting, record version boundary, CCIP steps, and the source event or execution result that last changed the answer.
 
@@ -404,7 +404,7 @@ Every response carries `coverage.status`, `coverage.exhaustiveness`, `coverage.s
 Default verified entrypoints:
 
 - ENS: `ens_execution` at the official Universal Resolver proxy `0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe`.[^ens-docs-univ][^v1-aur-l90][^v1-aur-l106]
-- Basenames: `basenames_execution` at `0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31`. While shadow, public Basenames verified reads stay `unsupported`.[^bn-readme-l22][^bn-l1resolver-l154][^bn-l1resolver-l173][^bn-l1resolver-l191]
+- Basenames: active `basenames_execution` v2 at `0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31` supports only the exact-surface transport-assisted direct path; other Basenames verified path classes stay `unsupported`.[^bn-readme-l22][^bn-l1resolver-l154][^bn-l1resolver-l173][^bn-l1resolver-l191]
 
 The execution engine supports onchain calls, wildcard resolution, alias-aware execution, nested CCIP-Read, batch/multicall, proof and verification persistence.
 

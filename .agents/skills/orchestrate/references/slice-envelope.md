@@ -5,7 +5,7 @@ Canonical schema for communicating about a slice across research, design, review
 ## Fields
 
 - `slice_id` — stable free-form identifier; used in the slice log. Must be unique per live slice.
-- `current_phase` — phase or milestone from `docs/development-plan.md` the slice belongs to.
+- `current_phase` — phase or milestone from `docs/internal/development-plan.md` the slice belongs to.
 - `next_slice` — one-sentence statement of what this slice accomplishes end-to-end.
 - `why_now` — why this slice unblocks the most useful next work.
 - `owned_paths` — approximate work zone (directories or files the implementation expects to write to). Best-effort disjoint from other in-flight slices; minor overlap is tolerated because the orchestrator reconciles and runs `verification_reviewer` post-wave when zones actually collide.
@@ -16,7 +16,7 @@ Canonical schema for communicating about a slice across research, design, review
 - `success_signal` — concrete outcome that marks the slice meaningfully complete (test passes, route returns, projection rebuilds).
 - `change_class` — `semantic`, `shared-interface`, or `implementation-only`. Produced by `$change-gate`.
 - `docs_to_update` — exact docs that must change first or alongside code. Produced by `$change-gate`. May overlap with `docs_to_touch`; treat `docs_to_update` as the stricter set.
-- `write_owner` — owning workstream or directory from `docs/workstreams.md`.
+- `write_owner` — owning workstream or directory from `docs/internal/workstreams.md`.
 - `upstream_refs` — list of `.refs/<key>/<path>` entries the slice's work must read before or during implementation. Populated by `next_slice_researcher` when the slice depends on ENSv1, ENSv2, or Basenames behavior; propagated into worker task reading lists by `task_designer`. May be empty for slices that do not touch upstream semantics. See `AGENTS.md` § Upstream anchors and `.refs/MANIFEST.toml`.
 
 ## Roles
