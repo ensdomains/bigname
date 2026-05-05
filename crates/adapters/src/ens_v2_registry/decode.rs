@@ -1,6 +1,7 @@
 use alloy_sol_types::sol_data::{Address as SolAddress, String as SolString, Uint};
 use anyhow::{Context, Result};
 
+use crate::adapter_manifest::ActiveManifestEventTopic0s;
 use crate::evm_abi::{
     abi_decode_params, address_hex, normalize_hex_32, topic_address_hex, u64_topic,
 };
@@ -8,18 +9,18 @@ use crate::evm_abi::{
 use super::{
     constants::*,
     types::{RegistryObservation, RegistryRawLogRow},
-    util::keccak_signature_hex,
 };
 
 pub(super) fn build_registry_observation(
     raw_log: &RegistryRawLogRow,
+    event_topics: &ActiveManifestEventTopic0s,
 ) -> Result<Option<RegistryObservation>> {
     let Some(topic0) = raw_log.topics.first() else {
         return Ok(None);
     };
     let reference = raw_log.reference();
 
-    if topic0.eq_ignore_ascii_case(&keccak_signature_hex(LABEL_REGISTERED_SIGNATURE)) {
+    if event_topics.matches(ABI_EVENT_LABEL_REGISTERED, topic0)? {
         let token_id = normalize_hex_32(
             raw_log
                 .topics
@@ -53,7 +54,7 @@ pub(super) fn build_registry_observation(
         }));
     }
 
-    if topic0.eq_ignore_ascii_case(&keccak_signature_hex(LABEL_RESERVED_SIGNATURE)) {
+    if event_topics.matches(ABI_EVENT_LABEL_RESERVED, topic0)? {
         let token_id = normalize_hex_32(
             raw_log
                 .topics
@@ -86,7 +87,7 @@ pub(super) fn build_registry_observation(
         }));
     }
 
-    if topic0.eq_ignore_ascii_case(&keccak_signature_hex(LABEL_UNREGISTERED_SIGNATURE)) {
+    if event_topics.matches(ABI_EVENT_LABEL_UNREGISTERED, topic0)? {
         let token_id = normalize_hex_32(
             raw_log
                 .topics
@@ -106,7 +107,7 @@ pub(super) fn build_registry_observation(
         }));
     }
 
-    if topic0.eq_ignore_ascii_case(&keccak_signature_hex(EXPIRY_UPDATED_SIGNATURE)) {
+    if event_topics.matches(ABI_EVENT_EXPIRY_UPDATED, topic0)? {
         let token_id = normalize_hex_32(
             raw_log
                 .topics
@@ -133,7 +134,7 @@ pub(super) fn build_registry_observation(
         }));
     }
 
-    if topic0.eq_ignore_ascii_case(&keccak_signature_hex(SUBREGISTRY_UPDATED_SIGNATURE)) {
+    if event_topics.matches(ABI_EVENT_SUBREGISTRY_UPDATED, topic0)? {
         let token_id = normalize_hex_32(
             raw_log
                 .topics
@@ -160,7 +161,7 @@ pub(super) fn build_registry_observation(
         }));
     }
 
-    if topic0.eq_ignore_ascii_case(&keccak_signature_hex(RESOLVER_UPDATED_SIGNATURE)) {
+    if event_topics.matches(ABI_EVENT_RESOLVER_UPDATED, topic0)? {
         let token_id = normalize_hex_32(
             raw_log
                 .topics
@@ -187,7 +188,7 @@ pub(super) fn build_registry_observation(
         }));
     }
 
-    if topic0.eq_ignore_ascii_case(&keccak_signature_hex(TOKEN_RESOURCE_SIGNATURE)) {
+    if event_topics.matches(ABI_EVENT_TOKEN_RESOURCE, topic0)? {
         let token_id = normalize_hex_32(
             raw_log
                 .topics
@@ -207,7 +208,7 @@ pub(super) fn build_registry_observation(
         }));
     }
 
-    if topic0.eq_ignore_ascii_case(&keccak_signature_hex(TOKEN_REGENERATED_SIGNATURE)) {
+    if event_topics.matches(ABI_EVENT_TOKEN_REGENERATED, topic0)? {
         let old_token_id = normalize_hex_32(
             raw_log
                 .topics
@@ -227,7 +228,7 @@ pub(super) fn build_registry_observation(
         }));
     }
 
-    if topic0.eq_ignore_ascii_case(&keccak_signature_hex(PARENT_UPDATED_SIGNATURE)) {
+    if event_topics.matches(ABI_EVENT_PARENT_UPDATED, topic0)? {
         let parent = topic_address_hex(
             raw_log
                 .topics

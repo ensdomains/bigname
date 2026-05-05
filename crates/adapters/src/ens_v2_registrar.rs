@@ -78,14 +78,13 @@ async fn sync_ens_v2_registrar_with_scope(
         .iter()
         .map(|emitter| emitter.source_manifest_id)
         .collect::<Vec<_>>();
-    let event_topic0s = load_required_active_manifest_event_topic0s(
+    let event_topics = load_required_active_manifest_event_topic0s(
         pool,
         &manifest_ids,
         &[ABI_EVENT_NAME_REGISTERED, ABI_EVENT_NAME_RENEWED],
         "ENSv2 registrar",
     )
     .await?;
-    let event_topics = decoding::RegistrarEventTopics::from_topic0s(&event_topic0s)?;
 
     let raw_logs = load_registrar_raw_logs(
         pool,

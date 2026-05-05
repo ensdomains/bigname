@@ -21,6 +21,7 @@ mod normalized;
 mod types;
 mod util;
 
+use crate::adapter_manifest::load_required_active_manifest_event_topic0s;
 use crate::normalized_event_support::count_events_by_kind;
 use constants::*;
 use decode::build_registry_observation;
@@ -37,19 +38,19 @@ use types::*;
 use util::normalize_address;
 
 #[cfg(test)]
+use crate::evm_abi::keccak_signature_hex;
+#[cfg(test)]
 use bigname_manifests::WatchedContractSource;
 #[cfg(test)]
 use bigname_storage::{CanonicalityState, upsert_surface_bindings};
 #[cfg(test)]
 use emitters::{preferred_emitters_by_scope, source_rank};
 #[cfg(test)]
-use serde_json::Value;
+use serde_json::{Value, json};
 #[cfg(test)]
 use sqlx::types::time::OffsetDateTime;
 #[cfg(test)]
-use util::{
-    deterministic_uuid, event_position_timestamp, hex_string, keccak_signature_hex, keccak256_bytes,
-};
+use util::{deterministic_uuid, event_position_timestamp, hex_string, keccak256_bytes};
 
 pub struct EnsV2RegistryResourceSurfaceSyncSummary {
     pub scanned_log_count: usize,
@@ -142,6 +143,17 @@ async fn sync_ens_v2_registry_resource_surface_with_scope(
     if active_emitters.is_empty() {
         return Ok(EnsV2RegistryResourceSurfaceSyncSummary::empty(0));
     }
+    let manifest_ids = active_emitters
+        .iter()
+        .map(|emitter| emitter.source_manifest_id)
+        .collect::<Vec<_>>();
+    let event_topics = load_required_active_manifest_event_topic0s(
+        pool,
+        &manifest_ids,
+        &ABI_EVENT_NAMES,
+        "ENSv2 registry",
+    )
+    .await?;
 
     let raw_logs = load_registry_raw_logs(
         pool,
@@ -173,7 +185,7 @@ async fn sync_ens_v2_registry_resource_surface_with_scope(
     let mut graph_events = Vec::<NormalizedEvent>::new();
 
     for raw_log in &raw_logs {
-        let Some(observation) = build_registry_observation(raw_log)? else {
+        let Some(observation) = build_registry_observation(raw_log, &event_topics)? else {
             continue;
         };
         matched_log_count += 1;

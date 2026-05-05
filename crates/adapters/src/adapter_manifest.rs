@@ -14,6 +14,24 @@ pub(crate) struct ActiveManifestMetadata {
     pub(crate) manifest_version: i64,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ActiveManifestEventTopic0s {
+    by_name: HashMap<String, String>,
+}
+
+impl ActiveManifestEventTopic0s {
+    pub(crate) fn topic0(&self, event_name: &str) -> Result<&str> {
+        self.by_name
+            .get(event_name)
+            .map(String::as_str)
+            .with_context(|| format!("missing required active manifest ABI event {event_name}"))
+    }
+
+    pub(crate) fn matches(&self, event_name: &str, topic0: &str) -> Result<bool> {
+        Ok(topic0.eq_ignore_ascii_case(self.topic0(event_name)?))
+    }
+}
+
 pub(crate) fn source_rank(source: WatchedContractSource) -> i32 {
     match source {
         WatchedContractSource::ManifestRoot => 0,
@@ -130,7 +148,7 @@ pub(crate) async fn load_required_active_manifest_event_topic0s(
     manifest_ids: &[i64],
     required_event_names: &[&str],
     context_label: &str,
-) -> Result<HashMap<String, String>> {
+) -> Result<ActiveManifestEventTopic0s> {
     let required_event_names = required_event_names.iter().copied().collect::<HashSet<_>>();
     let mut topic0s_by_name = HashMap::<String, String>::new();
 
@@ -171,7 +189,9 @@ pub(crate) async fn load_required_active_manifest_event_topic0s(
         }
     }
 
-    Ok(topic0s_by_name)
+    Ok(ActiveManifestEventTopic0s {
+        by_name: topic0s_by_name,
+    })
 }
 
 fn decode_active_manifest_metadata(row: sqlx::postgres::PgRow) -> Result<ActiveManifestMetadata> {

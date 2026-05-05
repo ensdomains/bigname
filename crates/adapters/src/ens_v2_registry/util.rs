@@ -5,7 +5,7 @@ use serde_json::Value;
 use sqlx::types::{Uuid, time::OffsetDateTime};
 
 pub(super) use crate::ens_v2_common::{
-    hex_string, keccak_signature_hex, keccak256_bytes, normalize_address, parse_canonicality_state,
+    hex_string, keccak256_bytes, normalize_address, parse_canonicality_state,
 };
 pub(super) use crate::evm_abi::namehash_bytes;
 

@@ -1,7 +1,7 @@
 use alloy_sol_types::sol_data::{Address as SolAddress, FixedBytes, String as SolString, Uint};
-use anyhow::{Context, Result, bail};
-use std::collections::HashMap;
+use anyhow::{Context, Result};
 
+use crate::adapter_manifest::ActiveManifestEventTopic0s;
 pub(super) use crate::ens_v2_common::{hex_string, normalize_address};
 use crate::evm_abi::{
     abi_decode_params, address_hex, hex_string as prefixed_hex_string, normalize_hex_32,
@@ -9,21 +9,6 @@ use crate::evm_abi::{
 };
 
 use super::{ABI_EVENT_NAME_REGISTERED, ABI_EVENT_NAME_RENEWED, raw_logs::RegistrarRawLogRow};
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct RegistrarEventTopics {
-    name_registered: String,
-    name_renewed: String,
-}
-
-impl RegistrarEventTopics {
-    pub(super) fn from_topic0s(topic0s_by_name: &HashMap<String, String>) -> Result<Self> {
-        Ok(Self {
-            name_registered: required_topic0(topic0s_by_name, ABI_EVENT_NAME_REGISTERED)?,
-            name_renewed: required_topic0(topic0s_by_name, ABI_EVENT_NAME_RENEWED)?,
-        })
-    }
-}
 
 pub(super) enum RegistrarObservation {
     NameRegistered {
@@ -51,13 +36,13 @@ pub(super) enum RegistrarObservation {
 
 pub(super) fn build_registrar_observation(
     raw_log: &RegistrarRawLogRow,
-    event_topics: &RegistrarEventTopics,
+    event_topics: &ActiveManifestEventTopic0s,
 ) -> Result<Option<RegistrarObservation>> {
     let Some(topic0) = raw_log.topics.first() else {
         return Ok(None);
     };
 
-    if topic0.eq_ignore_ascii_case(&event_topics.name_registered) {
+    if event_topics.matches(ABI_EVENT_NAME_REGISTERED, topic0)? {
         let token_id = normalize_hex_32(
             raw_log
                 .topics
@@ -90,7 +75,7 @@ pub(super) fn build_registrar_observation(
         }));
     }
 
-    if topic0.eq_ignore_ascii_case(&event_topics.name_renewed) {
+    if event_topics.matches(ABI_EVENT_NAME_RENEWED, topic0)? {
         let token_id = normalize_hex_32(
             raw_log
                 .topics
@@ -118,11 +103,4 @@ pub(super) fn build_registrar_observation(
     }
 
     Ok(None)
-}
-
-fn required_topic0(topic0s_by_name: &HashMap<String, String>, event_name: &str) -> Result<String> {
-    let Some(topic0) = topic0s_by_name.get(event_name) else {
-        bail!("missing required ENSv2 registrar ABI event {event_name} topic0");
-    };
-    Ok(topic0.clone())
 }
