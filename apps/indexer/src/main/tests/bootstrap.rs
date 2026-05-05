@@ -558,7 +558,7 @@ async fn bootstrap_auto_backfill_drains_manifest_started_targets_and_preserves_c
 -> Result<()> {
     let database = TestDatabase::new().await?;
     create_bootstrap_backfill_job_tables(database.pool()).await?;
-    let manifest_root = PathBuf::from("manifests-sepolia-dev");
+    let manifest_root = PathBuf::from("manifests/sepolia");
     let eligible_contract_instance_id = Uuid::from_u128(9_001);
     let unknown_start_contract_instance_id = Uuid::from_u128(9_002);
     let grouped_contract_instance_id = Uuid::from_u128(9_003);
@@ -853,11 +853,11 @@ async fn bootstrap_auto_backfill_drains_manifest_started_targets_and_preserves_c
         idempotency_key,
         source_identity,
     ) = &jobs[0];
-    assert_eq!(deployment_profile, "sepolia-dev");
+    assert_eq!(deployment_profile, "sepolia");
     assert_eq!(chain_id, "ethereum-mainnet");
     assert_eq!((*from_block, *to_block), (42, 43));
-    assert!(idempotency_key.contains("deployment_profile=sepolia-dev"));
-    assert!(idempotency_key.contains("manifest_root=manifests-sepolia-dev"));
+    assert!(idempotency_key.contains("deployment_profile=sepolia"));
+    assert!(idempotency_key.contains("manifest_root=manifests/sepolia"));
     assert!(idempotency_key.contains("chain=ethereum-mainnet"));
     assert!(idempotency_key.contains("from=42:to=43"));
     assert_eq!(
@@ -1122,7 +1122,7 @@ async fn bootstrap_auto_backfill_drains_manifest_started_targets_and_preserves_c
 async fn bootstrap_auto_backfill_scans_ensv1_resolver_events_by_source_family() -> Result<()> {
     let database = TestDatabase::new().await?;
     create_bootstrap_backfill_job_tables(database.pool()).await?;
-    let manifest_root = PathBuf::from("manifests");
+    let manifest_root = PathBuf::from("manifests/mainnet");
     let resolver_a_contract_instance_id = Uuid::from_u128(10_001);
     let resolver_b_contract_instance_id = Uuid::from_u128(10_002);
     let registry_contract_instance_id = Uuid::from_u128(10_003);
@@ -1447,7 +1447,7 @@ async fn bootstrap_auto_backfill_scans_ensv1_resolver_events_by_source_family() 
 async fn bootstrap_auto_backfill_covers_declared_start_to_provider_head() -> Result<()> {
     let database = TestDatabase::new().await?;
     create_bootstrap_backfill_job_tables(database.pool()).await?;
-    let manifest_root = PathBuf::from("manifests");
+    let manifest_root = PathBuf::from("manifests/mainnet");
     let contract_instance_id = Uuid::from_u128(9_500);
     let address = "0x0000000000000000000000000000000000000950";
 
@@ -1745,7 +1745,7 @@ async fn bootstrap_auto_backfill_covers_declared_start_to_provider_head() -> Res
 async fn bootstrap_auto_backfill_partitions_ranges_for_internal_workers() -> Result<()> {
     let database = TestDatabase::new().await?;
     create_bootstrap_backfill_job_tables(database.pool()).await?;
-    let manifest_root = PathBuf::from("manifests");
+    let manifest_root = PathBuf::from("manifests/mainnet");
     let contract_instance_id = Uuid::from_u128(9_600);
     let address = "0x0000000000000000000000000000000000000960";
 

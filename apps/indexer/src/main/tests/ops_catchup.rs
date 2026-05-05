@@ -444,7 +444,7 @@ fn provider_blocks(from: i64, to: i64) -> Vec<ProviderBlock> {
 fn ops_config(chunk_blocks: i64) -> OpsCatchupConfig {
     OpsCatchupConfig {
         deployment_profile: "mainnet".to_owned(),
-        manifests_root: PathBuf::from("manifests"),
+        manifests_root: PathBuf::from("manifests/mainnet"),
         chunk_blocks,
         follow: false,
         follow_iterations: None,

@@ -1,5 +1,9 @@
 use super::*;
 
+mod lineage;
+
+pub(super) use lineage::{build_resource, build_token_lineage, build_token_lineage_from_boundary};
+
 pub(super) fn coalesce_name_surfaces_for_upsert(surfaces: &mut Vec<NameSurface>) {
     let mut seen = HashSet::<String>::new();
     surfaces.retain(|surface| seen.insert(surface.logical_name_id.clone()));
@@ -269,24 +273,12 @@ fn merge_replayed_canonicality(
             }
         }
         CanonicalityState::Canonical | CanonicalityState::Safe | CanonicalityState::Finalized => {
-            if current == CanonicalityState::Orphaned
-                || canonicality_rank(incoming) > canonicality_rank(current)
-            {
+            if current == CanonicalityState::Orphaned || incoming.rank() > current.rank() {
                 incoming
             } else {
                 current
             }
         }
-    }
-}
-
-fn canonicality_rank(state: CanonicalityState) -> u8 {
-    match state {
-        CanonicalityState::Observed => 0,
-        CanonicalityState::Canonical => 1,
-        CanonicalityState::Safe => 2,
-        CanonicalityState::Finalized => 3,
-        CanonicalityState::Orphaned => 4,
     }
 }
 
@@ -347,97 +339,6 @@ pub(super) async fn build_name_surface(
         }),
         canonicality_state: reference.canonicality_state,
     }))
-}
-
-pub(super) async fn build_token_lineage(
-    pool: &PgPool,
-    token_lineage_id: Uuid,
-    chain: &str,
-    reference: &ObservationRef,
-    provenance: serde_json::Value,
-) -> Result<TokenLineage> {
-    if let Some(existing) =
-        load_token_lineage_including_noncanonical(pool, token_lineage_id).await?
-    {
-        return Ok(TokenLineage {
-            token_lineage_id: existing.token_lineage_id,
-            chain_id: existing.chain_id,
-            block_hash: existing.block_hash,
-            block_number: existing.block_number,
-            provenance,
-            canonicality_state: reference.canonicality_state,
-        });
-    }
-
-    Ok(TokenLineage {
-        token_lineage_id,
-        chain_id: chain.to_owned(),
-        block_hash: reference.block_hash.clone(),
-        block_number: reference.block_number,
-        provenance,
-        canonicality_state: reference.canonicality_state,
-    })
-}
-
-pub(super) async fn build_token_lineage_from_boundary(
-    pool: &PgPool,
-    token_lineage_id: Uuid,
-    chain: &str,
-    reference: &BoundaryRef,
-    provenance: serde_json::Value,
-) -> Result<TokenLineage> {
-    if let Some(existing) =
-        load_token_lineage_including_noncanonical(pool, token_lineage_id).await?
-    {
-        return Ok(TokenLineage {
-            token_lineage_id: existing.token_lineage_id,
-            chain_id: existing.chain_id,
-            block_hash: existing.block_hash,
-            block_number: existing.block_number,
-            provenance,
-            canonicality_state: reference.canonicality_state,
-        });
-    }
-
-    Ok(TokenLineage {
-        token_lineage_id,
-        chain_id: chain.to_owned(),
-        block_hash: reference.block_hash.clone(),
-        block_number: reference.block_number,
-        provenance,
-        canonicality_state: reference.canonicality_state,
-    })
-}
-
-pub(super) async fn build_resource(
-    pool: &PgPool,
-    resource_id: Uuid,
-    token_lineage_id: Option<Uuid>,
-    chain: &str,
-    reference: &BoundaryRef,
-    provenance: serde_json::Value,
-) -> Result<Resource> {
-    if let Some(existing) = load_resource_including_noncanonical(pool, resource_id).await? {
-        return Ok(Resource {
-            resource_id: existing.resource_id,
-            token_lineage_id: existing.token_lineage_id.or(token_lineage_id),
-            chain_id: existing.chain_id,
-            block_hash: existing.block_hash,
-            block_number: existing.block_number,
-            provenance,
-            canonicality_state: reference.canonicality_state,
-        });
-    }
-
-    Ok(Resource {
-        resource_id,
-        token_lineage_id,
-        chain_id: chain.to_owned(),
-        block_hash: reference.block_hash.clone(),
-        block_number: reference.block_number,
-        provenance,
-        canonicality_state: reference.canonicality_state,
-    })
 }
 
 pub(super) async fn build_surface_binding(
@@ -599,7 +500,7 @@ fn decode_adapter_surface_binding(row: sqlx::postgres::PgRow) -> Result<SurfaceB
             .try_get("logical_name_id")
             .context("missing logical_name_id")?,
         resource_id: row.try_get("resource_id").context("missing resource_id")?,
-        binding_kind: decode_adapter_surface_binding_kind(
+        binding_kind: SurfaceBindingKind::parse(
             &row.try_get::<String, _>("binding_kind")
                 .context("missing binding_kind")?,
         )?,
@@ -611,34 +512,11 @@ fn decode_adapter_surface_binding(row: sqlx::postgres::PgRow) -> Result<SurfaceB
             .try_get("block_number")
             .context("missing block_number")?,
         provenance: row.try_get("provenance").context("missing provenance")?,
-        canonicality_state: decode_adapter_canonicality_state(
+        canonicality_state: CanonicalityState::parse(
             &row.try_get::<String, _>("canonicality_state")
                 .context("missing canonicality_state")?,
         )?,
     })
-}
-
-fn decode_adapter_surface_binding_kind(value: &str) -> Result<SurfaceBindingKind> {
-    match value {
-        "declared_registry_path" => Ok(SurfaceBindingKind::DeclaredRegistryPath),
-        "linked_subregistry_path" => Ok(SurfaceBindingKind::LinkedSubregistryPath),
-        "resolver_alias_path" => Ok(SurfaceBindingKind::ResolverAliasPath),
-        "observed_wildcard_path" => Ok(SurfaceBindingKind::ObservedWildcardPath),
-        "migration_rebind" => Ok(SurfaceBindingKind::MigrationRebind),
-        "observed_only" => Ok(SurfaceBindingKind::ObservedOnly),
-        _ => bail!("unknown surface binding kind {value}"),
-    }
-}
-
-fn decode_adapter_canonicality_state(value: &str) -> Result<CanonicalityState> {
-    match value {
-        "observed" => Ok(CanonicalityState::Observed),
-        "canonical" => Ok(CanonicalityState::Canonical),
-        "safe" => Ok(CanonicalityState::Safe),
-        "finalized" => Ok(CanonicalityState::Finalized),
-        "orphaned" => Ok(CanonicalityState::Orphaned),
-        _ => bail!("unknown canonicality_state value {value}"),
-    }
 }
 
 #[cfg(test)]

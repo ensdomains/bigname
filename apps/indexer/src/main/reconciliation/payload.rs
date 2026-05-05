@@ -245,20 +245,10 @@ pub(crate) fn preferred_canonicality(
     current: CanonicalityState,
     incoming: CanonicalityState,
 ) -> CanonicalityState {
-    if canonicality_rank(incoming) > canonicality_rank(current) {
+    if incoming.rank() > current.rank() {
         incoming
     } else {
         current
-    }
-}
-
-pub(crate) fn canonicality_rank(state: CanonicalityState) -> u8 {
-    match state {
-        CanonicalityState::Observed => 0,
-        CanonicalityState::Canonical => 1,
-        CanonicalityState::Safe => 2,
-        CanonicalityState::Finalized => 3,
-        CanonicalityState::Orphaned => 4,
     }
 }
 

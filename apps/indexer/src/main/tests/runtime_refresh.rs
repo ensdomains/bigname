@@ -6,7 +6,7 @@ use bigname_manifests::{
 #[tokio::test]
 async fn build_manifest_runtime_state_loads_checked_in_repository_seed() -> Result<()> {
     let database = TestDatabase::new().await?;
-    let manifests_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../manifests");
+    let manifests_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../manifests/mainnet");
     let manifest_repository = load_manifest_repository(&manifests_root)?;
 
     let runtime_state = build_manifest_runtime_state(database.pool(), &manifest_repository).await?;
@@ -112,7 +112,7 @@ async fn build_manifest_runtime_state_loads_checked_in_repository_seed() -> Resu
 #[tokio::test]
 async fn ethereum_only_provider_leaves_active_base_watch_state_idle() -> Result<()> {
     let database = TestDatabase::new().await?;
-    let manifests_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../manifests");
+    let manifests_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../manifests/mainnet");
     let manifest_repository = load_manifest_repository(&manifests_root)?;
     let runtime_state = build_manifest_runtime_state(database.pool(), &manifest_repository).await?;
     let mut intake_tasks =

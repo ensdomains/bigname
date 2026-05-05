@@ -40,9 +40,9 @@ stored watch plan, creates persisted chain checkpoint rows for active watched
 chains, and then polls configured provider sources.
 
 Set `BIGNAME_INDEXER_MANIFESTS_ROOT` to select one runtime profile. The default
-is `manifests` for the shipped mainnet profile. Use `manifests-sepolia-dev` only
-when running the ENSv2 Sepolia dev profile; do not load it beside `manifests` in
-the same local database.
+is `manifests/mainnet` for the shipped mainnet profile. Use `manifests/sepolia`
+only when running the ENSv2 Sepolia profile; do not load it beside
+`manifests/mainnet` in the same local database.
 
 Set `BIGNAME_INDEXER_CHAIN_RPC_URLS` to a comma-delimited list of
 `<chain>=<url>` entries matching active watched chains in the selected profile:

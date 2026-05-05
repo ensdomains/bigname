@@ -258,7 +258,7 @@ fn decode_name_current_row_for_revalidation(row: PgRow) -> Result<NameCurrentRow
         binding_kind: row
             .try_get::<Option<String>, _>("binding_kind")
             .context("missing binding_kind")?
-            .map(|value| parse_surface_binding_kind_for_revalidation(&value))
+            .map(|value| SurfaceBindingKind::parse(&value))
             .transpose()?,
         declared_summary: row
             .try_get("declared_summary")
@@ -278,18 +278,6 @@ fn decode_name_current_row_for_revalidation(row: PgRow) -> Result<NameCurrentRow
             .try_get("last_recomputed_at")
             .context("missing last_recomputed_at")?,
     })
-}
-
-fn parse_surface_binding_kind_for_revalidation(value: &str) -> Result<SurfaceBindingKind> {
-    match value {
-        "declared_registry_path" => Ok(SurfaceBindingKind::DeclaredRegistryPath),
-        "linked_subregistry_path" => Ok(SurfaceBindingKind::LinkedSubregistryPath),
-        "resolver_alias_path" => Ok(SurfaceBindingKind::ResolverAliasPath),
-        "observed_wildcard_path" => Ok(SurfaceBindingKind::ObservedWildcardPath),
-        "migration_rebind" => Ok(SurfaceBindingKind::MigrationRebind),
-        "observed_only" => Ok(SurfaceBindingKind::ObservedOnly),
-        _ => bail!("unknown surface binding kind {value}"),
-    }
 }
 
 async fn load_record_inventory_current_for_revalidation(

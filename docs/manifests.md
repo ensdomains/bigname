@@ -7,16 +7,21 @@ Manifests pin watched contracts, capability ownership, and rollout state per sou
 Manifests are TOML files at:
 
 ```text
-manifests/<namespace>/<source_family>/<version>.toml
+manifests/<profile>/<chain_combo>/<namespace>/<source_family>/<version>.toml
 ```
 
-Alternate deployment profiles use the same schema under a profile-specific root. The first ENSv2 alternate profile is `sepolia-dev`:
+Profiles select a corpus, and chain-combo directories partition the chains inside that corpus:
 
 ```text
-manifests-sepolia-dev/<namespace>/<source_family>/v1.toml
+manifests/mainnet/ethereum/<namespace>/<source_family>/v1.toml
+manifests/mainnet/base/<namespace>/<source_family>/v1.toml
+manifests/sepolia/ethereum/<namespace>/<source_family>/v1.toml
+manifests/sepolia/base/<namespace>/<source_family>/v1.toml
 ```
 
-One runtime selects exactly one manifest root at startup — `manifests/` for the shipped mainnet profile, `manifests-sepolia-dev/` for the ENSv2 Sepolia dev profile. Profile selection is not a manifest schema change. A runtime never loads two roots into the same canonical corpus, watch plan, discovery graph, or projection set.
+One runtime selects exactly one manifest profile root at startup — `manifests/mainnet/` for the shipped mainnet profile, or `manifests/sepolia/` for the ENSv2 Sepolia profile. Profile selection is not a manifest schema change. A runtime never loads two profile roots into the same canonical corpus, watch plan, discovery graph, or projection set.
+
+Within a selected profile root, the first directory component is the chain combo. It must match the leading component of each manifest `chain` ID: `ethereum-mainnet` lives under `ethereum/`, `base-mainnet` under `base/`, and `ethereum-sepolia` under `ethereum/`.
 
 TOML is chosen for deterministic diffs, hand-editing, and straightforward Rust parsing.
 
@@ -48,7 +53,7 @@ Each flag carries a name, a status (`unsupported` | `shadow` | `supported`), and
 
 ### `chain`
 
-`chain` names the authority chain for that manifest within the selected profile. Mainnet manifests use chain IDs like `ethereum-mainnet` and `base-mainnet`. Sepolia and `sepolia-dev` support is additive as a separate manifest root and chain-ID set.
+`chain` names the authority chain for that manifest within the selected profile. Mainnet manifests use chain IDs like `ethereum-mainnet` and `base-mainnet`. Sepolia support is additive as a separate manifest profile root and chain-ID set.
 
 ## Example shape
 
@@ -123,16 +128,16 @@ Resolver discovery from registry `NewResolver(node, resolver)` admits the resolv
 
 `PubkeyChanged` is ignored by the current admission model. `DataResolver`-shaped events are unsupported on admitted generations and `pending` on unknown profiles. The generic `resolver_record` fact is an observation bucket; it does not act as a catch-all for unknown families.
 
-### ENSv2 (`sepolia-dev` profile)
+### ENSv2 (`sepolia` profile)
 
-The `sepolia-dev` profile admits four families under `manifests-sepolia-dev/ens/`:[^v2-deploy-root][^v2-deploy-ethreg][^v2-deploy-ethrc][^v2-deploy-pres]
+The `sepolia` profile admits four ENSv2 Sepolia dev families under `manifests/sepolia/ethereum/ens/`:[^v2-deploy-root][^v2-deploy-ethreg][^v2-deploy-ethrc][^v2-deploy-pres]
 
 - `ens_v2_root_l1` — `RootRegistry` at `0x3a3e15a5d27ff6f05c844313312f2e72096d3ed3`, `start_block = 10462881`. Tokenized, resource-scoped permissioned registry seed for discovery and parent graph state.[^v2-pr-l22][^v2-pr-l28]
 - `ens_v2_registry_l1` — `ETHRegistry` at `0x796fff2e907449be8d5921bcc215b1b76d89d080`, `start_block = 10462895`, plus discovered `UserRegistry` proxy instances. `UserRegistryImpl` at `0xea93aff7375e8176053ab6ab36b57cab53cbf702` is implementation metadata, not a separate owner.[^v2-userreg-l15]
 - `ens_v2_registrar_l1` — `ETHRegistrar` at `0x68586418353b771cf2425ed14a07512aa880c532`, `start_block = 10462909`. Registrar events and commit/renew facts; registered-name resource identity links back to the registry resource.[^v2-ethrc-l49][^v2-ethrc-l173]
 - `ens_v2_resolver_l1` — `PermissionedResolver` resolver state, alias events, record-version events, resolver-scoped EAC permissions. `PermissionedResolverImpl` at `0xe566a1fbaf30ff7c39828fe99f955fc55544cb9c` is the initial implementation artifact.[^v2-pres-l38][^v2-pres-l70]
 
-Exact-name profile promotion is profile-scoped: only `exact_name_profile = "supported"` on `ens_v2_registrar_l1` in the `sepolia-dev` root graduates `.eth` exact-name declared reads, backed by `ETHRegistry` resource/token state and `ETHRegistrar` lifecycle facts.[^v2-iperm-l22][^v2-events-l15][^v2-iethreg-l32] The promotion does not apply to mainnet, other Sepolia profiles, or any runtime that has not selected `sepolia-dev`. Active rollout, raw preimage observations, resolver admission, or backfill completion do not graduate any other capability.
+Exact-name profile promotion is profile-scoped: only `exact_name_profile = "supported"` on `ens_v2_registrar_l1` in the `sepolia` root graduates `.eth` exact-name declared reads, backed by `ETHRegistry` resource/token state and `ETHRegistrar` lifecycle facts.[^v2-iperm-l22][^v2-events-l15][^v2-iethreg-l32] The promotion does not apply to mainnet, other Sepolia profiles, or any runtime that has not selected `manifests/sepolia`. Active rollout, raw preimage observations, resolver admission, or backfill completion do not graduate any other capability.
 
 Upstream events map to normalized adapter output: `TokenResource` → `TokenResourceLinked`, `TokenRegenerated` → `TokenRegenerated`, `SubregistryUpdated` → `SubregistryChanged`, `ParentUpdated` → `ParentChanged`, `AliasChanged` → `AliasChanged`, `EACRolesChanged` → resource- or resolver-scoped permission events.[^v2-iperm-l34][^v2-events-l49][^v2-events-l69][^v2-events-l75][^v2-iperm-resolver-l14][^v2-eac-l19] These are adapter semantics, not manifest schema fields.
 

@@ -47,7 +47,7 @@ pub(crate) struct RunArgs {
     #[arg(
         long,
         env = "BIGNAME_INDEXER_MANIFESTS_ROOT",
-        default_value = "manifests"
+        default_value = "manifests/mainnet"
     )]
     pub(crate) manifests_root: PathBuf,
     #[arg(
@@ -137,7 +137,7 @@ pub(crate) struct BackfillArgs {
     #[arg(
         long,
         env = "BIGNAME_INDEXER_MANIFESTS_ROOT",
-        default_value = "manifests"
+        default_value = "manifests/mainnet"
     )]
     pub(crate) manifests_root: PathBuf,
     #[arg(
@@ -203,7 +203,7 @@ pub(crate) struct OpsCatchupArgs {
     #[arg(
         long,
         env = "BIGNAME_INDEXER_MANIFESTS_ROOT",
-        default_value = "manifests"
+        default_value = "manifests/mainnet"
     )]
     pub(crate) manifests_root: PathBuf,
     #[arg(

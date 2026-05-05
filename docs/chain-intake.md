@@ -2,7 +2,7 @@
 
 Chain intake is canonical-chain reconciliation with a fact log attached. Subscriptions, filters, and provider notifications are latency hints; raw facts are append-only; canonicality and head promotion are explicit state. Block hash is identity; block number is position. Live ingestion and backfill share one downstream pipeline.
 
-A deployment selects one chain profile at a time. Mainnet and Sepolia facts do not share a canonical corpus, checkpoints, or projection state. The ENSv2 `sepolia-dev` profile selects `manifests-sepolia-dev/` as a whole alternate profile and must not load alongside `manifests/` in the same intake runtime, watch plan, discovery graph, or projection set.
+A deployment selects one chain profile at a time. Mainnet and Sepolia facts do not share a canonical corpus, checkpoints, or projection state. The default profile selects `manifests/mainnet/`; the ENSv2 Sepolia profile selects `manifests/sepolia/`. A runtime must not load both profile roots into the same intake runtime, watch plan, discovery graph, or projection set.
 
 This document covers reconciliation, fetch, notification, backfill, and replay. The model and read contract live in [`architecture.md`](architecture.md). Persistence rules live in [`storage.md`](storage.md). Manifest and discovery rules live in [`manifests.md`](manifests.md).
 
@@ -40,9 +40,9 @@ Resolver-profile admission gates complete record-family coverage, resolver-overv
 
 The first dynamic resolver-profile admission for ENSv1 is limited to ENS Labs PublicResolver-generation profiles for the relevant complete fact families. The profile gate may use direct manifest admission, first-party known-resolver admission, stored code-hash observations, proxy/implementation edges, or another explicit non-schema admission rule. Registry `NewResolver` observation alone is not enough. Unknown dynamic resolvers keep explicit `pending` or `unsupported` profile state; older admitted generations expose only the families listed for their profile. PublicResolver-generation compatibility anchors to the upstream PublicResolver mixins, ERC165 support, and `ResolverBase` record-versioning.[^v1-pres-l20][^v1-pres-l31][^v1-pres-l131][^v1-pres-l150][^v1-resolverbase-l17][^v1-resolverbase-l21][^v1-resolverbase-l22][^v1-resolverbase-l23] ENSv1 profile admission does not widen Basenames resolver-profile support.[^bn-l2resolver-l22][^bn-registry-l132]
 
-## ENSv2 sepolia-dev adapter intake
+## ENSv2 Sepolia Adapter Intake
 
-The ENSv2 `sepolia-dev` intake starts from four admitted source families: `ens_v2_root_l1`, `ens_v2_registry_l1`, `ens_v2_registrar_l1`, and `ens_v2_resolver_l1` under `manifests-sepolia-dev/ens/...`. Direct watched roots come from the pinned upstream `sepolia-dev` deployment metadata for `RootRegistry`, `ETHRegistry`, and `ETHRegistrar`. `PermissionedResolverImpl` is implementation metadata for discovered or admitted resolver instances; resolver instances enter the watch plan only through manifest admission or discovery edges.[^v2-deploy-root][^v2-deploy-ethreg][^v2-deploy-ethrc][^v2-deploy-pres]
+The ENSv2 Sepolia intake starts from four admitted source families: `ens_v2_root_l1`, `ens_v2_registry_l1`, `ens_v2_registrar_l1`, and `ens_v2_resolver_l1` under `manifests/sepolia/ethereum/ens/...`. Direct watched roots come from the pinned upstream `sepolia-dev` deployment metadata for `RootRegistry`, `ETHRegistry`, and `ETHRegistrar`. `PermissionedResolverImpl` is implementation metadata for discovered or admitted resolver instances; resolver instances enter the watch plan only through manifest admission or discovery edges.[^v2-deploy-root][^v2-deploy-ethreg][^v2-deploy-ethrc][^v2-deploy-pres]
 
 ENSv2 adapters normalize log-derived facts after raw block admission:
 
@@ -67,7 +67,7 @@ Production correctness depends on `safe` and `finalized` support. Sources that c
 
 ### Local runtime provider configuration
 
-`bigname-indexer run` selects one manifest root with `BIGNAME_INDEXER_MANIFESTS_ROOT` and reads provider sources from `BIGNAME_INDEXER_CHAIN_RPC_URLS` and `BIGNAME_INDEXER_CHAIN_RETH_DB_SOURCES`. Each setting is a comma-delimited list of `<chain>=<value>` entries; each chain name matches an active watched chain produced by the selected manifest and watch state. JSON-RPC values are provider URLs; Reth DB values are local Reth data directories for deployments with a same-host Reth database and static-file store. The checked-in default selects `manifests`; the ENSv2 Sepolia dev profile loads with `BIGNAME_INDEXER_MANIFESTS_ROOT=manifests-sepolia-dev`.
+`bigname-indexer run` selects one manifest profile root with `BIGNAME_INDEXER_MANIFESTS_ROOT` and reads provider sources from `BIGNAME_INDEXER_CHAIN_RPC_URLS` and `BIGNAME_INDEXER_CHAIN_RETH_DB_SOURCES`. Each setting is a comma-delimited list of `<chain>=<value>` entries; each chain name matches an active watched chain produced by the selected manifest and watch state. JSON-RPC values are provider URLs; Reth DB values are local Reth data directories for deployments with a same-host Reth database and static-file store. The checked-in default selects `manifests/mainnet`; the ENSv2 Sepolia profile loads with `BIGNAME_INDEXER_MANIFESTS_ROOT=manifests/sepolia`.
 
 Header audit retention is an explicit operational mode. By default, `bigname-indexer run`, `backfill`, and `ops-catchup` persist minimal block anchors only: block hash, parent hash, number, timestamp, and canonicality state. Passing `--retain-header-audit-fields` or setting `BIGNAME_INDEXER_RETAIN_HEADER_AUDIT_FIELDS=true` retains nullable `logs_bloom`, `transactions_root`, `receipts_root`, and `state_root` when the provider returns them. Minimal replay coexists with retained fields without clearing them; auditable replay may fill a previously minimal row, and conflicting non-null audit fields stay an identity mismatch.
 

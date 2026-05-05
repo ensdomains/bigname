@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use bigname_storage::{CanonicalityState, SurfaceBindingKind};
 use serde_json::Value;
 use sqlx::types::time::{OffsetDateTime, UtcOffset};
@@ -14,31 +14,17 @@ pub(super) fn parse_canonicality_state(value: &str) -> Result<CanonicalityState>
 }
 
 pub(super) fn parse_surface_binding_kind(value: &str) -> Result<SurfaceBindingKind> {
-    match value {
-        "declared_registry_path" => Ok(SurfaceBindingKind::DeclaredRegistryPath),
-        "linked_subregistry_path" => Ok(SurfaceBindingKind::LinkedSubregistryPath),
-        "resolver_alias_path" => Ok(SurfaceBindingKind::ResolverAliasPath),
-        "observed_wildcard_path" => Ok(SurfaceBindingKind::ObservedWildcardPath),
-        "migration_rebind" => Ok(SurfaceBindingKind::MigrationRebind),
-        "observed_only" => Ok(SurfaceBindingKind::ObservedOnly),
-        _ => bail!("unknown surface_binding kind {value}"),
-    }
+    SurfaceBindingKind::parse(value)
 }
 
 pub(super) fn canonicality_rank(state: CanonicalityState) -> u8 {
-    match state {
-        CanonicalityState::Observed => 0,
-        CanonicalityState::Canonical => 1,
-        CanonicalityState::Safe => 2,
-        CanonicalityState::Finalized => 3,
-        CanonicalityState::Orphaned => 4,
-    }
+    state.rank()
 }
 
 pub(super) fn weakest_canonicality(
     states: impl Iterator<Item = CanonicalityState>,
 ) -> Option<CanonicalityState> {
-    states.min_by_key(|state| canonicality_rank(*state))
+    CanonicalityState::weakest(states)
 }
 
 pub(super) fn chain_slot(chain_id: &str) -> String {

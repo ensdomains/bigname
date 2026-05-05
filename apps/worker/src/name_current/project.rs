@@ -273,7 +273,7 @@ pub(super) fn build_canonicality_summary(
     }
 
     let status =
-        weakest_canonicality(states.iter().copied()).unwrap_or(CanonicalityState::Canonical);
+        CanonicalityState::weakest(states.iter().copied()).unwrap_or(CanonicalityState::Canonical);
     json!({
         "status": status.as_str(),
         "chains": chain_states
@@ -290,7 +290,7 @@ fn merge_chain_state(
 ) {
     let replacement = chain_states
         .get(chain_id)
-        .map(|current| canonicality_rank(state) < canonicality_rank(*current))
+        .map(|current| state.rank() < current.rank())
         .unwrap_or(true);
     if replacement {
         chain_states.insert(chain_id.to_owned(), state);
@@ -419,22 +419,6 @@ pub(super) fn max_timestamp(
             .map(|observation| observation.candidate.timestamp),
     );
     timestamps.into_iter().max()
-}
-
-fn canonicality_rank(state: CanonicalityState) -> u8 {
-    match state {
-        CanonicalityState::Observed => 0,
-        CanonicalityState::Canonical => 1,
-        CanonicalityState::Safe => 2,
-        CanonicalityState::Finalized => 3,
-        CanonicalityState::Orphaned => 4,
-    }
-}
-
-fn weakest_canonicality(
-    states: impl Iterator<Item = CanonicalityState>,
-) -> Option<CanonicalityState> {
-    states.min_by_key(|state| canonicality_rank(*state))
 }
 
 pub(super) fn chain_slot(chain_id: &str) -> String {

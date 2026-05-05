@@ -44,7 +44,6 @@ places to revisit after logic dedupe:
 
 - `crates/adapters/src/ens_v1_unwrapped_authority/preload.rs` at 1,762 LOC.
 - `apps/api/src/responses/app_facing/records_declared_values.rs` at 783 LOC.
-- `crates/adapters/src/ens_v1_unwrapped_authority/materialization.rs` at 645 LOC.
 - `crates/adapters/src/ens_v1_unwrapped_authority/pipeline.rs` at 635 LOC.
 - `apps/indexer/src/main/repair.rs` at 615 LOC.
 - `crates/adapters/src/ens_v1_unwrapped_authority/pipeline/apply.rs` at 612 LOC.
@@ -53,6 +52,12 @@ places to revisit after logic dedupe:
 - `crates/adapters/src/ens_v1_unwrapped_authority/loading/raw_logs.rs` at 594 LOC.
 - `crates/manifests/src/lib/views/watched.rs` at 587 LOC.
 
+First addressed slice:
+
+- `crates/adapters/src/ens_v1_unwrapped_authority/materialization.rs`
+  dropped from 645 LOC to 523 LOC by moving token-lineage/resource builders
+  into `materialization/lineage.rs`.
+
 ## Highest leverage cleanup map
 
 | Logic family | Current locations | Replace or centralize with | Expected payoff |
@@ -60,7 +65,7 @@ places to revisit after logic dedupe:
 | EVM ABI words, event topics, hex, hashes | `crates/adapters/src/evm_abi.rs`, `crates/adapters/src/ens_v2_*/*decode*.rs`, `crates/adapters/src/ens_v1_unwrapped_authority/{abi.rs,ids.rs,observation.rs}`, `crates/adapters/src/ens_v1_subregistry_discovery/hex_topic.rs`, `crates/adapters/src/block_derived_normalized_events/decoding.rs`, `crates/execution/src/ens_resolution_abi.rs`, `apps/indexer/src/provider/decode.rs`, `apps/indexer/src/main/reconciliation/payload.rs` | `alloy-primitives` for `Address`, `B256`, `U256`, `Bytes`, `FixedBytes`, `hex`, `keccak256`; `alloy-sol-types` `sol!`, `SolCall`, `SolEvent`, and `SolValue` for ABI call/event encode/decode | Large LOC reduction in adapters, fewer hand-rolled offset/word parsers, less duplicated topic hashing |
 | Provider JSON-RPC typed decoding | `apps/indexer/src/provider/decode.rs`, `apps/indexer/src/provider/types.rs`, `apps/indexer/src/provider/logs_receipts.rs`, `apps/indexer/src/provider/reth_db/convert.rs` | Keep current transport initially, but deserialize into `alloy-rpc-types-eth` block, transaction, receipt, log, filter, and block-id types before converting to storage DTOs | Removes brittle `serde_json::Value` object walking and custom hex parsing in provider code |
 | Address/hash normalization | `normalize_address` appears in API, indexer, worker, adapters, manifests, storage, and execution path validation; hash/hex helpers appear in at least 9 files | One storage-format helper per owner crate: parse with Alloy where EVM-shaped, return canonical lower `0x` strings; expose narrow helpers from adapters/execution/provider modules | Prevents drift between "lowercase only" and "validated EVM address/hash" call sites |
-| Canonicality and binding-kind parsing/rank | `CanonicalityState::parse` exists, but rank/weakest logic is duplicated in worker, adapter, and indexer modules; `SurfaceBindingKind::parse` is private, so consumers reimplement it | Add public or crate-visible helpers on `bigname_storage::CanonicalityState` and `SurfaceBindingKind`: `rank`, `weakest`, `is_supported_snapshot`, public `parse` where needed | Deletes repeated match blocks and reduces risk when enum variants change |
+| Canonicality and binding-kind parsing/rank | First slice landed: `CanonicalityState::rank`, `CanonicalityState::weakest`, and public `SurfaceBindingKind::parse` now cover indexer/adapters/storage/worker call sites with the canonical storage ordering; projection summaries with intentionally different ordering remain local | Continue replacing wrappers where semantics match; leave summary-specific rank orders local until their meaning is documented | Deletes repeated match blocks and reduces risk when enum variants change |
 | Projection JSON summaries | `apps/worker/src/name_current/json.rs`, `address_names/{util.rs,positions.rs,projection.rs}`, `permissions/{json.rs,canonicality.rs}`, `record_inventory/{json.rs,chain_position.rs}`, `resolver/{state_helpers.rs,summary_json.rs}`, `children.rs`; API also has response-side JSON dedupe/timestamp helpers | Add a worker-local `projection_json` module with provenance, chain-position, canonicality, timestamp, and JSON-dedupe primitives; consider storage helpers only for projection-shared public row shapes | Reduces repeated `serde_json` assembly and makes coverage/provenance mistakes easier to spot |
 | SQL row decoding boilerplate | Manual `PgRow::try_get(...).context(...)` decoders across storage, manifests, adapters, worker loaders, and API support; almost no production `query_as`/`FromRow` usage | Use `sqlx::FromRow` for plain rows; add small local row helper wrappers for contextual field reads and non-negative conversions where dynamic SQL prevents derive | Cuts a large amount of repetitive error text and makes row shape changes easier |
 | Keyset pagination and cursors | `apps/api/src/support/cursors.rs`, `apps/api/src/handlers/app_facing/{names_collection.rs,roles.rs}`, `crates/storage/src/{name_current/list_paging.rs,address_names/query.rs,address_names/page.rs,permissions/paging.rs,children/reads.rs}` | Shared cursor envelope helpers in API; storage keyset helper for `(field1, field2, ...) > (...)`, page-size validation, `limit = page_size + 1`; use a maintained hex/base64 crate for cursor bytes instead of hand decoding | Lower API/storage paging LOC and fewer subtle cursor-field validation variants |
@@ -147,21 +152,23 @@ Preferred shape:
 
 ### Canonicality and binding kind helpers
 
-Current duplicates:
+Current status:
 
-- `canonicality_rank` exists in worker projection modules,
-  `apps/indexer/src/main/reconciliation/payload.rs`, and
-  `crates/adapters/src/ens_v1_unwrapped_authority/materialization.rs`.
-- `weakest_canonicality` exists in several worker modules.
-- `SurfaceBindingKind` parsing is repeated because `SurfaceBindingKind::parse`
-  is `pub(super)` in `crates/storage/src/identity/types.rs`.
+- Implemented canonical storage helpers:
+  `CanonicalityState::rank`, `CanonicalityState::weakest`, and public
+  `SurfaceBindingKind::parse`.
+- Replaced matching duplicate rank/parse matches in storage row decoders,
+  indexer reconciliation payload handling, execution revalidation, worker name
+  current/address-name/resolver loading, and ENSv1 materialization.
+- Left `record_inventory`, `permissions`, and resolver summary ranking local
+  because those summaries currently order observed/canonical states differently
+  than storage promotion logic.
 
 Preferred shape:
 
-- Add `pub const fn rank(self) -> u8` and `pub fn weakest(...)` on
-  `CanonicalityState`.
-- Make `SurfaceBindingKind::parse` public if cross-crate consumers need it.
-- Replace local parse/rank matches with storage helpers.
+- Keep new helpers in storage; do not reintroduce local parse/rank matches for
+  the storage canonical ordering.
+- Replace remaining wrappers only when the ordering matches storage semantics.
 - Avoid widening `crates/domain`; these types already live in storage.
 
 ### Projection JSON helpers
@@ -317,7 +324,7 @@ generic helpers.
 
 ## Suggested cleanup slices
 
-1. Add storage enum helpers:
+1. Done: add storage enum helpers:
    `CanonicalityState::rank`, `CanonicalityState::weakest`, public
    `SurfaceBindingKind::parse`, and replace local duplicate matches.
 2. Add worker `projection_json` helpers and migrate one family at a time:

@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     fs,
     path::{Path, PathBuf},
 };
@@ -41,67 +42,22 @@ pub fn load_repository(root: impl AsRef<Path>) -> Result<ManifestRepository> {
         });
     }
 
+    let mut manifest_paths = Vec::new();
+    collect_manifest_paths(root, &mut manifest_paths)
+        .with_context(|| format!("failed to read manifests root {}", root.display()))?;
+
     let mut manifests = Vec::new();
-    let mut namespace_count = 0;
-    let mut source_family_count = 0;
+    let mut namespaces = BTreeSet::new();
+    let mut source_families = BTreeSet::new();
 
-    for namespace in read_dir_sorted(root)
-        .with_context(|| format!("failed to read manifests root {}", root.display()))?
-    {
-        if !namespace
-            .file_type()
-            .with_context(|| format!("failed to inspect {}", namespace.path().display()))?
-            .is_dir()
-        {
-            continue;
-        }
-
-        namespace_count += 1;
-        let namespace_name = namespace.file_name().to_string_lossy().into_owned();
-
-        for source_family in read_dir_sorted(&namespace.path()).with_context(|| {
-            format!(
-                "failed to read namespace directory {}",
-                namespace.path().display()
-            )
-        })? {
-            if !source_family
-                .file_type()
-                .with_context(|| format!("failed to inspect {}", source_family.path().display()))?
-                .is_dir()
-            {
-                continue;
-            }
-
-            source_family_count += 1;
-            let source_family_name = source_family.file_name().to_string_lossy().into_owned();
-
-            for manifest in read_dir_sorted(&source_family.path()).with_context(|| {
-                format!(
-                    "failed to read source family directory {}",
-                    source_family.path().display()
-                )
-            })? {
-                if !manifest
-                    .file_type()
-                    .with_context(|| format!("failed to inspect {}", manifest.path().display()))?
-                    .is_file()
-                {
-                    continue;
-                }
-
-                if manifest.path().extension().and_then(|part| part.to_str()) != Some("toml") {
-                    continue;
-                }
-
-                manifests.push(load_manifest_file(
-                    root,
-                    &manifest.path(),
-                    &namespace_name,
-                    &source_family_name,
-                )?);
-            }
-        }
+    for path in manifest_paths {
+        let loaded_manifest = load_manifest_file(root, &path)?;
+        namespaces.insert(loaded_manifest.manifest.namespace.clone());
+        source_families.insert((
+            loaded_manifest.manifest.namespace.clone(),
+            loaded_manifest.manifest.source_family.clone(),
+        ));
+        manifests.push(loaded_manifest);
     }
 
     let manifest_count = manifests.len();
@@ -117,19 +73,14 @@ pub fn load_repository(root: impl AsRef<Path>) -> Result<ManifestRepository> {
         summary: ManifestLoadSummary {
             root: display_root,
             status,
-            namespace_count,
-            source_family_count,
+            namespace_count: namespaces.len(),
+            source_family_count: source_families.len(),
             manifest_count,
         },
     })
 }
 
-fn load_manifest_file(
-    root: &Path,
-    path: &Path,
-    namespace_name: &str,
-    source_family_name: &str,
-) -> Result<LoadedManifest> {
+fn load_manifest_file(root: &Path, path: &Path) -> Result<LoadedManifest> {
     let relative_path = path
         .strip_prefix(root)
         .with_context(|| {
@@ -152,13 +103,7 @@ fn load_manifest_file(
         .with_context(|| format!("failed to parse manifest TOML {}", path.display()))?
         .into();
 
-    validate_manifest_metadata(
-        &manifest,
-        path,
-        &relative_path,
-        namespace_name,
-        source_family_name,
-    )?;
+    validate_manifest_metadata(&manifest, path, &relative_path)?;
 
     Ok(LoadedManifest {
         path: path.to_path_buf(),
@@ -172,13 +117,48 @@ fn validate_manifest_metadata(
     manifest: &SourceManifest,
     path: &Path,
     relative_path: &Path,
-    namespace_name: &str,
-    source_family_name: &str,
 ) -> Result<()> {
-    let depth = relative_path.iter().count();
-    if depth != 3 {
+    let parts = relative_path
+        .iter()
+        .map(|part| {
+            part.to_str().with_context(|| {
+                format!(
+                    "manifest path {} contains non-UTF-8 path component",
+                    path.display()
+                )
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let (chain_combo_name, namespace_name, source_family_name) = match parts.as_slice() {
+        [namespace_name, source_family_name, _version] => {
+            (None, *namespace_name, *source_family_name)
+        }
+        [
+            chain_combo_name,
+            namespace_name,
+            source_family_name,
+            _version,
+        ] => (
+            Some(*chain_combo_name),
+            *namespace_name,
+            *source_family_name,
+        ),
+        _ => {
+            bail!(
+                "manifest path {} must match <namespace>/<source_family>/<version>.toml or <chain_combo>/<namespace>/<source_family>/<version>.toml under the selected manifest root",
+                path.display()
+            );
+        }
+    };
+
+    if let Some(chain_combo_name) = chain_combo_name
+        && manifest_chain_combo(&manifest.chain) != chain_combo_name
+    {
         bail!(
-            "manifest path {} must match manifests/<namespace>/<source_family>/<version>.toml",
+            "manifest chain {} does not match chain directory {} for {}",
+            manifest.chain,
+            chain_combo_name,
             path.display()
         );
     }
@@ -212,6 +192,12 @@ fn validate_manifest_metadata(
     Ok(())
 }
 
+fn manifest_chain_combo(chain: &str) -> &str {
+    chain
+        .split_once('-')
+        .map_or(chain, |(chain_combo, _)| chain_combo)
+}
+
 fn validate_start_block_fits_i64(
     start_block: Option<u64>,
     declaration_kind: &str,
@@ -237,6 +223,26 @@ fn read_dir_sorted(path: &Path) -> Result<Vec<fs::DirEntry>> {
         .with_context(|| format!("failed to iterate directory {}", path.display()))?;
     entries.sort_by_key(|entry| entry.file_name());
     Ok(entries)
+}
+
+fn collect_manifest_paths(directory: &Path, manifests: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in read_dir_sorted(directory)? {
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("failed to inspect {}", path.display()))?;
+
+        if file_type.is_dir() {
+            collect_manifest_paths(&path, manifests)
+                .with_context(|| format!("failed to read manifest directory {}", path.display()))?;
+        } else if file_type.is_file()
+            && path.extension().and_then(|part| part.to_str()) == Some("toml")
+        {
+            manifests.push(path);
+        }
+    }
+
+    Ok(())
 }
 
 fn canonicalize_for_logging(root: &Path) -> PathBuf {

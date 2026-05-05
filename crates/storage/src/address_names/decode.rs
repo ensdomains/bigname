@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use sqlx::{Row, postgres::PgRow};
 
 use super::types::{
@@ -15,7 +15,7 @@ pub(super) fn decode_address_name_current_row(row: PgRow) -> Result<AddressNameC
     let binding_kind = row
         .try_get::<String, _>("binding_kind")
         .context("missing binding_kind")
-        .and_then(|value| parse_surface_binding_kind(&value))?;
+        .and_then(|value| SurfaceBindingKind::parse(&value))?;
 
     Ok(AddressNameCurrentRow {
         address: row.try_get("address").context("missing address")?,
@@ -60,7 +60,7 @@ pub(super) fn decode_address_name_current_entry(row: PgRow) -> Result<AddressNam
     let binding_kind = row
         .try_get::<String, _>("binding_kind")
         .context("missing binding_kind")
-        .and_then(|value| parse_surface_binding_kind(&value))?;
+        .and_then(|value| SurfaceBindingKind::parse(&value))?;
     let relations = row
         .try_get::<Vec<String>, _>("relations")
         .context("missing relations")?
@@ -140,16 +140,4 @@ pub(super) fn decode_address_names_current_summary(
             .try_get("last_recomputed_at")
             .context("missing last_recomputed_at")?,
     })
-}
-
-fn parse_surface_binding_kind(value: &str) -> Result<SurfaceBindingKind> {
-    match value {
-        "declared_registry_path" => Ok(SurfaceBindingKind::DeclaredRegistryPath),
-        "linked_subregistry_path" => Ok(SurfaceBindingKind::LinkedSubregistryPath),
-        "resolver_alias_path" => Ok(SurfaceBindingKind::ResolverAliasPath),
-        "observed_wildcard_path" => Ok(SurfaceBindingKind::ObservedWildcardPath),
-        "migration_rebind" => Ok(SurfaceBindingKind::MigrationRebind),
-        "observed_only" => Ok(SurfaceBindingKind::ObservedOnly),
-        _ => bail!("unknown surface binding kind {value}"),
-    }
 }

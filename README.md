@@ -10,8 +10,7 @@ bigname turns onchain state from Ethereum and Base into a versioned `v1` REST co
 - `apps/indexer` — chain intake, manifest sync, backfill, head-following
 - `apps/worker` — projections, replay, verified execution, inspection commands
 - `crates/` — domain types, storage, manifests, adapters (ENSv1, ENSv2, Basenames), execution
-- `manifests/` — checked-in mainnet source manifests for ENS and Basenames
-- `manifests-sepolia-dev/` — alternate ENSv2 dev profile (selected at runtime, not loaded together)
+- `manifests/` — checked-in profile roots such as `mainnet` and `sepolia`, split by chain combo
 - `migrations/` — Postgres schema
 - `docs/` — how it works
 - `tests/conformance/` — TypeScript conformance harness

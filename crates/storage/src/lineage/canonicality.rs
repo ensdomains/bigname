@@ -59,7 +59,7 @@ impl CanonicalityState {
         }
     }
 
-    fn rank(self) -> u8 {
+    pub const fn rank(self) -> u8 {
         match self {
             Self::Observed => 0,
             Self::Canonical => 1,
@@ -67,6 +67,10 @@ impl CanonicalityState {
             Self::Finalized => 3,
             Self::Orphaned => 4,
         }
+    }
+
+    pub fn weakest(states: impl IntoIterator<Item = Self>) -> Option<Self> {
+        states.into_iter().min_by_key(|state| state.rank())
     }
 
     pub fn parse(value: &str) -> Result<Self> {

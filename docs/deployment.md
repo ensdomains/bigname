@@ -40,8 +40,8 @@ the API, the indexer, and the worker. The API listens on the host port from
 deployments normally set it to `127.0.0.1` and expose traffic through the Caddy
 override documented in `docs/production.md`.
 
-The indexer loads exactly one manifest root. Use `/app/manifests` for the
-mainnet profile or `/app/manifests-sepolia-dev` for the ENSv2 Sepolia dev
+The indexer loads exactly one manifest profile root. Use `/app/manifests/mainnet`
+for the mainnet profile or `/app/manifests/sepolia` for the ENSv2 Sepolia
 profile. Do not point one runtime at both manifest roots.
 
 If `BIGNAME_INDEXER_CHAIN_RPC_URLS` is unset, the indexer still syncs

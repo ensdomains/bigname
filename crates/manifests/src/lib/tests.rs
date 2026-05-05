@@ -7,7 +7,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use bigname_storage::default_database_url;
 use sqlx::{
     PgPool, Row,
@@ -49,6 +49,27 @@ impl TestDir {
         contents: &str,
     ) -> Result<PathBuf> {
         let directory = self.path.join(namespace).join(source_family);
+        fs::create_dir_all(&directory)
+            .with_context(|| format!("failed to create {}", directory.display()))?;
+        let path = directory.join(format!("{version_tag}.toml"));
+        fs::write(&path, contents)
+            .with_context(|| format!("failed to write {}", path.display()))?;
+        Ok(path)
+    }
+
+    fn write_manifest_for_chain_combo(
+        &self,
+        chain_combo: &str,
+        namespace: &str,
+        source_family: &str,
+        version_tag: &str,
+        contents: &str,
+    ) -> Result<PathBuf> {
+        let directory = self
+            .path
+            .join(chain_combo)
+            .join(namespace)
+            .join(source_family);
         fs::create_dir_all(&directory)
             .with_context(|| format!("failed to create {}", directory.display()))?;
         let path = directory.join(format!("{version_tag}.toml"));
@@ -307,29 +328,27 @@ fn checked_in_manifest_contents(
     source_family: &str,
     version_tag: &str,
 ) -> Result<String> {
-    checked_in_profile_manifest_contents("manifests", namespace, source_family, version_tag)
+    for chain_combo in ["ethereum", "base"] {
+        let path = checked_in_manifest_root("manifests/mainnet")
+            .join(chain_combo)
+            .join(namespace)
+            .join(source_family)
+            .join(format!("{version_tag}.toml"));
+        if path.exists() {
+            return fs::read_to_string(&path)
+                .with_context(|| format!("failed to read checked-in manifest {}", path.display()));
+        }
+    }
+
+    bail!(
+        "failed to find checked-in manifest {namespace}/{source_family}/{version_tag}.toml in mainnet chain-combo roots"
+    );
 }
 
 fn checked_in_manifest_root(profile_root: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .join(profile_root)
-}
-
-fn checked_in_profile_manifest_contents(
-    profile_root: &str,
-    namespace: &str,
-    source_family: &str,
-    version_tag: &str,
-) -> Result<String> {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .join(profile_root)
-        .join(namespace)
-        .join(source_family)
-        .join(format!("{version_tag}.toml"));
-    fs::read_to_string(&path)
-        .with_context(|| format!("failed to read checked-in manifest {}", path.display()))
 }
 
 async fn load_single_contract_instance_for_address(
@@ -1152,6 +1171,36 @@ fn loads_valid_repository_manifest() -> Result<()> {
 }
 
 #[test]
+fn loads_chain_combo_repository_manifests() -> Result<()> {
+    let test_dir = TestDir::new()?;
+    test_dir.write_manifest_for_chain_combo(
+        "ethereum",
+        "ens",
+        "ens_v2_registry_l1",
+        "v1",
+        &manifest_contents(
+            "active",
+            "0x0000000000000000000000000000000000000001",
+            "0x00000000000000000000000000000000000000AA",
+            Some("0x00000000000000000000000000000000000000DD"),
+        ),
+    )?;
+
+    let repository = load_repository(&test_dir.path)?;
+
+    assert_eq!(repository.summary().status, ManifestLoadStatus::Loaded);
+    assert_eq!(repository.summary().namespace_count, 1);
+    assert_eq!(repository.summary().source_family_count, 1);
+    assert_eq!(repository.summary().manifest_count, 1);
+    assert_eq!(
+        repository.manifests()[0].relative_path,
+        PathBuf::from("ethereum/ens/ens_v2_registry_l1/v1.toml")
+    );
+
+    Ok(())
+}
+
+#[test]
 fn parses_optional_start_block_on_roots_and_contracts() -> Result<()> {
     let test_dir = TestDir::new()?;
     test_dir.write_manifest(
@@ -1284,9 +1333,35 @@ admission = "reachable_from_root"
 }
 
 #[test]
-fn checked_in_sepolia_dev_manifests_load_as_alternate_profile() -> Result<()> {
-    let main_repository = load_repository(checked_in_manifest_root("manifests"))?;
-    let sepolia_repository = load_repository(checked_in_manifest_root("manifests-sepolia-dev"))?;
+fn rejects_chain_combo_mismatch() -> Result<()> {
+    let test_dir = TestDir::new()?;
+    let path = test_dir.write_manifest_for_chain_combo(
+        "base",
+        "ens",
+        "ens_v2_registry_l1",
+        "v1",
+        &manifest_contents(
+            "active",
+            "0x0000000000000000000000000000000000000001",
+            "0x00000000000000000000000000000000000000AA",
+            Some("0x00000000000000000000000000000000000000DD"),
+        ),
+    )?;
+
+    let error = load_repository(&test_dir.path).expect_err("chain combo mismatch must fail");
+    assert!(
+        error.to_string().contains("does not match chain directory"),
+        "unexpected error for {}: {error:#}",
+        path.display()
+    );
+
+    Ok(())
+}
+
+#[test]
+fn checked_in_sepolia_manifests_load_as_alternate_profile() -> Result<()> {
+    let main_repository = load_repository(checked_in_manifest_root("manifests/mainnet"))?;
+    let sepolia_repository = load_repository(checked_in_manifest_root("manifests/sepolia"))?;
 
     assert_eq!(
         sepolia_repository.summary().status,
@@ -1320,7 +1395,7 @@ fn checked_in_sepolia_dev_manifests_load_as_alternate_profile() -> Result<()> {
     assert!(!main_repository.manifests().iter().any(|loaded_manifest| {
         loaded_manifest
             .relative_path
-            .starts_with("ens/ens_v2_root_l1")
+            .starts_with("ethereum/ens/ens_v2_root_l1")
     }));
     assert!(
         !sepolia_repository
@@ -1329,7 +1404,7 @@ fn checked_in_sepolia_dev_manifests_load_as_alternate_profile() -> Result<()> {
             .any(|loaded_manifest| {
                 loaded_manifest
                     .relative_path
-                    .starts_with("ens/ens_v1_registry_l1")
+                    .starts_with("ethereum/ens/ens_v1_registry_l1")
             })
     );
 
@@ -1455,10 +1530,10 @@ fn checked_in_sepolia_dev_manifests_load_as_alternate_profile() -> Result<()> {
 }
 
 #[tokio::test]
-async fn syncing_sepolia_dev_profile_replaces_main_profile_without_mixing() -> Result<()> {
+async fn syncing_sepolia_profile_replaces_main_profile_without_mixing() -> Result<()> {
     let database = TestDatabase::new().await?;
-    let main_repository = load_repository(checked_in_manifest_root("manifests"))?;
-    let sepolia_repository = load_repository(checked_in_manifest_root("manifests-sepolia-dev"))?;
+    let main_repository = load_repository(checked_in_manifest_root("manifests/mainnet"))?;
+    let sepolia_repository = load_repository(checked_in_manifest_root("manifests/sepolia"))?;
 
     assert_eq!(main_repository.summary().status, ManifestLoadStatus::Loaded);
     assert_eq!(

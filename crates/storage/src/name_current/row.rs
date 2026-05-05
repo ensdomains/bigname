@@ -141,7 +141,7 @@ pub(super) fn decode_name_current_row(row: PgRow) -> Result<NameCurrentRow> {
     let binding_kind = row
         .try_get::<Option<String>, _>("binding_kind")
         .context("missing binding_kind")?
-        .map(|value| parse_surface_binding_kind(&value))
+        .map(|value| SurfaceBindingKind::parse(&value))
         .transpose()?;
 
     Ok(NameCurrentRow {
@@ -182,16 +182,4 @@ pub(super) fn decode_name_current_row(row: PgRow) -> Result<NameCurrentRow> {
             .try_get("last_recomputed_at")
             .context("missing last_recomputed_at")?,
     })
-}
-
-fn parse_surface_binding_kind(value: &str) -> Result<SurfaceBindingKind> {
-    match value {
-        "declared_registry_path" => Ok(SurfaceBindingKind::DeclaredRegistryPath),
-        "linked_subregistry_path" => Ok(SurfaceBindingKind::LinkedSubregistryPath),
-        "resolver_alias_path" => Ok(SurfaceBindingKind::ResolverAliasPath),
-        "observed_wildcard_path" => Ok(SurfaceBindingKind::ObservedWildcardPath),
-        "migration_rebind" => Ok(SurfaceBindingKind::MigrationRebind),
-        "observed_only" => Ok(SurfaceBindingKind::ObservedOnly),
-        _ => bail!("unknown surface binding kind {value}"),
-    }
 }

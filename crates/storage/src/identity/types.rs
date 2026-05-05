@@ -72,7 +72,7 @@ impl SurfaceBindingKind {
         }
     }
 
-    pub(super) fn parse(value: &str) -> Result<Self> {
+    pub fn parse(value: &str) -> Result<Self> {
         match value {
             "declared_registry_path" => Ok(Self::DeclaredRegistryPath),
             "linked_subregistry_path" => Ok(Self::LinkedSubregistryPath),

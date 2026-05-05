@@ -157,7 +157,7 @@ Family ownership is fixed:
 
 ## Source manifests
 
-Manifests pin each source family by version and live at `manifests/<namespace>/<source_family>/<version>.toml`. Alternate profiles live under profile-specific roots (e.g. `manifests-sepolia-dev/`); one runtime selects exactly one.
+Manifests pin each source family by version and live under a selected profile root at `manifests/<profile>/<chain_combo>/<namespace>/<source_family>/<version>.toml`. The shipped runtime default is `manifests/mainnet/`; the Sepolia profile root is `manifests/sepolia/`. One runtime selects exactly one profile root.
 
 Each manifest contains: `manifest_version`, `namespace`, `source_family`, `chain`, `deployment_epoch`, `rollout_status` (`draft` | `shadow` | `active` | `deprecated`), `normalizer_version`, `capability_flags` (`unsupported` | `shadow` | `supported`), `roots`, `contracts`, `discovery_rules`. `start_block` is optional inclusive bootstrap metadata; omitted means unknown — adapters preserve that state rather than inferring zero.
 
