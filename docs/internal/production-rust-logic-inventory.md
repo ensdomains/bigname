@@ -65,12 +65,15 @@ Addressed slices:
 - `crates/adapters/src/evm_abi.rs` now owns adapter Keccak, event-signature
   topic hashes, prefixed/non-prefixed hex strings, namehash, and child-namehash
   helpers, backed by Alloy primitives.
+- `crates/adapters/src/ens_v2_registrar/decoding.rs` is the first adapter
+  decoder converted from manual ABI word walking to `alloy-sol-types`
+  `sol_data` tuple decoding.
 
 ## Highest leverage cleanup map
 
 | Logic family | Current locations | Replace or centralize with | Expected payoff |
 | --- | --- | --- | --- |
-| EVM ABI words, event topics, hex, hashes | `crates/adapters/src/evm_abi.rs` now owns shared adapter ABI-word, Keccak, topic-hash, hex, namehash, and child-namehash helpers. Remaining duplicates are in adapter decode/event builders, `crates/execution/src/ens_resolution_abi.rs`, `apps/indexer/src/provider/decode.rs`, and `apps/indexer/src/main/reconciliation/payload.rs` | Keep using `alloy-primitives` for `Address`, `B256`, `U256`, `Bytes`, `FixedBytes`, `hex`, `keccak256`; next use `alloy-sol-types` `sol!`, `SolCall`, `SolEvent`, and `SolValue` for ABI call/event encode/decode | Large LOC reduction in adapters, fewer hand-rolled offset/word parsers, less duplicated topic hashing |
+| EVM ABI words, event topics, hex, hashes | `crates/adapters/src/evm_abi.rs` now owns shared adapter ABI-word, Keccak, topic-hash, hex, namehash, and child-namehash helpers; `ens_v2_registrar/decoding.rs` now uses `alloy-sol-types` for event data decoding. Remaining duplicates are in adapter decode/event builders, `crates/execution/src/ens_resolution_abi.rs`, `apps/indexer/src/provider/decode.rs`, and `apps/indexer/src/main/reconciliation/payload.rs` | Keep using `alloy-primitives` for `Address`, `B256`, `U256`, `Bytes`, `FixedBytes`, `hex`, `keccak256`; continue replacing manual ABI word walking with `alloy-sol-types` `sol!`, `SolCall`, `SolEvent`, and `SolValue` where the event shape is stable | Large LOC reduction in adapters, fewer hand-rolled offset/word parsers, less duplicated topic hashing |
 | Provider JSON-RPC typed decoding | `apps/indexer/src/provider/decode.rs`, `apps/indexer/src/provider/types.rs`, `apps/indexer/src/provider/logs_receipts.rs`, `apps/indexer/src/provider/reth_db/convert.rs` | Keep current transport initially, but deserialize into `alloy-rpc-types-eth` block, transaction, receipt, log, filter, and block-id types before converting to storage DTOs | Removes brittle `serde_json::Value` object walking and custom hex parsing in provider code |
 | Address/hash normalization | Adapter hash/hex/namehash helpers are centralized in `evm_abi`; `normalize_address` still appears in API, indexer, worker, adapters, manifests, storage, and execution path validation | One storage-format helper per owner crate: parse with Alloy where EVM-shaped, return canonical lower `0x` strings; expose narrow helpers from adapters/execution/provider modules | Prevents drift between "lowercase only" and "validated EVM address/hash" call sites |
 | Canonicality and binding-kind parsing/rank | First slice landed: `CanonicalityState::rank`, `CanonicalityState::weakest`, and public `SurfaceBindingKind::parse` now cover indexer/adapters/storage/worker call sites with the canonical storage ordering; projection summaries with intentionally different ordering remain local | Continue replacing wrappers where semantics match; leave summary-specific rank orders local until their meaning is documented | Deletes repeated match blocks and reduces risk when enum variants change |
@@ -343,8 +346,9 @@ generic helpers.
 4. Partially done: consolidate adapter `hex_string`, `keccak256_hex`,
    `namehash_hex`, `hex_32`, and `child_namehash` in `evm_abi`; address
    normalization and execution/indexer helper consolidation remain.
-5. Convert one small adapter decoder to Alloy `sol!` event decoding. Use it as
-   the pattern before touching the large ENSv1 observation files.
+5. Done for first pattern: convert ENSv2 registrar data decoding to
+   `alloy-sol-types`; continue with small ENSv2 resolver/permission decoders
+   before touching the large ENSv1 observation files.
 6. Convert provider JSON-RPC response decoding from manual `serde_json::Value`
    walking to `alloy-rpc-types-eth`, while keeping existing provider DTOs.
 7. Add storage keyset pagination helpers for simple tuple cursors, then migrate
