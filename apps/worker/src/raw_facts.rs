@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, bail};
 use serde_json::json;
-use sqlx::{Executor, Postgres, Row, Transaction};
+use sqlx::{Executor, Postgres, Transaction};
 use tracing::info;
 
 use crate::cli::CompactLogStagingArgs;
@@ -157,16 +157,10 @@ async fn load_normalized_replay_readiness(
     .context("failed to inspect normalized replay cursor readiness")?;
 
     Ok(NormalizedReplayReadiness {
-        cursor_count: row
-            .try_get("cursor_count")
-            .context("missing cursor_count")?,
-        remaining_block_count: row
-            .try_get("remaining_block_count")
-            .context("missing remaining_block_count")?,
-        completed_through_block: row
-            .try_get("completed_through_block")
-            .context("missing completed_through_block")?,
-        caught_up: row.try_get("caught_up").context("missing caught_up")?,
+        cursor_count: crate::sql_row::get(&row, "cursor_count")?,
+        remaining_block_count: crate::sql_row::get(&row, "remaining_block_count")?,
+        completed_through_block: crate::sql_row::get(&row, "completed_through_block")?,
+        caught_up: crate::sql_row::get(&row, "caught_up")?,
     })
 }
 
@@ -196,11 +190,9 @@ async fn load_log_staging_table_summaries(
     rows.into_iter()
         .map(|row| {
             Ok(RawFactTableSummary {
-                table_name: row.try_get("table_name").context("missing table_name")?,
-                estimated_row_count: row
-                    .try_get("estimated_row_count")
-                    .context("missing estimated_row_count")?,
-                total_bytes: row.try_get("total_bytes").context("missing total_bytes")?,
+                table_name: crate::sql_row::get(&row, "table_name")?,
+                estimated_row_count: crate::sql_row::get(&row, "estimated_row_count")?,
+                total_bytes: crate::sql_row::get(&row, "total_bytes")?,
             })
         })
         .collect()
@@ -247,11 +239,9 @@ async fn load_uncovered_log_staging_rows(
     rows.into_iter()
         .map(|row| {
             Ok(RawFactUncoveredRows {
-                table_name: row.try_get("table_name").context("missing table_name")?,
-                row_count: row.try_get("row_count").context("missing row_count")?,
-                max_block_number: row
-                    .try_get("max_block_number")
-                    .context("missing max_block_number")?,
+                table_name: crate::sql_row::get(&row, "table_name")?,
+                row_count: crate::sql_row::get(&row, "row_count")?,
+                max_block_number: crate::sql_row::get(&row, "max_block_number")?,
             })
         })
         .collect()

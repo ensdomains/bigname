@@ -15,6 +15,7 @@ mod record_inventory;
 mod replay;
 mod resolver;
 mod runtime;
+mod sql_row;
 
 #[cfg(test)]
 mod main_tests;

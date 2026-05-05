@@ -198,64 +198,38 @@ pub(super) async fn load_relevant_events(
 
 fn decode_current_binding_seed(row: sqlx::postgres::PgRow) -> Result<CurrentBindingSeed> {
     Ok(CurrentBindingSeed {
-        logical_name_id: row
-            .try_get("logical_name_id")
-            .context("missing logical_name_id")?,
-        namespace: row.try_get("namespace").context("missing namespace")?,
-        canonical_display_name: row
-            .try_get("canonical_display_name")
-            .context("missing canonical_display_name")?,
-        normalized_name: row
-            .try_get("normalized_name")
-            .context("missing normalized_name")?,
-        namehash: row.try_get("namehash").context("missing namehash")?,
-        surface_chain_id: row
-            .try_get("surface_chain_id")
-            .context("missing surface_chain_id")?,
-        surface_block_hash: row
-            .try_get("surface_block_hash")
-            .context("missing surface_block_hash")?,
-        surface_block_number: row
-            .try_get("surface_block_number")
-            .context("missing surface_block_number")?,
-        surface_block_timestamp: row
-            .try_get("surface_block_timestamp")
-            .context("missing surface_block_timestamp")?,
-        surface_state: parse_canonicality_state(
-            &row.try_get::<String, _>("surface_state")
-                .context("missing surface_state")?,
-        )?,
-        surface_binding_id: row
-            .try_get("surface_binding_id")
-            .context("missing surface_binding_id")?,
-        resource_id: row.try_get("resource_id").context("missing resource_id")?,
-        token_lineage_id: row
-            .try_get("token_lineage_id")
-            .context("missing token_lineage_id")?,
-        binding_kind: parse_surface_binding_kind(
-            &row.try_get::<String, _>("binding_kind")
-                .context("missing binding_kind")?,
-        )?,
-        binding_chain_id: row
-            .try_get("binding_chain_id")
-            .context("missing binding_chain_id")?,
-        binding_block_hash: row
-            .try_get("binding_block_hash")
-            .context("missing binding_block_hash")?,
-        binding_block_number: row
-            .try_get("binding_block_number")
-            .context("missing binding_block_number")?,
-        binding_block_timestamp: row
-            .try_get("binding_block_timestamp")
-            .context("missing binding_block_timestamp")?,
-        binding_state: parse_canonicality_state(
-            &row.try_get::<String, _>("binding_state")
-                .context("missing binding_state")?,
-        )?,
-        resource_state: parse_canonicality_state(
-            &row.try_get::<String, _>("resource_state")
-                .context("missing resource_state")?,
-        )?,
+        logical_name_id: crate::sql_row::get(&row, "logical_name_id")?,
+        namespace: crate::sql_row::get(&row, "namespace")?,
+        canonical_display_name: crate::sql_row::get(&row, "canonical_display_name")?,
+        normalized_name: crate::sql_row::get(&row, "normalized_name")?,
+        namehash: crate::sql_row::get(&row, "namehash")?,
+        surface_chain_id: crate::sql_row::get(&row, "surface_chain_id")?,
+        surface_block_hash: crate::sql_row::get(&row, "surface_block_hash")?,
+        surface_block_number: crate::sql_row::get(&row, "surface_block_number")?,
+        surface_block_timestamp: crate::sql_row::get(&row, "surface_block_timestamp")?,
+        surface_state: parse_canonicality_state(&crate::sql_row::get::<String>(
+            &row,
+            "surface_state",
+        )?)?,
+        surface_binding_id: crate::sql_row::get(&row, "surface_binding_id")?,
+        resource_id: crate::sql_row::get(&row, "resource_id")?,
+        token_lineage_id: crate::sql_row::get(&row, "token_lineage_id")?,
+        binding_kind: parse_surface_binding_kind(&crate::sql_row::get::<String>(
+            &row,
+            "binding_kind",
+        )?)?,
+        binding_chain_id: crate::sql_row::get(&row, "binding_chain_id")?,
+        binding_block_hash: crate::sql_row::get(&row, "binding_block_hash")?,
+        binding_block_number: crate::sql_row::get(&row, "binding_block_number")?,
+        binding_block_timestamp: crate::sql_row::get(&row, "binding_block_timestamp")?,
+        binding_state: parse_canonicality_state(&crate::sql_row::get::<String>(
+            &row,
+            "binding_state",
+        )?)?,
+        resource_state: parse_canonicality_state(&crate::sql_row::get::<String>(
+            &row,
+            "resource_state",
+        )?)?,
         token_lineage_state: row
             .try_get::<Option<String>, _>("token_lineage_state")
             .context("missing token_lineage_state")?
@@ -266,34 +240,20 @@ fn decode_current_binding_seed(row: sqlx::postgres::PgRow) -> Result<CurrentBind
 
 fn decode_relevant_event(row: sqlx::postgres::PgRow) -> Result<RelevantEvent> {
     Ok(RelevantEvent {
-        normalized_event_id: row
-            .try_get("normalized_event_id")
-            .context("missing normalized_event_id")?,
-        event_kind: row.try_get("event_kind").context("missing event_kind")?,
-        source_family: row
-            .try_get("source_family")
-            .context("missing source_family")?,
-        manifest_version: row
-            .try_get("manifest_version")
-            .context("missing manifest_version")?,
-        source_manifest_id: row
-            .try_get("source_manifest_id")
-            .context("missing source_manifest_id")?,
-        chain_id: row.try_get("chain_id").context("missing chain_id")?,
-        block_number: row
-            .try_get("block_number")
-            .context("missing block_number")?,
-        block_hash: row.try_get("block_hash").context("missing block_hash")?,
-        block_timestamp: row
-            .try_get("block_timestamp")
-            .context("missing block_timestamp")?,
-        raw_fact_ref: row
-            .try_get("raw_fact_ref")
-            .context("missing raw_fact_ref")?,
-        canonicality_state: parse_canonicality_state(
-            &row.try_get::<String, _>("canonicality_state")
-                .context("missing canonicality_state")?,
-        )?,
-        after_state: row.try_get("after_state").context("missing after_state")?,
+        normalized_event_id: crate::sql_row::get(&row, "normalized_event_id")?,
+        event_kind: crate::sql_row::get(&row, "event_kind")?,
+        source_family: crate::sql_row::get(&row, "source_family")?,
+        manifest_version: crate::sql_row::get(&row, "manifest_version")?,
+        source_manifest_id: crate::sql_row::get(&row, "source_manifest_id")?,
+        chain_id: crate::sql_row::get(&row, "chain_id")?,
+        block_number: crate::sql_row::get(&row, "block_number")?,
+        block_hash: crate::sql_row::get(&row, "block_hash")?,
+        block_timestamp: crate::sql_row::get(&row, "block_timestamp")?,
+        raw_fact_ref: crate::sql_row::get(&row, "raw_fact_ref")?,
+        canonicality_state: parse_canonicality_state(&crate::sql_row::get::<String>(
+            &row,
+            "canonicality_state",
+        )?)?,
+        after_state: crate::sql_row::get(&row, "after_state")?,
     })
 }

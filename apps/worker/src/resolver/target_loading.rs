@@ -117,14 +117,10 @@ pub(super) async fn load_target_resolvers(pool: &PgPool) -> Result<Vec<ResolverT
 
     let mut targets = BTreeMap::<(String, String), BTreeSet<String>>::new();
     for row in rows {
-        let chain_id = row.try_get("chain_id").context("missing chain_id")?;
-        let resolver_address = normalize_resolver_address(
-            &row.try_get::<String, _>("resolver_address")
-                .context("missing resolver_address")?,
-        );
-        let source_family = row
-            .try_get::<String, _>("source_family")
-            .context("missing source_family")?;
+        let chain_id = crate::sql_row::get(&row, "chain_id")?;
+        let resolver_address =
+            normalize_resolver_address(&crate::sql_row::get::<String>(&row, "resolver_address")?);
+        let source_family = crate::sql_row::get::<String>(&row, "source_family")?;
         insert_target(
             &mut targets,
             chain_id,
@@ -182,11 +178,11 @@ async fn load_alias_target_resolvers(pool: &PgPool) -> Result<Vec<ResolverTarget
     rows.into_iter()
         .map(|row| {
             Ok(ResolverTarget {
-                chain_id: row.try_get("chain_id").context("missing chain_id")?,
-                resolver_address: normalize_resolver_address(
-                    &row.try_get::<String, _>("resolver_address")
-                        .context("missing resolver_address")?,
-                ),
+                chain_id: crate::sql_row::get(&row, "chain_id")?,
+                resolver_address: normalize_resolver_address(&crate::sql_row::get::<String>(
+                    &row,
+                    "resolver_address",
+                )?),
                 profile_source_family: row
                     .try_get::<String, _>("source_family")
                     .context("missing source_family")

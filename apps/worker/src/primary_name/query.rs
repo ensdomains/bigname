@@ -231,7 +231,7 @@ fn decode_primary_name_rebuild_input(row: PgRow) -> Result<PrimaryNameRebuildInp
 
             Ok::<NameClaimObservation, anyhow::Error>(NameClaimObservation {
                 key: tuple.key.clone(),
-                raw_name: row.try_get("raw_name").context("missing raw_name")?,
+                raw_name: crate::sql_row::get(&row, "raw_name")?,
                 primary_claim_source,
             })
         })
@@ -244,16 +244,14 @@ fn decode_primary_name_rebuild_input(row: PgRow) -> Result<PrimaryNameRebuildInp
 }
 
 fn decode_name_claim_observation(row: PgRow) -> Result<NameClaimObservation> {
-    let primary_claim_source: Value = row
-        .try_get("primary_claim_source")
-        .context("missing primary_claim_source")?;
+    let primary_claim_source: Value = crate::sql_row::get(&row, "primary_claim_source")?;
     primary_claim_source
         .as_object()
         .context("primary_claim_source must be a JSON object")?;
 
     Ok(NameClaimObservation {
         key: decode_tuple_key(&row)?,
-        raw_name: row.try_get("raw_name").context("missing raw_name")?,
+        raw_name: crate::sql_row::get(&row, "raw_name")?,
         primary_claim_source,
     })
 }
