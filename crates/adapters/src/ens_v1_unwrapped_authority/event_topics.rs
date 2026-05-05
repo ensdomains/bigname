@@ -5,20 +5,6 @@ use crate::adapter_manifest::{
     ActiveManifestEventTopic0sBySignature, load_required_active_manifest_event_topic0s_by_signature,
 };
 
-const ENS_NAME_REGISTERED_EXPIRY_WORDS: &[(&str, usize)] = &[
-    (NAME_REGISTERED_SIGNATURE, 64),
-    (WRAPPED_NAME_REGISTERED_SIGNATURE, 96),
-    (UNWRAPPED_NAME_REGISTERED_SIGNATURE, 96),
-];
-const BASENAMES_NAME_REGISTERED_EXPIRY_WORDS: &[(&str, usize)] =
-    &[(BASENAMES_NAME_REGISTERED_SIGNATURE, 32)];
-const ENS_NAME_RENEWED_EXPIRY_WORDS: &[(&str, usize)] = &[
-    (NAME_RENEWED_SIGNATURE, 64),
-    (UNWRAPPED_NAME_RENEWED_SIGNATURE, 64),
-];
-const BASENAMES_NAME_RENEWED_EXPIRY_WORDS: &[(&str, usize)] =
-    &[(BASENAMES_NAME_RENEWED_SIGNATURE, 32)];
-
 const ENS_REGISTRAR_EVENT_SIGNATURES: &[&str] = &[
     NAME_REGISTERED_SIGNATURE,
     WRAPPED_NAME_REGISTERED_SIGNATURE,
@@ -139,25 +125,6 @@ impl AuthorityEventTopics {
         self.topic0s.matches(canonical_signature, topic0)
     }
 
-    pub(super) fn registrar_name_registered_expiry_word_start(
-        &self,
-        source_family: &str,
-        topic0: &str,
-    ) -> Result<Option<usize>> {
-        self.matching_expiry_word_start(
-            registrar_name_registered_expiry_words(source_family),
-            topic0,
-        )
-    }
-
-    pub(super) fn registrar_name_renewed_expiry_word_start(
-        &self,
-        source_family: &str,
-        topic0: &str,
-    ) -> Result<Option<usize>> {
-        self.matching_expiry_word_start(registrar_name_renewed_expiry_words(source_family), topic0)
-    }
-
     pub(super) fn is_text_changed_topic0(&self, source_family: &str, topic0: &str) -> Result<bool> {
         Ok(text_changed_signatures(source_family).iter().try_fold(
             false,
@@ -176,19 +143,6 @@ impl AuthorityEventTopics {
             TEXT_CHANGED_WITHOUT_VALUE_SIGNATURE,
             TEXT_CHANGED_WITH_VALUE_SIGNATURE,
         ])
-    }
-
-    fn matching_expiry_word_start(
-        &self,
-        candidates: &[(&str, usize)],
-        topic0: &str,
-    ) -> Result<Option<usize>> {
-        for (signature, expiry_word_start) in candidates {
-            if self.matches(signature, topic0)? {
-                return Ok(Some(*expiry_word_start));
-            }
-        }
-        Ok(None)
     }
 
     fn from_signatures(signatures: impl IntoIterator<Item = &'static str>) -> Self {
@@ -265,22 +219,6 @@ pub(super) fn required_signatures_for_source_family(
         SOURCE_FAMILY_ENS_V1_RESOLVER_L1 => ENS_RESOLVER_EVENT_SIGNATURES,
         SOURCE_FAMILY_BASENAMES_BASE_RESOLVER => BASENAMES_RESOLVER_EVENT_SIGNATURES,
         SOURCE_FAMILY_ENS_V1_WRAPPER_L1 => WRAPPER_EVENT_SIGNATURES,
-        _ => &[],
-    }
-}
-
-fn registrar_name_registered_expiry_words(source_family: &str) -> &'static [(&'static str, usize)] {
-    match source_family {
-        SOURCE_FAMILY_ENS_V1_REGISTRAR_L1 => ENS_NAME_REGISTERED_EXPIRY_WORDS,
-        SOURCE_FAMILY_BASENAMES_BASE_REGISTRAR => BASENAMES_NAME_REGISTERED_EXPIRY_WORDS,
-        _ => &[],
-    }
-}
-
-fn registrar_name_renewed_expiry_words(source_family: &str) -> &'static [(&'static str, usize)] {
-    match source_family {
-        SOURCE_FAMILY_ENS_V1_REGISTRAR_L1 => ENS_NAME_RENEWED_EXPIRY_WORDS,
-        SOURCE_FAMILY_BASENAMES_BASE_REGISTRAR => BASENAMES_NAME_RENEWED_EXPIRY_WORDS,
         _ => &[],
     }
 }

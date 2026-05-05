@@ -17,44 +17,57 @@ pub(super) const SOURCE_EVENT_ALIAS_CHANGED: &str = "AliasChanged";
 pub(super) const SOURCE_EVENT_NAMED_RESOURCE: &str = "NamedResource";
 pub(super) const SOURCE_EVENT_NAMED_TEXT_RESOURCE: &str = "NamedTextResource";
 pub(super) const SOURCE_EVENT_NAMED_ADDR_RESOURCE: &str = "NamedAddrResource";
-pub(super) const ABI_EVENT_NAME_WRAPPED: &str = "NameWrapped";
-pub(super) const ABI_EVENT_LABEL_REGISTERED: &str = "LabelRegistered";
-pub(super) const ABI_EVENT_LABEL_RESERVED: &str = "LabelReserved";
-pub(super) const ABI_EVENT_PARENT_UPDATED: &str = "ParentUpdated";
-pub(super) const ABI_EVENT_NAME_REGISTERED: &str = "NameRegistered";
-pub(super) const ABI_EVENT_NAME_RENEWED: &str = "NameRenewed";
-pub(super) const ABI_EVENT_ALIAS_CHANGED: &str = "AliasChanged";
-pub(super) const ABI_EVENT_NAMED_RESOURCE: &str = "NamedResource";
-pub(super) const ABI_EVENT_NAMED_TEXT_RESOURCE: &str = "NamedTextResource";
-pub(super) const ABI_EVENT_NAMED_ADDR_RESOURCE: &str = "NamedAddrResource";
+pub(super) const NAME_WRAPPED_SIGNATURE: &str = "NameWrapped(bytes32,bytes,address,uint32,uint64)";
+pub(super) const ENS_V1_NAME_REGISTERED_SIGNATURE: &str =
+    "NameRegistered(string,bytes32,address,uint256,uint256)";
+pub(super) const ENS_V1_NAME_RENEWED_SIGNATURE: &str =
+    "NameRenewed(string,bytes32,uint256,uint256)";
+pub(super) const LABEL_REGISTERED_SIGNATURE: &str =
+    "LabelRegistered(uint256,bytes32,string,address,uint64,address)";
+pub(super) const LABEL_RESERVED_SIGNATURE: &str =
+    "LabelReserved(uint256,bytes32,string,uint64,address)";
+pub(super) const PARENT_UPDATED_SIGNATURE: &str = "ParentUpdated(address,string,address)";
+pub(super) const ENS_V2_NAME_REGISTERED_SIGNATURE: &str =
+    "NameRegistered(uint256,string,address,address,address,uint64,address,bytes32,uint256,uint256)";
+pub(super) const ENS_V2_NAME_RENEWED_SIGNATURE: &str =
+    "NameRenewed(uint256,string,uint64,uint64,address,bytes32,uint256)";
+pub(super) const ALIAS_CHANGED_SIGNATURE: &str = "AliasChanged(bytes,bytes,bytes,bytes)";
+pub(super) const NAMED_RESOURCE_SIGNATURE: &str = "NamedResource(uint256,bytes)";
+pub(super) const NAMED_TEXT_RESOURCE_SIGNATURE: &str =
+    "NamedTextResource(uint256,bytes,bytes32,string)";
+pub(super) const NAMED_ADDR_RESOURCE_SIGNATURE: &str = "NamedAddrResource(uint256,bytes,uint256)";
 
-pub(super) const ENS_V1_WRAPPER_PREIMAGE_EVENT_NAMES: [&str; 1] = [ABI_EVENT_NAME_WRAPPED];
-pub(super) const ENS_V1_REGISTRAR_PREIMAGE_EVENT_NAMES: [&str; 2] =
-    [ABI_EVENT_NAME_REGISTERED, ABI_EVENT_NAME_RENEWED];
-pub(super) const ENS_V2_REGISTRY_PREIMAGE_EVENT_NAMES: [&str; 3] = [
-    ABI_EVENT_LABEL_REGISTERED,
-    ABI_EVENT_LABEL_RESERVED,
-    ABI_EVENT_PARENT_UPDATED,
+pub(super) const ENS_V1_WRAPPER_PREIMAGE_EVENT_SIGNATURES: [&str; 1] = [NAME_WRAPPED_SIGNATURE];
+pub(super) const ENS_V1_REGISTRAR_PREIMAGE_EVENT_SIGNATURES: [&str; 2] = [
+    ENS_V1_NAME_REGISTERED_SIGNATURE,
+    ENS_V1_NAME_RENEWED_SIGNATURE,
 ];
-pub(super) const ENS_V2_REGISTRAR_PREIMAGE_EVENT_NAMES: [&str; 2] =
-    [ABI_EVENT_NAME_REGISTERED, ABI_EVENT_NAME_RENEWED];
-pub(super) const ENS_V2_RESOLVER_PREIMAGE_EVENT_NAMES: [&str; 4] = [
-    ABI_EVENT_ALIAS_CHANGED,
-    ABI_EVENT_NAMED_RESOURCE,
-    ABI_EVENT_NAMED_TEXT_RESOURCE,
-    ABI_EVENT_NAMED_ADDR_RESOURCE,
+pub(super) const ENS_V2_REGISTRY_PREIMAGE_EVENT_SIGNATURES: [&str; 3] = [
+    LABEL_REGISTERED_SIGNATURE,
+    LABEL_RESERVED_SIGNATURE,
+    PARENT_UPDATED_SIGNATURE,
 ];
-pub(super) const PREIMAGE_EVENT_NAMES: [&str; 12] = [
-    ABI_EVENT_NAME_WRAPPED,
-    ABI_EVENT_NAME_REGISTERED,
-    ABI_EVENT_NAME_RENEWED,
-    ABI_EVENT_LABEL_REGISTERED,
-    ABI_EVENT_LABEL_RESERVED,
-    ABI_EVENT_PARENT_UPDATED,
-    ABI_EVENT_NAME_REGISTERED,
-    ABI_EVENT_NAME_RENEWED,
-    ABI_EVENT_ALIAS_CHANGED,
-    ABI_EVENT_NAMED_RESOURCE,
-    ABI_EVENT_NAMED_TEXT_RESOURCE,
-    ABI_EVENT_NAMED_ADDR_RESOURCE,
+pub(super) const ENS_V2_REGISTRAR_PREIMAGE_EVENT_SIGNATURES: [&str; 2] = [
+    ENS_V2_NAME_REGISTERED_SIGNATURE,
+    ENS_V2_NAME_RENEWED_SIGNATURE,
+];
+pub(super) const ENS_V2_RESOLVER_PREIMAGE_EVENT_SIGNATURES: [&str; 4] = [
+    ALIAS_CHANGED_SIGNATURE,
+    NAMED_RESOURCE_SIGNATURE,
+    NAMED_TEXT_RESOURCE_SIGNATURE,
+    NAMED_ADDR_RESOURCE_SIGNATURE,
+];
+pub(super) const PREIMAGE_EVENT_SIGNATURES: [&str; 12] = [
+    NAME_WRAPPED_SIGNATURE,
+    ENS_V1_NAME_REGISTERED_SIGNATURE,
+    ENS_V1_NAME_RENEWED_SIGNATURE,
+    LABEL_REGISTERED_SIGNATURE,
+    LABEL_RESERVED_SIGNATURE,
+    PARENT_UPDATED_SIGNATURE,
+    ENS_V2_NAME_REGISTERED_SIGNATURE,
+    ENS_V2_NAME_RENEWED_SIGNATURE,
+    ALIAS_CHANGED_SIGNATURE,
+    NAMED_RESOURCE_SIGNATURE,
+    NAMED_TEXT_RESOURCE_SIGNATURE,
+    NAMED_ADDR_RESOURCE_SIGNATURE,
 ];

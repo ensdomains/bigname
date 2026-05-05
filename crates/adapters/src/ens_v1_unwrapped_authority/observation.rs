@@ -13,98 +13,88 @@ pub(super) fn build_authority_observation(
     let profile = authority_profile_for_source_family(&raw_log.source_family);
 
     if matches!(profile, Some(profile) if raw_log.source_family == profile.registrar_source_family())
-        && event_topics
-            .registrar_name_registered_expiry_word_start(&raw_log.source_family, topic0)?
-            .is_some()
     {
-        let expiry_word_start = event_topics
-            .registrar_name_registered_expiry_word_start(&raw_log.source_family, topic0)?
-            .expect("checked registrar NameRegistered topic must have an expiry word");
-        let Some(label) = decode_observable_registrar_label(&raw_log.data)? else {
-            return Ok(None);
-        };
-        let labelhash = normalize_hex_32(
-            raw_log
-                .topics
-                .get(1)
-                .context("NameRegistered log is missing indexed labelhash")?,
-        )?;
-        let observed = profile
-            .context("registrar observation is missing an authority profile")?
-            .observe_name(&label, &raw_log.normalizer_version)?;
-        let observed_labelhash = observed
-            .labelhashes
-            .first()
-            .context("observed registrar name is missing labelhash")?;
-        if !observed_labelhash.eq_ignore_ascii_case(&labelhash) {
-            return Ok(None);
+        if let Some(registration) = decode_registrar_name_registered_data(
+            &raw_log.source_family,
+            topic0,
+            &raw_log.data,
+            event_topics,
+        )? {
+            if !can_observe_registrar_label(&registration.label) {
+                return Ok(None);
+            }
+            let labelhash = normalize_hex_32(
+                raw_log
+                    .topics
+                    .get(1)
+                    .context("NameRegistered log is missing indexed labelhash")?,
+            )?;
+            let observed = profile
+                .context("registrar observation is missing an authority profile")?
+                .observe_name(&registration.label, &raw_log.normalizer_version)?;
+            let observed_labelhash = observed
+                .labelhashes
+                .first()
+                .context("observed registrar name is missing labelhash")?;
+            if !observed_labelhash.eq_ignore_ascii_case(&labelhash) {
+                return Ok(None);
+            }
+            let registrant = normalize_topic_address(
+                raw_log
+                    .topics
+                    .get(2)
+                    .context("NameRegistered log is missing indexed owner")?,
+            )?;
+            return Ok(Some(AuthorityObservation::RegistrationGranted(
+                NameRegistrationObservation {
+                    label: registration.label,
+                    labelhash,
+                    registrant,
+                    expiry: OffsetDateTime::from_unix_timestamp(registration.expiry)
+                        .context("NameRegistered expiry is not a valid unix timestamp")?,
+                    reference: raw_log.reference(),
+                },
+            )));
         }
-        let registrant = normalize_topic_address(
-            raw_log
-                .topics
-                .get(2)
-                .context("NameRegistered log is missing indexed owner")?,
-        )?;
-        let expiry = abi_word_to_i64(
-            raw_log
-                .data
-                .get(expiry_word_start..expiry_word_start + 32)
-                .context("NameRegistered data is missing expiry word")?,
-        )?;
-        return Ok(Some(AuthorityObservation::RegistrationGranted(
-            NameRegistrationObservation {
-                label,
-                labelhash,
-                registrant,
-                expiry: OffsetDateTime::from_unix_timestamp(expiry)
-                    .context("NameRegistered expiry is not a valid unix timestamp")?,
-                reference: raw_log.reference(),
-            },
-        )));
     }
 
     if matches!(profile, Some(profile) if raw_log.source_family == profile.registrar_source_family())
-        && event_topics
-            .registrar_name_renewed_expiry_word_start(&raw_log.source_family, topic0)?
-            .is_some()
     {
-        let expiry_word_start = event_topics
-            .registrar_name_renewed_expiry_word_start(&raw_log.source_family, topic0)?
-            .expect("checked registrar NameRenewed topic must have an expiry word");
-        let Some(label) = decode_observable_registrar_label(&raw_log.data)? else {
-            return Ok(None);
-        };
-        let labelhash = normalize_hex_32(
-            raw_log
-                .topics
-                .get(1)
-                .context("NameRenewed log is missing indexed labelhash")?,
-        )?;
-        let observed = profile
-            .context("registrar renewal observation is missing an authority profile")?
-            .observe_name(&label, &raw_log.normalizer_version)?;
-        let observed_labelhash = observed
-            .labelhashes
-            .first()
-            .context("observed renewed registrar name is missing labelhash")?;
-        if !observed_labelhash.eq_ignore_ascii_case(&labelhash) {
-            return Ok(None);
+        if let Some(renewal) = decode_registrar_name_renewed_data(
+            &raw_log.source_family,
+            topic0,
+            &raw_log.data,
+            event_topics,
+        )? {
+            if !can_observe_registrar_label(&renewal.label) {
+                return Ok(None);
+            }
+            let labelhash = normalize_hex_32(
+                raw_log
+                    .topics
+                    .get(1)
+                    .context("NameRenewed log is missing indexed labelhash")?,
+            )?;
+            let observed = profile
+                .context("registrar renewal observation is missing an authority profile")?
+                .observe_name(&renewal.label, &raw_log.normalizer_version)?;
+            let observed_labelhash = observed
+                .labelhashes
+                .first()
+                .context("observed renewed registrar name is missing labelhash")?;
+            if !observed_labelhash.eq_ignore_ascii_case(&labelhash) {
+                return Ok(None);
+            }
+            return Ok(Some(AuthorityObservation::RegistrationRenewed(
+                NameRenewalObservation {
+                    label: renewal.label,
+                    labelhash,
+                    expiry: OffsetDateTime::from_unix_timestamp(renewal.expiry)
+                        .context("NameRenewed expiry is not a valid unix timestamp")?,
+                    reference: raw_log.reference(),
+                },
+            )));
         }
-        let expiry = abi_word_to_i64(
-            raw_log
-                .data
-                .get(expiry_word_start..expiry_word_start + 32)
-                .context("NameRenewed data is missing expiry word")?,
-        )?;
-        return Ok(Some(AuthorityObservation::RegistrationRenewed(
-            NameRenewalObservation {
-                label,
-                labelhash,
-                expiry: OffsetDateTime::from_unix_timestamp(expiry)
-                    .context("NameRenewed expiry is not a valid unix timestamp")?,
-                reference: raw_log.reference(),
-            },
-        )));
     }
 
     if matches!(profile, Some(profile) if raw_log.source_family == profile.registrar_source_family())
@@ -216,7 +206,7 @@ pub(super) fn build_authority_observation(
     if matches!(profile, Some(profile) if raw_log.source_family == profile.resolver_source_family())
         && event_topics.matches(NAME_CHANGED_SIGNATURE, topic0)?
     {
-        let Some(name) = decode_resolver_first_dynamic_string(&raw_log.data) else {
+        let Some(name) = decode_name_changed_data(&raw_log.data) else {
             return Ok(None);
         };
         let Some(namehash) = normalize_resolver_topic(raw_log.topics.get(1)) else {
@@ -241,7 +231,7 @@ pub(super) fn build_authority_observation(
     if matches!(profile, Some(profile) if raw_log.source_family == profile.resolver_source_family())
         && event_topics.matches(ADDR_CHANGED_SIGNATURE, topic0)?
     {
-        let Some(address) = decode_resolver_owner_address(&raw_log.data) else {
+        let Some(address) = decode_addr_changed_data(&raw_log.data) else {
             return Ok(None);
         };
         let Some(namehash) = normalize_resolver_topic(raw_log.topics.get(1)) else {
@@ -266,13 +256,11 @@ pub(super) fn build_authority_observation(
     if matches!(profile, Some(profile) if raw_log.source_family == profile.resolver_source_family())
         && event_topics.matches(ADDRESS_CHANGED_SIGNATURE, topic0)?
     {
-        let Some(coin_type) = decode_resolver_i64_word(raw_log.data.get(..32)) else {
+        let Some(address_change) = decode_address_changed_data(&raw_log.data) else {
             return Ok(None);
         };
-        let Some(address_bytes) = decode_resolver_nth_dynamic_bytes(&raw_log.data, 1) else {
-            return Ok(None);
-        };
-        let value = resolver_address_record_value(coin_type, &address_bytes);
+        let value =
+            resolver_address_record_value(address_change.coin_type, &address_change.address_bytes);
         let Some(namehash) = normalize_resolver_topic(raw_log.topics.get(1)) else {
             return Ok(None);
         };
@@ -281,9 +269,9 @@ pub(super) fn build_authority_observation(
                 namehash,
                 resolver: raw_log.emitting_address.clone(),
                 selector: RecordSelector {
-                    record_key: format!("addr:{coin_type}"),
+                    record_key: format!("addr:{}", address_change.coin_type),
                     record_family: "addr".to_owned(),
-                    selector_key: Some(coin_type.to_string()),
+                    selector_key: Some(address_change.coin_type.to_string()),
                 },
                 value: Some(value),
                 raw_name: None,
@@ -304,7 +292,7 @@ pub(super) fn build_authority_observation(
         let Some(namehash) = normalize_resolver_topic(raw_log.topics.get(1)) else {
             return Ok(None);
         };
-        let Some(record_version) = decode_resolver_i64_word(raw_log.data.get(..32)) else {
+        let Some(record_version) = decode_version_changed_data(&raw_log.data) else {
             return Ok(None);
         };
         return Ok(Some(AuthorityObservation::RecordVersionChanged(
@@ -320,9 +308,9 @@ pub(super) fn build_authority_observation(
     if matches!(profile, Some(profile) if profile.wrapper_source_family() == Some(raw_log.source_family.as_str()))
         && event_topics.matches(NAME_WRAPPED_SIGNATURE, topic0)?
     {
-        let dns_name = decode_first_dynamic_bytes(&raw_log.data)?;
+        let decoded = decode_wrapper_name_wrapped_data(&raw_log.data)?;
         let name = observe_dns_encoded_name_with_reference(
-            &dns_name,
+            &decoded.dns_name,
             &raw_log.reference(),
             &raw_log.normalizer_version,
         )?;
@@ -335,30 +323,12 @@ pub(super) fn build_authority_observation(
         if !indexed_node.eq_ignore_ascii_case(&name.namehash) {
             bail!("NameWrapped indexed node does not match decoded DNS name");
         }
-        let owner = decode_owner_address(
-            raw_log
-                .data
-                .get(32..64)
-                .context("NameWrapped data is missing owner word")?,
-        )?;
-        let fuses = abi_word_to_i64(
-            raw_log
-                .data
-                .get(64..96)
-                .context("NameWrapped data is missing fuses word")?,
-        )?;
-        let expiry = abi_word_to_i64(
-            raw_log
-                .data
-                .get(96..128)
-                .context("NameWrapped data is missing expiry word")?,
-        )?;
         return Ok(Some(AuthorityObservation::WrapperNameWrapped(
             WrapperNameWrappedObservation {
                 name,
-                owner,
-                fuses,
-                expiry: OffsetDateTime::from_unix_timestamp(expiry)
+                owner: decoded.owner,
+                fuses: decoded.fuses,
+                expiry: OffsetDateTime::from_unix_timestamp(decoded.expiry)
                     .context("NameWrapped expiry is not a valid unix timestamp")?,
                 reference: raw_log.reference(),
             },
@@ -393,12 +363,7 @@ pub(super) fn build_authority_observation(
                         .get(1)
                         .context("FusesSet log is missing indexed node")?,
                 )?,
-                fuses: abi_word_to_i64(
-                    raw_log
-                        .data
-                        .get(..32)
-                        .context("FusesSet data is missing fuses word")?,
-                )?,
+                fuses: decode_wrapper_fuses_set_data(&raw_log.data)?,
                 reference: raw_log.reference(),
             },
         )));
@@ -407,12 +372,7 @@ pub(super) fn build_authority_observation(
     if matches!(profile, Some(profile) if profile.wrapper_source_family() == Some(raw_log.source_family.as_str()))
         && event_topics.matches(EXPIRY_EXTENDED_SIGNATURE, topic0)?
     {
-        let expiry = abi_word_to_i64(
-            raw_log
-                .data
-                .get(..32)
-                .context("ExpiryExtended data is missing expiry word")?,
-        )?;
+        let expiry = decode_wrapper_expiry_extended_data(&raw_log.data)?;
         return Ok(Some(AuthorityObservation::WrapperExpiryExtended(
             WrapperExpiryObservation {
                 namehash: normalize_hex_32(
@@ -431,21 +391,10 @@ pub(super) fn build_authority_observation(
     if matches!(profile, Some(profile) if profile.wrapper_source_family() == Some(raw_log.source_family.as_str()))
         && event_topics.matches(TRANSFER_SINGLE_SIGNATURE, topic0)?
     {
-        let namehash = normalize_hex_32(&hex_string(
-            raw_log
-                .data
-                .get(..32)
-                .context("TransferSingle data is missing token id word")?,
-        ))?;
-        let value = abi_word_to_i64(
-            raw_log
-                .data
-                .get(32..64)
-                .context("TransferSingle data is missing value word")?,
-        )?;
+        let transfer = decode_wrapper_transfer_single_data(&raw_log.data)?;
         return Ok(Some(AuthorityObservation::WrapperTokenTransferred(
             WrapperTokenTransferObservation {
-                namehash,
+                namehash: normalize_hex_32(&transfer.namehash)?,
                 from_address: normalize_topic_address(
                     raw_log
                         .topics
@@ -458,7 +407,7 @@ pub(super) fn build_authority_observation(
                         .get(3)
                         .context("TransferSingle topic3 is missing to address")?,
                 )?,
-                value,
+                value: transfer.value,
                 reference: raw_log.reference(),
             },
         )));
@@ -479,69 +428,25 @@ pub(super) fn decode_text_record_change(
     if !event_topics.is_text_changed_topic0(source_family, topic0)? {
         return Ok(None);
     }
-    let Some(key) = decode_resolver_first_dynamic_string(data) else {
+    let Some(text_change) = decode_text_changed_data(source_family, topic0, data, event_topics)?
+    else {
         return Ok(None);
     };
-    if key.trim().is_empty() {
+    if text_change.key.trim().is_empty() {
         return Ok(None);
     }
     let Some(indexed_key_hash) = normalize_resolver_topic(topics.get(2)) else {
         return Ok(None);
     };
-    if indexed_key_hash != keccak256_hex(key.as_bytes()) {
+    if indexed_key_hash != keccak256_hex(text_change.key.as_bytes()) {
         return Ok(None);
     }
-    let value = decode_second_dynamic_string_if_present(data);
     Ok(Some(EnsV1TextRecordChange {
-        record_key: format!("text:{key}"),
+        record_key: format!("text:{}", text_change.key),
         record_family: "text".to_owned(),
-        selector_key: key,
-        value,
+        selector_key: text_change.key,
+        value: text_change.value,
     }))
-}
-
-fn decode_second_dynamic_string_if_present(data: &[u8]) -> Option<String> {
-    if data.len() < 64 {
-        return None;
-    }
-
-    let Ok(first_offset) = abi_word_to_usize(&data[..32]) else {
-        return None;
-    };
-    if first_offset < 64 {
-        return None;
-    }
-
-    decode_nth_dynamic_string(data, 1).ok()
-}
-
-fn decode_observable_registrar_label(data: &[u8]) -> Result<Option<String>> {
-    let Ok(label_bytes) = decode_first_dynamic_bytes(data) else {
-        return Ok(None);
-    };
-    let Ok(label) = String::from_utf8(label_bytes) else {
-        return Ok(None);
-    };
-    if !can_observe_registrar_label(&label) {
-        return Ok(None);
-    }
-    Ok(Some(label))
-}
-
-fn decode_resolver_first_dynamic_string(data: &[u8]) -> Option<String> {
-    decode_first_dynamic_string(data).ok()
-}
-
-fn decode_resolver_nth_dynamic_bytes(data: &[u8], parameter_index: usize) -> Option<Vec<u8>> {
-    decode_nth_dynamic_bytes(data, parameter_index).ok()
-}
-
-fn decode_resolver_owner_address(data: &[u8]) -> Option<String> {
-    decode_owner_address(data).ok()
-}
-
-fn decode_resolver_i64_word(word: Option<&[u8]>) -> Option<i64> {
-    abi_word_to_i64(word?).ok()
 }
 
 fn normalize_resolver_topic(topic: Option<&String>) -> Option<String> {

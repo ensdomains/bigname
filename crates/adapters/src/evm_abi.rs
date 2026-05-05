@@ -19,30 +19,6 @@ pub(crate) fn address_hex(address: Address) -> String {
     hex_string(address.as_slice())
 }
 
-pub(crate) fn dynamic_string(data: &[u8], offset_word_index: usize) -> Result<String> {
-    String::from_utf8(dynamic_bytes(data, offset_word_index)?)
-        .context("dynamic string payload is not valid UTF-8")
-}
-
-pub(crate) fn dynamic_bytes(data: &[u8], offset_word_index: usize) -> Result<Vec<u8>> {
-    let offset = usize_word(data, offset_word_index).context("invalid ABI dynamic offset")?;
-    let length = usize_at(data, offset).context("invalid ABI dynamic length")?;
-    let start = offset
-        .checked_add(ABI_WORD_BYTES)
-        .context("ABI dynamic payload start overflow")?;
-    let end = start
-        .checked_add(length)
-        .context("ABI dynamic payload end overflow")?;
-    if data.len() < end {
-        bail!("ABI data is shorter than the declared dynamic payload");
-    }
-    Ok(data[start..end].to_vec())
-}
-
-pub(crate) fn address_word_hex(data: &[u8], word_index: usize) -> Result<String> {
-    address_hex_from_word(word_at(data, word_index)?)
-}
-
 pub(crate) fn address_hex_from_word(word: &[u8]) -> Result<String> {
     let word = exact_word(word)?;
     let address = Address::from_slice(&word[12..]);
@@ -67,18 +43,13 @@ pub(crate) fn i64_from_u64_word(word: &[u8]) -> Result<i64> {
     i64::try_from(u64::from_be_bytes(bytes)).context("u64 ABI word does not fit in i64")
 }
 
-pub(crate) fn usize_from_word(word: &[u8]) -> Result<usize> {
-    let word = exact_word(word)?;
-    if word[..24].iter().any(|byte| *byte != 0) {
-        bail!("ABI word exceeds supported usize width");
-    }
-    let mut bytes = [0u8; 8];
-    bytes.copy_from_slice(&word[24..]);
-    usize::try_from(u64::from_be_bytes(bytes)).context("ABI word does not fit in usize")
-}
-
 pub(crate) fn u256_decimal(value: U256) -> String {
     value.to_string()
+}
+
+pub(crate) fn u256_i64(value: U256, label: &str) -> Result<i64> {
+    let value = u64::try_from(value).with_context(|| format!("{label} exceeds u64"))?;
+    i64::try_from(value).with_context(|| format!("{label} exceeds i64"))
 }
 
 pub(crate) fn u256_word_hex(value: U256) -> String {
@@ -89,21 +60,8 @@ pub(crate) fn u256_topic_decimal(value: &str) -> Result<String> {
     Ok(U256::from_be_bytes(hex_32(value)?).to_string())
 }
 
-pub(crate) fn word_at(data: &[u8], word_index: usize) -> Result<&[u8; ABI_WORD_BYTES]> {
-    let offset = word_index
-        .checked_mul(ABI_WORD_BYTES)
-        .context("ABI word index overflow")?;
-    word_at_offset(data, offset)
-}
-
-pub(crate) fn word_at_offset(data: &[u8], offset: usize) -> Result<&[u8; ABI_WORD_BYTES]> {
-    let end = offset
-        .checked_add(ABI_WORD_BYTES)
-        .context("ABI word offset overflow")?;
-    let word = data
-        .get(offset..end)
-        .with_context(|| format!("ABI data missing word at byte offset {offset}"))?;
-    exact_word(word)
+pub(crate) fn u256_topic_i64(value: &str, label: &str) -> Result<i64> {
+    u256_i64(U256::from_be_bytes(hex_32(value)?), label)
 }
 
 pub(crate) fn hex_32(value: &str) -> Result<[u8; ABI_WORD_BYTES]> {
@@ -159,14 +117,6 @@ pub(crate) fn hex_string(bytes: impl AsRef<[u8]>) -> String {
 
 pub(crate) fn hex_string_without_prefix(bytes: impl AsRef<[u8]>) -> String {
     hex::encode(bytes)
-}
-
-fn usize_word(data: &[u8], word_index: usize) -> Result<usize> {
-    usize_from_word(word_at(data, word_index)?)
-}
-
-fn usize_at(data: &[u8], offset: usize) -> Result<usize> {
-    usize_from_word(word_at_offset(data, offset)?)
 }
 
 fn exact_word(word: &[u8]) -> Result<&[u8; ABI_WORD_BYTES]> {

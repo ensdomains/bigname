@@ -18,9 +18,20 @@ use sqlx::{
 };
 use uuid::Uuid;
 
-use crate::adapter_manifest::ActiveManifestEventTopic0s;
+use crate::adapter_manifest::ActiveManifestEventTopic0sBySignature;
 
 use super::*;
+
+const ABI_EVENT_NAME_WRAPPED: &str = "NameWrapped";
+const ABI_EVENT_LABEL_REGISTERED: &str = "LabelRegistered";
+const ABI_EVENT_LABEL_RESERVED: &str = "LabelReserved";
+const ABI_EVENT_PARENT_UPDATED: &str = "ParentUpdated";
+const ABI_EVENT_NAME_REGISTERED: &str = "NameRegistered";
+const ABI_EVENT_NAME_RENEWED: &str = "NameRenewed";
+const ABI_EVENT_ALIAS_CHANGED: &str = "AliasChanged";
+const ABI_EVENT_NAMED_RESOURCE: &str = "NamedResource";
+const ABI_EVENT_NAMED_TEXT_RESOURCE: &str = "NamedTextResource";
+const ABI_EVENT_NAMED_ADDR_RESOURCE: &str = "NamedAddrResource";
 
 // ENSv1's `NameWrapped` event declaration starts at this pinned source line.
 // (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L27 @ ens_v1@91c966f)
@@ -937,54 +948,54 @@ fn test_preimage_observed_event_topics() -> event_topics::PreimageObservedEventT
     event_topics::PreimageObservedEventTopics::from_manifest_topic0s(HashMap::from([
         (
             test_source_manifest_id(SOURCE_FAMILY_ENS_V1_REGISTRAR_L1),
-            ActiveManifestEventTopic0s::new(HashMap::from([
+            ActiveManifestEventTopic0sBySignature::new(HashMap::from([
                 (
-                    ABI_EVENT_NAME_REGISTERED.to_owned(),
+                    ENS_V1_NAME_REGISTERED_SIGNATURE.to_owned(),
                     keccak_signature_hex("NameRegistered(string,bytes32,address,uint256,uint256)"),
                 ),
                 (
-                    ABI_EVENT_NAME_RENEWED.to_owned(),
+                    ENS_V1_NAME_RENEWED_SIGNATURE.to_owned(),
                     keccak_signature_hex("NameRenewed(string,bytes32,uint256,uint256)"),
                 ),
             ])),
         ),
         (
             test_source_manifest_id(SOURCE_FAMILY_ENS_V1_WRAPPER_L1),
-            ActiveManifestEventTopic0s::new(HashMap::from([(
-                ABI_EVENT_NAME_WRAPPED.to_owned(),
+            ActiveManifestEventTopic0sBySignature::new(HashMap::from([(
+                NAME_WRAPPED_SIGNATURE.to_owned(),
                 keccak_signature_hex(UPSTREAM_NAME_WRAPPED_SIGNATURE),
             )])),
         ),
         (
             test_source_manifest_id(SOURCE_FAMILY_ENS_V2_REGISTRY_L1),
-            ActiveManifestEventTopic0s::new(HashMap::from([
+            ActiveManifestEventTopic0sBySignature::new(HashMap::from([
                 (
-                    ABI_EVENT_LABEL_REGISTERED.to_owned(),
+                    LABEL_REGISTERED_SIGNATURE.to_owned(),
                     keccak_signature_hex(
                         "LabelRegistered(uint256,bytes32,string,address,uint64,address)",
                     ),
                 ),
                 (
-                    ABI_EVENT_LABEL_RESERVED.to_owned(),
+                    LABEL_RESERVED_SIGNATURE.to_owned(),
                     keccak_signature_hex("LabelReserved(uint256,bytes32,string,uint64,address)"),
                 ),
                 (
-                    ABI_EVENT_PARENT_UPDATED.to_owned(),
+                    PARENT_UPDATED_SIGNATURE.to_owned(),
                     keccak_signature_hex("ParentUpdated(address,string,address)"),
                 ),
             ])),
         ),
         (
             test_source_manifest_id(SOURCE_FAMILY_ENS_V2_REGISTRAR_L1),
-            ActiveManifestEventTopic0s::new(HashMap::from([
+            ActiveManifestEventTopic0sBySignature::new(HashMap::from([
                 (
-                    ABI_EVENT_NAME_REGISTERED.to_owned(),
+                    ENS_V2_NAME_REGISTERED_SIGNATURE.to_owned(),
                     keccak_signature_hex(
                         "NameRegistered(uint256,string,address,address,address,uint64,address,bytes32,uint256,uint256)",
                     ),
                 ),
                 (
-                    ABI_EVENT_NAME_RENEWED.to_owned(),
+                    ENS_V2_NAME_RENEWED_SIGNATURE.to_owned(),
                     keccak_signature_hex(
                         "NameRenewed(uint256,string,uint64,uint64,address,bytes32,uint256)",
                     ),
@@ -993,21 +1004,21 @@ fn test_preimage_observed_event_topics() -> event_topics::PreimageObservedEventT
         ),
         (
             test_source_manifest_id(SOURCE_FAMILY_ENS_V2_RESOLVER_L1),
-            ActiveManifestEventTopic0s::new(HashMap::from([
+            ActiveManifestEventTopic0sBySignature::new(HashMap::from([
                 (
-                    ABI_EVENT_ALIAS_CHANGED.to_owned(),
+                    ALIAS_CHANGED_SIGNATURE.to_owned(),
                     keccak_signature_hex("AliasChanged(bytes,bytes,bytes,bytes)"),
                 ),
                 (
-                    ABI_EVENT_NAMED_RESOURCE.to_owned(),
+                    NAMED_RESOURCE_SIGNATURE.to_owned(),
                     keccak_signature_hex("NamedResource(uint256,bytes)"),
                 ),
                 (
-                    ABI_EVENT_NAMED_TEXT_RESOURCE.to_owned(),
+                    NAMED_TEXT_RESOURCE_SIGNATURE.to_owned(),
                     keccak_signature_hex("NamedTextResource(uint256,bytes,bytes32,string)"),
                 ),
                 (
-                    ABI_EVENT_NAMED_ADDR_RESOURCE.to_owned(),
+                    NAMED_ADDR_RESOURCE_SIGNATURE.to_owned(),
                     keccak_signature_hex("NamedAddrResource(uint256,bytes,uint256)"),
                 ),
             ])),

@@ -174,8 +174,13 @@ async fn sync_ens_v1_unwrapped_authority_with_scope(
         }
 
         let canonical_blocks_started = Instant::now();
-        let canonical_blocks =
-            load_canonical_blocks_for_restricted_authority_sync(pool, chain, &raw_logs).await?;
+        let canonical_blocks = load_canonical_blocks_for_restricted_authority_sync(
+            pool,
+            chain,
+            &raw_logs,
+            &event_topics,
+        )
+        .await?;
         canonical_blocks_ms = canonical_blocks_started.elapsed().as_millis();
         if canonical_blocks.is_empty() {
             return Ok(EnsV1UnwrappedAuthoritySyncSummary::empty(scanned_log_count));

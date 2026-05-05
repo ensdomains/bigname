@@ -1,3 +1,4 @@
+use alloy_sol_types::sol_data::Address as SolAddress;
 use anyhow::{Context, Result};
 
 use crate::evm_abi;
@@ -13,7 +14,10 @@ pub(super) const ZERO_NODE: &str =
 pub(super) const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 
 pub(super) fn decode_owner_address(data: &[u8]) -> Result<String> {
-    evm_abi::address_word_hex(data, 0).context("NewOwner log data must be at least 32 bytes")
+    let (owner,) =
+        evm_abi::abi_decode_params::<(SolAddress,)>(data, "registry address payload is malformed")
+            .context("NewOwner log data must encode one address")?;
+    Ok(evm_abi::address_hex(owner))
 }
 
 pub(super) fn child_node(parent_node: &str, labelhash: &str) -> Result<String> {

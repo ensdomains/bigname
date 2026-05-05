@@ -1,13 +1,17 @@
+use alloy_sol_types::sol_data::{
+    Address as SolAddress, Bytes as SolBytes, FixedBytes, String as SolString, Uint,
+};
 use anyhow::{Context, Result, bail};
 use bigname_storage::NormalizedEvent;
 use serde_json::{Value, json};
 
 use super::constants::{
-    ABI_EVENT_ALIAS_CHANGED, ABI_EVENT_LABEL_REGISTERED, ABI_EVENT_LABEL_RESERVED,
-    ABI_EVENT_NAME_REGISTERED, ABI_EVENT_NAME_RENEWED, ABI_EVENT_NAME_WRAPPED,
-    ABI_EVENT_NAMED_ADDR_RESOURCE, ABI_EVENT_NAMED_RESOURCE, ABI_EVENT_NAMED_TEXT_RESOURCE,
-    ABI_EVENT_PARENT_UPDATED, DERIVATION_KIND_RAW_LOG_PREIMAGE_OBSERVATION,
-    EVENT_KIND_PREIMAGE_OBSERVED, SOURCE_EVENT_ALIAS_CHANGED, SOURCE_EVENT_LABEL_REGISTERED,
+    ALIAS_CHANGED_SIGNATURE, DERIVATION_KIND_RAW_LOG_PREIMAGE_OBSERVATION,
+    ENS_V1_NAME_REGISTERED_SIGNATURE, ENS_V1_NAME_RENEWED_SIGNATURE,
+    ENS_V2_NAME_REGISTERED_SIGNATURE, ENS_V2_NAME_RENEWED_SIGNATURE, EVENT_KIND_PREIMAGE_OBSERVED,
+    LABEL_REGISTERED_SIGNATURE, LABEL_RESERVED_SIGNATURE, NAME_WRAPPED_SIGNATURE,
+    NAMED_ADDR_RESOURCE_SIGNATURE, NAMED_RESOURCE_SIGNATURE, NAMED_TEXT_RESOURCE_SIGNATURE,
+    PARENT_UPDATED_SIGNATURE, SOURCE_EVENT_ALIAS_CHANGED, SOURCE_EVENT_LABEL_REGISTERED,
     SOURCE_EVENT_LABEL_RESERVED, SOURCE_EVENT_NAME_REGISTERED, SOURCE_EVENT_NAME_RENEWED,
     SOURCE_EVENT_NAME_WRAPPED, SOURCE_EVENT_NAMED_ADDR_RESOURCE, SOURCE_EVENT_NAMED_RESOURCE,
     SOURCE_EVENT_NAMED_TEXT_RESOURCE, SOURCE_EVENT_PARENT_UPDATED,
@@ -15,15 +19,34 @@ use super::constants::{
     SOURCE_FAMILY_ENS_V2_REGISTRAR_L1, SOURCE_FAMILY_ENS_V2_REGISTRY_L1,
     SOURCE_FAMILY_ENS_V2_RESOLVER_L1, SOURCE_FAMILY_ENS_V2_ROOT_L1,
 };
-use super::decoding::{
-    decode_dynamic_bytes, decode_dynamic_string, hex_string_without_prefix, keccak256_hex,
-};
+use super::decoding::{hex_string_without_prefix, keccak256_hex};
 use super::event_topics::PreimageObservedEventTopics;
 use super::preimage_observation::{
     can_observe_dns_label, observe_dns_encoded_name, observe_registrar_eth_name,
     observe_single_label,
 };
 use super::types::{PreimageObservation, WatchedRawLogRow};
+
+type EnsV1RegistrarLabelData = (SolString, Uint<256>, Uint<256>);
+type EnsV2NameRegisteredData = (
+    SolString,
+    SolAddress,
+    SolAddress,
+    SolAddress,
+    Uint<64>,
+    SolAddress,
+    FixedBytes<32>,
+    Uint<256>,
+    Uint<256>,
+);
+type EnsV2NameRenewedData = (
+    SolString,
+    Uint<64>,
+    Uint<64>,
+    SolAddress,
+    FixedBytes<32>,
+    Uint<256>,
+);
 
 pub(super) fn build_preimage_observed_events(
     raw_log: &WatchedRawLogRow,
@@ -53,11 +76,11 @@ fn build_name_wrapped_preimage_observed_events(
     let Some(topic0) = raw_log.topics.first() else {
         return Ok(Vec::new());
     };
-    if !event_topics.matches(raw_log, ABI_EVENT_NAME_WRAPPED, topic0)? {
+    if !event_topics.matches(raw_log, NAME_WRAPPED_SIGNATURE, topic0)? {
         return Ok(Vec::new());
     }
 
-    let dns_name = decode_dynamic_bytes(&raw_log.data, 0).with_context(|| {
+    let dns_name = decode_name_wrapped_dns_name(&raw_log.data).with_context(|| {
         format!(
             "failed to decode NameWrapped bytes payload for chain {} block {} log {}",
             raw_log.chain_id, raw_log.block_hash, raw_log.log_index
@@ -102,15 +125,15 @@ fn build_registrar_preimage_observed_events(
     let Some(topic0) = raw_log.topics.first() else {
         return Ok(Vec::new());
     };
-    let source_event = if event_topics.matches(raw_log, ABI_EVENT_NAME_REGISTERED, topic0)? {
+    let source_event = if event_topics.matches(raw_log, ENS_V1_NAME_REGISTERED_SIGNATURE, topic0)? {
         SOURCE_EVENT_NAME_REGISTERED
-    } else if event_topics.matches(raw_log, ABI_EVENT_NAME_RENEWED, topic0)? {
+    } else if event_topics.matches(raw_log, ENS_V1_NAME_RENEWED_SIGNATURE, topic0)? {
         SOURCE_EVENT_NAME_RENEWED
     } else {
         return Ok(Vec::new());
     };
 
-    let Some(label) = decode_observable_dynamic_label(raw_log, 0)? else {
+    let Some(label) = decode_observable_event_label(raw_log, source_event)? else {
         return Ok(Vec::new());
     };
     let observation = observe_registrar_eth_name(&label).with_context(|| {
@@ -154,20 +177,21 @@ fn build_ens_v2_preimage_observed_events(
     };
 
     if is_ens_v2_registry_source(&raw_log.source_family) {
-        if event_topics.matches(raw_log, ABI_EVENT_LABEL_REGISTERED, topic0)? {
+        if event_topics.matches(raw_log, LABEL_REGISTERED_SIGNATURE, topic0)? {
             return build_ens_v2_registry_label_preimage_observed_events(
                 raw_log,
                 SOURCE_EVENT_LABEL_REGISTERED,
             );
         }
-        if event_topics.matches(raw_log, ABI_EVENT_LABEL_RESERVED, topic0)? {
+        if event_topics.matches(raw_log, LABEL_RESERVED_SIGNATURE, topic0)? {
             return build_ens_v2_registry_label_preimage_observed_events(
                 raw_log,
                 SOURCE_EVENT_LABEL_RESERVED,
             );
         }
-        if event_topics.matches(raw_log, ABI_EVENT_PARENT_UPDATED, topic0)? {
-            let Some(label) = decode_observable_dynamic_label(raw_log, 0)? else {
+        if event_topics.matches(raw_log, PARENT_UPDATED_SIGNATURE, topic0)? {
+            let Some(label) = decode_observable_event_label(raw_log, SOURCE_EVENT_PARENT_UPDATED)?
+            else {
                 return Ok(Vec::new());
             };
             let observation = observe_single_label(&label).with_context(|| {
@@ -187,13 +211,13 @@ fn build_ens_v2_preimage_observed_events(
     }
 
     if raw_log.source_family == SOURCE_FAMILY_ENS_V2_REGISTRAR_L1 {
-        if event_topics.matches(raw_log, ABI_EVENT_NAME_REGISTERED, topic0)? {
+        if event_topics.matches(raw_log, ENS_V2_NAME_REGISTERED_SIGNATURE, topic0)? {
             return build_ens_v2_registrar_label_preimage_observed_events(
                 raw_log,
                 SOURCE_EVENT_NAME_REGISTERED,
             );
         }
-        if event_topics.matches(raw_log, ABI_EVENT_NAME_RENEWED, topic0)? {
+        if event_topics.matches(raw_log, ENS_V2_NAME_RENEWED_SIGNATURE, topic0)? {
             return build_ens_v2_registrar_label_preimage_observed_events(
                 raw_log,
                 SOURCE_EVENT_NAME_RENEWED,
@@ -203,31 +227,25 @@ fn build_ens_v2_preimage_observed_events(
     }
 
     if raw_log.source_family == SOURCE_FAMILY_ENS_V2_RESOLVER_L1 {
-        if event_topics.matches(raw_log, ABI_EVENT_ALIAS_CHANGED, topic0)? {
+        if event_topics.matches(raw_log, ALIAS_CHANGED_SIGNATURE, topic0)? {
             return build_ens_v2_alias_preimage_observed_events(raw_log);
         }
-        if event_topics.matches(raw_log, ABI_EVENT_NAMED_RESOURCE, topic0)? {
+        if event_topics.matches(raw_log, NAMED_RESOURCE_SIGNATURE, topic0)? {
             return build_ens_v2_named_dns_preimage_observed_events(
                 raw_log,
                 SOURCE_EVENT_NAMED_RESOURCE,
-                0,
-                None,
             );
         }
-        if event_topics.matches(raw_log, ABI_EVENT_NAMED_TEXT_RESOURCE, topic0)? {
+        if event_topics.matches(raw_log, NAMED_TEXT_RESOURCE_SIGNATURE, topic0)? {
             return build_ens_v2_named_dns_preimage_observed_events(
                 raw_log,
                 SOURCE_EVENT_NAMED_TEXT_RESOURCE,
-                0,
-                None,
             );
         }
-        if event_topics.matches(raw_log, ABI_EVENT_NAMED_ADDR_RESOURCE, topic0)? {
+        if event_topics.matches(raw_log, NAMED_ADDR_RESOURCE_SIGNATURE, topic0)? {
             return build_ens_v2_named_dns_preimage_observed_events(
                 raw_log,
                 SOURCE_EVENT_NAMED_ADDR_RESOURCE,
-                0,
-                None,
             );
         }
     }
@@ -239,7 +257,7 @@ fn build_ens_v2_registry_label_preimage_observed_events(
     raw_log: &WatchedRawLogRow,
     source_event: &str,
 ) -> Result<Vec<NormalizedEvent>> {
-    let Some(label) = decode_observable_dynamic_label(raw_log, 0)? else {
+    let Some(label) = decode_observable_event_label(raw_log, source_event)? else {
         return Ok(Vec::new());
     };
     let observation = observe_single_label(&label).with_context(|| {
@@ -277,7 +295,7 @@ fn build_ens_v2_registrar_label_preimage_observed_events(
     raw_log: &WatchedRawLogRow,
     source_event: &str,
 ) -> Result<Vec<NormalizedEvent>> {
-    let Some(label) = decode_observable_dynamic_label(raw_log, 0)? else {
+    let Some(label) = decode_observable_event_label(raw_log, source_event)? else {
         return Ok(Vec::new());
     };
     let observation = observe_registrar_eth_name(&label).with_context(|| {
@@ -295,13 +313,12 @@ fn build_ens_v2_registrar_label_preimage_observed_events(
     )])
 }
 
-fn decode_observable_dynamic_label(
+fn decode_observable_event_label(
     raw_log: &WatchedRawLogRow,
-    offset_word_index: usize,
+    source_event: &str,
 ) -> Result<Option<String>> {
-    let label = match decode_dynamic_string(&raw_log.data, offset_word_index) {
-        Ok(label) => label,
-        Err(_) => return Ok(None),
+    let Some(label) = decode_event_label(raw_log, source_event) else {
+        return Ok(None);
     };
     if can_observe_dns_label(&label) {
         Ok(Some(label))
@@ -310,18 +327,92 @@ fn decode_observable_dynamic_label(
     }
 }
 
+fn decode_event_label(raw_log: &WatchedRawLogRow, source_event: &str) -> Option<String> {
+    match (raw_log.source_family.as_str(), source_event) {
+        (SOURCE_FAMILY_ENS_V1_REGISTRAR_L1, SOURCE_EVENT_NAME_REGISTERED) => {
+            decode_ens_v1_name_registered_label(&raw_log.data)
+        }
+        (SOURCE_FAMILY_ENS_V1_REGISTRAR_L1, SOURCE_EVENT_NAME_RENEWED) => {
+            decode_ens_v1_name_renewed_label(&raw_log.data)
+        }
+        (
+            SOURCE_FAMILY_ENS_V2_ROOT_L1 | SOURCE_FAMILY_ENS_V2_REGISTRY_L1,
+            SOURCE_EVENT_LABEL_REGISTERED,
+        ) => {
+            let (label, _owner, _expiry) =
+                crate::evm_abi::abi_decode_params::<(SolString, SolAddress, Uint<64>)>(
+                    &raw_log.data,
+                    "LabelRegistered data is malformed",
+                )
+                .ok()?;
+            Some(label)
+        }
+        (
+            SOURCE_FAMILY_ENS_V2_ROOT_L1 | SOURCE_FAMILY_ENS_V2_REGISTRY_L1,
+            SOURCE_EVENT_LABEL_RESERVED,
+        ) => {
+            let (label, _expiry) = crate::evm_abi::abi_decode_params::<(SolString, Uint<64>)>(
+                &raw_log.data,
+                "LabelReserved data is malformed",
+            )
+            .ok()?;
+            Some(label)
+        }
+        (
+            SOURCE_FAMILY_ENS_V2_ROOT_L1 | SOURCE_FAMILY_ENS_V2_REGISTRY_L1,
+            SOURCE_EVENT_PARENT_UPDATED,
+        ) => {
+            let (label,) = crate::evm_abi::abi_decode_params::<(SolString,)>(
+                &raw_log.data,
+                "ParentUpdated data is malformed",
+            )
+            .ok()?;
+            Some(label)
+        }
+        (SOURCE_FAMILY_ENS_V2_REGISTRAR_L1, SOURCE_EVENT_NAME_REGISTERED) => {
+            let (label, ..) = crate::evm_abi::abi_decode_params::<EnsV2NameRegisteredData>(
+                &raw_log.data,
+                "ENSv2 NameRegistered data is malformed",
+            )
+            .ok()?;
+            Some(label)
+        }
+        (SOURCE_FAMILY_ENS_V2_REGISTRAR_L1, SOURCE_EVENT_NAME_RENEWED) => {
+            let (label, ..) = crate::evm_abi::abi_decode_params::<EnsV2NameRenewedData>(
+                &raw_log.data,
+                "ENSv2 NameRenewed data is malformed",
+            )
+            .ok()?;
+            Some(label)
+        }
+        _ => None,
+    }
+}
+
+fn decode_ens_v1_name_registered_label(data: &[u8]) -> Option<String> {
+    let (label, ..) = crate::evm_abi::abi_decode_params::<EnsV1RegistrarLabelData>(
+        data,
+        "ENSv1 NameRegistered data is malformed",
+    )
+    .ok()?;
+    Some(label)
+}
+
+fn decode_ens_v1_name_renewed_label(data: &[u8]) -> Option<String> {
+    let (label, ..) = crate::evm_abi::abi_decode_params::<EnsV1RegistrarLabelData>(
+        data,
+        "ENSv1 NameRenewed data is malformed",
+    )
+    .ok()?;
+    Some(label)
+}
+
 fn build_ens_v2_alias_preimage_observed_events(
     raw_log: &WatchedRawLogRow,
 ) -> Result<Vec<NormalizedEvent>> {
-    let from_name = decode_dynamic_bytes(&raw_log.data, 0).with_context(|| {
+    let (from_name, to_name) = decode_alias_changed_names(&raw_log.data).with_context(|| {
         format!(
-            "failed to decode AliasChanged fromName payload for chain {} block {} log {}",
-            raw_log.chain_id, raw_log.block_hash, raw_log.log_index
-        )
-    })?;
-    let to_name = decode_dynamic_bytes(&raw_log.data, 1).with_context(|| {
-        format!(
-            "failed to decode AliasChanged toName payload for chain {} block {} log {}",
+            "failed to decode AliasChanged name payload for chain {} block {} log {}",
             raw_log.chain_id, raw_log.block_hash, raw_log.log_index
         )
     })?;
@@ -351,10 +442,8 @@ fn build_ens_v2_alias_preimage_observed_events(
 fn build_ens_v2_named_dns_preimage_observed_events(
     raw_log: &WatchedRawLogRow,
     source_event: &str,
-    offset_word_index: usize,
-    observation_slot: Option<&str>,
 ) -> Result<Vec<NormalizedEvent>> {
-    let dns_name = decode_dynamic_bytes(&raw_log.data, offset_word_index).with_context(|| {
+    let dns_name = decode_named_resource_name(&raw_log.data, source_event).with_context(|| {
         format!(
             "failed to decode {source_event} DNS name payload for chain {} block {} log {}",
             raw_log.chain_id, raw_log.block_hash, raw_log.log_index
@@ -374,8 +463,45 @@ fn build_ens_v2_named_dns_preimage_observed_events(
         raw_log,
         source_event,
         observation,
-        observation_slot,
+        None,
     )])
+}
+
+fn decode_name_wrapped_dns_name(data: &[u8]) -> Result<Vec<u8>> {
+    let (dns_name, _owner, _fuses, _expiry) =
+        crate::evm_abi::abi_decode_params::<(SolBytes, SolAddress, Uint<32>, Uint<64>)>(
+            data,
+            "NameWrapped data is malformed",
+        )?;
+    Ok(dns_name.to_vec())
+}
+
+fn decode_alias_changed_names(data: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
+    let (from_name, to_name) = crate::evm_abi::abi_decode_params::<(SolBytes, SolBytes)>(
+        data,
+        "AliasChanged data is malformed",
+    )?;
+    Ok((from_name.to_vec(), to_name.to_vec()))
+}
+
+fn decode_named_resource_name(data: &[u8], source_event: &str) -> Result<Vec<u8>> {
+    match source_event {
+        SOURCE_EVENT_NAMED_RESOURCE | SOURCE_EVENT_NAMED_ADDR_RESOURCE => {
+            let (name,) = crate::evm_abi::abi_decode_params::<(SolBytes,)>(
+                data,
+                "named resolver resource data is malformed",
+            )?;
+            Ok(name.to_vec())
+        }
+        SOURCE_EVENT_NAMED_TEXT_RESOURCE => {
+            let (name, _key) = crate::evm_abi::abi_decode_params::<(SolBytes, SolString)>(
+                data,
+                "named resolver text resource data is malformed",
+            )?;
+            Ok(name.to_vec())
+        }
+        _ => bail!("unsupported named resolver preimage event {source_event}"),
+    }
 }
 
 fn build_preimage_observed_normalized_event(

@@ -1,4 +1,7 @@
 use super::*;
+use alloy_sol_types::sol_data::{
+    Address as SolAddress, Bytes as SolBytes, FixedBytes, String as SolString, Uint,
+};
 
 pub(super) fn build_ens_v1_generic_record_observation(
     raw_log: &AuthorityRawLogRow,
@@ -10,12 +13,9 @@ pub(super) fn build_ens_v1_generic_record_observation(
     }
 
     if event_topics.matches(ABI_CHANGED_SIGNATURE, topic0)? {
-        let Some(content_type) = raw_log
-            .topics
-            .get(2)
-            .and_then(|topic| hex_to_word(topic).ok())
-            .and_then(|word| abi_word_to_i64(&word).ok())
-        else {
+        let Some(content_type) = raw_log.topics.get(2).and_then(|topic| {
+            crate::evm_abi::u256_topic_i64(topic, "ABIChanged content type").ok()
+        }) else {
             return Ok(None);
         };
         return resolver_record_observation(
@@ -32,14 +32,13 @@ pub(super) fn build_ens_v1_generic_record_observation(
     }
 
     if event_topics.matches(CONTENT_CHANGED_SIGNATURE, topic0)? {
-        let Some(content) = raw_log
-            .data
-            .get(..32)
-            .map(hex_string)
-            .and_then(|content| normalize_hex_32(&content).ok())
-        else {
+        let Ok((content,)) = crate::evm_abi::abi_decode_params::<(FixedBytes<32>,)>(
+            &raw_log.data,
+            "ContentChanged data is malformed",
+        ) else {
             return Ok(None);
         };
+        let content = normalize_hex_32(&hex_string(content.as_slice()))?;
         return resolver_record_observation(
             raw_log,
             "ContentChanged",
@@ -54,7 +53,10 @@ pub(super) fn build_ens_v1_generic_record_observation(
     }
 
     if event_topics.matches(CONTENTHASH_CHANGED_SIGNATURE, topic0)? {
-        let Some(contenthash) = decode_resolver_nth_dynamic_bytes(&raw_log.data, 0) else {
+        let Ok((contenthash,)) = crate::evm_abi::abi_decode_params::<(SolBytes,)>(
+            &raw_log.data,
+            "ContenthashChanged data is malformed",
+        ) else {
             return Ok(None);
         };
         return resolver_record_observation(
@@ -67,55 +69,56 @@ pub(super) fn build_ens_v1_generic_record_observation(
             },
             Some(json!({
                 "encoding": "hex",
-                "bytes": hex_string(&contenthash),
+                "bytes": hex_string(contenthash.as_ref()),
             })),
             None,
         );
     }
 
     if event_topics.matches(DNS_RECORD_CHANGED_SIGNATURE, topic0)? {
-        let Some(dns_name) = decode_resolver_nth_dynamic_bytes(&raw_log.data, 0) else {
+        let Ok((dns_name, resource, record)) =
+            crate::evm_abi::abi_decode_params::<(SolBytes, Uint<16>, SolBytes)>(
+                &raw_log.data,
+                "DNSRecordChanged data is malformed",
+            )
+        else {
             return Ok(None);
         };
-        let Some(resource) = decode_resolver_i64_word(raw_log.data.get(32..64)) else {
-            return Ok(None);
-        };
-        let Some(record) = decode_resolver_nth_dynamic_bytes(&raw_log.data, 2) else {
-            return Ok(None);
-        };
+        let resource = i64::from(resource);
         return resolver_record_observation(
             raw_log,
             "DNSRecordChanged",
-            dns_record_selector(resource, &dns_name),
+            dns_record_selector(resource, dns_name.as_ref()),
             Some(json!({
                 "encoding": "hex",
-                "bytes": hex_string(&record),
+                "bytes": hex_string(record.as_ref()),
             })),
             None,
         );
     }
 
     if event_topics.matches(DNS_RECORD_DELETED_SIGNATURE, topic0)? {
-        let Some(dns_name) = decode_resolver_nth_dynamic_bytes(&raw_log.data, 0) else {
+        let Ok((dns_name, resource)) = crate::evm_abi::abi_decode_params::<(SolBytes, Uint<16>)>(
+            &raw_log.data,
+            "DNSRecordDeleted data is malformed",
+        ) else {
             return Ok(None);
         };
-        let Some(resource) = decode_resolver_i64_word(raw_log.data.get(32..64)) else {
-            return Ok(None);
-        };
+        let resource = i64::from(resource);
         return resolver_record_observation(
             raw_log,
             "DNSRecordDeleted",
-            dns_record_selector(resource, &dns_name),
+            dns_record_selector(resource, dns_name.as_ref()),
             Some(json!({ "deleted": true })),
             None,
         );
     }
 
     if event_topics.matches(DNS_ZONEHASH_CHANGED_SIGNATURE, topic0)? {
-        let Some(last_zonehash) = decode_resolver_nth_dynamic_bytes(&raw_log.data, 0) else {
-            return Ok(None);
-        };
-        let Some(zonehash) = decode_resolver_nth_dynamic_bytes(&raw_log.data, 1) else {
+        let Ok((last_zonehash, zonehash)) = crate::evm_abi::abi_decode_params::<(SolBytes, SolBytes)>(
+            &raw_log.data,
+            "DNSZonehashChanged data is malformed",
+        ) else {
             return Ok(None);
         };
         return resolver_record_observation(
@@ -129,11 +132,11 @@ pub(super) fn build_ens_v1_generic_record_observation(
             Some(json!({
                 "previous": {
                     "encoding": "hex",
-                    "bytes": hex_string(&last_zonehash),
+                    "bytes": hex_string(last_zonehash.as_ref()),
                 },
                 "current": {
                     "encoding": "hex",
-                    "bytes": hex_string(&zonehash),
+                    "bytes": hex_string(zonehash.as_ref()),
                 },
             })),
             None,
@@ -148,13 +151,13 @@ pub(super) fn build_ens_v1_generic_record_observation(
         else {
             return Ok(None);
         };
-        let Some(implementer) = raw_log
-            .data
-            .get(..32)
-            .and_then(decode_resolver_owner_address)
-        else {
+        let Ok((implementer,)) = crate::evm_abi::abi_decode_params::<(SolAddress,)>(
+            &raw_log.data,
+            "InterfaceChanged data is malformed",
+        ) else {
             return Ok(None);
         };
+        let implementer = crate::evm_abi::address_hex(implementer);
         return resolver_record_observation(
             raw_log,
             "InterfaceChanged",
@@ -169,7 +172,10 @@ pub(super) fn build_ens_v1_generic_record_observation(
     }
 
     if event_topics.matches(DATA_CHANGED_SIGNATURE, topic0)? {
-        let Some(key) = decode_resolver_first_dynamic_string(&raw_log.data) else {
+        let Ok((key,)) = crate::evm_abi::abi_decode_params::<(SolString,)>(
+            &raw_log.data,
+            "DataChanged data is malformed",
+        ) else {
             return Ok(None);
         };
         let Some(indexed_key_hash) = normalize_resolver_topic(raw_log.topics.get(2)) else {
@@ -226,10 +232,6 @@ fn dns_record_selector(resource: i64, dns_name: &[u8]) -> RecordSelector {
         record_family: "dns".to_owned(),
         selector_key: Some(selector_key),
     }
-}
-
-fn hex_to_word(value: &str) -> Result<[u8; 32]> {
-    crate::evm_abi::hex_32(value)
 }
 
 fn topic_bytes4(value: &str) -> Result<String> {

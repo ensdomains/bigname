@@ -50,13 +50,19 @@ pub(in crate::ens_v1_unwrapped_authority) async fn load_canonical_blocks_for_res
     pool: &PgPool,
     chain: &str,
     raw_logs: &[AuthorityRawLogRow],
+    event_topics: &AuthorityEventTopics,
 ) -> Result<Vec<RawBlockSnapshot>> {
     let Some(replay_head) = restricted_replay_head_block(raw_logs) else {
         return Ok(Vec::new());
     };
-    let mut blocks =
-        load_release_boundary_blocks_for_authority_logs(pool, chain, raw_logs, &replay_head)
-            .await?;
+    let mut blocks = load_release_boundary_blocks_for_authority_logs(
+        pool,
+        chain,
+        raw_logs,
+        &replay_head,
+        event_topics,
+    )
+    .await?;
     blocks.push(replay_head);
 
     blocks.sort_by(|left, right| {
@@ -95,11 +101,14 @@ async fn load_release_boundary_blocks_for_authority_logs(
     chain: &str,
     raw_logs: &[AuthorityRawLogRow],
     replay_head: &RawBlockSnapshot,
+    event_topics: &AuthorityEventTopics,
 ) -> Result<Vec<RawBlockSnapshot>> {
     let mut release_timestamps = Vec::new();
     let mut release_namespaces = Vec::new();
     for raw_log in raw_logs {
-        let Some(release_timestamp) = release_boundary_timestamp_for_authority_log(raw_log)? else {
+        let Some(release_timestamp) =
+            release_boundary_timestamp_for_authority_log(raw_log, event_topics)?
+        else {
             continue;
         };
         release_timestamps.push(release_timestamp);
@@ -161,6 +170,7 @@ async fn load_release_boundary_blocks_for_authority_logs(
 
 fn release_boundary_timestamp_for_authority_log(
     raw_log: &AuthorityRawLogRow,
+    event_topics: &AuthorityEventTopics,
 ) -> Result<Option<OffsetDateTime>> {
     let Some(profile) = authority_profile_for_source_family(&raw_log.source_family) else {
         return Ok(None);
@@ -172,18 +182,24 @@ fn release_boundary_timestamp_for_authority_log(
     let Some(topic0) = raw_log.topics.first() else {
         return Ok(None);
     };
-    let expiry_word_start = registrar_name_registered_expiry_word_start(topic0)
-        .or_else(|| registrar_name_renewed_expiry_word_start(topic0));
-    let Some(expiry_word_start) = expiry_word_start else {
+    let expiry = if let Some(registration) = decode_registrar_name_registered_data(
+        &raw_log.source_family,
+        topic0,
+        &raw_log.data,
+        event_topics,
+    )? {
+        registration.expiry
+    } else if let Some(renewal) = decode_registrar_name_renewed_data(
+        &raw_log.source_family,
+        topic0,
+        &raw_log.data,
+        event_topics,
+    )? {
+        renewal.expiry
+    } else {
         return Ok(None);
     };
 
-    let expiry = abi_word_to_i64(
-        raw_log
-            .data
-            .get(expiry_word_start..expiry_word_start + 32)
-            .context("registrar authority log is missing expiry word")?,
-    )?;
     let expiry = OffsetDateTime::from_unix_timestamp(expiry)
         .context("registrar authority log expiry is not a valid unix timestamp")?;
     release_after_grace(expiry).map(Some)
