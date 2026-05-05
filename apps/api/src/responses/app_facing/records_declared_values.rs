@@ -94,14 +94,8 @@ fn compact_verified_record_cache_entries(
     let verified_queries = verified_outcome
         .and_then(|outcome| outcome.outcome_payload.as_ref())
         .and_then(|payload| provenance_field(payload, "verified_queries"))
-        .and_then(JsonValue::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|query| {
-            let record_key = string_field(provenance_field(query, "record_key"))?;
-            Some((record_key, query.clone()))
-        })
-        .collect::<BTreeMap<_, _>>();
+        .map(compact_record_items_by_key)
+        .unwrap_or_default();
 
     records
         .iter()
@@ -189,13 +183,7 @@ fn compact_declared_record_cache_entries(
             .collect();
     };
 
-    let mut value_entries = entries
-        .iter()
-        .filter_map(|entry| {
-            let record_key = string_field(provenance_field(entry, "record_key"))?;
-            Some((record_key, entry.clone()))
-        })
-        .collect::<BTreeMap<_, _>>();
+    let mut value_entries = compact_record_items_by_key_slice(entries);
 
     add_declared_compact_alias_entries(record_inventory_row, records, &mut value_entries);
     value_entries
@@ -254,8 +242,13 @@ fn compact_record_inventory_lookup(
 fn compact_record_items_by_key(value: &JsonValue) -> BTreeMap<String, JsonValue> {
     value
         .as_array()
-        .into_iter()
-        .flatten()
+        .map(|items| compact_record_items_by_key_slice(items))
+        .unwrap_or_default()
+}
+
+fn compact_record_items_by_key_slice(items: &[JsonValue]) -> BTreeMap<String, JsonValue> {
+    items
+        .iter()
         .filter_map(|item| {
             let record_key = string_field(provenance_field(item, "record_key"))?;
             Some((record_key, item.clone()))
@@ -423,26 +416,26 @@ fn compact_requested_coin_types(
 fn compact_known_coin_types(
     record_inventory_row: Option<&RecordInventoryCurrentRow>,
 ) -> Vec<String> {
-    record_inventory_row
-        .and_then(|row| row.selectors.as_array())
-        .into_iter()
-        .flatten()
-        .filter(|selector| {
-            string_field(provenance_field(selector, "record_family")).as_deref() == Some("addr")
-        })
-        .filter_map(|selector| string_field(provenance_field(selector, "selector_key")))
-        .collect()
+    compact_known_selector_keys(record_inventory_row, "addr")
 }
 
 fn compact_known_text_keys_from_inventory(
     record_inventory_row: Option<&RecordInventoryCurrentRow>,
+) -> Vec<String> {
+    compact_known_selector_keys(record_inventory_row, "text")
+}
+
+fn compact_known_selector_keys(
+    record_inventory_row: Option<&RecordInventoryCurrentRow>,
+    record_family: &str,
 ) -> Vec<String> {
     record_inventory_row
         .and_then(|row| row.selectors.as_array())
         .into_iter()
         .flatten()
         .filter(|selector| {
-            string_field(provenance_field(selector, "record_family")).as_deref() == Some("text")
+            string_field(provenance_field(selector, "record_family")).as_deref()
+                == Some(record_family)
         })
         .filter_map(|selector| string_field(provenance_field(selector, "selector_key")))
         .collect()

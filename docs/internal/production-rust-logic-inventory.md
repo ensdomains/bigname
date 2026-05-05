@@ -84,6 +84,9 @@ Addressed slices:
   decoding instead of repeating object walking at every field.
 - `apps/api/src/openapi/parameters.rs` now owns small string/enum/boolean/UUID
   schema builders used by both core and app-facing OpenAPI parameter lists.
+- `apps/api/src/responses/app_facing/records_declared_values.rs` now reuses
+  record-key indexing helpers for verified/declaration entries and selector
+  family lookups.
 
 ## Highest leverage cleanup map
 
@@ -99,7 +102,7 @@ Addressed slices:
 | Adapter active-emitter and source-scope flow | `crates/adapters/src/ens_v2_common.rs`, `ens_v2_*`, `ens_v1_reverse_claim`, `ens_v1_subregistry_discovery`, `ens_v1_unwrapped_authority`, `block_derived_normalized_events`, plus indexer replay/backfill source-scope builders | Adapter-local support modules for normalized source-scope targets, emitter interval overlap, active-at-block lookup, scoped ranges, and summaries. Event identity loading and by-kind counters are now in `normalized_event_support` | Removes repeated range-overlap and source-family filtering logic across adapter families |
 | Normalized-event builders and persistence summaries | `crates/adapters/src/normalized_event_support.rs` covers shared event identity loading and by-kind counters; remaining duplication lives in `crates/adapters/src/*/normalized.rs`, `events.rs`, `event_building.rs`, `persistence_summary.rs`, and manifest event identity/raw fact builders | Continue with shared `NormalizedEventBuilder`/summary helpers inside `crates/adapters`, with adapter-specific state supplied as data | Reduces repeated event identity, raw fact ref, by-kind count, and inserted count code |
 | OpenAPI schema/parameter JSON | `apps/api/src/openapi/parameters.rs` now owns shared primitive parameter schema builders used by `parameters.rs` and `app_facing_parameters.rs`; larger schema/operation JSON remains in `schemas.rs`, `responses.rs`, and `route_operations.rs` | Continue centralizing schema builders and parameter builders; later evaluate `utoipa`, `schemars`, or `aide` only if DTO derive-based schemas match public docs without obscuring contract review | Good LOC reduction, but public-contract risk is higher than internal helper cleanup |
-| Compact app-facing response transforms | `apps/api/src/responses/app_facing/records_declared_values.rs`, `handlers/app_facing/*.rs`, `responses/projections*.rs` | Extract typed compact record/role/event builders before considering a schema library; share selector parsing and record-key helpers with execution/storage support | Shrinks the largest API response file and improves reviewability |
+| Compact app-facing response transforms | `apps/api/src/responses/app_facing/records_declared_values.rs` now shares record-key indexing helpers for verified/declaration entries and selector-family lookups; remaining repeated transforms live in `handlers/app_facing/*.rs`, `responses/projections*.rs`, and compact record/role/event helpers | Extract typed compact record/role/event builders before considering a schema library; share selector parsing and record-key helpers with execution/storage support | Shrinks the largest API response file and improves reviewability |
 | ENSv1 restricted replay preload pipeline | `crates/adapters/src/ens_v1_unwrapped_authority/{preload.rs,pipeline.rs,pipeline/apply.rs,materialization.rs,observation.rs,loading/raw_logs.rs}` | Split by responsibility after the helper work above: preload queries, selected state before replay, resolver state preload, provenance decoding, history mutation, identity materialization | Most LOC impact, but should happen after shared helpers land to avoid pure file shuffling |
 
 ## EVM and Alloy inventory
