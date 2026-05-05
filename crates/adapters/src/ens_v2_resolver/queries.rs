@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 
 use crate::ens_v2_common::{
     ActiveEmitter, active_emitter_for_block, emitters_by_address, normalize_address,
@@ -126,17 +126,11 @@ pub(super) async fn load_name_link_by_name(
 
 fn decode_name_link(row: sqlx::postgres::PgRow) -> Result<NameLink> {
     Ok(NameLink {
-        logical_name_id: row
-            .try_get("logical_name_id")
-            .context("missing logical_name_id")?,
-        resource_id: row.try_get("resource_id").context("missing resource_id")?,
-        normalized_name: row
-            .try_get("normalized_name")
-            .context("missing normalized_name")?,
-        canonical_display_name: row
-            .try_get("canonical_display_name")
-            .context("missing canonical_display_name")?,
-        namehash: row.try_get("namehash").context("missing namehash")?,
+        logical_name_id: crate::sql_row::get(&row, "logical_name_id")?,
+        resource_id: crate::sql_row::get(&row, "resource_id")?,
+        normalized_name: crate::sql_row::get(&row, "normalized_name")?,
+        canonical_display_name: crate::sql_row::get(&row, "canonical_display_name")?,
+        namehash: crate::sql_row::get(&row, "namehash")?,
     })
 }
 
@@ -218,13 +212,9 @@ pub(super) async fn load_resolver_raw_logs(
 
     let mut output = Vec::new();
     for row in rows {
-        let emitting_address = normalize_address(
-            &row.try_get::<String, _>("emitting_address")
-                .context("missing emitting_address")?,
-        );
-        let block_number = row
-            .try_get("block_number")
-            .context("missing block_number")?;
+        let emitting_address =
+            normalize_address(&crate::sql_row::get::<String>(&row, "emitting_address")?);
+        let block_number = crate::sql_row::get(&row, "block_number")?;
         let Some(emitter) = active_emitters_by_address
             .get(&emitting_address)
             .and_then(|emitters| active_emitter_for_block(emitters, block_number))
@@ -232,27 +222,21 @@ pub(super) async fn load_resolver_raw_logs(
             continue;
         };
         output.push(ResolverRawLogRow {
-            chain_id: row.try_get("chain_id").context("missing chain_id")?,
-            block_hash: row.try_get("block_hash").context("missing block_hash")?,
+            chain_id: crate::sql_row::get(&row, "chain_id")?,
+            block_hash: crate::sql_row::get(&row, "block_hash")?,
             block_number,
-            event_position_timestamp: row
-                .try_get("event_position_timestamp")
-                .context("missing event_position_timestamp")?,
-            transaction_hash: row
-                .try_get("transaction_hash")
-                .context("missing transaction_hash")?,
-            transaction_index: row
-                .try_get("transaction_index")
-                .context("missing transaction_index")?,
-            log_index: row.try_get("log_index").context("missing log_index")?,
+            event_position_timestamp: crate::sql_row::get(&row, "event_position_timestamp")?,
+            transaction_hash: crate::sql_row::get(&row, "transaction_hash")?,
+            transaction_index: crate::sql_row::get(&row, "transaction_index")?,
+            log_index: crate::sql_row::get(&row, "log_index")?,
             emitting_address,
             emitting_contract_instance_id: emitter.contract_instance_id,
-            topics: row.try_get("topics").context("missing topics")?,
-            data: row.try_get("data").context("missing data")?,
-            canonicality_state: parse_canonicality_state(
-                &row.try_get::<String, _>("canonicality_state")
-                    .context("missing canonicality_state")?,
-            )?,
+            topics: crate::sql_row::get(&row, "topics")?,
+            data: crate::sql_row::get(&row, "data")?,
+            canonicality_state: parse_canonicality_state(&crate::sql_row::get::<String>(
+                &row,
+                "canonicality_state",
+            )?)?,
             source_manifest_id: emitter.source_manifest_id,
             namespace: emitter.namespace.clone(),
             source_family: emitter.source_family.clone(),

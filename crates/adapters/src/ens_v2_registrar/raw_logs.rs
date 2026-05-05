@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 use bigname_storage::CanonicalityState;
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 
 use crate::ens_v2_common::{normalize_address, parse_canonicality_state, source_scope_bindings};
 
@@ -100,8 +100,7 @@ pub(super) async fn load_registrar_raw_logs(
     rows.into_iter()
         .map(|row| {
             let emitting_address = normalize_address(
-                &row.try_get::<String, _>("emitting_address")
-                    .context("missing emitting_address")?,
+                &crate::sql_row::get::<String>(&row, "emitting_address")?,
             );
             let emitter = emitters_by_address
                 .get(&emitting_address)
@@ -111,24 +110,17 @@ pub(super) async fn load_registrar_raw_logs(
                     )
                 })?;
             Ok(RegistrarRawLogRow {
-                chain_id: row.try_get("chain_id").context("missing chain_id")?,
-                block_hash: row.try_get("block_hash").context("missing block_hash")?,
-                block_number: row
-                    .try_get("block_number")
-                    .context("missing block_number")?,
-                transaction_hash: row
-                    .try_get("transaction_hash")
-                    .context("missing transaction_hash")?,
-                transaction_index: row
-                    .try_get("transaction_index")
-                    .context("missing transaction_index")?,
-                log_index: row.try_get("log_index").context("missing log_index")?,
+                chain_id: crate::sql_row::get(&row, "chain_id")?,
+                block_hash: crate::sql_row::get(&row, "block_hash")?,
+                block_number: crate::sql_row::get(&row, "block_number")?,
+                transaction_hash: crate::sql_row::get(&row, "transaction_hash")?,
+                transaction_index: crate::sql_row::get(&row, "transaction_index")?,
+                log_index: crate::sql_row::get(&row, "log_index")?,
                 emitting_address,
-                topics: row.try_get("topics").context("missing topics")?,
-                data: row.try_get("data").context("missing data")?,
+                topics: crate::sql_row::get(&row, "topics")?,
+                data: crate::sql_row::get(&row, "data")?,
                 canonicality_state: parse_canonicality_state(
-                    &row.try_get::<String, _>("canonicality_state")
-                        .context("missing canonicality_state")?,
+                    &crate::sql_row::get::<String>(&row, "canonicality_state")?,
                 )?,
                 source_manifest_id: emitter.source_manifest_id,
                 namespace: emitter.namespace.clone(),

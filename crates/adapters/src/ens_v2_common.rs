@@ -184,12 +184,8 @@ async fn load_discovered_resolver_emitters(
                 namespace: manifest.namespace.clone(),
                 source_family: manifest.source_family.clone(),
                 manifest_version: manifest.manifest_version,
-                active_from_block_number: row
-                    .try_get("active_from_block_number")
-                    .context("missing active_from_block_number")?,
-                active_to_block_number: row
-                    .try_get("active_to_block_number")
-                    .context("missing active_to_block_number")?,
+                active_from_block_number: crate::sql_row::get(&row, "active_from_block_number")?,
+                active_to_block_number: crate::sql_row::get(&row, "active_to_block_number")?,
             })
         })
         .collect()

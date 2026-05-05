@@ -201,9 +201,7 @@ pub(super) async fn preload_restricted_name_histories(
             .or_insert_with(|| labelhash.clone());
 
         let logical_name_id = name.logical_name_id.clone();
-        let resource_provenance: Value = row
-            .try_get("resource_provenance")
-            .context("missing resource_provenance")?;
+        let resource_provenance: Value = crate::sql_row::get(&row, "resource_provenance")?;
         let active_from = row
             .try_get("active_from")
             .context("missing binding active_from")?;
@@ -211,26 +209,18 @@ pub(super) async fn preload_restricted_name_histories(
             .try_get("active_to")
             .context("missing binding active_to")?;
         let binding_ref = BoundaryRef {
-            chain_id: row
-                .try_get("binding_chain_id")
-                .context("missing binding_chain_id")?,
-            block_hash: row
-                .try_get("binding_block_hash")
-                .context("missing binding_block_hash")?,
-            block_number: row
-                .try_get("binding_block_number")
-                .context("missing binding_block_number")?,
+            chain_id: crate::sql_row::get(&row, "binding_chain_id")?,
+            block_hash: crate::sql_row::get(&row, "binding_block_hash")?,
+            block_number: crate::sql_row::get(&row, "binding_block_number")?,
             block_timestamp: active_from,
-            canonicality_state: decode_preload_canonicality_state(
-                &row.try_get::<String, _>("binding_canonicality_state")
-                    .context("missing binding_canonicality_state")?,
-            )?,
+            canonicality_state: decode_preload_canonicality_state(&crate::sql_row::get::<String>(
+                &row,
+                "binding_canonicality_state",
+            )?)?,
             namespace: name.namespace.clone(),
         };
-        let surface_binding_id = row
-            .try_get("surface_binding_id")
-            .context("missing surface_binding_id")?;
-        let resource_id = row.try_get("resource_id").context("missing resource_id")?;
+        let surface_binding_id = crate::sql_row::get(&row, "surface_binding_id")?;
+        let resource_id = crate::sql_row::get(&row, "resource_id")?;
 
         let history = histories
             .entry(name.namehash.clone())
@@ -346,9 +336,7 @@ async fn block_index_with_preloaded_registrar_release_boundaries(
     let mut release_namespaces = Vec::new();
 
     for row in rows {
-        let resource_provenance: Value = row
-            .try_get("resource_provenance")
-            .context("missing resource_provenance")?;
+        let resource_provenance: Value = crate::sql_row::get(&row, "resource_provenance")?;
         if resource_provenance
             .get("authority_kind")
             .and_then(Value::as_str)
@@ -357,9 +345,7 @@ async fn block_index_with_preloaded_registrar_release_boundaries(
             continue;
         }
 
-        let logical_name_id: String = row
-            .try_get("logical_name_id")
-            .context("missing logical_name_id")?;
+        let logical_name_id: String = crate::sql_row::get(&row, "logical_name_id")?;
         let expiry = if let Some(expiry) = registrar_state
             .get(&logical_name_id)
             .and_then(|state| state.expiry)
@@ -377,7 +363,7 @@ async fn block_index_with_preloaded_registrar_release_boundaries(
         let release_timestamp = release_after_grace(expiry)?;
         if release_timestamp <= replay_head.block_timestamp {
             release_timestamps.push(release_timestamp);
-            release_namespaces.push(row.try_get("namespace").context("missing namespace")?);
+            release_namespaces.push(crate::sql_row::get(&row, "namespace")?);
         }
     }
 
@@ -476,18 +462,14 @@ fn sort_and_dedup_blocks(blocks: &mut Vec<RawBlockSnapshot>) {
 
 fn raw_block_snapshot_from_row(row: sqlx::postgres::PgRow) -> Result<RawBlockSnapshot> {
     Ok(RawBlockSnapshot {
-        chain_id: row.try_get("chain_id").context("missing chain_id")?,
-        block_hash: row.try_get("block_hash").context("missing block_hash")?,
-        block_number: row
-            .try_get("block_number")
-            .context("missing block_number")?,
-        block_timestamp: row
-            .try_get("block_timestamp")
-            .context("missing block_timestamp")?,
-        canonicality_state: parse_canonicality_state(
-            &row.try_get::<String, _>("canonicality_state")
-                .context("missing canonicality_state")?,
-        )?,
+        chain_id: crate::sql_row::get(&row, "chain_id")?,
+        block_hash: crate::sql_row::get(&row, "block_hash")?,
+        block_number: crate::sql_row::get(&row, "block_number")?,
+        block_timestamp: crate::sql_row::get(&row, "block_timestamp")?,
+        canonicality_state: parse_canonicality_state(&crate::sql_row::get::<String>(
+            &row,
+            "canonicality_state",
+        )?)?,
     })
 }
 
@@ -1339,28 +1321,15 @@ async fn load_latest_record_versions_before_block(
 
 fn name_metadata_from_preload_row(row: &sqlx::postgres::PgRow) -> Result<NameMetadata> {
     Ok(NameMetadata {
-        namespace: row.try_get("namespace").context("missing namespace")?,
-        logical_name_id: row
-            .try_get("logical_name_id")
-            .context("missing logical_name_id")?,
-        input_name: row.try_get("input_name").context("missing input_name")?,
-        canonical_display_name: row
-            .try_get("canonical_display_name")
-            .context("missing canonical_display_name")?,
-        normalized_name: row
-            .try_get("normalized_name")
-            .context("missing normalized_name")?,
-        dns_encoded_name: row
-            .try_get("dns_encoded_name")
-            .context("missing dns_encoded_name")?,
-        namehash: row
-            .try_get::<String, _>("namehash")
-            .context("missing namehash")?
-            .to_ascii_lowercase(),
-        labelhashes: row.try_get("labelhashes").context("missing labelhashes")?,
-        normalizer_version: row
-            .try_get("normalizer_version")
-            .context("missing normalizer_version")?,
+        namespace: crate::sql_row::get(&row, "namespace")?,
+        logical_name_id: crate::sql_row::get(&row, "logical_name_id")?,
+        input_name: crate::sql_row::get(&row, "input_name")?,
+        canonical_display_name: crate::sql_row::get(&row, "canonical_display_name")?,
+        normalized_name: crate::sql_row::get(&row, "normalized_name")?,
+        dns_encoded_name: crate::sql_row::get(&row, "dns_encoded_name")?,
+        namehash: crate::sql_row::get::<String>(&row, "namehash")?.to_ascii_lowercase(),
+        labelhashes: crate::sql_row::get(&row, "labelhashes")?,
+        normalizer_version: crate::sql_row::get(&row, "normalizer_version")?,
     })
 }
 

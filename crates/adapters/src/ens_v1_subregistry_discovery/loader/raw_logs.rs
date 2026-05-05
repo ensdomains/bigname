@@ -11,7 +11,7 @@ use super::{ActiveEmitter, RegistryRawLogRow};
 use anyhow::{Context, Result};
 use bigname_storage::CanonicalityState;
 use futures_util::TryStreamExt;
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 
 pub(in crate::ens_v1_subregistry_discovery) async fn load_registry_raw_logs(
     pool: &PgPool,
@@ -113,13 +113,9 @@ pub(in crate::ens_v1_subregistry_discovery) async fn stream_registry_raw_logs(
         .await
         .with_context(|| format!("failed to stream ENSv1 registry raw logs for chain {chain}"))?
     {
-        let emitting_address = normalize_address(
-            &row.try_get::<String, _>("emitting_address")
-                .context("missing emitting_address")?,
-        );
-        let block_number = row
-            .try_get("block_number")
-            .context("missing block_number")?;
+        let emitting_address =
+            normalize_address(&crate::sql_row::get::<String>(&row, "emitting_address")?);
+        let block_number = crate::sql_row::get(&row, "block_number")?;
         let emitter = emitters_by_address
             .get(&emitting_address)
             .and_then(|emitters| emitter_for_block_and_scope(emitters, block_number, None))
@@ -328,12 +324,9 @@ async fn load_registry_raw_logs_internal(
     rows.into_iter()
         .map(|row| {
             let emitting_address = normalize_address(
-                &row.try_get::<String, _>("emitting_address")
-                    .context("missing emitting_address")?,
+                &crate::sql_row::get::<String>(&row, "emitting_address")?,
             );
-            let block_number = row
-                .try_get("block_number")
-                .context("missing block_number")?;
+            let block_number = crate::sql_row::get(&row, "block_number")?;
             let emitter = emitters_by_address
                 .get(&emitting_address)
                 .and_then(|emitters| {
@@ -370,23 +363,19 @@ fn registry_raw_log_from_row(
     emitter: &ActiveEmitter,
 ) -> Result<RegistryRawLogRow> {
     Ok(RegistryRawLogRow {
-        chain_id: row.try_get("chain_id").context("missing chain_id")?,
-        block_hash: row.try_get("block_hash").context("missing block_hash")?,
+        chain_id: crate::sql_row::get(&row, "chain_id")?,
+        block_hash: crate::sql_row::get(&row, "block_hash")?,
         block_number,
-        transaction_hash: row
-            .try_get("transaction_hash")
-            .context("missing transaction_hash")?,
-        transaction_index: row
-            .try_get("transaction_index")
-            .context("missing transaction_index")?,
-        log_index: row.try_get("log_index").context("missing log_index")?,
+        transaction_hash: crate::sql_row::get(&row, "transaction_hash")?,
+        transaction_index: crate::sql_row::get(&row, "transaction_index")?,
+        log_index: crate::sql_row::get(&row, "log_index")?,
         emitting_address,
-        topics: row.try_get("topics").context("missing topics")?,
-        data: row.try_get("data").context("missing data")?,
-        canonicality_state: CanonicalityState::parse(
-            &row.try_get::<String, _>("canonicality_state")
-                .context("missing canonicality_state")?,
-        )?,
+        topics: crate::sql_row::get(&row, "topics")?,
+        data: crate::sql_row::get(&row, "data")?,
+        canonicality_state: CanonicalityState::parse(&crate::sql_row::get::<String>(
+            &row,
+            "canonicality_state",
+        )?)?,
         emitting_contract_instance_id: emitter.contract_instance_id,
         source_manifest_id: emitter.source_manifest_id,
         namespace: emitter.namespace.clone(),

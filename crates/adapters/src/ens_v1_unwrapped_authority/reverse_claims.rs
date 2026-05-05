@@ -144,9 +144,7 @@ async fn load_reverse_claim_sources_internal(
 
     rows.into_iter()
         .map(|row| {
-            let reverse_node = row
-                .try_get::<String, _>("reverse_node")
-                .context("missing reverse_node")?;
+            let reverse_node = crate::sql_row::get::<String>(&row, "reverse_node")?;
             let address = row
                 .try_get::<String, _>("address")
                 .context("missing reverse claim address")?;

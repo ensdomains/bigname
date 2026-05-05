@@ -9,7 +9,7 @@ use bigname_manifests::{
     WatchedContract, WatchedContractSource, load_manifest_declared_watched_contracts,
     load_watched_contracts,
 };
-use sqlx::{PgPool, Row, types::Uuid};
+use sqlx::{PgPool, types::Uuid};
 
 use crate::adapter_manifest::{required_source_manifest_id, watched_contract_manifest_ids};
 
@@ -311,27 +311,14 @@ async fn load_scoped_discovery_watched_contracts(
     rows.into_iter()
         .map(|row| {
             Ok(WatchedContract {
-                chain: row.try_get("chain").context("missing chain")?,
-                source_family: row
-                    .try_get("source_family")
-                    .context("missing source_family")?,
-                address: row
-                    .try_get::<String, _>("address")
-                    .context("missing address")?
-                    .to_ascii_lowercase(),
-                contract_instance_id: row
-                    .try_get("contract_instance_id")
-                    .context("missing contract_instance_id")?,
+                chain: crate::sql_row::get(&row, "chain")?,
+                source_family: crate::sql_row::get(&row, "source_family")?,
+                address: crate::sql_row::get::<String>(&row, "address")?.to_ascii_lowercase(),
+                contract_instance_id: crate::sql_row::get(&row, "contract_instance_id")?,
                 source: WatchedContractSource::DiscoveryEdge,
-                source_manifest_id: row
-                    .try_get("source_manifest_id")
-                    .context("missing source_manifest_id")?,
-                active_from_block_number: row
-                    .try_get("active_from_block_number")
-                    .context("missing active_from_block_number")?,
-                active_to_block_number: row
-                    .try_get("active_to_block_number")
-                    .context("missing active_to_block_number")?,
+                source_manifest_id: crate::sql_row::get(&row, "source_manifest_id")?,
+                active_from_block_number: crate::sql_row::get(&row, "active_from_block_number")?,
+                active_to_block_number: crate::sql_row::get(&row, "active_to_block_number")?,
             })
         })
         .collect()
@@ -410,18 +397,12 @@ async fn load_active_manifest_metadata(
     rows.into_iter()
         .map(|row| {
             let manifest = ActiveManifestMetadata {
-                manifest_id: row.try_get("manifest_id").context("missing manifest_id")?,
-                chain: row.try_get("chain").context("missing chain")?,
-                namespace: row.try_get("namespace").context("missing namespace")?,
-                source_family: row
-                    .try_get("source_family")
-                    .context("missing source_family")?,
-                manifest_version: row
-                    .try_get("manifest_version")
-                    .context("missing manifest_version")?,
-                normalizer_version: row
-                    .try_get("normalizer_version")
-                    .context("missing normalizer_version")?,
+                manifest_id: crate::sql_row::get(&row, "manifest_id")?,
+                chain: crate::sql_row::get(&row, "chain")?,
+                namespace: crate::sql_row::get(&row, "namespace")?,
+                source_family: crate::sql_row::get(&row, "source_family")?,
+                manifest_version: crate::sql_row::get(&row, "manifest_version")?,
+                normalizer_version: crate::sql_row::get(&row, "normalizer_version")?,
             };
             Ok((manifest.manifest_id, manifest))
         })
@@ -467,11 +448,10 @@ async fn load_manifest_contract_roles(
         .map(|row| {
             Ok((
                 (
-                    row.try_get("manifest_id").context("missing manifest_id")?,
-                    row.try_get("contract_instance_id")
-                        .context("missing contract_instance_id")?,
+                    crate::sql_row::get(&row, "manifest_id")?,
+                    crate::sql_row::get(&row, "contract_instance_id")?,
                 ),
-                row.try_get("role").context("missing role")?,
+                crate::sql_row::get(&row, "role")?,
             ))
         })
         .collect()
@@ -507,18 +487,12 @@ async fn load_active_manifest_metadata_for_source_family(
     rows.into_iter()
         .map(|row| {
             Ok(ActiveManifestMetadata {
-                manifest_id: row.try_get("manifest_id").context("missing manifest_id")?,
-                chain: row.try_get("chain").context("missing chain")?,
-                namespace: row.try_get("namespace").context("missing namespace")?,
-                source_family: row
-                    .try_get("source_family")
-                    .context("missing source_family")?,
-                manifest_version: row
-                    .try_get("manifest_version")
-                    .context("missing manifest_version")?,
-                normalizer_version: row
-                    .try_get("normalizer_version")
-                    .context("missing normalizer_version")?,
+                manifest_id: crate::sql_row::get(&row, "manifest_id")?,
+                chain: crate::sql_row::get(&row, "chain")?,
+                namespace: crate::sql_row::get(&row, "namespace")?,
+                source_family: crate::sql_row::get(&row, "source_family")?,
+                manifest_version: crate::sql_row::get(&row, "manifest_version")?,
+                normalizer_version: crate::sql_row::get(&row, "normalizer_version")?,
             })
         })
         .collect()

@@ -34,11 +34,9 @@ pub(super) async fn load_active_capabilities(
             .entry(manifest_id)
             .or_default()
             .push(ActiveCapabilityRow {
-                capability_name: row
-                    .try_get("capability_name")
-                    .context("missing capability_name")?,
-                status: row.try_get("status").context("missing status")?,
-                notes: row.try_get("notes").context("missing notes")?,
+                capability_name: crate::sql_row::get(&row, "capability_name")?,
+                status: crate::sql_row::get(&row, "status")?,
+                notes: crate::sql_row::get(&row, "notes")?,
             });
     }
 

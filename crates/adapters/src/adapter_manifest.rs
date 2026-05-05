@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result, bail};
 use bigname_manifests::{WatchedContract, WatchedContractSource};
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ActiveManifestMetadata {
@@ -126,14 +126,10 @@ pub(crate) async fn load_latest_active_manifest_metadata_for_source_family(
 
 fn decode_active_manifest_metadata(row: sqlx::postgres::PgRow) -> Result<ActiveManifestMetadata> {
     Ok(ActiveManifestMetadata {
-        manifest_id: row.try_get("manifest_id").context("missing manifest_id")?,
-        chain: row.try_get("chain").context("missing chain")?,
-        namespace: row.try_get("namespace").context("missing namespace")?,
-        source_family: row
-            .try_get("source_family")
-            .context("missing source_family")?,
-        manifest_version: row
-            .try_get("manifest_version")
-            .context("missing manifest_version")?,
+        manifest_id: crate::sql_row::get(&row, "manifest_id")?,
+        chain: crate::sql_row::get(&row, "chain")?,
+        namespace: crate::sql_row::get(&row, "namespace")?,
+        source_family: crate::sql_row::get(&row, "source_family")?,
+        manifest_version: crate::sql_row::get(&row, "manifest_version")?,
     })
 }

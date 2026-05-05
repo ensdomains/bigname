@@ -134,30 +134,25 @@ pub(super) async fn load_active_registry_edge_observations_excluding_keys(
             }
             Some((|| {
                 Ok(DiscoveryObservation {
-                    chain: row.try_get("chain_id").context("missing chain_id")?,
-                    from_address: normalize_address(
-                        &row.try_get::<String, _>("from_address")
-                            .context("missing from_address")?,
-                    ),
-                    to_address: normalize_address(
-                        &row.try_get::<String, _>("to_address")
-                            .context("missing to_address")?,
-                    ),
-                    edge_kind: row.try_get("edge_kind").context("missing edge_kind")?,
+                    chain: crate::sql_row::get(&row, "chain_id")?,
+                    from_address: normalize_address(&crate::sql_row::get::<String>(
+                        &row,
+                        "from_address",
+                    )?),
+                    to_address: normalize_address(&crate::sql_row::get::<String>(
+                        &row,
+                        "to_address",
+                    )?),
+                    edge_kind: crate::sql_row::get(&row, "edge_kind")?,
                     discovery_source,
-                    active_from_block_number: row
-                        .try_get("active_from_block_number")
-                        .context("missing active_from_block_number")?,
-                    active_from_block_hash: row
-                        .try_get("active_from_block_hash")
-                        .context("missing active_from_block_hash")?,
-                    active_to_block_number: row
-                        .try_get("active_to_block_number")
-                        .context("missing active_to_block_number")?,
-                    active_to_block_hash: row
-                        .try_get("active_to_block_hash")
-                        .context("missing active_to_block_hash")?,
-                    provenance: row.try_get("provenance").context("missing provenance")?,
+                    active_from_block_number: crate::sql_row::get(
+                        &row,
+                        "active_from_block_number",
+                    )?,
+                    active_from_block_hash: crate::sql_row::get(&row, "active_from_block_hash")?,
+                    active_to_block_number: crate::sql_row::get(&row, "active_to_block_number")?,
+                    active_to_block_hash: crate::sql_row::get(&row, "active_to_block_hash")?,
+                    provenance: crate::sql_row::get(&row, "provenance")?,
                 })
             })())
         })

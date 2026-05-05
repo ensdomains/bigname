@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use anyhow::{Context, Result};
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 
 use super::{
     emitters::{emitter_for_block_and_scope, scoped_ranges_for_active_emitters},
@@ -161,13 +161,9 @@ pub(super) async fn load_registry_raw_logs(
 
     let mut output = Vec::new();
     for row in rows {
-        let emitting_address = normalize_address(
-            &row.try_get::<String, _>("emitting_address")
-                .context("missing emitting_address")?,
-        );
-        let block_number = row
-            .try_get("block_number")
-            .context("missing block_number")?;
+        let emitting_address =
+            normalize_address(&crate::sql_row::get::<String>(&row, "emitting_address")?);
+        let block_number = crate::sql_row::get(&row, "block_number")?;
         let Some(emitter) = emitters_by_address
             .get(&emitting_address)
             .and_then(|emitters| emitter_for_block_and_scope(emitters, block_number, source_scope))
@@ -175,26 +171,20 @@ pub(super) async fn load_registry_raw_logs(
             continue;
         };
         output.push(RegistryRawLogRow {
-            chain_id: row.try_get("chain_id").context("missing chain_id")?,
-            block_hash: row.try_get("block_hash").context("missing block_hash")?,
+            chain_id: crate::sql_row::get(&row, "chain_id")?,
+            block_hash: crate::sql_row::get(&row, "block_hash")?,
             block_number,
-            block_timestamp: row
-                .try_get("block_timestamp")
-                .context("missing block_timestamp")?,
-            transaction_hash: row
-                .try_get("transaction_hash")
-                .context("missing transaction_hash")?,
-            transaction_index: row
-                .try_get("transaction_index")
-                .context("missing transaction_index")?,
-            log_index: row.try_get("log_index").context("missing log_index")?,
+            block_timestamp: crate::sql_row::get(&row, "block_timestamp")?,
+            transaction_hash: crate::sql_row::get(&row, "transaction_hash")?,
+            transaction_index: crate::sql_row::get(&row, "transaction_index")?,
+            log_index: crate::sql_row::get(&row, "log_index")?,
             emitting_address,
-            topics: row.try_get("topics").context("missing topics")?,
-            data: row.try_get("data").context("missing data")?,
-            canonicality_state: parse_canonicality_state(
-                &row.try_get::<String, _>("canonicality_state")
-                    .context("missing canonicality_state")?,
-            )?,
+            topics: crate::sql_row::get(&row, "topics")?,
+            data: crate::sql_row::get(&row, "data")?,
+            canonicality_state: parse_canonicality_state(&crate::sql_row::get::<String>(
+                &row,
+                "canonicality_state",
+            )?)?,
             emitting_contract_instance_id: emitter.contract_instance_id,
             source_manifest_id: emitter.source_manifest_id,
             namespace: emitter.namespace.clone(),

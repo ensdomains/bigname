@@ -1,6 +1,6 @@
 use super::super::*;
 use anyhow::{Context, Result};
-use sqlx::{PgPool, Row, postgres::PgRow, types::time::OffsetDateTime};
+use sqlx::{PgPool, postgres::PgRow, types::time::OffsetDateTime};
 
 pub(in crate::ens_v1_unwrapped_authority) async fn load_canonical_blocks(
     pool: &PgPool,
@@ -32,18 +32,14 @@ pub(in crate::ens_v1_unwrapped_authority) async fn load_canonical_blocks(
     rows.into_iter()
         .map(|row| {
             Ok(RawBlockSnapshot {
-                chain_id: row.try_get("chain_id").context("missing chain_id")?,
-                block_hash: row.try_get("block_hash").context("missing block_hash")?,
-                block_number: row
-                    .try_get("block_number")
-                    .context("missing block_number")?,
-                block_timestamp: row
-                    .try_get("block_timestamp")
-                    .context("missing block_timestamp")?,
-                canonicality_state: parse_canonicality_state(
-                    &row.try_get::<String, _>("canonicality_state")
-                        .context("missing canonicality_state")?,
-                )?,
+                chain_id: crate::sql_row::get(&row, "chain_id")?,
+                block_hash: crate::sql_row::get(&row, "block_hash")?,
+                block_number: crate::sql_row::get(&row, "block_number")?,
+                block_timestamp: crate::sql_row::get(&row, "block_timestamp")?,
+                canonicality_state: parse_canonicality_state(&crate::sql_row::get::<String>(
+                    &row,
+                    "canonicality_state",
+                )?)?,
             })
         })
         .collect()
@@ -194,17 +190,13 @@ fn release_boundary_timestamp_for_authority_log(
 
 fn raw_block_snapshot_from_row(row: PgRow) -> Result<RawBlockSnapshot> {
     Ok(RawBlockSnapshot {
-        chain_id: row.try_get("chain_id").context("missing chain_id")?,
-        block_hash: row.try_get("block_hash").context("missing block_hash")?,
-        block_number: row
-            .try_get("block_number")
-            .context("missing block_number")?,
-        block_timestamp: row
-            .try_get("block_timestamp")
-            .context("missing block_timestamp")?,
-        canonicality_state: parse_canonicality_state(
-            &row.try_get::<String, _>("canonicality_state")
-                .context("missing canonicality_state")?,
-        )?,
+        chain_id: crate::sql_row::get(&row, "chain_id")?,
+        block_hash: crate::sql_row::get(&row, "block_hash")?,
+        block_number: crate::sql_row::get(&row, "block_number")?,
+        block_timestamp: crate::sql_row::get(&row, "block_timestamp")?,
+        canonicality_state: parse_canonicality_state(&crate::sql_row::get::<String>(
+            &row,
+            "canonicality_state",
+        )?)?,
     })
 }

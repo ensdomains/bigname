@@ -7,7 +7,7 @@ use super::super::scope::{
 use super::super::*;
 use anyhow::{Context, Result};
 use futures_util::TryStreamExt;
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 
 pub(in crate::ens_v1_unwrapped_authority) async fn load_authority_raw_logs(
     pool: &PgPool,
@@ -113,13 +113,8 @@ pub(in crate::ens_v1_unwrapped_authority) async fn stream_authority_raw_logs(
     while let Some(row) = rows.try_next().await.with_context(|| {
         format!("failed to stream ENSv1 unwrapped authority raw logs for chain {chain}")
     })? {
-        let address = row
-            .try_get::<String, _>("emitting_address")
-            .context("missing emitting_address")?
-            .to_ascii_lowercase();
-        let block_number = row
-            .try_get("block_number")
-            .context("missing block_number")?;
+        let address = crate::sql_row::get::<String>(&row, "emitting_address")?.to_ascii_lowercase();
+        let block_number = crate::sql_row::get(&row, "block_number")?;
         let emitter = emitters_by_address
             .get(&address)
             .and_then(|emitters| emitter_for_block_and_scope(emitters, block_number, None))
@@ -341,13 +336,9 @@ async fn load_authority_raw_logs_internal(
         raw_logs.extend(
             rows.into_iter()
                 .map(|row| {
-                    let address = row
-                        .try_get::<String, _>("emitting_address")
-                        .context("missing emitting_address")?
+                    let address = crate::sql_row::get::<String>(&row, "emitting_address")?
                         .to_ascii_lowercase();
-                    let block_number = row
-                        .try_get("block_number")
-                        .context("missing block_number")?;
+                    let block_number = crate::sql_row::get(&row, "block_number")?;
                     let emitter = emitters_by_address
                 .get(&address)
                 .and_then(|emitters| {
@@ -486,13 +477,9 @@ async fn load_generic_resolver_event_raw_logs(
 
     rows.into_iter()
         .map(|row| {
-            let address = row
-                .try_get::<String, _>("emitting_address")
-                .context("missing emitting_address")?
+            let address = crate::sql_row::get::<String>(&row, "emitting_address")?
                 .to_ascii_lowercase();
-            let block_number = row
-                .try_get("block_number")
-                .context("missing block_number")?;
+            let block_number = crate::sql_row::get(&row, "block_number")?;
             let source = generic_resolver_event_source_for_block(sources, block_number)
                 .with_context(|| {
                     format!(
@@ -528,26 +515,20 @@ fn authority_raw_log_from_row(
     emitter: &ActiveEmitter,
 ) -> Result<AuthorityRawLogRow> {
     Ok(AuthorityRawLogRow {
-        chain_id: row.try_get("chain_id").context("missing chain_id")?,
-        block_hash: row.try_get("block_hash").context("missing block_hash")?,
+        chain_id: crate::sql_row::get(&row, "chain_id")?,
+        block_hash: crate::sql_row::get(&row, "block_hash")?,
         block_number,
-        block_timestamp: row
-            .try_get("block_timestamp")
-            .context("missing block_timestamp")?,
-        transaction_hash: row
-            .try_get("transaction_hash")
-            .context("missing transaction_hash")?,
-        transaction_index: row
-            .try_get("transaction_index")
-            .context("missing transaction_index")?,
-        log_index: row.try_get("log_index").context("missing log_index")?,
+        block_timestamp: crate::sql_row::get(&row, "block_timestamp")?,
+        transaction_hash: crate::sql_row::get(&row, "transaction_hash")?,
+        transaction_index: crate::sql_row::get(&row, "transaction_index")?,
+        log_index: crate::sql_row::get(&row, "log_index")?,
         emitting_address,
-        topics: row.try_get("topics").context("missing topics")?,
-        data: row.try_get("data").context("missing data")?,
-        canonicality_state: parse_canonicality_state(
-            &row.try_get::<String, _>("canonicality_state")
-                .context("missing canonicality_state")?,
-        )?,
+        topics: crate::sql_row::get(&row, "topics")?,
+        data: crate::sql_row::get(&row, "data")?,
+        canonicality_state: parse_canonicality_state(&crate::sql_row::get::<String>(
+            &row,
+            "canonicality_state",
+        )?)?,
         source_manifest_id: emitter.source_manifest_id,
         namespace: emitter.namespace.clone(),
         source_family: emitter.source_family.clone(),
@@ -564,26 +545,20 @@ fn authority_raw_log_from_generic_resolver_source(
     source: &GenericResolverEventSource,
 ) -> Result<AuthorityRawLogRow> {
     Ok(AuthorityRawLogRow {
-        chain_id: row.try_get("chain_id").context("missing chain_id")?,
-        block_hash: row.try_get("block_hash").context("missing block_hash")?,
+        chain_id: crate::sql_row::get(&row, "chain_id")?,
+        block_hash: crate::sql_row::get(&row, "block_hash")?,
         block_number,
-        block_timestamp: row
-            .try_get("block_timestamp")
-            .context("missing block_timestamp")?,
-        transaction_hash: row
-            .try_get("transaction_hash")
-            .context("missing transaction_hash")?,
-        transaction_index: row
-            .try_get("transaction_index")
-            .context("missing transaction_index")?,
-        log_index: row.try_get("log_index").context("missing log_index")?,
+        block_timestamp: crate::sql_row::get(&row, "block_timestamp")?,
+        transaction_hash: crate::sql_row::get(&row, "transaction_hash")?,
+        transaction_index: crate::sql_row::get(&row, "transaction_index")?,
+        log_index: crate::sql_row::get(&row, "log_index")?,
         emitting_address,
-        topics: row.try_get("topics").context("missing topics")?,
-        data: row.try_get("data").context("missing data")?,
-        canonicality_state: parse_canonicality_state(
-            &row.try_get::<String, _>("canonicality_state")
-                .context("missing canonicality_state")?,
-        )?,
+        topics: crate::sql_row::get(&row, "topics")?,
+        data: crate::sql_row::get(&row, "data")?,
+        canonicality_state: parse_canonicality_state(&crate::sql_row::get::<String>(
+            &row,
+            "canonicality_state",
+        )?)?,
         source_manifest_id: source.source_manifest_id,
         namespace: source.namespace.clone(),
         source_family: source.source_family.clone(),
