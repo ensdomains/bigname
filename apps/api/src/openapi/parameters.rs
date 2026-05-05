@@ -71,14 +71,43 @@ pub(super) fn required_csv_query_parameter(
     parameter
 }
 
+fn string_schema() -> JsonValue {
+    json!({ "type": "string" })
+}
+
+fn boolean_schema() -> JsonValue {
+    json!({ "type": "boolean" })
+}
+
+fn uuid_string_schema() -> JsonValue {
+    json!({ "type": "string", "format": "uuid" })
+}
+
+fn string_pattern_schema(pattern: &'static str) -> JsonValue {
+    json!({ "type": "string", "pattern": pattern })
+}
+
+fn string_enum_schema(values: &[&str]) -> JsonValue {
+    json!({ "type": "string", "enum": values })
+}
+
+fn string_enum_default_schema(values: &[&str], default: &'static str) -> JsonValue {
+    json!({ "type": "string", "enum": values, "default": default })
+}
+
+fn integer_min_schema(minimum: i64) -> JsonValue {
+    json!({ "type": "integer", "minimum": minimum })
+}
+
+fn integer_range_schema(minimum: i64, maximum: u64) -> JsonValue {
+    json!({ "type": "integer", "minimum": minimum, "maximum": maximum })
+}
+
 pub(super) fn namespace_path_parameter() -> JsonValue {
     path_parameter(
         "namespace",
         "Supported namespace identifier.",
-        json!({
-            "type": "string",
-            "enum": PUBLIC_NAMESPACES,
-        }),
+        string_enum_schema(PUBLIC_NAMESPACES),
     )
 }
 
@@ -86,9 +115,7 @@ pub(super) fn name_path_parameter() -> JsonValue {
     path_parameter(
         "name",
         "Normalized name within the namespace.",
-        json!({
-            "type": "string",
-        }),
+        string_schema(),
     )
 }
 
@@ -110,9 +137,7 @@ pub(super) fn resolution_current_parameters() -> Vec<JsonValue> {
     parameters.push(csv_query_parameter(
         "records",
         "Comma-separated record selectors. Required when `mode` is `verified` or `both`.",
-        json!({
-            "type": "string",
-        }),
+        string_schema(),
     ));
     parameters
 }
@@ -121,9 +146,7 @@ fn at_query_parameter(description: &'static str) -> JsonValue {
     query_parameter(
         "at",
         description,
-        json!({
-            "type": "string",
-        }),
+        string_schema(),
     )
 }
 
@@ -131,9 +154,7 @@ fn chain_positions_query_parameter() -> JsonValue {
     query_parameter(
         "chain_positions",
         "Explicit exact-name snapshot selector encoded as one JSON object using ChainPositions position objects. Mutually exclusive with `at`.",
-        json!({
-            "type": "string",
-        }),
+        string_schema(),
     )
 }
 
@@ -141,11 +162,7 @@ fn consistency_query_parameter() -> JsonValue {
     query_parameter(
         "consistency",
         "Snapshot consistency floor. Defaults to `head`.",
-        json!({
-            "type": "string",
-            "enum": ["head", "safe", "finalized"],
-            "default": "head",
-        }),
+        string_enum_default_schema(&["head", "safe", "finalized"], "head"),
     )
 }
 
@@ -153,9 +170,7 @@ pub(super) fn address_path_parameter() -> JsonValue {
     path_parameter(
         "address",
         "Address anchor for the collection or history read. Addresses are normalized to lowercase.",
-        json!({
-            "type": "string",
-        }),
+        string_schema(),
     )
 }
 
@@ -163,10 +178,7 @@ pub(super) fn resource_id_path_parameter() -> JsonValue {
     path_parameter(
         "resource_id",
         "Resource identifier anchor.",
-        json!({
-            "type": "string",
-            "format": "uuid",
-        }),
+        uuid_string_schema(),
     )
 }
 
@@ -174,9 +186,7 @@ pub(super) fn chain_id_path_parameter() -> JsonValue {
     path_parameter(
         "chain_id",
         "Resolver chain identifier.",
-        json!({
-            "type": "string",
-        }),
+        string_schema(),
     )
 }
 
@@ -184,9 +194,7 @@ pub(super) fn resolver_address_path_parameter() -> JsonValue {
     path_parameter(
         "resolver_address",
         "Resolver address anchor. Addresses are normalized to lowercase.",
-        json!({
-            "type": "string",
-        }),
+        string_schema(),
     )
 }
 
@@ -194,10 +202,7 @@ pub(super) fn namespace_query_parameter() -> JsonValue {
     query_parameter(
         "namespace",
         "Optional namespace filter.",
-        json!({
-            "type": "string",
-            "enum": PUBLIC_NAMESPACES,
-        }),
+        string_enum_schema(PUBLIC_NAMESPACES),
     )
 }
 
@@ -205,10 +210,7 @@ pub(super) fn required_namespace_query_parameter() -> JsonValue {
     required_query_parameter(
         "namespace",
         "Required namespace identifier for the requested primary-name tuple.",
-        json!({
-            "type": "string",
-            "enum": PUBLIC_NAMESPACES,
-        }),
+        string_enum_schema(PUBLIC_NAMESPACES),
     )
 }
 
@@ -216,10 +218,7 @@ pub(super) fn relation_query_parameter() -> JsonValue {
     query_parameter(
         "relation",
         "Optional relation facet filter.",
-        json!({
-            "type": "string",
-            "enum": ["registrant", "token_holder", "effective_controller"],
-        }),
+        string_enum_schema(&["registrant", "token_holder", "effective_controller"]),
     )
 }
 
@@ -227,11 +226,7 @@ pub(super) fn dedupe_by_query_parameter() -> JsonValue {
     query_parameter(
         "dedupe_by",
         "Current collection dedupe basis.",
-        json!({
-            "type": "string",
-            "enum": ["surface", "resource"],
-            "default": "surface",
-        }),
+        string_enum_default_schema(&["surface", "resource"], "surface"),
     )
 }
 
@@ -239,11 +234,7 @@ pub(super) fn history_scope_query_parameter() -> JsonValue {
     query_parameter(
         "scope",
         "History scope selector.",
-        json!({
-            "type": "string",
-            "enum": ["surface", "resource", "both"],
-            "default": "both",
-        }),
+        string_enum_default_schema(&["surface", "resource", "both"], "both"),
     )
 }
 
@@ -259,11 +250,7 @@ pub(super) fn resolution_mode_query_parameter() -> JsonValue {
     query_parameter(
         "mode",
         "Resolution read mode.",
-        json!({
-            "type": "string",
-            "enum": ["declared", "verified", "both"],
-            "default": "declared",
-        }),
+        string_enum_default_schema(&["declared", "verified", "both"], "declared"),
     )
 }
 
@@ -271,11 +258,7 @@ pub(super) fn primary_name_mode_query_parameter() -> JsonValue {
     query_parameter(
         "mode",
         "Primary-name read mode.",
-        json!({
-            "type": "string",
-            "enum": ["declared", "verified", "both"],
-            "default": "declared",
-        }),
+        string_enum_default_schema(&["declared", "verified", "both"], "declared"),
     )
 }
 
@@ -285,10 +268,7 @@ pub(super) fn required_coin_type_query_parameter() -> JsonValue {
     required_query_parameter(
         "coin_type",
         "Required `coin_type` selector for the requested primary-name tuple.",
-        json!({
-            "type": "string",
-            "pattern": "^[0-9]+$",
-        }),
+        string_pattern_schema("^[0-9]+$"),
     )
 }
 
@@ -296,11 +276,7 @@ pub(super) fn view_query_parameter(default: &'static str) -> JsonValue {
     query_parameter(
         "view",
         "Response view selector.",
-        json!({
-            "type": "string",
-            "enum": ["compact", "full"],
-            "default": default,
-        }),
+        string_enum_default_schema(&["compact", "full"], default),
     )
 }
 
@@ -308,11 +284,7 @@ pub(super) fn meta_query_parameter(default: &'static str) -> JsonValue {
     query_parameter(
         "meta",
         "Compact response metadata selector.",
-        json!({
-            "type": "string",
-            "enum": ["none", "summary", "full"],
-            "default": default,
-        }),
+        string_enum_default_schema(&["none", "summary", "full"], default),
     )
 }
 
@@ -320,9 +292,7 @@ pub(super) fn cursor_query_parameter() -> JsonValue {
     query_parameter(
         "cursor",
         "Replay-stable pagination cursor.",
-        json!({
-            "type": "string",
-        }),
+        string_schema(),
     )
 }
 
@@ -330,10 +300,6 @@ pub(super) fn page_size_query_parameter() -> JsonValue {
     query_parameter(
         "page_size",
         format!("Optional page size. When supplied it must be between 1 and {MAX_PAGE_SIZE}."),
-        json!({
-            "type": "integer",
-            "minimum": 1,
-            "maximum": MAX_PAGE_SIZE,
-        }),
+        integer_range_schema(1, MAX_PAGE_SIZE),
     )
 }

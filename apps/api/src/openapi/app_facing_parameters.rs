@@ -4,66 +4,62 @@ pub(super) fn names_parameters() -> Vec<JsonValue> {
         query_parameter(
             "name",
             "Exact normalized-name lookup filter.",
-            json!({"type": "string"}),
+            string_schema(),
         ),
         query_parameter(
             "prefix",
             "Normalized-name prefix search filter.",
-            json!({"type": "string"}),
+            string_schema(),
         ),
         query_parameter(
             "contains",
             "Normalized-name contains search filter.",
-            json!({"type": "string"}),
+            string_schema(),
         ),
         query_parameter(
             "contains_nocase",
             "Case-insensitive normalized-name contains search filter.",
-            json!({"type": "string"}),
+            string_schema(),
         ),
         query_parameter(
             "owner",
             "Token-holder / owner address filter.",
-            json!({"type": "string"}),
+            string_schema(),
         ),
         query_parameter(
             "account",
             "Address relation filter anchor.",
-            json!({"type": "string"}),
+            string_schema(),
         ),
         query_parameter(
             "registrant",
             "Registrant address filter.",
-            json!({"type": "string"}),
+            string_schema(),
         ),
         query_parameter(
             "resolver",
             "Current declared resolver address filter.",
-            json!({"type": "string"}),
+            string_schema(),
         ),
         query_parameter(
             "resolved_address",
             "Declared record-value equality filter when projected.",
-            json!({"type": "string"}),
+            string_schema(),
         ),
         app_relation_query_parameter(),
         query_parameter(
             "sort",
             "Stable compact names sort key.",
-            json!({
-                "type": "string",
-                "enum": ["name", "expiry_date", "registration_date", "created_at"],
-                "default": "name",
-            }),
+            string_enum_default_schema(
+                &["name", "expiry_date", "registration_date", "created_at"],
+                "name",
+            ),
         ),
         order_query_parameter(),
         csv_query_parameter(
             "include",
             "Optional compact name expansions.",
-            json!({
-                "type": "string",
-                "enum": ["record_summaries", "total_count"],
-            }),
+            string_enum_schema(&["record_summaries", "total_count"]),
         ),
         view_query_parameter("compact"),
         meta_query_parameter("summary"),
@@ -80,22 +76,22 @@ pub(super) fn address_names_count_parameters() -> Vec<JsonValue> {
         query_parameter(
             "prefix",
             "Normalized-name prefix search filter.",
-            json!({"type": "string"}),
+            string_schema(),
         ),
         query_parameter(
             "contains",
             "Normalized-name contains search filter.",
-            json!({"type": "string"}),
+            string_schema(),
         ),
         query_parameter(
             "contains_nocase",
             "Case-insensitive normalized-name contains search filter.",
-            json!({"type": "string"}),
+            string_schema(),
         ),
         query_parameter(
             "resolver",
             "Current declared resolver address filter.",
-            json!({"type": "string"}),
+            string_schema(),
         ),
     ]
 }
@@ -106,7 +102,7 @@ pub(super) fn resource_lookup_parameters() -> Vec<JsonValue> {
         required_query_parameter(
             "name",
             "Required normalized name to resolve to a current resource identity.",
-            json!({"type": "string"}),
+            string_schema(),
         ),
         view_query_parameter("compact"),
         meta_query_parameter("summary"),
@@ -117,10 +113,7 @@ fn app_relation_query_parameter() -> JsonValue {
     query_parameter(
         "relation",
         "Optional app-facing relation facet filter.",
-        json!({
-            "type": "string",
-            "enum": ["token_holder", "registrant", "effective_controller", "any"],
-        }),
+        string_enum_schema(&["token_holder", "registrant", "effective_controller", "any"]),
     )
 }
 
@@ -144,45 +137,46 @@ fn name_records_query_parameters(default_mode: &'static str, default_include: &'
         query_parameter(
             "mode",
             "Compact records read mode. `auto` uses declared cache when the resolver profile is authoritative, otherwise verified resolution for requested selectors. When no declared selectors are available, app-facing defaults probe only a bounded basic profile set.",
-            json!({
-                "type": "string",
-                "enum": ["auto", "declared", "verified", "both"],
-                "default": default_mode,
-            }),
+            string_enum_default_schema(&["auto", "declared", "verified", "both"], default_mode),
         ),
         csv_query_parameter(
             "texts",
             "Requested text record keys.",
-            json!({"type": "string"}),
+            string_schema(),
         ),
         query_parameter(
             "known_text_keys",
             "Whether to return projected known text-key inventory.",
-            json!({"type": "boolean"}),
+            boolean_schema(),
         ),
         query_parameter(
             "avatar",
             "Whether to request the avatar text convenience field.",
-            json!({"type": "boolean"}),
+            boolean_schema(),
         ),
         query_parameter(
             "content_hash",
             "Whether to request the content-hash selector.",
-            json!({"type": "boolean"}),
+            boolean_schema(),
         ),
         csv_query_parameter(
             "coin_types",
             "Requested textual coin-type selector keys.",
-            json!({"type": "string"}),
+            string_schema(),
         ),
         csv_query_parameter(
             "include",
             "Optional compact record sections.",
-            json!({
-                "type": "string",
-                "enum": ["resolver_address", "known_text_keys", "avatar", "content_hash", "coins"],
-                "default": default_include,
-            }),
+            string_enum_default_schema(
+                &[
+                    "resolver_address",
+                    "known_text_keys",
+                    "avatar",
+                    "content_hash",
+                    "coins",
+                ],
+                default_include,
+            ),
         ),
         view_query_parameter("compact"),
         meta_query_parameter("summary"),
@@ -195,34 +189,34 @@ pub(super) fn events_parameters() -> Vec<JsonValue> {
         query_parameter(
             "name",
             "Normalized name event anchor filter.",
-            json!({"type": "string"}),
+            string_schema(),
         ),
         address_path_like_query_parameter("address", "Address relation event filter."),
         query_parameter(
             "resource",
             "Opaque resource identifier filter.",
-            json!({"type": "string", "format": "uuid"}),
+            uuid_string_schema(),
         ),
         query_parameter(
             "resource_id",
             "Opaque resource identifier filter.",
-            json!({"type": "string", "format": "uuid"}),
+            uuid_string_schema(),
         ),
         query_parameter(
             "type",
             "Normalized event type or compact type alias filter.",
-            json!({"type": "string"}),
+            string_schema(),
         ),
         app_relation_query_parameter(),
         query_parameter(
             "from_block",
             "Inclusive canonical block lower bound.",
-            json!({"type": "integer", "minimum": 0}),
+            integer_min_schema(0),
         ),
         query_parameter(
             "to_block",
             "Inclusive canonical block upper bound.",
-            json!({"type": "integer", "minimum": 0}),
+            integer_min_schema(0),
         ),
         view_query_parameter("compact"),
         meta_query_parameter("summary"),
@@ -237,18 +231,18 @@ pub(super) fn roles_parameters() -> Vec<JsonValue> {
         query_parameter(
             "resource_id",
             "Opaque resource identifier filter.",
-            json!({"type": "string", "format": "uuid"}),
+            uuid_string_schema(),
         ),
         namespace_query_parameter(),
         query_parameter(
             "name",
             "Normalized name lookup filter paired with namespace.",
-            json!({"type": "string"}),
+            string_schema(),
         ),
         query_parameter(
             "role_bitmap",
             "Projected role bitmap filter when supported.",
-            json!({"type": "string"}),
+            string_schema(),
         ),
         view_query_parameter("compact"),
         meta_query_parameter("summary"),
@@ -265,7 +259,7 @@ pub(super) fn name_roles_parameters() -> Vec<JsonValue> {
         query_parameter(
             "role_bitmap",
             "Projected role bitmap filter when supported.",
-            json!({"type": "string"}),
+            string_schema(),
         ),
         view_query_parameter("compact"),
         meta_query_parameter("summary"),
@@ -281,11 +275,10 @@ pub(super) fn resolver_overview_parameters() -> Vec<JsonValue> {
         csv_query_parameter(
             "include",
             "Requested compact resolver overview sections.",
-            json!({
-                "type": "string",
-                "enum": ["nodes", "aliases", "roles", "events"],
-                "default": "nodes,aliases,roles,events",
-            }),
+            string_enum_default_schema(
+                &["nodes", "aliases", "roles", "events"],
+                "nodes,aliases,roles,events",
+            ),
         ),
         view_query_parameter("compact"),
         meta_query_parameter("summary"),
@@ -296,11 +289,7 @@ fn order_query_parameter() -> JsonValue {
     query_parameter(
         "order",
         "Stable sort order.",
-        json!({
-            "type": "string",
-            "enum": ["asc", "desc"],
-            "default": "asc",
-        }),
+        string_enum_default_schema(&["asc", "desc"], "asc"),
     )
 }
 
@@ -308,8 +297,6 @@ fn address_path_like_query_parameter(name: &'static str, description: &'static s
     query_parameter(
         name,
         description,
-        json!({
-            "type": "string",
-        }),
+        string_schema(),
     )
 }
