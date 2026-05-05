@@ -2615,7 +2615,13 @@ async fn source_scoped_backfill_does_not_normalize_preexisting_unselected_raw_lo
     let (provider, server) = number_resolving_provider_with_fixtures(
         vec![ProviderBlockFixture {
             block: block_42.clone(),
-            logs: vec![rpc_log_payload_at_address(&block_42, selected_address, 0)],
+            logs: vec![rpc_ens_v2_label_registered_log_payload(
+                &block_42,
+                selected_address,
+                "selected",
+                1,
+                0,
+            )],
         }],
         Arc::clone(&requests),
     )
@@ -2637,7 +2643,7 @@ async fn source_scoped_backfill_does_not_normalize_preexisting_unselected_raw_lo
         .bind(selected_address)
         .fetch_one(database.pool())
         .await?,
-        1
+        2
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
@@ -2652,7 +2658,7 @@ async fn source_scoped_backfill_does_not_normalize_preexisting_unselected_raw_lo
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM normalized_events")
             .fetch_one(database.pool())
             .await?,
-        1
+        2
     );
 
     server.abort();
@@ -4495,7 +4501,7 @@ async fn insert_active_backfill_manifest_version(
                 'active',
                 'uts46-v1',
                 ('manifests/' || $2 || '/' || $3 || '/v1.toml'),
-                '{}'::jsonb
+                DEFAULT
             )
             "#,
     )

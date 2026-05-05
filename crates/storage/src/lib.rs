@@ -5,6 +5,7 @@ mod audit;
 mod backfill_jobs;
 mod checkpoints;
 mod children;
+mod evm_primitives;
 mod execution;
 mod history;
 mod identity;

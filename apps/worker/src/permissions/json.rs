@@ -5,6 +5,7 @@ use bigname_storage::PermissionScope;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+use crate::evm::normalize_evm_address_or_lowercase;
 use crate::projection_json::dedupe_json_values;
 
 use super::types::RelevantEvent;
@@ -30,11 +31,12 @@ pub(super) fn parse_scope(state: &Value) -> Result<PermissionScope> {
                 .and_then(Value::as_str)
                 .context("resolver scope must include chain_id")?
                 .to_owned(),
-            resolver_address: scope
-                .get("resolver_address")
-                .and_then(Value::as_str)
-                .context("resolver scope must include resolver_address")?
-                .to_ascii_lowercase(),
+            resolver_address: normalize_evm_address_or_lowercase(
+                scope
+                    .get("resolver_address")
+                    .and_then(Value::as_str)
+                    .context("resolver scope must include resolver_address")?,
+            ),
         }),
         "record_manager" => Ok(PermissionScope::RecordManager {
             chain_id: scope
@@ -42,11 +44,12 @@ pub(super) fn parse_scope(state: &Value) -> Result<PermissionScope> {
                 .and_then(Value::as_str)
                 .context("record_manager scope must include chain_id")?
                 .to_owned(),
-            manager_address: scope
-                .get("manager_address")
-                .and_then(Value::as_str)
-                .context("record_manager scope must include manager_address")?
-                .to_ascii_lowercase(),
+            manager_address: normalize_evm_address_or_lowercase(
+                scope
+                    .get("manager_address")
+                    .and_then(Value::as_str)
+                    .context("record_manager scope must include manager_address")?,
+            ),
         }),
         "migration_derived" => Ok(PermissionScope::MigrationDerived {
             predecessor_resource_id: Uuid::parse_str(

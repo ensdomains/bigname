@@ -35,7 +35,7 @@ fn compact_requested_text_keys(
                 keys.push(key);
             }
         }
-        if compact_should_probe_basic_records(record_inventory_row, request) {
+        if compact_should_probe_basic_selector_fallbacks(record_inventory_row, request) {
             for key in COMPACT_BASIC_TEXT_KEYS {
                 if seen.insert((*key).to_owned()) {
                     keys.push((*key).to_owned());
@@ -56,7 +56,7 @@ fn compact_should_include_known_or_basic_texts(request: &CompactNameRecordsReque
         )
 }
 
-fn compact_should_probe_basic_records(
+fn compact_should_probe_basic_selector_fallbacks(
     record_inventory_row: Option<&RecordInventoryCurrentRow>,
     request: &CompactNameRecordsRequest,
 ) -> bool {
@@ -279,7 +279,7 @@ fn compact_text_records(
         let record = parse_resolution_record_key(&record_key)
             .expect("compact text selector must be a valid record key");
         let value_entry = value_entries.get(&record_key);
-        if compact_is_basic_fallback_text_key(record_inventory_row, request, &text_key)
+        if compact_is_unrequested_basic_text_selector_fallback(record_inventory_row, request, &text_key)
             && !compact_value_entry_is_success(value_entry)
         {
             continue;
@@ -292,12 +292,12 @@ fn compact_text_records(
     JsonValue::Object(text_records)
 }
 
-fn compact_is_basic_fallback_text_key(
+fn compact_is_unrequested_basic_text_selector_fallback(
     record_inventory_row: Option<&RecordInventoryCurrentRow>,
     request: &CompactNameRecordsRequest,
     text_key: &str,
 ) -> bool {
-    compact_should_probe_basic_records(record_inventory_row, request)
+    compact_should_probe_basic_selector_fallbacks(record_inventory_row, request)
         && COMPACT_BASIC_TEXT_KEYS.contains(&text_key)
         && !request.texts.iter().any(|requested| requested == text_key)
 }
@@ -403,7 +403,7 @@ fn compact_requested_coin_types(
     if !known_coin_types.is_empty() {
         return known_coin_types;
     }
-    if compact_should_probe_basic_records(record_inventory_row, request) {
+    if compact_should_probe_basic_selector_fallbacks(record_inventory_row, request) {
         return COMPACT_BASIC_COIN_TYPES
             .iter()
             .map(|coin_type| (*coin_type).to_owned())

@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+alloy-primitives.workspace = true
 anyhow.workspace = true
 axum.workspace = true
 clap.workspace = true

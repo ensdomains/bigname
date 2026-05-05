@@ -3,7 +3,10 @@ use std::collections::BTreeMap;
 use anyhow::{Context, Result, bail};
 use sqlx::{Executor, PgPool, Postgres, Row, postgres::PgRow};
 
-use crate::CanonicalityState;
+use crate::{
+    CanonicalityState,
+    evm_primitives::{normalize_evm_address, normalize_evm_b256},
+};
 
 mod bulk;
 
@@ -29,8 +32,13 @@ pub async fn upsert_raw_code_hashes(
         return Ok(Vec::new());
     }
 
+    let code_hashes = code_hashes
+        .iter()
+        .map(normalize_raw_code_hash)
+        .collect::<Vec<_>>();
+
     if code_hashes.len() >= bulk::BULK_RAW_CODE_HASH_UPSERT_MIN_ROWS {
-        return bulk::upsert_raw_code_hashes_bulk(pool, code_hashes).await;
+        return bulk::upsert_raw_code_hashes_bulk(pool, &code_hashes).await;
     }
 
     let mut transaction = pool
@@ -39,7 +47,7 @@ pub async fn upsert_raw_code_hashes(
         .context("failed to open transaction for raw code-hash upsert")?;
 
     let mut snapshots = Vec::with_capacity(code_hashes.len());
-    for code_hash in code_hashes {
+    for code_hash in &code_hashes {
         validate_raw_code_hash(code_hash)?;
         snapshots.push(upsert_raw_code_hash(&mut transaction, code_hash).await?);
     }
@@ -52,6 +60,18 @@ pub async fn upsert_raw_code_hashes(
     Ok(snapshots)
 }
 
+fn normalize_raw_code_hash(code_hash: &RawCodeHash) -> RawCodeHash {
+    RawCodeHash {
+        chain_id: code_hash.chain_id.clone(),
+        block_hash: normalize_evm_b256(&code_hash.block_hash),
+        block_number: code_hash.block_number,
+        contract_address: normalize_evm_address(&code_hash.contract_address),
+        code_hash: normalize_evm_b256(&code_hash.code_hash),
+        code_byte_length: code_hash.code_byte_length,
+        canonicality_state: code_hash.canonicality_state,
+    }
+}
+
 /// Load stored code-hash counts by block hash for one chain.
 pub async fn load_raw_code_hash_counts_by_block_hashes(
     pool: &PgPool,
@@ -61,6 +81,10 @@ pub async fn load_raw_code_hash_counts_by_block_hashes(
     if block_hashes.is_empty() {
         return Ok(BTreeMap::new());
     }
+    let block_hashes = block_hashes
+        .iter()
+        .map(|block_hash| normalize_evm_b256(block_hash))
+        .collect::<Vec<_>>();
 
     let rows = sqlx::query(
         r#"
@@ -72,7 +96,7 @@ pub async fn load_raw_code_hash_counts_by_block_hashes(
         "#,
     )
     .bind(chain_id)
-    .bind(block_hashes)
+    .bind(&block_hashes)
     .fetch_all(pool)
     .await
     .with_context(|| {
@@ -208,6 +232,8 @@ async fn load_raw_code_hash_internal<'e, E>(
 where
     E: Executor<'e, Database = Postgres>,
 {
+    let block_hash = normalize_evm_b256(block_hash);
+    let contract_address = normalize_evm_address(contract_address);
     let row = sqlx::query(
         r#"
         SELECT
@@ -225,8 +251,8 @@ where
         "#,
     )
     .bind(chain_id)
-    .bind(block_hash)
-    .bind(contract_address)
+    .bind(&block_hash)
+    .bind(&contract_address)
     .fetch_optional(executor)
     .await
     .with_context(|| {

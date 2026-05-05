@@ -10,6 +10,8 @@ use serde_json::Value;
 use sqlx::{PgPool, Row, types::time::OffsetDateTime};
 use uuid::Uuid;
 
+use crate::evm::normalize_evm_address_or_lowercase;
+
 use super::{
     CANONICAL_STATE_FILTER, EVENT_KIND_ALIAS_CHANGED, EVENT_KIND_RESOLVER_CHANGED,
     SOURCE_FAMILY_BASENAMES_BASE_REGISTRY, SOURCE_FAMILY_BASENAMES_BASE_RESOLVER,
@@ -442,7 +444,7 @@ pub(super) async fn load_alias_events(
 }
 
 pub(super) fn normalize_resolver_address(value: &str) -> String {
-    value.to_ascii_lowercase()
+    normalize_evm_address_or_lowercase(value)
 }
 
 fn parse_surface_binding_kind(value: &str) -> Result<SurfaceBindingKind> {

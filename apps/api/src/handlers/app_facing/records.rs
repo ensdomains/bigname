@@ -390,6 +390,17 @@ async fn load_compact_records_current_inventory(
         ))
     })?;
 
+    probe_compact_record_inventory_candidates(pool, row, resource_id, &current_positions, candidates)
+        .await
+}
+
+async fn probe_compact_record_inventory_candidates(
+    pool: &PgPool,
+    row: &NameCurrentRow,
+    resource_id: Uuid,
+    current_positions: &ChainPositions,
+    candidates: Vec<sqlx::postgres::PgRow>,
+) -> ApiResult<Option<RecordInventoryCurrentRow>> {
     for candidate in candidates {
         let candidate_positions = candidate
             .try_get::<JsonValue, _>("chain_positions")

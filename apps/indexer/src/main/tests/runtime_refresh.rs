@@ -1576,6 +1576,7 @@ async fn storage_discovery_refresh_adds_basenames_address_without_manifest_reloa
 }
 
 fn manifest_contents_with_root_code_hash(root_address: &str, code_hash: &str) -> String {
+    let abi = test_manifest_abi_toml();
     format!(
         r#"
 manifest_version = 1
@@ -1603,12 +1604,14 @@ proxy_kind = "none"
 edge_kind = "subregistry"
 from_role = "registry"
 admission = "reachable_from_root"
+{abi}
 "#
     )
 }
 
 fn ens_v1_registry_resolver_discovery_manifest_contents() -> String {
-    r#"
+    format!(
+        r#"
 manifest_version = 1
 namespace = "ens"
 source_family = "ens_v1_registry_l1"
@@ -1638,12 +1641,16 @@ admission = "reachable_from_root"
 edge_kind = "resolver"
 from_role = "registry"
 admission = "reachable_from_root"
+{abi}
 "#
-    .to_owned()
+    ,
+        abi = test_manifest_abi_toml()
+    )
 }
 
 fn ens_v1_resolver_manifest_contents() -> String {
-    r#"
+    format!(
+        r#"
 manifest_version = 1
 namespace = "ens"
 source_family = "ens_v1_resolver_l1"
@@ -1656,8 +1663,11 @@ contracts = []
 discovery_rules = []
 
 [capability_flags]
+{abi}
 "#
-    .to_owned()
+    ,
+        abi = test_manifest_abi_toml()
+    )
 }
 
 async fn insert_raw_new_resolver_log_for_node(

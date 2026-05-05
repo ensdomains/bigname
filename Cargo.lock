@@ -1550,6 +1550,7 @@ dependencies = [
 name = "bigname-api"
 version = "0.1.0"
 dependencies = [
+ "alloy-primitives",
  "anyhow",
  "axum",
  "bigname-domain",
@@ -1640,6 +1641,7 @@ dependencies = [
 name = "bigname-storage"
 version = "0.1.0"
 dependencies = [
+ "alloy-primitives",
  "anyhow",
  "bigname-test-support",
  "clap",
@@ -1663,6 +1665,7 @@ dependencies = [
 name = "bigname-worker"
 version = "0.1.0"
 dependencies = [
+ "alloy-primitives",
  "anyhow",
  "bigname-domain",
  "bigname-execution",

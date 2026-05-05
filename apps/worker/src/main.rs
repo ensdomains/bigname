@@ -3,6 +3,7 @@ mod automatic_projection_replay;
 mod children;
 mod cli;
 mod commands;
+mod evm;
 mod execution;
 mod inspect;
 mod manifest_drift;

@@ -1775,7 +1775,7 @@ async fn insert_active_replay_watched_contract_with_source_family(
             'active',
             'uts46-v1',
             ('manifests/ens/' || $3 || '/v1.toml'),
-            '{}'::jsonb
+            DEFAULT
         )
         "#,
     )
@@ -1882,7 +1882,7 @@ async fn insert_active_replay_manifest(
             'active',
             'uts46-v1',
             ('manifests/' || $2 || '/' || $3 || '/v1.toml'),
-            '{}'::jsonb
+            DEFAULT
         )
         "#,
     )

@@ -10,6 +10,8 @@ use serde_json::{Value, json};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
+use crate::evm::normalize_trimmed_evm_address_or_lowercase;
+
 use super::{constants::*, types::RecordInventoryTextHydrationSummary};
 
 const DEFAULT_TEXT_HYDRATION_BATCH_SIZE: usize = 250;
@@ -424,7 +426,7 @@ fn ens_name_from_logical_name_id(logical_name_id: &str) -> Option<&str> {
 }
 
 fn normalize_address(address: &str) -> String {
-    address.trim().to_ascii_lowercase()
+    normalize_trimmed_evm_address_or_lowercase(address)
 }
 
 fn ens_v1_resolver_profile_admitted(profile: &str) -> bool {

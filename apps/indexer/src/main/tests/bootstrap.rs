@@ -1884,6 +1884,7 @@ async fn insert_bootstrap_manifest_version(
     source_family: &str,
     manifest_payload: Value,
 ) -> Result<()> {
+    let manifest_payload = test_manifest_payload_with_abi(manifest_payload);
     sqlx::query(
         r#"
             INSERT INTO manifest_versions (

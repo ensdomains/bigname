@@ -350,74 +350,16 @@ async fn load_record_inventory_current_matching_selected_snapshot(
 
     let mut matching_rows = Vec::new();
     for candidate in rows {
-        let record_version_boundary =
-            candidate
-                .try_get::<JsonValue, _>("record_version_boundary")
-                .map_err(|error| {
-                    SnapshotSelectionError::internal(format!(
-                        "record_inventory_current lookup for resource_id {resource_id} returned a row without record_version_boundary: {error}"
-                    ))
-                })?;
-
-        if allow_selected_superset {
-            let chain_positions = candidate
-                .try_get::<JsonValue, _>("chain_positions")
-                .map_err(|error| {
-                    SnapshotSelectionError::internal(format!(
-                        "record_inventory_current lookup for resource_id {resource_id} returned a row without chain_positions: {error}"
-                    ))
-                })?;
-            let projected = ChainPositions::from_value(&chain_positions).map_err(|error| {
-                SnapshotSelectionError::stale(format!(
-                    "record_inventory_current projection has unusable chain_positions: {}",
-                    error.message()
-                ))
-            })?;
-            if !record_inventory_chain_positions_match_selected_snapshot(
-                &projected,
-                selected_snapshot,
-                true,
-            ) {
-                continue;
-            }
-
-            let record_inventory_row =
-                load_record_inventory_current(pool, resource_id, &record_version_boundary)
-                    .await
-                    .map_err(|error| {
-                        SnapshotSelectionError::internal(format!(
-                            "failed to load record_inventory_current row for resource_id {resource_id}: {error}"
-                        ))
-                    })?
-                    .ok_or_else(|| {
-                        SnapshotSelectionError::internal(format!(
-                            "matched record_inventory_current boundary for resource_id {resource_id} but the projection row was not loadable"
-                        ))
-                    })?;
-            matching_rows.push(record_inventory_row);
-            continue;
-        }
-
-        match load_record_inventory_current_for_snapshot(
+        if let Some(record_inventory_row) = probe_record_inventory_current_candidate_for_snapshot(
             pool,
             resource_id,
-            &record_version_boundary,
-            &selected_snapshot.chain_positions,
+            selected_snapshot,
+            allow_selected_superset,
+            candidate,
         )
-        .await
+        .await?
         {
-            Ok(SnapshotProjectionRead::Found(record_inventory_row)) => {
-                matching_rows.push(record_inventory_row);
-            }
-            Ok(SnapshotProjectionRead::NotFound) => {
-                return Err(SnapshotSelectionError::internal(format!(
-                    "matched record_inventory_current boundary for resource_id {resource_id} but the projection row was not loadable"
-                )));
-            }
-            Err(error) if error.kind() == SnapshotSelectionErrorKind::Stale => {
-                continue;
-            }
-            Err(error) => return Err(error),
+            matching_rows.push(record_inventory_row);
         }
     }
 
@@ -431,6 +373,77 @@ async fn load_record_inventory_current_matching_selected_snapshot(
     }
 
     Ok(Some(record_inventory_row))
+}
+
+async fn probe_record_inventory_current_candidate_for_snapshot(
+    pool: &PgPool,
+    resource_id: Uuid,
+    selected_snapshot: &SelectedSnapshot,
+    allow_selected_superset: bool,
+    candidate: sqlx::postgres::PgRow,
+) -> std::result::Result<Option<RecordInventoryCurrentRow>, SnapshotSelectionError> {
+    let record_version_boundary =
+        candidate
+            .try_get::<JsonValue, _>("record_version_boundary")
+            .map_err(|error| {
+                SnapshotSelectionError::internal(format!(
+                    "record_inventory_current lookup for resource_id {resource_id} returned a row without record_version_boundary: {error}"
+                ))
+            })?;
+
+    if allow_selected_superset {
+        let chain_positions = candidate
+            .try_get::<JsonValue, _>("chain_positions")
+            .map_err(|error| {
+                SnapshotSelectionError::internal(format!(
+                    "record_inventory_current lookup for resource_id {resource_id} returned a row without chain_positions: {error}"
+                ))
+            })?;
+        let projected = ChainPositions::from_value(&chain_positions).map_err(|error| {
+            SnapshotSelectionError::stale(format!(
+                "record_inventory_current projection has unusable chain_positions: {}",
+                error.message()
+            ))
+        })?;
+        if !record_inventory_chain_positions_match_selected_snapshot(
+            &projected,
+            selected_snapshot,
+            true,
+        ) {
+            return Ok(None);
+        }
+
+        let record_inventory_row =
+            load_record_inventory_current(pool, resource_id, &record_version_boundary)
+                .await
+                .map_err(|error| {
+                    SnapshotSelectionError::internal(format!(
+                        "failed to load record_inventory_current row for resource_id {resource_id}: {error}"
+                    ))
+                })?
+                .ok_or_else(|| {
+                    SnapshotSelectionError::internal(format!(
+                        "matched record_inventory_current boundary for resource_id {resource_id} but the projection row was not loadable"
+                    ))
+                })?;
+        return Ok(Some(record_inventory_row));
+    }
+
+    match load_record_inventory_current_for_snapshot(
+        pool,
+        resource_id,
+        &record_version_boundary,
+        &selected_snapshot.chain_positions,
+    )
+    .await
+    {
+        Ok(SnapshotProjectionRead::Found(record_inventory_row)) => Ok(Some(record_inventory_row)),
+        Ok(SnapshotProjectionRead::NotFound) => Err(SnapshotSelectionError::internal(format!(
+            "matched record_inventory_current boundary for resource_id {resource_id} but the projection row was not loadable"
+        ))),
+        Err(error) if error.kind() == SnapshotSelectionErrorKind::Stale => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 pub(crate) fn record_inventory_chain_positions_match_selected_snapshot(

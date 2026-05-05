@@ -3,6 +3,7 @@ use crate::evm_abi;
 use alloy_sol_types::sol_data::{
     Address as SolAddress, Bytes as SolBytes, FixedBytes, String as SolString, Uint,
 };
+use alloy_sol_types::{SolType, abi::TokenSeq};
 
 pub(super) struct RegistrarLabelEventData {
     pub(super) label: String,
@@ -39,8 +40,8 @@ pub(super) fn decode_registrar_name_registered_data(
 ) -> Result<Option<RegistrarLabelEventData>> {
     if source_family == SOURCE_FAMILY_ENS_V1_REGISTRAR_L1 {
         if event_topics.matches(NAME_REGISTERED_SIGNATURE, topic0)? {
-            let Ok((label, _cost, expiry)) =
-                evm_abi::abi_decode_params::<(SolString, Uint<256>, Uint<256>)>(
+            let Some((label, _cost, expiry)) =
+                decode_exact_signature_params_or_skip::<(SolString, Uint<256>, Uint<256>)>(
                     data,
                     "NameRegistered data is malformed",
                 )
@@ -53,12 +54,12 @@ pub(super) fn decode_registrar_name_registered_data(
             }));
         }
         if event_topics.matches(WRAPPED_NAME_REGISTERED_SIGNATURE, topic0)? {
-            let Ok((label, _base_cost, _premium, expiry)) =
-                evm_abi::abi_decode_params::<(SolString, Uint<256>, Uint<256>, Uint<256>)>(
-                    data,
-                    "wrapped NameRegistered data is malformed",
-                )
-            else {
+            let Some((label, _base_cost, _premium, expiry)) = decode_exact_signature_params_or_skip::<
+                (SolString, Uint<256>, Uint<256>, Uint<256>),
+            >(
+                data,
+                "wrapped NameRegistered data is malformed",
+            ) else {
                 return Ok(None);
             };
             return Ok(Some(RegistrarLabelEventData {
@@ -67,12 +68,15 @@ pub(super) fn decode_registrar_name_registered_data(
             }));
         }
         if event_topics.matches(UNWRAPPED_NAME_REGISTERED_SIGNATURE, topic0)? {
-            let Ok((label, _base_cost, _premium, expiry, _referrer)) = evm_abi::abi_decode_params::<
-                (SolString, Uint<256>, Uint<256>, Uint<256>, FixedBytes<32>),
-            >(
-                data,
-                "unwrapped NameRegistered data is malformed",
-            ) else {
+            let Some((label, _base_cost, _premium, expiry, _referrer)) =
+                decode_exact_signature_params_or_skip::<(
+                    SolString,
+                    Uint<256>,
+                    Uint<256>,
+                    Uint<256>,
+                    FixedBytes<32>,
+                )>(data, "unwrapped NameRegistered data is malformed")
+            else {
                 return Ok(None);
             };
             return Ok(Some(RegistrarLabelEventData {
@@ -85,7 +89,7 @@ pub(super) fn decode_registrar_name_registered_data(
     if source_family == SOURCE_FAMILY_BASENAMES_BASE_REGISTRAR
         && event_topics.matches(BASENAMES_NAME_REGISTERED_SIGNATURE, topic0)?
     {
-        let Ok((label, expiry)) = evm_abi::abi_decode_params::<(SolString, Uint<256>)>(
+        let Some((label, expiry)) = decode_exact_signature_params_or_skip::<(SolString, Uint<256>)>(
             data,
             "Basenames NameRegistered data is malformed",
         ) else {
@@ -108,7 +112,7 @@ pub(super) fn decode_registrar_name_renewed_data(
 ) -> Result<Option<RegistrarLabelEventData>> {
     if source_family == SOURCE_FAMILY_ENS_V1_REGISTRAR_L1 {
         if event_topics.matches(NAME_RENEWED_SIGNATURE, topic0)? {
-            let Ok((label, _cost, expiry)) = evm_abi::abi_decode_params::<(
+            let Some((label, _cost, expiry)) = decode_exact_signature_params_or_skip::<(
                 SolString,
                 Uint<256>,
                 Uint<256>,
@@ -121,11 +125,13 @@ pub(super) fn decode_registrar_name_renewed_data(
             }));
         }
         if event_topics.matches(UNWRAPPED_NAME_RENEWED_SIGNATURE, topic0)? {
-            let Ok((label, _cost, expiry, _referrer)) =
-                evm_abi::abi_decode_params::<(SolString, Uint<256>, Uint<256>, FixedBytes<32>)>(
-                    data,
-                    "unwrapped NameRenewed data is malformed",
-                )
+            let Some((label, _cost, expiry, _referrer)) =
+                decode_exact_signature_params_or_skip::<(
+                    SolString,
+                    Uint<256>,
+                    Uint<256>,
+                    FixedBytes<32>,
+                )>(data, "unwrapped NameRenewed data is malformed")
             else {
                 return Ok(None);
             };
@@ -139,7 +145,7 @@ pub(super) fn decode_registrar_name_renewed_data(
     if source_family == SOURCE_FAMILY_BASENAMES_BASE_REGISTRAR
         && event_topics.matches(BASENAMES_NAME_RENEWED_SIGNATURE, topic0)?
     {
-        let Ok((label, expiry)) = evm_abi::abi_decode_params::<(SolString, Uint<256>)>(
+        let Some((label, expiry)) = decode_exact_signature_params_or_skip::<(SolString, Uint<256>)>(
             data,
             "Basenames NameRenewed data is malformed",
         ) else {
@@ -155,21 +161,23 @@ pub(super) fn decode_registrar_name_renewed_data(
 }
 
 pub(super) fn decode_name_changed_data(data: &[u8]) -> Option<String> {
-    evm_abi::abi_decode_params::<(SolString,)>(data, "NameChanged data is malformed")
+    decode_exact_signature_params_or_skip::<(SolString,)>(data, "NameChanged data is malformed")
         .map(|(name,)| name)
-        .ok()
 }
 
 pub(super) fn decode_addr_changed_data(data: &[u8]) -> Option<String> {
-    decode_owner_address(data).ok()
+    let (address,) = decode_exact_signature_params_or_skip::<(SolAddress,)>(
+        data,
+        "AddrChanged data is malformed",
+    )?;
+    Some(evm_abi::address_hex(address))
 }
 
 pub(super) fn decode_address_changed_data(data: &[u8]) -> Option<ResolverAddressChangedData> {
-    let (coin_type, address_bytes) = evm_abi::abi_decode_params::<(Uint<256>, SolBytes)>(
+    let (coin_type, address_bytes) = decode_exact_signature_params_or_skip::<(Uint<256>, SolBytes)>(
         data,
         "AddressChanged data is malformed",
-    )
-    .ok()?;
+    )?;
     Some(ResolverAddressChangedData {
         coin_type: evm_abi::u256_i64(coin_type, "AddressChanged coin type").ok()?,
         address_bytes: address_bytes.to_vec(),
@@ -177,8 +185,10 @@ pub(super) fn decode_address_changed_data(data: &[u8]) -> Option<ResolverAddress
 }
 
 pub(super) fn decode_version_changed_data(data: &[u8]) -> Option<i64> {
-    let (version,) =
-        evm_abi::abi_decode_params::<(Uint<64>,)>(data, "VersionChanged data is malformed").ok()?;
+    let (version,) = decode_exact_signature_params_or_skip::<(Uint<64>,)>(
+        data,
+        "VersionChanged data is malformed",
+    )?;
     i64::try_from(version).ok()
 }
 
@@ -191,17 +201,19 @@ pub(super) fn decode_text_changed_data(
     if source_family == SOURCE_FAMILY_ENS_V1_RESOLVER_L1
         && event_topics.matches(TEXT_CHANGED_WITHOUT_VALUE_SIGNATURE, topic0)?
     {
-        let Ok((key,)) =
-            evm_abi::abi_decode_params::<(SolString,)>(data, "TextChanged data is malformed")
-        else {
+        let Some((key,)) = decode_exact_signature_params_or_skip::<(SolString,)>(
+            data,
+            "TextChanged data is malformed",
+        ) else {
             return Ok(None);
         };
         return Ok(Some(TextChangedData { key, value: None }));
     }
 
-    let Ok((key, value)) =
-        evm_abi::abi_decode_params::<(SolString, SolString)>(data, "TextChanged data is malformed")
-    else {
+    let Some((key, value)) = decode_exact_signature_params_or_skip::<(SolString, SolString)>(
+        data,
+        "TextChanged data is malformed",
+    ) else {
         return Ok(None);
     };
     Ok(Some(TextChangedData {
@@ -258,6 +270,17 @@ pub(super) fn decode_owner_address(data: &[u8]) -> Result<String> {
 
 pub(super) fn normalize_topic_address(value: &str) -> Result<String> {
     evm_abi::topic_address_hex(value)
+}
+
+fn decode_exact_signature_params_or_skip<'de, T>(
+    data: &'de [u8],
+    context: &'static str,
+) -> Option<T::RustType>
+where
+    T: SolType,
+    T::Token<'de>: TokenSeq<'de>,
+{
+    evm_abi::abi_decode_params::<T>(data, context).ok()
 }
 
 pub(super) fn parse_canonicality_state(value: &str) -> Result<CanonicalityState> {

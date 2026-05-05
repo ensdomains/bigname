@@ -2,7 +2,7 @@ use anyhow::{Context, Result, bail};
 use serde_json::Value;
 use sqlx::{Executor, PgPool, Postgres, postgres::PgRow};
 
-use crate::CanonicalityState;
+use crate::{CanonicalityState, evm_primitives::normalize_evm_b256};
 
 /// Persisted exact block-anchored call snapshot stored as an immutable raw fact.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -60,8 +60,12 @@ pub async fn upsert_raw_call_snapshots_in_transaction(
         return Ok(Vec::new());
     }
 
+    let snapshots = snapshots
+        .iter()
+        .map(normalize_raw_call_snapshot)
+        .collect::<Vec<_>>();
     let mut persisted = Vec::with_capacity(snapshots.len());
-    for snapshot in snapshots {
+    for snapshot in &snapshots {
         validate_raw_call_snapshot(snapshot)?;
         persisted.push(upsert_raw_call_snapshot(transaction, snapshot).await?);
     }
@@ -75,6 +79,7 @@ pub async fn load_raw_call_snapshots_by_block_hash(
     chain_id: &str,
     block_hash: &str,
 ) -> Result<Vec<RawCallSnapshot>> {
+    let block_hash = normalize_evm_b256(block_hash);
     let rows = sqlx::query(
         r#"
         SELECT
@@ -93,7 +98,7 @@ pub async fn load_raw_call_snapshots_by_block_hash(
         "#,
     )
     .bind(chain_id)
-    .bind(block_hash)
+    .bind(&block_hash)
     .fetch_all(pool)
     .await
     .with_context(|| {
@@ -101,6 +106,19 @@ pub async fn load_raw_call_snapshots_by_block_hash(
     })?;
 
     rows.into_iter().map(decode_raw_call_snapshot).collect()
+}
+
+fn normalize_raw_call_snapshot(snapshot: &RawCallSnapshot) -> RawCallSnapshot {
+    RawCallSnapshot {
+        chain_id: snapshot.chain_id.clone(),
+        block_hash: normalize_evm_b256(&snapshot.block_hash),
+        block_number: snapshot.block_number,
+        request_hash: normalize_evm_b256(&snapshot.request_hash),
+        request_payload: snapshot.request_payload.clone(),
+        response_hash: normalize_evm_b256(&snapshot.response_hash),
+        response_payload: snapshot.response_payload.clone(),
+        canonicality_state: snapshot.canonicality_state,
+    }
 }
 
 async fn upsert_raw_call_snapshot(
@@ -215,6 +233,8 @@ async fn load_raw_call_snapshot_internal<'e, E>(
 where
     E: Executor<'e, Database = Postgres>,
 {
+    let block_hash = normalize_evm_b256(block_hash);
+    let request_hash = normalize_evm_b256(request_hash);
     let row = sqlx::query(
         r#"
         SELECT
@@ -233,8 +253,8 @@ where
         "#,
     )
     .bind(chain_id)
-    .bind(block_hash)
-    .bind(request_hash)
+    .bind(&block_hash)
+    .bind(&request_hash)
     .fetch_optional(executor)
     .await
     .with_context(|| {

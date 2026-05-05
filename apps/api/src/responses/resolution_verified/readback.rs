@@ -11,6 +11,27 @@ pub(crate) enum ResolutionVerifiedOutcomeLookup {
     NotSupported,
 }
 
+struct ResolutionVerifiedCacheLookupPlan {
+    compact_selector_records: Vec<ResolutionRecordKey>,
+    full_selector_records: Vec<ResolutionRecordKey>,
+}
+
+impl ResolutionVerifiedCacheLookupPlan {
+    fn new(row: &NameCurrentRow, supported_records: Vec<ResolutionRecordKey>) -> Self {
+        Self {
+            compact_selector_records: resolution_execution_cache_lookup_records(
+                row,
+                &supported_records,
+            ),
+            full_selector_records: supported_records,
+        }
+    }
+
+    fn should_probe_full_selector_fallback(&self) -> bool {
+        self.compact_selector_records != self.full_selector_records
+    }
+}
+
 pub(super) async fn lookup_resolution_verified_outcome(
     pool: &PgPool,
     row: &NameCurrentRow,
@@ -26,48 +47,15 @@ pub(super) async fn lookup_resolution_verified_outcome(
     if supported_records.is_empty() {
         return Ok(ResolutionVerifiedOutcomeLookup::NotSupported);
     }
-    let cache_key_records = resolution_execution_cache_lookup_records(row, &supported_records);
-
-    let cache_key = build_resolution_execution_cache_key(
+    let cache_lookup = ResolutionVerifiedCacheLookupPlan::new(row, supported_records);
+    let outcome = load_resolution_verified_outcome_with_full_selector_fallback(
+        pool,
         row,
-        &cache_key_records,
         record_inventory_row,
-        selected_snapshot.chain_positions_value(),
+        selected_snapshot,
+        &cache_lookup,
     )
-    .map_err(|error| {
-        SnapshotSelectionError::internal(format!(
-            "failed to derive persisted verified resolution cache key for {}: {error}",
-            row.logical_name_id
-        ))
-    })?;
-    let mut outcome = load_execution_outcome(pool, &cache_key).await.map_err(|error| {
-        SnapshotSelectionError::internal(format!(
-            "failed to load persisted verified resolution outcome for {}: {error}",
-            row.logical_name_id
-        ))
-    })?;
-    if outcome.is_none() && cache_key_records != supported_records {
-        let full_selector_cache_key = build_resolution_execution_cache_key(
-            row,
-            &supported_records,
-            record_inventory_row,
-            selected_snapshot.chain_positions_value(),
-        )
-        .map_err(|error| {
-            SnapshotSelectionError::internal(format!(
-                "failed to derive full-selector verified resolution cache key for {}: {error}",
-                row.logical_name_id
-            ))
-        })?;
-        outcome = load_execution_outcome(pool, &full_selector_cache_key)
-            .await
-            .map_err(|error| {
-                SnapshotSelectionError::internal(format!(
-                    "failed to load full-selector persisted verified resolution outcome for {}: {error}",
-                    row.logical_name_id
-                ))
-            })?;
-    }
+    .await?;
 
     match outcome {
         Some(outcome) => {
@@ -76,6 +64,70 @@ pub(super) async fn lookup_resolution_verified_outcome(
         }
         None => Ok(ResolutionVerifiedOutcomeLookup::CacheMiss),
     }
+}
+
+async fn load_resolution_verified_outcome_with_full_selector_fallback(
+    pool: &PgPool,
+    row: &NameCurrentRow,
+    record_inventory_row: Option<&RecordInventoryCurrentRow>,
+    selected_snapshot: &SelectedSnapshot,
+    cache_lookup: &ResolutionVerifiedCacheLookupPlan,
+) -> std::result::Result<Option<ExecutionOutcome>, SnapshotSelectionError> {
+    let compact_outcome = load_resolution_verified_outcome_for_records(
+        pool,
+        row,
+        &cache_lookup.compact_selector_records,
+        record_inventory_row,
+        selected_snapshot,
+        "persisted",
+        "persisted verified resolution outcome",
+    )
+    .await?;
+
+    if compact_outcome.is_some() || !cache_lookup.should_probe_full_selector_fallback() {
+        return Ok(compact_outcome);
+    }
+
+    load_resolution_verified_outcome_for_records(
+        pool,
+        row,
+        &cache_lookup.full_selector_records,
+        record_inventory_row,
+        selected_snapshot,
+        "full-selector",
+        "full-selector persisted verified resolution outcome",
+    )
+    .await
+}
+
+async fn load_resolution_verified_outcome_for_records(
+    pool: &PgPool,
+    row: &NameCurrentRow,
+    records: &[ResolutionRecordKey],
+    record_inventory_row: Option<&RecordInventoryCurrentRow>,
+    selected_snapshot: &SelectedSnapshot,
+    cache_key_label: &'static str,
+    load_label: &'static str,
+) -> std::result::Result<Option<ExecutionOutcome>, SnapshotSelectionError> {
+    let cache_key = build_resolution_execution_cache_key(
+        row,
+        records,
+        record_inventory_row,
+        selected_snapshot.chain_positions_value(),
+    )
+    .map_err(|error| {
+        SnapshotSelectionError::internal(format!(
+            "failed to derive {cache_key_label} verified resolution cache key for {}: {error}",
+            row.logical_name_id
+        ))
+    })?;
+
+    load_execution_outcome(pool, &cache_key).await.map_err(|error| {
+        SnapshotSelectionError::internal(format!(
+            "failed to load {load_label} for {}: {error}",
+            row.logical_name_id
+        ))
+    })
 }
 
 fn validate_loaded_resolution_verified_outcome(

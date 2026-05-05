@@ -35,7 +35,7 @@ async fn sync_adapter_owned_raw_log_state_backfills_reverse_claims_from_stored_r
                 'active',
                 'uts46-v1',
                 'manifests/ens/ens_v1_reverse_l1/v1.toml',
-                '{}'::jsonb
+                DEFAULT
             )
             "#,
     )
@@ -195,7 +195,7 @@ async fn live_adapter_sync_continues_after_block_derived_events() -> Result<()> 
                 'active',
                 'uts46-v1',
                 'manifests/ens/ens_v1_reverse_l1/v1.toml',
-                '{}'::jsonb
+                DEFAULT
             )
             "#,
     )
@@ -313,7 +313,7 @@ async fn sync_adapter_owned_raw_log_state_backfills_wrapper_authority_from_store
                     'active',
                     'uts46-v1',
                     'manifests/ens/ens_v1_wrapper_l1/v1.toml',
-                    '{}'::jsonb
+                    DEFAULT
                 ),
                 (
                     2,
@@ -325,7 +325,7 @@ async fn sync_adapter_owned_raw_log_state_backfills_wrapper_authority_from_store
                     'active',
                     'uts46-v1',
                     'manifests/ens/ens_v1_registry_l1/v1.toml',
-                    '{}'::jsonb
+                    DEFAULT
                 )
             "#,
     )
@@ -551,7 +551,7 @@ async fn sync_adapter_owned_raw_log_state_backfills_basenames_reverse_claims_and
                     'active',
                     'uts46-v1',
                     'manifests/basenames/basenames_base_primary/v1.toml',
-                    '{}'::jsonb
+                    DEFAULT
                 ),
                 (
                     2,
@@ -563,7 +563,7 @@ async fn sync_adapter_owned_raw_log_state_backfills_basenames_reverse_claims_and
                     'active',
                     'uts46-v1',
                     'manifests/basenames/basenames_base_registrar/v1.toml',
-                    '{}'::jsonb
+                    DEFAULT
                 ),
                 (
                     3,
@@ -575,7 +575,7 @@ async fn sync_adapter_owned_raw_log_state_backfills_basenames_reverse_claims_and
                     'active',
                     'uts46-v1',
                     'manifests/basenames/basenames_base_registry/v1.toml',
-                    '{}'::jsonb
+                    DEFAULT
                 ),
                 (
                     4,
@@ -587,7 +587,7 @@ async fn sync_adapter_owned_raw_log_state_backfills_basenames_reverse_claims_and
                     'active',
                     'uts46-v1',
                     'manifests/basenames/basenames_base_resolver/v1.toml',
-                    '{}'::jsonb
+                    DEFAULT
                 )
             "#,
     )
@@ -751,13 +751,13 @@ async fn sync_adapter_owned_raw_log_state_backfills_basenames_reverse_claims_and
                 log_index: 1,
                 emitting_address: registrar_address.to_owned(),
                 topics: vec![
-                    registrar_name_registered_topic0(),
+                    basenames_name_registered_topic0(),
                     labelhash_hex("alice"),
                     hex_string(&abi_word_address(
                         "0x0000000000000000000000000000000000000001",
                     )),
                 ],
-                data: decode_hex_string(&encode_registrar_name_registered_log_data(
+                data: decode_hex_string(&encode_basenames_name_registered_log_data(
                     "alice",
                     1_700_010_000,
                 )),
@@ -784,11 +784,14 @@ async fn sync_adapter_owned_raw_log_state_backfills_basenames_reverse_claims_and
                 log_index: 3,
                 emitting_address: resolver_address.to_owned(),
                 topics: vec![
-                    resolver_text_changed_topic0(),
+                    resolver_text_changed_with_value_topic0(),
                     alice_namehash.clone(),
                     keccak256_hex(b"com.twitter"),
                 ],
-                data: decode_hex_string(&encode_dynamic_string_log_data("com.twitter")),
+                data: decode_hex_string(&encode_two_dynamic_string_log_data(
+                    "com.twitter",
+                    "alice",
+                )),
                 canonicality_state: CanonicalityState::Canonical,
             },
             RawLog {
