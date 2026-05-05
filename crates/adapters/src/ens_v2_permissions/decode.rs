@@ -1,25 +1,23 @@
 use alloy_sol_types::sol_data::{Bytes as SolBytes, String as SolString, Uint};
 use anyhow::{Context, Result};
 
+use crate::adapter_manifest::ActiveManifestEventTopic0s;
 use crate::evm_abi::{
     abi_decode_params, normalize_hex_32, topic_address_hex, u256_topic_decimal, u256_word_hex,
 };
 
-use super::constants::{
-    EAC_ROLES_CHANGED_SIGNATURE, NAMED_ADDR_RESOURCE_SIGNATURE, NAMED_RESOURCE_SIGNATURE,
-    NAMED_TEXT_RESOURCE_SIGNATURE,
-};
+use super::constants::*;
 use super::types::{PermissionsObservation, PermissionsRawLogRow};
-use super::util::keccak_signature_hex;
 
 pub(super) fn build_permissions_observation(
     raw_log: &PermissionsRawLogRow,
+    event_topics: &ActiveManifestEventTopic0s,
 ) -> Result<Option<PermissionsObservation>> {
     let Some(topic0) = raw_log.topics.first() else {
         return Ok(None);
     };
 
-    if topic0.eq_ignore_ascii_case(&keccak_signature_hex(NAMED_RESOURCE_SIGNATURE)) {
+    if event_topics.matches(ABI_EVENT_NAMED_RESOURCE, topic0)? {
         let resource = normalize_hex_32(
             raw_log
                 .topics
@@ -34,7 +32,7 @@ pub(super) fn build_permissions_observation(
         }));
     }
 
-    if topic0.eq_ignore_ascii_case(&keccak_signature_hex(NAMED_TEXT_RESOURCE_SIGNATURE)) {
+    if event_topics.matches(ABI_EVENT_NAMED_TEXT_RESOURCE, topic0)? {
         let resource = normalize_hex_32(
             raw_log
                 .topics
@@ -59,7 +57,7 @@ pub(super) fn build_permissions_observation(
         }));
     }
 
-    if topic0.eq_ignore_ascii_case(&keccak_signature_hex(NAMED_ADDR_RESOURCE_SIGNATURE)) {
+    if event_topics.matches(ABI_EVENT_NAMED_ADDR_RESOURCE, topic0)? {
         let resource = normalize_hex_32(
             raw_log
                 .topics
@@ -81,7 +79,7 @@ pub(super) fn build_permissions_observation(
         }));
     }
 
-    if topic0.eq_ignore_ascii_case(&keccak_signature_hex(EAC_ROLES_CHANGED_SIGNATURE)) {
+    if event_topics.matches(ABI_EVENT_EAC_ROLES_CHANGED, topic0)? {
         let resource = normalize_hex_32(
             raw_log
                 .topics

@@ -1,22 +1,23 @@
 use alloy_sol_types::sol_data::{Bytes as SolBytes, String as SolString, Uint};
 use anyhow::{Context, Result};
 
+use crate::adapter_manifest::ActiveManifestEventTopic0s;
 use crate::evm_abi::{abi_decode_params, normalize_hex_32, u256_decimal};
 
 use super::{
     constants::*,
     types::{ResolverObservation, ResolverRawLogRow},
-    util::keccak_signature_hex,
 };
 
 pub(super) fn build_resolver_observation(
     raw_log: &ResolverRawLogRow,
+    event_topics: &ActiveManifestEventTopic0s,
 ) -> Result<Option<ResolverObservation>> {
     let Some(topic0) = raw_log.topics.first() else {
         return Ok(None);
     };
 
-    if topic0.eq_ignore_ascii_case(&keccak_signature_hex(ADDRESS_CHANGED_SIGNATURE)) {
+    if event_topics.matches(ABI_EVENT_ADDRESS_CHANGED, topic0)? {
         let node = normalize_hex_32(
             raw_log
                 .topics
@@ -34,7 +35,7 @@ pub(super) fn build_resolver_observation(
         }));
     }
 
-    if topic0.eq_ignore_ascii_case(&keccak_signature_hex(TEXT_CHANGED_SIGNATURE)) {
+    if event_topics.matches(ABI_EVENT_TEXT_CHANGED, topic0)? {
         let node = normalize_hex_32(
             raw_log
                 .topics
@@ -48,7 +49,7 @@ pub(super) fn build_resolver_observation(
         return Ok(Some(ResolverObservation::TextChanged { node, key, value }));
     }
 
-    if topic0.eq_ignore_ascii_case(&keccak_signature_hex(CONTENTHASH_CHANGED_SIGNATURE)) {
+    if event_topics.matches(ABI_EVENT_CONTENTHASH_CHANGED, topic0)? {
         let node = normalize_hex_32(
             raw_log
                 .topics
@@ -65,7 +66,7 @@ pub(super) fn build_resolver_observation(
         }));
     }
 
-    if topic0.eq_ignore_ascii_case(&keccak_signature_hex(NAME_CHANGED_SIGNATURE)) {
+    if event_topics.matches(ABI_EVENT_NAME_CHANGED, topic0)? {
         let node = normalize_hex_32(
             raw_log
                 .topics
@@ -77,7 +78,7 @@ pub(super) fn build_resolver_observation(
         return Ok(Some(ResolverObservation::NameChanged { node, name }));
     }
 
-    if topic0.eq_ignore_ascii_case(&keccak_signature_hex(VERSION_CHANGED_SIGNATURE)) {
+    if event_topics.matches(ABI_EVENT_VERSION_CHANGED, topic0)? {
         let node = normalize_hex_32(
             raw_log
                 .topics
@@ -92,7 +93,7 @@ pub(super) fn build_resolver_observation(
         }));
     }
 
-    if topic0.eq_ignore_ascii_case(&keccak_signature_hex(ALIAS_CHANGED_SIGNATURE)) {
+    if event_topics.matches(ABI_EVENT_ALIAS_CHANGED, topic0)? {
         let (from_name, to_name) = abi_decode_params::<(SolBytes, SolBytes)>(
             &raw_log.data,
             "AliasChanged data is malformed",
@@ -103,7 +104,7 @@ pub(super) fn build_resolver_observation(
         }));
     }
 
-    if topic0.eq_ignore_ascii_case(&keccak_signature_hex(NAMED_RESOURCE_SIGNATURE)) {
+    if event_topics.matches(ABI_EVENT_NAMED_RESOURCE, topic0)? {
         let (name,) =
             abi_decode_params::<(SolBytes,)>(&raw_log.data, "NamedResource data is malformed")?;
         return Ok(Some(ResolverObservation::NamedResource {
@@ -111,7 +112,7 @@ pub(super) fn build_resolver_observation(
         }));
     }
 
-    if topic0.eq_ignore_ascii_case(&keccak_signature_hex(NAMED_TEXT_RESOURCE_SIGNATURE)) {
+    if event_topics.matches(ABI_EVENT_NAMED_TEXT_RESOURCE, topic0)? {
         let (name,) =
             abi_decode_params::<(SolBytes,)>(&raw_log.data, "NamedTextResource data is malformed")?;
         return Ok(Some(ResolverObservation::NamedTextResource {
@@ -119,7 +120,7 @@ pub(super) fn build_resolver_observation(
         }));
     }
 
-    if topic0.eq_ignore_ascii_case(&keccak_signature_hex(NAMED_ADDR_RESOURCE_SIGNATURE)) {
+    if event_topics.matches(ABI_EVENT_NAMED_ADDR_RESOURCE, topic0)? {
         let (name,) =
             abi_decode_params::<(SolBytes,)>(&raw_log.data, "NamedAddrResource data is malformed")?;
         return Ok(Some(ResolverObservation::NamedAddrResource {

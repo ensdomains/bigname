@@ -20,6 +20,10 @@ pub(crate) struct ActiveManifestEventTopic0s {
 }
 
 impl ActiveManifestEventTopic0s {
+    pub(crate) fn new(by_name: HashMap<String, String>) -> Self {
+        Self { by_name }
+    }
+
     pub(crate) fn topic0(&self, event_name: &str) -> Result<&str> {
         self.by_name
             .get(event_name)
@@ -189,9 +193,7 @@ pub(crate) async fn load_required_active_manifest_event_topic0s(
         }
     }
 
-    Ok(ActiveManifestEventTopic0s {
-        by_name: topic0s_by_name,
-    })
+    Ok(ActiveManifestEventTopic0s::new(topic0s_by_name))
 }
 
 fn decode_active_manifest_metadata(row: sqlx::postgres::PgRow) -> Result<ActiveManifestMetadata> {

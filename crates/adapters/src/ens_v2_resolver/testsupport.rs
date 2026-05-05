@@ -1,8 +1,13 @@
 use anyhow::Result;
 use bigname_storage::{CanonicalityState, NormalizedEvent};
 use sqlx::types::{Uuid, time::OffsetDateTime};
+use std::collections::HashMap;
+
+use crate::adapter_manifest::ActiveManifestEventTopic0s;
+use crate::evm_abi::keccak_signature_hex;
 
 use super::{
+    constants::*,
     decode::build_resolver_observation,
     events::{alias_preimage_events, named_dns_preimage_events},
     types::{ResolverObservation, ResolverRawLogRow},
@@ -48,7 +53,8 @@ pub(crate) fn build_preimage_observed_events(
         manifest_version: input.manifest_version,
     };
 
-    let Some(observation) = build_resolver_observation(&raw_log)? else {
+    let event_topics = test_resolver_event_topics();
+    let Some(observation) = build_resolver_observation(&raw_log, &event_topics)? else {
         return Ok(Vec::new());
     };
     match observation {
@@ -66,4 +72,45 @@ pub(crate) fn build_preimage_observed_events(
         }
         _ => Ok(Vec::new()),
     }
+}
+
+fn test_resolver_event_topics() -> ActiveManifestEventTopic0s {
+    ActiveManifestEventTopic0s::new(HashMap::from([
+        (
+            ABI_EVENT_ADDRESS_CHANGED.to_owned(),
+            keccak_signature_hex("AddressChanged(bytes32,uint256,bytes)"),
+        ),
+        (
+            ABI_EVENT_TEXT_CHANGED.to_owned(),
+            keccak_signature_hex("TextChanged(bytes32,string,string,string)"),
+        ),
+        (
+            ABI_EVENT_CONTENTHASH_CHANGED.to_owned(),
+            keccak_signature_hex("ContenthashChanged(bytes32,bytes)"),
+        ),
+        (
+            ABI_EVENT_NAME_CHANGED.to_owned(),
+            keccak_signature_hex("NameChanged(bytes32,string)"),
+        ),
+        (
+            ABI_EVENT_VERSION_CHANGED.to_owned(),
+            keccak_signature_hex("VersionChanged(bytes32,uint64)"),
+        ),
+        (
+            ABI_EVENT_ALIAS_CHANGED.to_owned(),
+            keccak_signature_hex("AliasChanged(bytes,bytes,bytes,bytes)"),
+        ),
+        (
+            ABI_EVENT_NAMED_RESOURCE.to_owned(),
+            keccak_signature_hex("NamedResource(uint256,bytes)"),
+        ),
+        (
+            ABI_EVENT_NAMED_TEXT_RESOURCE.to_owned(),
+            keccak_signature_hex("NamedTextResource(uint256,bytes,bytes32,string)"),
+        ),
+        (
+            ABI_EVENT_NAMED_ADDR_RESOURCE.to_owned(),
+            keccak_signature_hex("NamedAddrResource(uint256,bytes,uint256)"),
+        ),
+    ]))
 }

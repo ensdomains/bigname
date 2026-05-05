@@ -1,7 +1,7 @@
 use sqlx::types::Uuid;
 
 use crate::ens_v2_common::keccak256_bytes;
-pub(super) use crate::ens_v2_common::{dns_decode, hex_string, keccak_signature_hex};
+pub(super) use crate::ens_v2_common::{dns_decode, hex_string};
 pub(super) use crate::evm_abi::hex_32 as decode_hex_32;
 
 pub(super) fn resource_is_root(resource: &str) -> bool {

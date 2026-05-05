@@ -4,6 +4,7 @@ use anyhow::Result;
 use bigname_storage::upsert_normalized_events;
 use sqlx::PgPool;
 
+use crate::adapter_manifest::load_required_active_manifest_event_topic0s;
 use crate::ens_v2_common::ActiveEmitter;
 use crate::normalized_event_support::{
     count_events_by_kind, count_inserted_events_by_kind, load_existing_event_identities,
@@ -76,6 +77,17 @@ async fn sync_ens_v2_resolver_with_scope(
     if active_emitters.is_empty() {
         return Ok(empty_summary(0));
     }
+    let manifest_ids = active_emitters
+        .iter()
+        .map(|emitter| emitter.source_manifest_id)
+        .collect::<Vec<_>>();
+    let event_topics = load_required_active_manifest_event_topic0s(
+        pool,
+        &manifest_ids,
+        &constants::ABI_EVENT_NAMES,
+        "ENSv2 resolver",
+    )
+    .await?;
 
     let raw_logs = load_resolver_raw_logs(
         pool,
@@ -94,7 +106,7 @@ async fn sync_ens_v2_resolver_with_scope(
     let mut matched_log_count = 0usize;
     let mut events = Vec::new();
     for raw_log in &raw_logs {
-        let Some(observation) = build_resolver_observation(raw_log)? else {
+        let Some(observation) = build_resolver_observation(raw_log, &event_topics)? else {
             continue;
         };
         matched_log_count += 1;
