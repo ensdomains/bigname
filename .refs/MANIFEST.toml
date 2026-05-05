@@ -20,7 +20,7 @@ commit = "91c966febd7b55494269df830fc6775f040b927b"
 purpose = "Canonical ENSv1 Solidity: registry, registrar, resolver, name wrapper, reverse registrar."
 authoritative_for = [
   "ENSv1 registry/registrar/resolver/wrapper behavior",
-  "authority-anchor rules in docs/adrs/0002-surface-resource-identity.md",
+  "authority-anchor rules in docs/architecture.md § Identity",
   "addresses in manifests/ens/*/v1.toml",
   "ENSv1 reverse-claim and primary-name semantics in docs/api-v1.md and docs/storage.md",
 ]
@@ -31,7 +31,7 @@ commit = "554c309b0df391fb72b0de6c398a9f9258f7451f"
 purpose = "ENSv2 contracts: linked surfaces, new resolver model."
 authoritative_for = [
   "ENSv2 semantics referenced in docs/architecture.md",
-  "ENSv2-specific rules in docs/adrs/0002-surface-resource-identity.md § ENSv2 linked surfaces",
+  "ENSv2-specific identity rules in docs/architecture.md § Identity",
 ]
 
 [refs.basenames]

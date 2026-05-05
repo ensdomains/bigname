@@ -1,12 +1,6 @@
 # Deployment
 
-The production container image contains the three runnable bigname binaries:
-
-- `bigname-api`
-- `bigname-indexer`
-- `bigname-worker`
-
-The image entrypoint accepts one service selector:
+The published image at `ghcr.io/tateb/bigname` contains all three runnable binaries:
 
 ```sh
 docker run --rm ghcr.io/tateb/bigname:latest api
@@ -15,88 +9,57 @@ docker run --rm ghcr.io/tateb/bigname:latest worker
 docker run --rm ghcr.io/tateb/bigname:latest migrate
 ```
 
-The default command is `api`. Raw binary invocations are also supported:
+`api` is the default. Raw binary invocations work too:
 
 ```sh
 docker run --rm ghcr.io/tateb/bigname:latest bigname-api print-openapi
 docker run --rm ghcr.io/tateb/bigname:latest bigname-worker inspect watch-plan --json
 ```
 
-## Fresh Server Compose
+For the public-edge stack, see [`production.md`](production.md).
 
-1. Install Docker and Docker Compose.
-2. Copy `.env.server.example` to `.env.server` and change the placeholder passwords.
-3. Set `BIGNAME_IMAGE` to the image tag to run.
-4. Start the stack:
+## Server compose
 
 ```sh
+cp .env.server.example .env.server          # set passwords + image tag
 docker compose --env-file .env.server -f docker-compose.server.yml up -d
 ```
 
-The server compose file starts PostgreSQL, MinIO, a one-shot migration service,
-the API, the indexer, and the worker. The API listens on the host port from
-`BIGNAME_API_PORT` and answers readiness at `/healthz`. Set
-`BIGNAME_API_HOST` to control the host bind address; production public-edge
-deployments normally set it to `127.0.0.1` and expose traffic through the Caddy
-override documented in `docs/production.md`.
+The compose file starts PostgreSQL, MinIO, a one-shot migration service, the API, the indexer, and the worker. The API listens on the host port from `BIGNAME_API_PORT` and answers `/healthz`. Set `BIGNAME_API_HOST=127.0.0.1` for production deployments behind Caddy (see [`production.md`](production.md)).
 
-The indexer loads exactly one manifest root. Use `/app/manifests` for the
-mainnet profile or `/app/manifests-sepolia-dev` for the ENSv2 Sepolia dev
-profile. Do not point one runtime at both manifest roots.
+The indexer loads exactly one manifest root. Use `/app/manifests` for mainnet or `/app/manifests-sepolia-dev` for the ENSv2 Sepolia dev profile. Don't point one runtime at both.
 
-If `BIGNAME_INDEXER_CHAIN_RPC_URLS` is unset, the indexer still syncs
-manifest/watch state, but provider-backed live ingestion remains idle. Current
-bootstrap RPC support accepts `http://` endpoints.
+## Provider configuration
 
-The API service also needs its own Ethereum JSON-RPC provider for live ENS
-verified resolution, configured as
-`BIGNAME_API_CHAIN_RPC_URLS=ethereum-mainnet=<http-url>`. `GET /v1/resolutions/{namespace}/{name}` and
-`GET /v1/resolve/{name}` in `mode=verified|both` first use matching persisted
-execution output; when supported ENS verified-resolution selectors are missing
-from execution storage, the API executes them against the selected exact-name
-snapshot, persists the trace/outcome, and then returns the result. With no `at`
-or `chain_positions` selector, that target is `consistency=head` at the latest
-stored Ethereum checkpoint, not provider latest. Missing API provider
-configuration or a provider that cannot serve the selected block must fail
-closed with `409 stale` plus a configuration message; it must not fall back
-to declared record cache. The indexer RPC setting and Reth DB source settings do
-not satisfy this API live-execution provider requirement by themselves.
+### Indexer
 
-Deployments with a same-host Reth database can layer
-`docker-compose.reth-db.yml` on top of the server compose file. Set
-`BIGNAME_INDEXER_RETH_DATADIR_HOST` to the host Reth datadir,
-`BIGNAME_INDEXER_RETH_DATADIR_CONTAINER` to the in-container mount path, and
-`BIGNAME_INDEXER_CHAIN_RETH_DB_SOURCES` to comma-delimited `<chain>=<path>`
-entries that use that in-container path. The override clears
-`BIGNAME_INDEXER_CHAIN_RPC_URLS` for the indexer so each chain still has only
-one provider source. Reth DB sources remain operational intake sources; they do
-not replace bigname raw facts or normalized-event `raw_fact_ref` identities.
-The repository Dockerfile builds `bigname-indexer` with the
-`bigname-indexer/reth-db` Cargo feature so this override keeps the Reth provider
-path available. Custom images that omit that feature fail fast when
-`BIGNAME_INDEXER_CHAIN_RETH_DB_SOURCES` is set, with a rebuild instruction
-instead of silently falling back to JSON-RPC or dropping the provider.
-The indexer opens the Reth database through Reth's read-only provider API, but
-the container mount is writable because MDBX cooperative read-only opens still
-need writable lock/coordination files in the datadir.
-The override defaults the indexer to `BIGNAME_INDEXER_RETH_DB_USER=0:0` because
-container-managed Reth datadirs are commonly `root:root`; operators may set a
-less-privileged UID/GID after granting that identity write access to
-the Reth datadir's MDBX lock files. The override also raises `nofile` because
-Reth's read-only RocksDB provider can keep thousands of SST files open.
-It uses the host PID/IPC namespaces and bypasses the image's `tini` entrypoint
-so the indexer process owns PID 1; Reth's live MDBX read-only open can fail
-from the default `tini` child process.
-High-volume bootstrap defaults to
-`BIGNAME_INDEXER_HASH_PINNED_BACKFILL_ADAPTER_SYNC=auto`. In `auto` mode,
-hash-pinned backfill chunks use the manifest-declared/raw catch-up scope while
-the indexer is catching up, live polling keeps new block-derived events current,
-and the indexer also runs automatic bounded raw-fact normalized-event replay
-from its `normalized_replay_*` cursor until historical normalized events reach
-the persisted raw-log head. Broad manifest-observation, discovery-refresh, and
-discovery-emitter adapter sync stay outside the live tailer. Operators may set
-`raw-only` to defer live normalized sync manually, or `inline` to replay each
-chunk immediately for small ranges and enable broad runtime refreshes.
+```sh
+BIGNAME_INDEXER_CHAIN_RPC_URLS=ethereum-mainnet=http://…,base-mainnet=http://…
+```
+
+Comma-delimited `<chain>=<url>`, HTTP only. Without this, manifest sync, watch-plan rebuild, and checkpoint setup still happen, but provider-backed live ingestion stays idle.
+
+Per-profile, per-chain availability:
+
+- An Ethereum-only run may omit Base entirely.
+- A profile that includes Base but has no Base RPC leaves Base provider-backed intake, automatic bootstrap, backfill catch-up, and live head following idle with `no_provider`. Startup for configured chains doesn't fail because Base is missing.
+- A provider for a chain not in the selected manifest root is invalid.
+
+### API
+
+The API needs its own Ethereum provider for live ENS verified resolution:
+
+```sh
+BIGNAME_API_CHAIN_RPC_URLS=ethereum-mainnet=http://…
+```
+
+`GET /v1/resolutions/{namespace}/{name}` and `GET /v1/resolve/{name}` in `mode=verified|both` first use matching persisted output. When supported ENS Universal Resolver selectors are missing, the API executes them against the selected exact-name snapshot, persists the trace/outcome, and returns the result.
+
+With no `at` or `chain_positions`, the target is `consistency=head` at the latest stored Ethereum checkpoint — not provider latest. Missing API provider config or a provider that can't serve the selected block fails closed with `409 stale` plus a configuration message — not declared cache fallback. The indexer RPC and Reth DB settings don't satisfy this.
+
+### Reth DB override (optional)
+
+Layer `docker-compose.reth-db.yml` on top of the server compose for a same-host Reth database:
 
 ```sh
 BIGNAME_INDEXER_RETH_DATADIR_HOST=/var/lib/reth \
@@ -111,69 +74,42 @@ docker compose --env-file .env.server \
   up -d indexer
 ```
 
-RPC requirements are per selected profile and active watched chain. An
-Ethereum-only run may omit Base entirely. If the selected profile includes Base
-but no Base RPC is configured, Base provider-backed intake, automatic bootstrap,
-backfill catch-up, and live head following stay idle with an explicit
-`no_provider` / unavailable operational state; startup for configured chains
-must not fail solely because Base is missing. A provider entry for a chain that
-is not part of the selected manifest root is invalid.
+Notes:
 
-Startup bootstrap creates finite backfill jobs from each eligible target's
-manifest/discovery admitted start through the provider head observed at job
-creation time. It does not cap work to a recent window. This is still
-operational intake work: completing bootstrap alone is not consumer-replacement
-or route-coverage evidence without the relevant projection, route, conformance,
-and rollout gates.
+- The override clears `BIGNAME_INDEXER_CHAIN_RPC_URLS` for the indexer so each chain has only one provider source.
+- Reth DB sources are operational intake; they don't replace bigname raw facts or normalized-event `raw_fact_ref` identities.
+- The repository Dockerfile builds `bigname-indexer` with the `bigname-indexer/reth-db` Cargo feature so this override keeps the Reth provider path available. Custom images that omit that feature fail fast on `BIGNAME_INDEXER_CHAIN_RETH_DB_SOURCES` instead of silently falling back.
+- The indexer opens Reth through its read-only provider API, but the container mount is writable because MDBX cooperative read-only opens still need writable lock files.
+- The override defaults to `BIGNAME_INDEXER_RETH_DB_USER=0:0` because container-managed Reth datadirs are commonly `root:root`. A less-privileged UID/GID needs write access to MDBX lock files in the datadir.
+- It uses host PID/IPC namespaces and bypasses `tini` so the indexer process owns PID 1; Reth's live MDBX read-only open can fail from the default `tini` child process.
+- `nofile` is raised because Reth's read-only RocksDB provider can keep thousands of SST files open.
 
-Automatic bootstrap partitions large job segments into child range leases for
-internal workers. `BIGNAME_INDEXER_BOOTSTRAP_BACKFILL_WORKERS=0` selects an
-automatic worker count capped at 4; set a positive value to pin the count.
-`BIGNAME_INDEXER_BOOTSTRAP_BACKFILL_RANGE_BLOCKS` controls the child range size
-and defaults to `50000` blocks. The worker pool is inside one normal
-`bigname-indexer run` process; operators do not need to launch extra indexer
-containers for parallel bootstrap. Parallel bootstrap applies to the effective
-raw-only startup path used by `auto` / `raw-only`; explicit `inline` adapter sync
-keeps startup bootstrap sequential so normalized-event writes remain ordered.
+## Bootstrap and catch-up
 
-Hash-pinned backfill execution batches each reserved range into
-`BIGNAME_INDEXER_HASH_PINNED_BACKFILL_CHUNK_BLOCKS`-sized chunks. The default
-server profile uses `1024` blocks. Larger chunks reduce checkpoint churn and RPC
-round trips during long historical bootstrap, while also increasing the amount
-of range work retried after a failed chunk. Raw-only sparse backfill also caps
-each materialized push with
-`BIGNAME_INDEXER_HASH_PINNED_BACKFILL_MAX_LOGS_PER_PUSH` so dense log spans are
-split before transaction and receipt fetch/persist work. The older
-`BIGNAME_INDEXER_HASH_PINNED_BACKFILL_MAX_LOGS_PER_RANGE` name is still accepted
-as a fallback.
-Automatic normalized-event replay catch-up keeps its block cursor, but also caps
-each replay chunk with `BIGNAME_INDEXER_NORMALIZED_REPLAY_CATCHUP_MAX_LOGS_PER_CHUNK`
-so sparse eras can move in large block jumps while dense spans are bounded by
-the number of persisted raw logs replayed. The automatic cursor is one
-all-source chain cursor over persisted canonical raw facts; source-scoped replay
-is reserved for explicit repair/backfill runs.
-Use `RUST_LOG=info,sqlx::query=error` for these runs; otherwise SQLx slow-query
-warnings can print huge generated INSERT statements for dense chunks and waste
-time on logging instead of ingest.
+Startup creates finite backfill jobs from each eligible target's manifest/discovery admitted start through the provider head observed at job creation. It doesn't cap work to a recent window. Completing bootstrap alone is operational intake readiness — not consumer-replacement or route-coverage evidence without the relevant projection, route, conformance, and rollout gates.
 
-Operational catch-up to finalized head should be run as bounded idempotent
-backfill chunks. Before every chunk starts range work, check current Postgres
-size, writable free disk, and any configured object-cache budget. Capacity
-shortage should pause or fail the chunk explicitly instead of silently retaining
-less selected replay data or retaining full payload bundles for empty historical
-blocks.
+| Variable | Purpose |
+| --- | --- |
+| `BIGNAME_INDEXER_BOOTSTRAP_BACKFILL_WORKERS` | `0` for auto (capped at 4); positive value to pin the count. |
+| `BIGNAME_INDEXER_BOOTSTRAP_BACKFILL_RANGE_BLOCKS` | child range size, default `50000` blocks. |
+| `BIGNAME_INDEXER_HASH_PINNED_BACKFILL_CHUNK_BLOCKS` | per-chunk batch, default `1024` blocks. |
+| `BIGNAME_INDEXER_HASH_PINNED_BACKFILL_MAX_LOGS_PER_PUSH` | caps dense log spans inside a chunk. |
+| `BIGNAME_INDEXER_NORMALIZED_REPLAY_CATCHUP_MAX_LOGS_PER_CHUNK` | caps automatic normalized-event replay catch-up chunks. |
+| `BIGNAME_INDEXER_HASH_PINNED_BACKFILL_ADAPTER_SYNC` | `auto` (default), `raw-only`, `inline`. |
 
-## GHCR Image
+`auto` mode keeps the manifest-declared/raw catch-up scope while catching up, runs live polling for new blocks, and runs automatic bounded raw-fact normalized-event replay from the indexer's `normalized_replay_*` cursor. `raw-only` defers live normalized sync; `inline` replays each chunk immediately for small ranges.
 
-The repository publishes the image to:
+The worker pool is inside one normal `bigname-indexer run` process — no need for extra indexer containers.
 
-```text
-ghcr.io/tateb/bigname
-```
+For dense chunks, run the indexer with `RUST_LOG=info,sqlx::query=error` to avoid SQLx slow-query warnings printing huge generated INSERT statements.
 
-The GitHub Actions workflow publishes `latest` on the default branch and a short
-commit SHA tag on every push to `main`. Tags pushed to the repository are also
-published with the same tag name.
+Operational catch-up to finalized head runs as bounded idempotent backfill chunks. Each chunk checks current Postgres size, writable free disk, and any configured object-cache budget before starting. Capacity shortage pauses or fails the chunk explicitly instead of silently retaining less data.
+
+## GHCR image
+
+Published to `ghcr.io/tateb/bigname`.
+
+The GitHub Actions workflow publishes `latest` on the default branch and a short commit SHA tag on every push to `main`. Tags pushed to the repo are also published.
 
 Manual publish from an authenticated checkout:
 

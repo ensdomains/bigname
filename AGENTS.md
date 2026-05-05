@@ -4,9 +4,10 @@ bigname is a versioned indexing and read API for ENS, ENSv2, and Basenames. The 
 
 ## Guardrails
 
-- Public-contract docs that constrain agent work: `docs/architecture.md`, `docs/api-v1.md` (plus `docs/api-v1-routes.md`), `docs/storage.md`, `docs/manifests.md`, `docs/consumer-capabilities.md`, `docs/adrs/0001-stack.md`, `docs/adrs/0002-surface-resource-identity.md`.
+- Public-contract docs that constrain agent work: `docs/architecture.md`, `docs/api-v1.md` (plus `docs/api-v1-routes.md`), `docs/storage.md`, `docs/manifests.md`, `docs/consumer-capabilities.md`.
 - If a task changes public semantics, shared IDs or enums, coverage meaning, manifest schema, workstream ownership, or replacement meaning, update the relevant docs first or in the same change.
 - Prefer cohesive end-to-end slices — a full capability with its tests and wiring, not a commit-sized edge. Do not build disguised legacy API parity or new planning docs unless semantics changed.
+- bigname has no ADR folder. Architectural decisions are recorded directly in the relevant `docs/*.md`, in `docs/upstream.md` § Known divergences for upstream-related divergences, and in commit/PR history.
 
 ## Boundaries
 

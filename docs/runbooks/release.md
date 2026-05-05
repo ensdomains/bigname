@@ -1,251 +1,89 @@
-# Release Runbook
+# Release runbook
 
-Use the release smoke gate before promoting a release candidate and as the CI
-release safety check. The gate is local: it validates the checked-out revision,
-the configured PostgreSQL database, local pinned upstream refs, generated OpenAPI
-artifact consistency, and the conformance ownership table for published OpenAPI
-paths, runs focused reorg chaos, capability, and resolver-profile conformance
-guards, runs the live manifest-drift audit with worker-owned alert observation
-persistence, inspects the runtime watch plan, and checks the API process
-readiness endpoint from a prebuilt local binary. It does not deploy, contact
-external RPC providers, contact GitHub or Fly, or validate a remote production
-target.
+The release smoke gate is a local script that validates the checked-out revision before promotion. It does not deploy, contact RPC providers, or hit GitHub or Fly. CI runs the same gate with `--no-network` as a release-blocking check.
 
-## Command
-
-Run the standard local release smoke gate:
+## Run it
 
 ```sh
-scripts/release-smoke
-```
-
-Run the CI-compatible no-network subset:
-
-```sh
-scripts/release-smoke --no-network
-```
-
-Show the supported arguments and environment inputs:
-
-```sh
+scripts/release-smoke              # full local gate
+scripts/release-smoke --no-network # CI-compatible subset
 scripts/release-smoke --help
 ```
 
-## Local Prerequisites
+## Prerequisites
 
-- `cargo`, `diff`, `seq`, and `curl` are available on `PATH`.
-- A PostgreSQL URL is available through `BIGNAME_DATABASE_URL` or
-  `DATABASE_URL`. If neither is set, the script defaults to
-  `postgres://bigname:bigname@127.0.0.1:5432/bigname`.
-  Point this at the local PostgreSQL database used for smoke checks. The focused
-  reorg chaos and dynamic resolver-profile conformance guards need a local
-  PostgreSQL server where they can create, migrate, and drop temporary test
-  databases; migrations, the manifest-drift audit and inspection path, runtime
-  watch-plan inspection, and readiness all use the configured database even
-  when `--no-network` is passed.
-- The checked-in migration that creates `manifest_alert_observations` must have
-  run before manifest-drift smoke checks can persist or read alert observations.
-  The smoke gate runs migrations before the audit; when running
-  `manifest-drift audit --json` or `inspect manifest-drift --json` by hand, run
-  the worker migration first against the same database.
-- The API bind address is free. Set `BIGNAME_SMOKE_API_BIND_ADDR` when
-  `127.0.0.1:3000` is already in use.
-- `BIGNAME_SMOKE_API_HEALTH_URL` is reachable from the operator host. By
-  default it is derived from `BIGNAME_SMOKE_API_BIND_ADDR` as
-  `http://<bind_addr>/healthz`.
-- The readiness check builds `bigname-api` before starting the probe window,
-  then runs the compiled binary from Cargo's local target directory directly.
-  Slow local compilation therefore fails or completes before readiness polling
-  begins; the 30 one-second probes measure server startup and health only.
+- `cargo`, `diff`, `seq`, `curl` on `PATH`.
+- A PostgreSQL URL via `BIGNAME_DATABASE_URL` or `DATABASE_URL` (default `postgres://bigname:bigname@127.0.0.1:5432/bigname`). The DB must be available even with `--no-network` — conformance guards create temporary test databases there.
+- Worker migrations applied (the gate runs them, but `manifest-drift audit --json` and `inspect manifest-drift --json` need `manifest_alert_observations` to exist if you run them by hand).
+- The API bind address is free (override with `BIGNAME_SMOKE_API_BIND_ADDR` if `127.0.0.1:3000` is in use).
 - For `--no-network`, Cargo dependencies must already be cached locally.
 
-The script loads `.env` when it exists, then uses the environment values above.
+The script loads `.env` if present, then uses the environment values above.
 
-## Gate Coverage
+## What it checks
 
-`scripts/release-smoke` performs these checks, in order:
+In order:
 
-1. Validates no-network constraints when `--no-network` is passed.
-2. Runs `scripts/sync-refs --check` as a local pinned upstream-ref verification
-   step. This check reads the pinned refs already present under `.refs/`; it
-   does not fetch, rotate, or mutate upstream refs.
-3. Runs `cargo test --locked --manifest-path tests/conformance/Cargo.toml
-   reorg_chaos_drill_conformance_job -- --nocapture` as the focused reorg chaos
-   conformance guard. This guard uses the configured local PostgreSQL server for
-   temporary test database work and must not require external network access
-   when dependencies are already cached.
-4. Runs `cargo run --locked -p bigname-api -- print-openapi` and compares the
-   result to `docs/api-v1.openapi.json`.
-5. Runs `cargo test --locked --manifest-path tests/conformance/Cargo.toml
-   openapi` as the OpenAPI conformance-owner smoke guard. This guard reads only
-   the checked-in `docs/api-v1.openapi.json` artifact and the conformance owner
-   table in the conformance harness; it is no-network and no-Postgres.
-6. Runs `cargo test --locked --manifest-path tests/conformance/Cargo.toml
-   capability_cutover_evidence` as the focused capability cutover evidence
-   guard.
-7. Runs `cargo test --locked --manifest-path tests/conformance/Cargo.toml
-   dynamic_resolver_profile -- --nocapture` as the focused dynamic
-   resolver-profile conformance guard. This guard uses the configured local
-   PostgreSQL server to create, migrate, and drop temporary test databases; it
-   must not require external network access when dependencies are already
-   cached.
-8. Runs `cargo run --locked -p bigname-worker -- migrate` against the configured
-   database, including the migration that creates the worker-owned
-   `manifest_alert_observations` storage used by manifest-drift audit and
-   inspection.
-9. Runs `cargo run --locked -p bigname-worker -- manifest-drift audit --json`
-   against the configured database. The audit computes live drift candidates,
-   persists alert observations through worker-owned storage, and renders the
-   persisted observation set.
-10. Runs `cargo run --locked -p bigname-worker -- inspect watch-plan --json`
-   against the configured database as a read-only runtime watch-plan inspection.
-11. Runs `cargo build --locked -p bigname-api --bin bigname-api` so API compile
-   time is outside the readiness probe window.
-12. Starts the compiled `bigname-api serve --bind-addr
-   <BIGNAME_SMOKE_API_BIND_ADDR>` binary directly from Cargo's local target
-   directory and probes `/healthz` until it returns `200` with
-   `"status":"ready"`.
+1. No-network constraints (when `--no-network` is passed).
+2. `scripts/sync-refs --check` — verifies `.refs/` matches the pinned manifest. Reads only; doesn't fetch.
+3. Reorg chaos conformance: `cargo test … reorg_chaos_drill_conformance_job`.
+4. OpenAPI drift: `cargo run -p bigname-api -- print-openapi` vs `docs/api-v1.openapi.json`.
+5. OpenAPI conformance-owner table: every published path has an owner or an explicit out-of-scope reason.
+6. Capability cutover evidence: `cargo test … capability_cutover_evidence`.
+7. Dynamic resolver-profile conformance: `cargo test … dynamic_resolver_profile`.
+8. `cargo run -p bigname-worker -- migrate` (creates `manifest_alert_observations`).
+9. `cargo run -p bigname-worker -- manifest-drift audit --json` — computes drift candidates, persists alert observations, renders the persisted set.
+10. `cargo run -p bigname-worker -- inspect watch-plan --json` — read-only runtime watch-plan inspection.
+11. `cargo build -p bigname-api --bin bigname-api` (so compile time doesn't eat into the readiness probe).
+12. Start the compiled `bigname-api serve` and probe `/healthz` until it returns `200` with `"status":"ready"`.
 
-With `--no-network`, the script also sets `CARGO_NET_OFFLINE=true`, passes
-`--offline` to Cargo, and rejects non-loopback smoke bind or health URLs. The
-local pinned-ref check still only reads the checked-out `.refs/` state, and the
-Cargo-backed conformance guards run from the local dependency cache. The gate
-does not contact external network services or external RPC providers, but the
-configured local PostgreSQL database must still be available. Once dependencies
-are cached, the manifest-drift audit and `inspect manifest-drift --json` triage
-path need no remote network; they still require the checked-out local refs and
-the configured local PostgreSQL database.
+With `--no-network`, the script sets `CARGO_NET_OFFLINE=true`, passes `--offline`, and rejects non-loopback bind/health URLs.
 
-Manifest-drift audit and inspection behavior:
+## Pass
 
-- `manifest-drift audit --json` persists live alert candidates into the
-  worker-owned `manifest_alert_observations` table, then renders the durable
-  persisted observation set. The JSON reports persisted counts and
-  `actionable_persisted_alert_count`; live candidate counts are diagnostic.
-- `--fail-on-alert`, when used with the audit command outside the smoke script,
-  fails on actionable persisted alerts. It is not a gate on transient live
-  candidates that were not persisted.
-- `inspect manifest-drift --json` is read-only and renders the same durable
-  observation shape from the same worker-owned storage.
-- Neither command fixes drift or mutates manifest truth, discovery edges,
-  source-family admission, watch plans, or normalized events. Remediation
-  remains explicit manifest, discovery, or source-family work.
+Exit `0` and `release smoke gate passed` in the log. That means:
 
-## Pass Criteria
+- OpenAPI artifact matches the generator output.
+- `.refs/` matches the pinned manifest.
+- Reorg chaos, capability cutover, and dynamic resolver-profile conformance pass.
+- Every published OpenAPI path has a conformance owner or an out-of-scope reason.
+- Migrations apply against the configured DB.
+- Manifest-drift audit persists alert observations and exits cleanly.
+- Watch-plan inspection runs.
+- API binary builds and `/healthz` reports ready.
 
-Treat the release smoke gate as passing only when the script exits `0` and logs
-`release smoke gate passed`.
+## Fail
 
-A passing gate means:
+Any non-zero exit blocks the release until triaged. Common causes:
 
-- the checked-in OpenAPI JSON matches the API generator output for this
-  revision;
-- the local `.refs/` checkouts match the pinned upstream-ref manifest for this
-  revision;
-- the focused reorg chaos conformance guard passes for this revision using local
-  PostgreSQL temporary databases;
-- every published OpenAPI public path has an explicit conformance harness owner
-  or an explicit private/out-of-scope reason in the conformance owner table;
-- the focused capability cutover evidence guard passes for this revision;
-- the focused dynamic resolver-profile conformance guard passes using local
-  PostgreSQL temporary databases;
-- the checked-in migrations apply to the configured local database, including
-  manifest alert observation storage;
-- the manifest-drift audit command exits successfully against the configured
-  local database, persists worker-owned alert observations, and renders the
-  persisted observation set;
-- the runtime watch-plan inspection command exits successfully and renders JSON
-  from the configured local database;
-- the API binary builds locally from this revision;
-- the API process can start from that built binary; and
-- the private readiness endpoint reports ready against that database.
+| Failure | What to check |
+| --- | --- |
+| OpenAPI drift | API contract vs `docs/api-v1.openapi.json` reconciled? |
+| Pinned ref mismatch | `.refs/` checkouts match the manifest? Run `scripts/sync-refs`. |
+| Reorg chaos / dynamic resolver-profile | DB precondition or actual conformance bug. |
+| Conformance-owner gap | New published path needs an owner entry. |
+| Migration failure | DB precondition; can the migrations apply at all? |
+| Manifest-drift audit non-zero | Local manifest/discovery state, audit inputs, persistence path. Doesn't auto-remediate — manifest/discovery work required. |
+| Manifest-drift `--fail-on-alert` | Persisted observations contain actionable alerts. Inspect with `inspect manifest-drift --json`. |
+| Watch-plan inspection | DB reachability or manifest/discovery state. |
+| API prebuild | Compile failure or missing offline cache. |
+| Readiness | API didn't stay up; check logs and DB reachability. |
+| No-network | Operator environment issue, not a product regression. |
 
-## Failure Criteria
+## Rollback decision
 
-Any non-zero exit blocks the release candidate until triaged.
+A failed gate before promotion is a stop-the-line block — fix and rerun, don't trigger rollback.
 
-- OpenAPI drift failure: the generated artifact and checked-in artifact disagree.
-  Do not promote the candidate until the API contract and checked-in artifact are
-  intentionally reconciled.
-- Pinned upstream-ref failure: `scripts/sync-refs --check` reported that the
-  local `.refs/` checkouts do not match the pinned manifest or are unavailable.
-  Do not promote until the local pinned-ref state is restored. This check is
-  local verification only; it does not fetch or rotate upstream refs.
-- Reorg chaos conformance failure: the focused
-  `reorg_chaos_drill_conformance_job` guard failed or could not prepare its
-  temporary PostgreSQL databases. Do not promote until the conformance failure or
-  local database precondition is triaged. This is local conformance evidence, not
-  proof of production reorg coverage.
-- OpenAPI conformance-owner failure: a published public path in
-  `docs/api-v1.openapi.json` lacks a conformance harness owner, an owner entry is
-  blank, or an out-of-scope entry lacks an explicit reason. Do not promote until
-  the route has an owning conformance harness or a deliberate private/out-of-scope
-  reason.
-- Dynamic resolver-profile conformance failure: the focused
-  `dynamic_resolver_profile` guard failed or could not prepare its temporary
-  PostgreSQL databases. Do not promote until the conformance failure or local
-  database precondition is triaged.
-- Migration failure: the configured database cannot apply the checked-in
-  migrations. Do not promote until the migration or database precondition is
-  fixed. Manifest-drift audit and inspection cannot persist or read
-  `manifest_alert_observations` until this migration state exists.
-- Manifest-drift audit failure: the audit command returned non-zero against the
-  configured local database. Do not promote until the local manifest/discovery
-  state, audit inputs, persistence path, migration state, or database
-  precondition is triaged. This is not production monitoring or external RPC
-  coverage, and the audit command does not auto-remediate drift.
-- Manifest-drift alert failure: if an operator reruns
-  `manifest-drift audit --json --fail-on-alert`, a non-zero exit means the
-  persisted observation set contains actionable alerts. Inspect the durable
-  shape with `inspect manifest-drift --json`; remediation remains explicit
-  manifest, discovery, or source-family work before rerunning the audit.
-- Watch-plan inspection failure: the read-only `inspect watch-plan --json`
-  command returned non-zero against the configured local database. Do not promote
-  until database reachability, manifest/discovery state, or the inspection
-  command failure is triaged.
-- API prebuild failure: the local `bigname-api` binary could not be built before
-  readiness probing. Do not promote until the compile failure or missing offline
-  cache is triaged.
-- Readiness failure: the API did not stay up or `/healthz` did not report
-  ready after the binary was built and started directly. Do not promote until
-  the API logs and database reachability explain the failure.
-- No-network failure: the gate was not fully local, the bind or health URL was
-  not loopback, or Cargo could not build from its local cache. Fix the operator
-  environment before treating it as a release failure.
+After promotion, start [rollback](./rollback.md) when the promoted revision is serving traffic and the failure is service-impacting or can't be resolved by fixing operator config quickly.
 
-## Rollback Decision Points
+This gate is not proof of external integration health. It doesn't run deploys, external RPC, GitHub, Fly, or remote production endpoints.
 
-Before promotion, a release smoke failure is a stop-the-line release block, not
-a rollback trigger. Fix the release candidate or the local prerequisites, then
-rerun the gate.
+## CI
 
-After promotion, start the rollback runbook when the promoted revision is
-already serving traffic and the failure is service-impacting or cannot be
-resolved quickly by correcting operator configuration. Use
-`docs/runbooks/rollback.md` to validate the rollback candidate locally before
-or alongside the operational rollback procedure.
-
-Do not use this gate as proof of external integration health. It intentionally
-does not exercise deploy commands, external RPC, GitHub, Fly, or remote
-production endpoints.
-
-## CI Behavior
-
-CI runs this gate as `release smoke gate (no network)` with:
+CI invokes:
 
 ```sh
 ./scripts/release-smoke --no-network
 ```
 
-The CI no-network subset preserves the existing OpenAPI drift and migration
-checks while adding the local pinned upstream-ref check, focused reorg chaos
-conformance guard, no-Postgres OpenAPI conformance-owner guard, focused
-capability cutover evidence guard, focused dynamic resolver-profile conformance
-guard, live manifest-drift audit with worker-owned alert persistence, runtime
-watch-plan inspection, and local API prebuild plus readiness. It uses
-loopback-only smoke URLs, offline Cargo execution, the checked-out `.refs/`
-state, and the configured local PostgreSQL server/database for reorg chaos and
-dynamic resolver-profile temporary databases, migrations, manifest-drift audit,
-watch-plan inspection, API prebuild, and readiness. A CI failure has the same
-release-blocking meaning as a local non-zero exit, except that missing cached
-dependencies are a CI environment issue rather than a product regression.
+A CI failure has the same release-blocking meaning as a local non-zero exit, except missing cached dependencies are an environment issue.
