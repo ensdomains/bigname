@@ -98,6 +98,8 @@ Addressed slices:
   first dynamic string/bytes payloads and address words through Alloy
   `sol_data` parameter decoding; mixed-position dynamic payload helpers remain
   local until they are converted per event shape.
+- Workspace `Cargo.toml` now owns direct Alloy dependency versions for adapters,
+  execution, and indexer crates.
 - `apps/api/src/openapi/parameters.rs` now owns small string/enum/boolean/UUID
   schema builders used by both core and app-facing OpenAPI parameter lists.
 - `apps/api/src/responses/app_facing/records_declared_values.rs` now reuses
@@ -171,9 +173,8 @@ Provider-side candidates:
 Dependency note:
 
 - `cargo tree -d --workspace` does not show duplicate Alloy major/minor versions
-  in the resolved tree, but direct version specs are split across manifests. Move
-  Alloy deps to `[workspace.dependencies]` with one set of versions before doing
-  broader Alloy migrations.
+  in the resolved tree. Direct Alloy version specs now live in
+  `[workspace.dependencies]`; member crates should use `.workspace = true`.
 
 ## Internal helper inventory
 

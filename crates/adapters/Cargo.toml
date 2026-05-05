@@ -6,8 +6,8 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-alloy-primitives = "1.5.7"
-alloy-sol-types = "1.5.7"
+alloy-primitives.workspace = true
+alloy-sol-types.workspace = true
 anyhow.workspace = true
 bigname-manifests = { workspace = true }
 bigname-storage = { workspace = true }

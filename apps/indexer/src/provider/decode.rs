@@ -138,6 +138,7 @@ pub(super) fn block_hash_from_value(value: &Value) -> Result<String> {
     Ok(normalize_hash(&block.hash))
 }
 
+#[cfg(test)]
 pub(super) fn parse_hex_i64(value: &str) -> Result<i64> {
     let value = value.strip_prefix("0x").unwrap_or(value);
     i64::from_str_radix(value, 16).with_context(|| format!("failed to parse hex integer {value}"))

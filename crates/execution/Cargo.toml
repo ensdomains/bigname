@@ -6,10 +6,10 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-alloy-json-rpc = "2.0.1"
-alloy-primitives = "1.5.7"
-alloy-sol-types = "1.5.7"
-alloy-transport-http = { version = "2.0.1", default-features = false, features = ["reqwest", "reqwest-rustls-tls"] }
+alloy-json-rpc.workspace = true
+alloy-primitives.workspace = true
+alloy-sol-types.workspace = true
+alloy-transport-http.workspace = true
 anyhow.workspace = true
 bigname-storage.workspace = true
 futures-util.workspace = true
