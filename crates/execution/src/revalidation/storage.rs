@@ -237,46 +237,26 @@ pub(super) async fn load_name_current_for_revalidation(
 
 fn decode_name_current_row_for_revalidation(row: PgRow) -> Result<NameCurrentRow> {
     Ok(NameCurrentRow {
-        logical_name_id: row
-            .try_get("logical_name_id")
-            .context("missing logical_name_id")?,
-        namespace: row.try_get("namespace").context("missing namespace")?,
-        canonical_display_name: row
-            .try_get("canonical_display_name")
-            .context("missing canonical_display_name")?,
-        normalized_name: row
-            .try_get("normalized_name")
-            .context("missing normalized_name")?,
-        namehash: row.try_get("namehash").context("missing namehash")?,
-        surface_binding_id: row
-            .try_get("surface_binding_id")
-            .context("missing surface_binding_id")?,
-        resource_id: row.try_get("resource_id").context("missing resource_id")?,
-        token_lineage_id: row
-            .try_get("token_lineage_id")
-            .context("missing token_lineage_id")?,
+        logical_name_id: crate::sql_row::get(&row, "logical_name_id")?,
+        namespace: crate::sql_row::get(&row, "namespace")?,
+        canonical_display_name: crate::sql_row::get(&row, "canonical_display_name")?,
+        normalized_name: crate::sql_row::get(&row, "normalized_name")?,
+        namehash: crate::sql_row::get(&row, "namehash")?,
+        surface_binding_id: crate::sql_row::get(&row, "surface_binding_id")?,
+        resource_id: crate::sql_row::get(&row, "resource_id")?,
+        token_lineage_id: crate::sql_row::get(&row, "token_lineage_id")?,
         binding_kind: row
             .try_get::<Option<String>, _>("binding_kind")
             .context("missing binding_kind")?
             .map(|value| SurfaceBindingKind::parse(&value))
             .transpose()?,
-        declared_summary: row
-            .try_get("declared_summary")
-            .context("missing declared_summary")?,
-        provenance: row.try_get("provenance").context("missing provenance")?,
-        coverage: row.try_get("coverage").context("missing coverage")?,
-        chain_positions: row
-            .try_get("chain_positions")
-            .context("missing chain_positions")?,
-        canonicality_summary: row
-            .try_get("canonicality_summary")
-            .context("missing canonicality_summary")?,
-        manifest_version: row
-            .try_get("manifest_version")
-            .context("missing manifest_version")?,
-        last_recomputed_at: row
-            .try_get("last_recomputed_at")
-            .context("missing last_recomputed_at")?,
+        declared_summary: crate::sql_row::get(&row, "declared_summary")?,
+        provenance: crate::sql_row::get(&row, "provenance")?,
+        coverage: crate::sql_row::get(&row, "coverage")?,
+        chain_positions: crate::sql_row::get(&row, "chain_positions")?,
+        canonicality_summary: crate::sql_row::get(&row, "canonicality_summary")?,
+        manifest_version: crate::sql_row::get(&row, "manifest_version")?,
+        last_recomputed_at: crate::sql_row::get(&row, "last_recomputed_at")?,
     })
 }
 
@@ -333,35 +313,19 @@ fn decode_record_inventory_current_row_for_revalidation(
     row: PgRow,
 ) -> Result<RecordInventoryCurrentRow> {
     Ok(RecordInventoryCurrentRow {
-        resource_id: row.try_get("resource_id").context("missing resource_id")?,
-        record_version_boundary: row
-            .try_get("record_version_boundary")
-            .context("missing record_version_boundary")?,
-        enumeration_basis: row
-            .try_get("enumeration_basis")
-            .context("missing enumeration_basis")?,
-        selectors: row.try_get("selectors").context("missing selectors")?,
-        explicit_gaps: row
-            .try_get("explicit_gaps")
-            .context("missing explicit_gaps")?,
-        unsupported_families: row
-            .try_get("unsupported_families")
-            .context("missing unsupported_families")?,
-        last_change: row.try_get("last_change").context("missing last_change")?,
-        entries: row.try_get("entries").context("missing entries")?,
-        provenance: row.try_get("provenance").context("missing provenance")?,
-        coverage: row.try_get("coverage").context("missing coverage")?,
-        chain_positions: row
-            .try_get("chain_positions")
-            .context("missing chain_positions")?,
-        canonicality_summary: row
-            .try_get("canonicality_summary")
-            .context("missing canonicality_summary")?,
-        manifest_version: row
-            .try_get("manifest_version")
-            .context("missing manifest_version")?,
-        last_recomputed_at: row
-            .try_get("last_recomputed_at")
-            .context("missing last_recomputed_at")?,
+        resource_id: crate::sql_row::get(&row, "resource_id")?,
+        record_version_boundary: crate::sql_row::get(&row, "record_version_boundary")?,
+        enumeration_basis: crate::sql_row::get(&row, "enumeration_basis")?,
+        selectors: crate::sql_row::get(&row, "selectors")?,
+        explicit_gaps: crate::sql_row::get(&row, "explicit_gaps")?,
+        unsupported_families: crate::sql_row::get(&row, "unsupported_families")?,
+        last_change: crate::sql_row::get(&row, "last_change")?,
+        entries: crate::sql_row::get(&row, "entries")?,
+        provenance: crate::sql_row::get(&row, "provenance")?,
+        coverage: crate::sql_row::get(&row, "coverage")?,
+        chain_positions: crate::sql_row::get(&row, "chain_positions")?,
+        canonicality_summary: crate::sql_row::get(&row, "canonicality_summary")?,
+        manifest_version: crate::sql_row::get(&row, "manifest_version")?,
+        last_recomputed_at: crate::sql_row::get(&row, "last_recomputed_at")?,
     })
 }

@@ -10,6 +10,7 @@ mod persistence;
 mod primary_name;
 mod revalidation;
 mod rpc;
+mod sql_row;
 mod validation;
 
 pub use bigname_storage::{
