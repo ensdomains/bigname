@@ -5,9 +5,15 @@ use anyhow::{Context, Result};
 use bigname_storage::CanonicalityState;
 use sqlx::PgPool;
 
-use super::event_builders::preimage_observed_topic0s;
+use super::event_topics::PreimageObservedEventTopics;
 use super::source_selection::{load_active_emitters, normalized_source_scope_targets};
 use super::types::WatchedRawLogRow;
+
+#[derive(Clone, Debug)]
+pub(super) struct WatchedRawLogLoad {
+    pub(super) raw_logs: Vec<WatchedRawLogRow>,
+    pub(super) event_topics: PreimageObservedEventTopics,
+}
 
 pub(super) async fn load_scanned_log_count(
     pool: &PgPool,
@@ -42,10 +48,13 @@ pub(super) async fn load_watched_raw_logs(
     chain: &str,
     block_hashes: &[String],
     source_scope: Option<&[(String, String, i64, i64)]>,
-) -> Result<Vec<WatchedRawLogRow>> {
+) -> Result<WatchedRawLogLoad> {
     let source_scope = source_scope.map(normalized_source_scope_targets);
     if source_scope.as_ref().is_some_and(Vec::is_empty) {
-        return Ok(Vec::new());
+        return Ok(WatchedRawLogLoad {
+            raw_logs: Vec::new(),
+            event_topics: PreimageObservedEventTopics::default(),
+        });
     }
     let scoped_emitter_identities = source_scope.as_ref().map(|source_scope| {
         source_scope
@@ -57,9 +66,13 @@ pub(super) async fn load_watched_raw_logs(
     let active_emitters =
         load_active_emitters(pool, chain, scoped_emitter_identities.as_ref()).await?;
     if active_emitters.is_empty() {
-        return Ok(Vec::new());
+        return Ok(WatchedRawLogLoad {
+            raw_logs: Vec::new(),
+            event_topics: PreimageObservedEventTopics::default(),
+        });
     }
-    let preimage_topic0s = preimage_observed_topic0s();
+    let event_topics = PreimageObservedEventTopics::load(pool, &active_emitters).await?;
+    let preimage_topic0s = event_topics.query_topic0s();
 
     let emitters_by_address = active_emitters
         .into_iter()
@@ -172,7 +185,8 @@ pub(super) async fn load_watched_raw_logs(
         })?
     };
 
-    rows.into_iter()
+    let raw_logs = rows
+        .into_iter()
         .map(|row| {
             let emitting_address = sql_row::get::<String>(&row, "emitting_address")?;
             let normalized_emitting_address = emitting_address.to_ascii_lowercase();
@@ -205,5 +219,10 @@ pub(super) async fn load_watched_raw_logs(
                 manifest_version: active_emitter.manifest_version,
             })
         })
-        .collect()
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(WatchedRawLogLoad {
+        raw_logs,
+        event_topics,
+    })
 }

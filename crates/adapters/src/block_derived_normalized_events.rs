@@ -7,6 +7,7 @@ use sqlx::PgPool;
 mod constants;
 mod decoding;
 mod event_builders;
+mod event_topics;
 mod loading;
 mod preimage_observation;
 mod source_selection;
@@ -23,6 +24,8 @@ pub use types::{
 };
 
 #[cfg(test)]
+use crate::evm_abi::keccak_signature_hex;
+#[cfg(test)]
 use anyhow::Context;
 #[cfg(test)]
 use bigname_storage::CanonicalityState;
@@ -30,8 +33,8 @@ use bigname_storage::CanonicalityState;
 use constants::*;
 #[cfg(test)]
 use decoding::{
-    hex_string, keccak_signature_hex, keccak256_hex, name_wrapped_topic0,
-    registrar_name_registered_topic0, registrar_name_renewed_topic0,
+    hex_string, keccak256_hex, name_wrapped_topic0, registrar_name_registered_topic0,
+    registrar_name_renewed_topic0,
 };
 #[cfg(test)]
 use preimage_observation::observe_dns_encoded_name;
@@ -82,7 +85,8 @@ async fn sync_block_derived_normalized_events_inner(
         Some(scanned_log_count) => scanned_log_count,
         None => load_scanned_log_count(pool, chain, block_hashes).await?,
     };
-    let raw_logs = load_watched_raw_logs(pool, chain, block_hashes, source_scope).await?;
+    let raw_log_load = load_watched_raw_logs(pool, chain, block_hashes, source_scope).await?;
+    let raw_logs = raw_log_load.raw_logs;
     if raw_logs.is_empty() {
         return Ok(empty_summary(scanned_log_count));
     }
@@ -90,7 +94,7 @@ async fn sync_block_derived_normalized_events_inner(
     let mut matched_log_refs = HashSet::new();
     let mut events = Vec::new();
     for raw_log in &raw_logs {
-        let observed_events = build_preimage_observed_events(raw_log)?;
+        let observed_events = build_preimage_observed_events(raw_log, &raw_log_load.event_topics)?;
         if observed_events.is_empty() {
             continue;
         }

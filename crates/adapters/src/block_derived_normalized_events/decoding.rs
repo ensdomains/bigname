@@ -3,7 +3,7 @@ use super::constants::{
 };
 pub(super) use crate::evm_abi::{
     dynamic_bytes as decode_dynamic_bytes, dynamic_string as decode_dynamic_string, hex_string,
-    hex_string_without_prefix, keccak_signature_hex, keccak256_hex, namehash_hex,
+    hex_string_without_prefix, keccak256_hex, namehash_hex,
 };
 
 pub(super) fn name_wrapped_topic0() -> String {
