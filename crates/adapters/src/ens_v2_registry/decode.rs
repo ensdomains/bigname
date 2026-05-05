@@ -1,7 +1,7 @@
 use alloy_sol_types::sol_data::{Address as SolAddress, String as SolString, Uint};
 use anyhow::{Context, Result};
 
-use crate::adapter_manifest::ActiveManifestEventTopic0s;
+use crate::adapter_manifest::ActiveManifestEventTopic0sBySignature;
 use crate::evm_abi::{
     abi_decode_params, address_hex, normalize_hex_32, topic_address_hex, u64_topic,
 };
@@ -13,14 +13,14 @@ use super::{
 
 pub(super) fn build_registry_observation(
     raw_log: &RegistryRawLogRow,
-    event_topics: &ActiveManifestEventTopic0s,
+    event_topics: &ActiveManifestEventTopic0sBySignature,
 ) -> Result<Option<RegistryObservation>> {
     let Some(topic0) = raw_log.topics.first() else {
         return Ok(None);
     };
     let reference = raw_log.reference();
 
-    if event_topics.matches(ABI_EVENT_LABEL_REGISTERED, topic0)? {
+    if event_topics.matches(ABI_EVENT_LABEL_REGISTERED_SIGNATURE, topic0)? {
         let token_id = normalize_hex_32(
             raw_log
                 .topics
@@ -54,7 +54,7 @@ pub(super) fn build_registry_observation(
         }));
     }
 
-    if event_topics.matches(ABI_EVENT_LABEL_RESERVED, topic0)? {
+    if event_topics.matches(ABI_EVENT_LABEL_RESERVED_SIGNATURE, topic0)? {
         let token_id = normalize_hex_32(
             raw_log
                 .topics
@@ -87,7 +87,7 @@ pub(super) fn build_registry_observation(
         }));
     }
 
-    if event_topics.matches(ABI_EVENT_LABEL_UNREGISTERED, topic0)? {
+    if event_topics.matches(ABI_EVENT_LABEL_UNREGISTERED_SIGNATURE, topic0)? {
         let token_id = normalize_hex_32(
             raw_log
                 .topics
@@ -107,7 +107,7 @@ pub(super) fn build_registry_observation(
         }));
     }
 
-    if event_topics.matches(ABI_EVENT_EXPIRY_UPDATED, topic0)? {
+    if event_topics.matches(ABI_EVENT_EXPIRY_UPDATED_SIGNATURE, topic0)? {
         let token_id = normalize_hex_32(
             raw_log
                 .topics
@@ -134,7 +134,7 @@ pub(super) fn build_registry_observation(
         }));
     }
 
-    if event_topics.matches(ABI_EVENT_SUBREGISTRY_UPDATED, topic0)? {
+    if event_topics.matches(ABI_EVENT_SUBREGISTRY_UPDATED_SIGNATURE, topic0)? {
         let token_id = normalize_hex_32(
             raw_log
                 .topics
@@ -161,7 +161,7 @@ pub(super) fn build_registry_observation(
         }));
     }
 
-    if event_topics.matches(ABI_EVENT_RESOLVER_UPDATED, topic0)? {
+    if event_topics.matches(ABI_EVENT_RESOLVER_UPDATED_SIGNATURE, topic0)? {
         let token_id = normalize_hex_32(
             raw_log
                 .topics
@@ -188,7 +188,7 @@ pub(super) fn build_registry_observation(
         }));
     }
 
-    if event_topics.matches(ABI_EVENT_TOKEN_RESOURCE, topic0)? {
+    if event_topics.matches(ABI_EVENT_TOKEN_RESOURCE_SIGNATURE, topic0)? {
         let token_id = normalize_hex_32(
             raw_log
                 .topics
@@ -208,7 +208,7 @@ pub(super) fn build_registry_observation(
         }));
     }
 
-    if event_topics.matches(ABI_EVENT_TOKEN_REGENERATED, topic0)? {
+    if event_topics.matches(ABI_EVENT_TOKEN_REGENERATED_SIGNATURE, topic0)? {
         let old_token_id = normalize_hex_32(
             raw_log
                 .topics
@@ -228,7 +228,7 @@ pub(super) fn build_registry_observation(
         }));
     }
 
-    if event_topics.matches(ABI_EVENT_PARENT_UPDATED, topic0)? {
+    if event_topics.matches(ABI_EVENT_PARENT_UPDATED_SIGNATURE, topic0)? {
         let parent = topic_address_hex(
             raw_log
                 .topics

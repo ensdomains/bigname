@@ -15,6 +15,7 @@ pub(crate) struct ActiveManifestMetadata {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[allow(dead_code)]
 pub(crate) struct ActiveManifestEventTopic0s {
     by_name: HashMap<String, String>,
 }
@@ -25,10 +26,12 @@ pub(crate) struct ActiveManifestEventTopic0sBySignature {
 }
 
 impl ActiveManifestEventTopic0s {
+    #[allow(dead_code)]
     pub(crate) fn new(by_name: HashMap<String, String>) -> Self {
         Self { by_name }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn topic0(&self, event_name: &str) -> Result<&str> {
         self.by_name
             .get(event_name)
@@ -36,6 +39,7 @@ impl ActiveManifestEventTopic0s {
             .with_context(|| format!("missing required active manifest ABI event {event_name}"))
     }
 
+    #[allow(dead_code)]
     pub(crate) fn matches(&self, event_name: &str, topic0: &str) -> Result<bool> {
         Ok(topic0.eq_ignore_ascii_case(self.topic0(event_name)?))
     }
@@ -184,6 +188,7 @@ pub(crate) async fn load_latest_active_manifest_metadata_for_source_family(
     row.map(decode_active_manifest_metadata).transpose()
 }
 
+#[allow(dead_code)]
 pub(crate) async fn load_required_active_manifest_event_topic0s(
     pool: &PgPool,
     manifest_ids: &[i64],

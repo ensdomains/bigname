@@ -19,24 +19,29 @@ pub(super) const EVENT_KIND_TOKEN_RESOURCE_LINKED: &str = "TokenResourceLinked";
 pub(super) const EVENT_KIND_TOKEN_REGENERATED: &str = "TokenRegenerated";
 pub(super) const EVENT_KIND_SURFACE_BOUND: &str = "SurfaceBound";
 
-pub(super) const ABI_EVENT_LABEL_REGISTERED: &str = "LabelRegistered";
-pub(super) const ABI_EVENT_LABEL_RESERVED: &str = "LabelReserved";
-pub(super) const ABI_EVENT_LABEL_UNREGISTERED: &str = "LabelUnregistered";
-pub(super) const ABI_EVENT_EXPIRY_UPDATED: &str = "ExpiryUpdated";
-pub(super) const ABI_EVENT_SUBREGISTRY_UPDATED: &str = "SubregistryUpdated";
-pub(super) const ABI_EVENT_RESOLVER_UPDATED: &str = "ResolverUpdated";
-pub(super) const ABI_EVENT_TOKEN_REGENERATED: &str = "TokenRegenerated";
-pub(super) const ABI_EVENT_PARENT_UPDATED: &str = "ParentUpdated";
-pub(super) const ABI_EVENT_TOKEN_RESOURCE: &str = "TokenResource";
+pub(super) const ABI_EVENT_LABEL_REGISTERED_SIGNATURE: &str =
+    "LabelRegistered(uint256,bytes32,string,address,uint64,address)";
+pub(super) const ABI_EVENT_LABEL_RESERVED_SIGNATURE: &str =
+    "LabelReserved(uint256,bytes32,string,uint64,address)";
+pub(super) const ABI_EVENT_LABEL_UNREGISTERED_SIGNATURE: &str =
+    "LabelUnregistered(uint256,address)";
+pub(super) const ABI_EVENT_EXPIRY_UPDATED_SIGNATURE: &str = "ExpiryUpdated(uint256,uint64,address)";
+pub(super) const ABI_EVENT_SUBREGISTRY_UPDATED_SIGNATURE: &str =
+    "SubregistryUpdated(uint256,address,address)";
+pub(super) const ABI_EVENT_RESOLVER_UPDATED_SIGNATURE: &str =
+    "ResolverUpdated(uint256,address,address)";
+pub(super) const ABI_EVENT_TOKEN_REGENERATED_SIGNATURE: &str = "TokenRegenerated(uint256,uint256)";
+pub(super) const ABI_EVENT_PARENT_UPDATED_SIGNATURE: &str = "ParentUpdated(address,string,address)";
+pub(super) const ABI_EVENT_TOKEN_RESOURCE_SIGNATURE: &str = "TokenResource(uint256,uint256)";
 
-pub(super) const ABI_EVENT_NAMES: [&str; 9] = [
-    ABI_EVENT_LABEL_REGISTERED,
-    ABI_EVENT_LABEL_RESERVED,
-    ABI_EVENT_LABEL_UNREGISTERED,
-    ABI_EVENT_EXPIRY_UPDATED,
-    ABI_EVENT_SUBREGISTRY_UPDATED,
-    ABI_EVENT_RESOLVER_UPDATED,
-    ABI_EVENT_TOKEN_RESOURCE,
-    ABI_EVENT_TOKEN_REGENERATED,
-    ABI_EVENT_PARENT_UPDATED,
+pub(super) const ABI_EVENT_SIGNATURES: [&str; 9] = [
+    ABI_EVENT_LABEL_REGISTERED_SIGNATURE,
+    ABI_EVENT_LABEL_RESERVED_SIGNATURE,
+    ABI_EVENT_LABEL_UNREGISTERED_SIGNATURE,
+    ABI_EVENT_EXPIRY_UPDATED_SIGNATURE,
+    ABI_EVENT_SUBREGISTRY_UPDATED_SIGNATURE,
+    ABI_EVENT_RESOLVER_UPDATED_SIGNATURE,
+    ABI_EVENT_TOKEN_RESOURCE_SIGNATURE,
+    ABI_EVENT_TOKEN_REGENERATED_SIGNATURE,
+    ABI_EVENT_PARENT_UPDATED_SIGNATURE,
 ];

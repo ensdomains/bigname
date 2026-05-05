@@ -17,6 +17,30 @@ mod abi {
 
 pub(crate) const UNIVERSAL_RESOLVER_RESOLVE_SELECTOR: [u8; 4] = abi::resolveCall::SELECTOR;
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct EncodedSolCall {
+    selector: [u8; 4],
+    calldata: Vec<u8>,
+}
+
+impl EncodedSolCall {
+    pub(crate) fn selector_hex(&self) -> String {
+        selector_hex(self.selector)
+    }
+
+    pub(crate) fn calldata(&self) -> &[u8] {
+        &self.calldata
+    }
+
+    pub(crate) fn calldata_hex(&self) -> String {
+        hex_string(&self.calldata)
+    }
+
+    pub(crate) fn into_calldata(self) -> Vec<u8> {
+        self.calldata
+    }
+}
+
 pub(crate) fn selector_hex(selector: [u8; 4]) -> String {
     hex_string(&selector)
 }
@@ -67,44 +91,50 @@ pub(crate) fn resolver_calldata(
     record_key: &str,
     node: [u8; 32],
 ) -> Result<Vec<u8>> {
+    Ok(resolver_record_call(selector, record_key, node)?.into_calldata())
+}
+
+pub(crate) fn resolver_record_call(
+    selector: &SupportedVerifiedResolutionRecordKey,
+    record_key: &str,
+    node: [u8; 32],
+) -> Result<EncodedSolCall> {
     match selector {
         SupportedVerifiedResolutionRecordKey::Addr { coin_type } if coin_type == "60" => {
-            Ok(abi::addr_0Call {
+            Ok(encoded_call(abi::addr_0Call {
                 node: B256::from(node),
-            }
-            .abi_encode())
+            }))
         }
         SupportedVerifiedResolutionRecordKey::Addr { coin_type } => {
             let coin_type = coin_type.parse::<u64>().with_context(|| {
                 format!("record selector {record_key} has invalid numeric coin type")
             })?;
-            Ok(abi::addr_1Call {
+            Ok(encoded_call(abi::addr_1Call {
                 node: B256::from(node),
                 coin_type: U256::from(coin_type),
-            }
-            .abi_encode())
+            }))
         }
         SupportedVerifiedResolutionRecordKey::Text => {
             let text_key = record_key
                 .strip_prefix("text:")
                 .filter(|value| !value.is_empty())
                 .with_context(|| format!("record selector {record_key} is missing text key"))?;
-            text_calldata(node, text_key)
+            text_call(node, text_key)
         }
-        SupportedVerifiedResolutionRecordKey::Avatar => text_calldata(node, "avatar"),
-        SupportedVerifiedResolutionRecordKey::Contenthash => Ok(abi::contenthashCall {
-            node: B256::from(node),
+        SupportedVerifiedResolutionRecordKey::Avatar => text_call(node, "avatar"),
+        SupportedVerifiedResolutionRecordKey::Contenthash => {
+            Ok(encoded_call(abi::contenthashCall {
+                node: B256::from(node),
+            }))
         }
-        .abi_encode()),
     }
 }
 
-pub(crate) fn universal_resolver_calldata(dns_name: &[u8], resolver_data: &[u8]) -> Vec<u8> {
-    abi::resolveCall {
+pub(crate) fn universal_resolver_call(dns_name: &[u8], resolver_data: &[u8]) -> EncodedSolCall {
+    encoded_call(abi::resolveCall {
         name: Bytes::copy_from_slice(dns_name),
         data: Bytes::copy_from_slice(resolver_data),
-    }
-    .abi_encode()
+    })
 }
 
 pub(crate) fn decode_universal_resolver_result(return_data: &[u8]) -> Result<Vec<u8>> {
@@ -173,15 +203,21 @@ pub(crate) fn digest_json(value: &serde_json::Value) -> String {
     format!("keccak256:{}", hex::encode(keccak256(&bytes)))
 }
 
-fn text_calldata(node: [u8; 32], text_key: &str) -> Result<Vec<u8>> {
+fn encoded_call<T: SolCall>(call: T) -> EncodedSolCall {
+    EncodedSolCall {
+        selector: T::SELECTOR,
+        calldata: call.abi_encode(),
+    }
+}
+
+fn text_call(node: [u8; 32], text_key: &str) -> Result<EncodedSolCall> {
     if text_key.is_empty() {
         bail!("text record key must not be empty");
     }
-    Ok(abi::textCall {
+    Ok(encoded_call(abi::textCall {
         node: B256::from(node),
         key: text_key.to_owned(),
-    }
-    .abi_encode())
+    }))
 }
 
 fn decode_addr60_result(return_data: &[u8]) -> Result<Option<String>> {
@@ -209,9 +245,13 @@ mod tests {
     fn encodes_universal_resolver_call_selector() {
         let dns_name = dns_encode_name("alice.eth").expect("name must encode");
         let resolver_data = vec![1, 2, 3, 4];
-        let calldata = universal_resolver_calldata(&dns_name, &resolver_data);
-        assert_eq!(&calldata[0..4], UNIVERSAL_RESOLVER_RESOLVE_SELECTOR);
-        assert_eq!(&calldata[4 + 31..4 + 32], &[64]);
+        let call = universal_resolver_call(&dns_name, &resolver_data);
+        assert_eq!(
+            call.selector_hex(),
+            selector_hex(UNIVERSAL_RESOLVER_RESOLVE_SELECTOR)
+        );
+        assert_eq!(&call.calldata()[0..4], UNIVERSAL_RESOLVER_RESOLVE_SELECTOR);
+        assert_eq!(&call.calldata()[4 + 31..4 + 32], &[64]);
     }
 
     #[test]

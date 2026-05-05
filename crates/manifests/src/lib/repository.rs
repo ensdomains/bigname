@@ -4,6 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use alloy_primitives::{Address, hex};
 use anyhow::{Context, Result, bail};
 
 use crate::model::RawSourceManifest;
@@ -266,14 +267,14 @@ fn validate_manifest_abi_fragments(abi: &ManifestAbi, path: &Path) -> Result<()>
                 path.display()
             );
         }
-        let parsed = event.parsed_event().with_context(|| {
+        let parsed = event.parsed_event_view().with_context(|| {
             format!(
                 "manifest ABI event {} in {} has invalid fragment",
                 event.name,
                 path.display()
             )
         })?;
-        let signature = parsed.signature();
+        let signature = parsed.canonical_signature();
         if !event_signatures.insert(signature.clone()) {
             bail!(
                 "manifest ABI event {} in {} duplicates event signature {}",
@@ -294,14 +295,14 @@ fn validate_manifest_abi_fragments(abi: &ManifestAbi, path: &Path) -> Result<()>
                 path.display()
             );
         }
-        let parsed = call.parsed_function().with_context(|| {
+        let parsed = call.parsed_function_view().with_context(|| {
             format!(
                 "manifest ABI call {} in {} has invalid fragment",
                 call.name,
                 path.display()
             )
         })?;
-        let signature = parsed.signature();
+        let signature = parsed.canonical_signature();
         if !call_signatures.insert(signature.clone()) {
             bail!(
                 "manifest ABI call {} in {} duplicates function signature {}",
@@ -349,5 +350,18 @@ fn canonicalize_for_logging(root: &Path) -> PathBuf {
 }
 
 pub(crate) fn normalize_address(value: &str) -> String {
-    value.to_ascii_lowercase()
+    normalize_alloy_address(value).unwrap_or_else(|| value.to_ascii_lowercase())
+}
+
+fn normalize_alloy_address(value: &str) -> Option<String> {
+    if value.len() != 42 || (!value.starts_with("0x") && !value.starts_with("0X")) {
+        return None;
+    }
+
+    let address = value.parse::<Address>().ok()?;
+    Some(format_prefixed_hex(address.as_slice()))
+}
+
+fn format_prefixed_hex(bytes: impl AsRef<[u8]>) -> String {
+    format!("0x{}", hex::encode(bytes))
 }

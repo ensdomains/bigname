@@ -1,4 +1,4 @@
-use anyhow::{Result, bail};
+use anyhow::Result;
 use bigname_storage::{
     CanonicalityState, NameCurrentRow, RawCallSnapshot, SupportedVerifiedResolutionRecordKey,
     parse_supported_verified_resolution_record_key,
@@ -8,9 +8,8 @@ use uuid::Uuid;
 
 use crate::ens_resolution::{EnsResolutionRecord, ExecutionBlock};
 use crate::ens_resolution_abi::{
-    UNIVERSAL_RESOLVER_RESOLVE_SELECTOR, decode_selector_result, decode_universal_resolver_result,
-    digest_json, hex_string, hex_to_bytes, resolver_calldata, selector_hex,
-    universal_resolver_calldata,
+    decode_selector_result, decode_universal_resolver_result, digest_json, hex_to_bytes,
+    resolver_record_call, universal_resolver_call,
 };
 use crate::ens_resolution_ccip::{CcipReadSummary, follow_ccip_read};
 use crate::rpc::{JsonRpcCallError, JsonRpcCallResult, JsonRpcHttpClient};
@@ -72,11 +71,11 @@ pub(super) async fn execute_record_call(
     use_latest_block_tag: bool,
 ) -> Result<SelectorCall> {
     let selector = parse_supported_verified_resolution_record_key(&record.record_key)?;
-    let resolver_data = resolver_calldata(&selector, &record.record_key, node)?;
-    let universal_calldata = universal_resolver_calldata(dns_name, &resolver_data);
-    let universal_calldata_hex = hex_string(&universal_calldata);
-    let universal_selector = selector_hex(UNIVERSAL_RESOLVER_RESOLVE_SELECTOR);
-    let resolver_selector = selector_hex(first_selector(&resolver_data)?);
+    let resolver_call = resolver_record_call(&selector, &record.record_key, node)?;
+    let universal_call = universal_resolver_call(dns_name, resolver_call.calldata());
+    let universal_calldata_hex = universal_call.calldata_hex();
+    let universal_selector = universal_call.selector_hex();
+    let resolver_selector = resolver_call.selector_hex();
     let contract_call = json!({
         "chain_id": ETHEREUM_MAINNET_CHAIN_ID,
         "contract_address": ENS_UNIVERSAL_RESOLVER_ADDRESS,
@@ -259,15 +258,6 @@ fn not_found_reason(selector: &SupportedVerifiedResolutionRecordKey) -> &'static
         SupportedVerifiedResolutionRecordKey::Avatar => "no_avatar_record",
         SupportedVerifiedResolutionRecordKey::Contenthash => "no_contenthash_record",
     }
-}
-
-fn first_selector(data: &[u8]) -> Result<[u8; 4]> {
-    if data.len() < 4 {
-        bail!("resolver calldata is shorter than a selector");
-    }
-    let mut selector = [0_u8; 4];
-    selector.copy_from_slice(&data[..4]);
-    Ok(selector)
 }
 
 #[cfg(test)]

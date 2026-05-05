@@ -9,24 +9,29 @@ pub(super) const EVENT_KIND_ALIAS_CHANGED: &str = "AliasChanged";
 pub(super) const EVENT_KIND_RECORD_CHANGED: &str = "RecordChanged";
 pub(super) const EVENT_KIND_RECORD_VERSION_CHANGED: &str = "RecordVersionChanged";
 
-pub(super) const ABI_EVENT_ADDRESS_CHANGED: &str = "AddressChanged";
-pub(super) const ABI_EVENT_TEXT_CHANGED: &str = "TextChanged";
-pub(super) const ABI_EVENT_CONTENTHASH_CHANGED: &str = "ContenthashChanged";
-pub(super) const ABI_EVENT_NAME_CHANGED: &str = "NameChanged";
-pub(super) const ABI_EVENT_VERSION_CHANGED: &str = "VersionChanged";
-pub(super) const ABI_EVENT_ALIAS_CHANGED: &str = "AliasChanged";
-pub(super) const ABI_EVENT_NAMED_RESOURCE: &str = "NamedResource";
-pub(super) const ABI_EVENT_NAMED_TEXT_RESOURCE: &str = "NamedTextResource";
-pub(super) const ABI_EVENT_NAMED_ADDR_RESOURCE: &str = "NamedAddrResource";
+pub(super) const ABI_EVENT_ADDRESS_CHANGED_SIGNATURE: &str =
+    "AddressChanged(bytes32,uint256,bytes)";
+pub(super) const ABI_EVENT_TEXT_CHANGED_SIGNATURE: &str =
+    "TextChanged(bytes32,string,string,string)";
+pub(super) const ABI_EVENT_CONTENTHASH_CHANGED_SIGNATURE: &str =
+    "ContenthashChanged(bytes32,bytes)";
+pub(super) const ABI_EVENT_NAME_CHANGED_SIGNATURE: &str = "NameChanged(bytes32,string)";
+pub(super) const ABI_EVENT_VERSION_CHANGED_SIGNATURE: &str = "VersionChanged(bytes32,uint64)";
+pub(super) const ABI_EVENT_ALIAS_CHANGED_SIGNATURE: &str = "AliasChanged(bytes,bytes,bytes,bytes)";
+pub(super) const ABI_EVENT_NAMED_RESOURCE_SIGNATURE: &str = "NamedResource(uint256,bytes)";
+pub(super) const ABI_EVENT_NAMED_TEXT_RESOURCE_SIGNATURE: &str =
+    "NamedTextResource(uint256,bytes,bytes32,string)";
+pub(super) const ABI_EVENT_NAMED_ADDR_RESOURCE_SIGNATURE: &str =
+    "NamedAddrResource(uint256,bytes,uint256)";
 
-pub(super) const ABI_EVENT_NAMES: [&str; 9] = [
-    ABI_EVENT_ADDRESS_CHANGED,
-    ABI_EVENT_TEXT_CHANGED,
-    ABI_EVENT_CONTENTHASH_CHANGED,
-    ABI_EVENT_NAME_CHANGED,
-    ABI_EVENT_VERSION_CHANGED,
-    ABI_EVENT_ALIAS_CHANGED,
-    ABI_EVENT_NAMED_RESOURCE,
-    ABI_EVENT_NAMED_TEXT_RESOURCE,
-    ABI_EVENT_NAMED_ADDR_RESOURCE,
+pub(super) const ABI_EVENT_SIGNATURES: [&str; 9] = [
+    ABI_EVENT_ADDRESS_CHANGED_SIGNATURE,
+    ABI_EVENT_TEXT_CHANGED_SIGNATURE,
+    ABI_EVENT_CONTENTHASH_CHANGED_SIGNATURE,
+    ABI_EVENT_NAME_CHANGED_SIGNATURE,
+    ABI_EVENT_VERSION_CHANGED_SIGNATURE,
+    ABI_EVENT_ALIAS_CHANGED_SIGNATURE,
+    ABI_EVENT_NAMED_RESOURCE_SIGNATURE,
+    ABI_EVENT_NAMED_TEXT_RESOURCE_SIGNATURE,
+    ABI_EVENT_NAMED_ADDR_RESOURCE_SIGNATURE,
 ];

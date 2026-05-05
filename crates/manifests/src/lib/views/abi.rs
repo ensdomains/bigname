@@ -39,6 +39,12 @@ pub async fn load_active_manifest_abi_events(
             .with_context(|| format!("failed to decode manifest payload for {manifest_id}"))?;
 
         for event in &manifest.abi.events {
+            let parsed = event.parsed_event_view().with_context(|| {
+                format!(
+                    "failed to derive ABI event view for manifest_id {manifest_id} event {}",
+                    event.name
+                )
+            })?;
             events.push(ActiveManifestAbiEvent {
                 manifest_id,
                 manifest_version: manifest.manifest_version,
@@ -47,18 +53,8 @@ pub async fn load_active_manifest_abi_events(
                 chain: manifest.chain.clone(),
                 deployment_epoch: manifest.deployment_epoch.clone(),
                 name: event.name.clone(),
-                canonical_signature: event.canonical_signature().with_context(|| {
-                    format!(
-                        "failed to derive ABI event signature for manifest_id {manifest_id} event {}",
-                        event.name
-                    )
-                })?,
-                topic0: event.topic0().with_context(|| {
-                    format!(
-                        "failed to derive ABI event topic0 for manifest_id {manifest_id} event {}",
-                        event.name
-                    )
-                })?,
+                canonical_signature: parsed.canonical_signature(),
+                topic0: parsed.topic0(),
                 emitter_roles: event.emitter_roles.clone(),
                 normalized_events: event.normalized_events.clone(),
             });

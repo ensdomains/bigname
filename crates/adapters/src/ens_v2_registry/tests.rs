@@ -1016,6 +1016,10 @@ fn test_registry_manifest_payload(chain: &str) -> Value {
                     "fragment": "event LabelReserved(uint256 indexed tokenId, bytes32 indexed labelHash, string label, uint64 expiry, address indexed sender)"
                 },
                 {
+                    "name": "LabelReserved",
+                    "fragment": "event LabelReserved(uint256 indexed tokenId, bytes32 indexed labelHash, string label, uint256 expiry, address indexed sender)"
+                },
+                {
                     "name": "LabelUnregistered",
                     "fragment": "event LabelUnregistered(uint256 indexed tokenId, address indexed sender)"
                 },

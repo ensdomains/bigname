@@ -1,14 +1,17 @@
 use alloy_sol_types::sol_data::{Address as SolAddress, FixedBytes, String as SolString, Uint};
 use anyhow::{Context, Result};
 
-use crate::adapter_manifest::ActiveManifestEventTopic0s;
+use crate::adapter_manifest::ActiveManifestEventTopic0sBySignature;
 pub(super) use crate::ens_v2_common::{hex_string, normalize_address};
 use crate::evm_abi::{
     abi_decode_params, address_hex, hex_string as prefixed_hex_string, normalize_hex_32,
     u256_word_hex,
 };
 
-use super::{ABI_EVENT_NAME_REGISTERED, ABI_EVENT_NAME_RENEWED, raw_logs::RegistrarRawLogRow};
+use super::{
+    ABI_EVENT_NAME_REGISTERED_SIGNATURE, ABI_EVENT_NAME_RENEWED_SIGNATURE,
+    raw_logs::RegistrarRawLogRow,
+};
 
 pub(super) enum RegistrarObservation {
     NameRegistered {
@@ -36,13 +39,13 @@ pub(super) enum RegistrarObservation {
 
 pub(super) fn build_registrar_observation(
     raw_log: &RegistrarRawLogRow,
-    event_topics: &ActiveManifestEventTopic0s,
+    event_topics: &ActiveManifestEventTopic0sBySignature,
 ) -> Result<Option<RegistrarObservation>> {
     let Some(topic0) = raw_log.topics.first() else {
         return Ok(None);
     };
 
-    if event_topics.matches(ABI_EVENT_NAME_REGISTERED, topic0)? {
+    if event_topics.matches(ABI_EVENT_NAME_REGISTERED_SIGNATURE, topic0)? {
         let token_id = normalize_hex_32(
             raw_log
                 .topics
@@ -75,7 +78,7 @@ pub(super) fn build_registrar_observation(
         }));
     }
 
-    if event_topics.matches(ABI_EVENT_NAME_RENEWED, topic0)? {
+    if event_topics.matches(ABI_EVENT_NAME_RENEWED_SIGNATURE, topic0)? {
         let token_id = normalize_hex_32(
             raw_log
                 .topics

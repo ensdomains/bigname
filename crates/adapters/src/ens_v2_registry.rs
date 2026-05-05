@@ -21,7 +21,7 @@ mod normalized;
 mod types;
 mod util;
 
-use crate::adapter_manifest::load_required_active_manifest_event_topic0s;
+use crate::adapter_manifest::load_required_active_manifest_event_topic0s_by_signature;
 use crate::normalized_event_support::count_events_by_kind;
 use constants::*;
 use decode::build_registry_observation;
@@ -147,10 +147,10 @@ async fn sync_ens_v2_registry_resource_surface_with_scope(
         .iter()
         .map(|emitter| emitter.source_manifest_id)
         .collect::<Vec<_>>();
-    let event_topics = load_required_active_manifest_event_topic0s(
+    let event_topics = load_required_active_manifest_event_topic0s_by_signature(
         pool,
         &manifest_ids,
-        &ABI_EVENT_NAMES,
+        &ABI_EVENT_SIGNATURES,
         "ENSv2 registry",
     )
     .await?;

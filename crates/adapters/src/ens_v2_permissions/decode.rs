@@ -1,7 +1,7 @@
 use alloy_sol_types::sol_data::{Bytes as SolBytes, String as SolString, Uint};
 use anyhow::{Context, Result};
 
-use crate::adapter_manifest::ActiveManifestEventTopic0s;
+use crate::adapter_manifest::ActiveManifestEventTopic0sBySignature;
 use crate::evm_abi::{
     abi_decode_params, normalize_hex_32, topic_address_hex, u256_topic_decimal, u256_word_hex,
 };
@@ -11,13 +11,13 @@ use super::types::{PermissionsObservation, PermissionsRawLogRow};
 
 pub(super) fn build_permissions_observation(
     raw_log: &PermissionsRawLogRow,
-    event_topics: &ActiveManifestEventTopic0s,
+    event_topics: &ActiveManifestEventTopic0sBySignature,
 ) -> Result<Option<PermissionsObservation>> {
     let Some(topic0) = raw_log.topics.first() else {
         return Ok(None);
     };
 
-    if event_topics.matches(ABI_EVENT_NAMED_RESOURCE, topic0)? {
+    if event_topics.matches(ABI_EVENT_NAMED_RESOURCE_SIGNATURE, topic0)? {
         let resource = normalize_hex_32(
             raw_log
                 .topics
@@ -32,7 +32,7 @@ pub(super) fn build_permissions_observation(
         }));
     }
 
-    if event_topics.matches(ABI_EVENT_NAMED_TEXT_RESOURCE, topic0)? {
+    if event_topics.matches(ABI_EVENT_NAMED_TEXT_RESOURCE_SIGNATURE, topic0)? {
         let resource = normalize_hex_32(
             raw_log
                 .topics
@@ -57,7 +57,7 @@ pub(super) fn build_permissions_observation(
         }));
     }
 
-    if event_topics.matches(ABI_EVENT_NAMED_ADDR_RESOURCE, topic0)? {
+    if event_topics.matches(ABI_EVENT_NAMED_ADDR_RESOURCE_SIGNATURE, topic0)? {
         let resource = normalize_hex_32(
             raw_log
                 .topics
@@ -79,7 +79,7 @@ pub(super) fn build_permissions_observation(
         }));
     }
 
-    if event_topics.matches(ABI_EVENT_EAC_ROLES_CHANGED, topic0)? {
+    if event_topics.matches(ABI_EVENT_EAC_ROLES_CHANGED_SIGNATURE, topic0)? {
         let resource = normalize_hex_32(
             raw_log
                 .topics

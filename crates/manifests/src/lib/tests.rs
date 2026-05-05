@@ -1289,19 +1289,35 @@ fn loads_manifest_abi_fragments() -> Result<()> {
     assert_eq!(abi.calls[0].name, "resolver");
     assert_eq!(abi.calls[0].target_roles, ["registry"]);
     assert_eq!(abi.calls[0].status, Some(CapabilitySupportStatus::Shadow));
+    let parsed_event = abi.events[0].parsed_event_view()?;
     assert_eq!(
-        abi.events[0].canonical_signature()?,
+        parsed_event.canonical_signature(),
         "SubregistryUpdated(uint256,address,address)"
     );
     assert!(
-        abi.events[0]
-            .topic0()?
+        parsed_event
+            .topic0()
             .is_some_and(|topic0| topic0.starts_with("0x") && topic0.len() == 66)
     );
-    assert_eq!(abi.calls[0].canonical_signature()?, "resolver(bytes32)");
-    assert_eq!(abi.calls[0].selector()?.len(), 10);
+    let parsed_call = abi.calls[0].parsed_function_view()?;
+    assert_eq!(parsed_call.canonical_signature(), "resolver(bytes32)");
+    assert_eq!(parsed_call.selector().len(), 10);
 
     Ok(())
+}
+
+#[test]
+fn normalize_address_uses_alloy_for_standard_hex_without_tightening_fallbacks() {
+    assert_eq!(
+        normalize_address("0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E"),
+        "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e"
+    );
+    assert_eq!(normalize_address("NOT-A-HEX-ADDRESS"), "not-a-hex-address");
+    assert_eq!(normalize_address("0xABC"), "0xabc");
+    assert_eq!(
+        normalize_address("00000000000000000000000000000000000000AA"),
+        "00000000000000000000000000000000000000aa"
+    );
 }
 
 #[test]

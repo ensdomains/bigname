@@ -1,3 +1,5 @@
+use std::str::FromStr;
+
 use alloy_primitives::{Address, B256, Bytes, U256, hex, keccak256};
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -123,7 +125,7 @@ impl ProviderLog {
             log_index,
             address: address_hex(log.address),
             topics: log.topics.into_iter().map(hash_hex).collect(),
-            data: hex_string(log.data.as_ref()),
+            data: bytes_hex(log.data.as_ref()),
         })
     }
 
@@ -145,20 +147,25 @@ pub(super) fn parse_hex_i64(value: &str) -> Result<i64> {
 }
 
 pub(super) fn parse_hex_bytes(value: &str) -> Result<Vec<u8>> {
+    parse_rpc_bytes(value).map(|bytes| bytes.to_vec())
+}
+
+fn parse_rpc_bytes(value: &str) -> Result<Bytes> {
     let value = value.strip_prefix("0x").unwrap_or(value);
     if !value.len().is_multiple_of(2) {
         bail!("invalid hex byte string with odd length");
     }
 
-    hex::decode(value).with_context(|| format!("failed to parse hex bytes {value}"))
+    let bytes = hex::decode(value).with_context(|| format!("failed to parse hex bytes {value}"))?;
+    Ok(Bytes::from(bytes))
 }
 
 pub(super) fn keccak256_hex(bytes: &[u8]) -> String {
-    hex_string(keccak256(bytes).as_slice())
+    hash_hex(keccak256(bytes))
 }
 
-fn hex_string(bytes: &[u8]) -> String {
-    format!("0x{}", hex::encode(bytes))
+pub(super) fn bytes_hex(bytes: &[u8]) -> String {
+    hex::encode_prefixed(bytes)
 }
 
 pub(super) fn normalize_hash(value: &str) -> String {
@@ -167,6 +174,32 @@ pub(super) fn normalize_hash(value: &str) -> String {
 
 pub(super) fn normalize_address(value: &str) -> String {
     value.to_ascii_lowercase()
+}
+
+pub(super) fn parse_b256(value: &str, label: &str) -> Result<B256> {
+    let value = normalize_hash(value);
+    if value.is_empty() {
+        bail!("{label} cannot be empty");
+    }
+
+    B256::from_str(&value).with_context(|| format!("failed to parse {label} {value}"))
+}
+
+pub(super) fn parse_address(value: &str) -> Result<Address> {
+    let value = normalize_address(value);
+    if value.is_empty() {
+        bail!("address cannot be empty");
+    }
+
+    Address::from_str(&value).with_context(|| format!("failed to parse address {value}"))
+}
+
+pub(super) fn hash_hex_from_str(value: &str, label: &str) -> Result<String> {
+    parse_b256(value, label).map(hash_hex)
+}
+
+pub(super) fn address_hex_from_str(value: &str) -> Result<String> {
+    parse_address(value).map(address_hex)
 }
 
 fn decode_rpc_value<T>(value: Value, label: &'static str) -> Result<T>
@@ -184,12 +217,12 @@ where
     decode_rpc_value(value.clone(), label)
 }
 
-fn hash_hex(value: B256) -> String {
-    hex_string(value.as_slice())
+pub(super) fn hash_hex(value: B256) -> String {
+    format!("{value}")
 }
 
-fn address_hex(value: Address) -> String {
-    hex_string(value.as_slice())
+pub(super) fn address_hex(value: Address) -> String {
+    format!("{value:#x}")
 }
 
 fn normalize_parent_hash(value: &str) -> Option<String> {

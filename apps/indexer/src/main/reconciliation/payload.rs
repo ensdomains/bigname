@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use alloy_primitives::{hex, keccak256};
+use alloy_primitives::{Bytes, hex, keccak256};
 use anyhow::{Context, Result, bail};
 use bigname_storage::{
     CanonicalityState, RawBlock, RawCodeHash, RawLog, RawPayloadCacheMetadataUpsert, RawReceipt,
@@ -394,20 +394,26 @@ pub(crate) fn parse_receipt_status(status: Option<i64>) -> Result<Option<bool>> 
 }
 
 pub(crate) fn keccak256_hex(bytes: &[u8]) -> String {
-    hex_string(keccak256(bytes).as_slice())
+    format!("{}", keccak256(bytes))
 }
 
 pub(crate) fn parse_hex_bytes(value: &str) -> Result<Vec<u8>> {
+    parse_rpc_bytes(value).map(|bytes| bytes.to_vec())
+}
+
+fn parse_rpc_bytes(value: &str) -> Result<Bytes> {
     let value = value.strip_prefix("0x").unwrap_or(value);
     if !value.len().is_multiple_of(2) {
         bail!("invalid hex byte string with odd length");
     }
 
-    hex::decode(value).with_context(|| format!("failed to parse hex bytes {value}"))
+    let bytes = hex::decode(value).with_context(|| format!("failed to parse hex bytes {value}"))?;
+    Ok(Bytes::from(bytes))
 }
 
+#[allow(dead_code, reason = "kept for crate-local test and fixture helpers")]
 pub(crate) fn hex_string(bytes: &[u8]) -> String {
-    format!("0x{}", hex::encode(bytes))
+    hex::encode_prefixed(bytes)
 }
 
 #[allow(dead_code)]

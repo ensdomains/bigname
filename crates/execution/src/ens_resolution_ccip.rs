@@ -1,7 +1,7 @@
 use std::sync::LazyLock;
 use std::time::Duration;
 
-use alloy_primitives::{Address, Bytes, FixedBytes};
+use alloy_primitives::{Address, Bytes};
 use alloy_sol_types::{SolCall, SolError, SolValue, sol};
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
@@ -263,57 +263,91 @@ async fn fetch_one_gateway(
 }
 
 fn decode_gateway_response_body(body: &[u8]) -> Result<Vec<u8>> {
-    if let Ok(value) = serde_json::from_slice::<Value>(body) {
-        if let Some(data) = value.get("data").and_then(Value::as_str) {
-            return hex_to_bytes(data);
+    gateway_response_hex_payload(body)?.decode()
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct HexPayload {
+    value: String,
+}
+
+impl HexPayload {
+    fn new(value: impl Into<String>) -> Self {
+        Self {
+            value: value.into(),
         }
-        if let Some(data) = value.as_str() {
-            return hex_to_bytes(data);
+    }
+
+    fn decode(&self) -> Result<Vec<u8>> {
+        hex_to_bytes(&self.value)
+    }
+}
+
+fn gateway_response_hex_payload(body: &[u8]) -> Result<HexPayload> {
+    if let Ok(value) = serde_json::from_slice::<Value>(body) {
+        if let Some(payload) = gateway_json_hex_payload(&value) {
+            return Ok(payload);
         }
     }
 
     let text = std::str::from_utf8(body).context("gateway response is not UTF-8")?;
-    hex_to_bytes(text.trim())
+    Ok(HexPayload::new(text.trim()))
 }
 
-fn offchain_lookup_from_rpc_error(error: &JsonRpcCallError) -> Result<Option<OffchainLookup>> {
-    let Some(data) = error.data.as_ref().and_then(find_hex_data) else {
-        return Ok(None);
-    };
-    let bytes = hex_to_bytes(data)?;
-    if bytes.len() < 4 || bytes[..4] != abi::OffchainLookup::SELECTOR {
-        return Ok(None);
-    }
-    decode_offchain_lookup(&bytes[4..]).map(Some)
-}
-
-fn find_hex_data(value: &Value) -> Option<&str> {
+fn gateway_json_hex_payload(value: &Value) -> Option<HexPayload> {
     match value {
-        Value::String(text) if text.starts_with("0x") => Some(text),
         Value::Object(object) => object
             .get("data")
-            .and_then(find_hex_data)
-            .or_else(|| object.get("originalError").and_then(find_hex_data))
-            .or_else(|| object.get("error").and_then(find_hex_data)),
+            .and_then(Value::as_str)
+            .map(HexPayload::new),
+        Value::String(data) => Some(HexPayload::new(data.clone())),
         _ => None,
     }
 }
 
+fn offchain_lookup_from_rpc_error(error: &JsonRpcCallError) -> Result<Option<OffchainLookup>> {
+    let Some(data) = error.data.as_ref().and_then(rpc_error_hex_data) else {
+        return Ok(None);
+    };
+    let bytes = data.decode()?;
+    decode_offchain_lookup_revert(&bytes)
+}
+
+// JSON-RPC providers disagree on where revert data lives; keep this compatibility
+// scan centralized so the accepted shapes stay deliberate.
+fn rpc_error_hex_data(value: &Value) -> Option<HexPayload> {
+    match value {
+        Value::String(text) if text.starts_with("0x") => Some(HexPayload::new(text.as_str())),
+        Value::Object(object) => object
+            .get("data")
+            .and_then(rpc_error_hex_data)
+            .or_else(|| object.get("originalError").and_then(rpc_error_hex_data))
+            .or_else(|| object.get("error").and_then(rpc_error_hex_data)),
+        _ => None,
+    }
+}
+
+fn decode_offchain_lookup_revert(bytes: &[u8]) -> Result<Option<OffchainLookup>> {
+    if !bytes.starts_with(&abi::OffchainLookup::SELECTOR) {
+        return Ok(None);
+    }
+    decode_offchain_lookup(bytes).map(Some)
+}
+
 fn decode_offchain_lookup(data: &[u8]) -> Result<OffchainLookup> {
     let decoded =
-        abi::OffchainLookup::abi_decode_raw(data).context("OffchainLookup data malformed")?;
+        abi::OffchainLookup::abi_decode_validate(data).context("OffchainLookup data malformed")?;
     Ok(OffchainLookup {
         sender: format_address(decoded.sender),
         urls: decoded.urls,
         call_data: decoded.callData.to_vec(),
-        callback_function: fixed_bytes4_to_array(decoded.callbackFunction),
+        callback_function: decoded.callbackFunction.into(),
         extra_data: decoded.extraData.to_vec(),
     })
 }
 
 fn decode_batch_gateway_query(call_data: &[u8]) -> Result<Vec<BatchGatewayRequest>> {
-    let decoded =
-        abi::queryCall::abi_decode(call_data).context("batch gateway query calldata malformed")?;
+    let decoded = decode_batch_gateway_query_call(call_data)?;
     Ok(decoded
         .requests
         .into_iter()
@@ -323,6 +357,10 @@ fn decode_batch_gateway_query(call_data: &[u8]) -> Result<Vec<BatchGatewayReques
             data: request.data.to_vec(),
         })
         .collect())
+}
+
+fn decode_batch_gateway_query_call(call_data: &[u8]) -> Result<abi::queryCall> {
+    abi::queryCall::abi_decode(call_data).context("batch gateway query calldata malformed")
 }
 
 fn ccip_callback_calldata(
@@ -354,12 +392,6 @@ fn abi_error_string(message: &str) -> Vec<u8> {
     alloy_sol_types::Revert::from(message).abi_encode()
 }
 
-fn fixed_bytes4_to_array(value: FixedBytes<4>) -> [u8; 4] {
-    let mut bytes = [0_u8; 4];
-    bytes.copy_from_slice(value.as_slice());
-    bytes
-}
-
 fn format_address(address: Address) -> String {
     hex_string(address.as_slice())
 }
@@ -367,6 +399,56 @@ fn format_address(address: Address) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decodes_offchain_lookup_from_compat_rpc_error_shapes() -> Result<()> {
+        let encoded = encoded_offchain_lookup_error();
+        let shapes = [
+            json!(encoded.clone()),
+            json!({ "data": encoded.clone() }),
+            json!({ "originalError": { "data": encoded.clone() } }),
+            json!({ "error": { "data": encoded } }),
+        ];
+
+        for data in shapes {
+            let lookup = offchain_lookup_from_rpc_error(&JsonRpcCallError {
+                code: Some(3),
+                message: "execution reverted".to_owned(),
+                data: Some(data),
+            })?
+            .expect("OffchainLookup error data must decode");
+            assert_eq!(lookup.sender, "0x1111111111111111111111111111111111111111");
+            assert_eq!(lookup.urls, vec!["https://gateway.example/{data}"]);
+            assert_eq!(lookup.call_data, vec![0xab, 0xcd]);
+            assert_eq!(lookup.callback_function, [0x12, 0x34, 0x56, 0x78]);
+            assert_eq!(lookup.extra_data, vec![0xef]);
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn ignores_non_offchain_lookup_revert_data() -> Result<()> {
+        let lookup = offchain_lookup_from_rpc_error(&JsonRpcCallError {
+            code: Some(3),
+            message: "execution reverted".to_owned(),
+            data: Some(json!("0x08c379a0")),
+        })?;
+
+        assert_eq!(lookup, None);
+        Ok(())
+    }
+
+    #[test]
+    fn decodes_gateway_response_compatibility_shapes() -> Result<()> {
+        let bodies: [&[u8]; 3] = [br#"{"data":"0xabcd"}"#, br#""0xabcd""#, b"0xabcd\n"];
+
+        for body in bodies {
+            assert_eq!(decode_gateway_response_body(body)?, vec![0xab, 0xcd]);
+        }
+
+        Ok(())
+    }
 
     #[test]
     fn encodes_ccip_callback_calldata() {
@@ -411,5 +493,18 @@ mod tests {
                 "cdef000000000000000000000000000000000000000000000000000000000000",
             )
         );
+    }
+
+    fn encoded_offchain_lookup_error() -> String {
+        hex_string(
+            &abi::OffchainLookup {
+                sender: Address::repeat_byte(0x11),
+                urls: vec!["https://gateway.example/{data}".to_owned()],
+                callData: Bytes::copy_from_slice(&[0xab, 0xcd]),
+                callbackFunction: alloy_primitives::FixedBytes::from(&[0x12, 0x34, 0x56, 0x78]),
+                extraData: Bytes::copy_from_slice(&[0xef]),
+            }
+            .abi_encode(),
+        )
     }
 }

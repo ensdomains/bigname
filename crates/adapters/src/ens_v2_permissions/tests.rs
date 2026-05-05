@@ -4,7 +4,7 @@ use serde_json::json;
 use sqlx::types::Uuid;
 use std::collections::HashMap;
 
-use crate::adapter_manifest::ActiveManifestEventTopic0s;
+use crate::adapter_manifest::ActiveManifestEventTopic0sBySignature;
 use crate::evm_abi::keccak_signature_hex;
 
 use super::constants::*;
@@ -264,23 +264,23 @@ fn bitmap_hex_with_last_byte(value: u8) -> String {
     format!("0x{}", hex_string(bitmap_with_last_byte(value)))
 }
 
-fn test_permissions_event_topics() -> ActiveManifestEventTopic0s {
-    ActiveManifestEventTopic0s::new(HashMap::from([
+fn test_permissions_event_topics() -> ActiveManifestEventTopic0sBySignature {
+    ActiveManifestEventTopic0sBySignature::new(HashMap::from([
         (
-            ABI_EVENT_NAMED_RESOURCE.to_owned(),
-            keccak_signature_hex("NamedResource(uint256,bytes)"),
+            ABI_EVENT_NAMED_RESOURCE_SIGNATURE.to_owned(),
+            keccak_signature_hex(ABI_EVENT_NAMED_RESOURCE_SIGNATURE),
         ),
         (
-            ABI_EVENT_NAMED_TEXT_RESOURCE.to_owned(),
-            keccak_signature_hex("NamedTextResource(uint256,bytes,bytes32,string)"),
+            ABI_EVENT_NAMED_TEXT_RESOURCE_SIGNATURE.to_owned(),
+            keccak_signature_hex(ABI_EVENT_NAMED_TEXT_RESOURCE_SIGNATURE),
         ),
         (
-            ABI_EVENT_NAMED_ADDR_RESOURCE.to_owned(),
-            keccak_signature_hex("NamedAddrResource(uint256,bytes,uint256)"),
+            ABI_EVENT_NAMED_ADDR_RESOURCE_SIGNATURE.to_owned(),
+            keccak_signature_hex(ABI_EVENT_NAMED_ADDR_RESOURCE_SIGNATURE),
         ),
         (
-            ABI_EVENT_EAC_ROLES_CHANGED.to_owned(),
-            keccak_signature_hex("EACRolesChanged(uint256,address,uint256,uint256)"),
+            ABI_EVENT_EAC_ROLES_CHANGED_SIGNATURE.to_owned(),
+            keccak_signature_hex(ABI_EVENT_EAC_ROLES_CHANGED_SIGNATURE),
         ),
     ]))
 }

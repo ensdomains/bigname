@@ -22,7 +22,7 @@ use event_building::build_registrar_event;
 use persistence_summary::empty_summary;
 use raw_logs::load_registrar_raw_logs;
 
-use crate::adapter_manifest::load_required_active_manifest_event_topic0s;
+use crate::adapter_manifest::load_required_active_manifest_event_topic0s_by_signature;
 
 pub use persistence_summary::{EnsV2RegistrarKindSyncSummary, EnsV2RegistrarSyncSummary};
 
@@ -31,8 +31,10 @@ pub(super) const DERIVATION_KIND_ENS_V2_REGISTRAR: &str = "ens_v2_registrar";
 pub(super) const REGISTRY_DERIVATION_KIND: &str = "ens_v2_registry_resource_surface";
 pub(super) const EVENT_KIND_REGISTRAR_NAME_REGISTERED: &str = "RegistrarNameRegistered";
 pub(super) const EVENT_KIND_REGISTRATION_RENEWED: &str = "RegistrationRenewed";
-pub(super) const ABI_EVENT_NAME_REGISTERED: &str = "NameRegistered";
-pub(super) const ABI_EVENT_NAME_RENEWED: &str = "NameRenewed";
+pub(super) const ABI_EVENT_NAME_REGISTERED_SIGNATURE: &str =
+    "NameRegistered(uint256,string,address,address,address,uint64,address,bytes32,uint256,uint256)";
+pub(super) const ABI_EVENT_NAME_RENEWED_SIGNATURE: &str =
+    "NameRenewed(uint256,string,uint64,uint64,address,bytes32,uint256)";
 
 impl EnsV2RegistrarSyncSummary {
     pub async fn sync_for_block_hashes(
@@ -78,10 +80,13 @@ async fn sync_ens_v2_registrar_with_scope(
         .iter()
         .map(|emitter| emitter.source_manifest_id)
         .collect::<Vec<_>>();
-    let event_topics = load_required_active_manifest_event_topic0s(
+    let event_topics = load_required_active_manifest_event_topic0s_by_signature(
         pool,
         &manifest_ids,
-        &[ABI_EVENT_NAME_REGISTERED, ABI_EVENT_NAME_RENEWED],
+        &[
+            ABI_EVENT_NAME_REGISTERED_SIGNATURE,
+            ABI_EVENT_NAME_RENEWED_SIGNATURE,
+        ],
         "ENSv2 registrar",
     )
     .await?;
