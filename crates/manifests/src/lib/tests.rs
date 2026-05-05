@@ -1289,6 +1289,17 @@ fn loads_manifest_abi_fragments() -> Result<()> {
     assert_eq!(abi.calls[0].name, "resolver");
     assert_eq!(abi.calls[0].target_roles, ["registry"]);
     assert_eq!(abi.calls[0].status, Some(CapabilitySupportStatus::Shadow));
+    assert_eq!(
+        abi.events[0].canonical_signature()?,
+        "SubregistryUpdated(uint256,address,address)"
+    );
+    assert!(
+        abi.events[0]
+            .topic0()?
+            .is_some_and(|topic0| topic0.starts_with("0x") && topic0.len() == 66)
+    );
+    assert_eq!(abi.calls[0].canonical_signature()?, "resolver(bytes32)");
+    assert_eq!(abi.calls[0].selector()?.len(), 10);
 
     Ok(())
 }
@@ -1891,6 +1902,40 @@ async fn syncing_sepolia_profile_replaces_main_profile_without_mixing() -> Resul
         "ethereum-sepolia",
         "0xe566a1fbaf30ff7c39828fe99f955fc55544cb9c"
     ));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn active_manifest_abi_events_derive_topics_from_payload() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let sepolia_repository = load_repository(checked_in_manifest_root("manifests/sepolia"))?;
+    sync_repository(database.pool(), &sepolia_repository).await?;
+
+    let registry_manifest_id =
+        active_manifest_id_for_source_family(database.pool(), "ens", "ens_v2_registry_l1").await?;
+    let events = load_active_manifest_abi_events(database.pool(), &[registry_manifest_id]).await?;
+
+    assert_eq!(events.len(), 9);
+    let label_registered = events
+        .iter()
+        .find(|event| event.name == "LabelRegistered")
+        .expect("registry manifest must declare LabelRegistered ABI");
+    assert_eq!(label_registered.manifest_id, registry_manifest_id);
+    assert_eq!(label_registered.source_family, "ens_v2_registry_l1");
+    assert_eq!(
+        label_registered.canonical_signature,
+        "LabelRegistered(uint256,bytes32,string,address,uint64,address)"
+    );
+    assert!(
+        label_registered
+            .topic0
+            .as_ref()
+            .is_some_and(|topic0| topic0.starts_with("0x") && topic0.len() == 66)
+    );
+    assert_eq!(label_registered.emitter_roles, ["registry"]);
+    assert_eq!(label_registered.normalized_events, ["RegistrationGranted"]);
 
     database.cleanup().await?;
     Ok(())

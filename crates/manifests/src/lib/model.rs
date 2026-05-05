@@ -4,6 +4,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use alloy_json_abi::{Event, Function};
+use alloy_primitives::hex;
 use anyhow::{Result, bail};
 use serde::{
     Deserialize, Deserializer, Serialize,
@@ -421,6 +423,20 @@ impl ManifestAbi {
     pub fn is_empty(&self) -> bool {
         self.events.is_empty() && self.calls.is_empty()
     }
+
+    pub fn event_topic0s(&self) -> Result<Vec<String>> {
+        let mut topic0s = self
+            .events
+            .iter()
+            .map(ManifestAbiEvent::topic0)
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        topic0s.sort();
+        topic0s.dedup();
+        Ok(topic0s)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -437,6 +453,31 @@ pub struct ManifestAbiEvent {
     pub notes: Option<String>,
 }
 
+impl ManifestAbiEvent {
+    pub fn parsed_event(&self) -> Result<Event> {
+        let fragment = self.fragment.trim();
+        if !fragment.starts_with("event ") {
+            bail!("ABI event {} must use an event fragment", self.name);
+        }
+
+        let parsed = Event::parse(fragment)?;
+        if parsed.name != self.name {
+            bail!("ABI event {} has fragment name {}", self.name, parsed.name);
+        }
+
+        Ok(parsed)
+    }
+
+    pub fn canonical_signature(&self) -> Result<String> {
+        Ok(self.parsed_event()?.signature())
+    }
+
+    pub fn topic0(&self) -> Result<Option<String>> {
+        let event = self.parsed_event()?;
+        Ok((!event.anonymous).then(|| prefixed_hex(event.selector().as_slice())))
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ManifestAbiCall {
     pub name: String,
@@ -447,6 +488,34 @@ pub struct ManifestAbiCall {
     pub status: Option<CapabilitySupportStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
+}
+
+impl ManifestAbiCall {
+    pub fn parsed_function(&self) -> Result<Function> {
+        let fragment = self.fragment.trim();
+        if !fragment.starts_with("function ") {
+            bail!("ABI call {} must use a function fragment", self.name);
+        }
+
+        let parsed = Function::parse(fragment)?;
+        if parsed.name != self.name {
+            bail!("ABI call {} has fragment name {}", self.name, parsed.name);
+        }
+
+        Ok(parsed)
+    }
+
+    pub fn canonical_signature(&self) -> Result<String> {
+        Ok(self.parsed_function()?.signature())
+    }
+
+    pub fn selector(&self) -> Result<String> {
+        Ok(prefixed_hex(self.parsed_function()?.selector().as_slice()))
+    }
+}
+
+fn prefixed_hex(bytes: impl AsRef<[u8]>) -> String {
+    format!("0x{}", hex::encode(bytes))
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

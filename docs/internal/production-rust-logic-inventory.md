@@ -113,6 +113,9 @@ Addressed slices:
 - The ENSv2 Sepolia registry, registrar, and resolver manifests now declare the
   event ABI fragments currently consumed by the ENSv2 adapters, with upstream
   citations next to the manifest declarations.
+- `crates/manifests` now derives canonical event signatures, event topic0s,
+  and function selectors from manifest ABI fragments through Alloy, and exposes
+  active manifest ABI events from persisted manifest payloads for adapter use.
 
 ## Highest leverage cleanup map
 

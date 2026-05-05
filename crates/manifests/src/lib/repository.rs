@@ -4,7 +4,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use alloy_json_abi::{Event, Function};
 use anyhow::{Context, Result, bail};
 
 use crate::model::RawSourceManifest;
@@ -267,21 +266,13 @@ fn validate_manifest_abi_fragments(abi: &ManifestAbi, path: &Path) -> Result<()>
                 path.display()
             );
         }
-        let parsed = Event::parse(fragment).with_context(|| {
+        let parsed = event.parsed_event().with_context(|| {
             format!(
                 "manifest ABI event {} in {} has invalid fragment",
                 event.name,
                 path.display()
             )
         })?;
-        if parsed.name != event.name {
-            bail!(
-                "manifest ABI event {} in {} has fragment name {}",
-                event.name,
-                path.display(),
-                parsed.name
-            );
-        }
         let signature = parsed.signature();
         if !event_signatures.insert(signature.clone()) {
             bail!(
@@ -303,21 +294,13 @@ fn validate_manifest_abi_fragments(abi: &ManifestAbi, path: &Path) -> Result<()>
                 path.display()
             );
         }
-        let parsed = Function::parse(fragment).with_context(|| {
+        let parsed = call.parsed_function().with_context(|| {
             format!(
                 "manifest ABI call {} in {} has invalid fragment",
                 call.name,
                 path.display()
             )
         })?;
-        if parsed.name != call.name {
-            bail!(
-                "manifest ABI call {} in {} has fragment name {}",
-                call.name,
-                path.display(),
-                parsed.name
-            );
-        }
         let signature = parsed.signature();
         if !call_signatures.insert(signature.clone()) {
             bail!(
