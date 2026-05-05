@@ -32,10 +32,7 @@ use bigname_storage::CanonicalityState;
 #[cfg(test)]
 use constants::*;
 #[cfg(test)]
-use decoding::{
-    hex_string, keccak256_hex, name_wrapped_topic0, registrar_name_registered_topic0,
-    registrar_name_renewed_topic0,
-};
+use decoding::{hex_string, keccak256_hex};
 #[cfg(test)]
 use preimage_observation::observe_dns_encoded_name;
 #[cfg(test)]

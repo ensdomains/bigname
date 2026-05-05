@@ -35,3 +35,11 @@ proxy_kind = "none"
 # (upstream: .refs/ens_v1/deployments/mainnet/NameWrapper.json:L1498 @ ens_v1@91c966f)
 # (upstream: .refs/ens_subgraph/subgraph.yaml:L200 @ ens_subgraph@723f1b6).
 start_block = 16925608
+
+# Wrapper event ABI fragment consumed by block-derived preimage observation.
+# NameWrapped: (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L27 @ ens_v1@91c966f).
+[[abi.events]]
+name = "NameWrapped"
+fragment = "event NameWrapped(bytes32 indexed node, bytes name, address owner, uint32 fuses, uint64 expiry)"
+emitter_roles = ["name_wrapper"]
+normalized_events = ["PreimageObserved"]

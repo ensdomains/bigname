@@ -7,35 +7,32 @@ use sqlx::PgPool;
 use crate::adapter_manifest::ActiveManifestEventTopic0s;
 
 use super::constants::{
-    ENS_V2_PREIMAGE_EVENT_NAMES, ENS_V2_REGISTRAR_PREIMAGE_EVENT_NAMES,
-    ENS_V2_REGISTRY_PREIMAGE_EVENT_NAMES, ENS_V2_RESOLVER_PREIMAGE_EVENT_NAMES,
-    SOURCE_FAMILY_ENS_V2_REGISTRAR_L1, SOURCE_FAMILY_ENS_V2_REGISTRY_L1,
-    SOURCE_FAMILY_ENS_V2_RESOLVER_L1, SOURCE_FAMILY_ENS_V2_ROOT_L1,
-};
-use super::decoding::{
-    name_wrapped_topic0, registrar_name_registered_topic0, registrar_name_renewed_topic0,
+    ENS_V1_REGISTRAR_PREIMAGE_EVENT_NAMES, ENS_V1_WRAPPER_PREIMAGE_EVENT_NAMES,
+    ENS_V2_REGISTRAR_PREIMAGE_EVENT_NAMES, ENS_V2_REGISTRY_PREIMAGE_EVENT_NAMES,
+    ENS_V2_RESOLVER_PREIMAGE_EVENT_NAMES, PREIMAGE_EVENT_NAMES, SOURCE_FAMILY_ENS_V1_REGISTRAR_L1,
+    SOURCE_FAMILY_ENS_V1_WRAPPER_L1, SOURCE_FAMILY_ENS_V2_REGISTRAR_L1,
+    SOURCE_FAMILY_ENS_V2_REGISTRY_L1, SOURCE_FAMILY_ENS_V2_RESOLVER_L1,
+    SOURCE_FAMILY_ENS_V2_ROOT_L1,
 };
 use super::types::{ActiveEmitter, WatchedRawLogRow};
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(super) struct PreimageObservedEventTopics {
-    ens_v2_by_manifest_id: HashMap<i64, ActiveManifestEventTopic0s>,
+    by_manifest_id: HashMap<i64, ActiveManifestEventTopic0s>,
 }
 
 impl PreimageObservedEventTopics {
     #[cfg(test)]
-    pub(super) fn from_ens_v2_topic0s(
-        ens_v2_by_manifest_id: HashMap<i64, ActiveManifestEventTopic0s>,
+    pub(super) fn from_manifest_topic0s(
+        by_manifest_id: HashMap<i64, ActiveManifestEventTopic0s>,
     ) -> Self {
-        Self {
-            ens_v2_by_manifest_id,
-        }
+        Self { by_manifest_id }
     }
 
     pub(super) async fn load(pool: &PgPool, active_emitters: &[ActiveEmitter]) -> Result<Self> {
         let manifest_ids = active_emitters
             .iter()
-            .filter(|emitter| is_ens_v2_preimage_source(&emitter.source_family))
+            .filter(|emitter| is_manifest_preimage_source(&emitter.source_family))
             .map(|emitter| emitter.source_manifest_id)
             .collect::<HashSet<_>>()
             .into_iter()
@@ -50,7 +47,7 @@ impl PreimageObservedEventTopics {
             .await
             .context("failed to load active manifest ABI events for block-derived preimages")?
         {
-            if !ENS_V2_PREIMAGE_EVENT_NAMES.contains(&event.name.as_str()) {
+            if !PREIMAGE_EVENT_NAMES.contains(&event.name.as_str()) {
                 continue;
             }
             let topic0 = event.topic0.with_context(|| {
@@ -76,16 +73,16 @@ impl PreimageObservedEventTopics {
             }
         }
 
-        let ens_v2_by_manifest_id = topic0s_by_manifest
+        let by_manifest_id = topic0s_by_manifest
             .into_iter()
             .map(|(manifest_id, topic0s)| (manifest_id, ActiveManifestEventTopic0s::new(topic0s)))
             .collect::<HashMap<_, _>>();
 
         for emitter in active_emitters
             .iter()
-            .filter(|emitter| is_ens_v2_preimage_source(&emitter.source_family))
+            .filter(|emitter| is_manifest_preimage_source(&emitter.source_family))
         {
-            let topics = ens_v2_by_manifest_id
+            let topics = by_manifest_id
                 .get(&emitter.source_manifest_id)
                 .with_context(|| {
                     format!(
@@ -103,19 +100,13 @@ impl PreimageObservedEventTopics {
             }
         }
 
-        Ok(Self {
-            ens_v2_by_manifest_id,
-        })
+        Ok(Self { by_manifest_id })
     }
 
     pub(super) fn query_topic0s(&self) -> Vec<String> {
-        let mut topic0s = vec![
-            name_wrapped_topic0(),
-            registrar_name_registered_topic0(),
-            registrar_name_renewed_topic0(),
-        ];
-        for manifest_topics in self.ens_v2_by_manifest_id.values() {
-            for event_name in ENS_V2_PREIMAGE_EVENT_NAMES {
+        let mut topic0s = Vec::new();
+        for manifest_topics in self.by_manifest_id.values() {
+            for event_name in PREIMAGE_EVENT_NAMES {
                 if let Ok(topic0) = manifest_topics.topic0(event_name) {
                     topic0s.push(topic0.to_owned());
                 }
@@ -126,14 +117,14 @@ impl PreimageObservedEventTopics {
         topic0s
     }
 
-    pub(super) fn ens_v2_matches(
+    pub(super) fn matches(
         &self,
         raw_log: &WatchedRawLogRow,
         event_name: &str,
         topic0: &str,
     ) -> Result<bool> {
         let topics = self
-            .ens_v2_by_manifest_id
+            .by_manifest_id
             .get(&raw_log.source_manifest_id)
             .with_context(|| {
                 format!(
@@ -145,10 +136,12 @@ impl PreimageObservedEventTopics {
     }
 }
 
-fn is_ens_v2_preimage_source(source_family: &str) -> bool {
+fn is_manifest_preimage_source(source_family: &str) -> bool {
     matches!(
         source_family,
-        SOURCE_FAMILY_ENS_V2_ROOT_L1
+        SOURCE_FAMILY_ENS_V1_REGISTRAR_L1
+            | SOURCE_FAMILY_ENS_V1_WRAPPER_L1
+            | SOURCE_FAMILY_ENS_V2_ROOT_L1
             | SOURCE_FAMILY_ENS_V2_REGISTRY_L1
             | SOURCE_FAMILY_ENS_V2_REGISTRAR_L1
             | SOURCE_FAMILY_ENS_V2_RESOLVER_L1
@@ -157,6 +150,8 @@ fn is_ens_v2_preimage_source(source_family: &str) -> bool {
 
 fn required_event_names(source_family: &str) -> &'static [&'static str] {
     match source_family {
+        SOURCE_FAMILY_ENS_V1_REGISTRAR_L1 => &ENS_V1_REGISTRAR_PREIMAGE_EVENT_NAMES,
+        SOURCE_FAMILY_ENS_V1_WRAPPER_L1 => &ENS_V1_WRAPPER_PREIMAGE_EVENT_NAMES,
         SOURCE_FAMILY_ENS_V2_ROOT_L1 | SOURCE_FAMILY_ENS_V2_REGISTRY_L1 => {
             &ENS_V2_REGISTRY_PREIMAGE_EVENT_NAMES
         }

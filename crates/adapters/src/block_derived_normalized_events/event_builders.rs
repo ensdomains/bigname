@@ -4,20 +4,19 @@ use serde_json::{Value, json};
 
 use super::constants::{
     ABI_EVENT_ALIAS_CHANGED, ABI_EVENT_LABEL_REGISTERED, ABI_EVENT_LABEL_RESERVED,
-    ABI_EVENT_NAME_REGISTERED, ABI_EVENT_NAME_RENEWED, ABI_EVENT_NAMED_ADDR_RESOURCE,
-    ABI_EVENT_NAMED_RESOURCE, ABI_EVENT_NAMED_TEXT_RESOURCE, ABI_EVENT_PARENT_UPDATED,
-    DERIVATION_KIND_RAW_LOG_PREIMAGE_OBSERVATION, EVENT_KIND_PREIMAGE_OBSERVED,
-    SOURCE_EVENT_ALIAS_CHANGED, SOURCE_EVENT_LABEL_REGISTERED, SOURCE_EVENT_LABEL_RESERVED,
-    SOURCE_EVENT_NAME_REGISTERED, SOURCE_EVENT_NAME_RENEWED, SOURCE_EVENT_NAME_WRAPPED,
-    SOURCE_EVENT_NAMED_ADDR_RESOURCE, SOURCE_EVENT_NAMED_RESOURCE,
+    ABI_EVENT_NAME_REGISTERED, ABI_EVENT_NAME_RENEWED, ABI_EVENT_NAME_WRAPPED,
+    ABI_EVENT_NAMED_ADDR_RESOURCE, ABI_EVENT_NAMED_RESOURCE, ABI_EVENT_NAMED_TEXT_RESOURCE,
+    ABI_EVENT_PARENT_UPDATED, DERIVATION_KIND_RAW_LOG_PREIMAGE_OBSERVATION,
+    EVENT_KIND_PREIMAGE_OBSERVED, SOURCE_EVENT_ALIAS_CHANGED, SOURCE_EVENT_LABEL_REGISTERED,
+    SOURCE_EVENT_LABEL_RESERVED, SOURCE_EVENT_NAME_REGISTERED, SOURCE_EVENT_NAME_RENEWED,
+    SOURCE_EVENT_NAME_WRAPPED, SOURCE_EVENT_NAMED_ADDR_RESOURCE, SOURCE_EVENT_NAMED_RESOURCE,
     SOURCE_EVENT_NAMED_TEXT_RESOURCE, SOURCE_EVENT_PARENT_UPDATED,
-    SOURCE_FAMILY_ENS_V1_REGISTRAR_L1, SOURCE_FAMILY_ENS_V2_REGISTRAR_L1,
-    SOURCE_FAMILY_ENS_V2_REGISTRY_L1, SOURCE_FAMILY_ENS_V2_RESOLVER_L1,
-    SOURCE_FAMILY_ENS_V2_ROOT_L1,
+    SOURCE_FAMILY_ENS_V1_REGISTRAR_L1, SOURCE_FAMILY_ENS_V1_WRAPPER_L1,
+    SOURCE_FAMILY_ENS_V2_REGISTRAR_L1, SOURCE_FAMILY_ENS_V2_REGISTRY_L1,
+    SOURCE_FAMILY_ENS_V2_RESOLVER_L1, SOURCE_FAMILY_ENS_V2_ROOT_L1,
 };
 use super::decoding::{
     decode_dynamic_bytes, decode_dynamic_string, hex_string_without_prefix, keccak256_hex,
-    name_wrapped_topic0, registrar_name_registered_topic0, registrar_name_renewed_topic0,
 };
 use super::event_topics::PreimageObservedEventTopics;
 use super::preimage_observation::{
@@ -30,7 +29,7 @@ pub(super) fn build_preimage_observed_events(
     raw_log: &WatchedRawLogRow,
     event_topics: &PreimageObservedEventTopics,
 ) -> Result<Vec<NormalizedEvent>> {
-    let events = build_registrar_preimage_observed_events(raw_log)?;
+    let events = build_registrar_preimage_observed_events(raw_log, event_topics)?;
     if !events.is_empty() {
         return Ok(events);
     }
@@ -40,16 +39,21 @@ pub(super) fn build_preimage_observed_events(
         return Ok(events);
     }
 
-    build_name_wrapped_preimage_observed_events(raw_log)
+    build_name_wrapped_preimage_observed_events(raw_log, event_topics)
 }
 
 fn build_name_wrapped_preimage_observed_events(
     raw_log: &WatchedRawLogRow,
+    event_topics: &PreimageObservedEventTopics,
 ) -> Result<Vec<NormalizedEvent>> {
+    if raw_log.source_family != SOURCE_FAMILY_ENS_V1_WRAPPER_L1 {
+        return Ok(Vec::new());
+    }
+
     let Some(topic0) = raw_log.topics.first() else {
         return Ok(Vec::new());
     };
-    if !topic0.eq_ignore_ascii_case(&name_wrapped_topic0()) {
+    if !event_topics.matches(raw_log, ABI_EVENT_NAME_WRAPPED, topic0)? {
         return Ok(Vec::new());
     }
 
@@ -89,6 +93,7 @@ fn build_name_wrapped_preimage_observed_events(
 
 fn build_registrar_preimage_observed_events(
     raw_log: &WatchedRawLogRow,
+    event_topics: &PreimageObservedEventTopics,
 ) -> Result<Vec<NormalizedEvent>> {
     if raw_log.source_family != SOURCE_FAMILY_ENS_V1_REGISTRAR_L1 {
         return Ok(Vec::new());
@@ -97,9 +102,9 @@ fn build_registrar_preimage_observed_events(
     let Some(topic0) = raw_log.topics.first() else {
         return Ok(Vec::new());
     };
-    let source_event = if topic0.eq_ignore_ascii_case(&registrar_name_registered_topic0()) {
+    let source_event = if event_topics.matches(raw_log, ABI_EVENT_NAME_REGISTERED, topic0)? {
         SOURCE_EVENT_NAME_REGISTERED
-    } else if topic0.eq_ignore_ascii_case(&registrar_name_renewed_topic0()) {
+    } else if event_topics.matches(raw_log, ABI_EVENT_NAME_RENEWED, topic0)? {
         SOURCE_EVENT_NAME_RENEWED
     } else {
         return Ok(Vec::new());
@@ -149,19 +154,19 @@ fn build_ens_v2_preimage_observed_events(
     };
 
     if is_ens_v2_registry_source(&raw_log.source_family) {
-        if event_topics.ens_v2_matches(raw_log, ABI_EVENT_LABEL_REGISTERED, topic0)? {
+        if event_topics.matches(raw_log, ABI_EVENT_LABEL_REGISTERED, topic0)? {
             return build_ens_v2_registry_label_preimage_observed_events(
                 raw_log,
                 SOURCE_EVENT_LABEL_REGISTERED,
             );
         }
-        if event_topics.ens_v2_matches(raw_log, ABI_EVENT_LABEL_RESERVED, topic0)? {
+        if event_topics.matches(raw_log, ABI_EVENT_LABEL_RESERVED, topic0)? {
             return build_ens_v2_registry_label_preimage_observed_events(
                 raw_log,
                 SOURCE_EVENT_LABEL_RESERVED,
             );
         }
-        if event_topics.ens_v2_matches(raw_log, ABI_EVENT_PARENT_UPDATED, topic0)? {
+        if event_topics.matches(raw_log, ABI_EVENT_PARENT_UPDATED, topic0)? {
             let Some(label) = decode_observable_dynamic_label(raw_log, 0)? else {
                 return Ok(Vec::new());
             };
@@ -182,13 +187,13 @@ fn build_ens_v2_preimage_observed_events(
     }
 
     if raw_log.source_family == SOURCE_FAMILY_ENS_V2_REGISTRAR_L1 {
-        if event_topics.ens_v2_matches(raw_log, ABI_EVENT_NAME_REGISTERED, topic0)? {
+        if event_topics.matches(raw_log, ABI_EVENT_NAME_REGISTERED, topic0)? {
             return build_ens_v2_registrar_label_preimage_observed_events(
                 raw_log,
                 SOURCE_EVENT_NAME_REGISTERED,
             );
         }
-        if event_topics.ens_v2_matches(raw_log, ABI_EVENT_NAME_RENEWED, topic0)? {
+        if event_topics.matches(raw_log, ABI_EVENT_NAME_RENEWED, topic0)? {
             return build_ens_v2_registrar_label_preimage_observed_events(
                 raw_log,
                 SOURCE_EVENT_NAME_RENEWED,
@@ -198,10 +203,10 @@ fn build_ens_v2_preimage_observed_events(
     }
 
     if raw_log.source_family == SOURCE_FAMILY_ENS_V2_RESOLVER_L1 {
-        if event_topics.ens_v2_matches(raw_log, ABI_EVENT_ALIAS_CHANGED, topic0)? {
+        if event_topics.matches(raw_log, ABI_EVENT_ALIAS_CHANGED, topic0)? {
             return build_ens_v2_alias_preimage_observed_events(raw_log);
         }
-        if event_topics.ens_v2_matches(raw_log, ABI_EVENT_NAMED_RESOURCE, topic0)? {
+        if event_topics.matches(raw_log, ABI_EVENT_NAMED_RESOURCE, topic0)? {
             return build_ens_v2_named_dns_preimage_observed_events(
                 raw_log,
                 SOURCE_EVENT_NAMED_RESOURCE,
@@ -209,7 +214,7 @@ fn build_ens_v2_preimage_observed_events(
                 None,
             );
         }
-        if event_topics.ens_v2_matches(raw_log, ABI_EVENT_NAMED_TEXT_RESOURCE, topic0)? {
+        if event_topics.matches(raw_log, ABI_EVENT_NAMED_TEXT_RESOURCE, topic0)? {
             return build_ens_v2_named_dns_preimage_observed_events(
                 raw_log,
                 SOURCE_EVENT_NAMED_TEXT_RESOURCE,
@@ -217,7 +222,7 @@ fn build_ens_v2_preimage_observed_events(
                 None,
             );
         }
-        if event_topics.ens_v2_matches(raw_log, ABI_EVENT_NAMED_ADDR_RESOURCE, topic0)? {
+        if event_topics.matches(raw_log, ABI_EVENT_NAMED_ADDR_RESOURCE, topic0)? {
             return build_ens_v2_named_dns_preimage_observed_events(
                 raw_log,
                 SOURCE_EVENT_NAMED_ADDR_RESOURCE,
