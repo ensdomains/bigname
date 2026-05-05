@@ -1,76 +1,91 @@
 # bigname
 
-A replayable, auditable indexing and read API for ENS, ENSv2, and Basenames.
+A point-in-time read API for ENS, ENSv2, and Basenames, backed by a replayable index.
 
-bigname turns onchain state from Ethereum and Base into a versioned `v1` REST contract that answers point-in-time, provenance-tagged questions about names, addresses, resolvers, primary names, and verified resolution. Raw facts are immutable; projections are rebuildable; verified answers come from durable execution traces, not opportunistic onchain calls.
+bigname watches Ethereum and Base, builds projections from chain events, and serves them through a versioned `/v1` REST contract. Every answer carries the chain positions it was derived from, so the same query at the same snapshot replays to the same result.
 
-## What's here
+## What's in the box
 
-- `apps/api` — the read API (`/v1/...`, `/healthz`, `/docs`)
-- `apps/indexer` — chain intake, manifest sync, backfill, head-following
-- `apps/worker` — projections, replay, verified execution, inspection commands
-- `crates/` — domain types, storage, manifests, adapters (ENSv1, ENSv2, Basenames), execution
-- `manifests/` — checked-in mainnet source manifests for ENS and Basenames
-- `manifests-sepolia-dev/` — alternate ENSv2 dev profile (selected at runtime, not loaded together)
-- `migrations/` — Postgres schema
-- `docs/` — how it works
-- `tests/conformance/` — TypeScript conformance harness
+```
+apps/
+  api/         REST API. Reads projections and execution output. /v1, /healthz, /docs.
+  indexer/     Chain intake. Manifest sync, backfill, head-following.
+  worker/      Projections, replay, verified execution, inspection commands.
+crates/        Domain types, storage, manifests, adapters, execution.
+manifests/     Mainnet ENS + Basenames source manifests.
+manifests-sepolia-dev/
+               Alternate ENSv2 dev profile. Selected at runtime; never loaded together.
+migrations/    Postgres schema.
+tests/conformance/
+               TypeScript conformance harness.
+docs/          The rest of the story — see [Reading the docs](#reading-the-docs).
+```
 
 ## Local development
 
 ```sh
-cp .env.example .env                       # optional, for custom ports/creds
-docker compose up -d                       # Postgres + MinIO
-./scripts/migrate                          # apply migrations
-./scripts/dev-up                           # boot api + indexer + worker
+cp .env.example .env          # optional, for custom ports/creds
+docker compose up -d          # Postgres + MinIO
+./scripts/migrate             # apply migrations
+./scripts/dev-up              # boot api + indexer + worker
 ```
 
-The API binds to `127.0.0.1:3000` by default. Hit `http://127.0.0.1:3000/docs` for OpenAPI, `/healthz` for readiness.
+The API binds to `127.0.0.1:3000`. Useful endpoints:
 
-Useful one-shots:
-
-- `cargo api -- serve`
-- `cargo indexer -- run`
-- `cargo worker -- run`
-- `cargo worker -- migrate`
+| Path | What |
+| --- | --- |
+| `/v1/...` | The public read contract. |
+| `/healthz` | Liveness + DB readiness. Operator-only, not part of `v1`. |
+| `/docs` | OpenAPI viewer. |
+| `/openapi.json` | Live OpenAPI document. |
 
 To enable live ingestion and live verified ENS resolution, set `BIGNAME_INDEXER_CHAIN_RPC_URLS` and `BIGNAME_API_CHAIN_RPC_URLS`. See [`docs/development.md`](docs/development.md).
 
+One-shots:
+
+```sh
+cargo api -- serve
+cargo indexer -- run
+cargo worker -- run
+cargo worker -- migrate
+```
+
 ## Container
 
-Published as `ghcr.io/tateb/bigname`. The image entrypoint takes a service name (`api`, `indexer`, `worker`, or `migrate`).
+Published as `ghcr.io/tateb/bigname`. The entrypoint takes a service name (`api`, `indexer`, `worker`, `migrate`).
 
-For server deployment:
+For a server deployment:
 
 ```sh
 cp .env.server.example .env.server         # set passwords + image tag
 docker compose --env-file .env.server -f docker-compose.server.yml up -d
 ```
 
-The compose file runs `migrate` once, then leaves `api`, `indexer`, and `worker` as long-running services. One-shot invocations (`migrate`, `bigname-api print-openapi`, `bigname-worker inspect ...`) can be run with `docker run --rm ghcr.io/tateb/bigname:latest <command>`.
+The compose file runs `migrate` once, then leaves `api`, `indexer`, and `worker` running. One-shots (`migrate`, `bigname-api print-openapi`, `bigname-worker inspect ...`) run via `docker run --rm ghcr.io/tateb/bigname:latest <command>`.
 
-See [`docs/deployment.md`](docs/deployment.md) and [`docs/production.md`](docs/production.md) for the public-edge stack.
+[`docs/deployment.md`](docs/deployment.md) covers the public-edge stack.
 
 ## Reading the docs
 
-Start with [`docs/architecture.md`](docs/architecture.md) for the model, then dive into the area you care about:
+Start with [`architecture.md`](docs/architecture.md) for the model. From there:
 
-- [`docs/api-v1.md`](docs/api-v1.md) — the public read contract; per-route reference in [`docs/api-v1-routes.md`](docs/api-v1-routes.md)
-- [`docs/storage.md`](docs/storage.md) — schema and write ownership
-- [`docs/manifests.md`](docs/manifests.md) — source manifests and discovery
-- [`docs/chain-intake.md`](docs/chain-intake.md) — block intake, lineage, reorgs, backfill
-- [`docs/projections.md`](docs/projections.md) — current-state read models
-- [`docs/execution.md`](docs/execution.md) — verified resolution and primary names
-- [`docs/consumer-capabilities.md`](docs/consumer-capabilities.md) — what each capability covers
-- [`docs/development.md`](docs/development.md), [`docs/deployment.md`](docs/deployment.md), [`docs/production.md`](docs/production.md) — running it
-- [`docs/upstream.md`](docs/upstream.md) — pinned upstream refs and intentional divergences
-- [`docs/adrs/`](docs/adrs/) — architecture decisions
+| If you want to know… | Read |
+| --- | --- |
+| The shape of API responses | [`api-v1.md`](docs/api-v1.md) |
+| Per-route semantics | [`api-v1-routes.md`](docs/api-v1-routes.md) |
+| The Postgres schema and write ownership | [`storage.md`](docs/storage.md) |
+| What contracts are watched and why | [`manifests.md`](docs/manifests.md) |
+| How blocks turn into facts | [`chain-intake.md`](docs/chain-intake.md) |
+| How facts turn into reads | [`projections.md`](docs/projections.md) |
+| How verified resolution works | [`execution.md`](docs/execution.md) |
+| What "supported" means per capability | [`consumer-capabilities.md`](docs/consumer-capabilities.md) |
+| Running it locally / on a server | [`development.md`](docs/development.md), [`deployment.md`](docs/deployment.md) |
+| Pinned upstream refs and divergences | [`upstream.md`](docs/upstream.md) |
 
-Internal planning notes (implementation sequencing, parallel workstreams) live under [`docs/internal/`](docs/internal/) and are not required reading to use or deploy bigname.
+Implementation sequencing notes live under [`docs/internal/`](docs/internal/) and aren't required reading.
 
-## Guardrails
+## Ground rules
 
-- adapters write identity rows and normalized events, not projection rows
-- the API reads projections and execution output, not raw facts
-- raw facts are immutable; projections are rebuildable; verified answers are durable
-- update the relevant doc before changing public semantics, shared IDs, manifest schema, or coverage meaning
+- Adapters write identity rows and normalized events; projections write read models; the API only reads.
+- Public semantics, shared IDs, manifest schema, and capability meanings change in docs first.
+- Raw facts don't move. Projections rebuild. Execution traces are kept.

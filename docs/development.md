@@ -1,113 +1,88 @@
 # Development
 
-Local development uses Docker Compose for PostgreSQL and S3-compatible object storage, matching the baseline in `docs/adrs/0001-stack.md`.
+Local dev runs the same three processes as a server (`api`, `indexer`, `worker`) against Dockerised Postgres and MinIO. This page walks through bootstrap, configuring chain providers, and the `/healthz` shape; the underlying stack is described in [`architecture.md`](architecture.md).
 
 ## Bootstrap
 
-1. Copy `.env.example` to `.env`.
-2. Run `docker compose up -d`.
-3. Apply the checked-in migration with `./scripts/migrate`.
-4. Boot the API, indexer, and worker together with `./scripts/dev-up`.
+```sh
+cp .env.example .env          # ports and creds; optional
+docker compose up -d          # Postgres + MinIO + bucket bootstrap
+./scripts/migrate             # apply checked-in migrations
+./scripts/dev-up              # api + indexer + worker
+```
 
-The compose stack starts:
+What `docker compose up -d` brings up:
 
-- PostgreSQL on `127.0.0.1:5432` with database `bigname` and credentials `bigname` / `bigname`
-- MinIO S3 API on `127.0.0.1:9000`
-- MinIO console on `127.0.0.1:9001`
-- a one-shot bootstrap container that creates the `bigname-dev` bucket by default
+| Service | Address | Notes |
+| --- | --- | --- |
+| Postgres | `127.0.0.1:5432` | db `bigname`, user/pass `bigname`/`bigname` |
+| MinIO S3 API | `127.0.0.1:9000` | object storage |
+| MinIO console | `127.0.0.1:9001` | web UI |
+| bucket bootstrap | one-shot | creates `bigname-dev` |
 
-Stop the local services with `docker compose down`. Add `-v` if you also want to remove the local data volumes.
+`docker compose down` stops it; add `-v` to drop the data volumes too.
 
-## Bootstrap Migration Hygiene
+`./scripts/dev-up` sources `.env`, runs migrations, and boots `bigname-api`, `bigname-indexer run`, and `bigname-worker`. On startup the indexer loads the selected manifest root, syncs manifest state into Postgres, rebuilds the stored watch plan, creates persisted chain checkpoint rows for active watched chains, and then polls configured providers.
 
-During bootstrap, bigname has no active deployments or shared production
-databases that must preserve data across every intermediate schema. Migration
-findings that only affect historical data moving between pre-deployment schemas
-should be tracked as bootstrap cleanup unless a shared/staging database is
-explicitly declared non-rebuildable.
+### Migration hygiene during bootstrap
 
-Before the first stateful deployment, collapse the checked-in SQL history into a
-small baseline migration set. When collapsing, remove obsolete transition-only
-steps or re-audit them for hard preflight checks before destructive drops, such
-as the pre-deployment `raw_blocks` to `chain_header_audit` transition.
+bigname has no shared production database to preserve across intermediate schemas yet, so migration findings that only affect pre-deployment data should be filed as bootstrap cleanup. Before the first stateful deployment, collapse the SQL history into a small baseline migration set. When collapsing, drop transition-only steps or re-audit them for hard preflight checks before destructive drops (e.g. the `raw_blocks` → `chain_header_audit` transition).
 
-## Live Indexing Configuration
+## Selecting a manifest profile
 
-`./scripts/dev-up` sources `.env`, applies migrations, starts the API, starts
-`bigname-indexer run`, and starts the worker. On startup the indexer loads the
-selected manifest root, syncs manifest state into PostgreSQL, rebuilds the
-stored watch plan, creates persisted chain checkpoint rows for active watched
-chains, and then polls configured provider sources.
+One runtime, one manifest root. Set `BIGNAME_INDEXER_MANIFESTS_ROOT`:
 
-Set `BIGNAME_INDEXER_MANIFESTS_ROOT` to select one runtime profile. The default
-is `manifests` for the shipped mainnet profile. Use `manifests-sepolia-dev` only
-when running the ENSv2 Sepolia dev profile; do not load it beside `manifests` in
-the same local database.
+| Value | Profile |
+| --- | --- |
+| `manifests` (default) | shipped mainnet ENS + Basenames |
+| `manifests-sepolia-dev` | ENSv2 dev profile |
 
-Set `BIGNAME_INDEXER_CHAIN_RPC_URLS` to a comma-delimited list of
-`<chain>=<url>` entries matching active watched chains in the selected profile:
+Don't load both against the same local database.
+
+## Chain providers
+
+Two separate provider settings — they're not interchangeable.
+
+| Variable | Process | Purpose |
+| --- | --- | --- |
+| `BIGNAME_INDEXER_CHAIN_RPC_URLS` | indexer | head following, backfill, raw-fact intake |
+| `BIGNAME_API_CHAIN_RPC_URLS` | api | live verified ENS execution on cache miss |
+| `BIGNAME_INDEXER_CHAIN_RETH_DB_SOURCES` | indexer | optional same-host Reth datadir source |
+| `BIGNAME_INDEXER_POLL_INTERVAL_SECS` | indexer | poll interval, default `5` |
+
+Format is comma-delimited `<chain>=<url>`:
 
 ```sh
 BIGNAME_INDEXER_CHAIN_RPC_URLS=ethereum-mainnet=http://127.0.0.1:8545,base-mainnet=http://127.0.0.1:9545
 ```
 
-If both provider source settings are unset, `./scripts/dev-up` still boots the
-processes and the indexer still syncs manifest/watch state, but provider-backed
-head fetch and live ingestion stay idle. Current bootstrap RPC support accepts
-`http://` endpoints only; use a local node or local HTTP proxy for hosted RPC
-providers that expose only HTTPS.
+If neither indexer setting is configured, `./scripts/dev-up` still boots and the indexer still syncs manifest/watch state — provider-backed head fetch and live ingestion just stay idle. Bootstrap RPC support accepts `http://` only; for HTTPS-only hosted providers, use a local HTTP proxy or local node.
 
-## Live API Execution Configuration
+### Why the API needs its own provider
 
-`GET /v1/resolutions/{namespace}/{name}` and `GET /v1/resolve/{name}` in
-`mode=verified|both` may execute supported ENS verified-resolution selectors on
-demand when matching persisted execution output is absent. That live execution
-uses the selected exact-name snapshot: no `at` and no `chain_positions` means
-`consistency=head` and the latest stored Ethereum checkpoint, and the API call
-targets that selected block rather than provider latest.
+`GET /v1/resolutions/{namespace}/{name}` and `GET /v1/resolve/{name}` in `mode=verified|both` may execute supported ENS verified-resolution selectors on demand when matching persisted execution output is absent. Live execution targets the selected exact-name snapshot — with no `at` or `chain_positions`, that's `consistency=head` at the latest stored Ethereum checkpoint, not provider latest.
 
-Configure `BIGNAME_API_CHAIN_RPC_URLS=ethereum-mainnet=<http-url>` for the API
-process before relying on live ENS verified resolution. This is separate from
-`BIGNAME_INDEXER_CHAIN_RPC_URLS`, which feeds indexer intake and checkpoint
-state only. If the API Ethereum provider is not configured, supported live ENS
-verified selectors fail closed with `409 stale` and a configuration message
-instead of falling back to declared record cache.
+Without `BIGNAME_API_CHAIN_RPC_URLS=ethereum-mainnet=<http-url>`, supported live ENS verified selectors fail closed with `409 stale` and a configuration message. There is no silent fallback to declared record cache.
 
-Deployments with a local Reth database can also set
-`BIGNAME_INDEXER_CHAIN_RETH_DB_SOURCES` to a comma-delimited list of
-`<chain>=<reth-datadir>` entries. Configure at most one source per chain. The
-Reth source is optional and operational: it must feed the same raw-fact intake
-contract as JSON-RPC, and Reth-local table references do not replace bigname raw
-fact refs or Postgres replay facts.
-Native Reth database support is compiled only when the indexer is built with
-the `reth-db` feature, for example
-`cargo check -p bigname-indexer --features reth-db`. That opt-in build requires
-Clang/libclang development headers for Reth's RocksDB/MDBX bindings. Default
-workspace checks do not build those native dependencies.
+### Reth database source (optional)
 
-`BIGNAME_INDEXER_POLL_INTERVAL_SECS` controls the local indexer poll interval
-and defaults to `5`.
+`BIGNAME_INDEXER_CHAIN_RETH_DB_SOURCES=<chain>=<reth-datadir>` (one source per chain) feeds the same raw-fact intake contract as JSON-RPC; Reth-local table references don't replace bigname raw-fact refs or Postgres replay facts. The Reth source compiles only with the `reth-db` Cargo feature:
 
-## Private Readiness Endpoint
+```sh
+cargo check -p bigname-indexer --features reth-db
+```
 
-The API process exposes `GET /healthz` on the same bind address as
-`cargo api -- serve` and `./scripts/dev-up`. The default local address is
-`http://127.0.0.1:3000/healthz`.
+That opt-in build needs Clang/libclang headers for Reth's RocksDB/MDBX bindings. Default workspace checks skip it.
 
-`/healthz` is a private operator endpoint. It is not part of the versioned
-`/v1` read API and should not be treated as a consumer compatibility surface.
+## Private readiness endpoint
 
-The endpoint separates process readiness from database readiness:
+`GET /healthz` lives on the API bind address (default `http://127.0.0.1:3000/healthz`). It's an operator endpoint, not part of `/v1`, and shouldn't be treated as a consumer surface.
 
-- Healthy database: `200 OK`, top-level `status` is `ready`,
-  `process.status` is `running`, `database.status` is `reachable`,
-  `database.reachable` is `true`, `database.check` is `select_1`, and
-  `database.error` is `null`.
-- Unreachable database or pool: `503 Service Unavailable`, top-level `status`
-  is `degraded`, `process.status` remains `running`, `database.status` is
-  `unreachable`, `database.reachable` is `false`, `database.check` remains
-  `select_1`, and `database.error` is `database readiness query failed`.
+It splits process readiness from database readiness. DB reachability is checked via `SELECT 1` through the configured pool.
 
-Database reachability is checked with `SELECT 1` through the configured
-PostgreSQL pool. A degraded response means the API process handled the request,
-but the configured database pool could not satisfy the readiness query.
+| Condition | HTTP | `status` | `process.status` | `database.status` | `database.reachable` | `database.check` | `database.error` |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| DB reachable | `200` | `ready` | `running` | `reachable` | `true` | `select_1` | `null` |
+| DB pool fails | `503` | `degraded` | `running` | `unreachable` | `false` | `select_1` | `database readiness query failed` |
+
+A `degraded` response means the API process handled the request but the configured pool couldn't satisfy the readiness query.

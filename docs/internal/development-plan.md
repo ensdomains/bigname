@@ -625,5 +625,3 @@ These docs should exist and be treated as the interface baseline before reposito
 - `docs/execution.md` for verified resolution and primary-name verification
 - `docs/consumer-capabilities.md` for the checked-in consumer capability baseline
 - `docs/internal/workstreams.md` for parallel delivery boundaries and ownership
-- `docs/adrs/0001-stack.md` for the implementation stack decision
-- `docs/adrs/0002-surface-resource-identity.md` for the surface / resource split
