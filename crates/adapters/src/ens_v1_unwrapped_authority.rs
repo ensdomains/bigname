@@ -50,9 +50,11 @@ const WRAPPED_NAME_REGISTERED_SIGNATURE: &str =
     "NameRegistered(string,bytes32,address,uint256,uint256,uint256)";
 const UNWRAPPED_NAME_REGISTERED_SIGNATURE: &str =
     "NameRegistered(string,bytes32,address,uint256,uint256,uint256,bytes32)";
+const BASENAMES_NAME_REGISTERED_SIGNATURE: &str = "NameRegistered(string,bytes32,address,uint256)";
 const NAME_RENEWED_SIGNATURE: &str = "NameRenewed(string,bytes32,uint256,uint256)";
 const UNWRAPPED_NAME_RENEWED_SIGNATURE: &str =
     "NameRenewed(string,bytes32,uint256,uint256,bytes32)";
+const BASENAMES_NAME_RENEWED_SIGNATURE: &str = "NameRenewed(string,bytes32,uint256)";
 const ADDR_CHANGED_SIGNATURE: &str = "AddrChanged(bytes32,address)";
 const ADDRESS_CHANGED_SIGNATURE: &str = "AddressChanged(bytes32,uint256,bytes)";
 const NAME_CHANGED_SIGNATURE: &str = "NameChanged(bytes32,string)";
@@ -509,6 +511,7 @@ mod apply_resolver;
 mod apply_wrapper;
 mod event_builders;
 mod event_state;
+mod event_topics;
 mod finalization;
 mod ids;
 mod loading;
@@ -529,16 +532,21 @@ pub use self::pipeline::sync_ens_v1_unwrapped_authority;
 
 use self::{
     abi::*, apply::*, apply_registrar::*, apply_registry::*, apply_resolver::*, apply_wrapper::*,
-    event_builders::*, event_state::*, finalization::*, ids::*, loading::*, materialization::*,
-    migration_guard::*, names::*, observation::*, permissions::*, preload::*, profiles::*,
-    release_events::*, resolver_gate::*, reverse_claims::*, scope::*, transition::*,
+    event_builders::*, event_state::*, event_topics::*, finalization::*, ids::*, loading::*,
+    materialization::*, migration_guard::*, names::*, observation::*, permissions::*, preload::*,
+    profiles::*, release_events::*, resolver_gate::*, reverse_claims::*, scope::*, transition::*,
 };
 
 pub fn decode_ens_v1_text_record_change(
     topics: &[String],
     data: &[u8],
 ) -> Result<Option<EnsV1TextRecordChange>> {
-    observation::decode_text_record_change(topics, data)
+    observation::decode_text_record_change(
+        SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
+        topics,
+        data,
+        &AuthorityEventTopics::for_ens_v1_text_decoding(),
+    )
 }
 
 mod pipeline;

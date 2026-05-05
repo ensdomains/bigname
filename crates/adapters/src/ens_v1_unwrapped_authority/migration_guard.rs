@@ -24,6 +24,7 @@ impl RegistryMigrationGuardAction {
 
 pub(super) fn registry_migration_guard_action(
     raw_log: &AuthorityRawLogRow,
+    event_topics: &AuthorityEventTopics,
 ) -> Result<RegistryMigrationGuardAction> {
     if raw_log.source_family != SOURCE_FAMILY_ENS_V1_REGISTRY_L1 {
         return Ok(RegistryMigrationGuardAction::None);
@@ -32,7 +33,7 @@ pub(super) fn registry_migration_guard_action(
         return Ok(RegistryMigrationGuardAction::None);
     };
 
-    if topic0.eq_ignore_ascii_case(&new_owner_topic0()) {
+    if event_topics.matches(NEW_OWNER_SIGNATURE, topic0)? {
         let node = registry_new_owner_child_node(raw_log)?;
         return Ok(if is_old_registry(raw_log) {
             RegistryMigrationGuardAction::SuppressIfMigrated(node)
@@ -45,17 +46,17 @@ pub(super) fn registry_migration_guard_action(
         return Ok(RegistryMigrationGuardAction::None);
     }
 
-    if topic0.eq_ignore_ascii_case(&new_resolver_topic0()) {
+    if event_topics.matches(NEW_RESOLVER_SIGNATURE, topic0)? {
         return Ok(RegistryMigrationGuardAction::SuppressIfMigrated(
             registry_indexed_node(raw_log, "NewResolver")?,
         ));
     }
-    if topic0.eq_ignore_ascii_case(&registry_transfer_topic0()) {
+    if event_topics.matches(REGISTRY_TRANSFER_SIGNATURE, topic0)? {
         return Ok(RegistryMigrationGuardAction::SuppressIfMigrated(
             registry_indexed_node(raw_log, "Transfer")?,
         ));
     }
-    if topic0.eq_ignore_ascii_case(&new_ttl_topic0()) {
+    if event_topics.matches(NEW_TTL_SIGNATURE, topic0)? {
         return Ok(RegistryMigrationGuardAction::SuppressIfMigrated(
             registry_indexed_node(raw_log, "NewTTL")?,
         ));

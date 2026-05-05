@@ -50,3 +50,33 @@ admission = "reachable_from_root"
 edge_kind = "resolver"
 from_role = "registry"
 admission = "reachable_from_root"
+
+# Registry event ABI fragments consumed by manifest-derived authority topic
+# lookup. Event declarations are pinned in the ENS registry interface:
+# (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L6 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L9 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L12 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L15 @ ens_v1@91c966f).
+[[abi.events]]
+name = "NewOwner"
+fragment = "event NewOwner(bytes32 indexed node, bytes32 indexed label, address owner)"
+emitter_roles = ["registry", "registry_old"]
+normalized_events = ["AuthorityTransferred"]
+
+[[abi.events]]
+name = "Transfer"
+fragment = "event Transfer(bytes32 indexed node, address owner)"
+emitter_roles = ["registry", "registry_old"]
+normalized_events = ["AuthorityTransferred"]
+
+[[abi.events]]
+name = "NewResolver"
+fragment = "event NewResolver(bytes32 indexed node, address resolver)"
+emitter_roles = ["registry", "registry_old"]
+normalized_events = ["ResolverChanged"]
+
+[[abi.events]]
+name = "NewTTL"
+fragment = "event NewTTL(bytes32 indexed node, uint64 ttl)"
+emitter_roles = ["registry", "registry_old"]
+normalized_events = ["AuthorityEpochChanged"]

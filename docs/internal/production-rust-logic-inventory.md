@@ -42,15 +42,15 @@ Production Rust snapshot from the working tree:
 The current file-size gate flags these oversized production files as the first
 places to revisit after logic dedupe:
 
-- `crates/adapters/src/ens_v1_unwrapped_authority/preload.rs` at 1,762 LOC.
-- `apps/api/src/responses/app_facing/records_declared_values.rs` at 783 LOC.
-- `crates/adapters/src/ens_v1_unwrapped_authority/pipeline.rs` at 635 LOC.
+- `crates/adapters/src/ens_v1_unwrapped_authority/preload.rs` at 1,757 LOC.
+- `apps/api/src/responses/app_facing/records_declared_values.rs` at 776 LOC.
 - `apps/indexer/src/main/repair.rs` at 615 LOC.
-- `crates/adapters/src/ens_v1_unwrapped_authority/pipeline/apply.rs` at 612 LOC.
-- `crates/adapters/src/ens_v1_unwrapped_authority/observation.rs` at 608 LOC.
+- `crates/adapters/src/ens_v1_unwrapped_authority/pipeline/apply.rs` at 622 LOC.
+- `crates/adapters/src/ens_v1_unwrapped_authority/observation.rs` at 623 LOC.
 - `crates/manifests/src/lib/views/resolver_profiles/ens_v1.rs` at 602 LOC.
-- `crates/adapters/src/ens_v1_unwrapped_authority/loading/raw_logs.rs` at 594 LOC.
+- `crates/adapters/src/ens_v1_unwrapped_authority/loading/raw_logs.rs` at 575 LOC.
 - `crates/manifests/src/lib/views/watched.rs` at 587 LOC.
+- `crates/adapters/src/ens_v1_unwrapped_authority/pipeline.rs` at 539 LOC.
 
 Addressed slices:
 
@@ -131,12 +131,21 @@ Addressed slices:
   wrapper/registrar and ENSv2 registry/registrar/resolver preimage event
   topic0s from active manifest ABI events by `source_manifest_id`; the module
   no longer owns production event signature strings.
+- `crates/adapters/src/ens_v1_unwrapped_authority` now loads authority
+  registrar, registry, resolver, and wrapper topic0s from active manifest ABI
+  events by canonical signature. Duplicate event names are matched through
+  signature-keyed manifest lookup for observation, resolver-gate,
+  migration-guard, generic resolver raw-log filtering, and restricted replay
+  preload paths.
+- `crates/adapters/src/ens_v1_unwrapped_authority/pipeline.rs` dropped below
+  the hard oversized-file threshold by moving binding-authority identity-row
+  staging helpers into `pipeline/identity.rs`.
 
 ## Highest leverage cleanup map
 
 | Logic family | Current locations | Replace or centralize with | Expected payoff |
 | --- | --- | --- | --- |
-| EVM ABI words, event topics, hex, hashes | `crates/adapters/src/evm_abi.rs` now owns shared adapter ABI-word, Keccak, topic-hash, hex, namehash, child-namehash, Alloy tuple decode, address formatting, and `U256` formatting helpers; ENSv2 registrar, registry, permissions, and resolver decoders now use `alloy-sol-types` for event data decoding. `crates/adapters/src/adapter_manifest.rs` now loads manifest-owned event topic0s for direct ENSv2 registrar, registry, resolver, and permissions adapters. `crates/adapters/src/block_derived_normalized_events` also uses manifest-owned ENSv1/ENSv2 topic0s for its preimage event filter/matcher. `crates/execution/src/ens_resolution_abi.rs` now uses Alloy `sol!`/`SolCall` for resolver selectors, calldata, and return decoding. ENSv1 unwrapped-authority ABI helpers now use Alloy for first dynamic payloads and address words. `crates/manifests` now accepts Alloy-validated event/function fragments so manifest versions can become the authoritative ABI inventory. Remaining duplicates are in ENSv1 authority adapter event variants with duplicate names, ENSv1 mixed-position observation decoding, execution DNS/namehash helpers, `apps/indexer/src/provider/decode.rs`, and `apps/indexer/src/main/reconciliation/payload.rs` | Keep using `alloy-primitives` for `Address`, `B256`, `U256`, `Bytes`, `FixedBytes`, `hex`, `keccak256`; continue replacing manual ABI word walking with `alloy-sol-types` `sol!`, `SolCall`, `SolEvent`, and `SolValue` where the event shape is stable; for manifest-owned surfaces, use `alloy-json-abi` fragments and `alloy-dyn-abi` lookup/decoding instead of new handwritten signatures | Large LOC reduction in adapters, fewer hand-rolled offset/word parsers, less duplicated topic hashing |
+| EVM ABI words, event topics, hex, hashes | `crates/adapters/src/evm_abi.rs` now owns shared adapter ABI-word, Keccak, topic-hash, hex, namehash, child-namehash, Alloy tuple decode, address formatting, and `U256` formatting helpers; ENSv2 registrar, registry, permissions, and resolver decoders now use `alloy-sol-types` for event data decoding. `crates/adapters/src/adapter_manifest.rs` now loads manifest-owned event topic0s for direct ENSv2 adapters, block-derived ENSv1/ENSv2 preimage matching, and ENSv1 unwrapped-authority matching keyed by canonical event signature. `crates/execution/src/ens_resolution_abi.rs` now uses Alloy `sol!`/`SolCall` for resolver selectors, calldata, and return decoding. ENSv1 unwrapped-authority ABI helpers now use Alloy for first dynamic payloads and address words. `crates/manifests` now accepts Alloy-validated event/function fragments so manifest versions can become the authoritative ABI inventory. Remaining duplicates are in ENSv1 mixed-position observation decoding, execution DNS/namehash helpers, `apps/indexer/src/provider/decode.rs`, and `apps/indexer/src/main/reconciliation/payload.rs` | Keep using `alloy-primitives` for `Address`, `B256`, `U256`, `Bytes`, `FixedBytes`, `hex`, `keccak256`; continue replacing manual ABI word walking with `alloy-sol-types` `sol!`, `SolCall`, `SolEvent`, and `SolValue` where the event shape is stable; for manifest-owned surfaces, use `alloy-json-abi` fragments and `alloy-dyn-abi` lookup/decoding instead of new handwritten signatures | Large LOC reduction in adapters, fewer hand-rolled offset/word parsers, less duplicated topic hashing |
 | Provider JSON-RPC typed decoding | `apps/indexer/src/provider/decode.rs` now uses typed serde DTOs with Alloy `U256`, `Address`, `B256`, and `Bytes` for quantities, transaction/receipt/log hashes, addresses, topics, byte blobs, and log data. Block hash/root strings remain normalized strings because existing provider fixtures and raw-payload cache-fill paths intentionally accept sparse or placeholder values. Remaining manual decoding lives in provider transport/bundle readers, request filter construction, and `reth_db` conversion boundaries | Keep current transport initially; evaluate narrower typed request/filter structs next, and only move to full `alloy-rpc-types-eth` block/receipt/log types if cache payloads and fixture contracts can tolerate their stricter headers | Removes brittle `serde_json::Value` object walking and custom hex parsing in provider code while avoiding accidental behavior tightening |
 | Address/hash normalization | Adapter hash/hex/namehash helpers are centralized in `evm_abi`; `normalize_address` still appears in API, indexer, worker, adapters, manifests, storage, and execution path validation | One storage-format helper per owner crate: parse with Alloy where EVM-shaped, return canonical lower `0x` strings; expose narrow helpers from adapters/execution/provider modules | Prevents drift between "lowercase only" and "validated EVM address/hash" call sites |
 | Canonicality and binding-kind parsing/rank | First slice landed: `CanonicalityState::rank`, `CanonicalityState::weakest`, and public `SurfaceBindingKind::parse` now cover indexer/adapters/storage/worker call sites with the canonical storage ordering; projection summaries with intentionally different ordering remain local | Continue replacing wrappers where semantics match; leave summary-specific rank orders local until their meaning is documented | Deletes repeated match blocks and reduces risk when enum variants change |
@@ -172,13 +181,15 @@ The codebase already uses Alloy in `crates/execution`, `crates/adapters`, and
 
 Near-term replacement candidates:
 
-- Extend manifest ABI lookup to support duplicate event names keyed by canonical
-  signature or local role/alias, then move ENSv1 authority adapter controller
-  and resolver topic constants out of code.
+- Continue replacing ENSv1 authority mixed-position event decoders with
+  event-shape-specific Alloy tuple or generated event decoding now that topic
+  matching comes from manifest-owned canonical signatures.
 - Move source-family event/call definitions into manifest `[[abi.events]]` and
   `[[abi.calls]]`, then consume them through `alloy-json-abi` and
   `alloy-dyn-abi` lookup helpers. ENSv2 Sepolia registry/registrar/resolver
-  fragments are seeded; replace ENSv1 generic resolver topic arrays next.
+  fragments are seeded; ENSv1 authority topic matching now consumes
+  manifest-owned canonical signatures, leaving call fragments and event-body
+  decoding as the next ABI inventory targets.
 - Replace topic hash functions like `keccak_signature_hex`, `*_topic0`, and
   signature arrays with constants derived from the `sol!` event types where the
   generated type exposes the selector/topic.
@@ -427,8 +438,9 @@ generic helpers.
 5. Partially done: direct ENSv2 registrar, registry, resolver, and permissions
    topic matching now uses active manifest ABI topic0s, their event bodies
    decode through `alloy-sol-types`, and block-derived ENSv1/ENSv2 preimage
-   matching uses manifest-owned topics; continue by adding duplicate-name ABI
-   lookup before touching the large ENSv1 observation files.
+   matching plus ENSv1 authority adapter matching use manifest-owned topics
+   keyed by canonical signatures; continue by converting ENSv1 authority
+   event-body decoders and manifest call fragments.
 6. Convert provider JSON-RPC response decoding from manual `serde_json::Value`
    walking to `alloy-rpc-types-eth`, while keeping existing provider DTOs.
 7. Add storage keyset pagination helpers for simple tuple cursors, then migrate

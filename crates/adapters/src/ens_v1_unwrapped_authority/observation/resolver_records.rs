@@ -3,12 +3,13 @@ use super::*;
 pub(super) fn build_ens_v1_generic_record_observation(
     raw_log: &AuthorityRawLogRow,
     topic0: &str,
+    event_topics: &AuthorityEventTopics,
 ) -> Result<Option<AuthorityObservation>> {
     if raw_log.source_family != SOURCE_FAMILY_ENS_V1_RESOLVER_L1 {
         return Ok(None);
     }
 
-    if topic0.eq_ignore_ascii_case(&abi_changed_topic0()) {
+    if event_topics.matches(ABI_CHANGED_SIGNATURE, topic0)? {
         let Some(content_type) = raw_log
             .topics
             .get(2)
@@ -30,7 +31,7 @@ pub(super) fn build_ens_v1_generic_record_observation(
         );
     }
 
-    if topic0.eq_ignore_ascii_case(&content_changed_topic0()) {
+    if event_topics.matches(CONTENT_CHANGED_SIGNATURE, topic0)? {
         let Some(content) = raw_log
             .data
             .get(..32)
@@ -52,7 +53,7 @@ pub(super) fn build_ens_v1_generic_record_observation(
         );
     }
 
-    if topic0.eq_ignore_ascii_case(&contenthash_changed_topic0()) {
+    if event_topics.matches(CONTENTHASH_CHANGED_SIGNATURE, topic0)? {
         let Some(contenthash) = decode_resolver_nth_dynamic_bytes(&raw_log.data, 0) else {
             return Ok(None);
         };
@@ -72,7 +73,7 @@ pub(super) fn build_ens_v1_generic_record_observation(
         );
     }
 
-    if topic0.eq_ignore_ascii_case(&dns_record_changed_topic0()) {
+    if event_topics.matches(DNS_RECORD_CHANGED_SIGNATURE, topic0)? {
         let Some(dns_name) = decode_resolver_nth_dynamic_bytes(&raw_log.data, 0) else {
             return Ok(None);
         };
@@ -94,7 +95,7 @@ pub(super) fn build_ens_v1_generic_record_observation(
         );
     }
 
-    if topic0.eq_ignore_ascii_case(&dns_record_deleted_topic0()) {
+    if event_topics.matches(DNS_RECORD_DELETED_SIGNATURE, topic0)? {
         let Some(dns_name) = decode_resolver_nth_dynamic_bytes(&raw_log.data, 0) else {
             return Ok(None);
         };
@@ -110,7 +111,7 @@ pub(super) fn build_ens_v1_generic_record_observation(
         );
     }
 
-    if topic0.eq_ignore_ascii_case(&dns_zonehash_changed_topic0()) {
+    if event_topics.matches(DNS_ZONEHASH_CHANGED_SIGNATURE, topic0)? {
         let Some(last_zonehash) = decode_resolver_nth_dynamic_bytes(&raw_log.data, 0) else {
             return Ok(None);
         };
@@ -139,7 +140,7 @@ pub(super) fn build_ens_v1_generic_record_observation(
         );
     }
 
-    if topic0.eq_ignore_ascii_case(&interface_changed_topic0()) {
+    if event_topics.matches(INTERFACE_CHANGED_SIGNATURE, topic0)? {
         let Some(interface_id) = raw_log
             .topics
             .get(2)
@@ -167,7 +168,7 @@ pub(super) fn build_ens_v1_generic_record_observation(
         );
     }
 
-    if topic0.eq_ignore_ascii_case(&data_changed_topic0()) {
+    if event_topics.matches(DATA_CHANGED_SIGNATURE, topic0)? {
         let Some(key) = decode_resolver_first_dynamic_string(&raw_log.data) else {
             return Ok(None);
         };

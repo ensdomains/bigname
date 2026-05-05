@@ -1,12 +1,17 @@
 use super::super::*;
 
-pub(super) fn resolver_profile_fact_nodes(raw_logs: &[AuthorityRawLogRow]) -> Result<Vec<String>> {
+pub(super) fn resolver_profile_fact_nodes(
+    raw_logs: &[AuthorityRawLogRow],
+    event_topics: &AuthorityEventTopics,
+) -> Result<Vec<String>> {
     let mut nodes = BTreeSet::<String>::new();
     for raw_log in raw_logs {
         let Some(topic0) = raw_log.topics.first() else {
             continue;
         };
-        if resolver_fact_families_for_topic0(&raw_log.source_family, topic0).is_empty() {
+        if resolver_fact_families_for_topic0(&raw_log.source_family, topic0, event_topics)?
+            .is_empty()
+        {
             continue;
         }
         let Some(node) = raw_log.topics.get(1) else {
@@ -30,6 +35,7 @@ pub(super) fn apply_authority_raw_logs(
     reverse_claim_sources: &HashMap<String, ReverseClaimSource>,
     resolver_profile_gate: &ResolverProfileGate,
     block_index: &CanonicalBlockIndex,
+    event_topics: &AuthorityEventTopics,
 ) -> Result<usize> {
     let mut matched_log_count = 0usize;
     for raw_log in raw_logs {
@@ -46,6 +52,7 @@ pub(super) fn apply_authority_raw_logs(
             reverse_claim_sources,
             resolver_profile_gate,
             block_index,
+            event_topics,
         )? {
             matched_log_count += 1;
         }
@@ -66,19 +73,20 @@ pub(super) fn apply_authority_raw_log(
     reverse_claim_sources: &HashMap<String, ReverseClaimSource>,
     resolver_profile_gate: &ResolverProfileGate,
     block_index: &CanonicalBlockIndex,
+    event_topics: &AuthorityEventTopics,
 ) -> Result<bool> {
-    let migration_guard = registry_migration_guard_action(raw_log)?;
+    let migration_guard = registry_migration_guard_action(raw_log, event_topics)?;
     if migration_guard.suppressed_by(migrated_registry_nodes) {
         return Ok(false);
     }
 
-    if resolver_profile_gate.rejects_resolver_local_fact(raw_log) {
+    if resolver_profile_gate.rejects_resolver_local_fact(raw_log, event_topics)? {
         if let Some(node) = migration_guard.mark_migrated_node() {
             migrated_registry_nodes.insert(node.to_owned());
         }
         return Ok(false);
     }
-    let observation = build_authority_observation(raw_log)?;
+    let observation = build_authority_observation(raw_log, event_topics)?;
     if let Some(node) = migration_guard.mark_migrated_node() {
         migrated_registry_nodes.insert(node.to_owned());
     }
@@ -486,10 +494,11 @@ fn registry_authority_started_before_observation(
 
 pub(super) fn name_intro_positions_for_raw_logs(
     raw_logs: &[AuthorityRawLogRow],
+    event_topics: &AuthorityEventTopics,
 ) -> Result<HashMap<String, Vec<RawLogPosition>>> {
     let mut positions = HashMap::<String, Vec<RawLogPosition>>::new();
     for raw_log in raw_logs {
-        let Some(observation) = build_authority_observation(raw_log)? else {
+        let Some(observation) = build_authority_observation(raw_log, event_topics)? else {
             continue;
         };
         let Some(namehash) = observation_intro_namehash(&observation)? else {
@@ -553,10 +562,11 @@ pub(super) async fn preload_name_metadata_for_raw_logs(
     pool: &PgPool,
     raw_logs: &[AuthorityRawLogRow],
     known_names_by_namehash: &mut HashMap<String, NameMetadata>,
+    event_topics: &AuthorityEventTopics,
 ) -> Result<()> {
     let mut namehashes = BTreeSet::<String>::new();
     for raw_log in raw_logs {
-        let Some(observation) = build_authority_observation(raw_log)? else {
+        let Some(observation) = build_authority_observation(raw_log, event_topics)? else {
             continue;
         };
         if let Some(namehash) = observation_namehash(&observation) {

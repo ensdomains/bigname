@@ -42,4 +42,36 @@ start_block = 16925608
 name = "NameWrapped"
 fragment = "event NameWrapped(bytes32 indexed node, bytes name, address owner, uint32 fuses, uint64 expiry)"
 emitter_roles = ["name_wrapper"]
-normalized_events = ["PreimageObserved"]
+normalized_events = ["WrapperNameWrapped", "PreimageObserved"]
+
+# Wrapper authority events consumed by manifest-derived authority topic lookup:
+# (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L35 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L37 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L38 @ ens_v1@91c966f).
+[[abi.events]]
+name = "NameUnwrapped"
+fragment = "event NameUnwrapped(bytes32 indexed node, address owner)"
+emitter_roles = ["name_wrapper"]
+normalized_events = ["WrapperNameUnwrapped"]
+
+[[abi.events]]
+name = "FusesSet"
+fragment = "event FusesSet(bytes32 indexed node, uint32 fuses)"
+emitter_roles = ["name_wrapper"]
+normalized_events = ["PermissionScopeChanged"]
+
+[[abi.events]]
+name = "ExpiryExtended"
+fragment = "event ExpiryExtended(bytes32 indexed node, uint64 expiry)"
+emitter_roles = ["name_wrapper"]
+normalized_events = ["ExpiryChanged"]
+
+# ERC1155 TransferSingle is emitted by the wrapper's ERC1155Fuse base:
+# (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L258 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L278 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L303 @ ens_v1@91c966f).
+[[abi.events]]
+name = "TransferSingle"
+fragment = "event TransferSingle(address indexed operator, address indexed from, address indexed to, uint256 id, uint256 value)"
+emitter_roles = ["name_wrapper"]
+normalized_events = ["TokenControlTransferred"]

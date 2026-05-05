@@ -3268,7 +3268,7 @@ async fn basenames_l2_resolver_profile_admission_keeps_unknowns_watch_only() -> 
             "Basenames resolver manifest is missing upstream citation {citation}"
         );
     }
-    assert!(!resolver_manifest.contains("ResolverBase"));
+    assert!(!resolver_manifest.contains("public_resolver_compatible"));
     assert!(!resolver_manifest.contains("record-version"));
 
     test_dir.write_manifest(

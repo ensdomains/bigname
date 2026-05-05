@@ -147,3 +147,90 @@ proxy_kind = "none"
 # (upstream: .refs/ensnode/packages/datasources/src/mainnet.ts:L345 @ ensnode@9b8f590)
 # (upstream: .refs/ensnode/packages/datasources/src/mainnet.ts:L346 @ ensnode@9b8f590).
 start_block = 3648359
+
+# Resolver event ABI fragments consumed by manifest-derived authority topic
+# lookup. Profile events are declared in the pinned ENSv1 resolver interfaces:
+# (upstream: .refs/ens_v1/contracts/resolvers/profiles/IABIResolver.sol:L5 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/resolvers/profiles/IAddrResolver.sol:L23 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/resolvers/profiles/IAddressResolver.sol:L35 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/resolvers/Resolver.sol:L215 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/resolvers/profiles/IContentHashResolver.sol:L82 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/resolvers/profiles/IDNSRecordResolver.sol:L94 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/resolvers/profiles/IDNSRecordResolver.sol:L101 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/resolvers/profiles/IDNSZoneResolver.sol:L119 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/resolvers/profiles/IDataResolver.sol:L136 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/resolvers/profiles/IInterfaceResolver.sol:L156 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/resolvers/profiles/INameResolver.sol:L50 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/resolvers/profiles/ITextResolver.sol:L62 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/resolvers/profiles/IVersionableResolver.sol:L179 @ ens_v1@91c966f).
+# Legacy TextChanged without value follows pinned ENS subgraph admission:
+# (upstream: .refs/ens_subgraph/subgraph.yaml:L109 @ ens_subgraph@723f1b6).
+[[abi.events]]
+name = "ABIChanged"
+fragment = "event ABIChanged(bytes32 indexed node, uint256 indexed contentType)"
+normalized_events = ["RecordChanged"]
+
+[[abi.events]]
+name = "AddrChanged"
+fragment = "event AddrChanged(bytes32 indexed node, address a)"
+normalized_events = ["RecordChanged"]
+
+[[abi.events]]
+name = "AddressChanged"
+fragment = "event AddressChanged(bytes32 indexed node, uint256 coinType, bytes newAddress)"
+normalized_events = ["RecordChanged"]
+
+[[abi.events]]
+name = "ContentChanged"
+fragment = "event ContentChanged(bytes32 indexed node, bytes32 hash)"
+normalized_events = ["RecordChanged"]
+
+[[abi.events]]
+name = "ContenthashChanged"
+fragment = "event ContenthashChanged(bytes32 indexed node, bytes hash)"
+normalized_events = ["RecordChanged"]
+
+[[abi.events]]
+name = "DNSRecordChanged"
+fragment = "event DNSRecordChanged(bytes32 indexed node, bytes name, uint16 resource, bytes record)"
+normalized_events = ["RecordChanged"]
+
+[[abi.events]]
+name = "DNSRecordDeleted"
+fragment = "event DNSRecordDeleted(bytes32 indexed node, bytes name, uint16 resource)"
+normalized_events = ["RecordChanged"]
+
+[[abi.events]]
+name = "DNSZonehashChanged"
+fragment = "event DNSZonehashChanged(bytes32 indexed node, bytes lastzonehash, bytes zonehash)"
+normalized_events = ["RecordChanged"]
+
+[[abi.events]]
+name = "DataChanged"
+fragment = "event DataChanged(bytes32 indexed node, string indexed indexedKey, string key, bytes indexed indexedData)"
+normalized_events = ["RecordChanged"]
+
+[[abi.events]]
+name = "InterfaceChanged"
+fragment = "event InterfaceChanged(bytes32 indexed node, bytes4 indexed interfaceID, address implementer)"
+normalized_events = ["RecordChanged"]
+
+[[abi.events]]
+name = "NameChanged"
+fragment = "event NameChanged(bytes32 indexed node, string name)"
+normalized_events = ["RecordChanged"]
+
+[[abi.events]]
+name = "TextChanged"
+fragment = "event TextChanged(bytes32 indexed node, string indexed indexedKey, string key)"
+normalized_events = ["RecordChanged"]
+
+[[abi.events]]
+name = "TextChanged"
+fragment = "event TextChanged(bytes32 indexed node, string indexed indexedKey, string key, string value)"
+normalized_events = ["RecordChanged"]
+
+[[abi.events]]
+name = "VersionChanged"
+fragment = "event VersionChanged(bytes32 indexed node, uint64 newVersion)"
+normalized_events = ["RecordVersionChanged"]

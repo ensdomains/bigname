@@ -98,7 +98,197 @@ struct ManifestVersionSeed<'a> {
     file_path: &'a str,
 }
 
+fn manifest_payload_for_seed(seed: &ManifestVersionSeed<'_>) -> Value {
+    json!({
+        "manifest_version": seed.manifest_version,
+        "namespace": seed.namespace,
+        "source_family": seed.source_family,
+        "chain": seed.chain,
+        "deployment_epoch": seed.deployment_epoch,
+        "rollout_status": seed.rollout_status,
+        "normalizer_version": seed.normalizer_version,
+        "capability_flags": {},
+        "roots": [],
+        "contracts": [],
+        "discovery_rules": [],
+        "abi": {
+            "events": manifest_abi_events_for_source_family(seed.source_family),
+        },
+    })
+}
+
+fn manifest_abi_events_for_source_family(source_family: &str) -> Vec<Value> {
+    match source_family {
+        SOURCE_FAMILY_ENS_V1_REGISTRAR_L1 => vec![
+            abi_event(
+                "NameRegistered",
+                "event NameRegistered(string name, bytes32 indexed label, address indexed owner, uint256 cost, uint256 expires)",
+            ),
+            abi_event(
+                "NameRegistered",
+                "event NameRegistered(string name, bytes32 indexed label, address indexed owner, uint256 baseCost, uint256 premium, uint256 expires)",
+            ),
+            abi_event(
+                "NameRegistered",
+                "event NameRegistered(string name, bytes32 indexed label, address indexed owner, uint256 baseCost, uint256 premium, uint256 expires, bytes32 referrer)",
+            ),
+            abi_event(
+                "NameRenewed",
+                "event NameRenewed(string name, bytes32 indexed label, uint256 cost, uint256 expires)",
+            ),
+            abi_event(
+                "NameRenewed",
+                "event NameRenewed(string name, bytes32 indexed label, uint256 cost, uint256 expires, bytes32 referrer)",
+            ),
+            abi_event(
+                "Transfer",
+                "event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)",
+            ),
+        ],
+        SOURCE_FAMILY_BASENAMES_BASE_REGISTRAR => vec![
+            abi_event(
+                "NameRegistered",
+                "event NameRegistered(string name, bytes32 indexed label, address indexed owner, uint256 expires)",
+            ),
+            abi_event(
+                "NameRenewed",
+                "event NameRenewed(string name, bytes32 indexed label, uint256 expires)",
+            ),
+            abi_event(
+                "Transfer",
+                "event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)",
+            ),
+        ],
+        SOURCE_FAMILY_ENS_V1_REGISTRY_L1 | SOURCE_FAMILY_BASENAMES_BASE_REGISTRY => vec![
+            abi_event(
+                "NewOwner",
+                "event NewOwner(bytes32 indexed node, bytes32 indexed label, address owner)",
+            ),
+            abi_event(
+                "Transfer",
+                "event Transfer(bytes32 indexed node, address owner)",
+            ),
+            abi_event(
+                "NewResolver",
+                "event NewResolver(bytes32 indexed node, address resolver)",
+            ),
+            abi_event("NewTTL", "event NewTTL(bytes32 indexed node, uint64 ttl)"),
+        ],
+        SOURCE_FAMILY_ENS_V1_RESOLVER_L1 => vec![
+            abi_event(
+                "ABIChanged",
+                "event ABIChanged(bytes32 indexed node, uint256 indexed contentType)",
+            ),
+            abi_event(
+                "AddrChanged",
+                "event AddrChanged(bytes32 indexed node, address a)",
+            ),
+            abi_event(
+                "AddressChanged",
+                "event AddressChanged(bytes32 indexed node, uint256 coinType, bytes newAddress)",
+            ),
+            abi_event(
+                "ContentChanged",
+                "event ContentChanged(bytes32 indexed node, bytes32 hash)",
+            ),
+            abi_event(
+                "ContenthashChanged",
+                "event ContenthashChanged(bytes32 indexed node, bytes hash)",
+            ),
+            abi_event(
+                "DNSRecordChanged",
+                "event DNSRecordChanged(bytes32 indexed node, bytes name, uint16 resource, bytes record)",
+            ),
+            abi_event(
+                "DNSRecordDeleted",
+                "event DNSRecordDeleted(bytes32 indexed node, bytes name, uint16 resource)",
+            ),
+            abi_event(
+                "DNSZonehashChanged",
+                "event DNSZonehashChanged(bytes32 indexed node, bytes lastzonehash, bytes zonehash)",
+            ),
+            abi_event(
+                "DataChanged",
+                "event DataChanged(bytes32 indexed node, string indexed indexedKey, string key, bytes indexed indexedData)",
+            ),
+            abi_event(
+                "InterfaceChanged",
+                "event InterfaceChanged(bytes32 indexed node, bytes4 indexed interfaceID, address implementer)",
+            ),
+            abi_event(
+                "NameChanged",
+                "event NameChanged(bytes32 indexed node, string name)",
+            ),
+            abi_event(
+                "TextChanged",
+                "event TextChanged(bytes32 indexed node, string indexed indexedKey, string key)",
+            ),
+            abi_event(
+                "TextChanged",
+                "event TextChanged(bytes32 indexed node, string indexed indexedKey, string key, string value)",
+            ),
+            abi_event(
+                "VersionChanged",
+                "event VersionChanged(bytes32 indexed node, uint64 newVersion)",
+            ),
+        ],
+        SOURCE_FAMILY_BASENAMES_BASE_RESOLVER => vec![
+            abi_event(
+                "AddrChanged",
+                "event AddrChanged(bytes32 indexed node, address a)",
+            ),
+            abi_event(
+                "AddressChanged",
+                "event AddressChanged(bytes32 indexed node, uint256 coinType, bytes newAddress)",
+            ),
+            abi_event(
+                "NameChanged",
+                "event NameChanged(bytes32 indexed node, string name)",
+            ),
+            abi_event(
+                "TextChanged",
+                "event TextChanged(bytes32 indexed node, string indexed indexedKey, string key, string value)",
+            ),
+            abi_event(
+                "VersionChanged",
+                "event VersionChanged(bytes32 indexed node, uint64 newVersion)",
+            ),
+        ],
+        SOURCE_FAMILY_ENS_V1_WRAPPER_L1 => vec![
+            abi_event(
+                "NameWrapped",
+                "event NameWrapped(bytes32 indexed node, bytes name, address owner, uint32 fuses, uint64 expiry)",
+            ),
+            abi_event(
+                "NameUnwrapped",
+                "event NameUnwrapped(bytes32 indexed node, address owner)",
+            ),
+            abi_event(
+                "FusesSet",
+                "event FusesSet(bytes32 indexed node, uint32 fuses)",
+            ),
+            abi_event(
+                "ExpiryExtended",
+                "event ExpiryExtended(bytes32 indexed node, uint64 expiry)",
+            ),
+            abi_event(
+                "TransferSingle",
+                "event TransferSingle(address indexed operator, address indexed from, address indexed to, uint256 id, uint256 value)",
+            ),
+        ],
+        _ => Vec::new(),
+    }
+}
+
+fn abi_event(name: &str, fragment: &str) -> Value {
+    json!({
+        "name": name,
+        "fragment": fragment,
+    })
+}
+
 async fn insert_manifest_version(pool: &PgPool, seed: ManifestVersionSeed<'_>) -> Result<i64> {
+    let manifest_payload = manifest_payload_for_seed(&seed);
     sqlx::query_scalar(
         r#"
             INSERT INTO manifest_versions (
@@ -124,7 +314,7 @@ async fn insert_manifest_version(pool: &PgPool, seed: ManifestVersionSeed<'_>) -
     .bind(seed.rollout_status)
     .bind(seed.normalizer_version)
     .bind(seed.file_path)
-    .bind("{}")
+    .bind(manifest_payload.to_string())
     .fetch_one(pool)
     .await
     .context("failed to insert manifest version")
@@ -494,6 +684,10 @@ fn encode_registrar_name_registered_log_data(label: &str, expiry_unix: i64) -> V
     encode_controller_label_event_log_data(label, &[1, expiry_unix as u64])
 }
 
+fn encode_basenames_registrar_name_registered_log_data(label: &str, expiry_unix: i64) -> Vec<u8> {
+    encode_controller_label_event_log_data(label, &[expiry_unix as u64])
+}
+
 fn encode_controller_label_event_log_data(
     label: &str,
     static_words_after_offset: &[u64],
@@ -851,20 +1045,24 @@ fn registrar_raw_log(topics: Vec<String>, data: Vec<u8>, log_index: i64) -> Auth
 
 #[test]
 fn build_authority_observation_decodes_registrar_controller_event_generations() -> Result<()> {
+    let event_topics = AuthorityEventTopics::for_tests();
     let owner_topic = hex_string(&abi_word_address(
         "0x0000000000000000000000000000000000000001",
     ));
     let labelhash = keccak256_hex(b"alice");
 
-    let wrapped = build_authority_observation(&registrar_raw_log(
-        vec![
-            wrapped_name_registered_topic0(),
-            labelhash.clone(),
-            owner_topic.clone(),
-        ],
-        encode_controller_label_event_log_data("alice", &[1, 2, 1_800_000_000]),
-        0,
-    ))?
+    let wrapped = build_authority_observation(
+        &registrar_raw_log(
+            vec![
+                wrapped_name_registered_topic0(),
+                labelhash.clone(),
+                owner_topic.clone(),
+            ],
+            encode_controller_label_event_log_data("alice", &[1, 2, 1_800_000_000]),
+            0,
+        ),
+        &event_topics,
+    )?
     .context("wrapped controller NameRegistered observation should decode")?;
     assert!(matches!(
         wrapped,
@@ -874,15 +1072,18 @@ fn build_authority_observation_decodes_registrar_controller_event_generations() 
         }) if expiry.unix_timestamp() == 1_800_000_000
     ));
 
-    let unwrapped = build_authority_observation(&registrar_raw_log(
-        vec![
-            unwrapped_name_registered_topic0(),
-            labelhash.clone(),
-            owner_topic,
-        ],
-        encode_controller_label_event_log_data("alice", &[1, 2, 1_900_000_000, 3]),
-        1,
-    ))?
+    let unwrapped = build_authority_observation(
+        &registrar_raw_log(
+            vec![
+                unwrapped_name_registered_topic0(),
+                labelhash.clone(),
+                owner_topic,
+            ],
+            encode_controller_label_event_log_data("alice", &[1, 2, 1_900_000_000, 3]),
+            1,
+        ),
+        &event_topics,
+    )?
     .context("unwrapped controller NameRegistered observation should decode")?;
     assert!(matches!(
         unwrapped,
@@ -892,11 +1093,14 @@ fn build_authority_observation_decodes_registrar_controller_event_generations() 
         }) if expiry.unix_timestamp() == 1_900_000_000
     ));
 
-    let renewed = build_authority_observation(&registrar_raw_log(
-        vec![unwrapped_name_renewed_topic0(), labelhash],
-        encode_controller_label_event_log_data("alice", &[1, 2_000_000_000, 3]),
-        2,
-    ))?
+    let renewed = build_authority_observation(
+        &registrar_raw_log(
+            vec![unwrapped_name_renewed_topic0(), labelhash],
+            encode_controller_label_event_log_data("alice", &[1, 2_000_000_000, 3]),
+            2,
+        ),
+        &event_topics,
+    )?
     .context("unwrapped controller NameRenewed observation should decode")?;
     assert!(matches!(
         renewed,
@@ -911,28 +1115,35 @@ fn build_authority_observation_decodes_registrar_controller_event_generations() 
 
 #[test]
 fn build_authority_observation_skips_oversized_registrar_labels() -> Result<()> {
+    let event_topics = AuthorityEventTopics::for_tests();
     let owner_topic = hex_string(&abi_word_address(
         "0x0000000000000000000000000000000000000001",
     ));
     let oversized_label = "a".repeat(usize::from(u8::MAX) + 1);
     let labelhash = keccak256_hex(oversized_label.as_bytes());
 
-    let registered = build_authority_observation(&registrar_raw_log(
-        vec![
-            wrapped_name_registered_topic0(),
-            labelhash.clone(),
-            owner_topic,
-        ],
-        encode_controller_label_event_log_data(&oversized_label, &[1, 2, 1_800_000_000]),
-        0,
-    ))?;
+    let registered = build_authority_observation(
+        &registrar_raw_log(
+            vec![
+                wrapped_name_registered_topic0(),
+                labelhash.clone(),
+                owner_topic,
+            ],
+            encode_controller_label_event_log_data(&oversized_label, &[1, 2, 1_800_000_000]),
+            0,
+        ),
+        &event_topics,
+    )?;
     assert_eq!(registered, None);
 
-    let renewed = build_authority_observation(&registrar_raw_log(
-        vec![unwrapped_name_renewed_topic0(), labelhash],
-        encode_controller_label_event_log_data(&oversized_label, &[1, 2_000_000_000, 3]),
-        1,
-    ))?;
+    let renewed = build_authority_observation(
+        &registrar_raw_log(
+            vec![unwrapped_name_renewed_topic0(), labelhash],
+            encode_controller_label_event_log_data(&oversized_label, &[1, 2_000_000_000, 3]),
+            1,
+        ),
+        &event_topics,
+    )?;
     assert_eq!(renewed, None);
 
     Ok(())
@@ -940,28 +1151,35 @@ fn build_authority_observation_skips_oversized_registrar_labels() -> Result<()> 
 
 #[test]
 fn build_authority_observation_skips_non_utf8_registrar_labels() -> Result<()> {
+    let event_topics = AuthorityEventTopics::for_tests();
     let owner_topic = hex_string(&abi_word_address(
         "0x0000000000000000000000000000000000000001",
     ));
     let invalid_label = [0xff, b'a', b'l', b'i', b'c', b'e'];
     let labelhash = keccak256_hex(&invalid_label);
 
-    let registered = build_authority_observation(&registrar_raw_log(
-        vec![
-            wrapped_name_registered_topic0(),
-            labelhash.clone(),
-            owner_topic,
-        ],
-        encode_controller_label_bytes_event_log_data(&invalid_label, &[1, 2, 1_800_000_000]),
-        0,
-    ))?;
+    let registered = build_authority_observation(
+        &registrar_raw_log(
+            vec![
+                wrapped_name_registered_topic0(),
+                labelhash.clone(),
+                owner_topic,
+            ],
+            encode_controller_label_bytes_event_log_data(&invalid_label, &[1, 2, 1_800_000_000]),
+            0,
+        ),
+        &event_topics,
+    )?;
     assert_eq!(registered, None);
 
-    let renewed = build_authority_observation(&registrar_raw_log(
-        vec![unwrapped_name_renewed_topic0(), labelhash],
-        encode_controller_label_bytes_event_log_data(&invalid_label, &[1, 2_000_000_000, 3]),
-        1,
-    ))?;
+    let renewed = build_authority_observation(
+        &registrar_raw_log(
+            vec![unwrapped_name_renewed_topic0(), labelhash],
+            encode_controller_label_bytes_event_log_data(&invalid_label, &[1, 2_000_000_000, 3]),
+            1,
+        ),
+        &event_topics,
+    )?;
     assert_eq!(renewed, None);
 
     Ok(())
@@ -969,28 +1187,35 @@ fn build_authority_observation_skips_non_utf8_registrar_labels() -> Result<()> {
 
 #[test]
 fn build_authority_observation_skips_malformed_registrar_label_payloads() -> Result<()> {
+    let event_topics = AuthorityEventTopics::for_tests();
     let owner_topic = hex_string(&abi_word_address(
         "0x0000000000000000000000000000000000000001",
     ));
     let labelhash = keccak256_hex(b"alice");
     let malformed_dynamic_label = abi_word_u64(96).to_vec();
 
-    let registered = build_authority_observation(&registrar_raw_log(
-        vec![
-            wrapped_name_registered_topic0(),
-            labelhash.clone(),
-            owner_topic,
-        ],
-        malformed_dynamic_label.clone(),
-        0,
-    ))?;
+    let registered = build_authority_observation(
+        &registrar_raw_log(
+            vec![
+                wrapped_name_registered_topic0(),
+                labelhash.clone(),
+                owner_topic,
+            ],
+            malformed_dynamic_label.clone(),
+            0,
+        ),
+        &event_topics,
+    )?;
     assert_eq!(registered, None);
 
-    let renewed = build_authority_observation(&registrar_raw_log(
-        vec![unwrapped_name_renewed_topic0(), labelhash],
-        malformed_dynamic_label,
-        1,
-    ))?;
+    let renewed = build_authority_observation(
+        &registrar_raw_log(
+            vec![unwrapped_name_renewed_topic0(), labelhash],
+            malformed_dynamic_label,
+            1,
+        ),
+        &event_topics,
+    )?;
     assert_eq!(renewed, None);
 
     Ok(())
@@ -998,27 +1223,34 @@ fn build_authority_observation_skips_malformed_registrar_label_payloads() -> Res
 
 #[test]
 fn build_authority_observation_skips_registrar_labelhash_mismatches() -> Result<()> {
+    let event_topics = AuthorityEventTopics::for_tests();
     let owner_topic = hex_string(&abi_word_address(
         "0x0000000000000000000000000000000000000001",
     ));
     let mismatched_labelhash = keccak256_hex(b"bob");
 
-    let registered = build_authority_observation(&registrar_raw_log(
-        vec![
-            wrapped_name_registered_topic0(),
-            mismatched_labelhash.clone(),
-            owner_topic,
-        ],
-        encode_controller_label_event_log_data("alice", &[1, 2, 1_800_000_000]),
-        0,
-    ))?;
+    let registered = build_authority_observation(
+        &registrar_raw_log(
+            vec![
+                wrapped_name_registered_topic0(),
+                mismatched_labelhash.clone(),
+                owner_topic,
+            ],
+            encode_controller_label_event_log_data("alice", &[1, 2, 1_800_000_000]),
+            0,
+        ),
+        &event_topics,
+    )?;
     assert_eq!(registered, None);
 
-    let renewed = build_authority_observation(&registrar_raw_log(
-        vec![unwrapped_name_renewed_topic0(), mismatched_labelhash],
-        encode_controller_label_event_log_data("alice", &[1, 2_000_000_000, 3]),
-        1,
-    ))?;
+    let renewed = build_authority_observation(
+        &registrar_raw_log(
+            vec![unwrapped_name_renewed_topic0(), mismatched_labelhash],
+            encode_controller_label_event_log_data("alice", &[1, 2_000_000_000, 3]),
+            1,
+        ),
+        &event_topics,
+    )?;
     assert_eq!(renewed, None);
 
     Ok(())
@@ -1578,32 +1810,39 @@ fn registrar_renewal_observation_replaces_same_label_subdomain_preload_name() ->
 
 #[test]
 fn build_authority_observation_skips_malformed_resolver_text_payloads() -> Result<()> {
+    let event_topics = AuthorityEventTopics::for_tests();
     let alice = observe_registrar_eth_name_with_version("alice", ENS_NORMALIZER_VERSION)?;
     let resolver_address = "0x00000000000000000000000000000000000000cc";
 
-    let malformed = build_authority_observation(&resolver_raw_log(
-        resolver_address,
-        vec![
-            text_changed_topic0(),
-            alice.namehash.clone(),
-            keccak256_hex(b"com.twitter"),
-            keccak256_hex(b"ignored-value"),
-        ],
-        Vec::new(),
-        0,
-    ))?;
+    let malformed = build_authority_observation(
+        &resolver_raw_log(
+            resolver_address,
+            vec![
+                text_changed_topic0(),
+                alice.namehash.clone(),
+                keccak256_hex(b"com.twitter"),
+                keccak256_hex(b"ignored-value"),
+            ],
+            Vec::new(),
+            0,
+        ),
+        &event_topics,
+    )?;
     assert_eq!(malformed, None);
 
-    let mismatched_indexed_key = build_authority_observation(&resolver_raw_log(
-        resolver_address,
-        vec![
-            text_changed_topic0(),
-            alice.namehash,
-            keccak256_hex(b"not-com.twitter"),
-        ],
-        encode_two_dynamic_string_log_data("com.twitter", "alice-twitter"),
-        1,
-    ))?;
+    let mismatched_indexed_key = build_authority_observation(
+        &resolver_raw_log(
+            resolver_address,
+            vec![
+                text_changed_topic0(),
+                alice.namehash,
+                keccak256_hex(b"not-com.twitter"),
+            ],
+            encode_two_dynamic_string_log_data("com.twitter", "alice-twitter"),
+            1,
+        ),
+        &event_topics,
+    )?;
     assert_eq!(mismatched_indexed_key, None);
 
     Ok(())
@@ -1611,19 +1850,23 @@ fn build_authority_observation_skips_malformed_resolver_text_payloads() -> Resul
 
 #[test]
 fn build_authority_observation_decodes_resolver_record_logs() -> Result<()> {
+    let event_topics = AuthorityEventTopics::for_tests();
     let alice = observe_registrar_eth_name_with_version("alice", ENS_NORMALIZER_VERSION)?;
     let resolver_address = "0x00000000000000000000000000000000000000cc";
 
-    let legacy_text_observation = build_authority_observation(&resolver_raw_log(
-        resolver_address,
-        vec![
-            text_changed_topic0(),
-            alice.namehash.clone(),
-            keccak256_hex(b"com.twitter"),
-        ],
-        encode_dynamic_string_log_data("com.twitter"),
-        0,
-    ))?
+    let legacy_text_observation = build_authority_observation(
+        &resolver_raw_log(
+            resolver_address,
+            vec![
+                text_changed_topic0(),
+                alice.namehash.clone(),
+                keccak256_hex(b"com.twitter"),
+            ],
+            encode_dynamic_string_log_data("com.twitter"),
+            0,
+        ),
+        &event_topics,
+    )?
     .context("legacy TextChanged observation should decode")?;
     assert_eq!(
         legacy_text_observation,
@@ -1641,16 +1884,19 @@ fn build_authority_observation_decodes_resolver_record_logs() -> Result<()> {
         })
     );
 
-    let text_with_value_observation = build_authority_observation(&resolver_raw_log(
-        resolver_address,
-        vec![
-            text_changed_with_value_topic0(),
-            alice.namehash.clone(),
-            keccak256_hex(b"com.twitter"),
-        ],
-        encode_two_dynamic_string_log_data("com.twitter", "alice-twitter"),
-        1,
-    ))?
+    let text_with_value_observation = build_authority_observation(
+        &resolver_raw_log(
+            resolver_address,
+            vec![
+                text_changed_with_value_topic0(),
+                alice.namehash.clone(),
+                keccak256_hex(b"com.twitter"),
+            ],
+            encode_two_dynamic_string_log_data("com.twitter", "alice-twitter"),
+            1,
+        ),
+        &event_topics,
+    )?
     .context("TextChanged observation with value should decode")?;
     assert_eq!(
         text_with_value_observation,
@@ -1668,12 +1914,15 @@ fn build_authority_observation_decodes_resolver_record_logs() -> Result<()> {
         })
     );
 
-    let name_observation = build_authority_observation(&resolver_raw_log(
-        resolver_address,
-        vec![name_changed_topic0(), alice.namehash.clone()],
-        encode_dynamic_string_log_data("alice.eth"),
-        2,
-    ))?
+    let name_observation = build_authority_observation(
+        &resolver_raw_log(
+            resolver_address,
+            vec![name_changed_topic0(), alice.namehash.clone()],
+            encode_dynamic_string_log_data("alice.eth"),
+            2,
+        ),
+        &event_topics,
+    )?
     .context("NameChanged observation should decode")?;
     assert_eq!(
         name_observation,
@@ -1691,12 +1940,15 @@ fn build_authority_observation_decodes_resolver_record_logs() -> Result<()> {
         })
     );
 
-    let addr_observation = build_authority_observation(&resolver_raw_log(
-        resolver_address,
-        vec![addr_changed_topic0(), alice.namehash.clone()],
-        encode_resolver_addr_changed_log_data("0x00000000000000000000000000000000000000aa"),
-        3,
-    ))?
+    let addr_observation = build_authority_observation(
+        &resolver_raw_log(
+            resolver_address,
+            vec![addr_changed_topic0(), alice.namehash.clone()],
+            encode_resolver_addr_changed_log_data("0x00000000000000000000000000000000000000aa"),
+            3,
+        ),
+        &event_topics,
+    )?
     .context("AddrChanged observation should decode")?;
     assert_eq!(
         addr_observation,
@@ -1714,12 +1966,15 @@ fn build_authority_observation_decodes_resolver_record_logs() -> Result<()> {
         })
     );
 
-    let multicoin_addr_observation = build_authority_observation(&resolver_raw_log(
-        resolver_address,
-        vec![address_changed_topic0(), alice.namehash.clone()],
-        encode_resolver_address_changed_log_data(61, &[0xde, 0xad, 0xbe, 0xef]),
-        4,
-    ))?
+    let multicoin_addr_observation = build_authority_observation(
+        &resolver_raw_log(
+            resolver_address,
+            vec![address_changed_topic0(), alice.namehash.clone()],
+            encode_resolver_address_changed_log_data(61, &[0xde, 0xad, 0xbe, 0xef]),
+            4,
+        ),
+        &event_topics,
+    )?
     .context("AddressChanged observation should decode")?;
     assert_eq!(
         multicoin_addr_observation,
@@ -1741,17 +1996,20 @@ fn build_authority_observation_decodes_resolver_record_logs() -> Result<()> {
     );
 
     let data_hash = keccak256_hex(&[0xde, 0xad, 0xbe, 0xef]);
-    let data_observation = build_authority_observation(&resolver_raw_log(
-        resolver_address,
-        vec![
-            data_changed_topic0(),
-            alice.namehash.clone(),
-            keccak256_hex(b"avatar"),
-            data_hash.clone(),
-        ],
-        encode_dynamic_string_log_data("avatar"),
-        5,
-    ))?
+    let data_observation = build_authority_observation(
+        &resolver_raw_log(
+            resolver_address,
+            vec![
+                data_changed_topic0(),
+                alice.namehash.clone(),
+                keccak256_hex(b"avatar"),
+                data_hash.clone(),
+            ],
+            encode_dynamic_string_log_data("avatar"),
+            5,
+        ),
+        &event_topics,
+    )?
     .context("DataChanged observation should decode")?;
     assert_eq!(
         data_observation,
@@ -1769,20 +2027,26 @@ fn build_authority_observation_decodes_resolver_record_logs() -> Result<()> {
         })
     );
 
-    let pubkey_observation = build_authority_observation(&resolver_raw_log(
-        resolver_address,
-        vec![pubkey_changed_topic0(), alice.namehash.clone()],
-        vec![0; 64],
-        6,
-    ))?;
+    let pubkey_observation = build_authority_observation(
+        &resolver_raw_log(
+            resolver_address,
+            vec![pubkey_changed_topic0(), alice.namehash.clone()],
+            vec![0; 64],
+            6,
+        ),
+        &event_topics,
+    )?;
     assert_eq!(pubkey_observation, None);
 
-    let record_version_observation = build_authority_observation(&resolver_raw_log(
-        resolver_address,
-        vec![version_changed_topic0(), alice.namehash.clone()],
-        encode_resolver_version_changed_log_data(7),
-        7,
-    ))?
+    let record_version_observation = build_authority_observation(
+        &resolver_raw_log(
+            resolver_address,
+            vec![version_changed_topic0(), alice.namehash.clone()],
+            encode_resolver_version_changed_log_data(7),
+            7,
+        ),
+        &event_topics,
+    )?
     .context("VersionChanged observation should decode")?;
     assert_eq!(
         record_version_observation,
@@ -1799,15 +2063,19 @@ fn build_authority_observation_decodes_resolver_record_logs() -> Result<()> {
 
 #[test]
 fn build_authority_observation_decodes_wrapper_logs() -> Result<()> {
+    let event_topics = AuthorityEventTopics::for_tests();
     let alice = observe_registrar_eth_name_with_version("alice", ENS_NORMALIZER_VERSION)?;
     let dns_name = dns_encoded_name(&["alice", "eth"]);
     let owner = "0x0000000000000000000000000000000000000001";
 
-    let wrapped_observation = build_authority_observation(&wrapper_raw_log(
-        vec![name_wrapped_topic0(), alice.namehash.clone()],
-        encode_name_wrapped_log_data(&dns_name, owner, 8, 1_800_000_000),
-        0,
-    ))?
+    let wrapped_observation = build_authority_observation(
+        &wrapper_raw_log(
+            vec![name_wrapped_topic0(), alice.namehash.clone()],
+            encode_name_wrapped_log_data(&dns_name, owner, 8, 1_800_000_000),
+            0,
+        ),
+        &event_topics,
+    )?
     .context("NameWrapped observation should decode")?;
     assert_eq!(
         wrapped_observation,
@@ -1826,11 +2094,14 @@ fn build_authority_observation_decodes_wrapper_logs() -> Result<()> {
         cased_namehash,
         namehash_hex(&[b"sean".to_vec(), b"decashed".to_vec(), b"com".to_vec(),])
     );
-    let cased_wrapped_observation = build_authority_observation(&wrapper_raw_log(
-        vec![name_wrapped_topic0(), cased_namehash.clone()],
-        encode_name_wrapped_log_data(&cased_dns_name, owner, 0, 0),
-        99,
-    ))?
+    let cased_wrapped_observation = build_authority_observation(
+        &wrapper_raw_log(
+            vec![name_wrapped_topic0(), cased_namehash.clone()],
+            encode_name_wrapped_log_data(&cased_dns_name, owner, 0, 0),
+            99,
+        ),
+        &event_topics,
+    )?
     .context("cased NameWrapped observation should decode")?;
     let AuthorityObservation::WrapperNameWrapped(cased_wrapped_observation) =
         cased_wrapped_observation
@@ -1847,11 +2118,14 @@ fn build_authority_observation_decodes_wrapper_logs() -> Result<()> {
         "sean.decashed.com"
     );
 
-    let unwrapped_observation = build_authority_observation(&wrapper_raw_log(
-        vec![name_unwrapped_topic0(), alice.namehash.clone()],
-        encode_name_unwrapped_log_data("0x0000000000000000000000000000000000000002"),
-        1,
-    ))?
+    let unwrapped_observation = build_authority_observation(
+        &wrapper_raw_log(
+            vec![name_unwrapped_topic0(), alice.namehash.clone()],
+            encode_name_unwrapped_log_data("0x0000000000000000000000000000000000000002"),
+            1,
+        ),
+        &event_topics,
+    )?
     .context("NameUnwrapped observation should decode")?;
     assert_eq!(
         unwrapped_observation,
@@ -1862,11 +2136,14 @@ fn build_authority_observation_decodes_wrapper_logs() -> Result<()> {
         })
     );
 
-    let fuses_observation = build_authority_observation(&wrapper_raw_log(
-        vec![fuses_set_topic0(), alice.namehash.clone()],
-        encode_fuses_set_log_data(10),
-        2,
-    ))?
+    let fuses_observation = build_authority_observation(
+        &wrapper_raw_log(
+            vec![fuses_set_topic0(), alice.namehash.clone()],
+            encode_fuses_set_log_data(10),
+            2,
+        ),
+        &event_topics,
+    )?
     .context("FusesSet observation should decode")?;
     assert_eq!(
         fuses_observation,
@@ -1877,11 +2154,14 @@ fn build_authority_observation_decodes_wrapper_logs() -> Result<()> {
         })
     );
 
-    let expiry_observation = build_authority_observation(&wrapper_raw_log(
-        vec![expiry_extended_topic0(), alice.namehash.clone()],
-        encode_expiry_extended_log_data(1_800_000_100),
-        3,
-    ))?
+    let expiry_observation = build_authority_observation(
+        &wrapper_raw_log(
+            vec![expiry_extended_topic0(), alice.namehash.clone()],
+            encode_expiry_extended_log_data(1_800_000_100),
+            3,
+        ),
+        &event_topics,
+    )?
     .context("ExpiryExtended observation should decode")?;
     assert_eq!(
         expiry_observation,
@@ -1892,22 +2172,25 @@ fn build_authority_observation_decodes_wrapper_logs() -> Result<()> {
         })
     );
 
-    let transfer_observation = build_authority_observation(&wrapper_raw_log(
-        vec![
-            transfer_single_topic0(),
-            hex_string(&abi_word_address(
-                "0x00000000000000000000000000000000000000ff",
-            )),
-            hex_string(&abi_word_address(
-                "0x0000000000000000000000000000000000000001",
-            )),
-            hex_string(&abi_word_address(
-                "0x0000000000000000000000000000000000000002",
-            )),
-        ],
-        encode_transfer_single_log_data(&alice.namehash, 1),
-        4,
-    ))?
+    let transfer_observation = build_authority_observation(
+        &wrapper_raw_log(
+            vec![
+                transfer_single_topic0(),
+                hex_string(&abi_word_address(
+                    "0x00000000000000000000000000000000000000ff",
+                )),
+                hex_string(&abi_word_address(
+                    "0x0000000000000000000000000000000000000001",
+                )),
+                hex_string(&abi_word_address(
+                    "0x0000000000000000000000000000000000000002",
+                )),
+            ],
+            encode_transfer_single_log_data(&alice.namehash, 1),
+            4,
+        ),
+        &event_topics,
+    )?
     .context("TransferSingle observation should decode")?;
     assert_eq!(
         transfer_observation,
@@ -5917,13 +6200,13 @@ async fn sync_ens_v1_unwrapped_authority_emits_basenames_base_authority_events_i
                 log_index: 0,
                 emitting_address: "0x00000000000000000000000000000000000000aa".to_owned(),
                 topics: vec![
-                    name_registered_topic0(),
+                    basenames_name_registered_topic0(),
                     keccak256_hex(b"alice"),
                     hex_string(&abi_word_address(
                         "0x0000000000000000000000000000000000000001",
                     )),
                 ],
-                data: encode_registrar_name_registered_log_data("alice", 1_700_010_000),
+                data: encode_basenames_registrar_name_registered_log_data("alice", 1_700_010_000),
                 canonicality_state: CanonicalityState::Canonical,
             },
             RawLog {
@@ -5949,7 +6232,7 @@ async fn sync_ens_v1_unwrapped_authority_emits_basenames_base_authority_events_i
                 log_index: 2,
                 emitting_address: "0x00000000000000000000000000000000000000cc".to_owned(),
                 topics: vec![
-                    text_changed_topic0(),
+                    text_changed_with_value_topic0(),
                     alice.namehash.clone(),
                     keccak256_hex(b"com.twitter"),
                 ],
@@ -5977,7 +6260,7 @@ async fn sync_ens_v1_unwrapped_authority_emits_basenames_base_authority_events_i
                 log_index: 4,
                 emitting_address: pending_resolver_address.to_owned(),
                 topics: vec![
-                    text_changed_topic0(),
+                    text_changed_with_value_topic0(),
                     alice.namehash.clone(),
                     keccak256_hex(b"com.github"),
                 ],
@@ -6301,13 +6584,13 @@ async fn sync_ens_v1_unwrapped_authority_gates_basenames_dynamic_resolver_facts_
                 log_index: 0,
                 emitting_address: registrar_address.to_owned(),
                 topics: vec![
-                    name_registered_topic0(),
+                    basenames_name_registered_topic0(),
                     keccak256_hex(b"alice"),
                     hex_string(&abi_word_address(
                         "0x0000000000000000000000000000000000000001",
                     )),
                 ],
-                data: encode_registrar_name_registered_log_data("alice", 1_700_010_000),
+                data: encode_basenames_registrar_name_registered_log_data("alice", 1_700_010_000),
                 canonicality_state: CanonicalityState::Canonical,
             },
             RawLog {

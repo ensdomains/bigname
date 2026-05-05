@@ -62,9 +62,16 @@ proxy_kind = "none"
 # (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L133 @ ens_v1@91c966f).
 start_block = 22764821
 
-# Legacy registrar-controller event ABI fragments consumed by block-derived
-# preimage observation. Newer controller variants remain a follow-up because
-# they share event names with different canonical signatures.
+# Registrar event ABI fragments consumed by manifest-derived authority topic
+# lookup and block-derived preimage observation.
+# BaseRegistrar ERC721 transfer admission follows the pinned ENS subgraph:
+# (upstream: .refs/ens_subgraph/subgraph.yaml:L141 @ ens_subgraph@723f1b6).
+[[abi.events]]
+name = "Transfer"
+fragment = "event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)"
+emitter_roles = ["registrar"]
+normalized_events = ["TokenControlTransferred"]
+
 # NameRegistered legacy-controller admission follows the pinned ENS subgraph:
 # (upstream: .refs/ens_subgraph/subgraph.yaml:L162 @ ens_subgraph@723f1b6)
 # (upstream: .refs/ens_subgraph/subgraph.yaml:L163 @ ens_subgraph@723f1b6)
@@ -73,12 +80,52 @@ start_block = 22764821
 name = "NameRegistered"
 fragment = "event NameRegistered(string name, bytes32 indexed label, address indexed owner, uint256 cost, uint256 expires)"
 emitter_roles = ["legacy_registrar_controller"]
-normalized_events = ["PreimageObserved"]
+normalized_events = ["RegistrationGranted", "PreimageObserved"]
+
+# NameRegistered wrapped-controller admission follows the pinned ENS subgraph:
+# (upstream: .refs/ens_subgraph/subgraph.yaml:L187 @ ens_subgraph@723f1b6)
+# (upstream: .refs/ens_subgraph/subgraph.yaml:L188 @ ens_subgraph@723f1b6)
+# (upstream: .refs/ens_subgraph/subgraph.yaml:L189 @ ens_subgraph@723f1b6).
+[[abi.events]]
+name = "NameRegistered"
+fragment = "event NameRegistered(string name, bytes32 indexed label, address indexed owner, uint256 baseCost, uint256 premium, uint256 expires)"
+emitter_roles = ["wrapped_registrar_controller"]
+normalized_events = ["RegistrationGranted"]
+
+# NameRegistered unwrapped-controller admission follows the pinned ENSv1
+# controller event declaration:
+# (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L229 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L230 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L231 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L232 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L233 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L234 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L235 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L236 @ ens_v1@91c966f).
+[[abi.events]]
+name = "NameRegistered"
+fragment = "event NameRegistered(string name, bytes32 indexed label, address indexed owner, uint256 baseCost, uint256 premium, uint256 expires, bytes32 referrer)"
+emitter_roles = ["unwrapped_registrar_controller"]
+normalized_events = ["RegistrationGranted"]
 
 # NameRenewed legacy-controller admission follows the pinned ENS subgraph:
 # (upstream: .refs/ens_subgraph/subgraph.yaml:L166 @ ens_subgraph@723f1b6).
 [[abi.events]]
 name = "NameRenewed"
 fragment = "event NameRenewed(string name, bytes32 indexed label, uint256 cost, uint256 expires)"
-emitter_roles = ["legacy_registrar_controller"]
-normalized_events = ["PreimageObserved"]
+emitter_roles = ["legacy_registrar_controller", "wrapped_registrar_controller"]
+normalized_events = ["RegistrationRenewed", "PreimageObserved"]
+
+# NameRenewed unwrapped-controller admission follows the pinned ENSv1
+# controller event declaration:
+# (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L246 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L247 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L248 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L249 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L250 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L251 @ ens_v1@91c966f).
+[[abi.events]]
+name = "NameRenewed"
+fragment = "event NameRenewed(string name, bytes32 indexed label, uint256 cost, uint256 expires, bytes32 referrer)"
+emitter_roles = ["unwrapped_registrar_controller"]
+normalized_events = ["RegistrationRenewed"]

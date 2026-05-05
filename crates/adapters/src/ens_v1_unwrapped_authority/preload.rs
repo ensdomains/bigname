@@ -39,14 +39,19 @@ pub(super) async fn preload_restricted_name_histories(
     known_name_refs_by_namehash: &mut HashMap<String, ObservationRef>,
     namehash_to_labelhash: &mut HashMap<String, String>,
     block_index: &CanonicalBlockIndex,
+    event_topics: &AuthorityEventTopics,
 ) -> Result<()> {
     let Some(first_log) = raw_logs.first() else {
         return Ok(());
     };
     let boundary_block = first_log.block_number;
     let boundary_timestamp = first_log.block_timestamp;
-    let labelhashes =
-        restricted_replay_labelhashes(raw_logs, known_names_by_namehash, namehash_to_labelhash)?;
+    let labelhashes = restricted_replay_labelhashes(
+        raw_logs,
+        known_names_by_namehash,
+        namehash_to_labelhash,
+        event_topics,
+    )?;
     if labelhashes.is_empty() {
         return Ok(());
     }
@@ -133,8 +138,13 @@ pub(super) async fn preload_restricted_name_histories(
         .collect::<Vec<_>>();
     let mut registrar_state =
         load_latest_registrar_state_before_block(pool, &registrar_scopes, boundary_block).await?;
-    let selected_registrar_state =
-        load_selected_registrar_state_before_replay(pool, &logical_name_ids, raw_logs).await?;
+    let selected_registrar_state = load_selected_registrar_state_before_replay(
+        pool,
+        &logical_name_ids,
+        raw_logs,
+        event_topics,
+    )
+    .await?;
     for (logical_name_id, selected_state) in selected_registrar_state {
         let state = registrar_state.entry(logical_name_id).or_default();
         if selected_state.expiry.is_some() {
@@ -151,8 +161,12 @@ pub(super) async fn preload_restricted_name_histories(
     }
     let selected_wrapper_state =
         load_selected_wrapper_state_before_replay(pool, &logical_name_ids, raw_logs).await?;
-    let resolver_scopes =
-        resolver_state_scopes_for_selected_names(raw_logs, known_names_by_namehash, &labelhashes)?;
+    let resolver_scopes = resolver_state_scopes_for_selected_names(
+        raw_logs,
+        known_names_by_namehash,
+        &labelhashes,
+        event_topics,
+    )?;
     let mut resolver_state =
         load_latest_resolver_state_before_block(pool, &logical_name_ids, boundary_block).await?;
     let raw_resolver_state = load_latest_registry_resolver_raw_state_before_block(
@@ -160,6 +174,7 @@ pub(super) async fn preload_restricted_name_histories(
         chain,
         &resolver_scopes,
         boundary_block,
+        event_topics,
     )
     .await?;
     for (logical_name_id, resolver) in raw_resolver_state {
@@ -582,12 +597,13 @@ async fn load_selected_registrar_state_before_replay(
     pool: &PgPool,
     _logical_name_ids: &[String],
     raw_logs: &[AuthorityRawLogRow],
+    event_topics: &AuthorityEventTopics,
 ) -> Result<HashMap<String, PreloadedRegistrarState>> {
     if raw_logs.is_empty() {
         return Ok(HashMap::new());
     }
 
-    let event_identities = selected_registrar_event_identities(raw_logs)?;
+    let event_identities = selected_registrar_event_identities(raw_logs, event_topics)?;
     if event_identities.is_empty() {
         return Ok(HashMap::new());
     }
@@ -805,10 +821,13 @@ async fn load_selected_registrar_state_before_replay(
     Ok(state)
 }
 
-fn selected_registrar_event_identities(raw_logs: &[AuthorityRawLogRow]) -> Result<Vec<String>> {
+fn selected_registrar_event_identities(
+    raw_logs: &[AuthorityRawLogRow],
+    event_topics: &AuthorityEventTopics,
+) -> Result<Vec<String>> {
     let mut identities = BTreeSet::<String>::new();
     for raw_log in raw_logs {
-        let Some(observation) = build_authority_observation(raw_log)? else {
+        let Some(observation) = build_authority_observation(raw_log, event_topics)? else {
             continue;
         };
         match observation {
@@ -958,10 +977,11 @@ fn restricted_replay_labelhashes(
     raw_logs: &[AuthorityRawLogRow],
     known_names_by_namehash: &HashMap<String, NameMetadata>,
     namehash_to_labelhash: &HashMap<String, String>,
+    event_topics: &AuthorityEventTopics,
 ) -> Result<Vec<String>> {
     let mut labelhashes = BTreeSet::<String>::new();
     for raw_log in raw_logs {
-        let Some(observation) = build_authority_observation(raw_log)? else {
+        let Some(observation) = build_authority_observation(raw_log, event_topics)? else {
             continue;
         };
         if let Some(namehash) = observation_namehash(&observation) {
@@ -983,12 +1003,13 @@ fn resolver_state_scopes_for_selected_names(
     raw_logs: &[AuthorityRawLogRow],
     known_names_by_namehash: &mut HashMap<String, NameMetadata>,
     labelhashes: &[String],
+    event_topics: &AuthorityEventTopics,
 ) -> Result<Vec<ResolverStateScope>> {
     if labelhashes.is_empty() {
         return Ok(Vec::new());
     }
     for raw_log in raw_logs {
-        let Some(observation) = build_authority_observation(raw_log)? else {
+        let Some(observation) = build_authority_observation(raw_log, event_topics)? else {
             continue;
         };
         let name = match observation {
@@ -1119,10 +1140,14 @@ async fn load_latest_registry_resolver_raw_state_before_block(
     chain: &str,
     scopes: &[ResolverStateScope],
     boundary_block: i64,
+    event_topics: &AuthorityEventTopics,
 ) -> Result<HashMap<String, String>> {
     if scopes.is_empty() {
         return Ok(HashMap::new());
     }
+    let Some(new_resolver_topic0) = event_topics.optional_topic0(NEW_RESOLVER_SIGNATURE) else {
+        return Ok(HashMap::new());
+    };
 
     let logical_name_ids = scopes
         .iter()
@@ -1198,7 +1223,7 @@ async fn load_latest_registry_resolver_raw_state_before_block(
     .bind(namehashes)
     .bind(registry_source_families)
     .bind(boundary_block)
-    .bind(new_resolver_topic0())
+    .bind(new_resolver_topic0)
     .fetch_all(pool)
     .await
     .context("failed to preload latest registry resolver raw state before restricted replay")?;

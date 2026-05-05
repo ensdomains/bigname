@@ -15,6 +15,7 @@ pub(in crate::ens_v1_unwrapped_authority) async fn load_authority_raw_logs(
     chain: &str,
     active_emitters: &[ActiveEmitter],
     generic_resolver_event_sources: &[GenericResolverEventSource],
+    event_topics: &AuthorityEventTopics,
     restrict_to_block_hashes: bool,
     block_hashes: &[String],
     source_scope: Option<&[AuthorityRawLogSourceScopeTarget]>,
@@ -25,6 +26,7 @@ pub(in crate::ens_v1_unwrapped_authority) async fn load_authority_raw_logs(
         chain,
         active_emitters,
         generic_resolver_event_sources,
+        event_topics,
         restrict_to_block_hashes,
         block_hashes,
         source_scope,
@@ -134,6 +136,7 @@ async fn load_authority_raw_logs_internal(
     chain: &str,
     active_emitters: &[ActiveEmitter],
     generic_resolver_event_sources: &[GenericResolverEventSource],
+    event_topics: &AuthorityEventTopics,
     restrict_to_block_hashes: bool,
     block_hashes: &[String],
     source_scope: Option<&[AuthorityRawLogSourceScopeTarget]>,
@@ -359,6 +362,7 @@ async fn load_authority_raw_logs_internal(
             pool,
             chain,
             generic_resolver_event_sources,
+            event_topics,
             restrict_to_block_hashes,
             block_hashes,
             block_range,
@@ -401,6 +405,7 @@ async fn load_generic_resolver_event_raw_logs(
     pool: &PgPool,
     chain: &str,
     sources: &[GenericResolverEventSource],
+    event_topics: &AuthorityEventTopics,
     restrict_to_block_hashes: bool,
     block_hashes: &[String],
     block_range: Option<(i64, i64)>,
@@ -417,7 +422,7 @@ async fn load_generic_resolver_event_raw_logs(
         .iter()
         .map(|source| source.effective_to_block.unwrap_or(i64::MAX))
         .collect::<Vec<_>>();
-    let topic0s = ens_v1_resolver_event_topic0s();
+    let topic0s = event_topics.ens_resolver_event_topic0s()?;
     let (has_block_range, from_block, to_block) = block_range
         .map(|(from_block, to_block)| (true, from_block, to_block))
         .unwrap_or((false, 0, 0));
