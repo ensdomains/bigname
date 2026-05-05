@@ -1,9 +1,6 @@
 #![recursion_limit = "256"]
 
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    fmt::Write as _,
-};
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, bail};
 use axum::{

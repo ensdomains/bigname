@@ -1559,6 +1559,7 @@ dependencies = [
  "bigname-test-support",
  "clap",
  "futures-util",
+ "hex",
  "serde",
  "serde_json",
  "sqlx",
