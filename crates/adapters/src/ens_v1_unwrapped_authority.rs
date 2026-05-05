@@ -13,7 +13,6 @@ use bigname_storage::{
     upsert_surface_bindings, upsert_token_lineages,
 };
 use serde_json::{Map, Value, json};
-use sha3::{Digest, Keccak256};
 use sqlx::{
     PgPool, Row,
     types::{Uuid, time::OffsetDateTime},

@@ -4,6 +4,8 @@ use anyhow::{Context, Result, bail};
 use bigname_manifests::{WatchedContractSource, load_watched_contracts};
 use sqlx::{PgPool, Row, types::Uuid};
 
+use crate::adapter_manifest::watched_contract_manifest_ids;
+
 use super::{
     constants::*,
     types::{ActiveEmitter, ActiveManifestMetadata, RegistryRawLogSourceScopeTarget},
@@ -26,19 +28,7 @@ pub(super) async fn load_active_emitters(
         return Ok(Vec::new());
     }
 
-    let manifest_ids = watched_contracts
-        .iter()
-        .map(|contract| {
-            contract.source_manifest_id.with_context(|| {
-                format!(
-                    "watched contract {} on {} is missing source_manifest_id",
-                    contract.address, contract.chain
-                )
-            })
-        })
-        .collect::<Result<HashSet<_>>>()?
-        .into_iter()
-        .collect::<Vec<_>>();
+    let manifest_ids = watched_contract_manifest_ids(&watched_contracts)?;
     let active_manifests = load_active_manifest_metadata(pool, &manifest_ids).await?;
 
     let mut emitter_candidates = Vec::new();
@@ -274,11 +264,7 @@ pub(super) fn emitter_active_at_block(emitter: &ActiveEmitter, block_number: i64
 }
 
 pub(super) fn source_rank(source: WatchedContractSource) -> i32 {
-    match source {
-        WatchedContractSource::ManifestRoot => 0,
-        WatchedContractSource::ManifestContract => 1,
-        WatchedContractSource::DiscoveryEdge => 2,
-    }
+    crate::adapter_manifest::source_rank(source)
 }
 
 pub(super) fn candidate_precedes(candidate: &ActiveEmitter, current: &ActiveEmitter) -> bool {

@@ -1,6 +1,6 @@
+use alloy_primitives::{hex, keccak256};
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
-use sha3::{Digest, Keccak256};
 
 use super::{
     ProviderBlock, ProviderBlockBundle, ProviderLog, ProviderReceipt, ProviderTransaction,
@@ -307,33 +307,15 @@ pub(super) fn parse_hex_bytes(value: &str) -> Result<Vec<u8>> {
         bail!("invalid hex byte string with odd length");
     }
 
-    let mut bytes = Vec::with_capacity(value.len() / 2);
-    let chars = value.as_bytes();
-    let mut index = 0;
-    while index < chars.len() {
-        let byte =
-            std::str::from_utf8(&chars[index..index + 2]).context("invalid UTF-8 in hex string")?;
-        bytes.push(
-            u8::from_str_radix(byte, 16)
-                .with_context(|| format!("failed to parse hex byte {byte}"))?,
-        );
-        index += 2;
-    }
-    Ok(bytes)
+    hex::decode(value).with_context(|| format!("failed to parse hex bytes {value}"))
 }
 
 pub(super) fn keccak256_hex(bytes: &[u8]) -> String {
-    let mut hasher = Keccak256::new();
-    hasher.update(bytes);
-    hex_string(&hasher.finalize())
+    hex_string(keccak256(bytes).as_slice())
 }
 
 fn hex_string(bytes: &[u8]) -> String {
-    let mut output = String::from("0x");
-    for byte in bytes {
-        output.push_str(&format!("{byte:02x}"));
-    }
-    output
+    format!("0x{}", hex::encode(bytes))
 }
 
 pub(super) fn normalize_hash(value: &str) -> String {

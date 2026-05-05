@@ -1533,12 +1533,12 @@ checksum = "d86b93f97252c47b41663388e6d155714a9d0c398b99f1005cbc5f978b29f445"
 name = "bigname-adapters"
 version = "0.1.0"
 dependencies = [
+ "alloy-primitives",
  "anyhow",
  "bigname-manifests",
  "bigname-storage",
  "futures-util",
  "serde_json",
- "sha3",
  "sqlx",
  "tokio",
  "tracing",
@@ -1575,21 +1575,19 @@ version = "0.1.0"
 name = "bigname-execution"
 version = "0.1.0"
 dependencies = [
+ "alloy-json-rpc",
  "alloy-primitives",
  "alloy-sol-types",
+ "alloy-transport-http",
  "anyhow",
  "bigname-storage",
- "bytes",
  "futures-util",
- "http-body-util",
- "hyper",
- "hyper-util",
  "reqwest 0.13.2",
  "serde",
  "serde_json",
- "sha3",
  "sqlx",
  "tokio",
+ "tower",
  "uuid",
 ]
 
@@ -1598,6 +1596,7 @@ name = "bigname-indexer"
 version = "0.1.0"
 dependencies = [
  "alloy-consensus",
+ "alloy-json-rpc",
  "alloy-primitives",
  "alloy-rpc-types-eth",
  "anyhow",
@@ -1613,7 +1612,6 @@ dependencies = [
  "reth-ethereum",
  "serde",
  "serde_json",
- "sha3",
  "sqlx",
  "tokio",
  "tracing",

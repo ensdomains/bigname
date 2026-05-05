@@ -1,10 +1,12 @@
 use std::collections::HashMap;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use bigname_storage::CanonicalityState;
 use sqlx::{PgPool, Row};
 
-use super::{active_emitters::ActiveEmitter, decoding::normalize_address};
+use crate::ens_v2_common::{normalize_address, parse_canonicality_state, source_scope_bindings};
+
+use super::{SOURCE_FAMILY_ENS_V2_REGISTRAR_L1, active_emitters::ActiveEmitter};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct RegistrarRawLogRow {
@@ -43,7 +45,7 @@ pub(super) async fn load_registrar_raw_logs(
         .collect::<HashMap<_, _>>();
     let watched_addresses = emitters_by_address.keys().cloned().collect::<Vec<_>>();
     let (scope_addresses, scope_from_blocks, scope_to_blocks) =
-        registrar_source_scope_bindings(source_scope);
+        source_scope_bindings(source_scope, SOURCE_FAMILY_ENS_V2_REGISTRAR_L1);
     if source_scope.is_some() && scope_addresses.is_empty() {
         return Ok(Vec::new());
     }
@@ -135,32 +137,4 @@ pub(super) async fn load_registrar_raw_logs(
             })
         })
         .collect()
-}
-
-fn registrar_source_scope_bindings(
-    source_scope: Option<&[(String, String, i64, i64)]>,
-) -> (Vec<String>, Vec<i64>, Vec<i64>) {
-    let mut addresses = Vec::new();
-    let mut from_blocks = Vec::new();
-    let mut to_blocks = Vec::new();
-    for (source_family, address, from_block, to_block) in source_scope.unwrap_or(&[]) {
-        if source_family != "ens_v2_registrar_l1" {
-            continue;
-        }
-        addresses.push(address.to_ascii_lowercase());
-        from_blocks.push(*from_block);
-        to_blocks.push(*to_block);
-    }
-    (addresses, from_blocks, to_blocks)
-}
-
-fn parse_canonicality_state(value: &str) -> Result<CanonicalityState> {
-    match value {
-        "observed" => Ok(CanonicalityState::Observed),
-        "canonical" => Ok(CanonicalityState::Canonical),
-        "safe" => Ok(CanonicalityState::Safe),
-        "finalized" => Ok(CanonicalityState::Finalized),
-        "orphaned" => Ok(CanonicalityState::Orphaned),
-        _ => bail!("unknown canonicality_state value {value}"),
-    }
 }

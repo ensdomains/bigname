@@ -14,6 +14,7 @@ use crate::{
         hash_pinned_backfill_range_specs, run_resumable_hash_pinned_backfill_job_concurrently,
     },
     backfill_lease_expires_at, default_backfill_lease_owner, deployment_profile_from_manifest_root,
+    ens_v1_resolver::{GENERIC_SOURCE_SCOPE_ADDRESS, SOURCE_FAMILY_ENS_V1_RESOLVER_L1},
     generated_backfill_lease_token,
     provider::{ChainProviderOps, ProviderRegistry},
     reconciliation::{
@@ -42,8 +43,6 @@ const BOOTSTRAP_BACKFILL_LEASE_DURATION_SECS: u64 = 300;
 pub(crate) const DEFAULT_BOOTSTRAP_BACKFILL_WORKERS: usize = 0;
 pub(crate) const DEFAULT_BOOTSTRAP_BACKFILL_RANGE_BLOCKS: i64 = 50_000;
 const MAX_AUTOMATIC_BOOTSTRAP_BACKFILL_WORKERS: usize = 4;
-const SOURCE_FAMILY_ENS_V1_RESOLVER_L1: &str = "ens_v1_resolver_l1";
-const GENERIC_SOURCE_SCOPE_ADDRESS: &str = "*";
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct BootstrapBackfillOutcome {

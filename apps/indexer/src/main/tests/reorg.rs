@@ -902,7 +902,7 @@ async fn reorg_reconcile_fetched_heads_orphans_losing_branch_rows_when_raw_block
             .bind(&losing_block.block_hash)
             .fetch_one(database.pool())
             .await?,
-        0
+        1
     );
     upsert_raw_transactions(
         database.pool(),

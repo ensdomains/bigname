@@ -9,6 +9,7 @@ use std::{
 };
 
 use anyhow::Context;
+use alloy_primitives::keccak256;
 use bigname_manifests::load_discovery_admission_state;
 use bigname_storage::{
     ExecutionCacheKey, ExecutionOutcome, ExecutionTrace, ExecutionTraceStep, NameSurface, Resource,
@@ -2060,19 +2061,11 @@ fn namehash_for_dns_name(dns_name: &[u8]) -> String {
 
     let mut node = [0u8; 32];
     for label in labels.iter().rev() {
-        let label_hash = {
-            let mut hasher = Keccak256::new();
-            hasher.update(label);
-            let digest = hasher.finalize();
-            let mut output = [0u8; 32];
-            output.copy_from_slice(&digest);
-            output
-        };
-        let mut hasher = Keccak256::new();
-        hasher.update(node);
-        hasher.update(label_hash);
-        let digest = hasher.finalize();
-        node.copy_from_slice(&digest);
+        let label_hash = keccak256(label);
+        let mut combined = [0u8; 64];
+        combined[..32].copy_from_slice(&node);
+        combined[32..].copy_from_slice(label_hash.as_slice());
+        node.copy_from_slice(keccak256(combined).as_slice());
     }
 
     hex_string(&node)

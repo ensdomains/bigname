@@ -3,14 +3,17 @@
 #[cfg(test)]
 use std::sync::{Arc, OnceLock};
 
+mod adapter_manifest;
 mod block_derived_normalized_events;
 mod ens_v1_reverse_claim;
 mod ens_v1_subregistry_discovery;
 mod ens_v1_unwrapped_authority;
+mod ens_v2_common;
 mod ens_v2_permissions;
 mod ens_v2_registrar;
 mod ens_v2_registry;
 mod ens_v2_resolver;
+mod evm_abi;
 mod manifest_normalized_events;
 mod registry_migration_cache;
 

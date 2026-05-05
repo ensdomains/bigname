@@ -1,9 +1,13 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
+
+use crate::evm_abi::{
+    address_word_hex, dynamic_string, normalize_hex_32, topic_address_hex, u64_topic, u64_word,
+};
 
 use super::{
     constants::*,
     types::{RegistryObservation, RegistryRawLogRow},
-    util::{hex_string, keccak_signature_hex},
+    util::keccak_signature_hex,
 };
 
 pub(super) fn build_registry_observation(
@@ -27,15 +31,15 @@ pub(super) fn build_registry_observation(
                 .get(2)
                 .context("LabelRegistered missing labelHash topic")?,
         )?;
-        let sender = normalize_topic_address(
+        let sender = topic_address_hex(
             raw_log
                 .topics
                 .get(3)
                 .context("LabelRegistered missing sender topic")?,
         )?;
-        let label = decode_dynamic_string(&raw_log.data, 0)?;
-        let owner = decode_address_word(&raw_log.data, 1)?;
-        let expiry = decode_u64_word(&raw_log.data, 2)?;
+        let label = dynamic_string(&raw_log.data, 0)?;
+        let owner = address_word_hex(&raw_log.data, 1)?;
+        let expiry = u64_word(&raw_log.data, 2)?;
         return Ok(Some(RegistryObservation::LabelRegistered {
             token_id,
             labelhash,
@@ -60,14 +64,14 @@ pub(super) fn build_registry_observation(
                 .get(2)
                 .context("LabelReserved missing labelHash topic")?,
         )?;
-        let sender = normalize_topic_address(
+        let sender = topic_address_hex(
             raw_log
                 .topics
                 .get(3)
                 .context("LabelReserved missing sender topic")?,
         )?;
-        let label = decode_dynamic_string(&raw_log.data, 0)?;
-        let expiry = decode_u64_word(&raw_log.data, 1)?;
+        let label = dynamic_string(&raw_log.data, 0)?;
+        let expiry = u64_word(&raw_log.data, 1)?;
         return Ok(Some(RegistryObservation::LabelReserved {
             token_id,
             labelhash,
@@ -85,7 +89,7 @@ pub(super) fn build_registry_observation(
                 .get(1)
                 .context("LabelUnregistered missing tokenId topic")?,
         )?;
-        let sender = normalize_topic_address(
+        let sender = topic_address_hex(
             raw_log
                 .topics
                 .get(2)
@@ -105,13 +109,13 @@ pub(super) fn build_registry_observation(
                 .get(1)
                 .context("ExpiryUpdated missing tokenId topic")?,
         )?;
-        let new_expiry = decode_u64_topic(
+        let new_expiry = u64_topic(
             raw_log
                 .topics
                 .get(2)
                 .context("ExpiryUpdated missing newExpiry topic")?,
         )?;
-        let sender = normalize_topic_address(
+        let sender = topic_address_hex(
             raw_log
                 .topics
                 .get(3)
@@ -132,13 +136,13 @@ pub(super) fn build_registry_observation(
                 .get(1)
                 .context("SubregistryUpdated missing tokenId topic")?,
         )?;
-        let subregistry = normalize_topic_address(
+        let subregistry = topic_address_hex(
             raw_log
                 .topics
                 .get(2)
                 .context("SubregistryUpdated missing subregistry topic")?,
         )?;
-        let sender = normalize_topic_address(
+        let sender = topic_address_hex(
             raw_log
                 .topics
                 .get(3)
@@ -159,13 +163,13 @@ pub(super) fn build_registry_observation(
                 .get(1)
                 .context("ResolverUpdated missing tokenId topic")?,
         )?;
-        let resolver = normalize_topic_address(
+        let resolver = topic_address_hex(
             raw_log
                 .topics
                 .get(2)
                 .context("ResolverUpdated missing resolver topic")?,
         )?;
-        let sender = normalize_topic_address(
+        let sender = topic_address_hex(
             raw_log
                 .topics
                 .get(3)
@@ -220,19 +224,19 @@ pub(super) fn build_registry_observation(
     }
 
     if topic0.eq_ignore_ascii_case(&keccak_signature_hex(PARENT_UPDATED_SIGNATURE)) {
-        let parent = normalize_topic_address(
+        let parent = topic_address_hex(
             raw_log
                 .topics
                 .get(1)
                 .context("ParentUpdated missing parent topic")?,
         )?;
-        let sender = normalize_topic_address(
+        let sender = topic_address_hex(
             raw_log
                 .topics
                 .get(2)
                 .context("ParentUpdated missing sender topic")?,
         )?;
-        let label = decode_dynamic_string(&raw_log.data, 0)?;
+        let label = dynamic_string(&raw_log.data, 0)?;
         return Ok(Some(RegistryObservation::ParentUpdated {
             parent,
             label,
@@ -242,105 +246,4 @@ pub(super) fn build_registry_observation(
     }
 
     Ok(None)
-}
-
-fn decode_dynamic_string(data: &[u8], offset_word_index: usize) -> Result<String> {
-    let offset = decode_usize_word(data, offset_word_index)?;
-    if data.len() < offset + 32 {
-        bail!("dynamic string payload is missing length word");
-    }
-    let length = decode_usize_at(data, offset)?;
-    let start = offset + 32;
-    let end = start + length;
-    if data.len() < end {
-        bail!("dynamic string payload is shorter than declared length");
-    }
-    String::from_utf8(data[start..end].to_vec()).context("dynamic string is not valid UTF-8")
-}
-
-fn decode_address_word(data: &[u8], word_index: usize) -> Result<String> {
-    let word = word_at(data, word_index)?;
-    Ok(format!("0x{}", hex_string(&word[12..32])))
-}
-
-fn decode_u64_word(data: &[u8], word_index: usize) -> Result<i64> {
-    let word = word_at(data, word_index)?;
-    if word[..24].iter().any(|byte| *byte != 0) {
-        bail!("u64 ABI word exceeds supported width");
-    }
-    let mut bytes = [0u8; 8];
-    bytes.copy_from_slice(&word[24..32]);
-    i64::try_from(u64::from_be_bytes(bytes)).context("u64 ABI word does not fit in i64")
-}
-
-fn decode_usize_word(data: &[u8], word_index: usize) -> Result<usize> {
-    let word = word_at(data, word_index)?;
-    decode_usize(word)
-}
-
-fn decode_usize_at(data: &[u8], offset: usize) -> Result<usize> {
-    if data.len() < offset + 32 {
-        bail!("ABI word offset is outside payload");
-    }
-    decode_usize(&data[offset..offset + 32])
-}
-
-fn decode_usize(word: &[u8]) -> Result<usize> {
-    if word.len() != 32 {
-        bail!("ABI word must be exactly 32 bytes");
-    }
-    if word[..24].iter().any(|byte| *byte != 0) {
-        bail!("ABI word exceeds supported usize width");
-    }
-    let mut bytes = [0u8; 8];
-    bytes.copy_from_slice(&word[24..32]);
-    usize::try_from(u64::from_be_bytes(bytes)).context("ABI word does not fit in usize")
-}
-
-fn word_at(data: &[u8], word_index: usize) -> Result<&[u8]> {
-    let start = word_index
-        .checked_mul(32)
-        .context("ABI word index overflow")?;
-    let end = start + 32;
-    data.get(start..end)
-        .with_context(|| format!("ABI data missing word {word_index}"))
-}
-
-fn decode_u64_topic(value: &str) -> Result<i64> {
-    let bytes = decode_hex_32(value)?;
-    if bytes[..24].iter().any(|byte| *byte != 0) {
-        bail!("indexed u64 topic exceeds supported width");
-    }
-    let mut tail = [0u8; 8];
-    tail.copy_from_slice(&bytes[24..32]);
-    i64::try_from(u64::from_be_bytes(tail)).context("indexed u64 topic does not fit in i64")
-}
-
-fn normalize_hex_32(value: &str) -> Result<String> {
-    let normalized = value.to_ascii_lowercase();
-    let normalized = if normalized.starts_with("0x") {
-        normalized
-    } else {
-        format!("0x{normalized}")
-    };
-    if normalized.len() != 66 {
-        bail!("expected 32-byte hex value, got {normalized}");
-    }
-    Ok(normalized)
-}
-
-fn decode_hex_32(value: &str) -> Result<[u8; 32]> {
-    let normalized = normalize_hex_32(value)?;
-    let mut output = [0u8; 32];
-    for (index, chunk) in normalized.as_bytes()[2..].chunks(2).enumerate() {
-        let hex = std::str::from_utf8(chunk).context("hex chunk must be UTF-8")?;
-        output[index] =
-            u8::from_str_radix(hex, 16).with_context(|| format!("invalid hex byte {hex}"))?;
-    }
-    Ok(output)
-}
-
-fn normalize_topic_address(value: &str) -> Result<String> {
-    let normalized = normalize_hex_32(value)?;
-    Ok(format!("0x{}", &normalized[26..]))
 }

@@ -676,7 +676,7 @@ async fn replay_normalized_events_uses_only_persisted_canonical_raw_log_inputs()
         &observed_block,
         watched_address,
         0,
-        CanonicalityState::Canonical,
+        CanonicalityState::Observed,
     )
     .await?;
     insert_raw_name_wrapped_log(
@@ -685,7 +685,7 @@ async fn replay_normalized_events_uses_only_persisted_canonical_raw_log_inputs()
         &orphaned_block,
         watched_address,
         0,
-        CanonicalityState::Canonical,
+        CanonicalityState::Orphaned,
     )
     .await?;
     bigname_storage::upsert_raw_payload_cache_metadata(
@@ -1097,7 +1097,6 @@ struct DynamicResolverReplayConfig {
 async fn assert_dynamic_resolver_replay_scope_behavior(
     config: DynamicResolverReplayConfig,
 ) -> Result<()> {
-    let generic_ensv1_resolver = config.resolver_source_family == "ens_v1_resolver_l1";
     let database = TestDatabase::new().await?;
     let reverse_manifest_id = config.manifest_id_base + 1;
     let registry_manifest_id = config.manifest_id_base + 2;
@@ -1478,15 +1477,7 @@ async fn assert_dynamic_resolver_replay_scope_behavior(
         .bind(config.resolver_source_family)
         .fetch_one(database.pool())
         .await?,
-        if generic_ensv1_resolver {
-            vec![
-                config.in_range_raw_name.to_owned(),
-                "pending.example".to_owned(),
-                "unsupported.example".to_owned(),
-            ]
-        } else {
-            vec![config.in_range_raw_name.to_owned()]
-        }
+        vec![config.in_range_raw_name.to_owned()]
     );
     assert_eq!(
         sqlx::query_scalar::<_, Vec<i64>>(
@@ -1503,11 +1494,7 @@ async fn assert_dynamic_resolver_replay_scope_behavior(
         .bind(config.resolver_source_family)
         .fetch_one(database.pool())
         .await?,
-        if generic_ensv1_resolver {
-            vec![7, 8, 9]
-        } else {
-            vec![7]
-        }
+        vec![7]
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
@@ -1516,7 +1503,7 @@ async fn assert_dynamic_resolver_replay_scope_behavior(
         .bind(config.resolver_source_family)
         .fetch_one(database.pool())
         .await?,
-        if generic_ensv1_resolver { 6 } else { 2 }
+        2
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
@@ -1542,11 +1529,7 @@ async fn assert_dynamic_resolver_replay_scope_behavior(
         .bind(config.closed_raw_name)
         .fetch_one(database.pool())
         .await?,
-        if generic_ensv1_resolver {
-            vec!["pending.example".to_owned(), "unsupported.example".to_owned()]
-        } else {
-            Vec::<String>::new()
-        }
+        Vec::<String>::new()
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>(

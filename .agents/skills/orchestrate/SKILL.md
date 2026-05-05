@@ -95,7 +95,7 @@ Pipeline the read-only stages. Parallelize within every stage that allows it. Wo
 
 1. If the real question is what to do next, delegate slice selection to `next_slice_researcher`. Expect 2–4 envelopes back.
 2. For every returned envelope, fire `$change-gate` and `task_designer` in parallel — they are read-only, share no write ownership, and there is no correctness reason to serialize them.
-3. Dispatch workers from `task_designer`'s `concurrent_wave` groupings up to `max_threads=6` across the whole in-flight set. Append every dispatched slice to the slice log.
+3. Dispatch workers from `task_designer`'s `concurrent_wave` groupings up to `max_threads=10` across the whole in-flight set. Append every dispatched slice to the slice log.
 4. As soon as workers are dispatched, if more slices may be available, spawn another `next_slice_researcher` so the next cycle's pending pool is ready when workers drain. Research runs *during* execution; waiting until workers return is a cache miss.
 5. Use `docs_writer` for doc and task-writeup changes.
 6. Use `verification_reviewer` for cross-slice checking when `parallel_risk` was `coordinated` or when multiple in-flight slices actually touched adjacent surfaces.

@@ -180,13 +180,27 @@ fn unique_database_name(prefix: &str) -> Result<String> {
         .context("system clock is before unix epoch")?
         .as_nanos();
     let sequence = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
+    let suffix = format!("{}_{}_{unique:x}", std::process::id(), sequence);
+    let max_prefix_len = 63usize.saturating_sub(suffix.len() + 1);
+    let prefix = truncate_identifier_prefix(prefix, max_prefix_len);
 
-    Ok(format!(
-        "{prefix}_{}_{}_{}",
-        std::process::id(),
-        unique,
-        sequence
-    ))
+    if prefix.is_empty() {
+        Ok(suffix)
+    } else {
+        Ok(format!("{prefix}_{suffix}"))
+    }
+}
+
+fn truncate_identifier_prefix(prefix: &str, max_bytes: usize) -> String {
+    let mut end = 0;
+    for (index, character) in prefix.char_indices() {
+        let next = index + character.len_utf8();
+        if next > max_bytes {
+            break;
+        }
+        end = next;
+    }
+    prefix[..end].to_owned()
 }
 
 fn quote_identifier(identifier: &str) -> String {

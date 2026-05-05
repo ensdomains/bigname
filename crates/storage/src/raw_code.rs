@@ -160,7 +160,9 @@ async fn upsert_raw_code_hash(
     })?;
 
     ensure_raw_code_hash_identity_matches(&existing, code_hash)?;
-    let next_state = merge_canonicality(existing.canonicality_state, code_hash.canonicality_state);
+    let next_state = existing
+        .canonicality_state
+        .merge_observation(code_hash.canonicality_state);
 
     let snapshot = sqlx::query(
         r#"
@@ -291,29 +293,6 @@ fn ensure_raw_code_hash_identity_matches(
     }
 
     Ok(())
-}
-
-fn merge_canonicality(
-    current: CanonicalityState,
-    incoming: CanonicalityState,
-) -> CanonicalityState {
-    match incoming {
-        CanonicalityState::Orphaned => CanonicalityState::Orphaned,
-        CanonicalityState::Observed => {
-            if current == CanonicalityState::Orphaned {
-                CanonicalityState::Observed
-            } else {
-                current
-            }
-        }
-        CanonicalityState::Canonical | CanonicalityState::Safe | CanonicalityState::Finalized => {
-            if current == CanonicalityState::Orphaned {
-                incoming
-            } else {
-                current.promote_to(incoming)
-            }
-        }
-    }
 }
 
 fn decode_raw_code_hash(row: PgRow) -> Result<RawCodeHash> {

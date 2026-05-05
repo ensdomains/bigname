@@ -228,13 +228,7 @@ fn dns_record_selector(resource: i64, dns_name: &[u8]) -> RecordSelector {
 }
 
 fn hex_to_word(value: &str) -> Result<[u8; 32]> {
-    let normalized = normalize_hex_32(value)?;
-    let mut word = [0u8; 32];
-    for (index, chunk) in normalized[2..].as_bytes().chunks(2).enumerate() {
-        let value = std::str::from_utf8(chunk).context("hex topic chunk is not UTF-8")?;
-        word[index] = u8::from_str_radix(value, 16).context("hex topic chunk is invalid")?;
-    }
-    Ok(word)
+    crate::evm_abi::hex_32(value)
 }
 
 fn topic_bytes4(value: &str) -> Result<String> {

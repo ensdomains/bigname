@@ -2,10 +2,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use bigname_manifests::{WatchedBackfillTarget, WatchedSourceSelectorPlan};
 
-use crate::provider::{ProviderLog, ProviderResolvedBlock};
-
-const GENERIC_SOURCE_SCOPE_ADDRESS: &str = "*";
-const SOURCE_FAMILY_ENS_V1_RESOLVER_L1: &str = "ens_v1_resolver_l1";
+use crate::{
+    ens_v1_resolver::{GENERIC_SOURCE_SCOPE_ADDRESS, SOURCE_FAMILY_ENS_V1_RESOLVER_L1},
+    provider::{ProviderLog, ProviderResolvedBlock},
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct BackfillLogRangeRequest {

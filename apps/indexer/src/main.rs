@@ -8,6 +8,8 @@ mod backfill_tests;
 mod bootstrap_backfill;
 #[path = "main/cli.rs"]
 mod cli;
+#[path = "main/ens_v1_resolver.rs"]
+mod ens_v1_resolver;
 #[path = "main/normalized_replay_catchup.rs"]
 mod normalized_replay_catchup;
 #[path = "main/ops_catchup.rs"]
@@ -72,8 +74,6 @@ pub(crate) use replay::{
 use replay::{backfill_source_selector, replay_normalized_events_selection};
 #[allow(unused_imports)]
 use runtime::*;
-#[allow(unused_imports)]
-use sha3::{Digest, Keccak256};
 use tracing::info;
 
 const MAX_PARENT_FETCH_DEPTH: usize = 16_384;

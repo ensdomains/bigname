@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 
+use crate::ens_v2_common::ActiveEmitter;
 use anyhow::{Context, Result};
 use bigname_storage::{Resource, upsert_normalized_events, upsert_resources};
 use sqlx::{PgPool, types::Uuid};
@@ -21,7 +22,7 @@ use normalized::{
     build_resource, count_events_by_kind, count_inserted_events_by_kind, permission_changed_event,
     remember_hint_and_resource,
 };
-use types::{ActiveEmitter, PermissionsObservation, ResolverResourceHint};
+use types::{PermissionsObservation, ResolverResourceHint};
 use util::resource_is_root;
 
 #[derive(Clone, Debug, Eq, PartialEq)]

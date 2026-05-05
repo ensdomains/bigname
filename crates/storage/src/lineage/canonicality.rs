@@ -39,6 +39,26 @@ impl CanonicalityState {
         }
     }
 
+    pub fn merge_observation(self, incoming: Self) -> Self {
+        match incoming {
+            Self::Orphaned => Self::Orphaned,
+            Self::Observed => {
+                if self == Self::Orphaned {
+                    Self::Observed
+                } else {
+                    self
+                }
+            }
+            Self::Canonical | Self::Safe | Self::Finalized => {
+                if self == Self::Orphaned {
+                    incoming
+                } else {
+                    self.promote_to(incoming)
+                }
+            }
+        }
+    }
+
     fn rank(self) -> u8 {
         match self {
             Self::Observed => 0,
@@ -49,7 +69,7 @@ impl CanonicalityState {
         }
     }
 
-    pub(crate) fn parse(value: &str) -> Result<Self> {
+    pub fn parse(value: &str) -> Result<Self> {
         match value {
             "observed" => Ok(Self::Observed),
             "canonical" => Ok(Self::Canonical),

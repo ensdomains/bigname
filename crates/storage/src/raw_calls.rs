@@ -166,7 +166,9 @@ async fn upsert_raw_call_snapshot(
     })?;
 
     ensure_raw_call_snapshot_identity_matches(&existing, snapshot)?;
-    let next_state = merge_canonicality(existing.canonicality_state, snapshot.canonicality_state);
+    let next_state = existing
+        .canonicality_state
+        .merge_observation(snapshot.canonicality_state);
 
     let persisted = sqlx::query(
         r#"
@@ -299,29 +301,6 @@ fn ensure_raw_call_snapshot_identity_matches(
     }
 
     Ok(())
-}
-
-fn merge_canonicality(
-    current: CanonicalityState,
-    incoming: CanonicalityState,
-) -> CanonicalityState {
-    match incoming {
-        CanonicalityState::Orphaned => CanonicalityState::Orphaned,
-        CanonicalityState::Observed => {
-            if current == CanonicalityState::Orphaned {
-                CanonicalityState::Observed
-            } else {
-                current
-            }
-        }
-        CanonicalityState::Canonical | CanonicalityState::Safe | CanonicalityState::Finalized => {
-            if current == CanonicalityState::Orphaned {
-                incoming
-            } else {
-                current.promote_to(incoming)
-            }
-        }
-    }
 }
 
 fn decode_raw_call_snapshot(row: PgRow) -> Result<RawCallSnapshot> {

@@ -4,6 +4,8 @@ use anyhow::Result;
 use bigname_storage::upsert_normalized_events;
 use sqlx::PgPool;
 
+use crate::ens_v2_common::ActiveEmitter;
+
 mod constants;
 mod decode;
 mod events;
@@ -126,7 +128,7 @@ async fn sync_ens_v2_resolver_with_scope(
 
 fn resolver_scope_includes_emitter(
     source_scope: &[(String, String, i64, i64)],
-    emitter: &types::ActiveEmitter,
+    emitter: &ActiveEmitter,
 ) -> bool {
     source_scope
         .iter()

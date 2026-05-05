@@ -2,8 +2,8 @@ use anyhow::{Context, Result};
 use sqlx::Postgres;
 
 use super::merge::{
-    StableObservationInput, merge_binding_active_to, merge_canonicality,
-    merge_stable_row_observation, merge_token_lineage_anchor,
+    StableObservationInput, merge_binding_active_to, merge_stable_row_observation,
+    merge_token_lineage_anchor,
 };
 use super::read::{
     decode_name_surface, decode_resource, decode_surface_binding, decode_token_lineage,
@@ -93,10 +93,9 @@ pub(super) async fn upsert_token_lineage(
             token_lineage.token_lineage_id
         )
     })?;
-    let next_state = merge_canonicality(
-        existing.canonicality_state,
-        token_lineage.canonicality_state,
-    );
+    let next_state = existing
+        .canonicality_state
+        .merge_observation(token_lineage.canonicality_state);
 
     let snapshot = sqlx::query(
         r#"
@@ -213,7 +212,9 @@ pub(super) async fn upsert_resource(
             resource.resource_id
         )
     })?;
-    let next_state = merge_canonicality(existing.canonicality_state, resource.canonicality_state);
+    let next_state = existing
+        .canonicality_state
+        .merge_observation(resource.canonicality_state);
 
     let snapshot = sqlx::query(
         r#"
@@ -383,8 +384,9 @@ pub(super) async fn upsert_name_surface(
             name_surface.logical_name_id
         )
     })?;
-    let next_state =
-        merge_canonicality(existing.canonicality_state, name_surface.canonicality_state);
+    let next_state = existing
+        .canonicality_state
+        .merge_observation(name_surface.canonicality_state);
 
     let snapshot = sqlx::query(
         r#"
@@ -505,7 +507,9 @@ pub(super) async fn upsert_surface_binding(
 
     ensure_surface_binding_identity_matches(&existing, binding)?;
     let next_active_to = merge_binding_active_to(existing.active_to, binding.active_to)?;
-    let next_state = merge_canonicality(existing.canonicality_state, binding.canonicality_state);
+    let next_state = existing
+        .canonicality_state
+        .merge_observation(binding.canonicality_state);
 
     let snapshot = sqlx::query(
         r#"

@@ -301,14 +301,7 @@ fn canonicality_rank(state: CanonicalityState) -> u8 {
 }
 
 pub(super) fn parse_canonicality_state(value: &str) -> Result<CanonicalityState> {
-    match value {
-        "canonical" => Ok(CanonicalityState::Canonical),
-        "safe" => Ok(CanonicalityState::Safe),
-        "finalized" => Ok(CanonicalityState::Finalized),
-        "observed" => Ok(CanonicalityState::Observed),
-        "orphaned" => Ok(CanonicalityState::Orphaned),
-        _ => anyhow::bail!("unknown canonicality_state value {value}"),
-    }
+    CanonicalityState::parse(value)
 }
 
 fn supported_native_addr_record_key() -> String {

@@ -3,8 +3,6 @@ use std::collections::HashMap;
 use anyhow::{Context, Result, bail};
 use sqlx::{PgPool, Postgres};
 
-use crate::CanonicalityState;
-
 use super::{types::NormalizedEvent, validation::validate_normalized_event};
 
 #[path = "upsert/batch.rs"]
@@ -142,33 +140,13 @@ fn normalized_event_snapshots_after_upsert(
         .map(|event| {
             let mut snapshot = event.clone();
             if let Some(existing) = existing_by_identity.get(&event.event_identity) {
-                snapshot.canonicality_state = merged_canonicality_state(
-                    existing.canonicality_state,
-                    event.canonicality_state,
-                );
+                snapshot.canonicality_state = existing
+                    .canonicality_state
+                    .merge_observation(event.canonicality_state);
             }
             snapshot
         })
         .collect()
-}
-
-fn merged_canonicality_state(
-    existing: CanonicalityState,
-    incoming: CanonicalityState,
-) -> CanonicalityState {
-    match (existing, incoming) {
-        (_, CanonicalityState::Orphaned) => CanonicalityState::Orphaned,
-        (CanonicalityState::Orphaned, CanonicalityState::Observed) => CanonicalityState::Observed,
-        (existing, CanonicalityState::Observed) => existing,
-        (CanonicalityState::Orphaned, incoming) => incoming,
-        (CanonicalityState::Finalized, _) | (_, CanonicalityState::Finalized) => {
-            CanonicalityState::Finalized
-        }
-        (CanonicalityState::Safe, _) | (_, CanonicalityState::Safe) => CanonicalityState::Safe,
-        (CanonicalityState::Canonical, _) | (_, CanonicalityState::Canonical) => {
-            CanonicalityState::Canonical
-        }
-    }
 }
 
 fn ensure_normalized_event_identity_matches(

@@ -8,11 +8,10 @@ use bigname_manifests::{
 use bigname_storage::list_canonical_raw_log_replay_inputs_for_block_hashes;
 use sqlx::Row;
 
+use crate::ens_v1_resolver::{GENERIC_SOURCE_SCOPE_ADDRESS, SOURCE_FAMILY_ENS_V1_RESOLVER_L1};
+
 #[path = "replay/scoped.rs"]
 mod scoped;
-
-const SOURCE_FAMILY_ENS_V1_RESOLVER_L1: &str = "ens_v1_resolver_l1";
-const GENERIC_SOURCE_SCOPE_ADDRESS: &str = "*";
 
 use super::{
     adapter_sync::sync_replay_normalized_events_from_persisted_raw_payloads,

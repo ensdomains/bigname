@@ -11,6 +11,8 @@ use bigname_manifests::{
 };
 use sqlx::{PgPool, Row, types::Uuid};
 
+use crate::adapter_manifest::{required_source_manifest_id, watched_contract_manifest_ids};
+
 pub(in crate::ens_v1_unwrapped_authority) async fn load_active_emitters(
     pool: &PgPool,
     chain: &str,
@@ -22,26 +24,11 @@ pub(in crate::ens_v1_unwrapped_authority) async fn load_active_emitters(
     }
     let contract_roles = load_manifest_contract_roles(pool, &watched_contracts).await?;
 
-    let manifest_ids = watched_contracts
-        .iter()
-        .map(|contract| {
-            contract.source_manifest_id.with_context(|| {
-                format!(
-                    "watched contract {} on {} is missing source_manifest_id",
-                    contract.address, contract.chain
-                )
-            })
-        })
-        .collect::<Result<HashSet<_>>>()?
-        .into_iter()
-        .collect::<Vec<_>>();
-
+    let manifest_ids = watched_contract_manifest_ids(&watched_contracts)?;
     let active_manifests = load_active_manifest_metadata(pool, &manifest_ids).await?;
     let mut emitters = Vec::new();
     for watched_contract in watched_contracts {
-        let Some(source_manifest_id) = watched_contract.source_manifest_id else {
-            continue;
-        };
+        let source_manifest_id = required_source_manifest_id(&watched_contract)?;
         let Some(manifest) = active_manifests.get(&source_manifest_id) else {
             continue;
         };
@@ -491,11 +478,7 @@ async fn load_manifest_contract_roles(
 }
 
 fn source_rank(source: WatchedContractSource) -> i32 {
-    match source {
-        WatchedContractSource::ManifestRoot => 0,
-        WatchedContractSource::ManifestContract => 1,
-        WatchedContractSource::DiscoveryEdge => 2,
-    }
+    crate::adapter_manifest::source_rank(source)
 }
 
 async fn load_active_manifest_metadata_for_source_family(

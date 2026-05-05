@@ -1,5 +1,7 @@
+use alloy_primitives::{hex, keccak256};
 use anyhow::{Result, bail};
-use sha3::{Digest, Keccak256};
+
+use crate::evm_abi;
 
 use super::{
     REVERSE_CLAIMED_SIGNATURE, SOURCE_FAMILY_BASENAMES_BASE_PRIMARY,
@@ -37,21 +39,11 @@ pub(super) fn reverse_node_for_address(address: &str) -> Result<String> {
 }
 
 pub(super) fn normalize_hex_32(value: &str) -> Result<String> {
-    let normalized = value.to_ascii_lowercase();
-    let normalized = if normalized.starts_with("0x") {
-        normalized
-    } else {
-        format!("0x{normalized}")
-    };
-    if normalized.len() != 66 {
-        bail!("expected 32-byte hex value, got {normalized}");
-    }
-    Ok(normalized)
+    evm_abi::normalize_hex_32(value)
 }
 
 pub(super) fn normalize_topic_address(value: &str) -> Result<String> {
-    let normalized = normalize_hex_32(value)?;
-    Ok(format!("0x{}", &normalized[26..]))
+    evm_abi::topic_address_hex(value)
 }
 
 pub(super) fn reverse_claimed_topic0() -> String {
@@ -61,34 +53,19 @@ pub(super) fn reverse_claimed_topic0() -> String {
 pub(super) fn namehash_hex(labels: &[Vec<u8>]) -> String {
     let mut node = [0u8; 32];
     for label in labels.iter().rev() {
-        let label_hash = {
-            let mut digest = Keccak256::new();
-            digest.update(label);
-            let output = digest.finalize();
-            let mut bytes = [0u8; 32];
-            bytes.copy_from_slice(&output);
-            bytes
-        };
-        let mut digest = Keccak256::new();
-        digest.update(node);
-        digest.update(label_hash);
-        let output = digest.finalize();
-        node.copy_from_slice(&output);
+        let mut combined = [0u8; 64];
+        combined[..32].copy_from_slice(&node);
+        combined[32..].copy_from_slice(keccak256(label).as_slice());
+        node.copy_from_slice(keccak256(combined).as_slice());
     }
 
     hex_string(&node)
 }
 
 pub(super) fn keccak256_hex(bytes: &[u8]) -> String {
-    let mut digest = Keccak256::new();
-    digest.update(bytes);
-    hex_string(&digest.finalize())
+    hex_string(keccak256(bytes).as_slice())
 }
 
 pub(super) fn hex_string(bytes: &[u8]) -> String {
-    let mut output = String::from("0x");
-    for byte in bytes {
-        output.push_str(&format!("{byte:02x}"));
-    }
-    output
+    format!("0x{}", hex::encode(bytes))
 }

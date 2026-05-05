@@ -5,6 +5,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use alloy_primitives::keccak256;
 use anyhow::{Context, Result};
 use bigname_manifests::{
     WatchedChainPlan, WatchedContractSource, WatchedSourceSelector, load_repository,
@@ -15,7 +16,6 @@ use bigname_storage::{
     CanonicalityState, RawBlock, RawLog, default_database_url, load_normalized_events_by_namespace,
     upsert_raw_blocks, upsert_raw_logs,
 };
-use sha3::{Digest, Keccak256};
 use sqlx::{
     PgPool, Row,
     postgres::{PgConnectOptions, PgPoolOptions},
@@ -563,9 +563,7 @@ async fn active_manifest_id_for_source_family(
 }
 
 fn labelhash_hex(label: &str) -> String {
-    let mut hasher = Keccak256::new();
-    hasher.update(label.as_bytes());
-    format!("0x{}", hex_string(hasher.finalize()))
+    format!("0x{}", hex_string(keccak256(label.as_bytes())))
 }
 
 fn base_eth_node() -> Result<String> {

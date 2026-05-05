@@ -1,4 +1,5 @@
 use super::*;
+use crate::evm_abi;
 use crate::registry_migration_cache::MigratedRegistryNodes;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -102,12 +103,5 @@ fn hash_pair(left: &str, right: &str) -> Result<String> {
 }
 
 fn decode_hex_32(value: &str) -> Result<[u8; 32]> {
-    let normalized = normalize_hex_32(value)?;
-    let mut output = [0u8; 32];
-    for (index, chunk) in normalized.as_bytes()[2..].chunks(2).enumerate() {
-        let hex = std::str::from_utf8(chunk).context("hex topic chunk must be utf-8")?;
-        output[index] =
-            u8::from_str_radix(hex, 16).with_context(|| format!("invalid hex byte {hex}"))?;
-    }
-    Ok(output)
+    evm_abi::hex_32(value)
 }

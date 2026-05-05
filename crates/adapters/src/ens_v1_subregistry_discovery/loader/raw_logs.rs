@@ -7,8 +7,9 @@ use super::super::{
         scoped_ranges_for_active_emitters,
     },
 };
-use super::{ActiveEmitter, RegistryRawLogRow, parse_canonicality_state};
+use super::{ActiveEmitter, RegistryRawLogRow};
 use anyhow::{Context, Result};
+use bigname_storage::CanonicalityState;
 use futures_util::TryStreamExt;
 use sqlx::{PgPool, Row};
 
@@ -382,7 +383,7 @@ fn registry_raw_log_from_row(
         emitting_address,
         topics: row.try_get("topics").context("missing topics")?,
         data: row.try_get("data").context("missing data")?,
-        canonicality_state: parse_canonicality_state(
+        canonicality_state: CanonicalityState::parse(
             &row.try_get::<String, _>("canonicality_state")
                 .context("missing canonicality_state")?,
         )?,

@@ -1881,13 +1881,24 @@ async fn frozen_source_family_backfills_lock_wrapper_resolver_and_basenames_l1_i
                 Some("0x9999999999999999999999999999999999999999999999999999999999999999"),
                 fixture.block_number,
             );
-            ProviderBlockFixture {
-                block: block.clone(),
-                logs: vec![rpc_log_payload_at_address(
+            let logs = if fixture.source_family == "ens_v1_resolver_l1" {
+                vec![rpc_resolver_name_changed_log_payload_for_namehash(
+                    &block,
+                    fixture.address,
+                    &namehash_for_dns_name(&dns_encoded_eth_name("focused")),
+                    "focused.eth",
+                    index as u64,
+                )]
+            } else {
+                vec![rpc_log_payload_at_address(
                     &block,
                     fixture.address,
                     index as i64,
-                )],
+                )]
+            };
+            ProviderBlockFixture {
+                block: block.clone(),
+                logs,
             }
         })
         .collect::<Vec<_>>();
@@ -1931,23 +1942,39 @@ async fn frozen_source_family_backfills_lock_wrapper_resolver_and_basenames_l1_i
         let job = load_backfill_job(database.pool(), outcome.backfill_job_id)
             .await?
             .expect("focused source-family backfill job must exist");
-        let expected_source_identity_hash = source_plan.source_identity_hash();
-        assert_eq!(job.source_identity, source_plan.source_identity_payload());
+        let expected_source_identity =
+            backfill::backfill_job_source_identity_payload(&source_plan)?;
+        let expected_source_identity_hash = expected_source_identity
+            .get("source_identity_hash")
+            .and_then(Value::as_str)
+            .expect("expected source identity must include hash")
+            .to_owned();
+        assert_eq!(job.source_identity, expected_source_identity);
         assert_eq!(
             job.source_identity
                 .get("source_identity_hash")
                 .and_then(Value::as_str),
             Some(expected_source_identity_hash.as_str())
         );
-        assert_eq!(
-            job.source_identity
-                .get("selected_targets")
-                .and_then(Value::as_array)
-                .and_then(|targets| targets.first())
-                .and_then(|target| target.get("source_family"))
-                .and_then(Value::as_str),
-            Some(fixture.source_family)
-        );
+        if fixture.source_family == "ens_v1_resolver_l1" {
+            assert_eq!(
+                job.source_identity
+                    .get("source_identity_payload_format")
+                    .and_then(Value::as_str),
+                Some("generic_resolver_event_topics_v1")
+            );
+            assert!(job.source_identity.get("selected_targets").is_none());
+        } else {
+            assert_eq!(
+                job.source_identity
+                    .get("selected_targets")
+                    .and_then(Value::as_array)
+                    .and_then(|targets| targets.first())
+                    .and_then(|target| target.get("source_family"))
+                    .and_then(Value::as_str),
+                Some(fixture.source_family)
+            );
+        }
 
         let repeat_lease = format!("lease-{}-repeat", fixture.source_family);
         let rerun = run_resumable_hash_pinned_backfill_job(

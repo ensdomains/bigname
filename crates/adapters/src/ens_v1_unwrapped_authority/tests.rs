@@ -38,12 +38,7 @@ impl TestDatabase {
             .context("system clock is before unix epoch")?
             .as_nanos();
         let sequence = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
-        let database_name = format!(
-            "bigname_adapters_ens_v1_unwrapped_authority_test_{}_{}_{}",
-            std::process::id(),
-            unique,
-            sequence
-        );
+        let database_name = format!("bn_ad_ua_{}_{}_{}", std::process::id(), sequence, unique);
 
         let admin_pool = PgPoolOptions::new()
             .max_connections(1)
@@ -5149,7 +5144,7 @@ async fn sync_ens_v1_unwrapped_authority_generic_resolver_events_do_not_require_
 
     let summary = sync_ens_v1_unwrapped_authority(database.pool(), "ethereum-mainnet").await?;
     assert_eq!(summary.scanned_log_count, 6);
-    assert_eq!(summary.matched_log_count, 6);
+    assert_eq!(summary.matched_log_count, 5);
     assert_eq!(summary.total_normalized_event_count, 5);
     assert_eq!(
         summary.by_kind.get(EVENT_KIND_RESOLVER_CHANGED),
@@ -5198,7 +5193,7 @@ async fn sync_ens_v1_unwrapped_authority_generic_resolver_events_do_not_require_
 }
 
 #[tokio::test]
-async fn sync_ens_v1_unwrapped_authority_keeps_discovered_ensv1_resolver_event_facts_without_profile()
+async fn sync_ens_v1_unwrapped_authority_gates_discovered_ensv1_resolver_event_facts_by_profile()
 -> Result<()> {
     let _permit = crate::acquire_test_db_permit().await;
     let database = TestDatabase::new().await?;
@@ -5541,18 +5536,18 @@ async fn sync_ens_v1_unwrapped_authority_keeps_discovered_ensv1_resolver_event_f
 
     let summary = sync_ens_v1_unwrapped_authority(database.pool(), "ethereum-mainnet").await?;
     assert_eq!(summary.scanned_log_count, 12);
-    assert_eq!(summary.matched_log_count, 12);
+    assert_eq!(summary.matched_log_count, 7);
     assert_eq!(
         summary.by_kind.get(EVENT_KIND_RESOLVER_CHANGED),
         Some(&4_usize)
     );
     assert_eq!(
         summary.by_kind.get(EVENT_KIND_RECORD_CHANGED),
-        Some(&4_usize)
+        Some(&1_usize)
     );
     assert_eq!(
         summary.by_kind.get(EVENT_KIND_RECORD_VERSION_CHANGED),
-        Some(&3_usize)
+        Some(&1_usize)
     );
     assert_eq!(
         sqlx::query_scalar::<_, Vec<String>>(
@@ -5573,12 +5568,7 @@ async fn sync_ens_v1_unwrapped_authority_keeps_discovered_ensv1_resolver_event_f
         )
         .fetch_one(database.pool())
         .await?,
-        vec![
-            "supported.eth".to_owned(),
-            "pending.eth".to_owned(),
-            "unsupported.eth".to_owned(),
-            "unlisted.eth".to_owned()
-        ]
+        vec!["supported.eth".to_owned()]
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
@@ -5587,15 +5577,15 @@ async fn sync_ens_v1_unwrapped_authority_keeps_discovered_ensv1_resolver_event_f
         .bind(vec![5_i64, 6, 8, 9])
         .fetch_one(database.pool())
         .await?,
-        4
+        0
     );
     assert_eq!(
-        sqlx::query_scalar::<_, String>(
-            "SELECT after_state->>'raw_name' FROM normalized_events WHERE log_index = 11 AND event_kind = 'RecordChanged'"
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM normalized_events WHERE log_index = 11 AND event_kind = 'RecordChanged'"
         )
         .fetch_one(database.pool())
         .await?,
-        "unlisted.eth".to_owned()
+        0
     );
 
     database.cleanup().await

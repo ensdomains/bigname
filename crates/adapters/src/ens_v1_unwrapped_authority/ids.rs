@@ -1,39 +1,28 @@
+use alloy_primitives::{hex, keccak256};
+
 use super::*;
+use crate::evm_abi;
 
 pub(super) fn deterministic_uuid(seed: &str) -> Uuid {
-    let mut digest = Keccak256::new();
-    digest.update(seed.as_bytes());
+    let digest = keccak256(seed.as_bytes());
     let mut bytes = [0u8; 16];
-    bytes.copy_from_slice(&digest.finalize()[..16]);
+    bytes.copy_from_slice(&digest.as_slice()[..16]);
     bytes[6] = (bytes[6] & 0x0f) | 0x50;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
     Uuid::from_bytes(bytes)
 }
 
 pub(super) fn keccak256_hex(bytes: &[u8]) -> String {
-    let mut hasher = Keccak256::new();
-    hasher.update(bytes);
-    let digest = hasher.finalize();
-    hex_string(&digest)
+    hex_string(keccak256(bytes).as_slice())
 }
 
 pub(super) fn namehash_hex(labels: &[Vec<u8>]) -> String {
     let mut node = [0u8; 32];
     for label in labels.iter().rev() {
-        let label_hash = {
-            let mut hasher = Keccak256::new();
-            hasher.update(label);
-            let digest = hasher.finalize();
-            let mut output = [0u8; 32];
-            output.copy_from_slice(&digest);
-            output
-        };
         let mut combined = [0u8; 64];
         combined[..32].copy_from_slice(&node);
-        combined[32..].copy_from_slice(&label_hash);
-        let mut hasher = Keccak256::new();
-        hasher.update(combined);
-        node.copy_from_slice(&hasher.finalize());
+        combined[32..].copy_from_slice(keccak256(label).as_slice());
+        node.copy_from_slice(keccak256(combined).as_slice());
     }
     hex_string(&node)
 }
@@ -46,14 +35,7 @@ pub(super) fn child_namehash_hex(parent_node: &str, labelhash: &str) -> Result<S
 }
 
 fn decode_hex_32(value: &str) -> Result<[u8; 32]> {
-    let normalized = normalize_hex_32(value)?;
-    let mut output = [0u8; 32];
-    for (index, chunk) in normalized.as_bytes()[2..].chunks(2).enumerate() {
-        let hex = std::str::from_utf8(chunk).context("hex topic chunk must be utf-8")?;
-        output[index] =
-            u8::from_str_radix(hex, 16).with_context(|| format!("invalid hex byte {hex}"))?;
-    }
-    Ok(output)
+    evm_abi::hex_32(value)
 }
 
 pub(super) fn eth_node() -> String {
@@ -235,9 +217,5 @@ pub(super) fn transfer_single_topic0() -> String {
 }
 
 pub(super) fn hex_string(bytes: &[u8]) -> String {
-    let mut output = String::from("0x");
-    for byte in bytes {
-        output.push_str(&format!("{byte:02x}"));
-    }
-    output
+    format!("0x{}", hex::encode(bytes))
 }

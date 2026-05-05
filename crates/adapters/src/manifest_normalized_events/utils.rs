@@ -80,14 +80,8 @@ pub(super) fn watched_contract_source_name(
 }
 
 pub(super) fn canonicality_state_from_view(value: &str) -> Result<CanonicalityState> {
-    match value {
-        "observed" => Ok(CanonicalityState::Observed),
-        "canonical" => Ok(CanonicalityState::Canonical),
-        "safe" => Ok(CanonicalityState::Safe),
-        "finalized" => Ok(CanonicalityState::Finalized),
-        "orphaned" => Ok(CanonicalityState::Orphaned),
-        _ => anyhow::bail!("failed to parse manifest drift canonicality state {value}"),
-    }
+    CanonicalityState::parse(value)
+        .with_context(|| format!("failed to parse manifest drift canonicality state {value}"))
 }
 
 pub(super) fn manifest_version_i64(manifest_version: u64) -> Result<i64> {

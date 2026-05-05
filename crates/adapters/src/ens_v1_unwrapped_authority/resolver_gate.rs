@@ -125,9 +125,6 @@ impl ResolverProfileGate {
         if !resolver_source_family_has_profiles(&raw_log.source_family) {
             return false;
         }
-        if raw_log.source_family == SOURCE_FAMILY_ENS_V1_RESOLVER_L1 {
-            return false;
-        }
 
         let Some(topic0) = raw_log.topics.first() else {
             return false;
@@ -268,7 +265,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn resolver_profile_gate_keeps_observed_record_facts_without_supported_profile() {
+    fn resolver_profile_gate_rejects_unsupported_record_facts() {
         let supported_resolver = "0x00000000000000000000000000000000000000c1";
         let unsupported_resolver = "0x00000000000000000000000000000000000000c2";
         let eth_only_resolver = "0x00000000000000000000000000000000000000c3";
@@ -280,6 +277,12 @@ mod tests {
                     SOURCE_FAMILY_ENS_V1_RESOLVER_L1.to_owned(),
                     supported_resolver.to_owned(),
                     "resolver_record",
+                ),
+                (
+                    "ethereum-mainnet".to_owned(),
+                    SOURCE_FAMILY_ENS_V1_RESOLVER_L1.to_owned(),
+                    supported_resolver.to_owned(),
+                    "resolver_record_version",
                 ),
                 (
                     "ethereum-mainnet".to_owned(),
@@ -302,7 +305,7 @@ mod tests {
                 name_changed_topic0(),
             ))
         );
-        assert!(!gate.rejects_resolver_local_fact(&resolver_log(
+        assert!(gate.rejects_resolver_local_fact(&resolver_log(
             unsupported_resolver,
             name_changed_topic0(),
         )));
@@ -316,7 +319,7 @@ mod tests {
                 addr_changed_topic0(),
             ))
         );
-        assert!(!gate.rejects_resolver_local_fact(&resolver_log(
+        assert!(gate.rejects_resolver_local_fact(&resolver_log(
             eth_only_resolver,
             address_changed_topic0(),
         )));

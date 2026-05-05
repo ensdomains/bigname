@@ -142,14 +142,7 @@ pub(super) fn decode_relevant_event(row: sqlx::postgres::PgRow) -> Result<Releva
 }
 
 pub(super) fn parse_canonicality_state(value: &str) -> Result<CanonicalityState> {
-    match value {
-        "observed" => Ok(CanonicalityState::Observed),
-        "canonical" => Ok(CanonicalityState::Canonical),
-        "safe" => Ok(CanonicalityState::Safe),
-        "finalized" => Ok(CanonicalityState::Finalized),
-        "orphaned" => Ok(CanonicalityState::Orphaned),
-        _ => bail!("unknown canonicality_state {value}"),
-    }
+    CanonicalityState::parse(value)
 }
 
 pub(super) fn parse_surface_binding_kind(value: &str) -> Result<SurfaceBindingKind> {

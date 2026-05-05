@@ -3,7 +3,7 @@ model_reasoning_effort = "xhigh"
 service_tier = "fast"
 
 [agents]
-max_threads = 6
+max_threads = 10
 max_depth = 1
 
 [features]

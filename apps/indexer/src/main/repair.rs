@@ -6,6 +6,7 @@ use sqlx::Row;
 use tracing::info;
 
 use crate::{
+    ens_v1_resolver::SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
     provider::{ChainProviderOps, ProviderLog},
     reconciliation::{keccak256_hex, parse_hex_bytes},
 };
@@ -15,7 +16,6 @@ pub(crate) const DEFAULT_ENS_V1_TEXT_RECORD_REPAIR_PAGE_SIZE: i64 = 10_000;
 
 const DERIVATION_KIND_ENS_V1_UNWRAPPED_AUTHORITY: &str = "ens_v1_unwrapped_authority";
 const EVENT_KIND_RECORD_CHANGED: &str = "RecordChanged";
-const SOURCE_FAMILY_ENS_V1_RESOLVER_L1: &str = "ens_v1_resolver_l1";
 const TEXT_CHANGED_WITHOUT_VALUE_SIGNATURE: &str = "TextChanged(bytes32,string,string)";
 const TEXT_CHANGED_WITH_VALUE_SIGNATURE: &str = "TextChanged(bytes32,string,string,string)";
 const TEXT_RECORD_FAMILY: &str = "text";

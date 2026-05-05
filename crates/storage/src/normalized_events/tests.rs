@@ -35,12 +35,7 @@ impl TestDatabase {
             .context("system clock is before unix epoch")?
             .as_nanos();
         let sequence = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
-        let database_name = format!(
-            "bigname_storage_normalized_event_test_{}_{}_{}",
-            std::process::id(),
-            unique,
-            sequence
-        );
+        let database_name = format!("bn_st_ne_{}_{}_{}", std::process::id(), sequence, unique);
 
         let admin_pool = PgPoolOptions::new()
             .max_connections(1)

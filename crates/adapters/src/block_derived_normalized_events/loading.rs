@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use bigname_storage::CanonicalityState;
 use sqlx::{PgPool, Row};
 
@@ -202,7 +202,7 @@ pub(super) async fn load_watched_raw_logs(
                 emitting_address,
                 topics: row.try_get("topics").context("missing topics")?,
                 data: row.try_get("data").context("missing data")?,
-                canonicality_state: parse_canonicality_state(
+                canonicality_state: CanonicalityState::parse(
                     &row.try_get::<String, _>("canonicality_state")
                         .context("missing canonicality_state")?,
                 )?,
@@ -213,15 +213,4 @@ pub(super) async fn load_watched_raw_logs(
             })
         })
         .collect()
-}
-
-fn parse_canonicality_state(value: &str) -> Result<CanonicalityState> {
-    match value {
-        "observed" => Ok(CanonicalityState::Observed),
-        "canonical" => Ok(CanonicalityState::Canonical),
-        "safe" => Ok(CanonicalityState::Safe),
-        "finalized" => Ok(CanonicalityState::Finalized),
-        "orphaned" => Ok(CanonicalityState::Orphaned),
-        _ => bail!("unknown canonicality_state value {value}"),
-    }
 }

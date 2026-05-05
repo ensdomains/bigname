@@ -1656,20 +1656,12 @@ async fn rebuild_projects_supported_basenames_transport_topology_from_frozen_inp
     .await?;
     upsert_chain_lineage_blocks(
         database.pool(),
-        &[
-            chain_lineage_block(
-                ETHEREUM_MAINNET_CHAIN_ID,
-                "0xbasenamesl1-compatible",
-                21_000_099,
-                1_717_172_513,
-            ),
-            chain_lineage_block(
-                ETHEREUM_MAINNET_CHAIN_ID,
-                "0xbasenamesl1-future",
-                21_000_100,
-                1_776_387_700,
-            ),
-        ],
+        &[chain_lineage_block(
+            ETHEREUM_MAINNET_CHAIN_ID,
+            "0xbasenamesl1-compatible",
+            21_000_099,
+            1_717_172_513,
+        )],
     )
     .await?;
     upsert_token_lineages(

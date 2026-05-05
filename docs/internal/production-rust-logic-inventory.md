@@ -1,0 +1,338 @@
+# Production Rust logic inventory
+
+Status: initial audit snapshot, 2026-05-05.
+
+Gate: implementation-only inventory. Follow-up cleanup slices stay
+implementation-only when they preserve API semantics, manifest semantics, storage
+ownership, shared IDs, and coverage meaning. If a slice changes those public
+rules, update the public contract docs in the same change before code lands.
+
+Scope: production Rust under `apps/` and `crates/`, excluding tests and generated
+output. This document records where logic currently lives so related cleanup can
+be grouped instead of handled as one-off file splits.
+
+## Maintenance rules
+
+- When adding or moving production logic, update the relevant inventory row here.
+- When deleting a duplication family, keep the row and mark it `done` with the
+  replacement path.
+- Do not put ENSv1, ENSv2, or Basenames behavioral claims in this file without
+  the required `.refs/` upstream citation. This document should inventory local
+  implementation shape, not restate upstream semantics.
+- Keep `crates/domain` narrow. Prefer crate-local helpers or existing owner
+  crates unless a type is truly cross-crate and contract-like.
+
+## Size snapshot
+
+Production Rust snapshot from the working tree:
+
+| Area | Production files | LOC |
+| --- | ---: | ---: |
+| `crates/storage` | 142 | 26,143 |
+| `crates/adapters` | 101 | 21,082 |
+| `apps/indexer` | 65 | 17,036 |
+| `apps/api` | 64 | 14,185 |
+| `apps/worker` | 71 | 13,163 |
+| `crates/manifests` | 31 | 7,279 |
+| `crates/execution` | 36 | 6,293 |
+| `crates/test-support` | 1 | 194 |
+| `crates/domain` | 1 | 6 |
+| Total | 512 | 105,381 |
+
+The current file-size gate flags these oversized production files as the first
+places to revisit after logic dedupe:
+
+- `crates/adapters/src/ens_v1_unwrapped_authority/preload.rs` at 1,762 LOC.
+- `apps/api/src/responses/app_facing/records_declared_values.rs` at 783 LOC.
+- `crates/adapters/src/ens_v1_unwrapped_authority/materialization.rs` at 645 LOC.
+- `crates/adapters/src/ens_v1_unwrapped_authority/pipeline.rs` at 635 LOC.
+- `apps/indexer/src/main/repair.rs` at 615 LOC.
+- `crates/adapters/src/ens_v1_unwrapped_authority/pipeline/apply.rs` at 612 LOC.
+- `crates/adapters/src/ens_v1_unwrapped_authority/observation.rs` at 608 LOC.
+- `crates/manifests/src/lib/views/resolver_profiles/ens_v1.rs` at 602 LOC.
+- `crates/adapters/src/ens_v1_unwrapped_authority/loading/raw_logs.rs` at 594 LOC.
+- `crates/manifests/src/lib/views/watched.rs` at 587 LOC.
+
+## Highest leverage cleanup map
+
+| Logic family | Current locations | Replace or centralize with | Expected payoff |
+| --- | --- | --- | --- |
+| EVM ABI words, event topics, hex, hashes | `crates/adapters/src/evm_abi.rs`, `crates/adapters/src/ens_v2_*/*decode*.rs`, `crates/adapters/src/ens_v1_unwrapped_authority/{abi.rs,ids.rs,observation.rs}`, `crates/adapters/src/ens_v1_subregistry_discovery/hex_topic.rs`, `crates/adapters/src/block_derived_normalized_events/decoding.rs`, `crates/execution/src/ens_resolution_abi.rs`, `apps/indexer/src/provider/decode.rs`, `apps/indexer/src/main/reconciliation/payload.rs` | `alloy-primitives` for `Address`, `B256`, `U256`, `Bytes`, `FixedBytes`, `hex`, `keccak256`; `alloy-sol-types` `sol!`, `SolCall`, `SolEvent`, and `SolValue` for ABI call/event encode/decode | Large LOC reduction in adapters, fewer hand-rolled offset/word parsers, less duplicated topic hashing |
+| Provider JSON-RPC typed decoding | `apps/indexer/src/provider/decode.rs`, `apps/indexer/src/provider/types.rs`, `apps/indexer/src/provider/logs_receipts.rs`, `apps/indexer/src/provider/reth_db/convert.rs` | Keep current transport initially, but deserialize into `alloy-rpc-types-eth` block, transaction, receipt, log, filter, and block-id types before converting to storage DTOs | Removes brittle `serde_json::Value` object walking and custom hex parsing in provider code |
+| Address/hash normalization | `normalize_address` appears in API, indexer, worker, adapters, manifests, storage, and execution path validation; hash/hex helpers appear in at least 9 files | One storage-format helper per owner crate: parse with Alloy where EVM-shaped, return canonical lower `0x` strings; expose narrow helpers from adapters/execution/provider modules | Prevents drift between "lowercase only" and "validated EVM address/hash" call sites |
+| Canonicality and binding-kind parsing/rank | `CanonicalityState::parse` exists, but rank/weakest logic is duplicated in worker, adapter, and indexer modules; `SurfaceBindingKind::parse` is private, so consumers reimplement it | Add public or crate-visible helpers on `bigname_storage::CanonicalityState` and `SurfaceBindingKind`: `rank`, `weakest`, `is_supported_snapshot`, public `parse` where needed | Deletes repeated match blocks and reduces risk when enum variants change |
+| Projection JSON summaries | `apps/worker/src/name_current/json.rs`, `address_names/{util.rs,positions.rs,projection.rs}`, `permissions/{json.rs,canonicality.rs}`, `record_inventory/{json.rs,chain_position.rs}`, `resolver/{state_helpers.rs,summary_json.rs}`, `children.rs`; API also has response-side JSON dedupe/timestamp helpers | Add a worker-local `projection_json` module with provenance, chain-position, canonicality, timestamp, and JSON-dedupe primitives; consider storage helpers only for projection-shared public row shapes | Reduces repeated `serde_json` assembly and makes coverage/provenance mistakes easier to spot |
+| SQL row decoding boilerplate | Manual `PgRow::try_get(...).context(...)` decoders across storage, manifests, adapters, worker loaders, and API support; almost no production `query_as`/`FromRow` usage | Use `sqlx::FromRow` for plain rows; add small local row helper wrappers for contextual field reads and non-negative conversions where dynamic SQL prevents derive | Cuts a large amount of repetitive error text and makes row shape changes easier |
+| Keyset pagination and cursors | `apps/api/src/support/cursors.rs`, `apps/api/src/handlers/app_facing/{names_collection.rs,roles.rs}`, `crates/storage/src/{name_current/list_paging.rs,address_names/query.rs,address_names/page.rs,permissions/paging.rs,children/reads.rs}` | Shared cursor envelope helpers in API; storage keyset helper for `(field1, field2, ...) > (...)`, page-size validation, `limit = page_size + 1`; use a maintained hex/base64 crate for cursor bytes instead of hand decoding | Lower API/storage paging LOC and fewer subtle cursor-field validation variants |
+| Adapter active-emitter and source-scope flow | `crates/adapters/src/ens_v2_common.rs`, `ens_v2_*`, `ens_v1_reverse_claim`, `ens_v1_subregistry_discovery`, `ens_v1_unwrapped_authority`, `block_derived_normalized_events`, plus indexer replay/backfill source-scope builders | Adapter-local support module for normalized source-scope targets, emitter interval overlap, active-at-block lookup, scoped ranges, event identity counting, and inserted/synced summaries | Removes repeated range-overlap and source-family filtering logic across adapter families |
+| Normalized-event builders and persistence summaries | `crates/adapters/src/*/normalized.rs`, `events.rs`, `event_building.rs`, `persistence_summary.rs`, `manifest_normalized_events/utils.rs`, `block_derived_normalized_events/persistence.rs` | Shared `NormalizedEventBuilder`/summary helpers inside `crates/adapters`, with adapter-specific state supplied as data | Reduces repeated event identity, raw fact ref, by-kind count, and inserted count code |
+| OpenAPI schema/parameter JSON | `apps/api/src/openapi/{schemas.rs,parameters.rs,app_facing_parameters.rs,responses.rs,route_operations.rs}` | First centralize schema builders and parameter builders; later evaluate `utoipa`, `schemars`, or `aide` only if DTO derive-based schemas match public docs without obscuring contract review | Good LOC reduction, but public-contract risk is higher than internal helper cleanup |
+| Compact app-facing response transforms | `apps/api/src/responses/app_facing/records_declared_values.rs`, `handlers/app_facing/*.rs`, `responses/projections*.rs` | Extract typed compact record/role/event builders before considering a schema library; share selector parsing and record-key helpers with execution/storage support | Shrinks the largest API response file and improves reviewability |
+| ENSv1 restricted replay preload pipeline | `crates/adapters/src/ens_v1_unwrapped_authority/{preload.rs,pipeline.rs,pipeline/apply.rs,materialization.rs,observation.rs,loading/raw_logs.rs}` | Split by responsibility after the helper work above: preload queries, selected state before replay, resolver state preload, provenance decoding, history mutation, identity materialization | Most LOC impact, but should happen after shared helpers land to avoid pure file shuffling |
+
+## EVM and Alloy inventory
+
+The codebase already uses Alloy in `crates/execution`, `crates/adapters`, and
+`apps/indexer`, but use is uneven:
+
+- `crates/execution/src/ens_text_records.rs` and
+  `crates/execution/src/ens_resolution_ccip.rs` already use `sol!`, `SolCall`,
+  and typed ABI encode/decode.
+- `crates/execution/src/ens_resolution_abi.rs` uses Alloy primitive ABI helpers
+  but still keeps local selector constants, DNS/namehash helpers, and hex helpers.
+- `crates/adapters/src/evm_abi.rs` centralizes some manual ABI word parsing for
+  adapters, but many adapter modules still match topic0 strings and decode
+  topics/data field-by-field.
+- `apps/indexer/src/provider/reth_db/convert.rs` uses Alloy/Reth primitives for
+  DB-backed provider data, while `apps/indexer/src/provider/decode.rs` manually
+  walks JSON-RPC `serde_json::Value` objects.
+
+Near-term replacement candidates:
+
+- Replace manual event data decoders in `crates/adapters/src/ens_v2_registry/decode.rs`,
+  `crates/adapters/src/ens_v2_resolver/decode.rs`,
+  `crates/adapters/src/ens_v2_permissions/decode.rs`, and
+  `crates/adapters/src/ens_v2_registrar/decoding.rs` with local `sol!` event
+  definitions and `SolEvent` decoding.
+- Replace topic hash functions like `keccak_signature_hex`, `*_topic0`, and
+  signature arrays with constants derived from the `sol!` event types where the
+  generated type exposes the selector/topic.
+- Keep adapter output types string-shaped for storage compatibility, but parse
+  EVM values through `Address`, `B256`, `U256`, and `Bytes` first.
+- Move shared `namehash`, `child_namehash`, `dns_encode`, `dns_decode`, `hex_32`,
+  and `hex_string` helpers into one adapter/execution support module. Do not put
+  ENS behavior claims in that module without upstream citations.
+
+Provider-side candidates:
+
+- Introduce typed JSON-RPC response structs from `alloy-rpc-types-eth` while
+  preserving the current `JsonRpcProvider` request/batch transport.
+- Normalize once at conversion boundaries: `alloy` typed response to existing
+  `ProviderBlock`, `ProviderTransaction`, `ProviderReceipt`, and `ProviderLog`.
+- After typed decoding is stable, consider whether `alloy-provider` can replace
+  custom transport pieces. This is a second slice because the current transport
+  preserves payload-cache and hash-pinned revalidation behavior.
+
+Dependency note:
+
+- `cargo tree -d --workspace` does not show duplicate Alloy major/minor versions
+  in the resolved tree, but direct version specs are split across manifests. Move
+  Alloy deps to `[workspace.dependencies]` with one set of versions before doing
+  broader Alloy migrations.
+
+## Internal helper inventory
+
+### Address, hex, hash, and namehash helpers
+
+Repeated names from the production function inventory:
+
+- `normalize_address`: 12 local definitions.
+- `hex_string`: 9 local definitions.
+- `keccak256_hex`: 6 local definitions.
+- `namehash_hex`: 4 local definitions.
+- `normalize_hex_32`: 5 local definitions.
+- `decode_hex_32`: 3 local definitions.
+
+Preferred shape:
+
+- `crates/adapters`: one `evm` helper module for adapter-side EVM primitives.
+- `crates/execution`: either use the adapter helper only if that dependency is
+  already intended, or keep an execution-local helper with the same public
+  behavior and tests.
+- `apps/indexer/provider`: provider conversion helpers should parse with Alloy
+  and return existing provider DTOs.
+- API and manifest string normalization should avoid importing Alloy unless the
+  field is explicitly EVM-shaped; otherwise keep simple string normalization
+  owner-local.
+
+### Canonicality and binding kind helpers
+
+Current duplicates:
+
+- `canonicality_rank` exists in worker projection modules,
+  `apps/indexer/src/main/reconciliation/payload.rs`, and
+  `crates/adapters/src/ens_v1_unwrapped_authority/materialization.rs`.
+- `weakest_canonicality` exists in several worker modules.
+- `SurfaceBindingKind` parsing is repeated because `SurfaceBindingKind::parse`
+  is `pub(super)` in `crates/storage/src/identity/types.rs`.
+
+Preferred shape:
+
+- Add `pub const fn rank(self) -> u8` and `pub fn weakest(...)` on
+  `CanonicalityState`.
+- Make `SurfaceBindingKind::parse` public if cross-crate consumers need it.
+- Replace local parse/rank matches with storage helpers.
+- Avoid widening `crates/domain`; these types already live in storage.
+
+### Projection JSON helpers
+
+Repeated worker helpers include:
+
+- `build_provenance`
+- `build_chain_positions`
+- `build_canonicality_summary`
+- `format_timestamp`
+- `dedupe_json_values`
+- `chain_slot`
+
+Preferred shape:
+
+- Add a worker-local module, for example `apps/worker/src/projection_json.rs`,
+  because most projection-summary assembly is worker-owned.
+- Use tiny input structs or traits such as `ProjectionEventRef` instead of
+  forcing all projection event rows into one enum.
+- Keep family-specific declared-state details in their current modules. Only
+  move the invariant envelope pieces: normalized event IDs, raw fact refs,
+  manifest versions, chain-position maps, canonicality summaries, timestamp
+  formatting, and JSON dedupe.
+- If API response code needs the same formatting, either expose the helper from a
+  storage support module or create a parallel API helper. Do not create a broad
+  domain crate just for formatting.
+
+### SQL row decoding
+
+Hotspots from pattern counts include:
+
+- `crates/manifests/src/lib/views/drift.rs`
+- `crates/adapters/src/ens_v1_unwrapped_authority/preload.rs`
+- `crates/storage/src/address_names/decode.rs`
+- `apps/worker/src/name_current/decode.rs`
+- `crates/storage/src/identity/read.rs`
+- `crates/execution/src/revalidation/storage.rs`
+- `apps/worker/src/resolver/target_loading.rs`
+
+Preferred shape:
+
+- For static row shapes, derive or implement `sqlx::FromRow` and use
+  `query_as::<_, RowType>`.
+- For dynamic SQL, add tiny helpers like `required(row, "field")`,
+  `optional(row, "field")`, and `non_negative_i64_to_u64(row, "field")`.
+- Add `TryFrom<String>` or public parse helpers for storage enums that are
+  decoded repeatedly.
+- Avoid a macro-heavy abstraction until the same helper has removed boilerplate
+  from at least two modules.
+
+### Pagination and cursor helpers
+
+Current pagination has two layers:
+
+- API cursor envelope and validation in `apps/api/src/support/cursors.rs`.
+- Storage keyset SQL in `crates/storage/src/*/paging.rs`, `address_names`, and
+  `name_current`.
+
+Preferred shape:
+
+- Keep the API cursor envelope in API, but replace manual hex nibble code with a
+  direct dependency on a maintained encoding crate or an already-owned shared
+  helper.
+- Introduce a storage-side helper for "page size to SQL limit", "truncate
+  sentinel row", and tuple keyset expressions. Start with the simple tuple cases
+  in children, permissions, and address names before tackling name-current
+  timestamp sorting.
+- Keep route-specific cursor field validation near API handlers until a shared
+  typed cursor trait naturally appears.
+
+## Adapter source-scope and normalized-event inventory
+
+Repeated adapter flow:
+
+1. Normalize optional source scope into source-family, address, from-block, and
+   to-block targets.
+2. Load watched/active emitters.
+3. Intersect emitters with scoped ranges.
+4. Load raw logs for block hashes or ranges.
+5. Build normalized events.
+6. Load existing event identities.
+7. Count synced and inserted events by kind.
+
+Current locations:
+
+- `crates/adapters/src/ens_v2_common.rs` already covers some ENSv2 helpers.
+- `crates/adapters/src/ens_v1_reverse_claim.rs` still keeps local existing-event
+  identity and count helpers.
+- `crates/adapters/src/block_derived_normalized_events/persistence.rs` has
+  similar helpers.
+- `crates/adapters/src/ens_v1_subregistry_discovery/{scope.rs,loader/*.rs}` and
+  `crates/adapters/src/ens_v1_unwrapped_authority/{scope.rs,loading/*.rs}` share
+  interval and active-emitter shapes.
+- `apps/indexer/src/main/reconciliation/{adapter_sync.rs,replay.rs}` and
+  `apps/indexer/src/main/backfill/fetching.rs` build matching source-scope
+  tuples for adapter calls.
+
+Preferred shape:
+
+- First move event-identity and by-kind count helpers to a common adapters
+  support module.
+- Then factor source-scope target normalization and interval-overlap helpers.
+- Only after those are stable, consider a shared `ActiveEmitter` type. Some
+  families carry slightly different manifest/discovery metadata, so a trait or
+  generic helper may be less disruptive than one mega struct.
+
+## Oversized-file notes
+
+### `crates/adapters/src/ens_v1_unwrapped_authority/preload.rs`
+
+This is the largest production file and mixes several different responsibilities:
+
+- selected name discovery for restricted replay
+- registrar state before replay
+- wrapper state before replay
+- resolver state before replay
+- record-version preload
+- name metadata decoding
+- preloaded history mutation
+- provenance field parsing
+- release-boundary block loading
+
+Best cleanup order:
+
+1. Extract row decoders and provenance parsers after the SQL row helper exists.
+2. Extract each preload family into submodules: registrar, wrapper, resolver,
+   record versions, metadata.
+3. Leave the orchestration function in `preload.rs` once its helpers are small.
+
+### `crates/adapters/src/ens_v1_unwrapped_authority/{observation.rs,ids.rs,abi.rs}`
+
+These files are good candidates for Alloy `sol!` event definitions and shared
+hash/namehash helpers. Do this before splitting observation logic so the split
+does not preserve the current manual ABI surface.
+
+### `apps/api/src/responses/app_facing/records_declared_values.rs`
+
+The file currently owns compact requested-record selection, declared cache
+mapping, verified cache mapping, known-text fallback, and response shaping.
+
+Best cleanup order:
+
+1. Extract record-key request selection and dedupe.
+2. Extract declared versus verified entry lookup.
+3. Extract final compact response assembly.
+4. Only then evaluate schema/OpenAPI generation helpers.
+
+### `apps/indexer/src/main.rs`
+
+This is a wiring file above the target. Prefer extracting command-mode runners
+and startup/runtime setup, not changing behavior. Do not bury CLI semantics in
+generic helpers.
+
+## Suggested cleanup slices
+
+1. Add storage enum helpers:
+   `CanonicalityState::rank`, `CanonicalityState::weakest`, public
+   `SurfaceBindingKind::parse`, and replace local duplicate matches.
+2. Add worker `projection_json` helpers and migrate one family at a time:
+   address names, permissions, record inventory, resolver, name current.
+3. Move adapter event identity and count helpers to common adapter support.
+4. Consolidate `normalize_address`, `hex_string`, `keccak256_hex`,
+   `namehash_hex`, `hex_32`, and `child_namehash` in adapter/execution support.
+5. Convert one small adapter decoder to Alloy `sol!` event decoding. Use it as
+   the pattern before touching the large ENSv1 observation files.
+6. Convert provider JSON-RPC response decoding from manual `serde_json::Value`
+   walking to `alloy-rpc-types-eth`, while keeping existing provider DTOs.
+7. Add storage keyset pagination helpers for simple tuple cursors, then migrate
+   children and permissions before name-current.
+8. Extract `apps/api/src/responses/app_facing/records_declared_values.rs` into
+   request-selection, entry-lookup, and response-assembly submodules.
+9. Split ENSv1 preload by family after row/provenance helpers land.
+10. Re-run `scripts/check-rust-file-size` and remove allowlist entries for files
+    that drop below threshold.

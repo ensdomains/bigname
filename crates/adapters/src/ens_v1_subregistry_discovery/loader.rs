@@ -1,4 +1,3 @@
-use anyhow::{Result, bail};
 use bigname_storage::CanonicalityState;
 use sqlx::types::Uuid;
 
@@ -50,15 +49,4 @@ pub(super) struct ActiveRegistryEdge {
     pub(super) discovery_source: String,
     pub(super) from_contract_instance_id: Uuid,
     pub(super) to_contract_instance_id: Uuid,
-}
-
-fn parse_canonicality_state(value: &str) -> Result<CanonicalityState> {
-    match value {
-        "observed" => Ok(CanonicalityState::Observed),
-        "canonical" => Ok(CanonicalityState::Canonical),
-        "safe" => Ok(CanonicalityState::Safe),
-        "finalized" => Ok(CanonicalityState::Finalized),
-        "orphaned" => Ok(CanonicalityState::Orphaned),
-        _ => bail!("unknown canonicality_state value {value}"),
-    }
 }
