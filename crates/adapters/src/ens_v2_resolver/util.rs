@@ -1,7 +1,8 @@
 use anyhow::{Result, bail};
 use sqlx::types::time::OffsetDateTime;
 
-use crate::ens_v2_common::{keccak256_bytes, keccak256_hex};
+use crate::ens_v2_common::keccak256_hex;
+use crate::evm_abi::namehash_hex;
 
 use super::types::{PreimageObservation, ResolverRawLogRow};
 pub(super) use crate::ens_v2_common::{
@@ -55,18 +56,6 @@ pub(super) fn observe_dns_encoded_name(bytes: &[u8]) -> Result<PreimageObservati
         labelhashes,
         namehash: namehash_hex(&labels),
     })
-}
-
-fn namehash_hex(labels: &[Vec<u8>]) -> String {
-    let mut node = [0u8; 32];
-    for label in labels.iter().rev() {
-        let label_hash = keccak256_bytes(label);
-        let mut combined = [0u8; 64];
-        combined[..32].copy_from_slice(&node);
-        combined[32..].copy_from_slice(&label_hash);
-        node = keccak256_bytes(&combined);
-    }
-    format!("0x{}", hex_string(node))
 }
 
 pub(super) fn display_name(name: &str) -> String {

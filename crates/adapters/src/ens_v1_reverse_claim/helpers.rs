@@ -1,7 +1,9 @@
-use alloy_primitives::{hex, keccak256};
 use anyhow::{Result, bail};
 
 use crate::evm_abi;
+#[cfg(test)]
+pub(super) use crate::evm_abi::hex_string;
+pub(super) use crate::evm_abi::namehash_hex;
 
 use super::{
     REVERSE_CLAIMED_SIGNATURE, SOURCE_FAMILY_BASENAMES_BASE_PRIMARY,
@@ -47,25 +49,5 @@ pub(super) fn normalize_topic_address(value: &str) -> Result<String> {
 }
 
 pub(super) fn reverse_claimed_topic0() -> String {
-    keccak256_hex(REVERSE_CLAIMED_SIGNATURE.as_bytes())
-}
-
-pub(super) fn namehash_hex(labels: &[Vec<u8>]) -> String {
-    let mut node = [0u8; 32];
-    for label in labels.iter().rev() {
-        let mut combined = [0u8; 64];
-        combined[..32].copy_from_slice(&node);
-        combined[32..].copy_from_slice(keccak256(label).as_slice());
-        node.copy_from_slice(keccak256(combined).as_slice());
-    }
-
-    hex_string(&node)
-}
-
-pub(super) fn keccak256_hex(bytes: &[u8]) -> String {
-    hex_string(keccak256(bytes).as_slice())
-}
-
-pub(super) fn hex_string(bytes: &[u8]) -> String {
-    format!("0x{}", hex::encode(bytes))
+    evm_abi::keccak_signature_hex(REVERSE_CLAIMED_SIGNATURE)
 }

@@ -1,41 +1,14 @@
-use alloy_primitives::{hex, keccak256};
-
 use super::*;
 use crate::evm_abi;
+pub(super) use crate::evm_abi::{child_namehash_hex, hex_string, keccak256_hex, namehash_hex};
 
 pub(super) fn deterministic_uuid(seed: &str) -> Uuid {
-    let digest = keccak256(seed.as_bytes());
+    let digest = evm_abi::keccak256_bytes(seed.as_bytes());
     let mut bytes = [0u8; 16];
-    bytes.copy_from_slice(&digest.as_slice()[..16]);
+    bytes.copy_from_slice(&digest[..16]);
     bytes[6] = (bytes[6] & 0x0f) | 0x50;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
     Uuid::from_bytes(bytes)
-}
-
-pub(super) fn keccak256_hex(bytes: &[u8]) -> String {
-    hex_string(keccak256(bytes).as_slice())
-}
-
-pub(super) fn namehash_hex(labels: &[Vec<u8>]) -> String {
-    let mut node = [0u8; 32];
-    for label in labels.iter().rev() {
-        let mut combined = [0u8; 64];
-        combined[..32].copy_from_slice(&node);
-        combined[32..].copy_from_slice(keccak256(label).as_slice());
-        node.copy_from_slice(keccak256(combined).as_slice());
-    }
-    hex_string(&node)
-}
-
-pub(super) fn child_namehash_hex(parent_node: &str, labelhash: &str) -> Result<String> {
-    let mut bytes = [0u8; 64];
-    bytes[..32].copy_from_slice(&decode_hex_32(parent_node)?);
-    bytes[32..].copy_from_slice(&decode_hex_32(labelhash)?);
-    Ok(keccak256_hex(&bytes))
-}
-
-fn decode_hex_32(value: &str) -> Result<[u8; 32]> {
-    evm_abi::hex_32(value)
 }
 
 pub(super) fn eth_node() -> String {
@@ -214,8 +187,4 @@ pub(super) fn expiry_extended_topic0() -> String {
 
 pub(super) fn transfer_single_topic0() -> String {
     keccak256_hex(TRANSFER_SINGLE_SIGNATURE.as_bytes())
-}
-
-pub(super) fn hex_string(bytes: &[u8]) -> String {
-    format!("0x{}", hex::encode(bytes))
 }

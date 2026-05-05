@@ -1,4 +1,4 @@
-use alloy_primitives::{Address, U256, hex};
+use alloy_primitives::{Address, U256, hex, keccak256};
 use anyhow::{Context, Result, bail};
 
 const ABI_WORD_BYTES: usize = 32;
@@ -115,6 +115,40 @@ pub(crate) fn normalize_hex_32(value: &str) -> Result<String> {
     Ok(normalized)
 }
 
+pub(crate) fn keccak_signature_hex(signature: &str) -> String {
+    keccak256_hex(signature.as_bytes())
+}
+
+pub(crate) fn keccak256_hex(bytes: &[u8]) -> String {
+    hex_string(keccak256_bytes(bytes))
+}
+
+pub(crate) fn keccak256_bytes(bytes: &[u8]) -> [u8; ABI_WORD_BYTES] {
+    let digest = keccak256(bytes);
+    let mut output = [0u8; ABI_WORD_BYTES];
+    output.copy_from_slice(digest.as_slice());
+    output
+}
+
+pub(crate) fn namehash_hex(labels: &[Vec<u8>]) -> String {
+    hex_string(namehash_bytes(labels))
+}
+
+pub(crate) fn child_namehash_hex(parent_node: &str, labelhash: &str) -> Result<String> {
+    let mut bytes = [0u8; ABI_WORD_BYTES * 2];
+    bytes[..ABI_WORD_BYTES].copy_from_slice(&hex_32(parent_node)?);
+    bytes[ABI_WORD_BYTES..].copy_from_slice(&hex_32(labelhash)?);
+    Ok(keccak256_hex(&bytes))
+}
+
+pub(crate) fn hex_string(bytes: impl AsRef<[u8]>) -> String {
+    format!("0x{}", hex_string_without_prefix(bytes))
+}
+
+pub(crate) fn hex_string_without_prefix(bytes: impl AsRef<[u8]>) -> String {
+    hex::encode(bytes)
+}
+
 fn usize_word(data: &[u8], word_index: usize) -> Result<usize> {
     usize_from_word(word_at(data, word_index)?)
 }
@@ -128,4 +162,15 @@ fn exact_word(word: &[u8]) -> Result<&[u8; ABI_WORD_BYTES]> {
         bail!("ABI word must be exactly 32 bytes");
     }
     word.try_into().context("ABI word must be exactly 32 bytes")
+}
+
+pub(crate) fn namehash_bytes(labels: &[Vec<u8>]) -> [u8; ABI_WORD_BYTES] {
+    let mut node = [0u8; ABI_WORD_BYTES];
+    for label in labels.iter().rev() {
+        let mut combined = [0u8; ABI_WORD_BYTES * 2];
+        combined[..ABI_WORD_BYTES].copy_from_slice(&node);
+        combined[ABI_WORD_BYTES..].copy_from_slice(&keccak256_bytes(label));
+        node = keccak256_bytes(&combined);
+    }
+    node
 }

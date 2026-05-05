@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 
-use alloy_primitives::{hex, keccak256};
 use anyhow::{Context, Result, bail};
 use bigname_manifests::load_watched_contracts;
 use bigname_storage::CanonicalityState;
@@ -10,6 +9,9 @@ use crate::adapter_manifest::{
     ActiveManifestMetadata, active_manifest_for_watched_contract,
     ensure_watched_contract_manifest_chain, load_active_manifest_metadata,
     load_latest_active_manifest_metadata_for_source_family, watched_contract_manifest_ids,
+};
+pub(crate) use crate::evm_abi::{
+    keccak_signature_hex, keccak256_bytes, keccak256_hex, normalize_hex_32,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -207,10 +209,6 @@ async fn load_active_source_family_manifest_metadata(
     .await
 }
 
-pub(crate) fn normalize_hex_32(value: &str) -> Result<String> {
-    crate::evm_abi::normalize_hex_32(value)
-}
-
 pub(crate) fn normalize_address(value: &str) -> String {
     value.to_ascii_lowercase()
 }
@@ -252,21 +250,6 @@ pub(crate) fn dns_decode(bytes: &[u8]) -> Result<String> {
     bail!("DNS-encoded name is missing root label")
 }
 
-pub(crate) fn keccak_signature_hex(signature: &str) -> String {
-    format!("0x{}", hex_string(keccak256_bytes(signature.as_bytes())))
-}
-
-pub(crate) fn keccak256_hex(bytes: &[u8]) -> String {
-    format!("0x{}", hex_string(keccak256_bytes(bytes)))
-}
-
-pub(crate) fn keccak256_bytes(bytes: &[u8]) -> [u8; 32] {
-    let digest = keccak256(bytes);
-    let mut output = [0u8; 32];
-    output.copy_from_slice(digest.as_slice());
-    output
-}
-
 pub(crate) fn hex_string(bytes: impl AsRef<[u8]>) -> String {
-    hex::encode(bytes)
+    crate::evm_abi::hex_string_without_prefix(bytes)
 }

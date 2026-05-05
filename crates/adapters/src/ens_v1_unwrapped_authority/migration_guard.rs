@@ -96,12 +96,5 @@ fn registry_indexed_node(raw_log: &AuthorityRawLogRow, event_name: &str) -> Resu
 }
 
 fn hash_pair(left: &str, right: &str) -> Result<String> {
-    let mut bytes = [0u8; 64];
-    bytes[..32].copy_from_slice(&decode_hex_32(left)?);
-    bytes[32..].copy_from_slice(&decode_hex_32(right)?);
-    Ok(keccak256_hex(&bytes))
-}
-
-fn decode_hex_32(value: &str) -> Result<[u8; 32]> {
-    evm_abi::hex_32(value)
+    evm_abi::child_namehash_hex(left, right)
 }

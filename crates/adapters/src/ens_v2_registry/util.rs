@@ -7,6 +7,7 @@ use sqlx::types::{Uuid, time::OffsetDateTime};
 pub(super) use crate::ens_v2_common::{
     hex_string, keccak_signature_hex, keccak256_bytes, normalize_address, parse_canonicality_state,
 };
+pub(super) use crate::evm_abi::namehash_bytes;
 
 use super::{constants::ZERO_ADDRESS, types::ObservationRef};
 
@@ -58,18 +59,6 @@ pub(super) fn display_name(name: &str) -> String {
         .chain(labels.map(|label| label.to_ascii_lowercase()))
         .collect::<Vec<_>>()
         .join(".")
-}
-
-pub(super) fn namehash_bytes(labels: &[Vec<u8>]) -> [u8; 32] {
-    let mut node = [0u8; 32];
-    for label in labels.iter().rev() {
-        let label_hash = keccak256_bytes(label);
-        let mut combined = [0u8; 64];
-        combined[..32].copy_from_slice(&node);
-        combined[32..].copy_from_slice(&label_hash);
-        node = keccak256_bytes(&combined);
-    }
-    node
 }
 
 pub(super) fn deterministic_uuid(seed: &str) -> Uuid {

@@ -1,7 +1,8 @@
-use alloy_primitives::{hex, keccak256};
 use anyhow::{Context, Result};
 
 use crate::evm_abi;
+pub(super) use crate::evm_abi::hex_string_without_prefix as hex_string;
+use crate::evm_abi::keccak_signature_hex;
 
 const NEW_OWNER_SIGNATURE: &str = "NewOwner(bytes32,bytes32,address)";
 const NEW_RESOLVER_SIGNATURE: &str = "NewResolver(bytes32,address)";
@@ -16,16 +17,7 @@ pub(super) fn decode_owner_address(data: &[u8]) -> Result<String> {
 }
 
 pub(super) fn child_node(parent_node: &str, labelhash: &str) -> Result<String> {
-    let parent_node = decode_hex_32(parent_node)?;
-    let labelhash = decode_hex_32(labelhash)?;
-    let mut combined = [0u8; 64];
-    combined[..32].copy_from_slice(&parent_node);
-    combined[32..].copy_from_slice(&labelhash);
-    Ok(format!("0x{}", hex_string(keccak256(combined))))
-}
-
-pub(super) fn decode_hex_32(value: &str) -> Result<[u8; 32]> {
-    evm_abi::hex_32(value)
+    evm_abi::child_namehash_hex(parent_node, labelhash)
 }
 
 pub(super) fn normalize_hex_32(value: &str) -> Result<String> {
@@ -52,18 +44,10 @@ pub(super) fn new_ttl_topic0() -> String {
     keccak_signature_hex(NEW_TTL_SIGNATURE)
 }
 
-fn keccak_signature_hex(signature: &str) -> String {
-    format!("0x{}", hex_string(keccak256(signature.as_bytes())))
-}
-
 pub(super) fn null_if_zero_address(address: &str) -> Option<String> {
     if normalize_address(address) == ZERO_ADDRESS {
         None
     } else {
         Some(normalize_address(address))
     }
-}
-
-pub(super) fn hex_string(bytes: impl AsRef<[u8]>) -> String {
-    hex::encode(bytes)
 }

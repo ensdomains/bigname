@@ -62,14 +62,17 @@ Addressed slices:
   re-export the helpers where tests or sibling modules already used those paths.
 - `crates/adapters/src/normalized_event_support.rs` now owns adapter
   normalized-event identity loading and by-kind inserted/synced counters.
+- `crates/adapters/src/evm_abi.rs` now owns adapter Keccak, event-signature
+  topic hashes, prefixed/non-prefixed hex strings, namehash, and child-namehash
+  helpers, backed by Alloy primitives.
 
 ## Highest leverage cleanup map
 
 | Logic family | Current locations | Replace or centralize with | Expected payoff |
 | --- | --- | --- | --- |
-| EVM ABI words, event topics, hex, hashes | `crates/adapters/src/evm_abi.rs`, `crates/adapters/src/ens_v2_*/*decode*.rs`, `crates/adapters/src/ens_v1_unwrapped_authority/{abi.rs,ids.rs,observation.rs}`, `crates/adapters/src/ens_v1_subregistry_discovery/hex_topic.rs`, `crates/adapters/src/block_derived_normalized_events/decoding.rs`, `crates/execution/src/ens_resolution_abi.rs`, `apps/indexer/src/provider/decode.rs`, `apps/indexer/src/main/reconciliation/payload.rs` | `alloy-primitives` for `Address`, `B256`, `U256`, `Bytes`, `FixedBytes`, `hex`, `keccak256`; `alloy-sol-types` `sol!`, `SolCall`, `SolEvent`, and `SolValue` for ABI call/event encode/decode | Large LOC reduction in adapters, fewer hand-rolled offset/word parsers, less duplicated topic hashing |
+| EVM ABI words, event topics, hex, hashes | `crates/adapters/src/evm_abi.rs` now owns shared adapter ABI-word, Keccak, topic-hash, hex, namehash, and child-namehash helpers. Remaining duplicates are in adapter decode/event builders, `crates/execution/src/ens_resolution_abi.rs`, `apps/indexer/src/provider/decode.rs`, and `apps/indexer/src/main/reconciliation/payload.rs` | Keep using `alloy-primitives` for `Address`, `B256`, `U256`, `Bytes`, `FixedBytes`, `hex`, `keccak256`; next use `alloy-sol-types` `sol!`, `SolCall`, `SolEvent`, and `SolValue` for ABI call/event encode/decode | Large LOC reduction in adapters, fewer hand-rolled offset/word parsers, less duplicated topic hashing |
 | Provider JSON-RPC typed decoding | `apps/indexer/src/provider/decode.rs`, `apps/indexer/src/provider/types.rs`, `apps/indexer/src/provider/logs_receipts.rs`, `apps/indexer/src/provider/reth_db/convert.rs` | Keep current transport initially, but deserialize into `alloy-rpc-types-eth` block, transaction, receipt, log, filter, and block-id types before converting to storage DTOs | Removes brittle `serde_json::Value` object walking and custom hex parsing in provider code |
-| Address/hash normalization | `normalize_address` appears in API, indexer, worker, adapters, manifests, storage, and execution path validation; hash/hex helpers appear in at least 9 files | One storage-format helper per owner crate: parse with Alloy where EVM-shaped, return canonical lower `0x` strings; expose narrow helpers from adapters/execution/provider modules | Prevents drift between "lowercase only" and "validated EVM address/hash" call sites |
+| Address/hash normalization | Adapter hash/hex/namehash helpers are centralized in `evm_abi`; `normalize_address` still appears in API, indexer, worker, adapters, manifests, storage, and execution path validation | One storage-format helper per owner crate: parse with Alloy where EVM-shaped, return canonical lower `0x` strings; expose narrow helpers from adapters/execution/provider modules | Prevents drift between "lowercase only" and "validated EVM address/hash" call sites |
 | Canonicality and binding-kind parsing/rank | First slice landed: `CanonicalityState::rank`, `CanonicalityState::weakest`, and public `SurfaceBindingKind::parse` now cover indexer/adapters/storage/worker call sites with the canonical storage ordering; projection summaries with intentionally different ordering remain local | Continue replacing wrappers where semantics match; leave summary-specific rank orders local until their meaning is documented | Deletes repeated match blocks and reduces risk when enum variants change |
 | Projection JSON summaries | `apps/worker/src/projection_json.rs` now covers repeated worker timestamp formatting, JSON path reads, and JSON value dedupe; remaining repeated worker families are provenance envelopes, chain-position maps, summary-specific canonicality ranks, and chain slots. API still has response-side JSON helpers | Continue growing worker-local `projection_json` with provenance, chain-position, and canonicality primitives where semantics match; consider storage helpers only for projection-shared public row shapes | Reduces repeated `serde_json` assembly and makes coverage/provenance mistakes easier to spot |
 | SQL row decoding boilerplate | Manual `PgRow::try_get(...).context(...)` decoders across storage, manifests, adapters, worker loaders, and API support; almost no production `query_as`/`FromRow` usage | Use `sqlx::FromRow` for plain rows; add small local row helper wrappers for contextual field reads and non-negative conversions where dynamic SQL prevents derive | Cuts a large amount of repetitive error text and makes row shape changes easier |
@@ -337,8 +340,9 @@ generic helpers.
    inventory, resolver, children, inspect, and name current.
 3. Partially done: move adapter normalized-event identity loading and by-kind
    counters to `crates/adapters/src/normalized_event_support.rs`.
-4. Consolidate `normalize_address`, `hex_string`, `keccak256_hex`,
-   `namehash_hex`, `hex_32`, and `child_namehash` in adapter/execution support.
+4. Partially done: consolidate adapter `hex_string`, `keccak256_hex`,
+   `namehash_hex`, `hex_32`, and `child_namehash` in `evm_abi`; address
+   normalization and execution/indexer helper consolidation remain.
 5. Convert one small adapter decoder to Alloy `sol!` event decoding. Use it as
    the pattern before touching the large ENSv1 observation files.
 6. Convert provider JSON-RPC response decoding from manual `serde_json::Value`
