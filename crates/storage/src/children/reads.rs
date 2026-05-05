@@ -2,7 +2,9 @@ use anyhow::{Context, Result, bail};
 use serde_json::Value;
 use sqlx::{PgPool, Postgres, QueryBuilder, Row, postgres::PgRow};
 
-use crate::projection_helpers::{checked_page_limit_i64, checked_page_size_usize, take_json_array};
+use crate::projection_helpers::{
+    checked_page_limit_i64, checked_page_size_usize, split_keyset_page, take_json_array,
+};
 
 use super::{
     DECLARED_SURFACE_CLASS, DEFAULT_CHILDREN_CURRENT_READ_FILTER,
@@ -99,7 +101,7 @@ pub async fn load_children_current_page(
     );
     builder.push_bind(limit);
 
-    let mut rows = builder
+    let rows = builder
         .build()
         .fetch_all(pool)
         .await
@@ -112,13 +114,9 @@ pub async fn load_children_current_page(
         .map(decode_children_current_row)
         .collect::<Result<Vec<_>>>()?;
 
-    let has_next_page = rows.len() > page_size;
-    if has_next_page {
-        rows.truncate(page_size);
-    }
-    let next_cursor = has_next_page
-        .then(|| rows.last().map(ChildrenCurrentKeysetCursor::from))
-        .flatten();
+    let (rows, next_cursor) = split_keyset_page(rows, page_size, |row| {
+        ChildrenCurrentKeysetCursor::from(row)
+    });
 
     let summary = load_children_current_summary(pool, parent_logical_name_id).await?;
 

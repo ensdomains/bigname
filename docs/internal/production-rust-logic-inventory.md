@@ -68,6 +68,9 @@ Addressed slices:
 - `crates/adapters/src/ens_v2_registrar/decoding.rs` is the first adapter
   decoder converted from manual ABI word walking to `alloy-sol-types`
   `sol_data` tuple decoding.
+- `crates/storage/src/projection_helpers.rs` now owns the storage keyset
+  page split/truncate/next-cursor pattern used by address names, children, and
+  permissions.
 
 ## Highest leverage cleanup map
 
@@ -79,7 +82,7 @@ Addressed slices:
 | Canonicality and binding-kind parsing/rank | First slice landed: `CanonicalityState::rank`, `CanonicalityState::weakest`, and public `SurfaceBindingKind::parse` now cover indexer/adapters/storage/worker call sites with the canonical storage ordering; projection summaries with intentionally different ordering remain local | Continue replacing wrappers where semantics match; leave summary-specific rank orders local until their meaning is documented | Deletes repeated match blocks and reduces risk when enum variants change |
 | Projection JSON summaries | `apps/worker/src/projection_json.rs` now covers repeated worker timestamp formatting, JSON path reads, and JSON value dedupe; remaining repeated worker families are provenance envelopes, chain-position maps, summary-specific canonicality ranks, and chain slots. API still has response-side JSON helpers | Continue growing worker-local `projection_json` with provenance, chain-position, and canonicality primitives where semantics match; consider storage helpers only for projection-shared public row shapes | Reduces repeated `serde_json` assembly and makes coverage/provenance mistakes easier to spot |
 | SQL row decoding boilerplate | Manual `PgRow::try_get(...).context(...)` decoders across storage, manifests, adapters, worker loaders, and API support; almost no production `query_as`/`FromRow` usage | Use `sqlx::FromRow` for plain rows; add small local row helper wrappers for contextual field reads and non-negative conversions where dynamic SQL prevents derive | Cuts a large amount of repetitive error text and makes row shape changes easier |
-| Keyset pagination and cursors | `apps/api/src/support/cursors.rs`, `apps/api/src/handlers/app_facing/{names_collection.rs,roles.rs}`, `crates/storage/src/{name_current/list_paging.rs,address_names/query.rs,address_names/page.rs,permissions/paging.rs,children/reads.rs}` | Shared cursor envelope helpers in API; storage keyset helper for `(field1, field2, ...) > (...)`, page-size validation, `limit = page_size + 1`; use a maintained hex/base64 crate for cursor bytes instead of hand decoding | Lower API/storage paging LOC and fewer subtle cursor-field validation variants |
+| Keyset pagination and cursors | `crates/storage/src/projection_helpers.rs` covers shared storage page-size checks and keyset page split/truncate/cursor selection for address names, children, and permissions; API cursor envelope helpers remain in `apps/api/src/support/cursors.rs` | Continue with shared cursor envelope helpers in API; storage keyset helper for `(field1, field2, ...) > (...)`; use a maintained hex/base64 crate for cursor bytes instead of hand decoding | Lower API/storage paging LOC and fewer subtle cursor-field validation variants |
 | Adapter active-emitter and source-scope flow | `crates/adapters/src/ens_v2_common.rs`, `ens_v2_*`, `ens_v1_reverse_claim`, `ens_v1_subregistry_discovery`, `ens_v1_unwrapped_authority`, `block_derived_normalized_events`, plus indexer replay/backfill source-scope builders | Adapter-local support modules for normalized source-scope targets, emitter interval overlap, active-at-block lookup, scoped ranges, and summaries. Event identity loading and by-kind counters are now in `normalized_event_support` | Removes repeated range-overlap and source-family filtering logic across adapter families |
 | Normalized-event builders and persistence summaries | `crates/adapters/src/normalized_event_support.rs` covers shared event identity loading and by-kind counters; remaining duplication lives in `crates/adapters/src/*/normalized.rs`, `events.rs`, `event_building.rs`, `persistence_summary.rs`, and manifest event identity/raw fact builders | Continue with shared `NormalizedEventBuilder`/summary helpers inside `crates/adapters`, with adapter-specific state supplied as data | Reduces repeated event identity, raw fact ref, by-kind count, and inserted count code |
 | OpenAPI schema/parameter JSON | `apps/api/src/openapi/{schemas.rs,parameters.rs,app_facing_parameters.rs,responses.rs,route_operations.rs}` | First centralize schema builders and parameter builders; later evaluate `utoipa`, `schemars`, or `aide` only if DTO derive-based schemas match public docs without obscuring contract review | Good LOC reduction, but public-contract risk is higher than internal helper cleanup |
@@ -352,7 +355,8 @@ generic helpers.
 6. Convert provider JSON-RPC response decoding from manual `serde_json::Value`
    walking to `alloy-rpc-types-eth`, while keeping existing provider DTOs.
 7. Add storage keyset pagination helpers for simple tuple cursors, then migrate
-   children and permissions before name-current.
+   children and permissions before name-current. Page split/truncate/cursor
+   selection is done for address names, children, and permissions.
 8. Extract `apps/api/src/responses/app_facing/records_declared_values.rs` into
    request-selection, entry-lookup, and response-assembly submodules.
 9. Split ENSv1 preload by family after row/provenance helpers land.

@@ -11,7 +11,9 @@ use super::{
         AddressNamesCurrentDedupe, AddressNamesCurrentPage, AddressNamesCurrentSummary,
     },
 };
-use crate::projection_helpers::{checked_page_limit_i64_from_usize, checked_page_size_usize};
+use crate::projection_helpers::{
+    checked_page_limit_i64_from_usize, checked_page_size_usize, split_keyset_page,
+};
 
 /// Load a bounded page of grouped current address-name entries from the default canonical read set.
 pub async fn load_address_names_current_page(
@@ -104,16 +106,12 @@ pub async fn load_address_names_current_page(
         )
     })?;
 
-    let mut entries = rows
+    let entries = rows
         .into_iter()
         .map(decode_address_name_current_entry)
         .collect::<Result<Vec<_>>>()?;
-    let next_cursor = if entries.len() > page_size {
-        entries.truncate(page_size);
-        entries.last().map(address_names_current_cursor_from_entry)
-    } else {
-        None
-    };
+    let (entries, next_cursor) =
+        split_keyset_page(entries, page_size, address_names_current_cursor_from_entry);
 
     Ok(AddressNamesCurrentPage {
         entries,
