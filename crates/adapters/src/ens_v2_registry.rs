@@ -21,6 +21,7 @@ mod normalized;
 mod types;
 mod util;
 
+use crate::normalized_event_support::count_events_by_kind;
 use constants::*;
 use decode::build_registry_observation;
 use discovery::{latest_discovery_observations, reconcile_discovery_observations_by_source};
@@ -32,7 +33,6 @@ use identity::{
 };
 use load::load_registry_raw_logs;
 use names::initial_registry_suffixes;
-use normalized::count_events_by_kind;
 use types::*;
 use util::normalize_address;
 

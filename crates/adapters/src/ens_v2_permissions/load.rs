@@ -1,7 +1,4 @@
-use std::collections::HashSet;
-
 use anyhow::{Context, Result};
-use bigname_storage::NormalizedEvent;
 use sqlx::{PgPool, Row};
 
 use crate::ens_v2_common::{
@@ -134,11 +131,4 @@ pub(super) async fn load_active_emitters(pool: &PgPool, chain: &str) -> Result<V
         "ENSv2 permissions",
     )
     .await
-}
-
-pub(super) async fn load_existing_event_identities(
-    pool: &PgPool,
-    events: &[NormalizedEvent],
-) -> Result<HashSet<String>> {
-    crate::ens_v2_common::load_existing_event_identities(pool, events, "ENSv2 permissions").await
 }

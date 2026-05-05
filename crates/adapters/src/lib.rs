@@ -15,6 +15,7 @@ mod ens_v2_registry;
 mod ens_v2_resolver;
 mod evm_abi;
 mod manifest_normalized_events;
+mod normalized_event_support;
 mod registry_migration_cache;
 
 /// Current adapter bootstrap status.

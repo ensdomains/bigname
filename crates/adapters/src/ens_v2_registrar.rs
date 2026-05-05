@@ -2,6 +2,10 @@ use anyhow::Result;
 use bigname_storage::upsert_normalized_events;
 use sqlx::PgPool;
 
+use crate::normalized_event_support::{
+    count_events_by_kind, count_inserted_events_by_kind, load_existing_event_identities,
+};
+
 mod active_emitters;
 mod decoding;
 mod event_building;
@@ -15,10 +19,7 @@ mod tests;
 use active_emitters::load_active_emitters;
 use decoding::build_registrar_observation;
 use event_building::build_registrar_event;
-use persistence_summary::{
-    count_events_by_kind, count_inserted_events_by_kind, empty_summary,
-    load_existing_event_identities,
-};
+use persistence_summary::empty_summary;
 use raw_logs::load_registrar_raw_logs;
 
 pub use persistence_summary::{EnsV2RegistrarKindSyncSummary, EnsV2RegistrarSyncSummary};
@@ -99,7 +100,7 @@ async fn sync_ens_v2_registrar_with_scope(
         events.push(build_registrar_event(pool, raw_log, observation).await?);
     }
 
-    let existing = load_existing_event_identities(pool, &events).await?;
+    let existing = load_existing_event_identities(pool, &events, "ENSv2 registrar").await?;
     let inserted_by_kind = count_inserted_events_by_kind(&events, &existing);
     let synced_by_kind = count_events_by_kind(&events);
     upsert_normalized_events(pool, &events).await?;

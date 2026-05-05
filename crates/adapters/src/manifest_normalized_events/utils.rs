@@ -1,11 +1,11 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 use bigname_manifests::{
     ManifestCodeHashObservation, ManifestDeclaredContractDriftInput, ManifestDriftInputs,
     WatchedContractSource,
 };
-use bigname_storage::{CanonicalityState, NormalizedEvent};
+use bigname_storage::CanonicalityState;
 use serde_json::Value;
 use sqlx::types::Uuid;
 
@@ -51,14 +51,6 @@ pub(super) fn event_identity(prefix: &str, key: Value) -> Result<String> {
         "{prefix}:{}",
         serde_json::to_string(&key).context("failed to serialize normalized-event identity")?
     ))
-}
-
-pub(super) fn count_events_by_kind(events: &[NormalizedEvent]) -> BTreeMap<String, usize> {
-    let mut counts = BTreeMap::new();
-    for event in events {
-        *counts.entry(event.event_kind.clone()).or_insert(0) += 1;
-    }
-    counts
 }
 
 pub(super) fn code_hash_observation_key(

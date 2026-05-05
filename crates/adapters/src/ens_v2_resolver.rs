@@ -5,6 +5,9 @@ use bigname_storage::upsert_normalized_events;
 use sqlx::PgPool;
 
 use crate::ens_v2_common::ActiveEmitter;
+use crate::normalized_event_support::{
+    count_events_by_kind, count_inserted_events_by_kind, load_existing_event_identities,
+};
 
 mod constants;
 mod decode;
@@ -15,8 +18,8 @@ mod util;
 
 pub(crate) const DERIVATION_KIND_ENS_V2_RESOLVER: &str = constants::DERIVATION_KIND_ENS_V2_RESOLVER;
 use decode::build_resolver_observation;
-use events::{build_resolver_events, count_events_by_kind, count_inserted_events_by_kind};
-use queries::{load_active_emitters, load_existing_event_identities, load_resolver_raw_logs};
+use events::build_resolver_events;
+use queries::{load_active_emitters, load_resolver_raw_logs};
 
 #[cfg(test)]
 pub(crate) mod testsupport;
@@ -98,7 +101,7 @@ async fn sync_ens_v2_resolver_with_scope(
         events.extend(build_resolver_events(pool, raw_log, observation).await?);
     }
 
-    let existing = load_existing_event_identities(pool, &events).await?;
+    let existing = load_existing_event_identities(pool, &events, "ENSv2 resolver").await?;
     let inserted_by_kind = count_inserted_events_by_kind(&events, &existing);
     let synced_by_kind = count_events_by_kind(&events);
     upsert_normalized_events(pool, &events).await?;

@@ -1,8 +1,12 @@
 use std::collections::{BTreeMap, HashSet};
 
-use anyhow::{Context, Result};
-use bigname_storage::{NormalizedEvent, upsert_normalized_events};
+use anyhow::Result;
+use bigname_storage::upsert_normalized_events;
 use sqlx::PgPool;
+
+use crate::normalized_event_support::{
+    count_events_by_kind, count_inserted_events_by_kind, load_existing_event_identities,
+};
 
 mod active_emitters;
 mod events;
@@ -13,6 +17,8 @@ use active_emitters::load_active_emitters;
 use events::build_reverse_changed_event;
 use raw_logs::load_reverse_raw_logs;
 
+#[cfg(test)]
+use anyhow::Context;
 #[cfg(test)]
 use bigname_storage::CanonicalityState;
 #[cfg(test)]
@@ -135,7 +141,8 @@ async fn sync_ens_v1_reverse_claim_with_scope(
         });
     }
 
-    let existing_event_identities = load_existing_event_identities(pool, &events).await?;
+    let existing_event_identities =
+        load_existing_event_identities(pool, &events, "ENSv1 reverse normalized-event").await?;
     let inserted_by_kind = count_inserted_events_by_kind(&events, &existing_event_identities);
     let synced_by_kind = count_events_by_kind(&events);
 
@@ -182,52 +189,6 @@ fn reverse_scope_includes_emitter(
                 && address.eq_ignore_ascii_case(&emitter.address)
                 && from_block <= to_block
         })
-}
-
-async fn load_existing_event_identities(
-    pool: &PgPool,
-    events: &[NormalizedEvent],
-) -> Result<HashSet<String>> {
-    let event_identities = events
-        .iter()
-        .map(|event| event.event_identity.clone())
-        .collect::<Vec<_>>();
-
-    let rows = sqlx::query_scalar::<_, String>(
-        r#"
-        SELECT event_identity
-        FROM normalized_events
-        WHERE event_identity = ANY($1::TEXT[])
-        "#,
-    )
-    .bind(event_identities)
-    .fetch_all(pool)
-    .await
-    .context("failed to load existing ENSv1 reverse normalized-event identities")?;
-
-    Ok(rows.into_iter().collect())
-}
-
-fn count_inserted_events_by_kind(
-    events: &[NormalizedEvent],
-    existing_event_identities: &HashSet<String>,
-) -> BTreeMap<String, usize> {
-    let mut counts = BTreeMap::new();
-    for event in events
-        .iter()
-        .filter(|event| !existing_event_identities.contains(&event.event_identity))
-    {
-        *counts.entry(event.event_kind.clone()).or_insert(0) += 1;
-    }
-    counts
-}
-
-fn count_events_by_kind(events: &[NormalizedEvent]) -> BTreeMap<String, usize> {
-    let mut counts = BTreeMap::new();
-    for event in events {
-        *counts.entry(event.event_kind.clone()).or_insert(0) += 1;
-    }
-    counts
 }
 
 #[cfg(test)]

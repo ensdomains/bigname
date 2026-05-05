@@ -3,6 +3,7 @@ use std::{
     time::Instant,
 };
 
+use crate::normalized_event_support::count_events_by_kind;
 use crate::registry_migration_cache::MigratedRegistryNodes;
 use anyhow::{Context, Result, bail};
 use bigname_storage::{

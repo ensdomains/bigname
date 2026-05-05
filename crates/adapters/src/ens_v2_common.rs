@@ -1,9 +1,9 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use alloy_primitives::{hex, keccak256};
 use anyhow::{Context, Result, bail};
 use bigname_manifests::load_watched_contracts;
-use bigname_storage::{CanonicalityState, NormalizedEvent};
+use bigname_storage::CanonicalityState;
 use sqlx::{PgPool, Row, types::Uuid};
 
 use crate::adapter_manifest::{
@@ -205,39 +205,6 @@ async fn load_active_source_family_manifest_metadata(
         "active ENSv2 resolver manifest",
     )
     .await
-}
-
-pub(crate) async fn load_existing_event_identities(
-    pool: &PgPool,
-    events: &[NormalizedEvent],
-    adapter_label: &str,
-) -> Result<HashSet<String>> {
-    if events.is_empty() {
-        return Ok(HashSet::new());
-    }
-
-    let identities = events
-        .iter()
-        .map(|event| event.event_identity.clone())
-        .collect::<Vec<_>>();
-    let rows = sqlx::query(
-        r#"
-        SELECT event_identity
-        FROM normalized_events
-        WHERE event_identity = ANY($1::TEXT[])
-        "#,
-    )
-    .bind(&identities)
-    .fetch_all(pool)
-    .await
-    .with_context(|| format!("failed to load existing {adapter_label} event identities"))?;
-
-    rows.into_iter()
-        .map(|row| {
-            row.try_get("event_identity")
-                .context("missing event_identity")
-        })
-        .collect()
 }
 
 pub(crate) fn normalize_hex_32(value: &str) -> Result<String> {

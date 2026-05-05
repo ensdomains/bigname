@@ -8,16 +8,15 @@ mod constants;
 mod decoding;
 mod event_builders;
 mod loading;
-mod persistence;
 mod preimage_observation;
 mod source_selection;
 mod types;
 
-use event_builders::build_preimage_observed_events;
-use loading::{load_scanned_log_count, load_watched_raw_logs};
-use persistence::{
+use crate::normalized_event_support::{
     count_events_by_kind, count_inserted_events_by_kind, load_existing_event_identities,
 };
+use event_builders::build_preimage_observed_events;
+use loading::{load_scanned_log_count, load_watched_raw_logs};
 
 pub use types::{
     BlockDerivedNormalizedEventKindSyncSummary, BlockDerivedNormalizedEventSyncSummary,
@@ -108,7 +107,8 @@ async fn sync_block_derived_normalized_events_inner(
         return Ok(empty_summary(scanned_log_count));
     }
 
-    let existing_event_identities = load_existing_event_identities(pool, &events).await?;
+    let existing_event_identities =
+        load_existing_event_identities(pool, &events, "block-derived normalized-event").await?;
     let inserted_by_kind = count_inserted_events_by_kind(&events, &existing_event_identities);
     let synced_by_kind = count_events_by_kind(&events);
 

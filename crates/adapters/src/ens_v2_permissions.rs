@@ -1,6 +1,9 @@
 use std::collections::{BTreeMap, HashMap};
 
 use crate::ens_v2_common::ActiveEmitter;
+use crate::normalized_event_support::{
+    count_events_by_kind, count_inserted_events_by_kind, load_existing_event_identities,
+};
 use anyhow::{Context, Result};
 use bigname_storage::{Resource, upsert_normalized_events, upsert_resources};
 use sqlx::{PgPool, types::Uuid};
@@ -17,11 +20,8 @@ mod util;
 
 use decode::build_permissions_observation;
 use hints::{fallback_resource_hint, resolver_resource_hint};
-use load::{load_active_emitters, load_existing_event_identities, load_permissions_raw_logs};
-use normalized::{
-    build_resource, count_events_by_kind, count_inserted_events_by_kind, permission_changed_event,
-    remember_hint_and_resource,
-};
+use load::{load_active_emitters, load_permissions_raw_logs};
+use normalized::{build_resource, permission_changed_event, remember_hint_and_resource};
 use types::{PermissionsObservation, ResolverResourceHint};
 use util::resource_is_root;
 
@@ -176,7 +176,7 @@ async fn sync_ens_v2_permissions_with_scope(
         .into_values()
         .map(|(resource, _)| resource)
         .collect::<Vec<_>>();
-    let existing = load_existing_event_identities(pool, &events).await?;
+    let existing = load_existing_event_identities(pool, &events, "ENSv2 permissions").await?;
     let inserted_by_kind = count_inserted_events_by_kind(&events, &existing);
     let synced_by_kind = count_events_by_kind(&events);
     upsert_resources(pool, &resources).await?;
