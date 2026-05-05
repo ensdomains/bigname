@@ -47,6 +47,8 @@ For `[[contracts]]`, `proxy_kind` is required. `proxy_kind = "none"` omits `impl
 
 For `[[discovery_rules]]`, the only authorable `admission` value is `reachable_from_root` — the discovered edge is authoritative while its `from_role` endpoint remains reachable from an active manifest root under an allowed rule. Internal labels like `manifest_declared` and `manifest_successor` are storage tags, not authored values.
 
+`[abi]` is optional. When present, it declares the Solidity ABI fragments that this manifest version authorizes for adapter, execution, or watch-plan use. ABI entries are source-family metadata; they do not by themselves graduate public capability support.
+
 ### `capability_flags`
 
 Each flag carries a name, a status (`unsupported` | `shadow` | `supported`), and optional notes.
@@ -54,6 +56,29 @@ Each flag carries a name, a status (`unsupported` | `shadow` | `supported`), and
 ### `chain`
 
 `chain` names the authority chain for that manifest within the selected profile. Mainnet manifests use chain IDs like `ethereum-mainnet` and `base-mainnet`. Sepolia support is additive as a separate manifest profile root and chain-ID set.
+
+### `abi`
+
+ABI entries use Alloy-parseable human-readable Solidity fragments, not handwritten selectors or topic hashes. The loader validates each fragment with Alloy and derives event topic0 values, function selectors, canonical signatures, indexed parameters, inputs, and outputs from the fragment. Authored selector/topic fields are intentionally absent.
+
+`[[abi.events]]` entries contain:
+
+- `name` — must match the parsed event name.
+- `fragment` — a human-readable event fragment such as `event ResolverUpdated(uint256 indexed node, address resolver, address sender)`.
+- `emitter_roles` — optional `[[contracts]].role` values that may emit the event.
+- `normalized_events` — optional normalized event kinds produced from the event.
+- `status` — optional `unsupported` | `shadow` | `supported` marker for the ABI entry.
+- `notes` — optional reviewer-facing context.
+
+`[[abi.calls]]` entries contain:
+
+- `name` — must match the parsed function name.
+- `fragment` — a human-readable function fragment such as `function resolver(bytes32 node) view returns (address)`.
+- `target_roles` — optional `[[contracts]].role` values that may be called.
+- `status` — optional `unsupported` | `shadow` | `supported` marker for the ABI entry.
+- `notes` — optional reviewer-facing context.
+
+ABI fragments should cite upstream in nearby manifest comments or in the public doc section that admits the source family. If an adapter still has an in-code selector or `sol!` definition for a manifest-declared fragment, that code is a compatibility bridge until the adapter consumes the manifest ABI directly.
 
 ## Example shape
 
@@ -83,6 +108,19 @@ start_block = 123456
 edge_kind = "subregistry"
 from_role = "registry"
 admission = "reachable_from_root"
+
+[[abi.events]]
+name = "ResolverUpdated"
+fragment = "event ResolverUpdated(uint256 indexed node, address resolver, address sender)"
+emitter_roles = ["registry"]
+normalized_events = ["ResolverChanged"]
+status = "supported"
+
+[[abi.calls]]
+name = "resolver"
+fragment = "function resolver(bytes32 node) view returns (address)"
+target_roles = ["registry"]
+status = "shadow"
 
 [capability_flags]
 declared_children = "supported"

@@ -1624,6 +1624,7 @@ dependencies = [
 name = "bigname-manifests"
 version = "0.1.0"
 dependencies = [
+ "alloy-json-abi",
  "anyhow",
  "bigname-storage",
  "serde",

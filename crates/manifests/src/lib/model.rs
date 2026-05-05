@@ -348,6 +348,8 @@ pub struct SourceManifest {
     pub roots: Vec<ManifestRoot>,
     pub contracts: Vec<ManifestContract>,
     pub discovery_rules: Vec<DiscoveryRule>,
+    #[serde(default, skip_serializing_if = "ManifestAbi::is_empty")]
+    pub abi: ManifestAbi,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -407,6 +409,46 @@ pub struct CapabilityFlag {
     pub notes: Option<String>,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ManifestAbi {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub events: Vec<ManifestAbiEvent>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub calls: Vec<ManifestAbiCall>,
+}
+
+impl ManifestAbi {
+    pub fn is_empty(&self) -> bool {
+        self.events.is_empty() && self.calls.is_empty()
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ManifestAbiEvent {
+    pub name: String,
+    pub fragment: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub emitter_roles: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub normalized_events: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<CapabilitySupportStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ManifestAbiCall {
+    pub name: String,
+    pub fragment: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub target_roles: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<CapabilitySupportStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ManifestRoot {
     pub name: String,
@@ -448,6 +490,8 @@ pub(crate) struct RawSourceManifest {
     roots: Vec<ManifestRoot>,
     contracts: Vec<ManifestContract>,
     discovery_rules: Vec<DiscoveryRule>,
+    #[serde(default)]
+    abi: ManifestAbi,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -484,6 +528,7 @@ impl From<RawSourceManifest> for SourceManifest {
             roots: value.roots,
             contracts: value.contracts,
             discovery_rules: value.discovery_rules,
+            abi: value.abi,
         }
     }
 }

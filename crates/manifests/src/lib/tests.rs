@@ -268,6 +268,50 @@ start_block = 4242
     .to_owned()
 }
 
+fn abi_manifest_contents() -> String {
+    r#"
+manifest_version = 1
+namespace = "ens"
+source_family = "ens_v2_registry_l1"
+chain = "ethereum-mainnet"
+deployment_epoch = "ens_v2"
+rollout_status = "active"
+normalizer_version = "uts46-v1"
+
+[capability_flags]
+declared_children = "supported"
+
+[[roots]]
+name = "RootRegistry"
+address = "0x0000000000000000000000000000000000000001"
+
+[[contracts]]
+role = "registry"
+address = "0x0000000000000000000000000000000000000002"
+proxy_kind = "none"
+
+[[abi.events]]
+name = "SubregistryUpdated"
+fragment = "event SubregistryUpdated(uint256 indexed node, address registry, address sender)"
+emitter_roles = ["registry"]
+normalized_events = ["SubregistryChanged"]
+status = "supported"
+notes = "adapter-owned registry resource link input"
+
+[[abi.calls]]
+name = "resolver"
+fragment = "function resolver(bytes32 node) view returns (address)"
+target_roles = ["registry"]
+status = "shadow"
+
+[[discovery_rules]]
+edge_kind = "subregistry"
+from_role = "registry"
+admission = "reachable_from_root"
+"#
+    .to_owned()
+}
+
 fn registry_manifest_contents(rollout_status: &str) -> String {
     format!(
         r#"
@@ -1166,6 +1210,7 @@ fn loads_valid_repository_manifest() -> Result<()> {
     assert_eq!(repository.manifests().len(), 1);
     assert_eq!(repository.manifests()[0].version_tag, "v1");
     assert_eq!(repository.manifests()[0].manifest.namespace, "ens");
+    assert!(repository.manifests()[0].manifest.abi.is_empty());
 
     Ok(())
 }
@@ -1220,6 +1265,74 @@ fn parses_optional_start_block_on_roots_and_contracts() -> Result<()> {
     assert_eq!(manifest.roots[0].start_block, Some(12_345));
     assert_eq!(manifest.contracts[0].start_block, Some(23_456));
     assert_eq!(manifest.contracts[1].start_block, None);
+
+    Ok(())
+}
+
+#[test]
+fn loads_manifest_abi_fragments() -> Result<()> {
+    let test_dir = TestDir::new()?;
+    test_dir.write_manifest("ens", "ens_v2_registry_l1", "v1", &abi_manifest_contents())?;
+
+    let repository = load_repository(&test_dir.path)?;
+    let abi = &repository.manifests()[0].manifest.abi;
+
+    assert_eq!(abi.events.len(), 1);
+    assert_eq!(abi.events[0].name, "SubregistryUpdated");
+    assert_eq!(abi.events[0].emitter_roles, ["registry"]);
+    assert_eq!(abi.events[0].normalized_events, ["SubregistryChanged"]);
+    assert_eq!(
+        abi.events[0].status,
+        Some(CapabilitySupportStatus::Supported)
+    );
+    assert_eq!(abi.calls.len(), 1);
+    assert_eq!(abi.calls[0].name, "resolver");
+    assert_eq!(abi.calls[0].target_roles, ["registry"]);
+    assert_eq!(abi.calls[0].status, Some(CapabilitySupportStatus::Shadow));
+
+    Ok(())
+}
+
+#[test]
+fn rejects_invalid_manifest_abi_fragment() -> Result<()> {
+    let test_dir = TestDir::new()?;
+    test_dir.write_manifest(
+        "ens",
+        "ens_v2_registry_l1",
+        "v1",
+        &abi_manifest_contents().replacen("event SubregistryUpdated", "SubregistryUpdated", 1),
+    )?;
+
+    let error =
+        load_repository(&test_dir.path).expect_err("non-event ABI fragment must fail validation");
+    assert!(
+        error.to_string().contains("must use an event fragment"),
+        "unexpected error: {error:#}"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn rejects_manifest_abi_unknown_roles() -> Result<()> {
+    let test_dir = TestDir::new()?;
+    test_dir.write_manifest(
+        "ens",
+        "ens_v2_registry_l1",
+        "v1",
+        &abi_manifest_contents().replacen(
+            r#"emitter_roles = ["registry"]"#,
+            r#"emitter_roles = ["missing_registry"]"#,
+            1,
+        ),
+    )?;
+
+    let error =
+        load_repository(&test_dir.path).expect_err("unknown ABI emitter role must fail validation");
+    assert!(
+        error.to_string().contains("unknown emitter role"),
+        "unexpected error: {error:#}"
+    );
 
     Ok(())
 }

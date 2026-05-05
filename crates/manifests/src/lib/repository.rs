@@ -4,12 +4,12 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use alloy_json_abi::{Event, Function};
 use anyhow::{Context, Result, bail};
 
 use crate::model::RawSourceManifest;
-use crate::{
-    LoadedManifest, ManifestLoadStatus, ManifestLoadSummary, ManifestRepository, SourceManifest,
-};
+use crate::{LoadedManifest, ManifestAbi, ManifestLoadStatus, ManifestLoadSummary};
+use crate::{ManifestRepository, SourceManifest};
 pub fn load_repository(root: impl AsRef<Path>) -> Result<ManifestRepository> {
     let root = root.as_ref();
     let display_root = canonicalize_for_logging(root);
@@ -189,6 +189,8 @@ fn validate_manifest_metadata(
         validate_start_block_fits_i64(contract.start_block, "contract", &contract.role, path)?;
     }
 
+    validate_manifest_abi(manifest, path)?;
+
     Ok(())
 }
 
@@ -211,6 +213,120 @@ fn validate_start_block_fits_i64(
             "manifest {declaration_kind} {declaration_name} in {} has start_block {start_block} that does not fit into BIGINT",
             path.display()
         );
+    }
+
+    Ok(())
+}
+
+fn validate_manifest_abi(manifest: &SourceManifest, path: &Path) -> Result<()> {
+    validate_manifest_abi_fragments(&manifest.abi, path)?;
+
+    let contract_roles = manifest
+        .contracts
+        .iter()
+        .map(|contract| contract.role.as_str())
+        .collect::<BTreeSet<_>>();
+
+    for event in &manifest.abi.events {
+        for role in &event.emitter_roles {
+            if !contract_roles.contains(role.as_str()) {
+                bail!(
+                    "manifest ABI event {} in {} references unknown emitter role {}",
+                    event.name,
+                    path.display(),
+                    role
+                );
+            }
+        }
+    }
+
+    for call in &manifest.abi.calls {
+        for role in &call.target_roles {
+            if !contract_roles.contains(role.as_str()) {
+                bail!(
+                    "manifest ABI call {} in {} references unknown target role {}",
+                    call.name,
+                    path.display(),
+                    role
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_manifest_abi_fragments(abi: &ManifestAbi, path: &Path) -> Result<()> {
+    let mut event_signatures = BTreeSet::new();
+    for event in &abi.events {
+        let fragment = event.fragment.trim();
+        if !fragment.starts_with("event ") {
+            bail!(
+                "manifest ABI event {} in {} must use an event fragment",
+                event.name,
+                path.display()
+            );
+        }
+        let parsed = Event::parse(fragment).with_context(|| {
+            format!(
+                "manifest ABI event {} in {} has invalid fragment",
+                event.name,
+                path.display()
+            )
+        })?;
+        if parsed.name != event.name {
+            bail!(
+                "manifest ABI event {} in {} has fragment name {}",
+                event.name,
+                path.display(),
+                parsed.name
+            );
+        }
+        let signature = parsed.signature();
+        if !event_signatures.insert(signature.clone()) {
+            bail!(
+                "manifest ABI event {} in {} duplicates event signature {}",
+                event.name,
+                path.display(),
+                signature
+            );
+        }
+    }
+
+    let mut call_signatures = BTreeSet::new();
+    for call in &abi.calls {
+        let fragment = call.fragment.trim();
+        if !fragment.starts_with("function ") {
+            bail!(
+                "manifest ABI call {} in {} must use a function fragment",
+                call.name,
+                path.display()
+            );
+        }
+        let parsed = Function::parse(fragment).with_context(|| {
+            format!(
+                "manifest ABI call {} in {} has invalid fragment",
+                call.name,
+                path.display()
+            )
+        })?;
+        if parsed.name != call.name {
+            bail!(
+                "manifest ABI call {} in {} has fragment name {}",
+                call.name,
+                path.display(),
+                parsed.name
+            );
+        }
+        let signature = parsed.signature();
+        if !call_signatures.insert(signature.clone()) {
+            bail!(
+                "manifest ABI call {} in {} duplicates function signature {}",
+                call.name,
+                path.display(),
+                signature
+            );
+        }
     }
 
     Ok(())
