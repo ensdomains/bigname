@@ -1,12 +1,21 @@
-use alloy_primitives::{Address, B256, U256, hex, keccak256};
-use alloy_sol_types::{SolType, SolValue, sol_data};
+use alloy_primitives::{Address, B256, Bytes, U256, hex, keccak256};
+use alloy_sol_types::{SolCall, sol};
 use anyhow::{Context, Result, bail};
 use bigname_storage::SupportedVerifiedResolutionRecordKey;
-pub(crate) const UNIVERSAL_RESOLVER_RESOLVE_SELECTOR: [u8; 4] = [0x90, 0x61, 0xb9, 0x23];
-pub(crate) const ADDR_SELECTOR: [u8; 4] = [0x3b, 0x3b, 0x57, 0xde];
-pub(crate) const MULTICOIN_ADDR_SELECTOR: [u8; 4] = [0xf1, 0xcb, 0x7e, 0x06];
-pub(crate) const TEXT_SELECTOR: [u8; 4] = [0x59, 0xd1, 0xd4, 0x3c];
-pub(crate) const CONTENTHASH_SELECTOR: [u8; 4] = [0xbc, 0x1c, 0x58, 0xd1];
+
+mod abi {
+    use super::*;
+
+    sol! {
+        function resolve(bytes name, bytes data) external view returns (bytes result, address resolver);
+        function addr(bytes32 node) external view returns (address);
+        function addr(bytes32 node, uint256 coin_type) external view returns (bytes);
+        function text(bytes32 node, string key) external view returns (string);
+        function contenthash(bytes32 node) external view returns (bytes);
+    }
+}
+
+pub(crate) const UNIVERSAL_RESOLVER_RESOLVE_SELECTOR: [u8; 4] = abi::resolveCall::SELECTOR;
 
 pub(crate) fn selector_hex(selector: [u8; 4]) -> String {
     hex_string(&selector)
@@ -60,18 +69,20 @@ pub(crate) fn resolver_calldata(
 ) -> Result<Vec<u8>> {
     match selector {
         SupportedVerifiedResolutionRecordKey::Addr { coin_type } if coin_type == "60" => {
-            let mut calldata = ADDR_SELECTOR.to_vec();
-            calldata.extend_from_slice(&(B256::from(node),).abi_encode_params());
-            Ok(calldata)
+            Ok(abi::addr_0Call {
+                node: B256::from(node),
+            }
+            .abi_encode())
         }
         SupportedVerifiedResolutionRecordKey::Addr { coin_type } => {
             let coin_type = coin_type.parse::<u64>().with_context(|| {
                 format!("record selector {record_key} has invalid numeric coin type")
             })?;
-            let mut calldata = MULTICOIN_ADDR_SELECTOR.to_vec();
-            calldata
-                .extend_from_slice(&(B256::from(node), U256::from(coin_type)).abi_encode_params());
-            Ok(calldata)
+            Ok(abi::addr_1Call {
+                node: B256::from(node),
+                coin_type: U256::from(coin_type),
+            }
+            .abi_encode())
         }
         SupportedVerifiedResolutionRecordKey::Text => {
             let text_key = record_key
@@ -81,25 +92,25 @@ pub(crate) fn resolver_calldata(
             text_calldata(node, text_key)
         }
         SupportedVerifiedResolutionRecordKey::Avatar => text_calldata(node, "avatar"),
-        SupportedVerifiedResolutionRecordKey::Contenthash => {
-            let mut calldata = CONTENTHASH_SELECTOR.to_vec();
-            calldata.extend_from_slice(&(B256::from(node),).abi_encode_params());
-            Ok(calldata)
+        SupportedVerifiedResolutionRecordKey::Contenthash => Ok(abi::contenthashCall {
+            node: B256::from(node),
         }
+        .abi_encode()),
     }
 }
 
 pub(crate) fn universal_resolver_calldata(dns_name: &[u8], resolver_data: &[u8]) -> Vec<u8> {
-    let mut calldata = Vec::with_capacity(4);
-    calldata.extend_from_slice(&UNIVERSAL_RESOLVER_RESOLVE_SELECTOR);
-    calldata.extend_from_slice(&(dns_name, resolver_data).abi_encode_params());
-    calldata
+    abi::resolveCall {
+        name: Bytes::copy_from_slice(dns_name),
+        data: Bytes::copy_from_slice(resolver_data),
+    }
+    .abi_encode()
 }
 
 pub(crate) fn decode_universal_resolver_result(return_data: &[u8]) -> Result<Vec<u8>> {
-    let (result, _) =
-        <(sol_data::Bytes, sol_data::Address)>::abi_decode_params_validate(return_data)
-            .context("Universal Resolver return data is malformed")?;
+    let result = abi::resolveCall::abi_decode_returns_validate(return_data)
+        .context("Universal Resolver return data is malformed")?
+        .result;
     Ok(result.to_vec())
 }
 
@@ -109,11 +120,20 @@ pub(crate) fn decode_selector_result(
 ) -> Result<Option<String>> {
     match selector {
         SupportedVerifiedResolutionRecordKey::Addr { coin_type } if coin_type == "60" => {
-            decode_abi_address(return_data)
+            decode_addr60_result(return_data)
         }
-        SupportedVerifiedResolutionRecordKey::Addr { .. }
-        | SupportedVerifiedResolutionRecordKey::Contenthash => {
-            let bytes = decode_abi_dynamic_bytes(return_data)?;
+        SupportedVerifiedResolutionRecordKey::Addr { .. } => {
+            let bytes = abi::addr_1Call::abi_decode_returns_validate(return_data)
+                .context("addr(bytes32,uint256) return data is malformed")?;
+            if bytes.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(hex_string(&bytes)))
+            }
+        }
+        SupportedVerifiedResolutionRecordKey::Contenthash => {
+            let bytes = abi::contenthashCall::abi_decode_returns_validate(return_data)
+                .context("contenthash(bytes32) return data is malformed")?;
             if bytes.is_empty() {
                 Ok(None)
             } else {
@@ -122,7 +142,8 @@ pub(crate) fn decode_selector_result(
         }
         SupportedVerifiedResolutionRecordKey::Text
         | SupportedVerifiedResolutionRecordKey::Avatar => {
-            let text = decode_abi_string(return_data)?;
+            let text = abi::textCall::abi_decode_returns_validate(return_data)
+                .context("string return data is not valid ABI string")?;
             if text.is_empty() {
                 Ok(None)
             } else {
@@ -156,30 +177,20 @@ fn text_calldata(node: [u8; 32], text_key: &str) -> Result<Vec<u8>> {
     if text_key.is_empty() {
         bail!("text record key must not be empty");
     }
-    let mut calldata = Vec::with_capacity(4);
-    calldata.extend_from_slice(&TEXT_SELECTOR);
-    calldata.extend_from_slice(&(B256::from(node), text_key).abi_encode_params());
-    Ok(calldata)
+    Ok(abi::textCall {
+        node: B256::from(node),
+        key: text_key.to_owned(),
+    }
+    .abi_encode())
 }
 
-fn decode_abi_address(return_data: &[u8]) -> Result<Option<String>> {
-    let address = sol_data::Address::abi_decode_validate(return_data)
+fn decode_addr60_result(return_data: &[u8]) -> Result<Option<String>> {
+    let address = abi::addr_0Call::abi_decode_returns_validate(return_data)
         .context("addr(bytes32) return data is malformed")?;
     if address == Address::ZERO {
         return Ok(None);
     }
     Ok(Some(hex_string(address.as_slice())))
-}
-
-fn decode_abi_dynamic_bytes(return_data: &[u8]) -> Result<Vec<u8>> {
-    Ok(sol_data::Bytes::abi_decode_validate(return_data)
-        .context("dynamic bytes return data is malformed")?
-        .to_vec())
-}
-
-fn decode_abi_string(return_data: &[u8]) -> Result<String> {
-    sol_data::String::abi_decode_validate(return_data)
-        .context("string return data is not valid ABI string")
 }
 
 #[cfg(test)]
@@ -205,16 +216,16 @@ mod tests {
 
     #[test]
     fn resolver_selectors_match_ens_profiles() {
-        assert_eq!(selector_hex(ADDR_SELECTOR), "0x3b3b57de");
-        assert_eq!(selector_hex(MULTICOIN_ADDR_SELECTOR), "0xf1cb7e06");
-        assert_eq!(selector_hex(TEXT_SELECTOR), "0x59d1d43c");
-        assert_eq!(selector_hex(CONTENTHASH_SELECTOR), "0xbc1c58d1");
+        assert_eq!(selector_hex(abi::addr_0Call::SELECTOR), "0x3b3b57de");
+        assert_eq!(selector_hex(abi::addr_1Call::SELECTOR), "0xf1cb7e06");
+        assert_eq!(selector_hex(abi::textCall::SELECTOR), "0x59d1d43c");
+        assert_eq!(selector_hex(abi::contenthashCall::SELECTOR), "0xbc1c58d1");
     }
 
     #[test]
     fn decodes_addr60_zero_as_missing() {
         assert_eq!(
-            decode_abi_address(&[0_u8; 32]).expect("address must decode"),
+            decode_addr60_result(&[0_u8; 32]).expect("address must decode"),
             None
         );
     }

@@ -8,8 +8,9 @@ use uuid::Uuid;
 
 use crate::ens_resolution::{EnsResolutionRecord, ExecutionBlock};
 use crate::ens_resolution_abi::{
-    decode_selector_result, decode_universal_resolver_result, digest_json, hex_string,
-    hex_to_bytes, resolver_calldata, selector_hex, universal_resolver_calldata,
+    UNIVERSAL_RESOLVER_RESOLVE_SELECTOR, decode_selector_result, decode_universal_resolver_result,
+    digest_json, hex_string, hex_to_bytes, resolver_calldata, selector_hex,
+    universal_resolver_calldata,
 };
 use crate::ens_resolution_ccip::{CcipReadSummary, follow_ccip_read};
 use crate::rpc::{JsonRpcCallError, JsonRpcCallResult, JsonRpcHttpClient};
@@ -74,11 +75,12 @@ pub(super) async fn execute_record_call(
     let resolver_data = resolver_calldata(&selector, &record.record_key, node)?;
     let universal_calldata = universal_resolver_calldata(dns_name, &resolver_data);
     let universal_calldata_hex = hex_string(&universal_calldata);
+    let universal_selector = selector_hex(UNIVERSAL_RESOLVER_RESOLVE_SELECTOR);
     let resolver_selector = selector_hex(first_selector(&resolver_data)?);
     let contract_call = json!({
         "chain_id": ETHEREUM_MAINNET_CHAIN_ID,
         "contract_address": ENS_UNIVERSAL_RESOLVER_ADDRESS,
-        "selector": "0x9061b923",
+        "selector": universal_selector,
         "record_key": record.record_key,
         "resolver_selector": resolver_selector,
     });
