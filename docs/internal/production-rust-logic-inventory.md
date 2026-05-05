@@ -116,6 +116,9 @@ Addressed slices:
 - `crates/manifests` now derives canonical event signatures, event topic0s,
   and function selectors from manifest ABI fragments through Alloy, and exposes
   active manifest ABI events from persisted manifest payloads for adapter use.
+- `crates/adapters/src/ens_v2_registrar` now loads `NameRegistered` and
+  `NameRenewed` topic0s from active manifest ABI events instead of owning
+  local event signature constants.
 
 ## Highest leverage cleanup map
 

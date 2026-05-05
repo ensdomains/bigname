@@ -22,6 +22,8 @@ use event_building::build_registrar_event;
 use persistence_summary::empty_summary;
 use raw_logs::load_registrar_raw_logs;
 
+use crate::adapter_manifest::load_required_active_manifest_event_topic0s;
+
 pub use persistence_summary::{EnsV2RegistrarKindSyncSummary, EnsV2RegistrarSyncSummary};
 
 pub(super) const SOURCE_FAMILY_ENS_V2_REGISTRAR_L1: &str = "ens_v2_registrar_l1";
@@ -29,11 +31,8 @@ pub(super) const DERIVATION_KIND_ENS_V2_REGISTRAR: &str = "ens_v2_registrar";
 pub(super) const REGISTRY_DERIVATION_KIND: &str = "ens_v2_registry_resource_surface";
 pub(super) const EVENT_KIND_REGISTRAR_NAME_REGISTERED: &str = "RegistrarNameRegistered";
 pub(super) const EVENT_KIND_REGISTRATION_RENEWED: &str = "RegistrationRenewed";
-
-pub(super) const NAME_REGISTERED_SIGNATURE: &str =
-    "NameRegistered(uint256,string,address,address,address,uint64,address,bytes32,uint256,uint256)";
-pub(super) const NAME_RENEWED_SIGNATURE: &str =
-    "NameRenewed(uint256,string,uint64,uint64,address,bytes32,uint256)";
+pub(super) const ABI_EVENT_NAME_REGISTERED: &str = "NameRegistered";
+pub(super) const ABI_EVENT_NAME_RENEWED: &str = "NameRenewed";
 
 impl EnsV2RegistrarSyncSummary {
     pub async fn sync_for_block_hashes(
@@ -75,6 +74,18 @@ async fn sync_ens_v2_registrar_with_scope(
     if active_emitters.is_empty() {
         return Ok(empty_summary(0));
     }
+    let manifest_ids = active_emitters
+        .iter()
+        .map(|emitter| emitter.source_manifest_id)
+        .collect::<Vec<_>>();
+    let event_topic0s = load_required_active_manifest_event_topic0s(
+        pool,
+        &manifest_ids,
+        &[ABI_EVENT_NAME_REGISTERED, ABI_EVENT_NAME_RENEWED],
+        "ENSv2 registrar",
+    )
+    .await?;
+    let event_topics = decoding::RegistrarEventTopics::from_topic0s(&event_topic0s)?;
 
     let raw_logs = load_registrar_raw_logs(
         pool,
@@ -93,7 +104,7 @@ async fn sync_ens_v2_registrar_with_scope(
     let mut matched_log_count = 0usize;
     let mut events = Vec::new();
     for raw_log in &raw_logs {
-        let Some(observation) = build_registrar_observation(raw_log)? else {
+        let Some(observation) = build_registrar_observation(raw_log, &event_topics)? else {
             continue;
         };
         matched_log_count += 1;

@@ -2,7 +2,7 @@ use bigname_storage::sql_row;
 use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result, bail};
-use bigname_manifests::{WatchedContract, WatchedContractSource};
+use bigname_manifests::{WatchedContract, WatchedContractSource, load_active_manifest_abi_events};
 use sqlx::PgPool;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -123,6 +123,55 @@ pub(crate) async fn load_latest_active_manifest_metadata_for_source_family(
     .with_context(|| format!("failed to load {context_label} for {chain}"))?;
 
     row.map(decode_active_manifest_metadata).transpose()
+}
+
+pub(crate) async fn load_required_active_manifest_event_topic0s(
+    pool: &PgPool,
+    manifest_ids: &[i64],
+    required_event_names: &[&str],
+    context_label: &str,
+) -> Result<HashMap<String, String>> {
+    let required_event_names = required_event_names.iter().copied().collect::<HashSet<_>>();
+    let mut topic0s_by_name = HashMap::<String, String>::new();
+
+    for event in load_active_manifest_abi_events(pool, manifest_ids)
+        .await
+        .with_context(|| format!("failed to load active manifest ABI events for {context_label}"))?
+    {
+        if !required_event_names.contains(event.name.as_str()) {
+            continue;
+        }
+        let topic0 = event.topic0.with_context(|| {
+            format!(
+                "active manifest ABI event {} for {context_label} is anonymous and has no topic0",
+                event.name
+            )
+        })?;
+        match topic0s_by_name.get(&event.name) {
+            Some(existing) if existing != &topic0 => {
+                bail!(
+                    "active manifest ABI event {} for {context_label} has conflicting topic0 values {} and {}",
+                    event.name,
+                    existing,
+                    topic0
+                );
+            }
+            Some(_) => {}
+            None => {
+                topic0s_by_name.insert(event.name, topic0);
+            }
+        }
+    }
+
+    for required_event_name in required_event_names {
+        if !topic0s_by_name.contains_key(required_event_name) {
+            bail!(
+                "active manifest ABI for {context_label} is missing required event {required_event_name}"
+            );
+        }
+    }
+
+    Ok(topic0s_by_name)
 }
 
 fn decode_active_manifest_metadata(row: sqlx::postgres::PgRow) -> Result<ActiveManifestMetadata> {

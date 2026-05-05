@@ -1,13 +1,29 @@
 use alloy_sol_types::sol_data::{Address as SolAddress, FixedBytes, String as SolString, Uint};
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
+use std::collections::HashMap;
 
-pub(super) use crate::ens_v2_common::{hex_string, keccak_signature_hex, normalize_address};
+pub(super) use crate::ens_v2_common::{hex_string, normalize_address};
 use crate::evm_abi::{
     abi_decode_params, address_hex, hex_string as prefixed_hex_string, normalize_hex_32,
     u256_word_hex,
 };
 
-use super::{NAME_REGISTERED_SIGNATURE, NAME_RENEWED_SIGNATURE, raw_logs::RegistrarRawLogRow};
+use super::{ABI_EVENT_NAME_REGISTERED, ABI_EVENT_NAME_RENEWED, raw_logs::RegistrarRawLogRow};
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct RegistrarEventTopics {
+    name_registered: String,
+    name_renewed: String,
+}
+
+impl RegistrarEventTopics {
+    pub(super) fn from_topic0s(topic0s_by_name: &HashMap<String, String>) -> Result<Self> {
+        Ok(Self {
+            name_registered: required_topic0(topic0s_by_name, ABI_EVENT_NAME_REGISTERED)?,
+            name_renewed: required_topic0(topic0s_by_name, ABI_EVENT_NAME_RENEWED)?,
+        })
+    }
+}
 
 pub(super) enum RegistrarObservation {
     NameRegistered {
@@ -35,12 +51,13 @@ pub(super) enum RegistrarObservation {
 
 pub(super) fn build_registrar_observation(
     raw_log: &RegistrarRawLogRow,
+    event_topics: &RegistrarEventTopics,
 ) -> Result<Option<RegistrarObservation>> {
     let Some(topic0) = raw_log.topics.first() else {
         return Ok(None);
     };
 
-    if topic0.eq_ignore_ascii_case(&keccak_signature_hex(NAME_REGISTERED_SIGNATURE)) {
+    if topic0.eq_ignore_ascii_case(&event_topics.name_registered) {
         let token_id = normalize_hex_32(
             raw_log
                 .topics
@@ -73,7 +90,7 @@ pub(super) fn build_registrar_observation(
         }));
     }
 
-    if topic0.eq_ignore_ascii_case(&keccak_signature_hex(NAME_RENEWED_SIGNATURE)) {
+    if topic0.eq_ignore_ascii_case(&event_topics.name_renewed) {
         let token_id = normalize_hex_32(
             raw_log
                 .topics
@@ -101,4 +118,11 @@ pub(super) fn build_registrar_observation(
     }
 
     Ok(None)
+}
+
+fn required_topic0(topic0s_by_name: &HashMap<String, String>, event_name: &str) -> Result<String> {
+    let Some(topic0) = topic0s_by_name.get(event_name) else {
+        bail!("missing required ENSv2 registrar ABI event {event_name} topic0");
+    };
+    Ok(topic0.clone())
 }
