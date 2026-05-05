@@ -1,10 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use bigname_storage::{PermissionsCurrentRow, ResolverCurrentRow, SurfaceBindingKind};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use sqlx::types::time::OffsetDateTime;
+
+use crate::projection_json::dedupe_json_values;
 
 use super::{
     EVENT_KIND_ALIAS_CHANGED, EVENT_KIND_PERMISSION_CHANGED, EVENT_KIND_RESOLVER_CHANGED,
@@ -516,18 +518,4 @@ fn json_string_array(value: &Value) -> Vec<String> {
         .filter_map(Value::as_str)
         .map(str::to_owned)
         .collect()
-}
-
-fn dedupe_json_values(values: Vec<Value>) -> Result<Vec<Value>> {
-    let mut seen = BTreeSet::new();
-    let mut deduped = Vec::new();
-
-    for value in values {
-        let key = serde_json::to_string(&value).context("failed to serialize JSON value")?;
-        if seen.insert(key) {
-            deduped.push(value);
-        }
-    }
-
-    Ok(deduped)
 }

@@ -3,7 +3,8 @@ use std::collections::BTreeMap;
 use anyhow::Result;
 use bigname_storage::{CanonicalityState, PermissionsCurrentRow};
 use serde_json::{Value, json};
-use sqlx::types::time::{OffsetDateTime, UtcOffset};
+
+use crate::projection_json::format_timestamp;
 
 use super::target_loading::{AliasSeed, CurrentBindingSeed};
 
@@ -205,17 +206,4 @@ fn decode_chain_position(value: &Value) -> Option<ChainPositionCandidate> {
         block_hash,
         timestamp,
     })
-}
-
-fn format_timestamp(value: OffsetDateTime) -> String {
-    let value = value.to_offset(UtcOffset::UTC);
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        value.year(),
-        value.month() as u8,
-        value.day(),
-        value.hour(),
-        value.minute(),
-        value.second()
-    )
 }

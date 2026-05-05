@@ -4,6 +4,8 @@ use anyhow::{Context, Result};
 use bigname_storage::CanonicalityState;
 use serde_json::{Value, json};
 
+use crate::projection_json::dedupe_json_values;
+
 use super::{
     chain_position::chain_position_value,
     constants::*,
@@ -306,18 +308,4 @@ pub(super) fn parse_canonicality_state(value: &str) -> Result<CanonicalityState>
 
 fn supported_native_addr_record_key() -> String {
     format!("{SUPPORTED_ADDR_RECORD_FAMILY}:{SUPPORTED_NATIVE_ADDR_SELECTOR_KEY}")
-}
-
-fn dedupe_json_values(values: impl IntoIterator<Item = Value>) -> Result<Vec<Value>> {
-    let mut seen = BTreeSet::new();
-    let mut deduped = Vec::new();
-
-    for value in values {
-        let key = serde_json::to_string(&value).context("failed to serialize JSON value")?;
-        if seen.insert(key) {
-            deduped.push(value);
-        }
-    }
-
-    Ok(deduped)
 }

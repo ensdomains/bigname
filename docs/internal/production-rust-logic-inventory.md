@@ -52,11 +52,14 @@ places to revisit after logic dedupe:
 - `crates/adapters/src/ens_v1_unwrapped_authority/loading/raw_logs.rs` at 594 LOC.
 - `crates/manifests/src/lib/views/watched.rs` at 587 LOC.
 
-First addressed slice:
+Addressed slices:
 
 - `crates/adapters/src/ens_v1_unwrapped_authority/materialization.rs`
   dropped from 645 LOC to 523 LOC by moving token-lineage/resource builders
   into `materialization/lineage.rs`.
+- `apps/worker/src/projection_json.rs` now owns worker timestamp formatting,
+  JSON path reads, and JSON value dedupe. Existing worker projection modules
+  re-export the helpers where tests or sibling modules already used those paths.
 
 ## Highest leverage cleanup map
 
@@ -66,7 +69,7 @@ First addressed slice:
 | Provider JSON-RPC typed decoding | `apps/indexer/src/provider/decode.rs`, `apps/indexer/src/provider/types.rs`, `apps/indexer/src/provider/logs_receipts.rs`, `apps/indexer/src/provider/reth_db/convert.rs` | Keep current transport initially, but deserialize into `alloy-rpc-types-eth` block, transaction, receipt, log, filter, and block-id types before converting to storage DTOs | Removes brittle `serde_json::Value` object walking and custom hex parsing in provider code |
 | Address/hash normalization | `normalize_address` appears in API, indexer, worker, adapters, manifests, storage, and execution path validation; hash/hex helpers appear in at least 9 files | One storage-format helper per owner crate: parse with Alloy where EVM-shaped, return canonical lower `0x` strings; expose narrow helpers from adapters/execution/provider modules | Prevents drift between "lowercase only" and "validated EVM address/hash" call sites |
 | Canonicality and binding-kind parsing/rank | First slice landed: `CanonicalityState::rank`, `CanonicalityState::weakest`, and public `SurfaceBindingKind::parse` now cover indexer/adapters/storage/worker call sites with the canonical storage ordering; projection summaries with intentionally different ordering remain local | Continue replacing wrappers where semantics match; leave summary-specific rank orders local until their meaning is documented | Deletes repeated match blocks and reduces risk when enum variants change |
-| Projection JSON summaries | `apps/worker/src/name_current/json.rs`, `address_names/{util.rs,positions.rs,projection.rs}`, `permissions/{json.rs,canonicality.rs}`, `record_inventory/{json.rs,chain_position.rs}`, `resolver/{state_helpers.rs,summary_json.rs}`, `children.rs`; API also has response-side JSON dedupe/timestamp helpers | Add a worker-local `projection_json` module with provenance, chain-position, canonicality, timestamp, and JSON-dedupe primitives; consider storage helpers only for projection-shared public row shapes | Reduces repeated `serde_json` assembly and makes coverage/provenance mistakes easier to spot |
+| Projection JSON summaries | `apps/worker/src/projection_json.rs` now covers repeated worker timestamp formatting, JSON path reads, and JSON value dedupe; remaining repeated worker families are provenance envelopes, chain-position maps, summary-specific canonicality ranks, and chain slots. API still has response-side JSON helpers | Continue growing worker-local `projection_json` with provenance, chain-position, and canonicality primitives where semantics match; consider storage helpers only for projection-shared public row shapes | Reduces repeated `serde_json` assembly and makes coverage/provenance mistakes easier to spot |
 | SQL row decoding boilerplate | Manual `PgRow::try_get(...).context(...)` decoders across storage, manifests, adapters, worker loaders, and API support; almost no production `query_as`/`FromRow` usage | Use `sqlx::FromRow` for plain rows; add small local row helper wrappers for contextual field reads and non-negative conversions where dynamic SQL prevents derive | Cuts a large amount of repetitive error text and makes row shape changes easier |
 | Keyset pagination and cursors | `apps/api/src/support/cursors.rs`, `apps/api/src/handlers/app_facing/{names_collection.rs,roles.rs}`, `crates/storage/src/{name_current/list_paging.rs,address_names/query.rs,address_names/page.rs,permissions/paging.rs,children/reads.rs}` | Shared cursor envelope helpers in API; storage keyset helper for `(field1, field2, ...) > (...)`, page-size validation, `limit = page_size + 1`; use a maintained hex/base64 crate for cursor bytes instead of hand decoding | Lower API/storage paging LOC and fewer subtle cursor-field validation variants |
 | Adapter active-emitter and source-scope flow | `crates/adapters/src/ens_v2_common.rs`, `ens_v2_*`, `ens_v1_reverse_claim`, `ens_v1_subregistry_discovery`, `ens_v1_unwrapped_authority`, `block_derived_normalized_events`, plus indexer replay/backfill source-scope builders | Adapter-local support module for normalized source-scope targets, emitter interval overlap, active-at-block lookup, scoped ranges, event identity counting, and inserted/synced summaries | Removes repeated range-overlap and source-family filtering logic across adapter families |
@@ -178,14 +181,14 @@ Repeated worker helpers include:
 - `build_provenance`
 - `build_chain_positions`
 - `build_canonicality_summary`
-- `format_timestamp`
-- `dedupe_json_values`
 - `chain_slot`
 
 Preferred shape:
 
-- Add a worker-local module, for example `apps/worker/src/projection_json.rs`,
-  because most projection-summary assembly is worker-owned.
+- Continue using worker-local `apps/worker/src/projection_json.rs`, because most
+  projection-summary assembly is worker-owned.
+- Done in the second cleanup slice: `format_timestamp`, `json_str`, `json_i64`,
+  and `dedupe_json_values` are centralized in `projection_json`.
 - Use tiny input structs or traits such as `ProjectionEventRef` instead of
   forcing all projection event rows into one enum.
 - Keep family-specific declared-state details in their current modules. Only
@@ -327,8 +330,9 @@ generic helpers.
 1. Done: add storage enum helpers:
    `CanonicalityState::rank`, `CanonicalityState::weakest`, public
    `SurfaceBindingKind::parse`, and replace local duplicate matches.
-2. Add worker `projection_json` helpers and migrate one family at a time:
-   address names, permissions, record inventory, resolver, name current.
+2. Partially done: add worker `projection_json` helpers for timestamp, JSON path
+   reads, and JSON value dedupe across address names, permissions, record
+   inventory, resolver, children, inspect, and name current.
 3. Move adapter event identity and count helpers to common adapter support.
 4. Consolidate `normalize_address`, `hex_string`, `keccak256_hex`,
    `namehash_hex`, `hex_32`, and `child_namehash` in adapter/execution support.

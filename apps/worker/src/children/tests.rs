@@ -4,6 +4,7 @@ use bigname_storage::{
     upsert_normalized_events, upsert_raw_blocks, upsert_raw_logs,
 };
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
+use sqlx::types::time::OffsetDateTime;
 
 use super::*;
 

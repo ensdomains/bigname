@@ -5,6 +5,8 @@ use bigname_storage::PermissionScope;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+use crate::projection_json::dedupe_json_values;
+
 use super::types::RelevantEvent;
 use super::{PERMISSIONS_CURRENT_DERIVATION_KIND, PERMISSIONS_ENUMERATION_BASIS};
 
@@ -163,18 +165,4 @@ pub(super) fn build_coverage(events: &[&RelevantEvent]) -> Value {
         "unsupported_reason": Value::Null,
         "enumeration_basis": PERMISSIONS_ENUMERATION_BASIS,
     })
-}
-
-fn dedupe_json_values(values: impl IntoIterator<Item = Value>) -> Result<Vec<Value>> {
-    let mut seen = BTreeSet::new();
-    let mut deduped = Vec::new();
-
-    for value in values {
-        let key = serde_json::to_string(&value).context("failed to serialize JSON value")?;
-        if seen.insert(key) {
-            deduped.push(value);
-        }
-    }
-
-    Ok(deduped)
 }
