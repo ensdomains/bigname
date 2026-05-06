@@ -2,7 +2,7 @@ use std::str::FromStr;
 
 use alloy_primitives::{Address, B256, hex};
 
-pub(crate) fn normalize_evm_address(value: &str) -> String {
+pub fn normalize_evm_address(value: &str) -> String {
     normalize_standard_address(value).unwrap_or_else(|| value.to_ascii_lowercase())
 }
 
@@ -10,7 +10,7 @@ pub(crate) fn normalize_optional_evm_address(value: &Option<String>) -> Option<S
     value.as_deref().map(normalize_evm_address)
 }
 
-pub(crate) fn normalize_evm_b256(value: &str) -> String {
+pub fn normalize_evm_b256(value: &str) -> String {
     normalize_standard_b256(value).unwrap_or_else(|| normalize_evm_hex_bytes(value))
 }
 

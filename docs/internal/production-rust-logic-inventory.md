@@ -28,15 +28,15 @@ Production Rust snapshot from the working tree:
 
 | Area | Production files | LOC |
 | --- | ---: | ---: |
-| `crates/storage` | 144 | 26,020 |
+| `crates/storage` | 144 | 26,021 |
 | `crates/adapters` | 101 | 21,520 |
 | `apps/indexer` | 65 | 17,060 |
 | `apps/api` | 64 | 14,218 |
-| `apps/worker` | 71 | 12,914 |
+| `apps/worker` | 71 | 12,865 |
 | `crates/manifests` | 33 | 7,675 |
 | `crates/execution` | 36 | 6,386 |
 | `crates/domain` | 1 | 6 |
-| Total | 515 | 105,799 |
+| Total | 515 | 105,751 |
 
 The current file-size gate hard-fails these oversized production files as the
 first places to revisit after logic dedupe:
@@ -152,9 +152,9 @@ Addressed slices:
 - `crates/storage/src/evm_primitives.rs` now owns storage-side EVM address and
   hash normalization through Alloy `Address`/`B256`, while preserving existing
   lowercase fallback behavior for non-standard sentinels and placeholder values.
-- `apps/api/src/support/query_parsing.rs` and `apps/worker/src/evm.rs` now
-  normalize standard EVM addresses through Alloy and keep the prior permissive
-  lowercase fallback at API and worker ingestion boundaries.
+- `apps/api/src/support/query_parsing.rs` now normalizes standard EVM addresses
+  through Alloy and keeps the prior permissive lowercase fallback at the API
+  ingestion boundary.
 - `apps/api/src/responses/resolution_verified/readback.rs` now names the
   compact-selector cache probe and the full-selector fallback explicitly, so
   the only remaining two-shape cache lookup documents why it exists.
@@ -175,6 +175,12 @@ Addressed slices:
 - Generic ENSv1 resolver record observation now decodes ABIChanged, content,
   DNS, interface, and data logs through generated `sol!`/`SolEvent` types,
   removing the local per-field event-body/topic skip helpers.
+- `apps/worker/src/evm.rs` now aliases the shared Alloy-backed storage EVM
+  normalizers instead of owning duplicate `Address`/`B256` parsing and hex
+  formatting logic. Worker address normalization call sites in address names,
+  primary names, record inventory, name current, and execution now route through
+  that shared boundary, and `bigname-worker` no longer directly depends on
+  `alloy-primitives`.
 
 ## Highest leverage cleanup map
 
@@ -182,7 +188,7 @@ Addressed slices:
 | --- | --- | --- | --- |
 | EVM ABI words, event topics, hex, hashes | `crates/adapters/src/evm_abi.rs` now owns shared adapter topic/static-word normalization, Keccak, topic-hash, hex, namehash, child-namehash, Alloy tuple decode, address formatting, and `U256` formatting helpers; ENSv2 registrar, registry, permissions, resolver, ENSv1 authority observation, and block-derived preimage event bodies now decode with generated `sol!`/`SolEvent` types. `crates/adapters/src/adapter_manifest.rs` now loads manifest-owned event topic0s for direct ENSv2 adapters, block-derived ENSv1/ENSv2 preimage matching, and ENSv1 unwrapped-authority matching keyed by canonical event signature. `crates/execution/src/ens_resolution_abi.rs` now uses Alloy `sol!`/`SolCall` for resolver selectors, calldata, and return decoding. `crates/manifests` now accepts Alloy-validated event/function fragments so manifest versions can become the authoritative ABI inventory. Remaining duplicates are in generated/dynamic ABI lookup from manifests, execution DNS/namehash helpers, `apps/indexer/src/provider/decode.rs`, and `apps/indexer/src/main/reconciliation/payload.rs` | Keep using `alloy-primitives` for `Address`, `B256`, `U256`, `Bytes`, `FixedBytes`, `hex`, `keccak256`; continue replacing code-owned ABI shape lists with `sol!`, `SolCall`, `SolEvent`, and manifest-backed `alloy-json-abi`/`alloy-dyn-abi` lookup where that does not obscure review; keep indexed-topic normalization narrow and explicit | Large LOC reduction in adapters, fewer hand-rolled offset/word parsers, less duplicated topic hashing |
 | Provider JSON-RPC typed decoding | `apps/indexer/src/provider/decode.rs` now uses typed serde DTOs with Alloy `U256`, `Address`, `B256`, and `Bytes` for quantities, transaction/receipt/log hashes, addresses, topics, byte blobs, and log data. Block hash/root strings remain normalized strings because existing provider fixtures and raw-payload cache-fill paths intentionally accept sparse or placeholder values. Remaining manual decoding lives in provider transport/bundle readers, request filter construction, and `reth_db` conversion boundaries | Keep current transport initially; evaluate narrower typed request/filter structs next, and only move to full `alloy-rpc-types-eth` block/receipt/log types if cache payloads and fixture contracts can tolerate their stricter headers | Removes brittle `serde_json::Value` object walking and custom hex parsing in provider code while avoiding accidental behavior tightening |
-| Address/hash normalization | Adapter hash/hex/namehash helpers are centralized in `evm_abi`; storage now owns `evm_primitives` for Alloy-backed `Address`/`B256` canonicalization with lowercase fallback; API query parsing and worker ingestion own small Alloy-backed address helpers. Remaining local normalization appears in indexer, manifests, adapters, and execution path validation | Keep one helper per owner crate where fallback semantics differ; parse with Alloy where EVM-shaped, return canonical lower `0x` strings, and preserve sentinels only at boundaries that already accepted them | Prevents drift between "lowercase only" and "validated EVM address/hash" call sites |
+| Address/hash normalization | Adapter hash/hex/namehash helpers are centralized in `evm_abi`; storage now owns shared `evm_primitives` for Alloy-backed `Address`/`B256` canonicalization with lowercase fallback, and worker ingestion reuses those helpers instead of duplicate parsing. API query parsing still owns a small Alloy-backed address helper. Remaining local normalization appears in indexer, manifests, adapters, and execution path validation | Keep one helper per owner crate where fallback semantics differ; parse with Alloy where EVM-shaped, return canonical lower `0x` strings, and preserve sentinels only at boundaries that already accepted them | Prevents drift between "lowercase only" and "validated EVM address/hash" call sites |
 | Canonicality and binding-kind parsing/rank | First slice landed: `CanonicalityState::rank`, `CanonicalityState::weakest`, and public `SurfaceBindingKind::parse` now cover indexer/adapters/storage/worker call sites with the canonical storage ordering; projection summaries with intentionally different ordering remain local | Continue replacing wrappers where semantics match; leave summary-specific rank orders local until their meaning is documented | Deletes repeated match blocks and reduces risk when enum variants change |
 | Projection JSON summaries | `apps/worker/src/projection_json.rs` now covers repeated worker timestamp formatting, JSON path reads, and JSON value dedupe; remaining repeated worker families are provenance envelopes, chain-position maps, summary-specific canonicality ranks, and chain slots. API still has response-side JSON helpers | Continue growing worker-local `projection_json` with provenance, chain-position, and canonicality primitives where semantics match; consider storage helpers only for projection-shared public row shapes | Reduces repeated `serde_json` assembly and makes coverage/provenance mistakes easier to spot |
 | SQL row decoding boilerplate | `crates/storage/src/sql_row.rs` covers the shared required-column helper for storage, worker, adapter, and execution decoders: 350 exact storage call sites, 70+ worker call sites, 199 adapter call sites, and 30 execution revalidation call sites; manual `PgRow::try_get(...).context(...)` decoders remain across storage edge cases, manifests, adapter custom-context loaders, worker custom-context loaders, and API/indexer support; almost no production `query_as`/`FromRow` usage | Continue replacing same-semantics row reads with the shared helper where dependent crates already use storage; use `sqlx::FromRow` for plain rows; add small helper wrappers for contextual field reads and non-negative conversions where dynamic SQL prevents derive | Cuts a large amount of repetitive error text and makes row shape changes easier |
@@ -212,9 +218,9 @@ The codebase already uses Alloy in `crates/execution`, `crates/adapters`, and
   authority adapters is
   manifest-derived, and block-derived dispatch is source-family keyed instead
   of builder probing.
-- `crates/storage/src/evm_primitives.rs` centralizes storage-side EVM address
-  and hash parsing with Alloy while leaving legacy non-standard values as
-  lowercase strings at the same ingestion boundaries.
+- `crates/storage/src/evm_primitives.rs` centralizes storage-side and worker
+  EVM address/hash parsing with Alloy while leaving legacy non-standard values
+  as lowercase strings at the same ingestion boundaries.
 - `apps/indexer/src/provider/reth_db/convert.rs` uses Alloy/Reth primitives for
   DB-backed provider data. `apps/indexer/src/provider/decode.rs` now uses
   typed serde DTOs backed by Alloy primitives for JSON-RPC quantities,

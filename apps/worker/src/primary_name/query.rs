@@ -4,6 +4,8 @@ use futures_util::{Stream, StreamExt};
 use serde_json::Value;
 use sqlx::{PgPool, Row, postgres::PgRow};
 
+use crate::evm::normalize_evm_address_or_lowercase;
+
 use super::types::{
     NameClaimObservation, PrimaryNameRebuildInput, PrimaryNameTupleKey, ReverseClaimTuple,
 };
@@ -258,10 +260,10 @@ fn decode_name_claim_observation(row: PgRow) -> Result<NameClaimObservation> {
 }
 
 fn decode_tuple_key(row: &PgRow) -> Result<PrimaryNameTupleKey> {
-    let address = row
-        .try_get::<String, _>("address")
-        .context("missing primary-name address")?
-        .to_ascii_lowercase();
+    let address = normalize_evm_address_or_lowercase(
+        &row.try_get::<String, _>("address")
+            .context("missing primary-name address")?,
+    );
     let namespace = row
         .try_get::<String, _>("namespace")
         .context("missing primary-name namespace")?;

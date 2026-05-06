@@ -65,6 +65,7 @@ pub use children::{
     load_children_current_page, load_children_current_summaries,
     stream_canonical_declared_child_sources, upsert_children_current_rows,
 };
+pub use evm_primitives::{normalize_evm_address, normalize_evm_b256};
 pub use execution::{
     ExecutionBoundaryInvalidation, ExecutionCacheKey, ExecutionManifestInvalidation,
     ExecutionOutcome, ExecutionOutcomeInvalidationSummary, ExecutionTrace,

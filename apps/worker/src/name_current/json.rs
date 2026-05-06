@@ -5,6 +5,7 @@ use bigname_storage::HistoryEvent;
 use serde_json::{Map, Value, json};
 use sqlx::types::time::OffsetDateTime;
 
+use crate::evm::normalize_trimmed_evm_address_or_lowercase;
 use crate::projection_json::dedupe_json_values;
 
 use super::types::{
@@ -168,7 +169,7 @@ fn history_manifest_version(event: &HistoryEvent) -> Value {
 }
 
 pub(super) fn normalize_resolver_address(value: Option<&str>) -> Option<String> {
-    let normalized = value?.trim().to_ascii_lowercase();
+    let normalized = normalize_trimmed_evm_address_or_lowercase(value?);
     if normalized.is_empty() || normalized == ZERO_ADDRESS {
         None
     } else {

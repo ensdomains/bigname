@@ -12,6 +12,8 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::evm::normalize_evm_address_or_lowercase;
+
 const VERIFIED_RESOLUTION_REQUEST_TYPE: &str = "verified_resolution";
 const VERIFIED_PRIMARY_NAME_REQUEST_TYPE: &str =
     bigname_storage::VERIFIED_PRIMARY_NAME_REQUEST_TYPE;
@@ -204,7 +206,10 @@ impl VerifiedPrimaryNameBoundaryInvalidation {
 }
 
 fn verified_primary_name_request_key(namespace: &str, address: &str, coin_type: &str) -> String {
-    format!("{namespace}:{}:{coin_type}", address.to_ascii_lowercase())
+    format!(
+        "{namespace}:{}:{coin_type}",
+        normalize_evm_address_or_lowercase(address)
+    )
 }
 
 #[cfg(test)]

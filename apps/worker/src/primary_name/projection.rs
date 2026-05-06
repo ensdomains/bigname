@@ -9,6 +9,8 @@ use futures_util::{TryStreamExt, pin_mut};
 use serde_json::{Map, Value, json};
 use sqlx::PgPool;
 
+use crate::evm::normalize_evm_address_or_lowercase;
+
 use super::{
     PrimaryNamesCurrentRebuildSummary,
     query::{
@@ -265,5 +267,5 @@ fn count_statuses(rows: &[PrimaryNameCurrentRow]) -> StatusCounts {
 }
 
 fn normalize_address(address: &str) -> String {
-    address.to_ascii_lowercase()
+    normalize_evm_address_or_lowercase(address)
 }

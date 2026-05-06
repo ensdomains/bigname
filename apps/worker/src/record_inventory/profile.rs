@@ -4,6 +4,8 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 use sqlx::PgPool;
 
+use crate::evm::normalize_evm_address_or_lowercase;
+
 use super::{constants::*, types::RelevantEvent};
 
 #[derive(Clone, Debug)]
@@ -455,5 +457,5 @@ fn resolver_address_from_event(event: &RelevantEvent) -> Option<String> {
 }
 
 fn normalize_address(value: &str) -> String {
-    value.to_ascii_lowercase()
+    normalize_evm_address_or_lowercase(value)
 }
