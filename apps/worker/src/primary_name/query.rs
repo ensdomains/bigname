@@ -1,10 +1,8 @@
 use anyhow::{Context, Result, bail};
-use bigname_storage::sql_row;
+use bigname_storage::{normalize_evm_address, sql_row};
 use futures_util::{Stream, StreamExt};
 use serde_json::Value;
 use sqlx::{PgPool, Row, postgres::PgRow};
-
-use crate::evm::normalize_evm_address_or_lowercase;
 
 use super::types::{
     NameClaimObservation, PrimaryNameRebuildInput, PrimaryNameTupleKey, ReverseClaimTuple,
@@ -260,7 +258,7 @@ fn decode_name_claim_observation(row: PgRow) -> Result<NameClaimObservation> {
 }
 
 fn decode_tuple_key(row: &PgRow) -> Result<PrimaryNameTupleKey> {
-    let address = normalize_evm_address_or_lowercase(
+    let address = normalize_evm_address(
         &row.try_get::<String, _>("address")
             .context("missing primary-name address")?,
     );

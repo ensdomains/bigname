@@ -6,13 +6,11 @@ use bigname_storage::{
     invalidate_execution_outcomes_for_record_boundary,
     invalidate_execution_outcomes_for_record_boundary_and_request_key,
     invalidate_execution_outcomes_for_topology_boundary,
-    invalidate_execution_outcomes_for_topology_boundary_and_request_key,
+    invalidate_execution_outcomes_for_topology_boundary_and_request_key, normalize_evm_address,
 };
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
-
-use crate::evm::normalize_evm_address_or_lowercase;
 
 const VERIFIED_RESOLUTION_REQUEST_TYPE: &str = "verified_resolution";
 const VERIFIED_PRIMARY_NAME_REQUEST_TYPE: &str =
@@ -206,10 +204,7 @@ impl VerifiedPrimaryNameBoundaryInvalidation {
 }
 
 fn verified_primary_name_request_key(namespace: &str, address: &str, coin_type: &str) -> String {
-    format!(
-        "{namespace}:{}:{coin_type}",
-        normalize_evm_address_or_lowercase(address)
-    )
+    format!("{namespace}:{}:{coin_type}", normalize_evm_address(address))
 }
 
 #[cfg(test)]

@@ -1,11 +1,10 @@
 use std::collections::BTreeSet;
 
 use anyhow::{Context, Result, bail};
-use bigname_storage::PermissionScope;
+use bigname_storage::{PermissionScope, normalize_evm_address};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::evm::normalize_evm_address_or_lowercase;
 use crate::projection_json::dedupe_json_values;
 
 use super::types::RelevantEvent;
@@ -31,7 +30,7 @@ pub(super) fn parse_scope(state: &Value) -> Result<PermissionScope> {
                 .and_then(Value::as_str)
                 .context("resolver scope must include chain_id")?
                 .to_owned(),
-            resolver_address: normalize_evm_address_or_lowercase(
+            resolver_address: normalize_evm_address(
                 scope
                     .get("resolver_address")
                     .and_then(Value::as_str)
@@ -44,7 +43,7 @@ pub(super) fn parse_scope(state: &Value) -> Result<PermissionScope> {
                 .and_then(Value::as_str)
                 .context("record_manager scope must include chain_id")?
                 .to_owned(),
-            manager_address: normalize_evm_address_or_lowercase(
+            manager_address: normalize_evm_address(
                 scope
                     .get("manager_address")
                     .and_then(Value::as_str)

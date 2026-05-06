@@ -1,10 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result};
+use bigname_storage::normalize_evm_address;
 use serde_json::Value;
 use sqlx::PgPool;
-
-use crate::evm::normalize_evm_address_or_lowercase;
 
 use super::{constants::*, types::RelevantEvent};
 
@@ -457,5 +456,5 @@ fn resolver_address_from_event(event: &RelevantEvent) -> Option<String> {
 }
 
 fn normalize_address(value: &str) -> String {
-    normalize_evm_address_or_lowercase(value)
+    normalize_evm_address(value)
 }

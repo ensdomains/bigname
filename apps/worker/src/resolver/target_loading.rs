@@ -5,12 +5,11 @@ use anyhow::{Context, Result};
 use bigname_storage::{
     CanonicalityState, PermissionsCurrentRow, SurfaceBindingKind,
     load_permissions_current_for_resolver_scope, load_permissions_current_resolver_targets,
+    normalize_evm_address,
 };
 use serde_json::Value;
 use sqlx::{PgPool, Row, types::time::OffsetDateTime};
 use uuid::Uuid;
-
-use crate::evm::normalize_evm_address_or_lowercase;
 
 use super::{
     CANONICAL_STATE_FILTER, EVENT_KIND_ALIAS_CHANGED, EVENT_KIND_RESOLVER_CHANGED,
@@ -444,7 +443,7 @@ pub(super) async fn load_alias_events(
 }
 
 pub(super) fn normalize_resolver_address(value: &str) -> String {
-    normalize_evm_address_or_lowercase(value)
+    normalize_evm_address(value)
 }
 
 fn parse_surface_binding_kind(value: &str) -> Result<SurfaceBindingKind> {

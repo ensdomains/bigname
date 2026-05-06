@@ -1,12 +1,10 @@
 use anyhow::Result;
-use bigname_storage::{CanonicalityState, SurfaceBindingKind};
-
-use crate::evm::normalize_evm_address_or_lowercase;
+use bigname_storage::{CanonicalityState, SurfaceBindingKind, normalize_evm_address};
 
 pub(super) use crate::projection_json::{dedupe_json_values, format_timestamp, json_str};
 
 pub(super) fn normalize_address(value: impl AsRef<str>) -> String {
-    normalize_evm_address_or_lowercase(value.as_ref())
+    normalize_evm_address(value.as_ref())
 }
 
 pub(super) fn parse_canonicality_state(value: &str) -> Result<CanonicalityState> {

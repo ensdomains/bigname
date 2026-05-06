@@ -5,12 +5,11 @@ use bigname_execution::{
     ChainRpcUrls, EnsTextRecordMulticallRequest, EnsTextRecordMulticallResult, MULTICALL3_ADDRESS,
     execute_ens_text_record_multicall,
 };
+use bigname_storage::normalize_evm_address;
 use futures_util::{FutureExt, future::BoxFuture};
 use serde_json::{Value, json};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
-
-use crate::evm::normalize_trimmed_evm_address_or_lowercase;
 
 use super::{constants::*, types::RecordInventoryTextHydrationSummary};
 
@@ -426,7 +425,7 @@ fn ens_name_from_logical_name_id(logical_name_id: &str) -> Option<&str> {
 }
 
 fn normalize_address(address: &str) -> String {
-    normalize_trimmed_evm_address_or_lowercase(address)
+    normalize_evm_address(address.trim())
 }
 
 fn ens_v1_resolver_profile_admitted(profile: &str) -> bool {

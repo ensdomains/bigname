@@ -2,14 +2,12 @@ use anyhow::{Context, Result, bail};
 use bigname_storage::{
     PrimaryNameClaimStatus, PrimaryNameCurrentRow, PrimaryNameCurrentSnapshot,
     VERIFIED_PRIMARY_NAME_INVALIDATION_KEY, VERIFIED_PRIMARY_NAME_LOOKUP_KEY,
-    clear_primary_names_current, delete_primary_name_current,
+    clear_primary_names_current, delete_primary_name_current, normalize_evm_address,
     upsert_primary_name_current_snapshots,
 };
 use futures_util::{TryStreamExt, pin_mut};
 use serde_json::{Map, Value, json};
 use sqlx::PgPool;
-
-use crate::evm::normalize_evm_address_or_lowercase;
 
 use super::{
     PrimaryNamesCurrentRebuildSummary,
@@ -267,5 +265,5 @@ fn count_statuses(rows: &[PrimaryNameCurrentRow]) -> StatusCounts {
 }
 
 fn normalize_address(address: &str) -> String {
-    normalize_evm_address_or_lowercase(address)
+    normalize_evm_address(address)
 }

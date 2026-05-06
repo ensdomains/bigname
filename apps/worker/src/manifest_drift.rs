@@ -1,13 +1,12 @@
 use anyhow::{Context, Result, bail};
 use bigname_storage::{
     CanonicalityState, ManifestDriftAlertInspection, ManifestDriftAlertKind,
-    ManifestDriftAlertObservation,
+    ManifestDriftAlertObservation, normalize_evm_address, normalize_evm_b256,
 };
 use serde_json::{Value, json};
 use sqlx::types::time::{Date, OffsetDateTime, PrimitiveDateTime, Time, UtcOffset};
 
 use crate::cli::ManifestDriftAuditArgs;
-use crate::evm::{normalize_evm_address_or_lowercase, normalize_evm_b256_or_lowercase};
 use crate::inspect;
 
 pub(crate) async fn audit(args: ManifestDriftAuditArgs) -> Result<()> {
@@ -135,13 +134,10 @@ fn manifest_code_hash_drift_candidate_observation(
     let source_family = required_string(candidate, "source_family")?;
     let source_manifest_id = required_i64(candidate, "source_manifest_id")?;
     let block_number = required_i64(observed_block, "number")?;
-    let block_hash = normalize_evm_b256_or_lowercase(required_string(observed_block, "hash")?);
-    let contract_address =
-        normalize_evm_address_or_lowercase(required_string(contract, "address")?);
-    let expected_code_hash =
-        normalize_evm_b256_or_lowercase(required_string(code_hash, "expected")?);
-    let observed_code_hash =
-        normalize_evm_b256_or_lowercase(required_string(code_hash, "observed")?);
+    let block_hash = normalize_evm_b256(required_string(observed_block, "hash")?);
+    let contract_address = normalize_evm_address(required_string(contract, "address")?);
+    let expected_code_hash = normalize_evm_b256(required_string(code_hash, "expected")?);
+    let observed_code_hash = normalize_evm_b256(required_string(code_hash, "observed")?);
     let canonicality_state =
         parse_manifest_drift_canonicality(required_string(observed_block, "canonicality_state")?)?;
     let raw_fact_ref = required_value(watched_target, "raw_fact_ref")?.clone();
@@ -194,11 +190,11 @@ pub(crate) fn manifest_proxy_implementation_candidate_observation(
     let discovery_edge_id = optional_i64(implementation_edge, "discovery_edge_id")?;
     let observed_implementation_contract_instance_id =
         optional_string(observed, "contract_instance_id")?;
-    let proxy_address = normalize_evm_address_or_lowercase(required_string(proxy, "address")?);
+    let proxy_address = normalize_evm_address(required_string(proxy, "address")?);
     let expected_implementation_address =
-        optional_string(expected, "address")?.map(normalize_evm_address_or_lowercase);
+        optional_string(expected, "address")?.map(normalize_evm_address);
     let observed_implementation_address =
-        optional_string(observed, "address")?.map(normalize_evm_address_or_lowercase);
+        optional_string(observed, "address")?.map(normalize_evm_address);
 
     Ok(ManifestDriftAlertObservation {
         normalized_event_id: 0,
