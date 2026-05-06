@@ -144,7 +144,7 @@ Rules:
 - Route-level `coverage` and per-section support are independent: a read may be authoritative while one declared section returns `UnsupportedSummary`.
 - Top-level `provenance` is the route-level summary. Mixed declared+verified routes may add section-local `provenance` where derivations differ.
 - `meta=none` omits `meta` (collection `page` stays). `meta=summary` includes route-level support, unsupported filters/fields, count metadata, and snapshot summary. `meta=full` adds the full-envelope `coverage`, `chain_positions`, `consistency`, `last_updated`, and route-level `provenance` summaries.
-- `view=full` returns the full envelope when the route documents one; otherwise it's reserved and returns `400 invalid_input`.
+- `view=full` returns the full envelope only when the route documents a full view. Compact-only routes keep `view=full` as a compatibility-reserved input that returns `400 invalid_input`; OpenAPI advertises only `view=compact` for those routes.
 - Compact responses never expose raw facts, full provenance, or projection internals as a substitute for `meta`. Explain detail belongs on explain/audit routes.
 
 ## Shared objects
@@ -324,11 +324,11 @@ The actual published routes are listed below. Per-route semantics are in [`api-v
 | --- | --- |
 | `GET /v1/namespaces/{namespace}` | Namespace metadata. |
 | `GET /v1/manifests/{namespace}` | Active manifest versions and capabilities. |
-| `GET /v1/names` | Compact name search, exact lookup, address relations, suggestions. |
+| `GET /v1/names` | Compact name search, compatibility exact filter, address relations, suggestions. |
 | `GET /v1/names/{namespace}/{name}` | Exact name lookup (full envelope). |
 | `GET /v1/names/{namespace}/{name}/children` | Direct children, compact by default, full via `view=full`. |
-| `GET /v1/names/{namespace}/{name}/records` | Compact resolver records over declared inventory/cache and verified selectors. |
-| `GET /v1/names/{namespace}/{name}/roles` | Compact role rows for the name's current resource. |
+| `GET /v1/names/{namespace}/{name}/records` | Compact resolver records over declared inventory/cache and verified selectors; compact view only. |
+| `GET /v1/names/{namespace}/{name}/roles` | Compact role rows for the name's current resource; compact view only. |
 | `GET /v1/coverage/{namespace}/{name}` | Single-name coverage and explain detail. |
 | `GET /v1/explain/names/{namespace}/{name}/surface-binding` | Current surface-binding explain view. |
 | `GET /v1/explain/names/{namespace}/{name}/authority-control` | Current authority/control explain view. |
@@ -338,15 +338,15 @@ The actual published routes are listed below. Per-route semantics are in [`api-v
 | `GET /v1/history/names/{namespace}/{name}` | Surface or combined history. |
 | `GET /v1/history/resources/{resource_id}` | Resource history. |
 | `GET /v1/history/addresses/{address}` | Address activity history. |
-| `GET /v1/events` | Compact event search across name, address, resource, type, block filters. |
-| `GET /v1/roles` | Compact role rows by account, resource, or name. |
-| `GET /v1/resources/lookup` | Compact lookup from `{namespace, name}` to current `resource_id`. |
+| `GET /v1/events` | Compact event search across name, address, resource, type, block filters; compact view only. |
+| `GET /v1/roles` | Compact role rows by account, resource, or name; compact view only. |
+| `GET /v1/resources/lookup` | Compact lookup from `{namespace, name}` to current `resource_id`; compact view only. |
 | `GET /v1/resources/{resource_id}/permissions` | Resource-centric effective permissions. |
 | `GET /v1/resolvers/{chain_id}/{resolver_address}` | Resolver overview (full envelope). |
 | `GET /v1/resolvers/{chain_id}/{resolver_address}/overview` | Compact resolver overview. |
 | `GET /v1/resolutions/{namespace}/{name}` | Resolution topology, inventory, cache, verified queries. |
 | `GET /v1/resolve/{name}` | Namespace-inferred convenience for resolution. |
-| `GET /v1/resolve/{name}/records` | Namespace-inferred convenience for compact records. |
+| `GET /v1/resolve/{name}/records` | Namespace-inferred convenience for compact records; compact view only. |
 | `GET /v1/primary-names/{address}` | Claimed and verified primary name for `(address, namespace, coin_type)`. |
 | `GET /healthz` | Liveness check. Not part of the `v1` contract. |
 

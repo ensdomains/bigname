@@ -61,7 +61,7 @@ pub(super) fn names_parameters() -> Vec<JsonValue> {
             "Optional compact name expansions.",
             string_enum_schema(&["record_summaries", "total_count"]),
         ),
-        view_query_parameter("compact"),
+        compact_view_query_parameter(),
         meta_query_parameter("summary"),
         cursor_query_parameter(),
         page_size_query_parameter(),
@@ -104,7 +104,7 @@ pub(super) fn resource_lookup_parameters() -> Vec<JsonValue> {
             "Required normalized name to resolve to a current resource identity.",
             string_schema(),
         ),
-        view_query_parameter("compact"),
+        compact_view_query_parameter(),
         meta_query_parameter("summary"),
     ]
 }
@@ -178,7 +178,7 @@ fn name_records_query_parameters(default_mode: &'static str, default_include: &'
                 default_include,
             ),
         ),
-        view_query_parameter("compact"),
+        compact_view_query_parameter(),
         meta_query_parameter("summary"),
     ]
 }
@@ -218,7 +218,7 @@ pub(super) fn events_parameters() -> Vec<JsonValue> {
             "Inclusive canonical block upper bound.",
             integer_min_schema(0),
         ),
-        view_query_parameter("compact"),
+        compact_view_query_parameter(),
         meta_query_parameter("summary"),
         cursor_query_parameter(),
         page_size_query_parameter(),
@@ -244,7 +244,7 @@ pub(super) fn roles_parameters() -> Vec<JsonValue> {
             "Projected role bitmap filter when supported.",
             string_schema(),
         ),
-        view_query_parameter("compact"),
+        compact_view_query_parameter(),
         meta_query_parameter("summary"),
         cursor_query_parameter(),
         page_size_query_parameter(),
@@ -261,7 +261,7 @@ pub(super) fn name_roles_parameters() -> Vec<JsonValue> {
             "Projected role bitmap filter when supported.",
             string_schema(),
         ),
-        view_query_parameter("compact"),
+        compact_view_query_parameter(),
         meta_query_parameter("summary"),
         cursor_query_parameter(),
         page_size_query_parameter(),

@@ -280,6 +280,14 @@ pub(super) fn view_query_parameter(default: &'static str) -> JsonValue {
     )
 }
 
+pub(super) fn compact_view_query_parameter() -> JsonValue {
+    query_parameter(
+        "view",
+        "Compact response view selector. `view=full` remains a compatibility-reserved value and returns `400 invalid_input`.",
+        string_enum_default_schema(&["compact"], "compact"),
+    )
+}
+
 pub(super) fn meta_query_parameter(default: &'static str) -> JsonValue {
     query_parameter(
         "meta",

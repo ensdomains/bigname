@@ -2103,15 +2103,14 @@
             }
           },
           {
-            "description": "Response view selector.",
+            "description": "Compact response view selector. `view=full` remains a compatibility-reserved value and returns `400 invalid_input`.",
             "in": "query",
             "name": "view",
             "required": false,
             "schema": {
               "default": "compact",
               "enum": [
-                "compact",
-                "full"
+                "compact"
               ],
               "type": "string"
             }
@@ -3136,15 +3135,14 @@
             "style": "form"
           },
           {
-            "description": "Response view selector.",
+            "description": "Compact response view selector. `view=full` remains a compatibility-reserved value and returns `400 invalid_input`.",
             "in": "query",
             "name": "view",
             "required": false,
             "schema": {
               "default": "compact",
               "enum": [
-                "compact",
-                "full"
+                "compact"
               ],
               "type": "string"
             }
@@ -3602,15 +3600,14 @@
             "style": "form"
           },
           {
-            "description": "Response view selector.",
+            "description": "Compact response view selector. `view=full` remains a compatibility-reserved value and returns `400 invalid_input`.",
             "in": "query",
             "name": "view",
             "required": false,
             "schema": {
               "default": "compact",
               "enum": [
-                "compact",
-                "full"
+                "compact"
               ],
               "type": "string"
             }
@@ -3724,15 +3721,14 @@
             }
           },
           {
-            "description": "Response view selector.",
+            "description": "Compact response view selector. `view=full` remains a compatibility-reserved value and returns `400 invalid_input`.",
             "in": "query",
             "name": "view",
             "required": false,
             "schema": {
               "default": "compact",
               "enum": [
-                "compact",
-                "full"
+                "compact"
               ],
               "type": "string"
             }
@@ -4307,15 +4303,14 @@
             "style": "form"
           },
           {
-            "description": "Response view selector.",
+            "description": "Compact response view selector. `view=full` remains a compatibility-reserved value and returns `400 invalid_input`.",
             "in": "query",
             "name": "view",
             "required": false,
             "schema": {
               "default": "compact",
               "enum": [
-                "compact",
-                "full"
+                "compact"
               ],
               "type": "string"
             }
@@ -4590,15 +4585,14 @@
             }
           },
           {
-            "description": "Response view selector.",
+            "description": "Compact response view selector. `view=full` remains a compatibility-reserved value and returns `400 invalid_input`.",
             "in": "query",
             "name": "view",
             "required": false,
             "schema": {
               "default": "compact",
               "enum": [
-                "compact",
-                "full"
+                "compact"
               ],
               "type": "string"
             }
@@ -4813,15 +4807,14 @@
             }
           },
           {
-            "description": "Response view selector.",
+            "description": "Compact response view selector. `view=full` remains a compatibility-reserved value and returns `400 invalid_input`.",
             "in": "query",
             "name": "view",
             "required": false,
             "schema": {
               "default": "compact",
               "enum": [
-                "compact",
-                "full"
+                "compact"
               ],
               "type": "string"
             }
