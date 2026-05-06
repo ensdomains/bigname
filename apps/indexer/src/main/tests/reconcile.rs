@@ -2925,7 +2925,9 @@ async fn reconcile_fetched_heads_backfills_ensv2_resolver_and_permission_events(
                 "logIndex": "0x6",
                 "address": resolver_address,
                 "topics": [
-                    ens_v2_alias_changed_topic0()
+                    ens_v2_alias_changed_topic0(),
+                    keccak256_hex(&alice_dns_name),
+                    keccak256_hex(&[])
                 ],
                 "data": encode_two_dynamic_bytes_log_data(&alice_dns_name, &[])
             }),
