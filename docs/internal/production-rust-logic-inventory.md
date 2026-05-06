@@ -29,14 +29,14 @@ Production Rust snapshot from the working tree:
 | Area | Production files | LOC |
 | --- | ---: | ---: |
 | `crates/storage` | 144 | 26,021 |
-| `crates/adapters` | 101 | 21,520 |
+| `crates/adapters` | 101 | 21,522 |
 | `apps/indexer` | 65 | 17,060 |
 | `apps/api` | 64 | 14,218 |
 | `apps/worker` | 70 | 12,836 |
 | `crates/manifests` | 33 | 7,675 |
 | `crates/execution` | 36 | 6,386 |
 | `crates/domain` | 1 | 6 |
-| Total | 514 | 105,722 |
+| Total | 514 | 105,724 |
 
 The current file-size gate hard-fails these oversized production files as the
 first places to revisit after logic dedupe:
@@ -179,6 +179,9 @@ Addressed slices:
   call sites in address names, primary names, record inventory, name current,
   execution, permissions, resolver target loading, and manifest drift now import
   the shared storage EVM normalizers directly.
+- ENSv1 reverse-claim topic matching now derives the `ReverseClaimed` topic0
+  from an Alloy-generated `sol!`/`SolEvent` event ref instead of owning a
+  hand-written signature string plus Keccak helper call.
 
 ## Highest leverage cleanup map
 

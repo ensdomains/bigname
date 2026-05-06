@@ -1,3 +1,4 @@
+use alloy_sol_types::{SolEvent, sol};
 use anyhow::{Result, bail};
 
 use crate::evm_abi;
@@ -5,10 +6,12 @@ use crate::evm_abi;
 pub(super) use crate::evm_abi::hex_string;
 pub(super) use crate::evm_abi::namehash_hex;
 
-use super::{
-    REVERSE_CLAIMED_SIGNATURE, SOURCE_FAMILY_BASENAMES_BASE_PRIMARY,
-    SOURCE_FAMILY_ENS_V1_REVERSE_L1,
-};
+use super::{SOURCE_FAMILY_BASENAMES_BASE_PRIMARY, SOURCE_FAMILY_ENS_V1_REVERSE_L1};
+
+sol! {
+    #[derive(Debug)]
+    event ReverseClaimed(address indexed addr, bytes32 indexed node);
+}
 
 pub(super) fn supports_reverse_claim_source_family(source_family: &str) -> bool {
     matches!(
@@ -49,5 +52,5 @@ pub(super) fn normalize_topic_address(value: &str) -> Result<String> {
 }
 
 pub(super) fn reverse_claimed_topic0() -> String {
-    evm_abi::keccak_signature_hex(REVERSE_CLAIMED_SIGNATURE)
+    evm_abi::hex_string(ReverseClaimed::SIGNATURE_HASH.as_slice())
 }

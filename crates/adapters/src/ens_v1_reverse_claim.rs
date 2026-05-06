@@ -31,7 +31,6 @@ const DERIVATION_KIND_ENS_V1_REVERSE_CLAIM: &str = "ens_v1_reverse_claim";
 const EVENT_KIND_REVERSE_CHANGED: &str = "ReverseChanged";
 const ENS_NATIVE_COIN_TYPE: &str = "60";
 const CONTRACT_ROLE_REVERSE_REGISTRAR: &str = "reverse_registrar";
-const REVERSE_CLAIMED_SIGNATURE: &str = "ReverseClaimed(address,bytes32)";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EnsV1ReverseClaimSyncSummary {
