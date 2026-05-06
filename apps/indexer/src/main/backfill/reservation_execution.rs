@@ -15,7 +15,10 @@ use serde_json::{Value, json};
 use sqlx::types::time::OffsetDateTime;
 use tracing::info;
 
-use crate::{ens_v1_resolver::SOURCE_FAMILY_ENS_V1_RESOLVER_L1, provider::ChainProviderOps};
+use crate::{
+    ens_v1_resolver::SOURCE_FAMILY_ENS_V1_RESOLVER_L1, provider::ChainProviderOps,
+    source_scope::watched_source_plan_uses_generic_resolver_scope,
+};
 
 use super::{
     BackfillBlockRange, BackfillJobRunConfig, BackfillJobRunOutcome,
@@ -95,7 +98,7 @@ pub(crate) fn hash_pinned_backfill_range_specs(
 pub(crate) fn backfill_job_source_identity_payload(
     source_plan: &WatchedSourceSelectorPlan,
 ) -> Result<Value> {
-    if includes_generic_resolver_event_scope(source_plan) {
+    if watched_source_plan_uses_generic_resolver_scope(source_plan) {
         return generic_topic_scan_source_identity_payload(source_plan);
     }
 
@@ -189,19 +192,6 @@ fn generic_topic_scan_source_identity_payload(
             Value::String(source_identity_hash),
         );
     Ok(payload)
-}
-
-fn is_ens_v1_resolver_source_family_plan(source_plan: &WatchedSourceSelectorPlan) -> bool {
-    source_plan.selector_kind == WatchedSourceSelectorKind::SourceFamily
-        && source_plan.source_family.as_deref() == Some(SOURCE_FAMILY_ENS_V1_RESOLVER_L1)
-}
-
-fn includes_generic_resolver_event_scope(source_plan: &WatchedSourceSelectorPlan) -> bool {
-    is_ens_v1_resolver_source_family_plan(source_plan)
-        || source_plan
-            .selected_targets
-            .iter()
-            .any(|target| target.source_family == SOURCE_FAMILY_ENS_V1_RESOLVER_L1)
 }
 
 fn selected_targets_sample(selected_targets: &[WatchedBackfillTarget]) -> Value {

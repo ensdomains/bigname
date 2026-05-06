@@ -30,6 +30,7 @@ use tokio::{
 };
 
 use super::*;
+use crate::run_mode::IndexerRunMode;
 
 static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
 

@@ -2,10 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use bigname_manifests::{WatchedBackfillTarget, WatchedSourceSelectorPlan};
 
-use crate::{
-    ens_v1_resolver::{GENERIC_SOURCE_SCOPE_ADDRESS, SOURCE_FAMILY_ENS_V1_RESOLVER_L1},
-    provider::{ProviderLog, ProviderResolvedBlock},
-};
+use crate::provider::{ProviderLog, ProviderResolvedBlock};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct BackfillLogRangeRequest {
@@ -228,45 +225,6 @@ impl SelectedTargetRangeCursor {
 
         self.active_counts_by_address.keys().cloned().collect()
     }
-}
-
-pub(super) fn backfill_adapter_sync_scope(
-    source_plan: &WatchedSourceSelectorPlan,
-    from_block: i64,
-    to_block: i64,
-) -> Vec<(String, String, i64, i64)> {
-    let has_generic_resolver_scope = source_plan.source_family.as_deref()
-        == Some(SOURCE_FAMILY_ENS_V1_RESOLVER_L1)
-        || source_plan
-            .selected_targets
-            .iter()
-            .any(|target| target.source_family == SOURCE_FAMILY_ENS_V1_RESOLVER_L1);
-
-    let mut scopes = Vec::new();
-    if has_generic_resolver_scope {
-        scopes.push((
-            SOURCE_FAMILY_ENS_V1_RESOLVER_L1.to_owned(),
-            GENERIC_SOURCE_SCOPE_ADDRESS.to_owned(),
-            from_block,
-            to_block,
-        ));
-    }
-
-    scopes.extend(
-        source_plan
-            .selected_targets
-            .iter()
-            .filter(|target| target.source_family != SOURCE_FAMILY_ENS_V1_RESOLVER_L1)
-            .map(|target| {
-                (
-                    target.source_family.clone(),
-                    target.address.to_ascii_lowercase(),
-                    target.effective_from_block,
-                    target.effective_to_block,
-                )
-            }),
-    );
-    scopes
 }
 
 #[cfg(test)]

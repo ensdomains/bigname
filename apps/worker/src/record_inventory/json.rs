@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use bigname_storage::CanonicalityState;
 use serde_json::{Value, json};
 
-use crate::projection_json::dedupe_json_values;
+use crate::projection_json::{dedupe_json_values, projection_coverage};
 
 use super::{
     chain_position::chain_position_value,
@@ -244,18 +244,15 @@ pub(super) fn build_coverage(events: &[RelevantEvent]) -> Value {
     let source_classes_considered = events
         .iter()
         .map(|event| event.source_family.clone())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .map(Value::String)
-        .collect::<Vec<_>>();
+        .collect::<BTreeSet<_>>();
 
-    json!({
-        "status": "full",
-        "exhaustiveness": "authoritative",
-        "source_classes_considered": source_classes_considered,
-        "unsupported_reason": Value::Null,
-        "enumeration_basis": RECORD_INVENTORY_ENUMERATION_BASIS,
-    })
+    projection_coverage(
+        "full",
+        "authoritative",
+        source_classes_considered,
+        None,
+        RECORD_INVENTORY_ENUMERATION_BASIS,
+    )
 }
 
 pub(super) fn build_canonicality_summary(events: &[RelevantEvent]) -> Value {

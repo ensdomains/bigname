@@ -46,6 +46,21 @@ pub(super) fn parse_response_view(
     }
 }
 
+pub(super) fn parse_compact_only_response_view(
+    view: Option<&str>,
+    full_view_message: &str,
+) -> ApiResult<()> {
+    if parse_response_view(view, ResponseView::Compact)? == ResponseView::Full {
+        return Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            code: "invalid_input",
+            message: full_view_message.to_owned(),
+        });
+    }
+
+    Ok(())
+}
+
 pub(super) fn parse_meta_mode(meta: Option<&str>, default: MetaMode) -> ApiResult<MetaMode> {
     let Some(meta) = meta.map(str::trim).filter(|value| !value.is_empty()) else {
         return Ok(default);

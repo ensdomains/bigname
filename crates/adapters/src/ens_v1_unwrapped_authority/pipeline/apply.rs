@@ -1,5 +1,9 @@
 use super::super::*;
 
+mod preload;
+
+pub(super) use preload::{name_intro_positions_for_raw_logs, preload_name_metadata_for_raw_logs};
+
 pub(super) fn resolver_profile_fact_nodes(
     raw_logs: &[AuthorityRawLogRow],
     event_topics: &AuthorityEventTopics,
@@ -418,6 +422,32 @@ fn should_defer_preloaded_namehash_observation(
     true
 }
 
+fn observation_raw_log_position(observation: &AuthorityObservation) -> Option<RawLogPosition> {
+    let reference = observation_reference(observation);
+    Some(RawLogPosition {
+        block_hash: reference.block_hash.clone(),
+        transaction_hash: reference.transaction_hash.clone()?,
+        log_index: reference.log_index?,
+    })
+}
+
+fn observation_reference(observation: &AuthorityObservation) -> &ObservationRef {
+    match observation {
+        AuthorityObservation::RegistrationGranted(value) => &value.reference,
+        AuthorityObservation::RegistrationRenewed(value) => &value.reference,
+        AuthorityObservation::TokenTransferred(value) => &value.reference,
+        AuthorityObservation::RegistryOwnerChanged(value) => &value.reference,
+        AuthorityObservation::ResolverChanged(value) => &value.reference,
+        AuthorityObservation::RecordChanged(value) => &value.reference,
+        AuthorityObservation::RecordVersionChanged(value) => &value.reference,
+        AuthorityObservation::WrapperNameWrapped(value) => &value.reference,
+        AuthorityObservation::WrapperNameUnwrapped(value) => &value.reference,
+        AuthorityObservation::WrapperFusesSet(value) => &value.reference,
+        AuthorityObservation::WrapperExpiryExtended(value) => &value.reference,
+        AuthorityObservation::WrapperTokenTransferred(value) => &value.reference,
+    }
+}
+
 fn history_has_authority_at_observation(
     history: &NameHistory,
     observation: &AuthorityObservation,
@@ -452,133 +482,4 @@ fn registry_authority_started_before_observation(
         .as_ref()
         .is_some_and(|anchor| anchor.block_number < reference.block_number)
         || nonzero_address(history.current_resolver.as_deref()).is_some()
-}
-
-pub(super) fn name_intro_positions_for_raw_logs(
-    raw_logs: &[AuthorityRawLogRow],
-    event_topics: &AuthorityEventTopics,
-) -> Result<HashMap<String, Vec<RawLogPosition>>> {
-    let mut positions = HashMap::<String, Vec<RawLogPosition>>::new();
-    for raw_log in raw_logs {
-        let Some(observation) = build_authority_observation(raw_log, event_topics)? else {
-            continue;
-        };
-        let Some(namehash) = observation_intro_namehash(&observation)? else {
-            continue;
-        };
-        let Some(position) = observation_raw_log_position(&observation) else {
-            continue;
-        };
-        positions
-            .entry(namehash.to_ascii_lowercase())
-            .or_default()
-            .push(position);
-    }
-    Ok(positions)
-}
-
-fn observation_intro_namehash(observation: &AuthorityObservation) -> Result<Option<String>> {
-    match observation {
-        AuthorityObservation::RegistrationGranted(value) => Ok(Some(
-            registrar_observation_namehash(&value.label, &value.reference)?,
-        )),
-        AuthorityObservation::RegistrationRenewed(value) => Ok(Some(
-            registrar_observation_namehash(&value.label, &value.reference)?,
-        )),
-        AuthorityObservation::WrapperNameWrapped(value) => Ok(Some(value.name.namehash.clone())),
-        _ => Ok(None),
-    }
-}
-
-fn registrar_observation_namehash(label: &str, reference: &ObservationRef) -> Result<String> {
-    Ok(observe_registrar_name_with_reference(label, reference, ENS_NORMALIZER_VERSION)?.namehash)
-}
-
-fn observation_raw_log_position(observation: &AuthorityObservation) -> Option<RawLogPosition> {
-    let reference = observation_reference(observation);
-    Some(RawLogPosition {
-        block_hash: reference.block_hash.clone(),
-        transaction_hash: reference.transaction_hash.clone()?,
-        log_index: reference.log_index?,
-    })
-}
-
-fn observation_reference(observation: &AuthorityObservation) -> &ObservationRef {
-    match observation {
-        AuthorityObservation::RegistrationGranted(value) => &value.reference,
-        AuthorityObservation::RegistrationRenewed(value) => &value.reference,
-        AuthorityObservation::TokenTransferred(value) => &value.reference,
-        AuthorityObservation::RegistryOwnerChanged(value) => &value.reference,
-        AuthorityObservation::ResolverChanged(value) => &value.reference,
-        AuthorityObservation::RecordChanged(value) => &value.reference,
-        AuthorityObservation::RecordVersionChanged(value) => &value.reference,
-        AuthorityObservation::WrapperNameWrapped(value) => &value.reference,
-        AuthorityObservation::WrapperNameUnwrapped(value) => &value.reference,
-        AuthorityObservation::WrapperFusesSet(value) => &value.reference,
-        AuthorityObservation::WrapperExpiryExtended(value) => &value.reference,
-        AuthorityObservation::WrapperTokenTransferred(value) => &value.reference,
-    }
-}
-
-pub(super) async fn preload_name_metadata_for_raw_logs(
-    pool: &PgPool,
-    raw_logs: &[AuthorityRawLogRow],
-    known_names_by_namehash: &mut HashMap<String, NameMetadata>,
-    event_topics: &AuthorityEventTopics,
-) -> Result<()> {
-    let mut namehashes = BTreeSet::<String>::new();
-    for raw_log in raw_logs {
-        let Some(observation) = build_authority_observation(raw_log, event_topics)? else {
-            continue;
-        };
-        if let Some(namehash) = observation_namehash(&observation) {
-            namehashes.insert(namehash.to_ascii_lowercase());
-        }
-    }
-    if namehashes.is_empty() {
-        return Ok(());
-    }
-
-    let rows = sqlx::query(
-        r#"
-        SELECT
-            namespace,
-            logical_name_id,
-            input_name,
-            canonical_display_name,
-            normalized_name,
-            dns_encoded_name,
-            namehash,
-            labelhashes,
-            normalizer_version
-        FROM name_surfaces
-        WHERE lower(namehash) = ANY($1)
-          AND labelhashes[1] IS NOT NULL
-          AND canonicality_state IN (
-              'canonical'::canonicality_state,
-              'safe'::canonicality_state,
-              'finalized'::canonicality_state
-          )
-        "#,
-    )
-    .bind(namehashes.into_iter().collect::<Vec<_>>())
-    .fetch_all(pool)
-    .await
-    .context("failed to preload name metadata for ENSv1 namehash observations")?;
-
-    for row in rows {
-        let name = NameMetadata {
-            namespace: row.try_get("namespace")?,
-            logical_name_id: row.try_get("logical_name_id")?,
-            input_name: row.try_get("input_name")?,
-            canonical_display_name: row.try_get("canonical_display_name")?,
-            normalized_name: row.try_get("normalized_name")?,
-            dns_encoded_name: row.try_get("dns_encoded_name")?,
-            namehash: row.try_get::<String, _>("namehash")?.to_ascii_lowercase(),
-            labelhashes: row.try_get("labelhashes")?,
-            normalizer_version: row.try_get("normalizer_version")?,
-        };
-        known_names_by_namehash.insert(name.namehash.clone(), name);
-    }
-    Ok(())
 }

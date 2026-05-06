@@ -1,9 +1,7 @@
 use anyhow::{Context, Result, bail};
-use bigname_manifests::{
-    WatchedSourceSelector, WatchedSourceSelectorPlan, load_watched_source_selector_plan,
-};
+use bigname_manifests::{WatchedSourceSelector, load_watched_source_selector_plan};
 
-use crate::ens_v1_resolver::{GENERIC_SOURCE_SCOPE_ADDRESS, SOURCE_FAMILY_ENS_V1_RESOLVER_L1};
+use crate::{ens_v1_resolver::SOURCE_FAMILY_ENS_V1_RESOLVER_L1, source_scope::SourceScope};
 
 const SOURCE_FAMILY_ENS_V2_ROOT_L1: &str = "ens_v2_root_l1";
 const SOURCE_FAMILY_ENS_V2_REGISTRY_L1: &str = "ens_v2_registry_l1";
@@ -70,44 +68,10 @@ pub(super) async fn load_live_adapter_source_scope(
             "failed to load source-scoped adapter sync plan for chain {chain} range {from_block}..={to_block}"
         )
     })?;
-    Ok(selected_target_sync_scope(
-        &source_plan,
-        from_block,
-        to_block,
-    ))
-}
-
-pub(crate) fn selected_target_sync_scope(
-    source_plan: &WatchedSourceSelectorPlan,
-    from_block: i64,
-    to_block: i64,
-) -> Vec<(String, String, i64, i64)> {
-    let mut scope = source_plan
-        .selected_targets
-        .iter()
-        .map(|target| {
-            (
-                target.source_family.clone(),
-                target.address.to_ascii_lowercase(),
-                target.effective_from_block,
-                target.effective_to_block,
-            )
-        })
-        .collect::<Vec<_>>();
-    if source_plan.source_family.as_deref() == Some(SOURCE_FAMILY_ENS_V1_RESOLVER_L1)
-        || source_plan
-            .selected_targets
-            .iter()
-            .any(|target| target.source_family == SOURCE_FAMILY_ENS_V1_RESOLVER_L1)
-    {
-        scope.push((
-            SOURCE_FAMILY_ENS_V1_RESOLVER_L1.to_owned(),
-            GENERIC_SOURCE_SCOPE_ADDRESS.to_owned(),
-            from_block,
-            to_block,
-        ));
-    }
-    scope
+    Ok(
+        SourceScope::from_watched_source_plan(&source_plan, from_block, to_block)
+            .adapter_sync_scope(),
+    )
 }
 
 pub(super) fn source_scope_includes_reverse_claim(

@@ -19,80 +19,6 @@ use sqlx::{
     types::{Uuid, time::OffsetDateTime},
 };
 
-const SOURCE_FAMILY_ENS_V1_REGISTRAR_L1: &str = "ens_v1_registrar_l1";
-const SOURCE_FAMILY_ENS_V1_REGISTRY_L1: &str = "ens_v1_registry_l1";
-const SOURCE_FAMILY_ENS_V1_RESOLVER_L1: &str = "ens_v1_resolver_l1";
-const SOURCE_FAMILY_ENS_V1_WRAPPER_L1: &str = "ens_v1_wrapper_l1";
-const SOURCE_FAMILY_BASENAMES_BASE_REGISTRAR: &str = "basenames_base_registrar";
-const SOURCE_FAMILY_BASENAMES_BASE_REGISTRY: &str = "basenames_base_registry";
-const SOURCE_FAMILY_BASENAMES_BASE_RESOLVER: &str = "basenames_base_resolver";
-const CONTRACT_ROLE_REGISTRY_OLD: &str = "registry_old";
-const GENERIC_SOURCE_SCOPE_ADDRESS: &str = "*";
-
-const DERIVATION_KIND_ENS_V1_UNWRAPPED_AUTHORITY: &str = "ens_v1_unwrapped_authority";
-const EVENT_KIND_AUTHORITY_EPOCH_CHANGED: &str = "AuthorityEpochChanged";
-const EVENT_KIND_AUTHORITY_TRANSFERRED: &str = "AuthorityTransferred";
-const EVENT_KIND_EXPIRY_CHANGED: &str = "ExpiryChanged";
-const EVENT_KIND_PERMISSION_CHANGED: &str = "PermissionChanged";
-const EVENT_KIND_PERMISSION_SCOPE_CHANGED: &str = "PermissionScopeChanged";
-const EVENT_KIND_RECORD_CHANGED: &str = "RecordChanged";
-const EVENT_KIND_RECORD_VERSION_CHANGED: &str = "RecordVersionChanged";
-const EVENT_KIND_REGISTRATION_GRANTED: &str = "RegistrationGranted";
-const EVENT_KIND_REGISTRATION_RELEASED: &str = "RegistrationReleased";
-const EVENT_KIND_REGISTRATION_RENEWED: &str = "RegistrationRenewed";
-const EVENT_KIND_RESOLVER_CHANGED: &str = "ResolverChanged";
-const EVENT_KIND_SURFACE_BOUND: &str = "SurfaceBound";
-const EVENT_KIND_SURFACE_UNBOUND: &str = "SurfaceUnbound";
-const EVENT_KIND_TOKEN_CONTROL_TRANSFERRED: &str = "TokenControlTransferred";
-
-const NAME_REGISTERED_SIGNATURE: &str = "NameRegistered(string,bytes32,address,uint256,uint256)";
-const WRAPPED_NAME_REGISTERED_SIGNATURE: &str =
-    "NameRegistered(string,bytes32,address,uint256,uint256,uint256)";
-const UNWRAPPED_NAME_REGISTERED_SIGNATURE: &str =
-    "NameRegistered(string,bytes32,address,uint256,uint256,uint256,bytes32)";
-const BASENAMES_NAME_REGISTERED_SIGNATURE: &str = "NameRegistered(string,bytes32,address,uint256)";
-const NAME_RENEWED_SIGNATURE: &str = "NameRenewed(string,bytes32,uint256,uint256)";
-const UNWRAPPED_NAME_RENEWED_SIGNATURE: &str =
-    "NameRenewed(string,bytes32,uint256,uint256,bytes32)";
-const BASENAMES_NAME_RENEWED_SIGNATURE: &str = "NameRenewed(string,bytes32,uint256)";
-const ADDR_CHANGED_SIGNATURE: &str = "AddrChanged(bytes32,address)";
-const ADDRESS_CHANGED_SIGNATURE: &str = "AddressChanged(bytes32,uint256,bytes)";
-const NAME_CHANGED_SIGNATURE: &str = "NameChanged(bytes32,string)";
-const NEW_RESOLVER_SIGNATURE: &str = "NewResolver(bytes32,address)";
-const ABI_CHANGED_SIGNATURE: &str = "ABIChanged(bytes32,uint256)";
-const TEXT_CHANGED_WITHOUT_VALUE_SIGNATURE: &str = "TextChanged(bytes32,string,string)";
-const TEXT_CHANGED_WITH_VALUE_SIGNATURE: &str = "TextChanged(bytes32,string,string,string)";
-const CONTENT_CHANGED_SIGNATURE: &str = "ContentChanged(bytes32,bytes32)";
-const CONTENTHASH_CHANGED_SIGNATURE: &str = "ContenthashChanged(bytes32,bytes)";
-const DNS_RECORD_CHANGED_SIGNATURE: &str = "DNSRecordChanged(bytes32,bytes,uint16,bytes)";
-const DNS_RECORD_DELETED_SIGNATURE: &str = "DNSRecordDeleted(bytes32,bytes,uint16)";
-const DNS_ZONEHASH_CHANGED_SIGNATURE: &str = "DNSZonehashChanged(bytes32,bytes,bytes)";
-const DATA_CHANGED_SIGNATURE: &str = "DataChanged(bytes32,string,string,bytes)";
-const INTERFACE_CHANGED_SIGNATURE: &str = "InterfaceChanged(bytes32,bytes4,address)";
-#[cfg(test)]
-const PUBKEY_CHANGED_SIGNATURE: &str = "PubkeyChanged(bytes32,bytes32,bytes32)";
-const TRANSFER_SIGNATURE: &str = "Transfer(address,address,uint256)";
-const REGISTRY_TRANSFER_SIGNATURE: &str = "Transfer(bytes32,address)";
-const NEW_OWNER_SIGNATURE: &str = "NewOwner(bytes32,bytes32,address)";
-const NEW_TTL_SIGNATURE: &str = "NewTTL(bytes32,uint64)";
-const VERSION_CHANGED_SIGNATURE: &str = "VersionChanged(bytes32,uint64)";
-const NAME_WRAPPED_SIGNATURE: &str = "NameWrapped(bytes32,bytes,address,uint32,uint64)";
-const NAME_UNWRAPPED_SIGNATURE: &str = "NameUnwrapped(bytes32,address)";
-const FUSES_SET_SIGNATURE: &str = "FusesSet(bytes32,uint32)";
-const EXPIRY_EXTENDED_SIGNATURE: &str = "ExpiryExtended(bytes32,uint64)";
-const TRANSFER_SINGLE_SIGNATURE: &str = "TransferSingle(address,address,address,uint256,uint256)";
-
-const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
-const ENS_NORMALIZER_VERSION: &str = "ensip15@2026-04-16";
-const ENS_GRACE_PERIOD_SECS: i64 = 90 * 24 * 60 * 60;
-const ENS_NATIVE_COIN_TYPE: &str = "60";
-const EVENT_KIND_REVERSE_CHANGED: &str = "ReverseChanged";
-const PERMISSION_POWER_RESOURCE_CONTROL: &str = "resource_control";
-const PERMISSION_POWER_RESOLVER_CONTROL: &str = "resolver_control";
-const PERMISSION_TRANSFER_BEHAVIOR: &str = "replace_on_authority_change";
-const CONTRACT_ROLE_REVERSE_REGISTRAR: &str = "reverse_registrar";
-const DERIVATION_KIND_ENS_V1_REVERSE_CLAIM: &str = "ens_v1_reverse_claim";
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EnsV1UnwrappedAuthoritySyncSummary {
     pub scanned_log_count: usize,
@@ -498,17 +424,13 @@ fn source_manifest_id_if_known(source_manifest_id: i64) -> Option<i64> {
     (source_manifest_id > 0).then_some(source_manifest_id)
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum AuthorityProfile {
-    Ens,
-    Basenames,
-}
 mod abi;
 mod apply;
 mod apply_registrar;
 mod apply_registry;
 mod apply_resolver;
 mod apply_wrapper;
+mod constants;
 mod event_builders;
 mod event_state;
 mod event_topics;
@@ -536,6 +458,7 @@ use self::{
     materialization::*, migration_guard::*, names::*, observation::*, permissions::*, preload::*,
     profiles::*, release_events::*, resolver_gate::*, reverse_claims::*, scope::*, transition::*,
 };
+use constants::*;
 
 pub fn decode_ens_v1_text_record_change(
     topics: &[String],

@@ -38,13 +38,18 @@ pub(crate) fn build_resource_lookup_response(
 
     let mut response = empty_object();
     insert_value_field(&mut response, "data", data);
-    insert_compact_meta(
-        &mut response,
-        meta_mode,
-        None,
-        &["resource_hex"],
-        &[],
-    );
+    if meta_mode != MetaMode::None {
+        insert_value_field(
+            &mut response,
+            "meta",
+            compact_meta_object(
+                "supported",
+                None,
+                ["resource_hex"].into_iter().map(str::to_owned),
+                std::iter::empty(),
+            ),
+        );
+    }
     response
 }
 
@@ -67,13 +72,18 @@ fn build_roles_response(
         "page",
         serde_json::to_value(page).expect("roles page response must serialize"),
     );
-    insert_compact_meta(
-        &mut response,
-        meta_mode,
-        Some(total_count),
-        &["resource_hex", "role_bitmap"],
-        &[],
-    );
+    if meta_mode != MetaMode::None {
+        insert_value_field(
+            &mut response,
+            "meta",
+            compact_meta_object(
+                "supported",
+                Some(total_count),
+                ["resource_hex", "role_bitmap"].into_iter().map(str::to_owned),
+                std::iter::empty(),
+            ),
+        );
+    }
     response
 }
 
@@ -135,48 +145,4 @@ fn first_raw_fact_ref(provenance: &JsonValue) -> Option<&JsonMap<String, JsonVal
         .and_then(JsonValue::as_array)?
         .iter()
         .find_map(JsonValue::as_object)
-}
-
-fn insert_compact_meta(
-    response: &mut JsonValue,
-    meta_mode: MetaMode,
-    total_count: Option<u64>,
-    unsupported_fields: &[&str],
-    unsupported_filters: &[&str],
-) {
-    if matches!(meta_mode, MetaMode::None) {
-        return;
-    }
-
-    let mut meta = empty_object();
-    insert_string_field(&mut meta, "support_status", "supported".to_owned());
-    insert_value_field(
-        &mut meta,
-        "unsupported_filters",
-        JsonValue::Array(
-            unsupported_filters
-                .iter()
-                .map(|field| JsonValue::String((*field).to_owned()))
-                .collect(),
-        ),
-    );
-    insert_value_field(
-        &mut meta,
-        "unsupported_fields",
-        JsonValue::Array(
-            unsupported_fields
-                .iter()
-                .map(|field| JsonValue::String((*field).to_owned()))
-                .collect(),
-        ),
-    );
-    insert_value_field(
-        &mut meta,
-        "total_count",
-        total_count
-            .map(serde_json::Number::from)
-            .map(JsonValue::Number)
-            .unwrap_or(JsonValue::Null),
-    );
-    insert_value_field(response, "meta", meta);
 }

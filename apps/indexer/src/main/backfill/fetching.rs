@@ -35,11 +35,9 @@ mod sparse;
 use super::{
     BackfillAdapterSyncMode, BackfillBlockRange, BackfillOutcome,
     range_resolution::resolve_backfill_range,
-    selection::{
-        SelectedTargetIntervalIndex, backfill_adapter_sync_scope,
-        selected_target_addresses_at_block,
-    },
+    selection::{SelectedTargetIntervalIndex, selected_target_addresses_at_block},
 };
+use crate::source_scope::SourceScope;
 
 use log_ranges::{
     fetch_backfill_logs_by_safe_ranges, selected_addresses_for_materialized_block,
@@ -136,7 +134,9 @@ pub(crate) async fn run_hash_pinned_backfill_range(
     header_audit_mode: HeaderAuditMode,
 ) -> Result<BackfillOutcome> {
     let watched_chain = &source_plan.watched_chain_plan;
-    let source_scope = backfill_adapter_sync_scope(source_plan, range.from_block, range.to_block);
+    let source_scope =
+        SourceScope::from_watched_source_plan(source_plan, range.from_block, range.to_block);
+    let adapter_sync_scope = source_scope.adapter_sync_scope();
     let total_started = Instant::now();
     let resolve_started = Instant::now();
     let resolved_blocks = resolve_backfill_range(provider, range).await?;
@@ -384,7 +384,7 @@ pub(crate) async fn run_hash_pinned_backfill_range(
                 pool,
                 &watched_chain.chain,
                 &block_hashes,
-                &source_scope,
+                &adapter_sync_scope,
             )
             .await?;
         }

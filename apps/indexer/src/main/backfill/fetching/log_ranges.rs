@@ -1,12 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, bail};
-use bigname_manifests::{WatchedSourceSelectorKind, WatchedSourceSelectorPlan};
+use bigname_manifests::WatchedSourceSelectorPlan;
 use tracing::info;
 
 use crate::{
     ens_v1_resolver::{SOURCE_FAMILY_ENS_V1_RESOLVER_L1, generic_resolver_record_topic0s},
     provider::{ChainProviderOps, ProviderLog, ProviderResolvedBlock},
+    source_scope::watched_source_plan_uses_generic_resolver_scope,
 };
 
 use super::super::{
@@ -210,7 +211,7 @@ struct SourceFamilyTopicScan {
 fn source_family_topic_scan(
     source_plan: &WatchedSourceSelectorPlan,
 ) -> Option<SourceFamilyTopicScan> {
-    if !includes_generic_resolver_event_scope(source_plan) {
+    if !watched_source_plan_uses_generic_resolver_scope(source_plan) {
         return None;
     }
 
@@ -221,16 +222,7 @@ fn source_family_topic_scan(
 }
 
 fn scans_all_resolver_event_emitters(source_plan: &WatchedSourceSelectorPlan) -> bool {
-    includes_generic_resolver_event_scope(source_plan)
-}
-
-fn includes_generic_resolver_event_scope(source_plan: &WatchedSourceSelectorPlan) -> bool {
-    source_plan.selector_kind == WatchedSourceSelectorKind::SourceFamily
-        && source_plan.source_family.as_deref() == Some(SOURCE_FAMILY_ENS_V1_RESOLVER_L1)
-        || source_plan
-            .selected_targets
-            .iter()
-            .any(|target| target.source_family == SOURCE_FAMILY_ENS_V1_RESOLVER_L1)
+    watched_source_plan_uses_generic_resolver_scope(source_plan)
 }
 
 fn merge_logs_by_block(

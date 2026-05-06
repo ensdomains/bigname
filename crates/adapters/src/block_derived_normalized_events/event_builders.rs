@@ -3,27 +3,27 @@ use anyhow::{Context, Result, bail};
 use bigname_storage::NormalizedEvent;
 use serde_json::{Value, json};
 
+mod label_preimages;
+
 use super::constants::{
     ALIAS_CHANGED_SIGNATURE, DERIVATION_KIND_RAW_LOG_PREIMAGE_OBSERVATION,
-    ENS_V1_NAME_REGISTERED_SIGNATURE, ENS_V1_NAME_RENEWED_SIGNATURE,
-    ENS_V2_NAME_REGISTERED_SIGNATURE, ENS_V2_NAME_RENEWED_SIGNATURE, EVENT_KIND_PREIMAGE_OBSERVED,
-    LABEL_REGISTERED_SIGNATURE, LABEL_RESERVED_SIGNATURE, NAME_WRAPPED_SIGNATURE,
-    NAMED_ADDR_RESOURCE_SIGNATURE, NAMED_RESOURCE_SIGNATURE, NAMED_TEXT_RESOURCE_SIGNATURE,
-    PARENT_UPDATED_SIGNATURE, SOURCE_EVENT_ALIAS_CHANGED, SOURCE_EVENT_LABEL_REGISTERED,
-    SOURCE_EVENT_LABEL_RESERVED, SOURCE_EVENT_NAME_REGISTERED, SOURCE_EVENT_NAME_RENEWED,
+    EVENT_KIND_PREIMAGE_OBSERVED, NAME_WRAPPED_SIGNATURE, NAMED_ADDR_RESOURCE_SIGNATURE,
+    NAMED_RESOURCE_SIGNATURE, NAMED_TEXT_RESOURCE_SIGNATURE, SOURCE_EVENT_ALIAS_CHANGED,
     SOURCE_EVENT_NAME_WRAPPED, SOURCE_EVENT_NAMED_ADDR_RESOURCE, SOURCE_EVENT_NAMED_RESOURCE,
-    SOURCE_EVENT_NAMED_TEXT_RESOURCE, SOURCE_EVENT_PARENT_UPDATED,
-    SOURCE_FAMILY_ENS_V1_REGISTRAR_L1, SOURCE_FAMILY_ENS_V1_WRAPPER_L1,
-    SOURCE_FAMILY_ENS_V2_REGISTRAR_L1, SOURCE_FAMILY_ENS_V2_REGISTRY_L1,
-    SOURCE_FAMILY_ENS_V2_RESOLVER_L1, SOURCE_FAMILY_ENS_V2_ROOT_L1,
+    SOURCE_EVENT_NAMED_TEXT_RESOURCE, SOURCE_FAMILY_ENS_V1_REGISTRAR_L1,
+    SOURCE_FAMILY_ENS_V1_WRAPPER_L1, SOURCE_FAMILY_ENS_V2_REGISTRAR_L1,
+    SOURCE_FAMILY_ENS_V2_REGISTRY_L1, SOURCE_FAMILY_ENS_V2_RESOLVER_L1,
+    SOURCE_FAMILY_ENS_V2_ROOT_L1,
 };
 use super::decoding::{hex_string, hex_string_without_prefix, keccak256_hex};
 use super::event_topics::PreimageObservedEventTopics;
-use super::preimage_observation::{
-    can_observe_dns_label, observe_dns_encoded_name, observe_registrar_eth_name,
-    observe_single_label,
-};
+use super::preimage_observation::observe_dns_encoded_name;
 use super::types::{PreimageObservation, WatchedRawLogRow};
+use label_preimages::{
+    build_registrar_preimage_observed_events,
+    try_build_ens_v2_registrar_label_preimage_observed_events,
+    try_build_ens_v2_registry_label_preimage_observed_events,
+};
 
 sol! {
     #[derive(Debug)]
@@ -134,60 +134,6 @@ fn build_name_wrapped_preimage_observed_events(
     )])
 }
 
-fn build_registrar_preimage_observed_events(
-    raw_log: &WatchedRawLogRow,
-    event_topics: &PreimageObservedEventTopics,
-) -> Result<Vec<NormalizedEvent>> {
-    let Some(topic0) = raw_log.topics.first() else {
-        return Ok(Vec::new());
-    };
-    let (source_event, signature) =
-        if event_topics.matches(raw_log, ENS_V1_NAME_REGISTERED_SIGNATURE, topic0)? {
-            (
-                SOURCE_EVENT_NAME_REGISTERED,
-                ENS_V1_NAME_REGISTERED_SIGNATURE,
-            )
-        } else if event_topics.matches(raw_log, ENS_V1_NAME_RENEWED_SIGNATURE, topic0)? {
-            (SOURCE_EVENT_NAME_RENEWED, ENS_V1_NAME_RENEWED_SIGNATURE)
-        } else {
-            return Ok(Vec::new());
-        };
-
-    let Some(label) = decode_observable_event_label(raw_log, signature)? else {
-        return Ok(Vec::new());
-    };
-    let observation = observe_registrar_eth_name(&label).with_context(|| {
-        format!(
-            "failed to derive registrar .eth preimage for chain {} block {} log {}",
-            raw_log.chain_id, raw_log.block_hash, raw_log.log_index
-        )
-    })?;
-    let observed_labelhash = observation
-        .labelhashes
-        .first()
-        .context("registrar observation is missing the explicit labelhash")?;
-
-    if let Some(indexed_labelhash) = raw_log.topics.get(1)
-        && !indexed_labelhash.eq_ignore_ascii_case(observed_labelhash)
-    {
-        bail!(
-            "{source_event} indexed labelhash {} does not match decoded labelhash {} for chain {} block {} log {}",
-            indexed_labelhash,
-            observed_labelhash,
-            raw_log.chain_id,
-            raw_log.block_hash,
-            raw_log.log_index
-        );
-    }
-
-    Ok(vec![build_preimage_observed_normalized_event(
-        raw_log,
-        source_event,
-        observation,
-        None,
-    )])
-}
-
 fn build_ens_v2_preimage_observed_events(
     raw_log: &WatchedRawLogRow,
     event_topics: &PreimageObservedEventTopics,
@@ -198,54 +144,22 @@ fn build_ens_v2_preimage_observed_events(
 
     match raw_log.source_family.as_str() {
         SOURCE_FAMILY_ENS_V2_ROOT_L1 | SOURCE_FAMILY_ENS_V2_REGISTRY_L1 => {
-            if event_topics.matches(raw_log, LABEL_REGISTERED_SIGNATURE, topic0)? {
-                return build_ens_v2_registry_label_preimage_observed_events(
-                    raw_log,
-                    SOURCE_EVENT_LABEL_REGISTERED,
-                    LABEL_REGISTERED_SIGNATURE,
-                );
-            }
-            if event_topics.matches(raw_log, LABEL_RESERVED_SIGNATURE, topic0)? {
-                return build_ens_v2_registry_label_preimage_observed_events(
-                    raw_log,
-                    SOURCE_EVENT_LABEL_RESERVED,
-                    LABEL_RESERVED_SIGNATURE,
-                );
-            }
-            if event_topics.matches(raw_log, PARENT_UPDATED_SIGNATURE, topic0)? {
-                let Some(label) = decode_observable_event_label(raw_log, PARENT_UPDATED_SIGNATURE)?
-                else {
-                    return Ok(Vec::new());
-                };
-                let observation = observe_single_label(&label).with_context(|| {
-                format!(
-                    "failed to derive ENSv2 registry parent label preimage for chain {} block {} log {}",
-                    raw_log.chain_id, raw_log.block_hash, raw_log.log_index
-                )
-            })?;
-                return Ok(vec![build_preimage_observed_normalized_event(
-                    raw_log,
-                    SOURCE_EVENT_PARENT_UPDATED,
-                    observation,
-                    None,
-                )]);
+            if let Some(events) = try_build_ens_v2_registry_label_preimage_observed_events(
+                raw_log,
+                event_topics,
+                topic0,
+            )? {
+                return Ok(events);
             }
             return Ok(Vec::new());
         }
         SOURCE_FAMILY_ENS_V2_REGISTRAR_L1 => {
-            if event_topics.matches(raw_log, ENS_V2_NAME_REGISTERED_SIGNATURE, topic0)? {
-                return build_ens_v2_registrar_label_preimage_observed_events(
-                    raw_log,
-                    SOURCE_EVENT_NAME_REGISTERED,
-                    ENS_V2_NAME_REGISTERED_SIGNATURE,
-                );
-            }
-            if event_topics.matches(raw_log, ENS_V2_NAME_RENEWED_SIGNATURE, topic0)? {
-                return build_ens_v2_registrar_label_preimage_observed_events(
-                    raw_log,
-                    SOURCE_EVENT_NAME_RENEWED,
-                    ENS_V2_NAME_RENEWED_SIGNATURE,
-                );
+            if let Some(events) = try_build_ens_v2_registrar_label_preimage_observed_events(
+                raw_log,
+                event_topics,
+                topic0,
+            )? {
+                return Ok(events);
             }
             return Ok(Vec::new());
         }
@@ -278,124 +192,11 @@ fn build_ens_v2_preimage_observed_events(
     Ok(Vec::new())
 }
 
-fn build_ens_v2_registry_label_preimage_observed_events(
-    raw_log: &WatchedRawLogRow,
-    source_event: &str,
-    signature: &str,
-) -> Result<Vec<NormalizedEvent>> {
-    let Some(label) = decode_observable_event_label(raw_log, signature)? else {
-        return Ok(Vec::new());
-    };
-    let observation = observe_single_label(&label).with_context(|| {
-        format!(
-            "failed to derive ENSv2 registry label preimage for chain {} block {} log {}",
-            raw_log.chain_id, raw_log.block_hash, raw_log.log_index
-        )
-    })?;
-    let observed_labelhash = observation
-        .labelhashes
-        .first()
-        .context("ENSv2 registry observation is missing the explicit labelhash")?;
-    if let Some(indexed_labelhash) = raw_log.topics.get(2)
-        && !indexed_labelhash.eq_ignore_ascii_case(observed_labelhash)
-    {
-        bail!(
-            "{source_event} indexed labelhash {} does not match decoded labelhash {} for chain {} block {} log {}",
-            indexed_labelhash,
-            observed_labelhash,
-            raw_log.chain_id,
-            raw_log.block_hash,
-            raw_log.log_index
-        );
-    }
-
-    Ok(vec![build_preimage_observed_normalized_event(
-        raw_log,
-        source_event,
-        observation,
-        None,
-    )])
-}
-
-fn build_ens_v2_registrar_label_preimage_observed_events(
-    raw_log: &WatchedRawLogRow,
-    source_event: &str,
-    signature: &str,
-) -> Result<Vec<NormalizedEvent>> {
-    let Some(label) = decode_observable_event_label(raw_log, signature)? else {
-        return Ok(Vec::new());
-    };
-    let observation = observe_registrar_eth_name(&label).with_context(|| {
-        format!(
-            "failed to derive ENSv2 registrar .eth preimage for chain {} block {} log {}",
-            raw_log.chain_id, raw_log.block_hash, raw_log.log_index
-        )
-    })?;
-
-    Ok(vec![build_preimage_observed_normalized_event(
-        raw_log,
-        source_event,
-        observation,
-        None,
-    )])
-}
-
-fn decode_observable_event_label(
-    raw_log: &WatchedRawLogRow,
-    signature: &str,
-) -> Result<Option<String>> {
-    let Some(label) = decode_event_label(raw_log, signature) else {
-        return Ok(None);
-    };
-    if can_observe_dns_label(&label) {
-        Ok(Some(label))
-    } else {
-        Ok(None)
-    }
-}
-
-fn decode_event_label(raw_log: &WatchedRawLogRow, signature: &str) -> Option<String> {
-    match (raw_log.source_family.as_str(), signature) {
-        (SOURCE_FAMILY_ENS_V1_REGISTRAR_L1, ENS_V1_NAME_REGISTERED_SIGNATURE) => {
-            decode_event_log::<NameRegistered_0>(raw_log, "ENSv1 NameRegistered log is malformed")
-                .ok()
-                .map(|event| event.name)
-        }
-        (SOURCE_FAMILY_ENS_V1_REGISTRAR_L1, ENS_V1_NAME_RENEWED_SIGNATURE) => {
-            decode_event_log::<NameRenewed_0>(raw_log, "ENSv1 NameRenewed log is malformed")
-                .ok()
-                .map(|event| event.name)
-        }
-        (
-            SOURCE_FAMILY_ENS_V2_ROOT_L1 | SOURCE_FAMILY_ENS_V2_REGISTRY_L1,
-            LABEL_REGISTERED_SIGNATURE,
-        ) => decode_event_log::<LabelRegistered>(raw_log, "LabelRegistered log is malformed")
-            .ok()
-            .map(|event| event.label),
-        (
-            SOURCE_FAMILY_ENS_V2_ROOT_L1 | SOURCE_FAMILY_ENS_V2_REGISTRY_L1,
-            LABEL_RESERVED_SIGNATURE,
-        ) => decode_event_log::<LabelReserved>(raw_log, "LabelReserved log is malformed")
-            .ok()
-            .map(|event| event.label),
-        (
-            SOURCE_FAMILY_ENS_V2_ROOT_L1 | SOURCE_FAMILY_ENS_V2_REGISTRY_L1,
-            PARENT_UPDATED_SIGNATURE,
-        ) => decode_event_log::<ParentUpdated>(raw_log, "ParentUpdated log is malformed")
-            .ok()
-            .map(|event| event.label),
-        (SOURCE_FAMILY_ENS_V2_REGISTRAR_L1, ENS_V2_NAME_REGISTERED_SIGNATURE) => {
-            decode_event_log::<NameRegistered_1>(raw_log, "ENSv2 NameRegistered log is malformed")
-                .ok()
-                .map(|event| event.label)
-        }
-        (SOURCE_FAMILY_ENS_V2_REGISTRAR_L1, ENS_V2_NAME_RENEWED_SIGNATURE) => {
-            decode_event_log::<NameRenewed_1>(raw_log, "ENSv2 NameRenewed log is malformed")
-                .ok()
-                .map(|event| event.label)
-        }
-        _ => None,
-    }
+fn log_context(raw_log: &WatchedRawLogRow, message: &str) -> String {
+    format!(
+        "{message} for chain {} block {} log {}",
+        raw_log.chain_id, raw_log.block_hash, raw_log.log_index
+    )
 }
 
 fn build_ens_v2_alias_preimage_observed_events(
