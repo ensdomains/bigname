@@ -284,10 +284,10 @@ impl HexPayload {
 }
 
 fn gateway_response_hex_payload(body: &[u8]) -> Result<HexPayload> {
-    if let Ok(value) = serde_json::from_slice::<Value>(body) {
-        if let Some(payload) = gateway_json_hex_payload(&value) {
-            return Ok(payload);
-        }
+    if let Ok(value) = serde_json::from_slice::<Value>(body)
+        && let Some(payload) = gateway_json_hex_payload(&value)
+    {
+        return Ok(payload);
     }
 
     let text = std::str::from_utf8(body).context("gateway response is not UTF-8")?;

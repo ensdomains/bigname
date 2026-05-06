@@ -10,10 +10,22 @@ fn main() {
     let rewritten = rewrite_openapi_components(&strip_crate_recursion_limit(&source))
         .replace("crate::", "crate::shipped_api::")
         .replace("\n#[cfg(test)]\nmod tests;\n", "\n");
-    let out_path = PathBuf::from(env::var("OUT_DIR").expect("out dir")).join("api_main.rs");
+    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("out dir"));
+    let out_path = out_dir.join("api_main.rs");
 
     fs::write(&out_path, rewritten)
         .unwrap_or_else(|error| panic!("failed to write {}: {error}", out_path.display()));
+
+    let docs_source_path = manifest_dir.join("../../apps/api/src/openapi/docs.html");
+    let docs_out_path = out_dir.join("docs.html");
+    println!("cargo:rerun-if-changed={}", docs_source_path.display());
+    fs::copy(&docs_source_path, &docs_out_path).unwrap_or_else(|error| {
+        panic!(
+            "failed to copy {} to {}: {error}",
+            docs_source_path.display(),
+            docs_out_path.display()
+        )
+    });
 }
 
 fn inline_local_includes(source_path: &Path) -> String {

@@ -115,34 +115,49 @@ pub(super) async fn execute_record_call(
     } else {
         result
     };
-    selector_call_from_rpc_result(
+    selector_call_from_rpc_result(SelectorCallRpcContext {
         row,
         record,
-        &selector,
+        selector: &selector,
         result,
         block,
         contract_call,
         resolver_selector,
-        universal_calldata_hex,
+        universal_calldata: universal_calldata_hex,
         block_selector,
-        !use_latest_block_tag,
+        persist_raw_call_snapshot: !use_latest_block_tag,
         ccip_summary,
-    )
+    })
 }
 
-fn selector_call_from_rpc_result(
-    row: &NameCurrentRow,
-    record: &EnsResolutionRecord,
-    selector: &SupportedVerifiedResolutionRecordKey,
+struct SelectorCallRpcContext<'a> {
+    row: &'a NameCurrentRow,
+    record: &'a EnsResolutionRecord,
+    selector: &'a SupportedVerifiedResolutionRecordKey,
     result: JsonRpcCallResult,
-    block: &ExecutionBlock,
+    block: &'a ExecutionBlock,
     contract_call: Value,
     resolver_selector: String,
     universal_calldata: String,
     block_selector: Value,
     persist_raw_call_snapshot: bool,
     ccip_summary: Option<CcipReadSummary>,
-) -> Result<SelectorCall> {
+}
+
+fn selector_call_from_rpc_result(context: SelectorCallRpcContext<'_>) -> Result<SelectorCall> {
+    let SelectorCallRpcContext {
+        row,
+        record,
+        selector,
+        result,
+        block,
+        contract_call,
+        resolver_selector,
+        universal_calldata,
+        block_selector,
+        persist_raw_call_snapshot,
+        ccip_summary,
+    } = context;
     let JsonRpcCallResult {
         request_payload,
         response_payload,
@@ -276,11 +291,11 @@ mod tests {
             block_number: 21_000_000,
             block_hash: "0xabc123".to_owned(),
         };
-        let selector_call = selector_call_from_rpc_result(
-            &row,
-            &record,
-            &selector,
-            JsonRpcCallResult {
+        let selector_call = selector_call_from_rpc_result(SelectorCallRpcContext {
+            row: &row,
+            record: &record,
+            selector: &selector,
+            result: JsonRpcCallResult {
                 request_payload: json!({
                     "jsonrpc": "2.0",
                     "id": 1,
@@ -300,20 +315,20 @@ mod tests {
                 }),
                 result: Ok(json!("0x")),
             },
-            &block,
-            json!({
+            block: &block,
+            contract_call: json!({
                 "chain_id": ETHEREUM_MAINNET_CHAIN_ID,
                 "contract_address": ENS_UNIVERSAL_RESOLVER_ADDRESS,
                 "selector": "0x9061b923",
                 "record_key": "avatar",
                 "resolver_selector": "0x59d1d43c"
             }),
-            "0x59d1d43c".to_owned(),
-            "0x9061b923".to_owned(),
-            json!("latest"),
-            false,
-            None,
-        )?;
+            resolver_selector: "0x59d1d43c".to_owned(),
+            universal_calldata: "0x9061b923".to_owned(),
+            block_selector: json!("latest"),
+            persist_raw_call_snapshot: false,
+            ccip_summary: None,
+        })?;
 
         assert_eq!(selector_call.block_selector, json!("latest"));
         assert!(selector_call.request_hash.is_some());
