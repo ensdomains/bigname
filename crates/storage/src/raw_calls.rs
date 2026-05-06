@@ -332,10 +332,7 @@ fn decode_raw_call_snapshot(row: PgRow) -> Result<RawCallSnapshot> {
         request_payload: crate::sql_row::get(&row, "request_payload")?,
         response_hash: crate::sql_row::get(&row, "response_hash")?,
         response_payload: crate::sql_row::get(&row, "response_payload")?,
-        canonicality_state: CanonicalityState::parse(&crate::sql_row::get::<String>(
-            &row,
-            "canonicality_state",
-        )?)?,
+        canonicality_state: crate::sql_row::get(&row, "canonicality_state")?,
     })
 }
 

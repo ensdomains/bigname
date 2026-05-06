@@ -1,7 +1,7 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use serde_json::Value;
+use sqlx::postgres::PgRow;
 use sqlx::types::time::OffsetDateTime;
-use sqlx::{Row, postgres::PgRow};
 use uuid::Uuid;
 
 use crate::SurfaceBindingKind;
@@ -138,11 +138,7 @@ fn ensure_json_object(value: &Value, field_name: &str, logical_name_id: &str) ->
 }
 
 pub(super) fn decode_name_current_row(row: PgRow) -> Result<NameCurrentRow> {
-    let binding_kind = row
-        .try_get::<Option<String>, _>("binding_kind")
-        .context("missing binding_kind")?
-        .map(|value| SurfaceBindingKind::parse(&value))
-        .transpose()?;
+    let binding_kind = crate::sql_row::get(&row, "binding_kind")?;
 
     Ok(NameCurrentRow {
         logical_name_id: crate::sql_row::get(&row, "logical_name_id")?,

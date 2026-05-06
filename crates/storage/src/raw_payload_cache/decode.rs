@@ -1,8 +1,6 @@
 use anyhow::Result;
 use sqlx::postgres::PgRow;
 
-use crate::CanonicalityState;
-
 use super::types::RawPayloadCacheMetadata;
 
 pub(super) fn decode_raw_payload_cache_metadata(row: PgRow) -> Result<RawPayloadCacheMetadata> {
@@ -18,10 +16,7 @@ pub(super) fn decode_raw_payload_cache_metadata(row: PgRow) -> Result<RawPayload
         content_type: crate::sql_row::get(&row, "content_type")?,
         content_encoding: crate::sql_row::get(&row, "content_encoding")?,
         cache_metadata: crate::sql_row::get(&row, "cache_metadata")?,
-        canonicality_state: CanonicalityState::parse(&crate::sql_row::get::<String>(
-            &row,
-            "canonicality_state",
-        )?)?,
+        canonicality_state: crate::sql_row::get(&row, "canonicality_state")?,
         first_observed_at: crate::sql_row::get(&row, "first_observed_at")?,
         last_observed_at: crate::sql_row::get(&row, "last_observed_at")?,
     })

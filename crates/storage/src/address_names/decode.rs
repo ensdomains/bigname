@@ -5,17 +5,12 @@ use super::types::{
     AddressNameCurrentEntry, AddressNameCurrentRow, AddressNameRelation,
     AddressNamesCurrentProvenanceSummary, AddressNamesCurrentSummary,
 };
-use crate::SurfaceBindingKind;
-
 pub(super) fn decode_address_name_current_row(row: PgRow) -> Result<AddressNameCurrentRow> {
     let relation = row
         .try_get::<String, _>("relation")
         .context("missing relation")
         .and_then(|value| AddressNameRelation::parse(&value))?;
-    let binding_kind = row
-        .try_get::<String, _>("binding_kind")
-        .context("missing binding_kind")
-        .and_then(|value| SurfaceBindingKind::parse(&value))?;
+    let binding_kind = crate::sql_row::get(&row, "binding_kind")?;
 
     Ok(AddressNameCurrentRow {
         address: crate::sql_row::get(&row, "address")?,
@@ -39,10 +34,7 @@ pub(super) fn decode_address_name_current_row(row: PgRow) -> Result<AddressNameC
 }
 
 pub(super) fn decode_address_name_current_entry(row: PgRow) -> Result<AddressNameCurrentEntry> {
-    let binding_kind = row
-        .try_get::<String, _>("binding_kind")
-        .context("missing binding_kind")
-        .and_then(|value| SurfaceBindingKind::parse(&value))?;
+    let binding_kind = crate::sql_row::get(&row, "binding_kind")?;
     let relations = row
         .try_get::<Vec<String>, _>("relations")
         .context("missing relations")?

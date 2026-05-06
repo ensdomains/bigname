@@ -2,9 +2,7 @@ use anyhow::{Context, Result};
 use sqlx::{Executor, PgPool, Postgres, postgres::PgRow};
 use uuid::Uuid;
 
-use crate::CanonicalityState;
-
-use super::types::{NameSurface, Resource, SurfaceBinding, SurfaceBindingKind, TokenLineage};
+use super::types::{NameSurface, Resource, SurfaceBinding, TokenLineage};
 
 const DEFAULT_IDENTITY_READ_FILTER: &str = r#"
   AND canonicality_state IN (
@@ -338,10 +336,7 @@ pub(super) fn decode_token_lineage(row: PgRow) -> Result<TokenLineage> {
         block_hash: crate::sql_row::get(&row, "block_hash")?,
         block_number: crate::sql_row::get(&row, "block_number")?,
         provenance: crate::sql_row::get(&row, "provenance")?,
-        canonicality_state: CanonicalityState::parse(&crate::sql_row::get::<String>(
-            &row,
-            "canonicality_state",
-        )?)?,
+        canonicality_state: crate::sql_row::get(&row, "canonicality_state")?,
     })
 }
 
@@ -353,10 +348,7 @@ pub(super) fn decode_resource(row: PgRow) -> Result<Resource> {
         block_hash: crate::sql_row::get(&row, "block_hash")?,
         block_number: crate::sql_row::get(&row, "block_number")?,
         provenance: crate::sql_row::get(&row, "provenance")?,
-        canonicality_state: CanonicalityState::parse(&crate::sql_row::get::<String>(
-            &row,
-            "canonicality_state",
-        )?)?,
+        canonicality_state: crate::sql_row::get(&row, "canonicality_state")?,
     })
 }
 
@@ -377,10 +369,7 @@ pub(super) fn decode_name_surface(row: PgRow) -> Result<NameSurface> {
         block_hash: crate::sql_row::get(&row, "block_hash")?,
         block_number: crate::sql_row::get(&row, "block_number")?,
         provenance: crate::sql_row::get(&row, "provenance")?,
-        canonicality_state: CanonicalityState::parse(&crate::sql_row::get::<String>(
-            &row,
-            "canonicality_state",
-        )?)?,
+        canonicality_state: crate::sql_row::get(&row, "canonicality_state")?,
     })
 }
 
@@ -389,19 +378,13 @@ pub(super) fn decode_surface_binding(row: PgRow) -> Result<SurfaceBinding> {
         surface_binding_id: crate::sql_row::get(&row, "surface_binding_id")?,
         logical_name_id: crate::sql_row::get(&row, "logical_name_id")?,
         resource_id: crate::sql_row::get(&row, "resource_id")?,
-        binding_kind: SurfaceBindingKind::parse(&crate::sql_row::get::<String>(
-            &row,
-            "binding_kind",
-        )?)?,
+        binding_kind: crate::sql_row::get(&row, "binding_kind")?,
         active_from: crate::sql_row::get(&row, "active_from")?,
         active_to: crate::sql_row::get(&row, "active_to")?,
         chain_id: crate::sql_row::get(&row, "chain_id")?,
         block_hash: crate::sql_row::get(&row, "block_hash")?,
         block_number: crate::sql_row::get(&row, "block_number")?,
         provenance: crate::sql_row::get(&row, "provenance")?,
-        canonicality_state: CanonicalityState::parse(&crate::sql_row::get::<String>(
-            &row,
-            "canonicality_state",
-        )?)?,
+        canonicality_state: crate::sql_row::get(&row, "canonicality_state")?,
     })
 }

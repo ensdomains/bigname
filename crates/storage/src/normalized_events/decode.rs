@@ -1,8 +1,6 @@
 use anyhow::Result;
 use sqlx::postgres::PgRow;
 
-use crate::CanonicalityState;
-
 use super::types::NormalizedEvent;
 
 pub(super) fn decode_normalized_event(row: PgRow) -> Result<NormalizedEvent> {
@@ -22,10 +20,7 @@ pub(super) fn decode_normalized_event(row: PgRow) -> Result<NormalizedEvent> {
         log_index: crate::sql_row::get(&row, "log_index")?,
         raw_fact_ref: crate::sql_row::get(&row, "raw_fact_ref")?,
         derivation_kind: crate::sql_row::get(&row, "derivation_kind")?,
-        canonicality_state: CanonicalityState::parse(&crate::sql_row::get::<String>(
-            &row,
-            "canonicality_state",
-        )?)?,
+        canonicality_state: crate::sql_row::get(&row, "canonicality_state")?,
         before_state: crate::sql_row::get(&row, "before_state")?,
         after_state: crate::sql_row::get(&row, "after_state")?,
     })

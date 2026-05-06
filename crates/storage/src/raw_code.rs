@@ -329,10 +329,7 @@ fn decode_raw_code_hash(row: PgRow) -> Result<RawCodeHash> {
         contract_address: crate::sql_row::get(&row, "contract_address")?,
         code_hash: crate::sql_row::get(&row, "code_hash")?,
         code_byte_length: crate::sql_row::get(&row, "code_byte_length")?,
-        canonicality_state: CanonicalityState::parse(&crate::sql_row::get::<String>(
-            &row,
-            "canonicality_state",
-        )?)?,
+        canonicality_state: crate::sql_row::get(&row, "canonicality_state")?,
     })
 }
 

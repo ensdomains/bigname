@@ -28,7 +28,7 @@ Production Rust snapshot from the working tree:
 
 | Area | Production files | LOC |
 | --- | ---: | ---: |
-| `crates/storage` | 144 | 26,064 |
+| `crates/storage` | 144 | 25,985 |
 | `crates/adapters` | 101 | 21,522 |
 | `apps/indexer` | 65 | 17,060 |
 | `apps/api` | 64 | 14,218 |
@@ -36,7 +36,7 @@ Production Rust snapshot from the working tree:
 | `crates/manifests` | 33 | 7,675 |
 | `crates/execution` | 36 | 6,386 |
 | `crates/domain` | 1 | 6 |
-| Total | 513 | 105,422 |
+| Total | 513 | 105,343 |
 
 The current file-size gate hard-fails these oversized production files as the
 first places to revisit after logic dedupe:
@@ -189,6 +189,9 @@ Addressed slices:
   directly from SQL text through SQLx, allowing worker projection loaders to
   use `query_as`/`FromRow`. The name-current decoder module and address-name,
   permission, and record-inventory event decode functions were removed.
+- Storage row decoders now read `CanonicalityState` and `SurfaceBindingKind`
+  through the shared SQLx decoders instead of repeatedly loading strings and
+  reparsing them at each raw/identity/history/projection decode site.
 
 ## Highest leverage cleanup map
 

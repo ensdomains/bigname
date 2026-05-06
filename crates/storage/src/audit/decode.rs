@@ -24,10 +24,7 @@ pub(super) fn decode_stored_lineage_block(
         transactions_root: crate::sql_row::get(&row, "transactions_root")?,
         receipts_root: crate::sql_row::get(&row, "receipts_root")?,
         state_root: crate::sql_row::get(&row, "state_root")?,
-        canonicality_state: CanonicalityState::parse(&crate::sql_row::get::<String>(
-            &row,
-            "canonicality_state",
-        )?)?,
+        canonicality_state: crate::sql_row::get(&row, "canonicality_state")?,
     })
 }
 
@@ -39,11 +36,7 @@ pub(super) fn decode_manifest_drift_alert_observation(
     let lifecycle_status = ManifestDriftAlertLifecycleStatus::parse(
         &crate::sql_row::get::<String>(&row, "lifecycle_status")?,
     )?;
-    let observed_canonicality_state = row
-        .try_get::<Option<String>, _>("observed_canonicality_state")
-        .context("missing observed_canonicality_state")?
-        .map(|value| CanonicalityState::parse(&value))
-        .transpose()?;
+    let observed_canonicality_state = crate::sql_row::get(&row, "observed_canonicality_state")?;
     let last_observed_at = crate::sql_row::get(&row, "last_observed_at")?;
     let raw_fact_ref = crate::sql_row::get(&row, "raw_fact_ref")?;
     let alert_state = build_manifest_alert_state(

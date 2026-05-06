@@ -2,8 +2,6 @@ use anyhow::Result;
 use sqlx::postgres::PgRow;
 
 use super::types::{RawLog, RawReceipt, RawTransaction};
-use crate::CanonicalityState;
-
 pub(super) fn decode_raw_transaction(row: PgRow) -> Result<RawTransaction> {
     Ok(RawTransaction {
         chain_id: crate::sql_row::get(&row, "chain_id")?,
@@ -13,10 +11,7 @@ pub(super) fn decode_raw_transaction(row: PgRow) -> Result<RawTransaction> {
         transaction_index: crate::sql_row::get(&row, "transaction_index")?,
         from_address: crate::sql_row::get(&row, "from_address")?,
         to_address: crate::sql_row::get(&row, "to_address")?,
-        canonicality_state: CanonicalityState::parse(&crate::sql_row::get::<String>(
-            &row,
-            "canonicality_state",
-        )?)?,
+        canonicality_state: crate::sql_row::get(&row, "canonicality_state")?,
     })
 }
 
@@ -32,10 +27,7 @@ pub(super) fn decode_raw_receipt(row: PgRow) -> Result<RawReceipt> {
         gas_used: crate::sql_row::get(&row, "gas_used")?,
         cumulative_gas_used: crate::sql_row::get(&row, "cumulative_gas_used")?,
         logs_bloom: crate::sql_row::get(&row, "logs_bloom")?,
-        canonicality_state: CanonicalityState::parse(&crate::sql_row::get::<String>(
-            &row,
-            "canonicality_state",
-        )?)?,
+        canonicality_state: crate::sql_row::get(&row, "canonicality_state")?,
     })
 }
 
@@ -50,9 +42,6 @@ pub(super) fn decode_raw_log(row: PgRow) -> Result<RawLog> {
         emitting_address: crate::sql_row::get(&row, "emitting_address")?,
         topics: crate::sql_row::get(&row, "topics")?,
         data: crate::sql_row::get(&row, "data")?,
-        canonicality_state: CanonicalityState::parse(&crate::sql_row::get::<String>(
-            &row,
-            "canonicality_state",
-        )?)?,
+        canonicality_state: crate::sql_row::get(&row, "canonicality_state")?,
     })
 }
