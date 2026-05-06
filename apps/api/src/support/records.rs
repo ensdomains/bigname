@@ -13,6 +13,7 @@ pub(super) struct ResolutionRecordsRead {
 
 pub(super) struct CompactRecordsRead {
     pub(super) row: NameCurrentRow,
+    pub(super) records: Vec<ResolutionRecordKey>,
     pub(super) record_inventory_current: Option<RecordInventoryCurrentRow>,
     pub(super) value_source: CompactNameRecordsValueSource,
     pub(super) verified_outcome: Option<ExecutionOutcome>,
@@ -145,6 +146,7 @@ pub(super) async fn load_compact_records_read(
         request,
         CompactRecordsRead {
             row,
+            records: requested_records,
             record_inventory_current,
             value_source,
             verified_outcome,

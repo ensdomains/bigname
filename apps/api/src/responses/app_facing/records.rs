@@ -155,18 +155,18 @@ pub(crate) fn compact_name_records_value_source(
 pub(crate) fn build_compact_name_records_response(
     row: &NameCurrentRow,
     record_inventory_row: Option<&RecordInventoryCurrentRow>,
+    requested_records: &[ResolutionRecordKey],
     request: &CompactNameRecordsRequest,
     value_source: CompactNameRecordsValueSource,
     verified_outcome: Option<&ExecutionOutcome>,
 ) -> CompactNameRecordsResponse {
-    let requested_records = compact_requested_records(record_inventory_row, request);
     let inventory_lookup = compact_record_inventory_lookup(record_inventory_row);
     let value_entries = match value_source {
         CompactNameRecordsValueSource::Declared => {
-            compact_declared_record_cache_entries(row, record_inventory_row, &requested_records)
+            compact_declared_record_cache_entries(row, record_inventory_row, requested_records)
         }
         CompactNameRecordsValueSource::Verified => {
-            compact_verified_record_cache_entries(&requested_records, verified_outcome)
+            compact_verified_record_cache_entries(requested_records, verified_outcome)
         }
     };
 
@@ -229,7 +229,7 @@ pub(crate) fn build_compact_name_records_response(
         insert_value_field(
             &mut data,
             "verified_records",
-            compact_verified_records_summary(&requested_records, verified_outcome),
+            compact_verified_records_summary(requested_records, verified_outcome),
         );
     }
 

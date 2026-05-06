@@ -53,6 +53,7 @@ async fn compact_name_records_response_for_name(
     Ok(build_compact_name_records_response(
         &read.row,
         read.record_inventory_current.as_ref(),
+        &read.records,
         &request,
         read.value_source,
         read.verified_outcome.as_ref(),
