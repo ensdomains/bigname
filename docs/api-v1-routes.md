@@ -273,7 +273,7 @@ Rules:
 - `account` filters by effective permission subject. It doesn't search owner, registrant, or address-name relations unless those subjects also exist in `permissions_current`.
 - `role_bitmap` filters only when the projection exposes it; otherwise non-2xx `unsupported` for that filter.
 - `effective_powers` remains the API-owned post-scope result. Don't infer powers from `role_bitmap` alone.
-- `provenance` is compact section provenance. Row-granular grant lineage stays on `GET /v1/resources/{resource_id}/permissions`.
+- Compact role rows do not expose provenance, raw facts, normalized-event IDs, or execution traces. Row-granular grant lineage stays on `GET /v1/resources/{resource_id}/permissions`.
 - `view=full` is compatibility-reserved and still returns `400 invalid_input`; OpenAPI advertises only `view=compact`.
 
 ## `GET /v1/resolvers/{chain_id}/{resolver_address}`

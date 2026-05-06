@@ -100,49 +100,5 @@ fn build_role_row(row: &PermissionsCurrentRow, name: Option<&String>) -> JsonVal
     // permissions_current currently exposes post-scope powers, not a raw role bitmap.
     insert_value_field(&mut value, "role_bitmap", JsonValue::Null);
     insert_value_field(&mut value, "effective_powers", row.effective_powers.clone());
-    insert_value_field(&mut value, "provenance", build_role_row_provenance(row));
     value
-}
-
-fn build_role_row_provenance(row: &PermissionsCurrentRow) -> JsonValue {
-    let mut provenance = empty_object();
-    if let Some(position) = first_chain_position(&row.chain_positions) {
-        for field in ["chain_id", "block_number", "block_hash", "timestamp"] {
-            if let Some(value) = position.get(field).cloned() {
-                insert_value_field(&mut provenance, field, value);
-            }
-        }
-    }
-
-    if let Some(raw_ref) = first_raw_fact_ref(&row.provenance) {
-        if let Some(tx_hash) = raw_ref
-            .get("transaction_hash")
-            .or_else(|| raw_ref.get("tx_hash"))
-            .and_then(JsonValue::as_str)
-        {
-            insert_string_field(&mut provenance, "tx_hash", tx_hash.to_owned());
-        }
-        if let Some(log_index) = raw_ref.get("log_index").cloned() {
-            insert_value_field(&mut provenance, "log_index", log_index);
-        }
-    }
-
-    provenance
-}
-
-fn first_chain_position(chain_positions: &JsonValue) -> Option<&JsonMap<String, JsonValue>> {
-    let positions = chain_positions.as_object()?;
-    positions
-        .iter()
-        .filter_map(|(slot, value)| value.as_object().map(|position| (slot, position)))
-        .min_by(|(left_slot, _), (right_slot, _)| left_slot.cmp(right_slot))
-        .map(|(_, position)| position)
-}
-
-fn first_raw_fact_ref(provenance: &JsonValue) -> Option<&JsonMap<String, JsonValue>> {
-    provenance
-        .get("raw_fact_refs")
-        .and_then(JsonValue::as_array)?
-        .iter()
-        .find_map(JsonValue::as_object)
 }

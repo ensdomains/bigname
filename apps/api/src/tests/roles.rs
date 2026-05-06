@@ -123,11 +123,7 @@ async fn roles_filter_by_account_resource_and_name_from_permissions_current() ->
         account_payload["data"][0]["effective_powers"],
         json!(["set_resolver", "create_subnames"])
     );
-    assert_eq!(account_payload["data"][0]["provenance"]["block_number"], json!(41));
-    assert_eq!(
-        account_payload["data"][0]["provenance"]["timestamp"],
-        json!("2026-04-17T00:00:41Z")
-    );
+    assert!(account_payload["data"][0].get("provenance").is_none());
 
     let resource_response = app_router(database.app_state())
         .oneshot(

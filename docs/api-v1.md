@@ -302,7 +302,7 @@ For ENSv1 and Basenames, retained current-resolver record events may populate se
 
 ### `RoleRow`
 
-`account`, `resource_hex`, `resource_id`, `name`, `role_bitmap`, `effective_powers`, `provenance`. `resource_id` is opaque and stable; clients treat it as such. `resource_hex` is nullable and appears only when a stable projected hex exists.
+`account`, `resource_hex`, `resource_id`, `name`, `role_bitmap`, `effective_powers`. `resource_id` is opaque and stable; clients treat it as such. `resource_hex` is nullable and appears only when a stable projected hex exists. Row-granular grant lineage is exposed by `GET /v1/resources/{resource_id}/permissions`, not compact role rows.
 
 ### `ResolverOverviewCompact`
 

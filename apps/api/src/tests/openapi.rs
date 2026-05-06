@@ -752,6 +752,10 @@ fn openapi_document_freezes_query_params_and_shared_envelopes() {
         openapi_schema(&document, "ResourceLookupData"),
         &["logical_name_id", "surface_binding_id", "namehash"],
     );
+    assert_schema_omits(
+        openapi_schema(&document, "RoleRow"),
+        &["provenance", "raw_fact_refs", "normalized_event_ids", "execution_trace_id"],
+    );
 
     let resolution = openapi_schema(&document, "ResolutionResponse");
     assert_eq!(

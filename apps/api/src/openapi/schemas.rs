@@ -377,7 +377,7 @@ fn compact_history_event_schema() -> JsonValue {
 
 #[rustfmt::skip]
 fn role_row_schema() -> JsonValue {
-    compact_object_schema(&["account", "resource_id", "effective_powers"], &["account", "resource_hex", "resource_id", "name", "role_bitmap", "effective_powers", "provenance"])
+    compact_object_schema(&["account", "resource_id", "effective_powers"], &["account", "resource_hex", "resource_id", "name", "role_bitmap", "effective_powers"])
 }
 
 #[rustfmt::skip]

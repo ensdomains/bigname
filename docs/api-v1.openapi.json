@@ -1585,16 +1585,6 @@
               "null"
             ]
           },
-          "provenance": {
-            "type": [
-              "object",
-              "array",
-              "string",
-              "integer",
-              "boolean",
-              "null"
-            ]
-          },
           "resource_hex": {
             "type": [
               "object",
