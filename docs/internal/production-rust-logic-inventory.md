@@ -29,19 +29,19 @@ Production Rust snapshot from the working tree:
 | Area | Production files | LOC |
 | --- | ---: | ---: |
 | `crates/storage` | 144 | 25,985 |
-| `crates/adapters` | 101 | 21,450 |
+| `crates/adapters` | 101 | 21,384 |
 | `apps/indexer` | 65 | 17,060 |
 | `apps/api` | 64 | 14,218 |
 | `apps/worker` | 69 | 12,491 |
 | `crates/manifests` | 33 | 7,675 |
 | `crates/execution` | 36 | 6,386 |
 | `crates/domain` | 1 | 6 |
-| Total | 513 | 105,271 |
+| Total | 513 | 105,205 |
 
 The current file-size gate hard-fails these oversized production files as the
 first places to revisit after logic dedupe:
 
-- `crates/adapters/src/ens_v1_unwrapped_authority/preload.rs` at 1,757 LOC.
+- `crates/adapters/src/ens_v1_unwrapped_authority/preload.rs` at 1,674 LOC.
 - `apps/api/src/responses/app_facing/records_declared_values.rs` at 776 LOC.
 - `apps/indexer/src/main/repair.rs` at 615 LOC.
 - `crates/adapters/src/ens_v1_unwrapped_authority/pipeline/apply.rs` at 622 LOC.
@@ -52,7 +52,7 @@ first places to revisit after logic dedupe:
 Additional advisory-only warnings remain above 500 LOC, including
 `crates/adapters/src/block_derived_normalized_events/event_builders.rs` at 593
 LOC, `crates/adapters/src/ens_v1_unwrapped_authority.rs` at 572 LOC, and
-`crates/storage/src/raw_code.rs` at 565 LOC.
+`crates/storage/src/raw_code.rs` at 562 LOC.
 
 Addressed slices:
 
@@ -196,6 +196,10 @@ Addressed slices:
   path for canonicality and binding-kind fields. The ENSv2 common
   canonicality parse shim and the unused ENSv1 authority ABI parse helper were
   removed.
+- `crates/adapters/src/ens_v1_unwrapped_authority/preload.rs` now centralizes
+  its canonical/safe/finalized SQL filter and collapses selected registrar
+  replay reference aggregation to one JSON payload, removing repeated reference
+  column aggregates and hand-decoded optional reference columns.
 
 ## Highest leverage cleanup map
 

@@ -30,6 +30,14 @@ struct ResolverStateScope {
     registry_source_family: String,
 }
 
+const CANONICALITY_STATE_FILTER: &str = r#"
+IN (
+    'canonical'::canonicality_state,
+    'safe'::canonicality_state,
+    'finalized'::canonicality_state
+)
+"#;
+
 pub(super) async fn preload_restricted_name_histories(
     pool: &PgPool,
     chain: &str,
@@ -56,7 +64,7 @@ pub(super) async fn preload_restricted_name_histories(
         return Ok(());
     }
 
-    let rows = sqlx::query(
+    let rows = sqlx::query(&format!(
         r#"
         SELECT DISTINCT ON (surface.logical_name_id)
             surface.namespace,
@@ -91,28 +99,16 @@ pub(super) async fn preload_restricted_name_histories(
               binding.active_to IS NULL
               OR binding.active_to >= $3
           )
-          AND surface.canonicality_state IN (
-              'canonical'::canonicality_state,
-              'safe'::canonicality_state,
-              'finalized'::canonicality_state
-          )
-          AND binding.canonicality_state IN (
-              'canonical'::canonicality_state,
-              'safe'::canonicality_state,
-              'finalized'::canonicality_state
-          )
-          AND resource.canonicality_state IN (
-              'canonical'::canonicality_state,
-              'safe'::canonicality_state,
-              'finalized'::canonicality_state
-          )
+          AND surface.canonicality_state {CANONICALITY_STATE_FILTER}
+          AND binding.canonicality_state {CANONICALITY_STATE_FILTER}
+          AND resource.canonicality_state {CANONICALITY_STATE_FILTER}
         ORDER BY
             surface.logical_name_id,
             binding.active_from DESC,
             binding.block_number DESC,
             binding.surface_binding_id
-        "#,
-    )
+        "#
+    ))
     .bind(chain)
     .bind(&labelhashes)
     .bind(boundary_timestamp)
@@ -409,7 +405,7 @@ async fn load_release_boundary_blocks_for_timestamps(
     release_namespaces: &[String],
     replay_head: &RawBlockSnapshot,
 ) -> Result<Vec<RawBlockSnapshot>> {
-    let rows = sqlx::query(
+    let rows = sqlx::query(&format!(
         r#"
         SELECT DISTINCT ON (requested.release_timestamp, requested.namespace)
             rb.chain_id,
@@ -433,17 +429,13 @@ async fn load_release_boundary_blocks_for_timestamps(
               AND block_timestamp >= requested.release_timestamp
               AND block_timestamp <= $4
               AND block_number <= $5
-              AND canonicality_state IN (
-                  'canonical'::canonicality_state,
-                  'safe'::canonicality_state,
-                  'finalized'::canonicality_state
-              )
+              AND canonicality_state {CANONICALITY_STATE_FILTER}
             ORDER BY block_timestamp, block_number
             LIMIT 1
         ) rb ON TRUE
         ORDER BY requested.release_timestamp, requested.namespace, rb.block_timestamp, rb.block_number
-        "#,
-    )
+        "#
+    ))
     .bind(chain)
     .bind(release_timestamps)
     .bind(release_namespaces)
@@ -500,7 +492,7 @@ async fn load_latest_registrar_state_before_block(
         .map(|scope| scope.lower_block_number)
         .collect::<Vec<_>>();
 
-    let rows = sqlx::query(
+    let rows = sqlx::query(&format!(
         r#"
         WITH scope AS (
             SELECT *
@@ -528,11 +520,7 @@ async fn load_latest_registrar_state_before_block(
             WHERE event.block_number >= scope.lower_block_number
               AND event.block_number < $3
               AND event.event_kind IN ($4, $5, $6, $7)
-              AND event.canonicality_state IN (
-                  'canonical'::canonicality_state,
-                  'safe'::canonicality_state,
-                  'finalized'::canonicality_state
-              )
+              AND event.canonicality_state {CANONICALITY_STATE_FILTER}
         )
         SELECT
             logical_name_id,
@@ -550,8 +538,8 @@ async fn load_latest_registrar_state_before_block(
             )[1] AS registrant
         FROM candidates
         GROUP BY logical_name_id
-        "#,
-    )
+        "#
+    ))
     .bind(logical_name_ids)
     .bind(lower_block_numbers)
     .bind(boundary_block)
@@ -605,7 +593,7 @@ async fn load_selected_registrar_state_before_replay(
         .iter()
         .map(|raw_log| (raw_log.block_hash.clone(), raw_log.block_timestamp))
         .collect::<HashMap<_, _>>();
-    let rows = sqlx::query(
+    let rows = sqlx::query(&format!(
         r#"
         WITH candidates AS (
             SELECT
@@ -645,11 +633,7 @@ async fn load_selected_registrar_state_before_replay(
               ON resource.resource_id = event.resource_id
             WHERE event.event_identity = ANY($1::TEXT[])
               AND event.event_kind IN ($2, $3, $4)
-              AND event.canonicality_state IN (
-                  'canonical'::canonicality_state,
-                  'safe'::canonicality_state,
-                  'finalized'::canonicality_state
-              )
+              AND event.canonicality_state {CANONICALITY_STATE_FILTER}
         )
         SELECT
             logical_name_id,
@@ -680,68 +664,25 @@ async fn load_selected_registrar_state_before_replay(
             )[1] AS labelhash,
             (
                 ARRAY_AGG(
-                    chain_id
+                    jsonb_build_object(
+                        'chain_id', chain_id,
+                        'block_hash', block_hash,
+                        'block_number', block_number,
+                        'transaction_hash', transaction_hash,
+                        'log_index', log_index,
+                        'canonicality_state', canonicality_state,
+                        'namespace', namespace,
+                        'source_manifest_id', source_manifest_id,
+                        'source_family', source_family,
+                        'manifest_version', manifest_version
+                    )
                     ORDER BY block_number ASC, log_index ASC, normalized_event_id ASC
                 ) FILTER (WHERE authority_key IS NOT NULL)
-            )[1] AS reference_chain_id,
-            (
-                ARRAY_AGG(
-                    block_hash
-                    ORDER BY block_number ASC, log_index ASC, normalized_event_id ASC
-                ) FILTER (WHERE authority_key IS NOT NULL)
-            )[1] AS reference_block_hash,
-            (
-                ARRAY_AGG(
-                    block_number
-                    ORDER BY block_number ASC, log_index ASC, normalized_event_id ASC
-                ) FILTER (WHERE authority_key IS NOT NULL)
-            )[1] AS reference_block_number,
-            (
-                ARRAY_AGG(
-                    transaction_hash
-                    ORDER BY block_number ASC, log_index ASC, normalized_event_id ASC
-                ) FILTER (WHERE authority_key IS NOT NULL)
-            )[1] AS reference_transaction_hash,
-            (
-                ARRAY_AGG(
-                    log_index
-                    ORDER BY block_number ASC, log_index ASC, normalized_event_id ASC
-                ) FILTER (WHERE authority_key IS NOT NULL)
-            )[1] AS reference_log_index,
-            (
-                ARRAY_AGG(
-                    namespace
-                    ORDER BY block_number ASC, log_index ASC, normalized_event_id ASC
-                ) FILTER (WHERE authority_key IS NOT NULL)
-            )[1] AS reference_namespace,
-            (
-                ARRAY_AGG(
-                    source_manifest_id
-                    ORDER BY block_number ASC, log_index ASC, normalized_event_id ASC
-                ) FILTER (WHERE authority_key IS NOT NULL)
-            )[1] AS reference_source_manifest_id,
-            (
-                ARRAY_AGG(
-                    source_family
-                    ORDER BY block_number ASC, log_index ASC, normalized_event_id ASC
-                ) FILTER (WHERE authority_key IS NOT NULL)
-            )[1] AS reference_source_family,
-            (
-                ARRAY_AGG(
-                    manifest_version
-                    ORDER BY block_number ASC, log_index ASC, normalized_event_id ASC
-                ) FILTER (WHERE authority_key IS NOT NULL)
-            )[1] AS reference_manifest_version,
-            (
-                ARRAY_AGG(
-                    canonicality_state
-                    ORDER BY block_number ASC, log_index ASC, normalized_event_id ASC
-                ) FILTER (WHERE authority_key IS NOT NULL)
-            )[1] AS reference_canonicality_state
+            )[1] AS reference
         FROM candidates
         GROUP BY logical_name_id
-        "#,
-    )
+        "#
+    ))
     .bind(&event_identities)
     .bind(EVENT_KIND_REGISTRATION_RENEWED)
     .bind(EVENT_KIND_EXPIRY_CHANGED)
@@ -762,44 +703,15 @@ async fn load_selected_registrar_state_before_replay(
         let registrant = row.try_get("registrant")?;
         let authority_key: Option<String> = row.try_get("authority_key")?;
         let labelhash: Option<String> = row.try_get("labelhash")?;
-        let reference_block_hash: Option<String> = row.try_get("reference_block_hash")?;
-        let start_ref = if authority_key.is_some() {
-            let block_hash = reference_block_hash
-                .clone()
-                .context("selected registrar replay state is missing reference block hash")?;
-            Some(ObservationRef {
-                chain_id: row
-                    .try_get::<Option<String>, _>("reference_chain_id")?
-                    .context("selected registrar replay state is missing reference chain")?,
-                block_timestamp: *block_timestamps.get(&block_hash).context(
-                    "selected registrar replay state is missing raw log block timestamp",
-                )?,
-                block_hash,
-                block_number: row
-                    .try_get::<Option<i64>, _>("reference_block_number")?
-                    .context("selected registrar replay state is missing reference block number")?,
-                transaction_hash: row.try_get("reference_transaction_hash")?,
-                transaction_index: None,
-                log_index: row.try_get("reference_log_index")?,
-                canonicality_state: CanonicalityState::parse(
-                    &row.try_get::<Option<String>, _>("reference_canonicality_state")?
-                        .context("selected registrar replay state is missing canonicality")?,
-                )?,
-                namespace: row
-                    .try_get::<Option<String>, _>("reference_namespace")?
-                    .context("selected registrar replay state is missing namespace")?,
-                source_manifest_id: row
-                    .try_get::<Option<i64>, _>("reference_source_manifest_id")?
-                    .unwrap_or(0),
-                source_family: row
-                    .try_get::<Option<String>, _>("reference_source_family")?
-                    .unwrap_or_else(|| SOURCE_FAMILY_ENS_V1_REGISTRAR_L1.to_owned()),
-                manifest_version: row
-                    .try_get::<Option<i64>, _>("reference_manifest_version")?
-                    .unwrap_or(1),
-            })
-        } else {
-            None
+        let reference: Option<Value> = row.try_get("reference")?;
+        let start_ref = match (authority_key.as_ref(), reference) {
+            (Some(_), Some(reference)) => {
+                Some(selected_registrar_start_ref(&reference, &block_timestamps)?)
+            }
+            (Some(_), None) => {
+                bail!("selected registrar replay state is missing reference")
+            }
+            _ => None,
         };
         state.insert(
             row.try_get("logical_name_id")?,
@@ -813,6 +725,56 @@ async fn load_selected_registrar_state_before_replay(
         );
     }
     Ok(state)
+}
+
+fn selected_registrar_start_ref(
+    reference: &Value,
+    block_timestamps: &HashMap<String, OffsetDateTime>,
+) -> Result<ObservationRef> {
+    let block_hash = json_string(reference, "block_hash")?;
+    Ok(ObservationRef {
+        chain_id: json_string(reference, "chain_id")?,
+        block_timestamp: *block_timestamps
+            .get(&block_hash)
+            .context("selected registrar replay state is missing raw log block timestamp")?,
+        block_hash,
+        block_number: json_i64(reference, "block_number")?,
+        transaction_hash: json_optional_string(reference, "transaction_hash"),
+        transaction_index: None,
+        log_index: json_optional_i64(reference, "log_index"),
+        canonicality_state: CanonicalityState::parse(&json_string(
+            reference,
+            "canonicality_state",
+        )?)?,
+        namespace: json_string(reference, "namespace")?,
+        source_manifest_id: json_optional_i64(reference, "source_manifest_id").unwrap_or(0),
+        source_family: json_optional_string(reference, "source_family")
+            .unwrap_or_else(|| SOURCE_FAMILY_ENS_V1_REGISTRAR_L1.to_owned()),
+        manifest_version: json_optional_i64(reference, "manifest_version").unwrap_or(1),
+    })
+}
+
+fn json_string(value: &Value, key: &str) -> Result<String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .with_context(|| format!("selected registrar replay reference is missing {key}"))
+}
+
+fn json_i64(value: &Value, key: &str) -> Result<i64> {
+    value
+        .get(key)
+        .and_then(Value::as_i64)
+        .with_context(|| format!("selected registrar replay reference is missing {key}"))
+}
+
+fn json_optional_string(value: &Value, key: &str) -> Option<String> {
+    value.get(key).and_then(Value::as_str).map(str::to_owned)
+}
+
+fn json_optional_i64(value: &Value, key: &str) -> Option<i64> {
+    value.get(key).and_then(Value::as_i64)
 }
 
 fn selected_registrar_event_identities(
@@ -881,7 +843,7 @@ async fn load_selected_wrapper_state_before_replay(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
-    let rows = sqlx::query(
+    let rows = sqlx::query(&format!(
         r#"
         WITH candidates AS (
             SELECT
@@ -907,11 +869,7 @@ async fn load_selected_wrapper_state_before_replay(
               AND event_kind IN ($3, $4, $5)
               AND after_state->>'authority_kind' = 'wrapper'
               AND after_state ? 'authority_key'
-              AND canonicality_state IN (
-                  'canonical'::canonicality_state,
-                  'safe'::canonicality_state,
-                  'finalized'::canonicality_state
-              )
+              AND canonicality_state {CANONICALITY_STATE_FILTER}
         )
         SELECT
             authority_key,
@@ -935,8 +893,8 @@ async fn load_selected_wrapper_state_before_replay(
             )[1] AS expiry
         FROM candidates
         GROUP BY authority_key
-        "#,
-    )
+        "#
+    ))
     .bind(logical_name_ids)
     .bind(&block_hashes)
     .bind(EVENT_KIND_TOKEN_CONTROL_TRANSFERRED)
@@ -1095,7 +1053,7 @@ async fn load_latest_resolver_state_before_block(
         return Ok(HashMap::new());
     }
 
-    let rows = sqlx::query(
+    let rows = sqlx::query(&format!(
         r#"
         SELECT DISTINCT ON (logical_name_id)
             logical_name_id,
@@ -1104,14 +1062,10 @@ async fn load_latest_resolver_state_before_block(
         WHERE logical_name_id = ANY($1::TEXT[])
           AND block_number < $2
           AND event_kind = $3
-          AND canonicality_state IN (
-              'canonical'::canonicality_state,
-              'safe'::canonicality_state,
-              'finalized'::canonicality_state
-          )
+          AND canonicality_state {CANONICALITY_STATE_FILTER}
         ORDER BY logical_name_id, block_number DESC, log_index DESC, normalized_event_id DESC
-        "#,
-    )
+        "#
+    ))
     .bind(logical_name_ids)
     .bind(boundary_block)
     .bind(EVENT_KIND_RESOLVER_CHANGED)
@@ -1156,7 +1110,7 @@ async fn load_latest_registry_resolver_raw_state_before_block(
         .map(|scope| scope.registry_source_family.clone())
         .collect::<Vec<_>>();
 
-    let rows = sqlx::query(
+    let rows = sqlx::query(&format!(
         r#"
         WITH scope AS (
             SELECT *
@@ -1201,17 +1155,13 @@ async fn load_latest_registry_resolver_raw_state_before_block(
                  AND LEAST(emitter.active_to_block_number, $5 - 1)
             WHERE emitter.source_family = scope.registry_source_family
               AND lower(log.topics[2]) = scope.namehash
-              AND log.canonicality_state IN (
-                  'canonical'::canonicality_state,
-                  'safe'::canonicality_state,
-                  'finalized'::canonicality_state
-              )
+              AND log.canonicality_state {CANONICALITY_STATE_FILTER}
             ORDER BY log.block_number DESC, log.transaction_index DESC, log.log_index DESC, log.raw_log_id DESC
             LIMIT 1
         ) resolver_log ON TRUE
         ORDER BY scope.logical_name_id, resolver_log.block_number DESC, resolver_log.transaction_index DESC, resolver_log.log_index DESC, resolver_log.raw_log_id DESC
-        "#,
-    )
+        "#
+    ))
     .bind(chain)
     .bind(logical_name_ids)
     .bind(namehashes)
@@ -1248,7 +1198,7 @@ async fn load_selected_registry_resolver_state_before_replay(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
-    let rows = sqlx::query(
+    let rows = sqlx::query(&format!(
         r#"
         SELECT DISTINCT ON (event.logical_name_id)
             event.logical_name_id,
@@ -1263,19 +1213,11 @@ async fn load_selected_registry_resolver_state_before_replay(
           AND event.log_index IS NULL
           AND event.after_state->>'source_event' = $4
           AND resource.provenance->>'authority_kind' = 'registry_only'
-          AND event.canonicality_state IN (
-              'canonical'::canonicality_state,
-              'safe'::canonicality_state,
-              'finalized'::canonicality_state
-          )
-          AND resource.canonicality_state IN (
-              'canonical'::canonicality_state,
-              'safe'::canonicality_state,
-              'finalized'::canonicality_state
-          )
+          AND event.canonicality_state {CANONICALITY_STATE_FILTER}
+          AND resource.canonicality_state {CANONICALITY_STATE_FILTER}
         ORDER BY event.logical_name_id, event.block_number DESC, event.normalized_event_id DESC
-        "#,
-    )
+        "#
+    ))
     .bind(logical_name_ids)
     .bind(&block_hashes)
     .bind(EVENT_KIND_RESOLVER_CHANGED)
@@ -1303,7 +1245,7 @@ async fn load_latest_record_versions_before_block(
         return Ok(HashMap::new());
     }
 
-    let rows = sqlx::query(
+    let rows = sqlx::query(&format!(
         r#"
         SELECT DISTINCT ON (logical_name_id)
             logical_name_id,
@@ -1312,14 +1254,10 @@ async fn load_latest_record_versions_before_block(
         WHERE logical_name_id = ANY($1::TEXT[])
           AND block_number < $2
           AND event_kind = $3
-          AND canonicality_state IN (
-              'canonical'::canonicality_state,
-              'safe'::canonicality_state,
-              'finalized'::canonicality_state
-          )
+          AND canonicality_state {CANONICALITY_STATE_FILTER}
         ORDER BY logical_name_id, block_number DESC, log_index DESC, normalized_event_id DESC
-        "#,
-    )
+        "#
+    ))
     .bind(logical_name_ids)
     .bind(boundary_block)
     .bind(EVENT_KIND_RECORD_VERSION_CHANGED)
@@ -1361,7 +1299,7 @@ async fn load_name_metadata_by_logical_name_ids(
         return Ok(HashMap::new());
     }
 
-    let rows = sqlx::query(
+    let rows = sqlx::query(&format!(
         r#"
         SELECT
             namespace,
@@ -1375,13 +1313,9 @@ async fn load_name_metadata_by_logical_name_ids(
             normalizer_version
         FROM name_surfaces
         WHERE logical_name_id = ANY($1::TEXT[])
-          AND canonicality_state IN (
-              'canonical'::canonicality_state,
-              'safe'::canonicality_state,
-              'finalized'::canonicality_state
-          )
-        "#,
-    )
+          AND canonicality_state {CANONICALITY_STATE_FILTER}
+        "#
+    ))
     .bind(logical_name_ids)
     .fetch_all(pool)
     .await
