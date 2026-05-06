@@ -1,9 +1,7 @@
 use serde_json::{Map as JsonMap, json};
 use sqlx::types::JsonValue;
 
-use crate::routes::{
-    ApiRouteContract, ApiRouteDefinition, ApiRouteId, ApiRouteMethod, ApiRouteParameters,
-};
+use crate::routes::{ApiRouteContract, ApiRouteDefinition, ApiRouteId, ApiRouteParameters};
 use crate::{
     AppState, Router, address_history, address_names, address_names_count, coverage_current, events,
     explain_authority_control_current, explain_resolution_execution_current,
@@ -33,12 +31,6 @@ use super::{
 
 impl ApiRouteDefinition {
     pub(super) fn register(self, router: Router<AppState>) -> Router<AppState> {
-        match self.method {
-            ApiRouteMethod::Get => self.register_get(router),
-        }
-    }
-
-    fn register_get(self, router: Router<AppState>) -> Router<AppState> {
         match self.id {
             ApiRouteId::Health => router.route(self.path, get(health)),
             ApiRouteId::Names => router.route(self.path, get(names)),
@@ -79,19 +71,8 @@ impl ApiRouteDefinition {
     pub(super) fn openapi_path_item(self) -> Option<JsonValue> {
         let contract = self.contract?;
         let mut path_item = JsonMap::new();
-        path_item.insert(
-            self.method.openapi_key().to_owned(),
-            contract.openapi_operation(),
-        );
+        path_item.insert("get".to_owned(), contract.openapi_operation());
         Some(JsonValue::Object(path_item))
-    }
-}
-
-impl ApiRouteMethod {
-    fn openapi_key(self) -> &'static str {
-        match self {
-            Self::Get => "get",
-        }
     }
 }
 
