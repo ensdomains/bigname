@@ -182,19 +182,12 @@ fn release_boundary_timestamp_for_authority_log(
     let Some(topic0) = raw_log.topics.first() else {
         return Ok(None);
     };
-    let expiry = if let Some(registration) = decode_registrar_name_registered_data(
-        &raw_log.source_family,
-        topic0,
-        &raw_log.data,
-        event_topics,
-    )? {
+    let expiry = if let Some(registration) =
+        decode_registrar_name_registered_data(raw_log, topic0, event_topics)?
+    {
         registration.expiry
-    } else if let Some(renewal) = decode_registrar_name_renewed_data(
-        &raw_log.source_family,
-        topic0,
-        &raw_log.data,
-        event_topics,
-    )? {
+    } else if let Some(renewal) = decode_registrar_name_renewed_data(raw_log, topic0, event_topics)?
+    {
         renewal.expiry
     } else {
         return Ok(None);

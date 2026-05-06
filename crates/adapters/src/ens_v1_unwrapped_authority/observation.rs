@@ -14,12 +14,9 @@ pub(super) fn build_authority_observation(
 
     if matches!(profile, Some(profile) if raw_log.source_family == profile.registrar_source_family())
     {
-        if let Some(registration) = decode_registrar_name_registered_data(
-            &raw_log.source_family,
-            topic0,
-            &raw_log.data,
-            event_topics,
-        )? {
+        if let Some(registration) =
+            decode_registrar_name_registered_data(raw_log, topic0, event_topics)?
+        {
             if !can_observe_registrar_label(&registration.label) {
                 return Ok(None);
             }
@@ -60,12 +57,7 @@ pub(super) fn build_authority_observation(
 
     if matches!(profile, Some(profile) if raw_log.source_family == profile.registrar_source_family())
     {
-        if let Some(renewal) = decode_registrar_name_renewed_data(
-            &raw_log.source_family,
-            topic0,
-            &raw_log.data,
-            event_topics,
-        )? {
+        if let Some(renewal) = decode_registrar_name_renewed_data(raw_log, topic0, event_topics)? {
             if !can_observe_registrar_label(&renewal.label) {
                 return Ok(None);
             }
@@ -178,13 +170,7 @@ pub(super) fn build_authority_observation(
     if matches!(profile, Some(profile) if raw_log.source_family == profile.resolver_source_family())
         && event_topics.is_text_changed_topic0(&raw_log.source_family, topic0)?
     {
-        let Some(text_record) = decode_text_record_change(
-            &raw_log.source_family,
-            &raw_log.topics,
-            &raw_log.data,
-            event_topics,
-        )?
-        else {
+        let Some(text_record) = decode_text_record_change(raw_log, event_topics)? else {
             return Ok(None);
         };
         let Some(namehash) = normalize_resolver_topic(raw_log.topics.get(1)) else {
@@ -206,7 +192,7 @@ pub(super) fn build_authority_observation(
     if matches!(profile, Some(profile) if raw_log.source_family == profile.resolver_source_family())
         && event_topics.matches(NAME_CHANGED_SIGNATURE, topic0)?
     {
-        let Some(name) = decode_name_changed_data(&raw_log.data) else {
+        let Some(name) = decode_name_changed_data(raw_log) else {
             return Ok(None);
         };
         let Some(namehash) = normalize_resolver_topic(raw_log.topics.get(1)) else {
@@ -231,7 +217,7 @@ pub(super) fn build_authority_observation(
     if matches!(profile, Some(profile) if raw_log.source_family == profile.resolver_source_family())
         && event_topics.matches(ADDR_CHANGED_SIGNATURE, topic0)?
     {
-        let Some(address) = decode_addr_changed_data(&raw_log.data) else {
+        let Some(address) = decode_addr_changed_data(raw_log) else {
             return Ok(None);
         };
         let Some(namehash) = normalize_resolver_topic(raw_log.topics.get(1)) else {
@@ -256,7 +242,7 @@ pub(super) fn build_authority_observation(
     if matches!(profile, Some(profile) if raw_log.source_family == profile.resolver_source_family())
         && event_topics.matches(ADDRESS_CHANGED_SIGNATURE, topic0)?
     {
-        let Some(address_change) = decode_address_changed_data(&raw_log.data) else {
+        let Some(address_change) = decode_address_changed_data(raw_log) else {
             return Ok(None);
         };
         let value =
@@ -292,7 +278,7 @@ pub(super) fn build_authority_observation(
         let Some(namehash) = normalize_resolver_topic(raw_log.topics.get(1)) else {
             return Ok(None);
         };
-        let Some(record_version) = decode_version_changed_data(&raw_log.data) else {
+        let Some(record_version) = decode_version_changed_data(raw_log) else {
             return Ok(None);
         };
         return Ok(Some(AuthorityObservation::RecordVersionChanged(
@@ -308,19 +294,13 @@ pub(super) fn build_authority_observation(
     if matches!(profile, Some(profile) if profile.wrapper_source_family() == Some(raw_log.source_family.as_str()))
         && event_topics.matches(NAME_WRAPPED_SIGNATURE, topic0)?
     {
-        let decoded = decode_wrapper_name_wrapped_data(&raw_log.data)?;
+        let decoded = decode_wrapper_name_wrapped_data(raw_log)?;
         let name = observe_dns_encoded_name_with_reference(
             &decoded.dns_name,
             &raw_log.reference(),
             &raw_log.normalizer_version,
         )?;
-        let indexed_node = normalize_hex_32(
-            raw_log
-                .topics
-                .get(1)
-                .context("NameWrapped log is missing indexed node")?,
-        )?;
-        if !indexed_node.eq_ignore_ascii_case(&name.namehash) {
+        if !decoded.namehash.eq_ignore_ascii_case(&name.namehash) {
             bail!("NameWrapped indexed node does not match decoded DNS name");
         }
         return Ok(Some(AuthorityObservation::WrapperNameWrapped(
@@ -355,15 +335,11 @@ pub(super) fn build_authority_observation(
     if matches!(profile, Some(profile) if profile.wrapper_source_family() == Some(raw_log.source_family.as_str()))
         && event_topics.matches(FUSES_SET_SIGNATURE, topic0)?
     {
+        let decoded = decode_wrapper_fuses_set_data(raw_log)?;
         return Ok(Some(AuthorityObservation::WrapperFusesSet(
             WrapperFusesObservation {
-                namehash: normalize_hex_32(
-                    raw_log
-                        .topics
-                        .get(1)
-                        .context("FusesSet log is missing indexed node")?,
-                )?,
-                fuses: decode_wrapper_fuses_set_data(&raw_log.data)?,
+                namehash: normalize_hex_32(&decoded.namehash)?,
+                fuses: decoded.fuses,
                 reference: raw_log.reference(),
             },
         )));
@@ -372,16 +348,11 @@ pub(super) fn build_authority_observation(
     if matches!(profile, Some(profile) if profile.wrapper_source_family() == Some(raw_log.source_family.as_str()))
         && event_topics.matches(EXPIRY_EXTENDED_SIGNATURE, topic0)?
     {
-        let expiry = decode_wrapper_expiry_extended_data(&raw_log.data)?;
+        let decoded = decode_wrapper_expiry_extended_data(raw_log)?;
         return Ok(Some(AuthorityObservation::WrapperExpiryExtended(
             WrapperExpiryObservation {
-                namehash: normalize_hex_32(
-                    raw_log
-                        .topics
-                        .get(1)
-                        .context("ExpiryExtended log is missing indexed node")?,
-                )?,
-                expiry: OffsetDateTime::from_unix_timestamp(expiry)
+                namehash: normalize_hex_32(&decoded.namehash)?,
+                expiry: OffsetDateTime::from_unix_timestamp(decoded.expiry)
                     .context("ExpiryExtended expiry is not a valid unix timestamp")?,
                 reference: raw_log.reference(),
             },
@@ -391,22 +362,12 @@ pub(super) fn build_authority_observation(
     if matches!(profile, Some(profile) if profile.wrapper_source_family() == Some(raw_log.source_family.as_str()))
         && event_topics.matches(TRANSFER_SINGLE_SIGNATURE, topic0)?
     {
-        let transfer = decode_wrapper_transfer_single_data(&raw_log.data)?;
+        let transfer = decode_wrapper_transfer_single_data(raw_log)?;
         return Ok(Some(AuthorityObservation::WrapperTokenTransferred(
             WrapperTokenTransferObservation {
                 namehash: normalize_hex_32(&transfer.namehash)?,
-                from_address: normalize_topic_address(
-                    raw_log
-                        .topics
-                        .get(2)
-                        .context("TransferSingle topic2 is missing from address")?,
-                )?,
-                to_address: normalize_topic_address(
-                    raw_log
-                        .topics
-                        .get(3)
-                        .context("TransferSingle topic3 is missing to address")?,
-                )?,
+                from_address: transfer.from_address,
+                to_address: transfer.to_address,
                 value: transfer.value,
                 reference: raw_log.reference(),
             },
@@ -417,28 +378,23 @@ pub(super) fn build_authority_observation(
 }
 
 pub(super) fn decode_text_record_change(
-    source_family: &str,
-    topics: &[String],
-    data: &[u8],
+    raw_log: &AuthorityRawLogRow,
     event_topics: &AuthorityEventTopics,
 ) -> Result<Option<EnsV1TextRecordChange>> {
-    let Some(topic0) = topics.first() else {
+    let Some(topic0) = raw_log.topics.first() else {
         return Ok(None);
     };
+    let source_family = raw_log.source_family.as_str();
     if !event_topics.is_text_changed_topic0(source_family, topic0)? {
         return Ok(None);
     }
-    let Some(text_change) = decode_text_changed_data(source_family, topic0, data, event_topics)?
-    else {
+    let Some(text_change) = decode_text_changed_data(source_family, raw_log, event_topics)? else {
         return Ok(None);
     };
     if text_change.key.trim().is_empty() {
         return Ok(None);
     }
-    let Some(indexed_key_hash) = normalize_resolver_topic(topics.get(2)) else {
-        return Ok(None);
-    };
-    if indexed_key_hash != keccak256_hex(text_change.key.as_bytes()) {
+    if text_change.indexed_key_hash != keccak256_hex(text_change.key.as_bytes()) {
         return Ok(None);
     }
     Ok(Some(EnsV1TextRecordChange {

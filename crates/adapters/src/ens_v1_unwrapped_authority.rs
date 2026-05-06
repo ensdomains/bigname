@@ -541,10 +541,27 @@ pub fn decode_ens_v1_text_record_change(
     topics: &[String],
     data: &[u8],
 ) -> Result<Option<EnsV1TextRecordChange>> {
+    let raw_log = AuthorityRawLogRow {
+        chain_id: String::new(),
+        block_hash: String::new(),
+        block_number: 0,
+        block_timestamp: OffsetDateTime::UNIX_EPOCH,
+        transaction_hash: String::new(),
+        transaction_index: 0,
+        log_index: 0,
+        emitting_address: String::new(),
+        topics: topics.to_vec(),
+        data: data.to_vec(),
+        canonicality_state: CanonicalityState::Observed,
+        source_manifest_id: 0,
+        namespace: String::new(),
+        source_family: SOURCE_FAMILY_ENS_V1_RESOLVER_L1.to_owned(),
+        manifest_version: 0,
+        normalizer_version: ENS_NORMALIZER_VERSION.to_owned(),
+        contract_role: None,
+    };
     observation::decode_text_record_change(
-        SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
-        topics,
-        data,
+        &raw_log,
         &AuthorityEventTopics::for_ens_v1_text_decoding(),
     )
 }
