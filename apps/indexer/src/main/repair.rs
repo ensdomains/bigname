@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, bail};
+use bigname_storage::serialize_jsonb_value;
 use serde_json::Value;
 use sqlx::Row;
 use tracing::info;
@@ -500,9 +501,13 @@ async fn update_text_record_after_states(
         .collect::<Vec<_>>();
     let after_states = updates
         .iter()
-        .map(|update| serialize_jsonb_safe_value(&update.after_state))
-        .collect::<serde_json::Result<Vec<_>>>()
-        .context("failed to serialize ENSv1 text record repair after_state payloads")?;
+        .map(|update| {
+            serialize_jsonb_value(
+                &update.after_state,
+                "failed to serialize ENSv1 text record repair after_state payload",
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
 
     let affected = sqlx::query(
         r#"
@@ -541,43 +546,6 @@ async fn update_text_record_after_states(
     .rows_affected();
 
     usize::try_from(affected).context("ENSv1 text record repair update count overflowed usize")
-}
-
-fn serialize_jsonb_safe_value(value: &Value) -> serde_json::Result<String> {
-    if json_value_contains_nul(value) {
-        return serde_json::to_string(&jsonb_safe_value(value));
-    }
-
-    serde_json::to_string(value)
-}
-
-fn json_value_contains_nul(value: &Value) -> bool {
-    match value {
-        Value::String(text) => text.contains('\0'),
-        Value::Array(items) => items.iter().any(json_value_contains_nul),
-        Value::Object(fields) => fields
-            .iter()
-            .any(|(key, value)| key.contains('\0') || json_value_contains_nul(value)),
-        _ => false,
-    }
-}
-
-fn jsonb_safe_value(value: &Value) -> Value {
-    match value {
-        Value::String(text) => Value::String(postgres_text_safe(text)),
-        Value::Array(items) => Value::Array(items.iter().map(jsonb_safe_value).collect()),
-        Value::Object(fields) => Value::Object(
-            fields
-                .iter()
-                .map(|(key, value)| (postgres_text_safe(key), jsonb_safe_value(value)))
-                .collect(),
-        ),
-        _ => value.clone(),
-    }
-}
-
-fn postgres_text_safe(text: &str) -> String {
-    text.replace('\0', "\\u0000")
 }
 
 impl TextRecordRepairCandidate {

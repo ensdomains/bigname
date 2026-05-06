@@ -115,7 +115,7 @@ pub use name_current::{
 pub use normalized_events::{
     NormalizedEvent, NormalizedEventUpsertSummary, load_normalized_event_counts_by_kind,
     load_normalized_events_by_namespace, mark_block_derived_normalized_events_range_orphaned,
-    upsert_normalized_events, upsert_normalized_events_with_summary,
+    serialize_jsonb_value, upsert_normalized_events, upsert_normalized_events_with_summary,
 };
 pub use permissions::{
     PermissionScope, PermissionsCurrentAccountResourceCursor,

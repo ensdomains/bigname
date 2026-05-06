@@ -28,22 +28,21 @@ Production Rust snapshot from the working tree:
 
 | Area | Production files | LOC |
 | --- | ---: | ---: |
-| `crates/storage` | 144 | 25,985 |
+| `crates/storage` | 144 | 25,984 |
 | `crates/adapters` | 101 | 21,384 |
-| `apps/indexer` | 65 | 17,035 |
+| `apps/indexer` | 65 | 17,003 |
 | `apps/api` | 64 | 14,218 |
 | `apps/worker` | 69 | 12,491 |
 | `crates/manifests` | 33 | 7,656 |
 | `crates/execution` | 36 | 6,386 |
 | `crates/domain` | 1 | 6 |
-| Total | 513 | 105,161 |
+| Total | 513 | 105,128 |
 
 The current file-size gate hard-fails these oversized production files as the
 first places to revisit after logic dedupe:
 
 - `crates/adapters/src/ens_v1_unwrapped_authority/preload.rs` at 1,674 LOC.
 - `apps/api/src/responses/app_facing/records_declared_values.rs` at 776 LOC.
-- `apps/indexer/src/main/repair.rs` at 615 LOC.
 - `crates/adapters/src/ens_v1_unwrapped_authority/pipeline/apply.rs` at 622 LOC.
 - `crates/manifests/src/lib/model.rs` at 632 LOC.
 
@@ -53,7 +52,8 @@ LOC, `crates/adapters/src/ens_v1_unwrapped_authority.rs` at 572 LOC, and
 `crates/storage/src/raw_code.rs` at 562 LOC. `apps/indexer/src/main.rs` is no
 longer a hard failure, but remains a wiring-file advisory at 493 LOC.
 `crates/manifests/src/lib/views/resolver_profiles/ens_v1.rs` is now advisory
-only at 577 LOC.
+only at 577 LOC. `apps/indexer/src/main/repair.rs` is now advisory only at 583
+LOC.
 
 Addressed slices:
 
@@ -206,6 +206,9 @@ Addressed slices:
 - `crates/manifests/src/lib/views/resolver_profiles/ens_v1.rs` dropped below
   the hard oversized-file threshold by reusing the shared resolver-profile
   admission sort helper.
+- `apps/indexer/src/main/repair.rs` dropped below the hard oversized-file
+  threshold by reusing the storage normalized-event JSONB serializer instead of
+  carrying a duplicate NUL-safe JSON sanitizer.
 
 ## Highest leverage cleanup map
 

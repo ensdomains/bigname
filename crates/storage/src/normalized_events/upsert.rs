@@ -15,6 +15,7 @@ use batch::{
     upsert_normalized_event_batch,
 };
 use sanitize::jsonb_safe_normalized_event;
+pub use sanitize::serialize_jsonb_value;
 
 pub(super) const NORMALIZED_EVENT_FAST_INSERT_BATCH_SIZE: usize = 10_000;
 
