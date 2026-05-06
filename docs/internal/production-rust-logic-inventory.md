@@ -33,10 +33,10 @@ Production Rust snapshot from the working tree:
 | `apps/indexer` | 65 | 17,003 |
 | `apps/api` | 64 | 14,218 |
 | `apps/worker` | 69 | 12,491 |
-| `crates/manifests` | 33 | 7,656 |
+| `crates/manifests` | 33 | 7,602 |
 | `crates/execution` | 36 | 6,386 |
 | `crates/domain` | 1 | 6 |
-| Total | 513 | 105,128 |
+| Total | 513 | 105,074 |
 
 The current file-size gate hard-fails these oversized production files as the
 first places to revisit after logic dedupe:
@@ -44,7 +44,6 @@ first places to revisit after logic dedupe:
 - `crates/adapters/src/ens_v1_unwrapped_authority/preload.rs` at 1,674 LOC.
 - `apps/api/src/responses/app_facing/records_declared_values.rs` at 776 LOC.
 - `crates/adapters/src/ens_v1_unwrapped_authority/pipeline/apply.rs` at 622 LOC.
-- `crates/manifests/src/lib/model.rs` at 632 LOC.
 
 Additional advisory-only warnings remain above 500 LOC, including
 `crates/adapters/src/block_derived_normalized_events/event_builders.rs` at 593
@@ -53,7 +52,7 @@ LOC, `crates/adapters/src/ens_v1_unwrapped_authority.rs` at 572 LOC, and
 longer a hard failure, but remains a wiring-file advisory at 493 LOC.
 `crates/manifests/src/lib/views/resolver_profiles/ens_v1.rs` is now advisory
 only at 577 LOC. `apps/indexer/src/main/repair.rs` is now advisory only at 583
-LOC.
+LOC. `crates/manifests/src/lib/model.rs` is now advisory only at 578 LOC.
 
 Addressed slices:
 
@@ -209,6 +208,10 @@ Addressed slices:
 - `apps/indexer/src/main/repair.rs` dropped below the hard oversized-file
   threshold by reusing the storage normalized-event JSONB serializer instead of
   carrying a duplicate NUL-safe JSON sanitizer.
+- `crates/manifests/src/lib/model.rs` dropped below the hard oversized-file
+  threshold by replacing its hand-written optional `start_block` Serde visitor
+  with direct optional integer deserialization plus the same non-negative
+  conversion check.
 
 ## Highest leverage cleanup map
 

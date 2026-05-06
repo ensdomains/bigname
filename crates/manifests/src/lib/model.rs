@@ -5,10 +5,7 @@ use std::{
 };
 
 use anyhow::{Result, bail};
-use serde::{
-    Deserialize, Deserializer, Serialize,
-    de::{self, Visitor},
-};
+use serde::{Deserialize, Deserializer, Serialize, de};
 use uuid::Uuid;
 
 use crate::REACHABLE_FROM_ROOT_ADMISSION;
@@ -556,63 +553,12 @@ fn deserialize_optional_start_block<'de, D>(deserializer: D) -> Result<Option<u6
 where
     D: Deserializer<'de>,
 {
-    struct OptionalStartBlockVisitor;
-
-    impl<'de> Visitor<'de> for OptionalStartBlockVisitor {
-        type Value = Option<u64>;
-
-        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            formatter.write_str("a non-negative integer start_block")
-        }
-
-        fn visit_none<E>(self) -> Result<Self::Value, E>
-        where
-            E: de::Error,
-        {
-            Ok(None)
-        }
-
-        fn visit_unit<E>(self) -> Result<Self::Value, E>
-        where
-            E: de::Error,
-        {
-            Ok(None)
-        }
-
-        fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
-        where
-            D: Deserializer<'de>,
-        {
-            deserializer.deserialize_any(StartBlockVisitor).map(Some)
-        }
-    }
-
-    struct StartBlockVisitor;
-
-    impl Visitor<'_> for StartBlockVisitor {
-        type Value = u64;
-
-        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            formatter.write_str("a non-negative integer start_block")
-        }
-
-        fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
-        where
-            E: de::Error,
-        {
-            u64::try_from(value)
-                .map_err(|_| E::custom("start_block must be a non-negative integer"))
-        }
-
-        fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
-        where
-            E: de::Error,
-        {
-            Ok(value)
-        }
-    }
-
-    deserializer.deserialize_option(OptionalStartBlockVisitor)
+    Option::<i64>::deserialize(deserializer)?
+        .map(|start_block| {
+            u64::try_from(start_block)
+                .map_err(|_| de::Error::custom("start_block must be a non-negative integer"))
+        })
+        .transpose()
 }
 
 fn deserialize_authored_discovery_rule_admission<'de, D>(
