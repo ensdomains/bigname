@@ -259,21 +259,25 @@ async fn sync_ens_v1_unwrapped_authority_with_scope(
         }
 
         let apply_started = Instant::now();
-        matched_log_count += apply_authority_raw_logs(
-            &raw_logs,
-            &mut histories,
-            &mut reverse_histories,
-            &mut known_names_by_namehash,
-            &mut known_name_refs_by_namehash,
-            &mut namehash_to_labelhash,
-            &mut pending_namehash_observations,
-            &same_tx_name_intro_positions,
-            &mut migrated_registry_nodes,
-            &reverse_claim_sources,
-            &resolver_profile_gate,
-            &block_index,
-            &event_topics,
-        )?;
+        for raw_log in &raw_logs {
+            if apply_authority_raw_log(
+                raw_log,
+                &mut histories,
+                &mut reverse_histories,
+                &mut known_names_by_namehash,
+                &mut known_name_refs_by_namehash,
+                &mut namehash_to_labelhash,
+                &mut pending_namehash_observations,
+                &same_tx_name_intro_positions,
+                &mut migrated_registry_nodes,
+                &reverse_claim_sources,
+                &resolver_profile_gate,
+                &block_index,
+                &event_topics,
+            )? {
+                matched_log_count += 1;
+            }
+        }
         apply_ms = apply_started.elapsed().as_millis();
     }
 

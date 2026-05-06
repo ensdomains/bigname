@@ -22,44 +22,6 @@ pub(super) fn resolver_profile_fact_nodes(
     Ok(nodes.into_iter().collect())
 }
 
-pub(super) fn apply_authority_raw_logs(
-    raw_logs: &[AuthorityRawLogRow],
-    histories: &mut BTreeMap<String, NameHistory>,
-    reverse_histories: &mut BTreeMap<String, ReverseClaimSourceHistory>,
-    known_names_by_namehash: &mut HashMap<String, NameMetadata>,
-    known_name_refs_by_namehash: &mut HashMap<String, ObservationRef>,
-    namehash_to_labelhash: &mut HashMap<String, String>,
-    pending_namehash_observations: &mut HashMap<String, Vec<AuthorityObservation>>,
-    same_tx_name_intro_positions: &HashMap<String, Vec<RawLogPosition>>,
-    migrated_registry_nodes: &mut MigratedRegistryNodes,
-    reverse_claim_sources: &HashMap<String, ReverseClaimSource>,
-    resolver_profile_gate: &ResolverProfileGate,
-    block_index: &CanonicalBlockIndex,
-    event_topics: &AuthorityEventTopics,
-) -> Result<usize> {
-    let mut matched_log_count = 0usize;
-    for raw_log in raw_logs {
-        if apply_authority_raw_log(
-            raw_log,
-            histories,
-            reverse_histories,
-            known_names_by_namehash,
-            known_name_refs_by_namehash,
-            namehash_to_labelhash,
-            pending_namehash_observations,
-            same_tx_name_intro_positions,
-            migrated_registry_nodes,
-            reverse_claim_sources,
-            resolver_profile_gate,
-            block_index,
-            event_topics,
-        )? {
-            matched_log_count += 1;
-        }
-    }
-    Ok(matched_log_count)
-}
-
 pub(super) fn apply_authority_raw_log(
     raw_log: &AuthorityRawLogRow,
     histories: &mut BTreeMap<String, NameHistory>,
