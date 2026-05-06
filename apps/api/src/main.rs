@@ -62,7 +62,7 @@ use crate::{
         ResolutionExecutionExplainQuery, ResolutionMode, ResolutionQuery, ResolutionRecordKey,
         ResolverOverviewQuery, ResourceLookupQuery, ResponseView, RolesQuery,
     },
-    routes::{API_ROUTE_DEFINITIONS, ApiRouteDefinition, ApiRouteId},
+    routes::API_ROUTE_DEFINITIONS,
     state::AppState,
     types::*,
 };
