@@ -29,19 +29,16 @@ Production Rust snapshot from the working tree:
 | Area | Production files | LOC |
 | --- | ---: | ---: |
 | `crates/storage` | 144 | 25,984 |
-| `crates/adapters` | 101 | 21,350 |
+| `crates/adapters` | 106 | 21,377 |
 | `apps/indexer` | 65 | 17,003 |
 | `apps/api` | 65 | 14,218 |
 | `apps/worker` | 69 | 12,491 |
 | `crates/manifests` | 33 | 7,602 |
 | `crates/execution` | 36 | 6,386 |
 | `crates/domain` | 1 | 6 |
-| Total | 514 | 105,040 |
+| Total | 519 | 105,067 |
 
-The current file-size gate hard-fails these oversized production files as the
-first places to revisit after logic dedupe:
-
-- `crates/adapters/src/ens_v1_unwrapped_authority/preload.rs` at 1,674 LOC.
+The current file-size gate has no hard-failing production Rust files.
 
 Additional advisory-only warnings remain above 500 LOC, including
 `crates/adapters/src/block_derived_normalized_events/event_builders.rs` at 593
@@ -55,6 +52,9 @@ LOC. `crates/manifests/src/lib/model.rs` is now advisory only at 578 LOC.
 advisory only at 584 LOC.
 `apps/api/src/responses/app_facing/records_declared_values.rs` is now advisory
 only at 595 LOC.
+`crates/adapters/src/ens_v1_unwrapped_authority/preload.rs` is now below the
+advisory threshold at 347 LOC, and its largest preload helper module is
+`preload/registrar_state.rs` at 411 LOC.
 
 Addressed slices:
 
@@ -222,6 +222,10 @@ Addressed slices:
   the hard oversized-file threshold by moving compact record inventory lookup,
   inventory-derived payload, and inventory-source helpers into
   `records_declared_inventory.rs`.
+- `crates/adapters/src/ens_v1_unwrapped_authority/preload.rs` dropped below the
+  hard oversized-file threshold by splitting restricted replay preload support
+  into `preload/{registrar_state,registrar_history,resolver,support,wrapper_registry}.rs`
+  while preserving adapter-owned history preload and canonicality filters.
 
 ## Highest leverage cleanup map
 
@@ -238,7 +242,7 @@ Addressed slices:
 | Normalized-event builders and persistence summaries | `crates/adapters/src/normalized_event_support.rs` covers shared event identity loading and by-kind counters; remaining duplication lives in `crates/adapters/src/*/normalized.rs`, `events.rs`, `event_building.rs`, `persistence_summary.rs`, and manifest event identity/raw fact builders | Continue with shared `NormalizedEventBuilder`/summary helpers inside `crates/adapters`, with adapter-specific state supplied as data | Reduces repeated event identity, raw fact ref, by-kind count, and inserted count code |
 | OpenAPI schema/parameter JSON | `apps/api/src/openapi/parameters.rs` now owns shared primitive parameter schema builders used by `parameters.rs` and `app_facing_parameters.rs`; larger schema/operation JSON remains in `schemas.rs`, `responses.rs`, and `route_operations.rs` | Continue centralizing schema builders and parameter builders; later evaluate `utoipa`, `schemars`, or `aide` only if DTO derive-based schemas match public docs without obscuring contract review | Good LOC reduction, but public-contract risk is higher than internal helper cleanup |
 | Compact app-facing response transforms | `apps/api/src/responses/app_facing/records_declared_values.rs` now shares record-key indexing helpers for verified/declaration entries and selector-family lookups; remaining repeated transforms live in `handlers/app_facing/*.rs`, `responses/projections*.rs`, and compact record/role/event helpers | Extract typed compact record/role/event builders before considering a schema library; share selector parsing and record-key helpers with execution/storage support | Shrinks the largest API response file and improves reviewability |
-| ENSv1 restricted replay preload pipeline | `crates/adapters/src/ens_v1_unwrapped_authority/{preload.rs,pipeline.rs,pipeline/apply.rs,materialization.rs,observation.rs,loading/raw_logs.rs}` | Split by responsibility after the helper work above: preload queries, selected state before replay, resolver state preload, provenance decoding, history mutation, identity materialization | Most LOC impact, but should happen after shared helpers land to avoid pure file shuffling |
+| ENSv1 restricted replay preload pipeline | `crates/adapters/src/ens_v1_unwrapped_authority/{preload.rs,preload/*.rs,pipeline.rs,pipeline/apply.rs,materialization.rs,observation.rs,loading/raw_logs.rs}` | `preload.rs` now owns restricted replay orchestration while `preload/*.rs` owns registrar state/history, resolver state, row/provenance support, and wrapper/registry history helpers. Continue with behavior-preserving dedupe in pipeline/materialization/loading before changing semantics | Most LOC impact, but should stay as narrow adapter-owned slices to avoid replay-boundary drift |
 
 ## EVM and Alloy inventory
 
