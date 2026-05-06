@@ -1,12 +1,9 @@
 use std::collections::{BTreeMap, HashSet};
 
 use anyhow::Result;
-use bigname_storage::upsert_normalized_events;
 use sqlx::PgPool;
 
-use crate::normalized_event_support::{
-    count_events_by_kind, count_inserted_events_by_kind, load_existing_event_identities,
-};
+use crate::normalized_event_support::upsert_normalized_events_in_chunks_with_counts;
 
 mod active_emitters;
 mod events;
@@ -140,39 +137,26 @@ async fn sync_ens_v1_reverse_claim_with_scope(
         });
     }
 
-    let existing_event_identities =
-        load_existing_event_identities(pool, &events, "ENSv1 reverse normalized-event").await?;
-    let inserted_by_kind = count_inserted_events_by_kind(&events, &existing_event_identities);
-    let synced_by_kind = count_events_by_kind(&events);
-
-    let events_to_upsert = events.iter().collect::<Vec<_>>();
-    for chunk in events_to_upsert.chunks(10_000) {
-        let chunk = chunk
-            .iter()
-            .map(|event| (*event).to_owned())
-            .collect::<Vec<_>>();
-        upsert_normalized_events(pool, &chunk).await?;
-    }
-
-    let by_kind = synced_by_kind
-        .into_iter()
-        .map(|(event_kind, synced_count)| {
-            let inserted_count = inserted_by_kind.get(&event_kind).copied().unwrap_or(0);
-            (
-                event_kind,
-                EnsV1ReverseClaimKindSyncSummary {
-                    synced_count,
-                    inserted_count,
-                },
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
+    let counts = upsert_normalized_events_in_chunks_with_counts(
+        pool,
+        &events,
+        "ENSv1 reverse normalized-event",
+        10_000,
+    )
+    .await?;
+    let (total_synced_count, total_inserted_count, by_kind) =
+        counts.into_parts_by_kind(|synced_count, inserted_count| {
+            EnsV1ReverseClaimKindSyncSummary {
+                synced_count,
+                inserted_count,
+            }
+        });
 
     Ok(EnsV1ReverseClaimSyncSummary {
         scanned_log_count,
         matched_log_count: matched_log_refs.len(),
-        total_synced_count: events.len(),
-        total_inserted_count: inserted_by_kind.values().sum(),
+        total_synced_count,
+        total_inserted_count,
         by_kind,
     })
 }

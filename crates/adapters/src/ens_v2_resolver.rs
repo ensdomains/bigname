@@ -1,14 +1,11 @@
 use std::collections::BTreeMap;
 
 use anyhow::Result;
-use bigname_storage::upsert_normalized_events;
 use sqlx::PgPool;
 
 use crate::adapter_manifest::load_required_active_manifest_event_topic0s_by_signature;
 use crate::ens_v2_common::ActiveEmitter;
-use crate::normalized_event_support::{
-    count_events_by_kind, count_inserted_events_by_kind, load_existing_event_identities,
-};
+use crate::normalized_event_support::upsert_normalized_events_with_counts;
 
 mod constants;
 mod decode;
@@ -113,30 +110,19 @@ async fn sync_ens_v2_resolver_with_scope(
         events.extend(build_resolver_events(pool, raw_log, observation).await?);
     }
 
-    let existing = load_existing_event_identities(pool, &events, "ENSv2 resolver").await?;
-    let inserted_by_kind = count_inserted_events_by_kind(&events, &existing);
-    let synced_by_kind = count_events_by_kind(&events);
-    upsert_normalized_events(pool, &events).await?;
-
-    let by_kind = synced_by_kind
-        .into_iter()
-        .map(|(event_kind, synced_count)| {
-            let inserted_count = inserted_by_kind.get(&event_kind).copied().unwrap_or(0);
-            (
-                event_kind,
-                EnsV2ResolverKindSyncSummary {
-                    synced_count,
-                    inserted_count,
-                },
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
+    let counts = upsert_normalized_events_with_counts(pool, &events, "ENSv2 resolver").await?;
+    let (total_synced_count, total_inserted_count, by_kind) = counts.into_parts_by_kind(
+        |synced_count, inserted_count| EnsV2ResolverKindSyncSummary {
+            synced_count,
+            inserted_count,
+        },
+    );
 
     Ok(EnsV2ResolverSyncSummary {
         scanned_log_count,
         matched_log_count,
-        total_synced_count: events.len(),
-        total_inserted_count: inserted_by_kind.values().sum(),
+        total_synced_count,
+        total_inserted_count,
         by_kind,
     })
 }

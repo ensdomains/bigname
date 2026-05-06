@@ -1,8 +1,10 @@
 use std::collections::{BTreeMap, HashSet};
 
 use anyhow::Result;
-use bigname_storage::{NormalizedEvent, upsert_normalized_events};
 use sqlx::PgPool;
+
+#[cfg(test)]
+use bigname_storage::NormalizedEvent;
 
 mod constants;
 mod decoding;
@@ -14,7 +16,7 @@ mod source_selection;
 mod types;
 
 use crate::normalized_event_support::{
-    count_events_by_kind, count_inserted_events_by_kind, load_existing_event_identities,
+    NormalizedEventSyncCounts, upsert_normalized_events_with_counts,
 };
 use event_builders::build_preimage_observed_events;
 use loading::{load_scanned_log_count, load_watched_raw_logs};
@@ -108,19 +110,14 @@ async fn sync_block_derived_normalized_events_inner(
         return Ok(empty_summary(scanned_log_count));
     }
 
-    let existing_event_identities =
-        load_existing_event_identities(pool, &events, "block-derived normalized-event").await?;
-    let inserted_by_kind = count_inserted_events_by_kind(&events, &existing_event_identities);
-    let synced_by_kind = count_events_by_kind(&events);
-
-    upsert_normalized_events(pool, &events).await?;
+    let counts =
+        upsert_normalized_events_with_counts(pool, &events, "block-derived normalized-event")
+            .await?;
 
     Ok(build_summary(
         scanned_log_count,
         matched_log_refs.len(),
-        &events,
-        synced_by_kind,
-        inserted_by_kind,
+        counts,
     ))
 }
 
@@ -137,29 +134,21 @@ fn empty_summary(scanned_log_count: usize) -> BlockDerivedNormalizedEventSyncSum
 fn build_summary(
     scanned_log_count: usize,
     matched_log_count: usize,
-    events: &[NormalizedEvent],
-    synced_by_kind: BTreeMap<String, usize>,
-    inserted_by_kind: BTreeMap<String, usize>,
+    counts: NormalizedEventSyncCounts,
 ) -> BlockDerivedNormalizedEventSyncSummary {
-    let by_kind = synced_by_kind
-        .into_iter()
-        .map(|(event_kind, synced_count)| {
-            let inserted_count = inserted_by_kind.get(&event_kind).copied().unwrap_or(0);
-            (
-                event_kind,
-                BlockDerivedNormalizedEventKindSyncSummary {
-                    synced_count,
-                    inserted_count,
-                },
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
+    let (total_synced_count, total_inserted_count, by_kind) =
+        counts.into_parts_by_kind(|synced_count, inserted_count| {
+            BlockDerivedNormalizedEventKindSyncSummary {
+                synced_count,
+                inserted_count,
+            }
+        });
 
     BlockDerivedNormalizedEventSyncSummary {
         scanned_log_count,
         matched_log_count,
-        total_synced_count: events.len(),
-        total_inserted_count: inserted_by_kind.values().sum(),
+        total_synced_count,
+        total_inserted_count,
         by_kind,
     }
 }

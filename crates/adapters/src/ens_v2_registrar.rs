@@ -1,10 +1,7 @@
 use anyhow::Result;
-use bigname_storage::upsert_normalized_events;
 use sqlx::PgPool;
 
-use crate::normalized_event_support::{
-    count_events_by_kind, count_inserted_events_by_kind, load_existing_event_identities,
-};
+use crate::normalized_event_support::upsert_normalized_events_with_counts;
 
 mod active_emitters;
 mod decoding;
@@ -115,30 +112,19 @@ async fn sync_ens_v2_registrar_with_scope(
         events.push(build_registrar_event(pool, raw_log, observation).await?);
     }
 
-    let existing = load_existing_event_identities(pool, &events, "ENSv2 registrar").await?;
-    let inserted_by_kind = count_inserted_events_by_kind(&events, &existing);
-    let synced_by_kind = count_events_by_kind(&events);
-    upsert_normalized_events(pool, &events).await?;
-
-    let by_kind = synced_by_kind
-        .into_iter()
-        .map(|(event_kind, synced_count)| {
-            let inserted_count = inserted_by_kind.get(&event_kind).copied().unwrap_or(0);
-            (
-                event_kind,
-                EnsV2RegistrarKindSyncSummary {
-                    synced_count,
-                    inserted_count,
-                },
-            )
-        })
-        .collect();
+    let counts = upsert_normalized_events_with_counts(pool, &events, "ENSv2 registrar").await?;
+    let (total_synced_count, total_inserted_count, by_kind) = counts.into_parts_by_kind(
+        |synced_count, inserted_count| EnsV2RegistrarKindSyncSummary {
+            synced_count,
+            inserted_count,
+        },
+    );
 
     Ok(EnsV2RegistrarSyncSummary {
         scanned_log_count,
         matched_log_count,
-        total_synced_count: events.len(),
-        total_inserted_count: inserted_by_kind.values().sum(),
+        total_synced_count,
+        total_inserted_count,
         by_kind,
     })
 }
