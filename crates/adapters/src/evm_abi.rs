@@ -1,5 +1,7 @@
-use alloy_primitives::{Address, U256, hex, keccak256};
-use alloy_sol_types::{SolType, abi::TokenSeq};
+use std::str::FromStr;
+
+use alloy_primitives::{Address, B256, LogData, U256, hex, keccak256};
+use alloy_sol_types::{SolEvent, SolType, abi::TokenSeq};
 use anyhow::{Context, Result, bail};
 
 const ABI_WORD_BYTES: usize = 32;
@@ -13,6 +15,18 @@ where
     T::Token<'de>: TokenSeq<'de>,
 {
     T::abi_decode_params_validate(data).context(context)
+}
+
+pub(crate) fn decode_event_log<E>(
+    topics: &[String],
+    data: &[u8],
+    context: &'static str,
+) -> Result<E>
+where
+    E: SolEvent,
+{
+    let log_data = alloy_log_data(topics, data)?;
+    E::decode_log_data_validate(&log_data).context(context)
 }
 
 pub(crate) fn address_hex(address: Address) -> String {
@@ -29,20 +43,6 @@ pub(crate) fn topic_address_hex(value: &str) -> Result<String> {
     address_hex_from_word(&hex_32(value)?)
 }
 
-pub(crate) fn u64_topic(value: &str) -> Result<i64> {
-    i64_from_u64_word(&hex_32(value)?)
-}
-
-pub(crate) fn i64_from_u64_word(word: &[u8]) -> Result<i64> {
-    let word = exact_word(word)?;
-    if word[..24].iter().any(|byte| *byte != 0) {
-        bail!("u64 ABI word exceeds supported width");
-    }
-    let mut bytes = [0u8; 8];
-    bytes.copy_from_slice(&word[24..]);
-    i64::try_from(u64::from_be_bytes(bytes)).context("u64 ABI word does not fit in i64")
-}
-
 pub(crate) fn u256_decimal(value: U256) -> String {
     value.to_string()
 }
@@ -54,10 +54,6 @@ pub(crate) fn u256_i64(value: U256, label: &str) -> Result<i64> {
 
 pub(crate) fn u256_word_hex(value: U256) -> String {
     hex_string(value.to_be_bytes::<ABI_WORD_BYTES>())
-}
-
-pub(crate) fn u256_topic_decimal(value: &str) -> Result<String> {
-    Ok(U256::from_be_bytes(hex_32(value)?).to_string())
 }
 
 pub(crate) fn u256_topic_i64(value: &str, label: &str) -> Result<i64> {
@@ -117,6 +113,17 @@ pub(crate) fn hex_string(bytes: impl AsRef<[u8]>) -> String {
 
 pub(crate) fn hex_string_without_prefix(bytes: impl AsRef<[u8]>) -> String {
     hex::encode(bytes)
+}
+
+fn alloy_log_data(topics: &[String], data: &[u8]) -> Result<LogData> {
+    let topics = topics
+        .iter()
+        .map(|topic| {
+            let normalized = normalize_hex_32(topic)?;
+            B256::from_str(&normalized).with_context(|| format!("invalid EVM log topic {topic}"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    LogData::new(topics, data.to_vec().into()).context("EVM log has more than four topics")
 }
 
 fn exact_word(word: &[u8]) -> Result<&[u8; ABI_WORD_BYTES]> {

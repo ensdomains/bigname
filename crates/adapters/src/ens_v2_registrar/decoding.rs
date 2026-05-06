@@ -1,17 +1,43 @@
-use alloy_sol_types::sol_data::{Address as SolAddress, FixedBytes, String as SolString, Uint};
+use alloy_sol_types::sol;
 use anyhow::{Context, Result};
 
 use crate::adapter_manifest::ActiveManifestEventTopic0sBySignature;
 pub(super) use crate::ens_v2_common::{hex_string, normalize_address};
 use crate::evm_abi::{
-    abi_decode_params, address_hex, hex_string as prefixed_hex_string, normalize_hex_32,
-    u256_word_hex,
+    address_hex, decode_event_log, hex_string as prefixed_hex_string, u256_word_hex,
 };
 
 use super::{
     ABI_EVENT_NAME_REGISTERED_SIGNATURE, ABI_EVENT_NAME_RENEWED_SIGNATURE,
     raw_logs::RegistrarRawLogRow,
 };
+
+sol! {
+    #[derive(Debug)]
+    event NameRegistered(
+        uint256 indexed tokenId,
+        string label,
+        address owner,
+        address subregistry,
+        address resolver,
+        uint64 duration,
+        address paymentToken,
+        bytes32 referrer,
+        uint256 base,
+        uint256 premium
+    );
+
+    #[derive(Debug)]
+    event NameRenewed(
+        uint256 indexed tokenId,
+        string label,
+        uint64 duration,
+        uint64 newExpiry,
+        address paymentToken,
+        bytes32 referrer,
+        uint256 base
+    );
+}
 
 pub(super) enum RegistrarObservation {
     NameRegistered {
@@ -46,62 +72,40 @@ pub(super) fn build_registrar_observation(
     };
 
     if event_topics.matches(ABI_EVENT_NAME_REGISTERED_SIGNATURE, topic0)? {
-        let token_id = normalize_hex_32(
-            raw_log
-                .topics
-                .get(1)
-                .context("NameRegistered missing tokenId topic")?,
+        let event = decode_event_log::<NameRegistered>(
+            &raw_log.topics,
+            &raw_log.data,
+            "NameRegistered log is malformed",
         )?;
-        let (label, owner, subregistry, resolver, duration, payment_token, referrer, base, premium) =
-            abi_decode_params::<(
-                SolString,
-                SolAddress,
-                SolAddress,
-                SolAddress,
-                Uint<64>,
-                SolAddress,
-                FixedBytes<32>,
-                Uint<256>,
-                Uint<256>,
-            )>(&raw_log.data, "NameRegistered data is malformed")?;
         return Ok(Some(RegistrarObservation::NameRegistered {
-            token_id,
-            label,
-            owner: address_hex(owner),
-            subregistry: address_hex(subregistry),
-            resolver: address_hex(resolver),
-            duration: i64::try_from(duration).context("NameRegistered duration exceeds i64")?,
-            payment_token: address_hex(payment_token),
-            referrer: prefixed_hex_string(referrer.as_slice()),
-            base: u256_word_hex(base),
-            premium: u256_word_hex(premium),
+            token_id: u256_word_hex(event.tokenId),
+            label: event.label,
+            owner: address_hex(event.owner),
+            subregistry: address_hex(event.subregistry),
+            resolver: address_hex(event.resolver),
+            duration: i64::try_from(event.duration)
+                .context("NameRegistered duration exceeds i64")?,
+            payment_token: address_hex(event.paymentToken),
+            referrer: prefixed_hex_string(event.referrer.as_slice()),
+            base: u256_word_hex(event.base),
+            premium: u256_word_hex(event.premium),
         }));
     }
 
     if event_topics.matches(ABI_EVENT_NAME_RENEWED_SIGNATURE, topic0)? {
-        let token_id = normalize_hex_32(
-            raw_log
-                .topics
-                .get(1)
-                .context("NameRenewed missing tokenId topic")?,
+        let event = decode_event_log::<NameRenewed>(
+            &raw_log.topics,
+            &raw_log.data,
+            "NameRenewed log is malformed",
         )?;
-        let (label, duration, new_expiry, payment_token, referrer, base) =
-            abi_decode_params::<(
-                SolString,
-                Uint<64>,
-                Uint<64>,
-                SolAddress,
-                FixedBytes<32>,
-                Uint<256>,
-            )>(&raw_log.data, "NameRenewed data is malformed")?;
         return Ok(Some(RegistrarObservation::NameRenewed {
-            token_id,
-            label,
-            duration: i64::try_from(duration).context("NameRenewed duration exceeds i64")?,
-            new_expiry: i64::try_from(new_expiry).context("NameRenewed expiry exceeds i64")?,
-            payment_token: address_hex(payment_token),
-            referrer: prefixed_hex_string(referrer.as_slice()),
-            base: u256_word_hex(base),
+            token_id: u256_word_hex(event.tokenId),
+            label: event.label,
+            duration: i64::try_from(event.duration).context("NameRenewed duration exceeds i64")?,
+            new_expiry: i64::try_from(event.newExpiry).context("NameRenewed expiry exceeds i64")?,
+            payment_token: address_hex(event.paymentToken),
+            referrer: prefixed_hex_string(event.referrer.as_slice()),
+            base: u256_word_hex(event.base),
         }));
     }
 

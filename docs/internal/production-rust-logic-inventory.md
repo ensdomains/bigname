@@ -29,14 +29,14 @@ Production Rust snapshot from the working tree:
 | Area | Production files | LOC |
 | --- | ---: | ---: |
 | `crates/storage` | 144 | 26,020 |
-| `crates/adapters` | 101 | 21,546 |
+| `crates/adapters` | 101 | 21,516 |
 | `apps/indexer` | 65 | 17,060 |
 | `apps/api` | 64 | 14,218 |
 | `apps/worker` | 71 | 12,914 |
 | `crates/manifests` | 33 | 7,675 |
 | `crates/execution` | 36 | 6,386 |
 | `crates/domain` | 1 | 6 |
-| Total | 515 | 105,825 |
+| Total | 515 | 105,795 |
 
 The current file-size gate hard-fails these oversized production files as the
 first places to revisit after logic dedupe:
@@ -129,6 +129,9 @@ Addressed slices:
   `crates/adapters/src/ens_v2_permissions` now load resolver and permission
   event topic0s from active manifest ABI events. Production ENSv2 adapter
   decoders no longer own event signature strings for direct adapter matching.
+- Direct ENSv2 registry, registrar, resolver, and permissions decoders now use
+  `sol!`/`SolEvent` to validate and decode full logs, including indexed topics
+  and event bodies, after the manifest-owned canonical signature gate matches.
 - `crates/adapters/src/block_derived_normalized_events` now loads ENSv1
   wrapper/registrar and ENSv2 registry/registrar/resolver preimage event
   topic0s from active manifest ABI events by `source_manifest_id` and canonical
@@ -194,11 +197,13 @@ The codebase already uses Alloy in `crates/execution`, `crates/adapters`, and
   generated types for Universal Resolver and resolver selector calldata/return
   decoding. It still owns execution-local DNS/namehash and hex helpers.
 - `crates/adapters/src/evm_abi.rs` centralizes indexed-topic/static-word
-  normalization and Alloy tuple decoding for adapters. ENSv1 authority,
-  block-derived preimage, ENSv2 registrar, registry, permissions, and resolver
-  event bodies decode through Alloy. Topic matching for the direct ENSv2,
-  block-derived, and ENSv1 authority adapters is manifest-derived, and
-  block-derived dispatch is source-family keyed instead of builder probing.
+  normalization, Alloy tuple decoding, and `SolEvent` log decoding for adapters.
+  Direct ENSv2 registrar, registry, permissions, and resolver logs decode
+  through generated `sol!` event types; ENSv1 authority and block-derived
+  preimage event bodies decode through Alloy tuples. Topic matching for the
+  direct ENSv2, block-derived, and ENSv1 authority adapters is
+  manifest-derived, and block-derived dispatch is source-family keyed instead
+  of builder probing.
 - `crates/storage/src/evm_primitives.rs` centralizes storage-side EVM address
   and hash parsing with Alloy while leaving legacy non-standard values as
   lowercase strings at the same ingestion boundaries.
@@ -212,8 +217,8 @@ Near-term replacement candidates:
 
 - Replace remaining code-owned ABI shape declarations with generated `sol!`
   event types or manifest-backed dynamic ABI decoding where the generated or
-  dynamic surface stays easy to review. The current adapter event-body decoders
-  are Alloy tuple based, but their tuple shapes are still written in Rust.
+  dynamic surface stays easy to review. Direct ENSv2 adapters use `SolEvent`;
+  ENSv1 authority and block-derived tuple shapes are still written in Rust.
 - Move source-family event/call definitions into manifest `[[abi.events]]` and
   `[[abi.calls]]`, then consume them through `alloy-json-abi` and
   `alloy-dyn-abi` lookup helpers. ENSv2 Sepolia registry/registrar/resolver
@@ -468,11 +473,11 @@ generic helpers.
    and worker standard EVM address/hash helpers now use Alloy with owner-local
    fallback semantics. Execution/indexer helper consolidation remains.
 5. Partially done: direct ENSv2 registrar, registry, resolver, and permissions
-   topic matching now uses active manifest ABI topic0s, their event bodies
-   decode through `alloy-sol-types`, and block-derived ENSv1/ENSv2 preimage
-   matching plus ENSv1 authority adapter matching use manifest-owned topics
-   keyed by canonical signatures. Block-derived and ENSv1 authority event-body
-   decoders are now Alloy tuple based; continue by moving call fragments and
+   topic matching now uses active manifest ABI topic0s and full log decoding is
+   `sol!`/`SolEvent` based. Block-derived ENSv1/ENSv2 preimage matching plus
+   ENSv1 authority adapter matching use manifest-owned topics keyed by canonical
+   signatures. Block-derived and ENSv1 authority event-body decoders are now
+   Alloy tuple based; continue by moving call fragments and the remaining
    code-owned event tuple shapes to generated or manifest-backed ABI lookup.
 6. Partially done: provider JSON-RPC response decoding now uses typed serde DTOs
    backed by Alloy primitives for hashes, addresses, quantities, topics, and

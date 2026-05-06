@@ -1,15 +1,65 @@
-use alloy_sol_types::sol_data::{Address as SolAddress, String as SolString, Uint};
+use alloy_sol_types::sol;
 use anyhow::{Context, Result};
 
 use crate::adapter_manifest::ActiveManifestEventTopic0sBySignature;
 use crate::evm_abi::{
-    abi_decode_params, address_hex, normalize_hex_32, topic_address_hex, u64_topic,
+    address_hex, decode_event_log, hex_string as prefixed_hex_string, u256_word_hex,
 };
 
 use super::{
     constants::*,
     types::{RegistryObservation, RegistryRawLogRow},
 };
+
+sol! {
+    #[derive(Debug)]
+    event LabelRegistered(
+        uint256 indexed tokenId,
+        bytes32 indexed labelHash,
+        string label,
+        address owner,
+        uint64 expiry,
+        address indexed sender
+    );
+
+    #[derive(Debug)]
+    event LabelReserved(
+        uint256 indexed tokenId,
+        bytes32 indexed labelHash,
+        string label,
+        uint64 expiry,
+        address indexed sender
+    );
+
+    #[derive(Debug)]
+    event LabelUnregistered(uint256 indexed tokenId, address indexed sender);
+
+    #[derive(Debug)]
+    event ExpiryUpdated(uint256 indexed tokenId, uint64 indexed newExpiry, address indexed sender);
+
+    #[derive(Debug)]
+    event SubregistryUpdated(
+        uint256 indexed tokenId,
+        address indexed subregistry,
+        address indexed sender
+    );
+
+    #[derive(Debug)]
+    event ResolverUpdated(
+        uint256 indexed tokenId,
+        address indexed resolver,
+        address indexed sender
+    );
+
+    #[derive(Debug)]
+    event TokenResource(uint256 indexed tokenId, uint256 indexed resource);
+
+    #[derive(Debug)]
+    event TokenRegenerated(uint256 indexed oldTokenId, uint256 indexed newTokenId);
+
+    #[derive(Debug)]
+    event ParentUpdated(address indexed parent, string label, address indexed sender);
+}
 
 pub(super) fn build_registry_observation(
     raw_log: &RegistryRawLogRow,
@@ -21,232 +71,130 @@ pub(super) fn build_registry_observation(
     let reference = raw_log.reference();
 
     if event_topics.matches(ABI_EVENT_LABEL_REGISTERED_SIGNATURE, topic0)? {
-        let token_id = normalize_hex_32(
-            raw_log
-                .topics
-                .get(1)
-                .context("LabelRegistered missing tokenId topic")?,
-        )?;
-        let labelhash = normalize_hex_32(
-            raw_log
-                .topics
-                .get(2)
-                .context("LabelRegistered missing labelHash topic")?,
-        )?;
-        let sender = topic_address_hex(
-            raw_log
-                .topics
-                .get(3)
-                .context("LabelRegistered missing sender topic")?,
-        )?;
-        let (label, owner, expiry) = abi_decode_params::<(SolString, SolAddress, Uint<64>)>(
+        let event = decode_event_log::<LabelRegistered>(
+            &raw_log.topics,
             &raw_log.data,
-            "LabelRegistered data is malformed",
+            "LabelRegistered log is malformed",
         )?;
         return Ok(Some(RegistryObservation::LabelRegistered {
-            token_id,
-            labelhash,
-            label,
-            owner: address_hex(owner),
-            expiry: i64::try_from(expiry).context("LabelRegistered expiry exceeds i64")?,
-            sender,
+            token_id: u256_word_hex(event.tokenId),
+            labelhash: prefixed_hex_string(event.labelHash.as_slice()),
+            label: event.label,
+            owner: address_hex(event.owner),
+            expiry: i64::try_from(event.expiry).context("LabelRegistered expiry exceeds i64")?,
+            sender: address_hex(event.sender),
             reference,
         }));
     }
 
     if event_topics.matches(ABI_EVENT_LABEL_RESERVED_SIGNATURE, topic0)? {
-        let token_id = normalize_hex_32(
-            raw_log
-                .topics
-                .get(1)
-                .context("LabelReserved missing tokenId topic")?,
-        )?;
-        let labelhash = normalize_hex_32(
-            raw_log
-                .topics
-                .get(2)
-                .context("LabelReserved missing labelHash topic")?,
-        )?;
-        let sender = topic_address_hex(
-            raw_log
-                .topics
-                .get(3)
-                .context("LabelReserved missing sender topic")?,
-        )?;
-        let (label, expiry) = abi_decode_params::<(SolString, Uint<64>)>(
+        let event = decode_event_log::<LabelReserved>(
+            &raw_log.topics,
             &raw_log.data,
-            "LabelReserved data is malformed",
+            "LabelReserved log is malformed",
         )?;
         return Ok(Some(RegistryObservation::LabelReserved {
-            token_id,
-            labelhash,
-            label,
-            expiry: i64::try_from(expiry).context("LabelReserved expiry exceeds i64")?,
-            sender,
+            token_id: u256_word_hex(event.tokenId),
+            labelhash: prefixed_hex_string(event.labelHash.as_slice()),
+            label: event.label,
+            expiry: i64::try_from(event.expiry).context("LabelReserved expiry exceeds i64")?,
+            sender: address_hex(event.sender),
             reference,
         }));
     }
 
     if event_topics.matches(ABI_EVENT_LABEL_UNREGISTERED_SIGNATURE, topic0)? {
-        let token_id = normalize_hex_32(
-            raw_log
-                .topics
-                .get(1)
-                .context("LabelUnregistered missing tokenId topic")?,
-        )?;
-        let sender = topic_address_hex(
-            raw_log
-                .topics
-                .get(2)
-                .context("LabelUnregistered missing sender topic")?,
+        let event = decode_event_log::<LabelUnregistered>(
+            &raw_log.topics,
+            &raw_log.data,
+            "LabelUnregistered log is malformed",
         )?;
         return Ok(Some(RegistryObservation::LabelUnregistered {
-            token_id,
-            sender,
+            token_id: u256_word_hex(event.tokenId),
+            sender: address_hex(event.sender),
             reference,
         }));
     }
 
     if event_topics.matches(ABI_EVENT_EXPIRY_UPDATED_SIGNATURE, topic0)? {
-        let token_id = normalize_hex_32(
-            raw_log
-                .topics
-                .get(1)
-                .context("ExpiryUpdated missing tokenId topic")?,
-        )?;
-        let new_expiry = u64_topic(
-            raw_log
-                .topics
-                .get(2)
-                .context("ExpiryUpdated missing newExpiry topic")?,
-        )?;
-        let sender = topic_address_hex(
-            raw_log
-                .topics
-                .get(3)
-                .context("ExpiryUpdated missing sender topic")?,
+        let event = decode_event_log::<ExpiryUpdated>(
+            &raw_log.topics,
+            &raw_log.data,
+            "ExpiryUpdated log is malformed",
         )?;
         return Ok(Some(RegistryObservation::ExpiryUpdated {
-            token_id,
-            new_expiry,
-            sender,
+            token_id: u256_word_hex(event.tokenId),
+            new_expiry: i64::try_from(event.newExpiry)
+                .context("ExpiryUpdated new expiry exceeds i64")?,
+            sender: address_hex(event.sender),
             reference,
         }));
     }
 
     if event_topics.matches(ABI_EVENT_SUBREGISTRY_UPDATED_SIGNATURE, topic0)? {
-        let token_id = normalize_hex_32(
-            raw_log
-                .topics
-                .get(1)
-                .context("SubregistryUpdated missing tokenId topic")?,
-        )?;
-        let subregistry = topic_address_hex(
-            raw_log
-                .topics
-                .get(2)
-                .context("SubregistryUpdated missing subregistry topic")?,
-        )?;
-        let sender = topic_address_hex(
-            raw_log
-                .topics
-                .get(3)
-                .context("SubregistryUpdated missing sender topic")?,
+        let event = decode_event_log::<SubregistryUpdated>(
+            &raw_log.topics,
+            &raw_log.data,
+            "SubregistryUpdated log is malformed",
         )?;
         return Ok(Some(RegistryObservation::SubregistryUpdated {
-            token_id,
-            subregistry,
-            sender,
+            token_id: u256_word_hex(event.tokenId),
+            subregistry: address_hex(event.subregistry),
+            sender: address_hex(event.sender),
             reference,
         }));
     }
 
     if event_topics.matches(ABI_EVENT_RESOLVER_UPDATED_SIGNATURE, topic0)? {
-        let token_id = normalize_hex_32(
-            raw_log
-                .topics
-                .get(1)
-                .context("ResolverUpdated missing tokenId topic")?,
-        )?;
-        let resolver = topic_address_hex(
-            raw_log
-                .topics
-                .get(2)
-                .context("ResolverUpdated missing resolver topic")?,
-        )?;
-        let sender = topic_address_hex(
-            raw_log
-                .topics
-                .get(3)
-                .context("ResolverUpdated missing sender topic")?,
+        let event = decode_event_log::<ResolverUpdated>(
+            &raw_log.topics,
+            &raw_log.data,
+            "ResolverUpdated log is malformed",
         )?;
         return Ok(Some(RegistryObservation::ResolverUpdated {
-            token_id,
-            resolver,
-            sender,
+            token_id: u256_word_hex(event.tokenId),
+            resolver: address_hex(event.resolver),
+            sender: address_hex(event.sender),
             reference,
         }));
     }
 
     if event_topics.matches(ABI_EVENT_TOKEN_RESOURCE_SIGNATURE, topic0)? {
-        let token_id = normalize_hex_32(
-            raw_log
-                .topics
-                .get(1)
-                .context("TokenResource missing tokenId topic")?,
-        )?;
-        let upstream_resource = normalize_hex_32(
-            raw_log
-                .topics
-                .get(2)
-                .context("TokenResource missing resource topic")?,
+        let event = decode_event_log::<TokenResource>(
+            &raw_log.topics,
+            &raw_log.data,
+            "TokenResource log is malformed",
         )?;
         return Ok(Some(RegistryObservation::TokenResource {
-            token_id,
-            upstream_resource,
+            token_id: u256_word_hex(event.tokenId),
+            upstream_resource: u256_word_hex(event.resource),
             reference,
         }));
     }
 
     if event_topics.matches(ABI_EVENT_TOKEN_REGENERATED_SIGNATURE, topic0)? {
-        let old_token_id = normalize_hex_32(
-            raw_log
-                .topics
-                .get(1)
-                .context("TokenRegenerated missing oldTokenId topic")?,
-        )?;
-        let new_token_id = normalize_hex_32(
-            raw_log
-                .topics
-                .get(2)
-                .context("TokenRegenerated missing newTokenId topic")?,
+        let event = decode_event_log::<TokenRegenerated>(
+            &raw_log.topics,
+            &raw_log.data,
+            "TokenRegenerated log is malformed",
         )?;
         return Ok(Some(RegistryObservation::TokenRegenerated {
-            old_token_id,
-            new_token_id,
+            old_token_id: u256_word_hex(event.oldTokenId),
+            new_token_id: u256_word_hex(event.newTokenId),
             reference,
         }));
     }
 
     if event_topics.matches(ABI_EVENT_PARENT_UPDATED_SIGNATURE, topic0)? {
-        let parent = topic_address_hex(
-            raw_log
-                .topics
-                .get(1)
-                .context("ParentUpdated missing parent topic")?,
+        let event = decode_event_log::<ParentUpdated>(
+            &raw_log.topics,
+            &raw_log.data,
+            "ParentUpdated log is malformed",
         )?;
-        let sender = topic_address_hex(
-            raw_log
-                .topics
-                .get(2)
-                .context("ParentUpdated missing sender topic")?,
-        )?;
-        let (label,) =
-            abi_decode_params::<(SolString,)>(&raw_log.data, "ParentUpdated data is malformed")?;
         return Ok(Some(RegistryObservation::ParentUpdated {
-            parent,
-            label,
-            sender,
+            parent: address_hex(event.parent),
+            label: event.label,
+            sender: address_hex(event.sender),
             reference,
         }));
     }
