@@ -395,10 +395,10 @@ Primary files:
 - `apps/api/src/openapi.rs`
 - `apps/api/src/openapi/route_operations.rs`
 - `apps/api/src/openapi/schemas.rs`
-- `apps/api/src/openapi/parameters.rs`
-- `apps/api/src/openapi/app_facing_parameters.rs`
 - `apps/api/src/openapi/responses.rs`
 - `apps/api/src/routes.rs`
+- `apps/api/src/routes/parameters.rs`
+- `apps/api/src/routes/parameters/app.rs`
 - `apps/api/src/tests/openapi.rs`
 - `docs/api-v1.openapi.json`
 

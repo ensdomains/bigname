@@ -1,6 +1,6 @@
 # ADR 0004: Conceptual Deduplication Gate
 
-Status: Proposed
+Status: Accepted
 Date: 2026-05-06
 
 ## Context

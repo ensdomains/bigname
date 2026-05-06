@@ -210,8 +210,11 @@ fn strip_crate_recursion_limit(source: &str) -> String {
 
 fn rewrite_openapi_components(source: &str) -> String {
     const START: &str = "fn openapi_components() -> JsonValue {";
+    const CURRENT_END: &str = "\npub(super) fn schema_ref(";
     const LEGACY_END: &str = "\nfn declared_response_schema(";
+    const LEGACY_VISIBLE_END: &str = "\npub(super) fn declared_response_schema(";
     const SPLIT_SCHEMA_END: &str = "\nfn primary_name_claimed_result_schema(";
+    const SPLIT_SCHEMA_VISIBLE_END: &str = "\npub(super) fn primary_name_claimed_result_schema(";
     const REPLACEMENT: &str = r###"fn openapi_components() -> JsonValue {
     let mut schemas = serde_json::Map::new();
     schemas.insert("JsonObject".to_owned(), json_object_schema());
@@ -598,13 +601,19 @@ fn rewrite_openapi_components(source: &str) -> String {
     let start = source
         .find(START)
         .unwrap_or_else(|| panic!("failed to find `{START}` in copied api source"));
-    let end = [LEGACY_END, SPLIT_SCHEMA_END]
+    let end = [
+        CURRENT_END,
+        LEGACY_END,
+        LEGACY_VISIBLE_END,
+        SPLIT_SCHEMA_END,
+        SPLIT_SCHEMA_VISIBLE_END,
+    ]
         .into_iter()
         .filter_map(|marker| source[start..].find(marker).map(|offset| start + offset))
         .min()
         .unwrap_or_else(|| {
             panic!(
-                "failed to find `{LEGACY_END}` or `{SPLIT_SCHEMA_END}` after `{START}` in copied api source"
+                "failed to find an OpenAPI component helper after `{START}` in copied api source"
             )
         });
 
