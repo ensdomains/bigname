@@ -295,6 +295,11 @@ pub(super) fn derive_code_hash_resolver_profile_admissions(
         }
     }
 
+    sort_resolver_profile_admissions(&mut admissions);
+    admissions
+}
+
+pub(super) fn sort_resolver_profile_admissions(admissions: &mut [ResolverProfileAdmission]) {
     admissions.sort_by(|left, right| {
         (
             left.chain.as_str(),
@@ -303,6 +308,7 @@ pub(super) fn derive_code_hash_resolver_profile_admissions(
             left.contract_instance_id,
             left.active_from_block_number,
             left.active_to_block_number,
+            left.profile.as_str(),
             left.fact_family.as_str(),
         )
             .cmp(&(
@@ -312,10 +318,10 @@ pub(super) fn derive_code_hash_resolver_profile_admissions(
                 right.contract_instance_id,
                 right.active_from_block_number,
                 right.active_to_block_number,
+                right.profile.as_str(),
                 right.fact_family.as_str(),
             ))
     });
-    admissions
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

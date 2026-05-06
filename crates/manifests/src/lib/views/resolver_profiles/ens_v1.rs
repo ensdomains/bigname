@@ -21,7 +21,7 @@ use super::{
     RESOLVER_PROFILE_BASIS_CODE_HASH_MATCH, RESOLVER_PROFILE_BASIS_CODE_HASH_MISMATCH,
     RESOLVER_PROFILE_BASIS_CODE_HASH_PENDING, RESOLVER_PROFILE_STATUS_PENDING,
     RESOLVER_PROFILE_STATUS_SUPPORTED, RESOLVER_PROFILE_STATUS_UNSUPPORTED,
-    latest_resolver_code_hashes_by_contract_id,
+    latest_resolver_code_hashes_by_contract_id, sort_resolver_profile_admissions,
 };
 
 const ENS_V1_RESOLVER_SOURCE_FAMILY: &str = "ens_v1_resolver_l1";
@@ -445,7 +445,7 @@ fn derive_ens_v1_resolver_profile_admissions(
         push_profile_admissions(watched_contract, profile_match, &mut admissions);
     }
 
-    sort_admissions(&mut admissions);
+    sort_resolver_profile_admissions(&mut admissions);
     admissions
 }
 
@@ -573,30 +573,5 @@ fn push_admission(
         observed_code_hash: profile_match.observed_code_hash.clone(),
         matched_code_hash: profile_match.matched_code_hash.clone(),
         matched_contract_instance_id: profile_match.matched_contract_instance_id,
-    });
-}
-
-fn sort_admissions(admissions: &mut [ResolverProfileAdmission]) {
-    admissions.sort_by(|left, right| {
-        (
-            left.chain.as_str(),
-            left.source_family.as_str(),
-            left.address.as_str(),
-            left.contract_instance_id,
-            left.active_from_block_number,
-            left.active_to_block_number,
-            left.profile.as_str(),
-            left.fact_family.as_str(),
-        )
-            .cmp(&(
-                right.chain.as_str(),
-                right.source_family.as_str(),
-                right.address.as_str(),
-                right.contract_instance_id,
-                right.active_from_block_number,
-                right.active_to_block_number,
-                right.profile.as_str(),
-                right.fact_family.as_str(),
-            ))
     });
 }
