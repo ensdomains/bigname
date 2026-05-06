@@ -262,8 +262,39 @@ pub(super) async fn load_supported_record_inventory_current_for_snapshot(
     .await
 }
 
-pub(super) fn record_inventory_lookup_key(row: &NameCurrentRow) -> Option<(Uuid, JsonValue)> {
-    record_inventory::record_inventory_lookup_key(row)
+pub(super) async fn load_explicit_unsupported_record_inventory_current(
+    pool: &PgPool,
+    row: &NameCurrentRow,
+) -> std::result::Result<Option<RecordInventoryCurrentRow>, SnapshotSelectionError> {
+    record_inventory::load_explicit_unsupported_record_inventory_current(pool, row).await
+}
+
+pub(super) async fn load_record_inventory_current_matching_selected_snapshot(
+    pool: &PgPool,
+    row: &NameCurrentRow,
+    selected_snapshot: &SelectedSnapshot,
+    allow_selected_superset: bool,
+) -> std::result::Result<Option<RecordInventoryCurrentRow>, SnapshotSelectionError> {
+    record_inventory::load_record_inventory_current_matching_selected_snapshot(
+        pool,
+        row,
+        selected_snapshot,
+        allow_selected_superset,
+    )
+    .await
+}
+
+#[cfg(test)]
+pub(super) fn record_inventory_chain_positions_match_selected_snapshot(
+    projected: &ChainPositions,
+    selected_snapshot: &SelectedSnapshot,
+    allow_selected_superset: bool,
+) -> bool {
+    record_inventory::record_inventory_chain_positions_match_selected_snapshot(
+        projected,
+        selected_snapshot,
+        allow_selected_superset,
+    )
 }
 
 pub(super) fn resolution_verified_support_boundary(
@@ -271,21 +302,4 @@ pub(super) fn resolution_verified_support_boundary(
     record_inventory_row: Option<&RecordInventoryCurrentRow>,
 ) -> Option<bigname_storage::VerifiedResolutionSupportBoundary> {
     record_inventory::resolution_verified_support_boundary(row, record_inventory_row)
-}
-
-pub(super) fn record_version_boundary_has_pointer(record_version_boundary: &JsonValue) -> bool {
-    record_inventory::record_version_boundary_has_pointer(record_version_boundary)
-}
-
-pub(super) async fn find_supported_record_inventory_boundary(
-    pool: &PgPool,
-    resource_id: Uuid,
-    record_version_boundary: &JsonValue,
-) -> Result<Option<JsonValue>> {
-    record_inventory::find_supported_record_inventory_boundary(
-        pool,
-        resource_id,
-        record_version_boundary,
-    )
-    .await
 }
