@@ -11,6 +11,54 @@ pub(super) struct ExactNameInventoryRead {
     pub(super) selected_snapshot: SelectedSnapshot,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(super) struct ExactNameReadRequest<'a> {
+    namespace: &'a str,
+    name: &'a str,
+    selector: ExactNameSnapshotSelector<'a>,
+    include_resolution_auxiliary: bool,
+    projection_kind: Option<&'a str>,
+}
+
+impl<'a> ExactNameReadRequest<'a> {
+    pub(super) fn new(
+        namespace: &'a str,
+        name: &'a str,
+        selector: ExactNameSnapshotSelector<'a>,
+    ) -> Self {
+        Self {
+            namespace,
+            name,
+            selector,
+            include_resolution_auxiliary: false,
+            projection_kind: None,
+        }
+    }
+
+    pub(super) fn include_resolution_auxiliary(mut self, include: bool) -> Self {
+        self.include_resolution_auxiliary = include;
+        self
+    }
+
+    fn with_projection_kind(mut self, projection_kind: &'a str) -> Self {
+        self.projection_kind = Some(projection_kind);
+        self
+    }
+
+    fn map_internal_error(self, error: ApiError) -> ApiError {
+        let Some(projection_kind) = self.projection_kind else {
+            return error;
+        };
+        map_internal_api_error(
+            error,
+            format!(
+                "failed to load {projection_kind} projection for name {}/{}",
+                self.namespace, self.name
+            ),
+        )
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct ExactNameSnapshotSelector<'a> {
     at: Option<&'a str>,
@@ -75,14 +123,33 @@ pub(super) async fn load_exact_name_read(
     selector: ExactNameSnapshotSelector<'_>,
     projection_kind: &str,
 ) -> ApiResult<ExactNameRead> {
-    let failure_message =
-        || format!("failed to load {projection_kind} projection for name {namespace}/{name}");
-    let selected_snapshot = resolve_exact_name_selected_snapshot(pool, namespace, selector, false)
-        .await
-        .map_err(|error| map_internal_api_error(error, failure_message()))?;
-    let row = load_name_current_for_selected_snapshot(pool, namespace, name, &selected_snapshot)
-        .await
-        .map_err(|error| map_internal_api_error(error, failure_message()))?;
+    load_exact_name_read_for_route(
+        pool,
+        ExactNameReadRequest::new(namespace, name, selector).with_projection_kind(projection_kind),
+    )
+    .await
+}
+
+pub(super) async fn load_exact_name_read_for_route(
+    pool: &PgPool,
+    request: ExactNameReadRequest<'_>,
+) -> ApiResult<ExactNameRead> {
+    let selected_snapshot = resolve_exact_name_selected_snapshot(
+        pool,
+        request.namespace,
+        request.selector,
+        request.include_resolution_auxiliary,
+    )
+    .await
+    .map_err(|error| request.map_internal_error(error))?;
+    let row = load_name_current_for_selected_snapshot(
+        pool,
+        request.namespace,
+        request.name,
+        &selected_snapshot,
+    )
+    .await
+    .map_err(|error| request.map_internal_error(error))?;
 
     Ok(ExactNameRead {
         row,

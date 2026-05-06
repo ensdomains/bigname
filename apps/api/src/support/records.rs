@@ -42,15 +42,15 @@ pub(super) async fn load_resolution_records_read(
     let pool = &state.pool;
     let mode = parse_resolution_mode(query.mode.as_deref())?;
     let records = parse_resolution_record_keys(query.records.as_deref(), mode)?;
-    let selected_snapshot = resolve_exact_name_selected_snapshot(
+    let ExactNameRead {
+        row,
+        selected_snapshot,
+    } = load_exact_name_read_for_route(
         pool,
-        namespace,
-        ExactNameSnapshotSelector::from(&query),
-        namespace == BASENAMES_NAMESPACE && mode.includes_verified(),
+        ExactNameReadRequest::new(namespace, name, ExactNameSnapshotSelector::from(&query))
+            .include_resolution_auxiliary(namespace == BASENAMES_NAMESPACE && mode.includes_verified()),
     )
     .await?;
-    let row =
-        load_name_current_for_selected_snapshot(pool, namespace, name, &selected_snapshot).await?;
 
     let record_inventory_current = if mode.includes_declared() || mode.includes_verified() {
         load_resolution_record_inventory_current_for_snapshot(pool, &row, mode, &selected_snapshot)
