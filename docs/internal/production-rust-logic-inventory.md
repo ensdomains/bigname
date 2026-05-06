@@ -28,15 +28,15 @@ Production Rust snapshot from the working tree:
 
 | Area | Production files | LOC |
 | --- | ---: | ---: |
-| `crates/storage` | 143 | 25,932 |
-| `crates/adapters` | 101 | 21,622 |
+| `crates/storage` | 144 | 26,020 |
+| `crates/adapters` | 101 | 21,546 |
 | `apps/indexer` | 65 | 17,060 |
 | `apps/api` | 64 | 14,218 |
-| `apps/worker` | 70 | 12,843 |
+| `apps/worker` | 71 | 12,914 |
 | `crates/manifests` | 33 | 7,675 |
 | `crates/execution` | 36 | 6,386 |
 | `crates/domain` | 1 | 6 |
-| Total | 513 | 105,742 |
+| Total | 515 | 105,825 |
 
 The current file-size gate hard-fails these oversized production files as the
 first places to revisit after logic dedupe:
@@ -161,6 +161,9 @@ Addressed slices:
   source-family context from persisted view columns while decoding only ABI
   fragments from `manifest_payload`, so manifest-derived topic lookup works for
   older minimal payload rows without restoring code-owned ABI constants.
+- `crates/adapters/src/adapter_manifest.rs` no longer carries the unused
+  name-keyed manifest event topic loader. Active adapter topic matching now goes
+  through canonical signature keys only.
 
 ## Highest leverage cleanup map
 

@@ -15,34 +15,8 @@ pub(crate) struct ActiveManifestMetadata {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-#[allow(dead_code)]
-pub(crate) struct ActiveManifestEventTopic0s {
-    by_name: HashMap<String, String>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ActiveManifestEventTopic0sBySignature {
     by_signature: HashMap<String, String>,
-}
-
-impl ActiveManifestEventTopic0s {
-    #[allow(dead_code)]
-    pub(crate) fn new(by_name: HashMap<String, String>) -> Self {
-        Self { by_name }
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn topic0(&self, event_name: &str) -> Result<&str> {
-        self.by_name
-            .get(event_name)
-            .map(String::as_str)
-            .with_context(|| format!("missing required active manifest ABI event {event_name}"))
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn matches(&self, event_name: &str, topic0: &str) -> Result<bool> {
-        Ok(topic0.eq_ignore_ascii_case(self.topic0(event_name)?))
-    }
 }
 
 impl ActiveManifestEventTopic0sBySignature {
@@ -186,56 +160,6 @@ pub(crate) async fn load_latest_active_manifest_metadata_for_source_family(
     .with_context(|| format!("failed to load {context_label} for {chain}"))?;
 
     row.map(decode_active_manifest_metadata).transpose()
-}
-
-#[allow(dead_code)]
-pub(crate) async fn load_required_active_manifest_event_topic0s(
-    pool: &PgPool,
-    manifest_ids: &[i64],
-    required_event_names: &[&str],
-    context_label: &str,
-) -> Result<ActiveManifestEventTopic0s> {
-    let required_event_names = required_event_names.iter().copied().collect::<HashSet<_>>();
-    let mut topic0s_by_name = HashMap::<String, String>::new();
-
-    for event in load_active_manifest_abi_events(pool, manifest_ids)
-        .await
-        .with_context(|| format!("failed to load active manifest ABI events for {context_label}"))?
-    {
-        if !required_event_names.contains(event.name.as_str()) {
-            continue;
-        }
-        let topic0 = event.topic0.with_context(|| {
-            format!(
-                "active manifest ABI event {} for {context_label} is anonymous and has no topic0",
-                event.name
-            )
-        })?;
-        match topic0s_by_name.get(&event.name) {
-            Some(existing) if existing != &topic0 => {
-                bail!(
-                    "active manifest ABI event {} for {context_label} has conflicting topic0 values {} and {}",
-                    event.name,
-                    existing,
-                    topic0
-                );
-            }
-            Some(_) => {}
-            None => {
-                topic0s_by_name.insert(event.name, topic0);
-            }
-        }
-    }
-
-    for required_event_name in required_event_names {
-        if !topic0s_by_name.contains_key(required_event_name) {
-            bail!(
-                "active manifest ABI for {context_label} is missing required event {required_event_name}"
-            );
-        }
-    }
-
-    Ok(ActiveManifestEventTopic0s::new(topic0s_by_name))
 }
 
 pub(crate) async fn load_required_active_manifest_event_topic0s_by_signature(
