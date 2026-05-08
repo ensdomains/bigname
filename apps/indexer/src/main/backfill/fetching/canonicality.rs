@@ -8,6 +8,8 @@ use bigname_storage::{
 
 use crate::provider::{ChainProviderOps, ProviderBlock, ProviderHeadSnapshot};
 
+const MAX_STORED_CHECKPOINT_ANCESTRY_DISTANCE: i64 = 1_024;
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct BackfillCanonicalityEvidence {
     provider_canonical: Option<CheckpointBlockRef>,
@@ -64,9 +66,9 @@ impl BackfillCanonicalityEvidence {
             .map(|block| (block.block_hash.clone(), CanonicalityState::Observed))
             .collect::<BTreeMap<_, _>>();
 
-        self.apply_stored_checkpoint_evidence(pool, chain, blocks, &mut states)
-            .await?;
         self.apply_revalidated_provider_evidence(provider, blocks, &mut states)
+            .await?;
+        self.apply_stored_checkpoint_evidence(pool, chain, blocks, &mut states)
             .await?;
 
         Ok(states)
@@ -125,6 +127,9 @@ impl BackfillCanonicalityEvidence {
             return Ok(());
         };
         if block.block_number > anchor.block_number {
+            return Ok(());
+        }
+        if anchor.block_number - block.block_number > MAX_STORED_CHECKPOINT_ANCESTRY_DISTANCE {
             return Ok(());
         }
         if states
@@ -412,6 +417,107 @@ mod tests {
         };
         let pool = PgPool::connect_lazy("postgres://bigname:bigname@127.0.0.1:5432/bigname")
             .expect("canonicality evidence test does not touch the lazy pool");
+
+        let states = evidence
+            .states_for_blocks(&pool, "ethereum-mainnet", &provider, &[losing_40.clone()])
+            .await?;
+
+        assert_eq!(
+            states.get(&losing_40.block_hash),
+            Some(&CanonicalityState::Observed)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn provider_revalidation_preempts_distant_stored_checkpoint_walk() -> Result<()> {
+        let canonical_40 = test_provider_block(
+            "0x4000000000000000000000000000000000000000000000000000000000000040",
+            40,
+        );
+        let checkpoint = test_provider_block(
+            "0x5000000000000000000000000000000000000000000000000000000000005000",
+            5_000,
+        );
+        let mut evidence = BackfillCanonicalityEvidence::from_heads(&ProviderHeadSnapshot {
+            canonical: checkpoint.clone(),
+            safe: Some(checkpoint.clone()),
+            finalized: Some(checkpoint.clone()),
+        });
+        evidence.include_checkpoint(Some(&ChainCheckpoint {
+            chain_id: "ethereum-mainnet".to_owned(),
+            canonical_block_hash: Some(checkpoint.block_hash.clone()),
+            canonical_block_number: Some(checkpoint.block_number),
+            safe_block_hash: Some(checkpoint.block_hash.clone()),
+            safe_block_number: Some(checkpoint.block_number),
+            finalized_block_hash: Some(checkpoint.block_hash.clone()),
+            finalized_block_number: Some(checkpoint.block_number),
+        }));
+        let provider = RevalidatingProvider {
+            heads: ProviderHeadSnapshot {
+                canonical: checkpoint.clone(),
+                safe: Some(checkpoint.clone()),
+                finalized: Some(checkpoint),
+            },
+            hashes_by_number: BTreeMap::from([(40, canonical_40.block_hash.clone())]),
+        };
+        let pool = PgPool::connect_lazy("postgres://bigname:bigname@127.0.0.1:1/bigname")
+            .expect("test pool must stay lazy unless stored lineage is queried");
+
+        let states = evidence
+            .states_for_blocks(
+                &pool,
+                "ethereum-mainnet",
+                &provider,
+                &[canonical_40.clone()],
+            )
+            .await?;
+
+        assert_eq!(
+            states.get(&canonical_40.block_hash),
+            Some(&CanonicalityState::Finalized)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn distant_stored_checkpoint_is_not_used_without_provider_hash_match() -> Result<()> {
+        let canonical_40 = test_provider_block(
+            "0x4000000000000000000000000000000000000000000000000000000000000040",
+            40,
+        );
+        let losing_40 = test_provider_block(
+            "0xdead000000000000000000000000000000000000000000000000000000000040",
+            40,
+        );
+        let checkpoint = test_provider_block(
+            "0x5000000000000000000000000000000000000000000000000000000000005000",
+            5_000,
+        );
+        let mut evidence = BackfillCanonicalityEvidence::from_heads(&ProviderHeadSnapshot {
+            canonical: checkpoint.clone(),
+            safe: Some(checkpoint.clone()),
+            finalized: Some(checkpoint.clone()),
+        });
+        evidence.include_checkpoint(Some(&ChainCheckpoint {
+            chain_id: "ethereum-mainnet".to_owned(),
+            canonical_block_hash: Some(checkpoint.block_hash.clone()),
+            canonical_block_number: Some(checkpoint.block_number),
+            safe_block_hash: Some(checkpoint.block_hash.clone()),
+            safe_block_number: Some(checkpoint.block_number),
+            finalized_block_hash: Some(checkpoint.block_hash.clone()),
+            finalized_block_number: Some(checkpoint.block_number),
+        }));
+        let provider = RevalidatingProvider {
+            heads: ProviderHeadSnapshot {
+                canonical: checkpoint.clone(),
+                safe: Some(checkpoint.clone()),
+                finalized: Some(checkpoint),
+            },
+            hashes_by_number: BTreeMap::from([(40, canonical_40.block_hash)]),
+        };
+        let pool = PgPool::connect_lazy("postgres://bigname:bigname@127.0.0.1:1/bigname")
+            .expect("test pool must stay lazy unless stored lineage is queried");
 
         let states = evidence
             .states_for_blocks(&pool, "ethereum-mainnet", &provider, &[losing_40.clone()])
