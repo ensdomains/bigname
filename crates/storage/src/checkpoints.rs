@@ -168,17 +168,21 @@ pub async fn advance_chain_checkpoints(
             .await?;
         }
     }
-    let effective_canonical_hash = update
-        .canonical
+    let current_canonical = current
+        .canonical_block_hash
         .as_ref()
-        .map(|block| block.block_hash.as_str())
-        .or(current.canonical_block_hash.as_deref());
+        .zip(current.canonical_block_number)
+        .map(|(block_hash, block_number)| CheckpointBlockRef {
+            block_hash: block_hash.clone(),
+            block_number,
+        });
+    let effective_canonical = update.canonical.as_ref().or(current_canonical.as_ref());
     if let Some(safe) = &update.safe {
         ensure_checkpoint_target_on_canonical_branch(
             &mut transaction,
             &update.chain_id,
             "safe",
-            effective_canonical_hash,
+            effective_canonical,
             safe,
         )
         .await?;
@@ -200,7 +204,7 @@ pub async fn advance_chain_checkpoints(
             &mut transaction,
             &update.chain_id,
             "finalized",
-            effective_canonical_hash,
+            effective_canonical,
             finalized,
         )
         .await?;
@@ -243,20 +247,29 @@ async fn ensure_checkpoint_target_on_canonical_branch(
     transaction: &mut sqlx::Transaction<'_, Postgres>,
     chain_id: &str,
     checkpoint_name: &str,
-    canonical_hash: Option<&str>,
+    canonical: Option<&CheckpointBlockRef>,
     target: &CheckpointBlockRef,
 ) -> Result<()> {
-    let Some(canonical_hash) = canonical_hash else {
+    let Some(canonical) = canonical else {
         return Ok(());
     };
-    if canonical_hash == target.block_hash {
+    if canonical.block_hash == target.block_hash {
         return Ok(());
+    }
+    if target.block_number > canonical.block_number {
+        bail!(
+            "{checkpoint_name} checkpoint for chain {chain_id} block {} at {} is ahead of canonical branch head {} at {}",
+            target.block_hash,
+            target.block_number,
+            canonical.block_hash,
+            canonical.block_number
+        );
     }
 
     if chain_lineage_contains_ancestor_internal(
         &mut **transaction,
         chain_id,
-        canonical_hash,
+        &canonical.block_hash,
         &target.block_hash,
     )
     .await?
@@ -265,8 +278,9 @@ async fn ensure_checkpoint_target_on_canonical_branch(
     }
 
     bail!(
-        "{checkpoint_name} checkpoint for chain {chain_id} block {} is not on the canonical branch ending at {canonical_hash}",
-        target.block_hash
+        "{checkpoint_name} checkpoint for chain {chain_id} block {} is not on the canonical branch ending at {}",
+        target.block_hash,
+        canonical.block_hash
     )
 }
 

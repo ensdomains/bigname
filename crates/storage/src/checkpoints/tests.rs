@@ -492,7 +492,10 @@ async fn checkpoint_promotion_rejects_partial_ancestry_path() -> Result<()> {
         database.pool(),
         &ChainCheckpointUpdate {
             chain_id: "eth-mainnet".to_owned(),
-            canonical: None,
+            canonical: Some(CheckpointBlockRef {
+                block_hash: "0x003".to_owned(),
+                block_number: 3,
+            }),
             safe: Some(CheckpointBlockRef {
                 block_hash: "0x003".to_owned(),
                 block_number: 3,

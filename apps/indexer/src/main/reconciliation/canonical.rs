@@ -32,7 +32,7 @@ mod orphaning;
 
 use orphaning::orphan_reorg_losing_branch_payloads;
 
-const MAX_PARENT_FETCH_DEPTH: usize = 16_384;
+const MAX_PARENT_FETCH_DEPTH: usize = 131_072;
 
 #[allow(dead_code)]
 pub(crate) async fn poll_provider_heads(
@@ -223,16 +223,26 @@ pub(crate) async fn reconcile_fetched_heads_with_adapter_sync(
         .await?;
     }
 
+    let canonical_update = canonical.canonical.clone();
+    let (safe_update, finalized_update) = if canonical_update.is_some() {
+        (
+            heads.safe.as_ref().map(provider_block_to_checkpoint_ref),
+            heads
+                .finalized
+                .as_ref()
+                .map(provider_block_to_checkpoint_ref),
+        )
+    } else {
+        (None, None)
+    };
+
     let next_checkpoint = advance_chain_checkpoints(
         pool,
         &ChainCheckpointUpdate {
             chain_id: task.chain.clone(),
-            canonical: canonical.canonical.clone(),
-            safe: heads.safe.as_ref().map(provider_block_to_checkpoint_ref),
-            finalized: heads
-                .finalized
-                .as_ref()
-                .map(provider_block_to_checkpoint_ref),
+            canonical: canonical_update,
+            safe: safe_update,
+            finalized: finalized_update,
         },
     )
     .await?;
