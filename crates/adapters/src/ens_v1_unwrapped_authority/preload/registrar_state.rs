@@ -170,6 +170,7 @@ pub(super) async fn load_latest_registrar_state_before_block(
                     THEN (event.after_state->>'expiry')::BIGINT
                     WHEN event.event_kind = $6
                      AND resource.provenance->>'authority_kind' = 'registrar'
+                     AND resource.canonicality_state {CANONICALITY_STATE_FILTER}
                     THEN (event.after_state->>'expiry')::BIGINT
                     ELSE NULL
                 END AS expiry,
@@ -180,11 +181,13 @@ pub(super) async fn load_latest_registrar_state_before_block(
                 END AS registrant,
                 CASE
                     WHEN resource.provenance->>'authority_kind' = 'registrar'
+                     AND resource.canonicality_state {CANONICALITY_STATE_FILTER}
                     THEN resource.provenance->>'authority_key'
                     ELSE NULL
                 END AS authority_key,
                 CASE
                     WHEN resource.provenance->>'authority_kind' = 'registrar'
+                     AND resource.canonicality_state {CANONICALITY_STATE_FILTER}
                     THEN COALESCE(resource.provenance->>'labelhash', event.after_state->>'labelhash')
                     ELSE NULL
                 END AS labelhash,
@@ -366,6 +369,7 @@ pub(super) async fn load_selected_registrar_state_before_replay(
                     THEN (event.before_state->>'expiry')::BIGINT
                     WHEN event.event_kind = $3
                      AND resource.provenance->>'authority_kind' = 'registrar'
+                     AND resource.canonicality_state {CANONICALITY_STATE_FILTER}
                     THEN (event.before_state->>'expiry')::BIGINT
                     ELSE NULL
                 END AS expiry,
@@ -460,6 +464,7 @@ pub(super) async fn load_selected_registrar_state_before_replay(
                 JOIN resources resource
                   ON resource.resource_id = event.resource_id
                  AND resource.provenance->>'authority_kind' = 'registrar'
+                 AND resource.canonicality_state {CANONICALITY_STATE_FILTER}
                 LEFT JOIN chain_lineage start_block
                   ON start_block.chain_id = resource.chain_id
                  AND start_block.block_hash = resource.block_hash
