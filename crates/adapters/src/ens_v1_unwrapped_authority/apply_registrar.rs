@@ -340,26 +340,30 @@ pub(super) fn apply_token_transferred(
         return Ok(());
     };
     let current_resolver = history.current_resolver.clone();
-    let current_registration =
-        if let Some(current_registration) = history.current_registration.as_mut() {
-            current_registration
-        } else if let Some(superseded_registration) = history.superseded_registration.as_mut() {
-            if registration_released_at_or_before(
-                superseded_registration,
-                event.reference.block_timestamp,
-            ) {
+    let mut transfer_applied_to_superseded_registration = false;
+    let anchor = {
+        let current_registration =
+            if let Some(current_registration) = history.current_registration.as_mut() {
+                current_registration
+            } else if let Some(superseded_registration) = history.superseded_registration.as_mut() {
+                if registration_released_at_or_before(
+                    superseded_registration,
+                    event.reference.block_timestamp,
+                ) {
+                    return Ok(());
+                }
+                transfer_applied_to_superseded_registration = true;
+                superseded_registration
+            } else {
                 return Ok(());
-            }
-            superseded_registration
-        } else {
+            };
+        if event.from_address == ZERO_ADDRESS || event.to_address == ZERO_ADDRESS {
             return Ok(());
-        };
-    if event.from_address == ZERO_ADDRESS || event.to_address == ZERO_ADDRESS {
-        return Ok(());
-    }
+        }
+        current_registration.registrant = event.to_address.clone();
+        build_registrar_anchor(current_registration)
+    };
     let previous_registrant = event.from_address.clone();
-    current_registration.registrant = event.to_address.clone();
-    let anchor = build_registrar_anchor(current_registration);
     history.events.push(build_normalized_event(
         &event.reference,
         Some(name.logical_name_id.clone()),
@@ -395,6 +399,24 @@ pub(super) fn apply_token_transferred(
             source_event_kind: EVENT_KIND_TOKEN_CONTROL_TRANSFERRED,
         },
     );
+    if transfer_applied_to_superseded_registration
+        && history.current_wrapper_key.is_none()
+        && nonzero_address(history.current_registry_owner.as_deref())
+            .is_some_and(|owner| owner.eq_ignore_ascii_case(&event.to_address))
+    {
+        let before_anchor = active_anchor_for_observation(history, &event.reference);
+        if let Some(lease) = history.superseded_registration.take() {
+            history.current_registration = Some(lease);
+            let after_anchor = active_anchor_for_observation(history, &event.reference);
+            transition_authority(
+                history,
+                before_anchor,
+                after_anchor,
+                &event.reference.as_boundary_ref(),
+                event.reference.block_timestamp,
+            )?;
+        }
+    }
     Ok(())
 }
 
