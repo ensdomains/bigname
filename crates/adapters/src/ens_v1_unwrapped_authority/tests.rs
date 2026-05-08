@@ -1780,6 +1780,36 @@ fn registry_owner_divergence_supersedes_live_registrar_before_wrap() -> Result<(
     )?;
     assert!(history.current_registration.is_none());
     assert!(history.superseded_registration.is_some());
+    let registry_anchor = active_anchor_for_history(&history, "ethereum-mainnet")
+        .context("registry-only authority should be active")?;
+    assert_eq!(registry_anchor.kind, AuthorityKind::RegistryOnly);
+    let registry_permission = history
+        .events
+        .iter()
+        .rev()
+        .find(|event| {
+            event.event_kind == EVENT_KIND_PERMISSION_CHANGED
+                && event
+                    .after_state
+                    .pointer("/scope/kind")
+                    .and_then(Value::as_str)
+                    == Some("resource")
+                && event
+                    .after_state
+                    .pointer("/grant_source/authority_kind")
+                    .and_then(Value::as_str)
+                    == Some("registry_only")
+                && event
+                    .after_state
+                    .pointer("/grant_source/authority_key")
+                    .and_then(Value::as_str)
+                    == Some(registry_anchor.authority_key.as_str())
+        })
+        .context("registry owner grant should use the registry-only authority")?;
+    assert_eq!(
+        registry_permission.resource_id,
+        Some(registry_anchor.resource_id)
+    );
 
     apply_wrapper_name_wrapped(
         &mut history,
