@@ -194,7 +194,7 @@ Workers derive invalidations from normalized events and apply them in projection
 
 ## Rebuild
 
-Every projection supports point rebuild by key, range rebuild by chain position, and full rebuild from canonical events. Worker modes: continuous apply, backfill apply, reorg repair, one-shot rebuild.
+Every projection supports point rebuild by key, range rebuild by chain position, and full rebuild from canonical events. Point rebuilds must use the family key to bound their canonical input set before recomputing the row; they must not scan unrelated current projection inputs on every invalidation. Worker modes: continuous apply, backfill apply, reorg repair, one-shot rebuild.
 
 Fresh normalized replay may defer normalized-event indexes used only by projection or API readback while current projection tables are empty. Rebuild tooling treats those indexes as part of its readiness boundary: before full current-state rebuilds count as ready for API reads, the deferred indexes must exist again.
 

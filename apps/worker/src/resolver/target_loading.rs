@@ -235,7 +235,21 @@ pub(super) async fn load_current_bindings(
 ) -> Result<Vec<CurrentBindingSeed>> {
     let rows = sqlx::query(&format!(
         r#"
-        WITH current_bindings AS (
+        WITH candidate_pairs AS (
+            SELECT DISTINCT
+                ne.logical_name_id,
+                ne.resource_id
+            FROM normalized_events ne
+            WHERE ne.event_kind = $1
+              AND ne.logical_name_id IS NOT NULL
+              AND ne.resource_id IS NOT NULL
+              AND ne.chain_id = $2
+              AND ne.after_state->>'resolver' IS NOT NULL
+              AND ne.after_state->>'resolver' <> ''
+              AND LOWER(ne.after_state->>'resolver') = $3
+              AND ne.canonicality_state {CANONICAL_STATE_FILTER}
+        ),
+        current_bindings AS (
             SELECT
                 sb.logical_name_id,
                 sb.resource_id,
@@ -245,6 +259,9 @@ pub(super) async fn load_current_bindings(
                 ns.normalized_name,
                 ns.namehash
             FROM surface_bindings sb
+            INNER JOIN candidate_pairs candidate
+              ON candidate.logical_name_id = sb.logical_name_id
+             AND candidate.resource_id = sb.resource_id
             INNER JOIN name_surfaces ns
               ON ns.logical_name_id = sb.logical_name_id
              AND ns.canonicality_state {CANONICAL_STATE_FILTER}
@@ -267,6 +284,9 @@ pub(super) async fn load_current_bindings(
                 ne.canonicality_state::TEXT AS canonicality_state,
                 LOWER(ne.after_state->>'resolver') AS resolver_address
             FROM normalized_events ne
+            INNER JOIN candidate_pairs candidate
+              ON candidate.logical_name_id = ne.logical_name_id
+             AND candidate.resource_id = ne.resource_id
             LEFT JOIN chain_lineage rb
               ON rb.chain_id = ne.chain_id
              AND rb.block_hash = ne.block_hash
