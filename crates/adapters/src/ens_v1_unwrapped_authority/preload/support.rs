@@ -23,33 +23,6 @@ pub(super) fn raw_block_snapshot_from_row(row: sqlx::postgres::PgRow) -> Result<
     })
 }
 
-pub(super) fn selected_registrar_start_ref(
-    reference: &Value,
-    block_timestamps: &HashMap<String, OffsetDateTime>,
-) -> Result<ObservationRef> {
-    let block_hash = json_string(reference, "block_hash")?;
-    Ok(ObservationRef {
-        chain_id: json_string(reference, "chain_id")?,
-        block_timestamp: *block_timestamps
-            .get(&block_hash)
-            .context("selected registrar replay state is missing raw log block timestamp")?,
-        block_hash,
-        block_number: json_i64(reference, "block_number")?,
-        transaction_hash: json_optional_string(reference, "transaction_hash"),
-        transaction_index: None,
-        log_index: json_optional_i64(reference, "log_index"),
-        canonicality_state: CanonicalityState::parse(&json_string(
-            reference,
-            "canonicality_state",
-        )?)?,
-        namespace: json_string(reference, "namespace")?,
-        source_manifest_id: json_optional_i64(reference, "source_manifest_id").unwrap_or(0),
-        source_family: json_optional_string(reference, "source_family")
-            .unwrap_or_else(|| SOURCE_FAMILY_ENS_V1_REGISTRAR_L1.to_owned()),
-        manifest_version: json_optional_i64(reference, "manifest_version").unwrap_or(1),
-    })
-}
-
 pub(super) fn json_string(value: &Value, key: &str) -> Result<String> {
     value
         .get(key)

@@ -4,7 +4,7 @@ use sqlx::{PgPool, Postgres, pool::PoolConnection};
 use tokio::time::{Duration, sleep};
 use tracing::{debug, info, warn};
 
-use crate::{cli::RunArgs, replay};
+use crate::{cli::RunArgs, projection_apply, replay};
 
 const CURSOR_KIND_RAW_FACT_NORMALIZED_EVENTS: &str = "raw_fact_normalized_events";
 const ALL_CURRENT_PROJECTIONS_MIN_DATABASE_CONNECTIONS: u32 = 64;
@@ -56,12 +56,39 @@ pub(crate) async fn run_worker(args: RunArgs) -> Result<()> {
 
 pub(crate) async fn run_automatic_current_projection_replay(pool: PgPool, poll_interval_secs: u64) {
     let poll_interval = Duration::from_secs(poll_interval_secs.max(1));
-    let mut replay_completed = false;
+    let mut bootstrap_completed = false;
 
     loop {
-        if !replay_completed {
+        let mut progressed = false;
+        if !bootstrap_completed {
+            match projection_bootstrap_already_handed_off_to_apply(&pool).await {
+                Ok(true) => {
+                    bootstrap_completed = true;
+                    progressed = true;
+                    info!(
+                        service = "worker",
+                        replay = "all_current_projections",
+                        "automatic all-current projection replay skipped because durable apply cursor and replay markers exist"
+                    );
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    warn!(
+                        service = "worker",
+                        replay = "all_current_projections",
+                        error = %format!("{error:#}"),
+                        "failed to inspect automatic all-current projection replay handoff state"
+                    );
+                }
+            }
+        }
+
+        if !bootstrap_completed {
             match replay_all_current_projections_when_ready(&pool).await {
-                Ok(true) => replay_completed = true,
+                Ok(true) => {
+                    bootstrap_completed = true;
+                    progressed = true;
+                }
                 Ok(false) => {}
                 Err(error) => {
                     warn!(
@@ -74,7 +101,25 @@ pub(crate) async fn run_automatic_current_projection_replay(pool: PgPool, poll_i
             }
         }
 
-        sleep(poll_interval).await;
+        if bootstrap_completed {
+            match projection_apply::run_once(&pool).await {
+                Ok(summary) => {
+                    progressed |= summary.made_progress();
+                }
+                Err(error) => {
+                    warn!(
+                        service = "worker",
+                        projection_apply = true,
+                        error = %format!("{error:#}"),
+                        "continuous projection apply iteration failed"
+                    );
+                }
+            }
+        }
+
+        if !progressed {
+            sleep(poll_interval).await;
+        }
     }
 }
 
@@ -118,6 +163,16 @@ async fn replay_all_current_projections_when_ready(pool: &PgPool) -> Result<bool
         "automatic all-current projection replay started"
     );
 
+    let cursor_exists = projection_apply::normalized_event_cursor_exists(pool).await?;
+    let existing_replay_marker_count = if cursor_exists {
+        0
+    } else {
+        load_existing_projection_replay_marker_count(pool).await?
+    };
+    let should_seed_apply_cursor =
+        should_seed_apply_cursor_after_bootstrap(cursor_exists, existing_replay_marker_count);
+    let bootstrap_watermark =
+        projection_apply::load_normalized_event_change_watermark(pool).await?;
     let replay_result = replay::rebuild_pending_all_current_projections(
         pool,
         readiness.normalized_replay_max_target_block,
@@ -127,6 +182,9 @@ async fn replay_all_current_projections_when_ready(pool: &PgPool) -> Result<bool
 
     let summary =
         replay_result.context("failed to automatically replay all current projections")?;
+    if should_seed_apply_cursor {
+        projection_apply::seed_normalized_event_cursor_if_absent(pool, bootstrap_watermark).await?;
+    }
     info!(
         service = "worker",
         replay = "all_current_projections",
@@ -139,6 +197,33 @@ async fn replay_all_current_projections_when_ready(pool: &PgPool) -> Result<bool
     );
 
     Ok(true)
+}
+
+async fn projection_bootstrap_already_handed_off_to_apply(pool: &PgPool) -> Result<bool> {
+    let cursor_exists = projection_apply::normalized_event_cursor_exists(pool).await?;
+    if !cursor_exists {
+        return Ok(false);
+    }
+
+    let complete_marker_count = load_current_projection_replay_marker_count(pool).await?;
+    Ok(should_skip_bootstrap_for_existing_apply_cursor(
+        cursor_exists,
+        complete_marker_count,
+    ))
+}
+
+fn should_seed_apply_cursor_after_bootstrap(
+    cursor_exists: bool,
+    existing_replay_marker_count: i64,
+) -> bool {
+    !cursor_exists && existing_replay_marker_count == 0
+}
+
+fn should_skip_bootstrap_for_existing_apply_cursor(
+    cursor_exists: bool,
+    complete_marker_count: i64,
+) -> bool {
+    cursor_exists && complete_marker_count == replay::ALL_CURRENT_PROJECTION_ORDER.len() as i64
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -216,6 +301,39 @@ async fn missing_projection_index_count(pool: &PgPool) -> Result<i64> {
         .fetch_one(pool)
         .await
         .context("failed to inspect deferred normalized-event projection indexes")
+}
+
+async fn load_existing_projection_replay_marker_count(pool: &PgPool) -> Result<i64> {
+    sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)::BIGINT
+        FROM current_projection_replay_status
+        "#,
+    )
+    .fetch_one(pool)
+    .await
+    .context("failed to inspect existing projection replay markers")
+}
+
+async fn load_current_projection_replay_marker_count(pool: &PgPool) -> Result<i64> {
+    let projections = replay::ALL_CURRENT_PROJECTION_ORDER
+        .iter()
+        .copied()
+        .collect::<Vec<_>>();
+
+    sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(DISTINCT projection)::BIGINT
+        FROM current_projection_replay_status
+        WHERE replay_version = $1
+          AND projection = ANY($2::TEXT[])
+        "#,
+    )
+    .bind(replay::CURRENT_PROJECTION_REPLAY_VERSION)
+    .bind(&projections)
+    .fetch_one(pool)
+    .await
+    .context("failed to inspect current projection replay markers")
 }
 
 async fn try_acquire_replay_lock(pool: &PgPool) -> Result<Option<PoolConnection<Postgres>>> {
@@ -321,5 +439,30 @@ mod tests {
     #[test]
     fn projection_replay_runs_when_normalized_replay_and_indexes_are_ready() {
         assert!(ready_status().is_ready());
+    }
+
+    #[test]
+    fn apply_cursor_is_seeded_only_for_fresh_bootstrap_without_old_markers() {
+        assert!(should_seed_apply_cursor_after_bootstrap(false, 0));
+        assert!(!should_seed_apply_cursor_after_bootstrap(false, 1));
+        assert!(!should_seed_apply_cursor_after_bootstrap(true, 0));
+    }
+
+    #[test]
+    fn restart_bootstrap_skip_requires_apply_cursor_and_all_current_markers() {
+        let complete_marker_count = replay::ALL_CURRENT_PROJECTION_ORDER.len() as i64;
+
+        assert!(should_skip_bootstrap_for_existing_apply_cursor(
+            true,
+            complete_marker_count
+        ));
+        assert!(!should_skip_bootstrap_for_existing_apply_cursor(
+            false,
+            complete_marker_count
+        ));
+        assert!(!should_skip_bootstrap_for_existing_apply_cursor(
+            true,
+            complete_marker_count - 1
+        ));
     }
 }

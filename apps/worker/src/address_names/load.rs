@@ -8,9 +8,44 @@ use super::{
     source_policy::{authority_derivation_kinds, authority_source_families},
 };
 
-pub(super) async fn load_current_bindings(pool: &PgPool) -> Result<Vec<CurrentBindingSeed>> {
+pub(super) async fn load_current_bindings_for_address(
+    pool: &PgPool,
+    address: &str,
+) -> Result<Vec<CurrentBindingSeed>> {
     let rows = sqlx::query_as::<_, CurrentBindingSeed>(&format!(
         r#"
+        WITH affected_names AS (
+            SELECT DISTINCT ne.logical_name_id
+            FROM normalized_events ne
+            WHERE ne.logical_name_id IS NOT NULL
+              AND ne.event_kind = 'RegistrationGranted'
+              AND ne.canonicality_state {CANONICAL_STATE_FILTER}
+              AND ne.after_state ->> 'registrant' IS NOT NULL
+              AND ne.after_state ->> 'registrant' <> ''
+              AND lower(ne.after_state ->> 'registrant') = $1
+
+            UNION
+
+            SELECT DISTINCT ne.logical_name_id
+            FROM normalized_events ne
+            WHERE ne.logical_name_id IS NOT NULL
+              AND ne.event_kind = 'TokenControlTransferred'
+              AND ne.canonicality_state {CANONICAL_STATE_FILTER}
+              AND ne.after_state ->> 'to' IS NOT NULL
+              AND ne.after_state ->> 'to' <> ''
+              AND lower(ne.after_state ->> 'to') = $1
+
+            UNION
+
+            SELECT DISTINCT ne.logical_name_id
+            FROM normalized_events ne
+            WHERE ne.logical_name_id IS NOT NULL
+              AND ne.event_kind = 'AuthorityTransferred'
+              AND ne.canonicality_state {CANONICAL_STATE_FILTER}
+              AND ne.after_state ->> 'owner' IS NOT NULL
+              AND ne.after_state ->> 'owner' <> ''
+              AND lower(ne.after_state ->> 'owner') = $1
+        )
         SELECT
             ns.logical_name_id,
             ns.namespace,
@@ -34,6 +69,8 @@ pub(super) async fn load_current_bindings(pool: &PgPool) -> Result<Vec<CurrentBi
             r.canonicality_state::TEXT AS resource_state,
             tl.canonicality_state::TEXT AS token_lineage_state
         FROM surface_bindings sb
+        JOIN affected_names affected
+          ON affected.logical_name_id = sb.logical_name_id
         JOIN name_surfaces ns
           ON ns.logical_name_id = sb.logical_name_id
          AND ns.canonicality_state {CANONICAL_STATE_FILTER}
@@ -54,9 +91,12 @@ pub(super) async fn load_current_bindings(pool: &PgPool) -> Result<Vec<CurrentBi
         ORDER BY ns.logical_name_id
         "#
     ))
+    .bind(address)
     .fetch_all(pool)
     .await
-    .context("failed to load current bindings for address_names_current rebuild")?;
+    .with_context(|| {
+        format!("failed to load current bindings for address_names_current address {address}")
+    })?;
 
     Ok(rows)
 }

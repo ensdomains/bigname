@@ -129,7 +129,9 @@ async fn projection_should_replay(
     skip_completed: bool,
     normalized_target_block: Option<i64>,
 ) -> Result<bool> {
-    if skip_completed && projection_replay_completed(pool, projection).await? {
+    if skip_completed
+        && projection_replay_completed(pool, projection, normalized_target_block).await?
+    {
         info!(
             service = "worker",
             replay = "all_current_projections",

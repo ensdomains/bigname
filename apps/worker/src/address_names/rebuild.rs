@@ -7,7 +7,7 @@ use tokio::task::JoinSet;
 use super::{
     AddressNamesCurrentRebuildSummary,
     cleanup::delete_stale_address_names_current_rows_for_address,
-    load::{load_current_bindings, stream_current_bindings},
+    load::{load_current_bindings_for_address, stream_current_bindings},
     model::CurrentBindingSeed,
     projection::{build_rows, build_rows_for_binding},
     util::normalize_address,
@@ -101,7 +101,7 @@ async fn rebuild_one_address(
     address: &str,
 ) -> Result<AddressNamesCurrentRebuildSummary> {
     let normalized_address = normalize_address(address);
-    let bindings = load_current_bindings(pool).await?;
+    let bindings = load_current_bindings_for_address(pool, &normalized_address).await?;
     let rows = build_rows(pool, &bindings, Some(normalized_address.as_str())).await?;
     let upserted_row_count = upsert_address_names_current_rows(pool, &rows).await?.len();
     let deleted_row_count =

@@ -104,10 +104,11 @@ pub(super) fn apply_registration_granted(
         );
     }
 
+    let surface_after_anchor = active_anchor_for_observation(history, &event.reference);
     transition_authority(
         history,
         before_anchor,
-        after_anchor,
+        surface_after_anchor,
         &event.reference.as_boundary_ref(),
         event.reference.block_timestamp,
     )?;
@@ -158,20 +159,22 @@ pub(super) fn apply_registration_renewed(
             ),
             start_ref: event.reference.clone(),
         };
+        let registrar_anchor = Some(build_registrar_anchor(&lease));
+        let before_anchor = active_anchor_for_observation(history, &event.reference);
         history.current_registration = Some(lease.clone());
         history.superseded_registration = None;
-        let anchor = Some(build_registrar_anchor(&lease));
+        let surface_after_anchor = active_anchor_for_observation(history, &event.reference);
         transition_authority(
             history,
-            None,
-            anchor.clone(),
+            before_anchor,
+            surface_after_anchor,
             &event.reference.as_boundary_ref(),
             event.reference.block_timestamp,
         )?;
         history.events.push(build_normalized_event(
             &event.reference,
             Some(name.logical_name_id.clone()),
-            anchor.as_ref().map(|value| value.resource_id),
+            registrar_anchor.as_ref().map(|value| value.resource_id),
             EVENT_KIND_REGISTRATION_GRANTED,
             json!({}),
             json!({
@@ -193,7 +196,7 @@ pub(super) fn apply_registration_renewed(
             ),
         ));
         if let (Some(anchor), Some(subject)) = (
-            anchor.as_ref(),
+            registrar_anchor.as_ref(),
             nonzero_address(Some(lease.registrant.as_str())),
         ) {
             emit_observation_permission_grants(
@@ -286,9 +289,6 @@ pub(super) fn settle_due_registration_release(
     {
         history.superseded_registration = None;
     }
-    if history.current_wrapper_key.is_some() {
-        return Ok(());
-    }
     let Some(lease) = history.current_registration.take() else {
         return Ok(());
     };
@@ -302,6 +302,9 @@ pub(super) fn settle_due_registration_release(
     }
 
     emit_registration_released_event(history, &lease, &release_ref)?;
+    if history.current_wrapper_key.is_some() {
+        return Ok(());
+    }
     let registry_after =
         registry_anchor_for_history(history, &lease.reference_chain(), &lease.labelhash);
     transition_authority(
@@ -354,7 +357,7 @@ pub(super) fn apply_token_transferred(
     if event.from_address == ZERO_ADDRESS || event.to_address == ZERO_ADDRESS {
         return Ok(());
     }
-    let previous_registrant = current_registration.registrant.clone();
+    let previous_registrant = event.from_address.clone();
     current_registration.registrant = event.to_address.clone();
     let anchor = build_registrar_anchor(current_registration);
     history.events.push(build_normalized_event(
@@ -413,8 +416,8 @@ fn restore_superseded_registration_for_renewal(
     }
 
     let before_anchor = active_anchor_for_observation(history, &event.reference);
-    let after_anchor = Some(build_registrar_anchor(&lease));
     history.current_registration = Some(lease);
+    let after_anchor = active_anchor_for_observation(history, &event.reference);
     transition_authority(
         history,
         before_anchor,

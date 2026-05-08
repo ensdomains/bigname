@@ -151,7 +151,7 @@ For ENSv1 and Basenames, `record_inventory_current` and `record_cache` may consu
 
 For ENSv1 discovered resolver instances, the supported dynamic profile set is ENS Labs PublicResolver-generation-compatible and profile-exact.[^v1-pres-l20][^v1-pres-l31][^v1-pres-l131][^v1-pres-l150][^v1-resbase-l17][^v1-resbase-l23] Older admitted generations do not inherit latest-only NameWrapper awareness, default coin-type fallback, VersionableResolver boundaries, DNS records, text, contenthash, ABI, name, or interface support. For Basenames discovered Base-side resolver instances, the only complete supported dynamic profile is `L2Resolver`-compatible.[^bn-l2resolver-l4][^bn-l2resolver-l16][^bn-l2resolver-l22][^bn-l2resolver-l29][^bn-l2resolver-l182][^bn-l2resolver-l193][^bn-l2resolver-l209][^bn-l2resolver-l225]
 
-After a `record_inventory_current` rebuild, the worker may run a bounded text-value hydration pass for observed ENSv1 `text:<key>` selectors whose current resolver is admitted as a supported PublicResolver-compatible text profile. The pass batches `text(bytes32,string)` calls through Multicall3 at provider `latest`, writes only `success` and `not_found` into `record_inventory_current.entries`, leaves failed calls as explicit `unsupported`, and creates no execution traces.
+After a `record_inventory_current` rebuild, the worker may run a bounded text-value hydration pass for observed ENSv1 `text:<key>` selectors whose current resolver is admitted as a supported PublicResolver-compatible text profile. The pass batches `text(bytes32,string)` calls through Multicall3 at the projection's selected chain position, writes only `success` and `not_found` into `record_inventory_current.entries`, leaves failed or unpinned calls as explicit `unsupported`, and creates no execution traces.
 
 `GET /v1/names/{namespace}/{name}/records` is a compact read over the same resolver summary, `record_inventory_current`, `record_cache` join. Verified values stay execution-owned. `verified_queries` for the supported Basenames class can include persisted CCIP-participating traces only for the exact transport-assisted direct class.[^bn-l1resolver-l154][^bn-l1resolver-l173][^bn-l1resolver-l191] Other Basenames path classes stay execution-local `unsupported`.
 
@@ -188,7 +188,9 @@ Projection invalidation fires on:
 - normalized event insertion for a relevant key
 - execution invalidation signal where the projection stores a declared cache summary
 
-Invalidation is deterministic and key-scoped. No projection refreshes from broad time-based polling.
+Invalidation is deterministic and key-scoped. `projection_invalidations` is the shared worker queue for affected projection families plus family-local keys (`logical_name_id`, `resource_id`, address, resolver tuple, or primary-name tuple). `projection_normalized_event_changes` is the append-only normalized-event input to that queue, populated by the normalized-event storage trigger for normalized-event inserts and canonicality-state updates. `projection_apply_cursors` records the worker's consumed `change_id` watermark for that input. Manifest, execution, and other non-normalized-event producers enqueue directly into `projection_invalidations` under the same generation rule. A new invalidation for a key increments that row's generation; an in-flight apply may delete only the generation it claimed, so a newer change cannot be lost by an older rebuild finishing late.
+
+Workers derive invalidations from normalized events and apply them in projection dependency order: `name_current`, `children_current`, `permissions_current`, `record_inventory_current`, `resolver_current`, `address_names_current`, `primary_names_current`. `resolver_current` follows `permissions_current` because resolver-scoped permission summaries are projection inputs. Durable claims are leases, not ownership transfers: if a worker exits mid-apply, another worker may reclaim a claimed invalidation after the retry delay and apply the same generation. No projection refreshes from broad time-based polling.
 
 ## Rebuild
 
@@ -196,11 +198,21 @@ Every projection supports point rebuild by key, range rebuild by chain position,
 
 Fresh normalized replay may defer normalized-event indexes used only by projection or API readback while current projection tables are empty. Rebuild tooling treats those indexes as part of its readiness boundary: before full current-state rebuilds count as ready for API reads, the deferred indexes must exist again.
 
+### Rewind and historical snapshots
+
+Projection rewind is worker-owned deterministic rebuild to selected `ChainPositions`. It reads canonical normalized events and manifest inputs whose block identities are eligible at the requested snapshot, then rebuilds only the requested family/key set or range. `observed` and `orphaned` rows are excluded from normal rewind outputs.
+
+When the selected snapshot is the latest eligible chain position for the projection key, the worker may publish into the current table. Older snapshots must be materialized with exact chain-position context, either in snapshot-scoped rows or an equivalent bounded cache. They must not overwrite newer current rows. If no eligible materialization exists, public routes return `stale`; they do not answer from raw facts, adapter internals, provider `latest`, or a newer projection row.
+
+Reorg repair uses the same machinery after canonicality updates enqueue key-scoped invalidations. The apply path consumes normalized-event insert and canonicality-change records, rebuilds affected keys in dependency order, and only deletes the invalidation generation it claimed.
+
 ### Replay status tracking
 
 `current_projection_replay_status` records durable worker-owned completion markers per projection family after a family publishes successfully. Columns: `projection`, `replay_version`, `completed_normalized_target_block`, `requested_key_count`, `upserted_row_count`, `deleted_row_count`, `completed_at`.
 
-On worker restart, automatic replay skips a family when its marker's `replay_version` matches the current code's replay version. The recorded `completed_normalized_target_block` is operational metadata, not the skip condition — the chain head can advance while a bootstrap replay is in flight.
+On worker restart before continuous apply has taken over, automatic bootstrap replay may skip a family when its marker's `replay_version` matches the current code's replay version and `completed_normalized_target_block` covers the requested normalized replay target. Once the normalized-event apply cursor exists and every current projection family has a current-version replay marker, the worker treats bootstrap as handed off and resumes continuous apply instead of forcing another full replay for newly advancing normalized blocks. Replay markers are bootstrap/full-rebuild resume aids only; they are not live-readiness signals and do not prove that projections have consumed normalized events after the recorded target. Continuous projection catch-up is owned by `projection_apply_cursors` and `projection_invalidations`.
+
+When a bootstrap full replay actually rebuilds projection keys, the worker seeds the normalized-event apply cursor to the normalized-event change watermark captured before that replay began; an empty change log is watermark `0`. Events inserted or canonicality-updated after that watermark are still consumed through key-scoped invalidation. Schema migrations install the forward change log and trigger without bulk-copying historical `normalized_events`; historical baseline catch-up is owned by worker full/backfill replay. If a deployment already has old replay markers but no apply cursor, the worker starts from the beginning of `projection_normalized_event_changes` and derives key-scoped invalidations rather than trusting the replay markers as a live cursor; markers that do not cover the requested normalized replay target force replay first.
 
 Explicit one-shot rebuild commands are force rebuilds. They clear any stale marker before rebuilding so a failed rebuild cannot leave a misleading completion marker behind.
 
