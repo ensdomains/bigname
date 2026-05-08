@@ -6094,6 +6094,194 @@ async fn block_hash_replay_preloads_wrapper_state_before_selected_transfer() -> 
 }
 
 #[tokio::test]
+async fn block_hash_replay_preloads_wrapper_state_at_boundary_not_resource_head() -> Result<()> {
+    let _permit = crate::acquire_test_db_permit().await;
+    let database = TestDatabase::new().await?;
+
+    let registry_address = "0x00000000000000000000000000000000000000bb";
+    let wrapper_address = "0x00000000000000000000000000000000000000dd";
+    insert_active_contract_fixture(
+        database.pool(),
+        SOURCE_FAMILY_ENS_V1_REGISTRY_L1,
+        "registry",
+        registry_address,
+        Some("registry"),
+        "manifests/ens/ens_v1_registry_l1/v1.toml",
+    )
+    .await?;
+    insert_active_contract_fixture(
+        database.pool(),
+        SOURCE_FAMILY_ENS_V1_WRAPPER_L1,
+        "name_wrapper",
+        wrapper_address,
+        Some("name_wrapper"),
+        "manifests/ens/ens_v1_wrapper_l1/v1.toml",
+    )
+    .await?;
+
+    let wrap_block_hash = "0xba00000000000000000000000000000000000000000000000000000000000001";
+    let first_transfer_block_hash =
+        "0xba00000000000000000000000000000000000000000000000000000000000002";
+    let resolver_block_hash = "0xba00000000000000000000000000000000000000000000000000000000000003";
+    let later_transfer_block_hash =
+        "0xba00000000000000000000000000000000000000000000000000000000000004";
+    let first_owner = "0x0000000000000000000000000000000000000001";
+    let second_owner = "0x0000000000000000000000000000000000000002";
+    let later_owner = "0x0000000000000000000000000000000000000003";
+    let resolver = "0x00000000000000000000000000000000000000ee";
+    let alice = observe_registrar_eth_name_with_version("alice", ENS_NORMALIZER_VERSION)?;
+    let dns_name = dns_encoded_name(&["alice", "eth"]);
+
+    upsert_raw_blocks(
+        database.pool(),
+        &[
+            raw_block(
+                wrap_block_hash,
+                Some("0xb900000000000000000000000000000000000000000000000000000000000000"),
+                42,
+                1_700_000_042,
+            ),
+            raw_block(
+                first_transfer_block_hash,
+                Some(wrap_block_hash),
+                43,
+                1_700_000_043,
+            ),
+            raw_block(
+                resolver_block_hash,
+                Some(first_transfer_block_hash),
+                44,
+                1_700_000_044,
+            ),
+            raw_block(
+                later_transfer_block_hash,
+                Some(resolver_block_hash),
+                45,
+                1_700_000_045,
+            ),
+        ],
+    )
+    .await?;
+    upsert_raw_logs(
+        database.pool(),
+        &[
+            RawLog {
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: wrap_block_hash.to_owned(),
+                block_number: 42,
+                transaction_hash:
+                    "0xtxba0000000000000000000000000000000000000000000000000000000001".to_owned(),
+                transaction_index: 0,
+                log_index: 0,
+                emitting_address: wrapper_address.to_owned(),
+                topics: vec![name_wrapped_topic0(), alice.namehash.clone()],
+                data: encode_name_wrapped_log_data(&dns_name, first_owner, 0, 1_800_000_000),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            RawLog {
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: first_transfer_block_hash.to_owned(),
+                block_number: 43,
+                transaction_hash:
+                    "0xtxba0000000000000000000000000000000000000000000000000000000002".to_owned(),
+                transaction_index: 0,
+                log_index: 0,
+                emitting_address: wrapper_address.to_owned(),
+                topics: vec![
+                    transfer_single_topic0(),
+                    hex_string(&abi_word_address(
+                        "0x00000000000000000000000000000000000000ff",
+                    )),
+                    hex_string(&abi_word_address(first_owner)),
+                    hex_string(&abi_word_address(second_owner)),
+                ],
+                data: encode_transfer_single_log_data(&alice.namehash, 1),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            RawLog {
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: resolver_block_hash.to_owned(),
+                block_number: 44,
+                transaction_hash:
+                    "0xtxba0000000000000000000000000000000000000000000000000000000003".to_owned(),
+                transaction_index: 0,
+                log_index: 0,
+                emitting_address: registry_address.to_owned(),
+                topics: vec![new_resolver_topic0(), alice.namehash.clone()],
+                data: abi_word_address(resolver).to_vec(),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            RawLog {
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: later_transfer_block_hash.to_owned(),
+                block_number: 45,
+                transaction_hash:
+                    "0xtxba0000000000000000000000000000000000000000000000000000000004".to_owned(),
+                transaction_index: 0,
+                log_index: 0,
+                emitting_address: wrapper_address.to_owned(),
+                topics: vec![
+                    transfer_single_topic0(),
+                    hex_string(&abi_word_address(
+                        "0x00000000000000000000000000000000000000ff",
+                    )),
+                    hex_string(&abi_word_address(second_owner)),
+                    hex_string(&abi_word_address(later_owner)),
+                ],
+                data: encode_transfer_single_log_data(&alice.namehash, 1),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+        ],
+    )
+    .await?;
+
+    let seeded = EnsV1UnwrappedAuthoritySyncSummary::sync_for_block_hashes(
+        database.pool(),
+        "ethereum-mainnet",
+        &[
+            wrap_block_hash.to_owned(),
+            first_transfer_block_hash.to_owned(),
+            resolver_block_hash.to_owned(),
+            later_transfer_block_hash.to_owned(),
+        ],
+    )
+    .await?;
+    assert_eq!(seeded.matched_log_count, 4);
+
+    let wrapper_resource_owner = sqlx::query_scalar::<_, String>(
+        "SELECT provenance->>'owner'
+         FROM resources
+         WHERE provenance->>'authority_kind' = 'wrapper'",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(wrapper_resource_owner, later_owner);
+
+    let replayed = EnsV1UnwrappedAuthoritySyncSummary::sync_for_block_hashes(
+        database.pool(),
+        "ethereum-mainnet",
+        &[resolver_block_hash.to_owned()],
+    )
+    .await?;
+    assert_eq!(replayed.matched_log_count, 1);
+    assert_eq!(replayed.total_normalized_event_inserted_count, 0);
+
+    let resolver_subject = sqlx::query_scalar::<_, String>(
+        "SELECT after_state->>'subject'
+         FROM normalized_events
+         WHERE logical_name_id = 'ens:alice.eth'
+           AND event_kind = 'PermissionChanged'
+           AND block_number = 44
+           AND log_index = 0",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(resolver_subject, second_owner);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn sync_ens_v1_unwrapped_authority_emits_reverse_claim_source_observations() -> Result<()> {
     let _permit = crate::acquire_test_db_permit().await;
     let database = TestDatabase::new().await?;

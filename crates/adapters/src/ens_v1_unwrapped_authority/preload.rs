@@ -176,8 +176,22 @@ pub(super) async fn preload_restricted_name_histories(
             state.start_ref = selected_state.start_ref;
         }
     }
-    let selected_wrapper_state =
-        load_selected_wrapper_state_before_replay(pool, &logical_name_ids, raw_logs).await?;
+    let mut wrapper_state =
+        load_latest_wrapper_state_before_block(pool, &logical_name_ids, boundary_block).await?;
+    for (authority_key, selected_state) in
+        load_selected_wrapper_state_before_replay(pool, &logical_name_ids, raw_logs).await?
+    {
+        let state = wrapper_state.entry(authority_key).or_default();
+        if selected_state.owner.is_some() {
+            state.owner = selected_state.owner;
+        }
+        if selected_state.fuses.is_some() {
+            state.fuses = selected_state.fuses;
+        }
+        if selected_state.expiry.is_some() {
+            state.expiry = selected_state.expiry;
+        }
+    }
     let registry_owner_state =
         load_latest_registry_owner_before_block(pool, &logical_name_ids, boundary_block).await?;
     let resolver_scopes = resolver_state_scopes_for_selected_names(
@@ -290,7 +304,7 @@ pub(super) async fn preload_restricted_name_histories(
                 &resource_provenance,
                 &binding_ref,
                 surface_binding_id,
-                &selected_wrapper_state,
+                &wrapper_state,
             )?,
             "registry_only" => {
                 preload_registry_history(

@@ -98,6 +98,100 @@ pub(super) async fn load_selected_wrapper_state_before_replay(
     Ok(state)
 }
 
+pub(super) async fn load_latest_wrapper_state_before_block(
+    pool: &PgPool,
+    logical_name_ids: &[String],
+    boundary_block: i64,
+) -> Result<HashMap<String, PreloadedWrapperState>> {
+    if logical_name_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let rows = sqlx::query(&format!(
+        r#"
+        WITH candidates AS (
+            SELECT
+                resource.provenance->>'authority_key' AS authority_key,
+                CASE
+                    WHEN event.event_kind = $3 THEN event.after_state->>'to'
+                    ELSE NULL
+                END AS owner,
+                CASE
+                    WHEN event.event_kind = $4 THEN (event.after_state->>'fuses')::BIGINT
+                    ELSE NULL
+                END AS fuses,
+                CASE
+                    WHEN event.event_kind = $5 THEN (event.after_state->>'expiry')::BIGINT
+                    ELSE NULL
+                END AS expiry,
+                event.block_number,
+                event.log_index,
+                event.normalized_event_id
+            FROM normalized_events event
+            JOIN resources resource
+              ON resource.resource_id = event.resource_id
+            WHERE event.logical_name_id = ANY($1::TEXT[])
+              AND event.block_number < $2
+              AND event.event_kind IN ($3, $4, $5)
+              AND resource.provenance->>'authority_kind' = 'wrapper'
+              AND resource.provenance ? 'authority_key'
+              AND event.canonicality_state {CANONICALITY_STATE_FILTER}
+              AND resource.canonicality_state {CANONICALITY_STATE_FILTER}
+        )
+        SELECT
+            authority_key,
+            (
+                ARRAY_AGG(
+                    owner
+                    ORDER BY block_number DESC, log_index DESC NULLS LAST, normalized_event_id DESC
+                ) FILTER (WHERE owner IS NOT NULL)
+            )[1] AS owner,
+            (
+                ARRAY_AGG(
+                    fuses
+                    ORDER BY block_number DESC, log_index DESC NULLS LAST, normalized_event_id DESC
+                ) FILTER (WHERE fuses IS NOT NULL)
+            )[1] AS fuses,
+            (
+                ARRAY_AGG(
+                    expiry
+                    ORDER BY block_number DESC, log_index DESC NULLS LAST, normalized_event_id DESC
+                ) FILTER (WHERE expiry IS NOT NULL)
+            )[1] AS expiry
+        FROM candidates
+        GROUP BY authority_key
+        "#
+    ))
+    .bind(logical_name_ids)
+    .bind(boundary_block)
+    .bind(EVENT_KIND_TOKEN_CONTROL_TRANSFERRED)
+    .bind(EVENT_KIND_PERMISSION_SCOPE_CHANGED)
+    .bind(EVENT_KIND_EXPIRY_CHANGED)
+    .fetch_all(pool)
+    .await
+    .context("failed to preload latest wrapper state before restricted replay")?;
+
+    let mut state = HashMap::new();
+    for row in rows {
+        let expiry = row
+            .try_get::<Option<i64>, _>("expiry")?
+            .map(|value| {
+                OffsetDateTime::from_unix_timestamp(value)
+                    .context("preloaded latest wrapper expiry is not a valid unix timestamp")
+            })
+            .transpose()?;
+        state.insert(
+            row.try_get("authority_key")?,
+            PreloadedWrapperState {
+                owner: row.try_get("owner")?,
+                fuses: row.try_get("fuses")?,
+                expiry,
+            },
+        );
+    }
+    Ok(state)
+}
+
 pub(super) async fn load_latest_registry_owner_before_block(
     pool: &PgPool,
     logical_name_ids: &[String],
