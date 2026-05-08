@@ -1,7 +1,8 @@
 use anyhow::Result;
 use bigname_storage::{
     CanonicalityState, ChainCheckpoint, ChainCheckpointUpdate, advance_chain_checkpoints,
-    load_chain_lineage_block, mark_chain_lineage_range_orphaned, upsert_chain_lineage_blocks,
+    chain_lineage_contains_ancestor, load_chain_lineage_block, mark_chain_lineage_range_orphaned,
+    upsert_chain_lineage_blocks,
 };
 use tracing::warn;
 
@@ -334,9 +335,16 @@ pub(crate) async fn reconcile_canonical_head(
         };
 
         if let Some(stored_parent) = load_chain_lineage_block(pool, chain, &parent_hash).await? {
+            let is_current_branch_ancestor = if let Some(head_hash) = current_canonical_hash {
+                chain_lineage_contains_ancestor(pool, chain, head_hash, &stored_parent.block_hash)
+                    .await?
+            } else {
+                false
+            };
             if stored_parent.canonicality_state != CanonicalityState::Orphaned
                 && current_canonical_number
                     .is_some_and(|number| stored_parent.block_number <= number)
+                && is_current_branch_ancestor
             {
                 common_ancestor_hash = Some(stored_parent.block_hash.clone());
                 break;

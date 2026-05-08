@@ -132,6 +132,83 @@ where
     rows.into_iter().map(decode_lineage_block).collect()
 }
 
+pub(crate) fn ensure_chain_lineage_path_reaches_stop(
+    chain_id: &str,
+    from_hash: &str,
+    stop_before_hash: Option<&str>,
+    path: &[ChainLineageBlock],
+) -> Result<()> {
+    let Some(stop_before_hash) = stop_before_hash else {
+        return Ok(());
+    };
+
+    if path
+        .iter()
+        .any(|block| block.parent_hash.as_deref() == Some(stop_before_hash))
+    {
+        return Ok(());
+    }
+
+    bail!(
+        "stored lineage path for chain {chain_id} from block {from_hash} did not reach required ancestor {stop_before_hash}"
+    )
+}
+
+pub async fn chain_lineage_contains_ancestor(
+    pool: &PgPool,
+    chain_id: &str,
+    descendant_hash: &str,
+    ancestor_hash: &str,
+) -> Result<bool> {
+    chain_lineage_contains_ancestor_internal(pool, chain_id, descendant_hash, ancestor_hash).await
+}
+
+pub(crate) async fn chain_lineage_contains_ancestor_internal<'e, E>(
+    executor: E,
+    chain_id: &str,
+    descendant_hash: &str,
+    ancestor_hash: &str,
+) -> Result<bool>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    let contains = sqlx::query_scalar::<_, bool>(
+        r#"
+        WITH RECURSIVE lineage_path AS (
+            SELECT chain_id, block_hash, parent_hash
+            FROM chain_lineage
+            WHERE chain_id = $1
+              AND block_hash = $2
+
+            UNION ALL
+
+            SELECT parent.chain_id, parent.block_hash, parent.parent_hash
+            FROM chain_lineage AS parent
+            JOIN lineage_path
+              ON parent.chain_id = lineage_path.chain_id
+             AND parent.block_hash = lineage_path.parent_hash
+        )
+        SELECT EXISTS (
+            SELECT 1
+            FROM lineage_path
+            WHERE block_hash = $3
+        )
+        "#,
+    )
+    .bind(chain_id)
+    .bind(descendant_hash)
+    .bind(ancestor_hash)
+    .fetch_one(executor)
+    .await
+    .with_context(|| {
+        format!(
+            "failed to prove lineage ancestry for chain {chain_id} descendant {descendant_hash} ancestor {ancestor_hash}"
+        )
+    })?;
+
+    Ok(contains)
+}
+
 pub(crate) async fn load_lineage_snapshots_for_hashes<'e, E>(
     executor: E,
     chain_id: &str,

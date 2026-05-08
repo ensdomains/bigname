@@ -222,7 +222,9 @@ impl TestDatabase {
             .max_connections(1)
             .connect_with(base_options.clone().database("postgres"))
             .await
-            .context("failed to connect admin pool for indexer tests")?;
+            .context(
+                "failed to connect admin pool for indexer tests. Run DB-backed tests through ./scripts/test-db -- <cargo test command>, or set BIGNAME_TEST_DATABASE_URL for an already-running PostgreSQL server.",
+            )?;
 
         sqlx::query(&format!(r#"CREATE DATABASE "{}""#, database_name))
             .execute(&admin_pool)

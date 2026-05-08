@@ -24,6 +24,10 @@ pub fn database_url_from_env() -> String {
         .unwrap_or_else(|_| default_database_url().to_owned())
 }
 
+pub const fn test_database_harness_hint() -> &'static str {
+    "Run DB-backed tests through ./scripts/test-db -- <cargo test command>, or set BIGNAME_TEST_DATABASE_URL for an already-running PostgreSQL server."
+}
+
 #[derive(Clone, Debug)]
 pub struct TestDatabaseConfig {
     name_prefix: String,
@@ -105,7 +109,13 @@ impl TestDatabase {
             .max_connections(config.admin_max_connections)
             .connect_with(admin_options)
             .await
-            .context(config.admin_connect_context)?;
+            .with_context(|| {
+                format!(
+                    "{}. {}",
+                    config.admin_connect_context,
+                    test_database_harness_hint()
+                )
+            })?;
 
         sqlx::query(&format!(
             "CREATE DATABASE {}",

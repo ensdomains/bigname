@@ -337,7 +337,10 @@ pub(super) async fn run_reserved_hash_pinned_backfill_range(
     aggregate: &mut BackfillJobRunOutcome,
 ) -> Result<()> {
     let mut active_range = reserved_range.clone();
-    let mut block_number = active_range.checkpoint_block_number;
+    let mut block_number = active_range
+        .checkpoint_block_number
+        .checked_add(1)
+        .context("backfill checkpoint overflowed while computing resume block")?;
     let selected_target_index = SelectedTargetIntervalIndex::from_source_plan(source_plan);
     let mut selected_target_range_cursor = SelectedTargetRangeCursor::from_source_plan(source_plan);
     let canonicality_evidence = match load_backfill_canonicality_evidence(
@@ -377,7 +380,7 @@ pub(super) async fn run_reserved_hash_pinned_backfill_range(
             &selected_target_addresses_for_chunk,
             provider,
             chunk_range,
-            canonicality_evidence,
+            canonicality_evidence.clone(),
             config.adapter_sync_mode,
             config.header_audit_mode,
         )

@@ -5,7 +5,10 @@ use sqlx::{
     postgres::{PgTypeInfo, PgValueRef},
 };
 
-use super::reads::{load_chain_lineage_path, load_lineage_snapshots_for_hashes};
+use super::reads::{
+    ensure_chain_lineage_path_reaches_stop, load_chain_lineage_path,
+    load_lineage_snapshots_for_hashes,
+};
 use super::types::{CanonicalityState, ChainLineageBlock};
 
 impl CanonicalityState {
@@ -112,6 +115,7 @@ pub(crate) async fn promote_chain_lineage_path(
     from_hash: &str,
     stop_before_hash: Option<&str>,
     target_state: CanonicalityState,
+    require_stop: bool,
 ) -> Result<Vec<ChainLineageBlock>> {
     let path = load_chain_lineage_path(&mut **executor, chain_id, from_hash, stop_before_hash)
         .await
@@ -122,6 +126,9 @@ pub(crate) async fn promote_chain_lineage_path(
         })?;
     if path.is_empty() {
         bail!("missing stored lineage row for chain {chain_id} block {from_hash}");
+    }
+    if require_stop {
+        ensure_chain_lineage_path_reaches_stop(chain_id, from_hash, stop_before_hash, &path)?;
     }
 
     let block_hashes = path

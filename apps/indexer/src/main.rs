@@ -25,6 +25,8 @@ mod reconciliation;
 mod repair;
 #[path = "main/replay.rs"]
 mod replay;
+#[path = "main/rewind.rs"]
+mod rewind;
 #[path = "main/run.rs"]
 mod run;
 #[path = "main/run_mode.rs"]
@@ -63,7 +65,7 @@ use bootstrap_backfill::*;
 use clap::Parser;
 use cli::{
     BackfillArgs, Cli, Command, OpsCatchupArgs, RepairArgs, RepairCommand, ReplayArgs,
-    ReplayCommand, ReplayNormalizedEventsArgs,
+    ReplayCommand, ReplayNormalizedEventsArgs, RewindArgs,
 };
 #[allow(unused_imports)]
 use provider::{
@@ -90,6 +92,7 @@ async fn main() -> Result<()> {
         Command::Backfill(args) => run_backfill(args).await,
         Command::OpsCatchup(args) => run_ops_catchup(args).await,
         Command::Replay(args) => run_replay(args).await,
+        Command::Rewind(args) => run_rewind(args).await.map(|_| ()),
         Command::Repair(args) => run_repair(args).await,
     }
 }
@@ -216,6 +219,32 @@ async fn run_replay(args: ReplayArgs) -> Result<()> {
     match args.command {
         ReplayCommand::NormalizedEvents(args) => run_replay_normalized_events(args).await,
     }
+}
+
+async fn run_rewind(args: RewindArgs) -> Result<rewind::RewindOutcome> {
+    let outcome = rewind::run_rewind(args).await?;
+    tracing::info!(
+        service = "indexer",
+        command = "rewind",
+        deployment_profile = %outcome.deployment_profile,
+        chain = %outcome.chain,
+        from_block_hash = %outcome.from_block_hash,
+        ancestor_block_hash = %outcome.ancestor_block_hash,
+        ancestor_block_number = outcome.ancestor_block_number,
+        orphaned_lineage_count = outcome.orphaned_lineage_count,
+        orphaned_raw_code_hash_count = outcome.orphaned_raw_fact_counts.code_hash_count,
+        orphaned_raw_transaction_count = outcome.orphaned_raw_fact_counts.transaction_count,
+        orphaned_raw_receipt_count = outcome.orphaned_raw_fact_counts.receipt_count,
+        orphaned_raw_log_count = outcome.orphaned_raw_fact_counts.log_count,
+        orphaned_normalized_event_count = outcome.orphaned_normalized_event_count,
+        orphaned_token_lineage_count = outcome.orphaned_identity_counts.token_lineage_count,
+        orphaned_resource_count = outcome.orphaned_identity_counts.resource_count,
+        orphaned_name_surface_count = outcome.orphaned_identity_counts.name_surface_count,
+        orphaned_surface_binding_count = outcome.orphaned_identity_counts.surface_binding_count,
+        invalidated_execution_outcome_count = outcome.invalidated_execution_outcome_count,
+        "rewind completed"
+    );
+    Ok(outcome)
 }
 
 async fn run_repair(args: RepairArgs) -> Result<()> {

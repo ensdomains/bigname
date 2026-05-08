@@ -55,7 +55,8 @@ pub use backfill_jobs::{
 };
 pub use checkpoints::{
     ChainCheckpoint, ChainCheckpointUpdate, CheckpointBlockRef, advance_chain_checkpoints,
-    load_chain_checkpoint, load_chain_checkpoint_snapshots, sync_chain_checkpoints,
+    load_chain_checkpoint, load_chain_checkpoint_snapshots, rewind_chain_checkpoints_to_ancestor,
+    sync_chain_checkpoints,
 };
 pub use children::{
     ChildrenCurrentKeysetCursor, ChildrenCurrentPage, ChildrenCurrentRow, ChildrenCurrentSummary,
@@ -99,8 +100,8 @@ pub use identity::{
     upsert_surface_bindings, upsert_token_lineages,
 };
 pub use lineage::{
-    CanonicalityState, ChainLineageBlock, load_chain_lineage_block,
-    mark_chain_lineage_range_orphaned, upsert_chain_lineage_blocks,
+    CanonicalityState, ChainLineageBlock, chain_lineage_contains_ancestor,
+    load_chain_lineage_block, mark_chain_lineage_range_orphaned, upsert_chain_lineage_blocks,
     upsert_chain_lineage_blocks_without_snapshots,
 };
 pub use name_current::{

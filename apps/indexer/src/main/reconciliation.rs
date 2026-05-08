@@ -51,8 +51,8 @@ pub(crate) use payload::{
 };
 #[allow(unused_imports)]
 pub(crate) use persistence::{
-    persist_reconciled_raw_blocks, persist_reconciled_raw_code_hashes,
-    persist_reconciled_raw_payloads,
+    ensure_losing_branch_raw_blocks_exist, persist_reconciled_raw_blocks,
+    persist_reconciled_raw_code_hashes, persist_reconciled_raw_payloads,
 };
 #[allow(unused_imports)]
 pub(crate) use replay::replay_raw_fact_normalized_events;

@@ -39,12 +39,12 @@ async fn reconcile_fetched_heads_initializes_chain_from_provider_heads() -> Resu
     let tasks = sync_intake_chain_tasks(database.pool(), &watched_plan).await?;
     let canonical_head = provider_block(
         "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        Some("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+        Some("0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"),
         42,
     );
     let safe_head = provider_block(
         "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-        Some("0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"),
+        Some("0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"),
         41,
     );
     let finalized_head = provider_block(
@@ -631,7 +631,7 @@ async fn reconcile_fetched_heads_backfills_registrar_name_observation_events() -
     let tasks = sync_intake_chain_tasks(database.pool(), &watched_plan).await?;
     let canonical_head = provider_block(
         "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        Some("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+        None,
         42,
     );
     let (provider, server) = bundle_provider_with_fixtures(vec![ProviderBlockFixture {

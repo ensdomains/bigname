@@ -50,7 +50,9 @@ Switching modes is operational policy. It does not change route coverage, projec
 
 `bigname-worker raw-facts compact-log-staging` is the manual compaction boundary for minimal mode. It refuses to compact unless the `raw_fact_normalized_events` replay cursor is caught up and failure-free, and only operates on raw-log staging families. Log-audit deployments do not run it for retained ranges.
 
-After compaction, `chain_lineage` and compact `raw_blocks` remain the block-hash path for losing-branch repair, and `normalized_events` carry the block identity, source identity, event identity, and provenance needed by projection rebuilds and history reads. If raw-log staging rows are already gone, reorg repair marks normalized events and identity rows orphaned from lineage and updates zero raw-log rows for that range. Historical adapter replay from compacted ranges is an explicit backfill/refetch operation against the configured provider/cache substrate or requires log-audit retention; it is not an implicit API fallback.
+After compaction, `chain_lineage` and any retained compact block-anchor metadata remain the block-hash path for losing-branch repair, and `normalized_events` carry the block identity, source identity, event identity, and provenance needed by projection rebuilds and history reads. If raw-log staging rows are already gone, reorg repair marks normalized events and identity rows orphaned from lineage and updates zero raw-log rows for that range. Historical adapter replay from compacted ranges is an explicit backfill/refetch operation against the configured provider/cache substrate or requires log-audit retention; it is not an implicit API fallback.
+
+Compaction and pruning must stay behind the rewind horizon they serve. Minimal mode may drop staging rows after replay is durable, but it must not drop lineage, normalized-event provenance, identity intervals, projection change records, or retained replay facts needed to orphan a losing branch and rebuild the canonical snapshot. If a compacted range later needs adapter-level byte replay and no retained digest-checked payload or provider/cache fill can satisfy it, that repair fails closed rather than inventing state from current projections.
 
 ## Evictable payload cache
 
@@ -111,7 +113,9 @@ For ENSv2, `resource_id` keys by `(chain_id, registry_contract_instance_id, upst
 | `name_surfaces`, `surface_bindings`, `resources`, `token_lineages` | adapters | stable identity anchors |
 | `normalized_events` | adapters | append-only normalized protocol events |
 | `projection_*` | projection workers | disposable read models |
-| `current_projection_replay_status` | projection workers | durable operational completion markers for automatic all-current projection replay |
+| `current_projection_replay_status` | projection workers | durable operational completion markers for bootstrap/full all-current projection replay |
+| `projection_normalized_event_changes` | normalized-event storage trigger; projection workers consume | append-only downstream change log for normalized-event inserts and canonicality-state updates |
+| `projection_apply_cursors`, `projection_invalidations` | projection workers | durable projection apply watermarks and key-scoped projection invalidation queue |
 | `execution_*` | execution workers; synchronous indexer/reorg repair for orphan-block cache outcome deletes only | durable traces and steps, normal `execution_cache_outcomes` writes, invalidation records |
 
 The API process is read-only against storage.
@@ -138,7 +142,7 @@ Resolver-profile admission state (PublicResolver-generation profiles for ENSv1, 
 At minimum:
 
 - `backfill_jobs` — one row per bounded backfill job with selected profile, chain, selector kind, resolved source identity, scan mode, declared range start and end, idempotency key, lifecycle status, failure metadata, timestamps.
-- `backfill_ranges` — child range records with declared range bounds, next checkpoint, lease owner, lease token, lease expiry, attempt counters, lifecycle status, failure metadata, timestamps.
+- `backfill_ranges` — child range records with declared range bounds, last-completed checkpoint, lease owner, lease token, lease expiry, attempt counters, lifecycle status, failure metadata, timestamps. A new range initializes its checkpoint to one block before the declared start so resume starts at `checkpoint_block_number + 1`.
 - Monotonic helper-owned checkpoint fields that let a worker resume after crash without widening the original range or reclassifying already admitted facts.
 
 Operational finalized catch-up uses these same families. It may create many finite chunks, but each chunk preserves one immutable job shape and idempotency key. Capacity preflight (current Postgres size, writable free disk, configured object-cache budget) records explicit failure or paused state in existing lifecycle/failure metadata when capacity is insufficient.
@@ -152,6 +156,8 @@ The selector identity fields on a job:
 - `source_identity_hash` — digest of `selector_kind`, `source_family`, `requested_watched_targets`, and `selected_targets`
 
 Very large source-family jobs may persist compact selector identity instead of a full `selected_targets` array. Compact identity sets `source_identity_payload_format=selected_targets_digest_v1` and carries `selected_target_count`, `selected_targets_digest_algorithm`, `selected_targets_digest`, a first/last `selected_targets_sample`, and `source_identity_hash`. The digest input remains the sorted canonical `selected_targets` tuple.
+
+Backfill idempotency is derived from deployment profile, chain, finite range, scan family, and source identity. It must not include the local manifest root path: moving the same selected manifest corpus between filesystem locations does not create new raw backfill work. Bootstrap checkpoint reuse follows the same rule by matching persisted source identity and contiguous range coverage rather than the literal idempotency-key text.
 
 `effective_to_block` is finite for every persisted selected target — backfill jobs are finite at creation time. Bootstrap ranges start at each eligible target's manifest/discovery admitted start and end at the finite provider head observed at job creation. A watched target whose manifest-declared `start_block` is unknown is skipped by bootstrap; it leaves no synthetic block-zero, provider-history, recent-window, or job-start range in `backfill_*`.
 
@@ -240,13 +246,17 @@ The currently admitted repair is ENSv1 PublicResolver-compatible `TextChanged` p
 
 During fresh normalized replay — current projection tables empty, normalized replay cursor not at target — the indexer may defer normalized-event indexes that exist only for projection/API readback while keeping replay-required indexes for event identity, reverse-claim lookup, and latest resolver/version preloads. Deferred indexes are recreated before projection rebuilds or API-ready declared reads complete.
 
-`current_projection_replay_status` rows let worker restarts resume from the first unfinished projection family instead of restarting bootstrap replay from the start. They are worker-owned operational progress: not API truth, not projection data, and ignored unless the recorded replay version is still current.
+`current_projection_replay_status` rows let worker restarts resume from the first unfinished projection family instead of restarting bootstrap/full replay from the start. They are worker-owned operational progress: not API truth, not projection data, not live-readiness state, and ignored unless the recorded replay version is still current and the recorded normalized target covers the requested replay target.
+
+`projection_invalidations` rows are the durable key-scoped work queue for projection refreshes. `projection_normalized_event_changes` is the append-only downstream input for normalized-event inserts and canonicality-state updates; migrations install the forward log and trigger without bulk-copying historical `normalized_events`. `projection_apply_cursors` rows track consumed `change_id` watermarks for that input. Manifest, execution, and other non-normalized-event invalidation producers write the same queue directly. The primary key is `(projection, projection_key)`; repeated invalidations for the same key update the row generation and release any stale claim so an older apply cannot erase newer work. Projection workers claim and apply rows in projection dependency order, then delete only the claimed generation.
 
 ## Projection storage rules
 
 Every current-state projection row carries provenance pointers, manifest version, relevant chain positions, canonicality summary, and last-recomputed timestamp.
 
 Projection tables may be truncated and rebuilt from canonical facts plus normalized events.
+
+Historical projection materializations are projection-owned caches, not truth. When a worker materializes an `at` or `chain_positions` snapshot, the rows are keyed by the normal projection key plus exact chain-position context or an equivalent snapshot key. They may be bounded and evicted by policy; absence returns `stale`. A historical materialization must never overwrite a newer current row in place, and the API must never fill a missing historical projection from raw facts or provider data.
 
 Exact-name snapshot selection is a storage read boundary, not a new family. The API resolves `at`, explicit `chain_positions`, and `consistency` to one concrete `ChainPositions` object, then reads only projection rows and execution outputs eligible for that exact object. `name_current`, `coverage_current`, `surface_bindings_current`, `permissions_current`, and `record_inventory_current` retain enough chain-position context for the API to reject mismatched joins rather than combine rows from different snapshots.
 
