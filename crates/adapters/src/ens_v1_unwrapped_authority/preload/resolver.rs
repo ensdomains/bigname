@@ -139,7 +139,7 @@ pub(super) async fn load_latest_resolver_state_before_block(
           AND block_number < $2
           AND event_kind = $3
           AND canonicality_state {CANONICALITY_STATE_FILTER}
-        ORDER BY logical_name_id, block_number DESC, log_index DESC, normalized_event_id DESC
+        ORDER BY logical_name_id, block_number DESC, log_index DESC NULLS LAST, normalized_event_id DESC
         "#
     ))
     .bind(logical_name_ids)
@@ -331,7 +331,7 @@ pub(super) async fn load_latest_record_versions_before_block(
           AND block_number < $2
           AND event_kind = $3
           AND canonicality_state {CANONICALITY_STATE_FILTER}
-        ORDER BY logical_name_id, block_number DESC, log_index DESC, normalized_event_id DESC
+        ORDER BY logical_name_id, block_number DESC, log_index DESC NULLS LAST, normalized_event_id DESC
         "#
     ))
     .bind(logical_name_ids)
