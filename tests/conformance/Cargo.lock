@@ -610,6 +610,7 @@ dependencies = [
  "anyhow",
  "clap",
  "futures-util",
+ "serde",
  "serde_json",
  "sqlx",
  "tracing",
