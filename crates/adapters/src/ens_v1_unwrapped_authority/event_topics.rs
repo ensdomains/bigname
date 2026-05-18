@@ -138,6 +138,24 @@ impl AuthorityEventTopics {
         self.topic0s.topic0s(ENS_RESOLVER_EVENT_SIGNATURES)
     }
 
+    pub(super) fn authority_replay_event_topic0s(&self) -> Vec<String> {
+        [
+            ENS_REGISTRAR_EVENT_SIGNATURES,
+            BASENAMES_REGISTRAR_EVENT_SIGNATURES,
+            REGISTRY_EVENT_SIGNATURES,
+            ENS_RESOLVER_EVENT_SIGNATURES,
+            BASENAMES_RESOLVER_EVENT_SIGNATURES,
+            WRAPPER_EVENT_SIGNATURES,
+        ]
+        .into_iter()
+        .flatten()
+        .filter_map(|signature| self.optional_topic0(signature))
+        .map(str::to_ascii_lowercase)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+    }
+
     pub(super) fn for_ens_v1_text_decoding() -> Self {
         Self::from_signatures([
             TEXT_CHANGED_WITHOUT_VALUE_SIGNATURE,

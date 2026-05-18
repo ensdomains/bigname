@@ -183,6 +183,8 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
         effective_hash_pinned_backfill_adapter_sync =
             run_mode.startup_backfill_adapter_sync_mode.as_str(),
         live_poll_adapter_sync = run_mode.live_poll_adapter_sync_enabled,
+        live_poll_adapter_sync_after_normalized_replay_catchup =
+            run_mode.live_poll_adapter_sync_after_normalized_replay_catchup,
         normalized_replay_catchup_enabled = run_mode.normalized_replay_catchup_enabled,
         normalized_replay_catchup_chunk_blocks = args.normalized_replay_catchup_chunk_blocks,
         normalized_replay_catchup_max_logs_per_chunk = args.normalized_replay_catchup_max_logs_per_chunk,
@@ -208,6 +210,7 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
         run_mode.runtime_watch_scope,
         run_mode.broad_runtime_refresh_enabled,
         run_mode.live_poll_adapter_sync_enabled,
+        run_mode.live_poll_adapter_sync_after_normalized_replay_catchup,
         run_mode.broad_runtime_refresh_enabled,
         run_mode.broad_runtime_refresh_enabled,
         header_audit_mode,

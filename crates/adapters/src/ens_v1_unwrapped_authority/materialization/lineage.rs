@@ -39,7 +39,7 @@ pub(in crate::ens_v1_unwrapped_authority) async fn build_token_lineage_from_boun
 }
 
 async fn build_token_lineage_for_ref(
-    pool: &PgPool,
+    _pool: &PgPool,
     token_lineage_id: Uuid,
     chain: &str,
     block_hash: &str,
@@ -47,19 +47,6 @@ async fn build_token_lineage_for_ref(
     canonicality_state: CanonicalityState,
     provenance: serde_json::Value,
 ) -> Result<TokenLineage> {
-    if let Some(existing) =
-        load_token_lineage_including_noncanonical(pool, token_lineage_id).await?
-    {
-        return Ok(TokenLineage {
-            token_lineage_id: existing.token_lineage_id,
-            chain_id: existing.chain_id,
-            block_hash: existing.block_hash,
-            block_number: existing.block_number,
-            provenance,
-            canonicality_state,
-        });
-    }
-
     Ok(TokenLineage {
         token_lineage_id,
         chain_id: chain.to_owned(),
@@ -71,25 +58,13 @@ async fn build_token_lineage_for_ref(
 }
 
 pub(in crate::ens_v1_unwrapped_authority) async fn build_resource(
-    pool: &PgPool,
+    _pool: &PgPool,
     resource_id: Uuid,
     token_lineage_id: Option<Uuid>,
     chain: &str,
     reference: &BoundaryRef,
     provenance: serde_json::Value,
 ) -> Result<Resource> {
-    if let Some(existing) = load_resource_including_noncanonical(pool, resource_id).await? {
-        return Ok(Resource {
-            resource_id: existing.resource_id,
-            token_lineage_id: existing.token_lineage_id.or(token_lineage_id),
-            chain_id: existing.chain_id,
-            block_hash: existing.block_hash,
-            block_number: existing.block_number,
-            provenance,
-            canonicality_state: reference.canonicality_state,
-        });
-    }
-
     Ok(Resource {
         resource_id,
         token_lineage_id,

@@ -8,7 +8,7 @@ use super::{
 
 const RECORDS_MODE_DECLARED_QUERY: ApiRouteParameter = ApiRouteParameter::query(
     "mode",
-    "Compact records read mode. `auto` uses declared cache when the resolver profile is authoritative, otherwise verified resolution for requested selectors. When no declared selectors are available, app-facing defaults probe only a bounded basic profile set.",
+    "Compact records read mode. `auto` uses declared cache when it can satisfy the requested values from replayable state, otherwise verified resolution for requested selectors. When no declared selectors are available, app-facing defaults probe only a bounded basic profile set.",
     ApiParameterSchema::StringEnumDefault {
         values: &["auto", "declared", "verified", "both"],
         default: "declared",
@@ -16,7 +16,7 @@ const RECORDS_MODE_DECLARED_QUERY: ApiRouteParameter = ApiRouteParameter::query(
 );
 const RECORDS_MODE_AUTO_QUERY: ApiRouteParameter = ApiRouteParameter::query(
     "mode",
-    "Compact records read mode. `auto` uses declared cache when the resolver profile is authoritative, otherwise verified resolution for requested selectors. When no declared selectors are available, app-facing defaults probe only a bounded basic profile set.",
+    "Compact records read mode. `auto` uses declared cache when it can satisfy the requested values from replayable state, otherwise verified resolution for requested selectors. When no declared selectors are available, app-facing defaults probe only a bounded basic profile set.",
     ApiParameterSchema::StringEnumDefault {
         values: &["auto", "declared", "verified", "both"],
         default: "auto",

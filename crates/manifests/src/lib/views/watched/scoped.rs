@@ -67,7 +67,7 @@ async fn load_watched_contracts_by_addresses_scoped(
         FROM target_addresses target
         JOIN contract_instance_addresses cia
           ON cia.chain_id = target.chain
-         AND LOWER(cia.address) = target.address
+         AND cia.address = target.address
          AND cia.deactivated_at IS NULL
         JOIN manifest_contract_instances mci
           ON mci.contract_instance_id = cia.contract_instance_id
@@ -131,7 +131,7 @@ async fn load_watched_contracts_by_addresses_scoped(
         FROM target_addresses target
         JOIN contract_instance_addresses cia
           ON cia.chain_id = target.chain
-         AND LOWER(cia.address) = target.address
+         AND cia.address = target.address
          AND cia.deactivated_at IS NULL
         JOIN discovery_edges de
           ON de.chain_id = target.chain

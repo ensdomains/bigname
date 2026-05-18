@@ -145,7 +145,7 @@ Rules:
 
 ## `GET /v1/names/{namespace}/{name}/records`
 
-Compact resolver records over declared inventory/cache and optional verified selectors. Current-projection read; doesn't run normalized-event catch-up scans.
+Compact resolver records over declared inventory/cache and optional verified selectors. Selected-snapshot projection read; doesn't run normalized-event catch-up scans.
 
 Query: `mode=auto|declared|verified|both`, `texts`, `known_text_keys=true|false`, `avatar=true|false`, `content_hash=true|false`, `coin_types`, `include=resolver_address,known_text_keys,avatar,content_hash,coins`, `view=compact`, `meta=none|summary|full`.
 
@@ -162,10 +162,10 @@ Rules:
 - `content_hash=true` requests the declared content-hash selector.
 - `coin_types` is a comma-separated list of textual coin-type selectors.
 - `mode=declared` uses `record_cache` and `record_inventory`. No live execution.
-- `mode=verified|both` follows the same supported verified-resolution boundary as `GET /v1/resolutions/{namespace}/{name}`. Supported ENS cache misses execute live through the configured Ethereum RPC provider using `latest`.
-- `mode=auto`: an authoritative declared profile uses local inventory/cache (including worker-hydrated ENSv1 PublicResolver text values for observed selectors after rebuild). Otherwise supported requested selectors use verified output, including non-persisted on-demand Universal Resolver execution at provider `latest` when no exact-snapshot output exists.
+- `mode=verified|both` follows the same supported verified-resolution boundary as `GET /v1/resolutions/{namespace}/{name}`. Supported ENS cache misses execute through the configured Ethereum RPC provider at the selected stored snapshot and persist the trace/outcome before joining it.
+- `mode=auto`: an authoritative declared profile uses local inventory/cache only when the declared cache can satisfy every requested value from replayable state, including worker-hydrated ENSv1 PublicResolver text values for observed selectors after rebuild. Requested selectors with explicit declared gaps, unretained declared values, or no declared selectors use verified output instead, including on-demand Universal Resolver execution at the selected stored snapshot when no exact-snapshot output exists.
 - Without declared selectors, `mode=auto|verified|both` may probe the basic app profile set (`addr:60`, `avatar`, `contenthash`, text keys `description`, `url`, `email`).
-- On-demand `latest` calls return inline; they don't create exact-snapshot execution cache rows or block-anchored `raw_call_snapshots`. Use `GET /v1/resolutions/{namespace}/{name}` for persisted exact-block provenance.
+- On-demand execution never targets provider `latest` independently of the selected stored snapshot. If the provider cannot serve that block, the route returns `409 stale`; declared cache is not a fallback for a verified miss.
 - Selector-specific record history isn't on this route. Use `GET /v1/events` or history routes with event-type filters.
 - `view=full` is compatibility-reserved and still returns `400 invalid_input`; OpenAPI advertises only `view=compact`.
 
@@ -430,7 +430,7 @@ Rules:
 
 ## `GET /v1/resolve/{name}/records`
 
-Namespace-inferred convenience for `GET /v1/names/{namespace}/{name}/records`. Default `mode=auto`. Current-projection read (no normalized-event catch-up).
+Namespace-inferred convenience for `GET /v1/names/{namespace}/{name}/records`. Default `mode=auto`. Selected-snapshot projection read (no normalized-event catch-up).
 
 Query: `mode=auto|declared|verified|both`, `texts`, `known_text_keys=true|false`, `avatar=true|false`, `content_hash=true|false`, `coin_types`, `include=resolver_address,known_text_keys,avatar,content_hash,coins`, `view=compact`, `meta=none|summary|full`.
 
@@ -438,7 +438,7 @@ Defaults: `mode=auto`, `view=compact`, `meta=summary`, `include=resolver_address
 
 Inference matches `GET /v1/resolve/{name}`. After inference, returns the same `CompactRecordSummary` and verified support boundary as the canonical compact records route. The default also turns on the common app-facing sections so one request returns resolver address, known text keys, avatar, content hash, and known coin addresses where available.
 
-Without declared selectors, `mode=auto` probes the basic app profile set and returns successful fallback text rows plus the ETH coin row when available. It doesn't claim `known_text_keys` inventory support from those probes. No `at`, `chain_positions`, or `consistency`. Supported ENS verified fallback uses provider `latest` and returns non-persisted selector results inline. Identity, support state, and errors stay namespace-local — Basenames doesn't fall back to ENS when the inferred tuple is missing. `view=full` is compatibility-reserved and still returns `400 invalid_input`; OpenAPI advertises only `view=compact`.
+Without declared selectors, `mode=auto` probes the basic app profile set through verified resolution and returns successful fallback text rows plus the ETH coin row when available. It doesn't claim `known_text_keys` inventory support from those probes. No `at`, `chain_positions`, or `consistency`; the canonical default snapshot applies. Supported ENS verified fallback uses that selected stored snapshot and fails closed with `409 stale` when the provider cannot serve it. Identity, support state, and errors stay namespace-local — Basenames doesn't fall back to ENS when the inferred tuple is missing. `view=full` is compatibility-reserved and still returns `400 invalid_input`; OpenAPI advertises only `view=compact`.
 
 ## `GET /v1/explain/resolutions/{namespace}/{name}/execution`
 

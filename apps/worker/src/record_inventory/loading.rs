@@ -14,6 +14,13 @@ pub(super) fn stream_target_resource_ids<'a>(
         r#"
         SELECT DISTINCT ne.resource_id
         FROM normalized_events ne
+        JOIN resources resource
+          ON resource.resource_id = ne.resource_id
+         AND resource.canonicality_state IN (
+              'canonical'::canonicality_state,
+              'safe'::canonicality_state,
+              'finalized'::canonicality_state
+          )
         WHERE ne.derivation_kind = ANY($1::TEXT[])
           AND ne.event_kind IN ($2, $3, $4)
           AND (ne.event_kind <> $4 OR ne.namespace = ANY($5::TEXT[]))
@@ -68,6 +75,13 @@ pub(super) async fn load_relevant_events(
             ne.after_state,
             LOWER(rl.emitting_address) AS emitting_address
         FROM normalized_events ne
+        JOIN resources resource
+          ON resource.resource_id = ne.resource_id
+         AND resource.canonicality_state IN (
+              'canonical'::canonicality_state,
+              'safe'::canonicality_state,
+              'finalized'::canonicality_state
+          )
         LEFT JOIN chain_lineage rb
           ON rb.chain_id = ne.chain_id
          AND rb.block_hash = ne.block_hash

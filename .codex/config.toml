@@ -7,4 +7,4 @@ max_threads = 10
 max_depth = 1
 
 [features]
-codex_hooks = true
+codex_hooks = false

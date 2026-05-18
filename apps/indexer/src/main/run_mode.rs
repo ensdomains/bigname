@@ -9,6 +9,7 @@ pub(crate) struct IndexerRunMode {
     pub(crate) sync_adapter_after_startup_backfill: bool,
     pub(crate) normalized_replay_catchup_enabled: bool,
     pub(crate) live_poll_adapter_sync_enabled: bool,
+    pub(crate) live_poll_adapter_sync_after_normalized_replay_catchup: bool,
     pub(crate) broad_runtime_refresh_enabled: bool,
 }
 
@@ -28,6 +29,8 @@ impl IndexerRunMode {
         let live_poll_adapter_sync_enabled = adapter_sync_mode != BackfillAdapterSyncMode::RawOnly
             && !(adapter_sync_mode == BackfillAdapterSyncMode::Auto
                 && normalized_replay_catchup_enabled);
+        let live_poll_adapter_sync_after_normalized_replay_catchup =
+            adapter_sync_mode == BackfillAdapterSyncMode::Auto && normalized_replay_catchup_enabled;
 
         Self {
             adapter_sync_mode,
@@ -39,6 +42,7 @@ impl IndexerRunMode {
             sync_adapter_after_startup_backfill: false,
             normalized_replay_catchup_enabled,
             live_poll_adapter_sync_enabled,
+            live_poll_adapter_sync_after_normalized_replay_catchup,
             broad_runtime_refresh_enabled: adapter_sync_mode == BackfillAdapterSyncMode::Inline,
         }
     }

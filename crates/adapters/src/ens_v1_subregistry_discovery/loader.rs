@@ -7,7 +7,10 @@ mod raw_logs;
 
 pub(super) use active_emitters::load_active_emitters;
 pub(super) use edges::load_registry_edges_by_observation_point;
-pub(super) use raw_logs::{load_registry_raw_logs, stream_registry_raw_logs};
+pub(super) use raw_logs::{
+    RegistryRawLogPosition, load_registry_raw_log_checkpoint_page, load_registry_raw_logs,
+    stream_registry_raw_logs,
+};
 
 #[derive(Clone, Debug)]
 pub(super) struct RegistryRawLogRow {

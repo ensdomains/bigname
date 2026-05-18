@@ -856,8 +856,9 @@ async fn bootstrap_auto_backfill_drains_manifest_started_targets_and_preserves_c
     assert_eq!(deployment_profile, "sepolia");
     assert_eq!(chain_id, "ethereum-mainnet");
     assert_eq!((*from_block, *to_block), (42, 43));
+    assert!(idempotency_key.starts_with("indexer-bootstrap-backfill:v3:"));
     assert!(idempotency_key.contains("deployment_profile=sepolia"));
-    assert!(idempotency_key.contains("manifest_root=manifests/sepolia"));
+    assert!(!idempotency_key.contains("manifest_root="));
     assert!(idempotency_key.contains("chain=ethereum-mainnet"));
     assert!(idempotency_key.contains("from=42:to=43"));
     assert_eq!(
@@ -976,6 +977,10 @@ async fn bootstrap_auto_backfill_drains_manifest_started_targets_and_preserves_c
             .await?,
         2
     );
+    let initial_requests = requests
+        .lock()
+        .expect("request log must not be poisoned")
+        .clone();
 
     let rerun = run_startup_bootstrap_backfills(
         database.pool(),
@@ -1009,10 +1014,7 @@ async fn bootstrap_auto_backfill_drains_manifest_started_targets_and_preserves_c
         *backfill_job_id
     );
 
-    let requests = requests
-        .lock()
-        .expect("request log must not be poisoned")
-        .clone();
+    let requests = initial_requests;
     assert!(
         requests
             .iter()
@@ -1053,20 +1055,28 @@ async fn bootstrap_auto_backfill_drains_manifest_started_targets_and_preserves_c
         .collect::<Vec<_>>();
     assert_eq!(
         block_number_requests.len(),
-        4,
-        "grouped bootstrap should resolve and revalidate the two selected target blocks"
+        6,
+        "grouped bootstrap should resolve, revalidate, and code-pin the two selected target blocks"
     );
     let resolved_block_params = block_number_requests[..2]
         .iter()
         .map(|(_, request)| request.params.first().and_then(Value::as_str))
         .collect::<Vec<_>>();
-    let revalidated_block_params = block_number_requests[2..]
+    let revalidated_block_params = block_number_requests[2..4]
+        .iter()
+        .map(|(_, request)| request.params.first().and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    let code_observation_block_params = block_number_requests[4..]
         .iter()
         .map(|(_, request)| request.params.first().and_then(Value::as_str))
         .collect::<Vec<_>>();
     assert_eq!(
         resolved_block_params, revalidated_block_params,
         "grouped bootstrap should revalidate the same block hashes after fetching logs"
+    );
+    assert_eq!(
+        resolved_block_params, code_observation_block_params,
+        "grouped bootstrap should pin code observations to the selected block hashes"
     );
     let log_requests = requests
         .iter()
@@ -1083,7 +1093,11 @@ async fn bootstrap_auto_backfill_drains_manifest_started_targets_and_preserves_c
             && log_requests[0].0 < block_number_requests[2].0,
         "grouped bootstrap should fetch logs between range resolution and revalidation"
     );
-    for batch in [&block_number_requests[..2], &block_number_requests[2..]] {
+    for batch in [
+        &block_number_requests[..2],
+        &block_number_requests[2..4],
+        &block_number_requests[4..],
+    ] {
         assert_eq!(batch[0].1.batch_size, 2);
         assert!(
             batch.iter().all(|(_, request)| {
@@ -1622,6 +1636,46 @@ async fn bootstrap_auto_backfill_covers_declared_start_to_provider_head() -> Res
         2
     );
 
+    sqlx::query(
+        r#"
+        UPDATE backfill_jobs
+        SET idempotency_key = replace(
+            idempotency_key,
+            'indexer-bootstrap-backfill:v3:deployment_profile=mainnet:',
+            'indexer-bootstrap-backfill:v1:deployment_profile=mainnet:manifest_root=manifests:'
+        )
+        "#,
+    )
+    .execute(database.pool())
+    .await
+    .context("failed to rewrite bootstrap job to legacy manifest-root idempotency key")?;
+    let legacy_idempotency_key =
+        sqlx::query_scalar::<_, String>("SELECT idempotency_key FROM backfill_jobs")
+            .fetch_one(database.pool())
+            .await?;
+    assert!(legacy_idempotency_key.contains("manifest_root=manifests"));
+
+    let root_alias_rerun = run_startup_bootstrap_backfills(
+        database.pool(),
+        &manifest_root,
+        &intake_tasks,
+        &provider_registry,
+        crate::backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS,
+        crate::backfill::BackfillAdapterSyncMode::Inline,
+        false,
+        HeaderAuditMode::Minimal,
+        crate::bootstrap_backfill::DEFAULT_BOOTSTRAP_BACKFILL_WORKERS,
+        crate::bootstrap_backfill::DEFAULT_BOOTSTRAP_BACKFILL_RANGE_BLOCKS,
+    )
+    .await?;
+    assert_eq!(root_alias_rerun.drained_job_count, 0);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM backfill_jobs")
+            .fetch_one(database.pool())
+            .await?,
+        1
+    );
+
     let block_5 = provider_block(
         "0x5000000000000000000000000000000000000000000000000000000000000005",
         Some(&block_4.block_hash),
@@ -1861,7 +1915,8 @@ async fn bootstrap_auto_backfill_partitions_ranges_for_internal_workers() -> Res
     )
     .fetch_one(database.pool())
     .await?;
-    assert!(idempotency_key.starts_with("indexer-bootstrap-backfill:v2:"));
+    assert!(idempotency_key.starts_with("indexer-bootstrap-backfill:v3:"));
+    assert!(!idempotency_key.contains("manifest_root="));
     assert!(idempotency_key.contains("range_blocks=2"));
 
     server.abort();
@@ -2241,7 +2296,7 @@ async fn create_bootstrap_backfill_job_tables(pool: &PgPool) -> Result<()> {
             backfill_job_id BIGINT NOT NULL REFERENCES backfill_jobs (backfill_job_id) ON DELETE CASCADE,
             range_start_block_number BIGINT NOT NULL CHECK (range_start_block_number >= 0),
             range_end_block_number BIGINT NOT NULL CHECK (range_end_block_number >= range_start_block_number),
-            checkpoint_block_number BIGINT NOT NULL CHECK (checkpoint_block_number >= range_start_block_number AND checkpoint_block_number <= range_end_block_number),
+            checkpoint_block_number BIGINT NOT NULL CHECK (checkpoint_block_number >= range_start_block_number - 1 AND checkpoint_block_number <= range_end_block_number),
             status backfill_lifecycle_status NOT NULL DEFAULT 'pending',
             lease_token TEXT,
             lease_owner TEXT,

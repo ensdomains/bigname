@@ -12,10 +12,7 @@ use super::super::{
         load_manifest_code_hash_observations_for_watched_contracts,
     },
     types::ManifestCodeHashObservation,
-    watched::{
-        load_watched_contracts_by_source_family,
-        load_watched_contracts_by_source_family_and_addresses,
-    },
+    watched::load_watched_contracts_by_source_family,
 };
 use super::{
     RESOLVER_PROFILE_BASIS_CODE_HASH_MATCH, RESOLVER_PROFILE_BASIS_CODE_HASH_MISMATCH,
@@ -63,7 +60,7 @@ pub async fn load_ens_v1_public_resolver_profile_admissions_for_targets(
     }
 
     let seed_contracts = load_ens_v1_resolver_profile_seed_watched_contracts(pool).await?;
-    let target_contracts = load_watched_contracts_by_source_family_and_addresses(
+    let target_contracts = super::load_resolver_profile_target_watched_contracts(
         pool,
         ENS_V1_RESOLVER_SOURCE_FAMILY,
         targets,

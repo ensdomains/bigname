@@ -176,6 +176,43 @@ fn compact_declared_records_are_authoritative(
             .is_some_and(|status| status == "full")
 }
 
+fn compact_declared_records_satisfy_request(
+    row: &NameCurrentRow,
+    record_inventory_row: Option<&RecordInventoryCurrentRow>,
+    requested_records: &[ResolutionRecordKey],
+) -> bool {
+    if compact_name_has_terminal_no_declared_resolver(row) {
+        return true;
+    }
+    if !compact_declared_records_are_authoritative(row, record_inventory_row) {
+        return false;
+    }
+    if requested_records.is_empty() {
+        return true;
+    }
+
+    let Some(record_inventory_row) = record_inventory_row else {
+        return false;
+    };
+    let value_entries = compact_record_items_by_key(&record_inventory_row.entries);
+    requested_records.iter().all(|record| {
+        compact_declared_record_entry_satisfies(&record.record_key, &value_entries)
+            || record.record_key == "avatar"
+                && compact_declared_record_entry_satisfies("text:avatar", &value_entries)
+    })
+}
+
+fn compact_declared_record_entry_satisfies(
+    record_key: &str,
+    value_entries: &BTreeMap<String, JsonValue>,
+) -> bool {
+    value_entries
+        .get(record_key)
+        .and_then(|entry| provenance_field(entry, "status"))
+        .and_then(JsonValue::as_str)
+        .is_some_and(|status| matches!(status, "success" | "not_found"))
+}
+
 fn compact_name_has_terminal_no_declared_resolver(row: &NameCurrentRow) -> bool {
     let Some(resolver_summary) = provenance_field(&row.declared_summary, "resolver")
         .filter(|value| value.is_object())

@@ -225,6 +225,8 @@ async fn ens_v2_scoped_loader_preserves_same_address_disjoint_effective_ranges()
         true,
         &[first_block_hash.to_owned(), second_block_hash.to_owned()],
         Some(&source_scope),
+        RawLogCanonicalityFilter::IncludeObserved,
+        None,
     )
     .await?;
 
@@ -246,6 +248,8 @@ async fn ens_v2_scoped_loader_preserves_same_address_disjoint_effective_ranges()
         true,
         &[first_block_hash.to_owned(), second_block_hash.to_owned()],
         Some(&source_scope[1..]),
+        RawLogCanonicalityFilter::IncludeObserved,
+        None,
     )
     .await?;
     assert_eq!(
@@ -254,6 +258,24 @@ async fn ens_v2_scoped_loader_preserves_same_address_disjoint_effective_ranges()
             .map(|row| (row.block_number, row.emitting_contract_instance_id))
             .collect::<Vec<_>>(),
         vec![(42, second_contract_instance_id)]
+    );
+    let target_bounded_rows = load_registry_raw_logs(
+        database.pool(),
+        chain,
+        &emitters,
+        true,
+        &[first_block_hash.to_owned(), second_block_hash.to_owned()],
+        Some(&source_scope),
+        RawLogCanonicalityFilter::IncludeObserved,
+        Some(40),
+    )
+    .await?;
+    assert_eq!(
+        target_bounded_rows
+            .iter()
+            .map(|row| (row.block_number, row.emitting_contract_instance_id))
+            .collect::<Vec<_>>(),
+        vec![(40, first_contract_instance_id)]
     );
 
     database.cleanup().await

@@ -1,11 +1,9 @@
+use super::materialize::AuthorityIdentityBuffers;
 use super::*;
 
 pub(super) async fn ensure_binding_authority_identity_rows(
     pool: &PgPool,
-    token_lineages: &mut Vec<TokenLineage>,
-    token_lineage_ids: &mut HashSet<Uuid>,
-    resources: &mut Vec<Resource>,
-    resource_ids: &mut HashSet<Uuid>,
+    identity: &mut AuthorityIdentityBuffers,
     logical_name_id: &str,
     segment: &BindingSegment,
 ) -> Result<()> {
@@ -65,9 +63,7 @@ pub(super) async fn ensure_binding_authority_identity_rows(
     let provenance = Value::Object(provenance);
 
     if let Some(token_lineage_id) = segment.authority.token_lineage_id {
-        push_token_lineage_once(
-            token_lineages,
-            token_lineage_ids,
+        identity.push_token_lineage(
             build_token_lineage_from_boundary(
                 pool,
                 token_lineage_id,
@@ -79,9 +75,7 @@ pub(super) async fn ensure_binding_authority_identity_rows(
         );
     }
 
-    push_resource_once(
-        resources,
-        resource_ids,
+    identity.push_resource(
         build_resource(
             pool,
             segment.authority.resource_id,
@@ -94,24 +88,4 @@ pub(super) async fn ensure_binding_authority_identity_rows(
     );
 
     Ok(())
-}
-
-pub(super) fn push_token_lineage_once(
-    token_lineages: &mut Vec<TokenLineage>,
-    token_lineage_ids: &mut HashSet<Uuid>,
-    token_lineage: TokenLineage,
-) {
-    if token_lineage_ids.insert(token_lineage.token_lineage_id) {
-        token_lineages.push(token_lineage);
-    }
-}
-
-pub(super) fn push_resource_once(
-    resources: &mut Vec<Resource>,
-    resource_ids: &mut HashSet<Uuid>,
-    resource: Resource,
-) {
-    if resource_ids.insert(resource.resource_id) {
-        resources.push(resource);
-    }
 }

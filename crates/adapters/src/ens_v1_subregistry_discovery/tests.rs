@@ -2334,6 +2334,129 @@ async fn sync_ens_v1_subregistry_discovery_reconciles_reassigned_children_to_one
 }
 
 #[tokio::test]
+async fn source_scoped_subregistry_discovery_reconciles_touched_assignments_only() -> Result<()> {
+    let _permit = crate::acquire_test_db_permit().await;
+    let test_dir = TestDir::new()?;
+    let database = TestDatabase::new().await?;
+    let registry_address = "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E";
+
+    test_dir.write_manifest("ens", "ens_v1_registry_l1", "v1", &manifest_contents(true))?;
+    sync_repository(database.pool(), &load_repository(&test_dir.path)?).await?;
+    insert_raw_new_owner_log(
+        database.pool(),
+        "ethereum-mainnet",
+        "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        46,
+        registry_address,
+        "0x00000000000000000000000000000000000000CC",
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    insert_raw_new_owner_log_with_key(
+        database.pool(),
+        RawNewOwnerLog {
+            chain_id: "ethereum-mainnet",
+            block_hash: "0xabababababababababababababababababababababababababababababababab",
+            block_number: 47,
+            emitting_address: registry_address,
+            owner: "0x00000000000000000000000000000000000000EE",
+            parent_node: ZERO_NODE,
+            label: "alice",
+            canonicality_state: CanonicalityState::Canonical,
+        },
+    )
+    .await?;
+    sync_ens_v1_subregistry_discovery(database.pool(), "ethereum-mainnet").await?;
+
+    insert_raw_new_owner_log(
+        database.pool(),
+        "ethereum-mainnet",
+        "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        48,
+        registry_address,
+        "0x00000000000000000000000000000000000000DD",
+        CanonicalityState::Canonical,
+    )
+    .await?;
+
+    let source_scope = vec![(
+        ENS_V1_REGISTRY_SOURCE_FAMILY.to_owned(),
+        registry_address.to_owned(),
+        0,
+        i64::MAX,
+    )];
+    let summary = EnsV1SubregistryDiscoverySyncSummary::sync_for_block_hashes_with_source_scope(
+        database.pool(),
+        "ethereum-mainnet",
+        &["0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".to_owned()],
+        &source_scope,
+    )
+    .await?;
+    assert_eq!(summary.scanned_log_count, 1);
+    assert_eq!(summary.matched_log_count, 1);
+    assert_eq!(summary.active_observation_count, 1);
+    assert_eq!(summary.active_edge_count, 1);
+    assert_eq!(summary.admitted_edge_count, 1);
+    assert_eq!(summary.inserted_edge_count, 1);
+    assert_eq!(summary.deactivated_edge_count, 1);
+
+    let discovery_source = ens_v1_subregistry_discovery_source("ethereum-mainnet");
+    assert_eq!(
+        query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM discovery_edges WHERE discovery_source = $1 AND deactivated_at IS NULL"
+        )
+        .bind(&discovery_source)
+        .fetch_one(database.pool())
+        .await?,
+        2
+    );
+    let eth_node = child_node(ZERO_NODE, &labelhash_hex("eth"))?;
+    let alice_node = child_node(ZERO_NODE, &labelhash_hex("alice"))?;
+    let active_eth_owner = query_scalar::<_, String>(
+        r#"
+        SELECT cia.address
+        FROM discovery_edges de
+        JOIN contract_instance_addresses cia
+          ON cia.contract_instance_id = de.to_contract_instance_id
+         AND cia.deactivated_at IS NULL
+        WHERE de.discovery_source = $1
+          AND de.provenance ->> 'observation_key' = $2
+          AND de.deactivated_at IS NULL
+        "#,
+    )
+    .bind(&discovery_source)
+    .bind(&eth_node)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(
+        active_eth_owner,
+        "0x00000000000000000000000000000000000000dd"
+    );
+    let active_alice_owner = query_scalar::<_, String>(
+        r#"
+        SELECT cia.address
+        FROM discovery_edges de
+        JOIN contract_instance_addresses cia
+          ON cia.contract_instance_id = de.to_contract_instance_id
+         AND cia.deactivated_at IS NULL
+        WHERE de.discovery_source = $1
+          AND de.provenance ->> 'observation_key' = $2
+          AND de.deactivated_at IS NULL
+        "#,
+    )
+    .bind(&discovery_source)
+    .bind(&alice_node)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(
+        active_alice_owner,
+        "0x00000000000000000000000000000000000000ee"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn sync_ens_v1_subregistry_discovery_respects_manifest_discovery_rules() -> Result<()> {
     let _permit = crate::acquire_test_db_permit().await;
     let test_dir = TestDir::new()?;

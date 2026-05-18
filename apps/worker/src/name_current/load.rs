@@ -236,6 +236,12 @@ pub(super) async fn load_relevant_events(
               AND ne.canonicality_state {CANONICAL_STATE_FILTER}
             ORDER BY
                 ne.block_number NULLS FIRST,
+                CASE
+                    WHEN ne.event_kind = 'ResolverChanged'
+                     AND ne.after_state ->> 'source_event' = 'AuthorityEpochChanged'
+                    THEN -1
+                    ELSE COALESCE(ne.log_index, 2147483647)
+                END,
                 COALESCE(ne.log_index, 2147483647),
                 ne.event_identity
             "#
@@ -287,6 +293,12 @@ pub(super) async fn load_relevant_events(
               AND ne.canonicality_state {CANONICAL_STATE_FILTER}
             ORDER BY
                 ne.block_number NULLS FIRST,
+                CASE
+                    WHEN ne.event_kind = 'ResolverChanged'
+                     AND ne.after_state ->> 'source_event' = 'AuthorityEpochChanged'
+                    THEN -1
+                    ELSE COALESCE(ne.log_index, 2147483647)
+                END,
                 COALESCE(ne.log_index, 2147483647),
                 ne.event_identity
             "#

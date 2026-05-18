@@ -696,6 +696,17 @@ fn raw_block_on_chain(
     }
 }
 
+fn raw_block_snapshot(block_number: i64, timestamp: i64) -> RawBlockSnapshot {
+    RawBlockSnapshot {
+        chain_id: "ethereum-mainnet".to_owned(),
+        block_hash: format!("0x{block_number:064x}"),
+        block_number,
+        block_timestamp: OffsetDateTime::from_unix_timestamp(timestamp)
+            .expect("test block timestamp must be valid"),
+        canonicality_state: CanonicalityState::Canonical,
+    }
+}
+
 fn raw_code_hash_for_address(address: &str, code_hash: &str) -> RawCodeHash {
     raw_code_hash_for_address_on_chain("ethereum-mainnet", address, code_hash)
 }
@@ -1315,6 +1326,41 @@ fn build_authority_observation_skips_registrar_labelhash_mismatches() -> Result<
         &event_topics,
     )?;
     assert_eq!(renewed, None);
+
+    Ok(())
+}
+
+#[test]
+fn canonical_block_index_finds_first_block_at_or_after_timestamp() -> Result<()> {
+    let index = CanonicalBlockIndex {
+        blocks: vec![
+            raw_block_snapshot(100, 1_700_000_000),
+            raw_block_snapshot(101, 1_700_000_012),
+            raw_block_snapshot(102, 1_700_000_024),
+        ],
+    };
+
+    let before_first = index
+        .first_block_at_or_after(OffsetDateTime::from_unix_timestamp(1_699_999_999)?, "ens")
+        .context("timestamp before first block should resolve to first block")?;
+    assert_eq!(before_first.block_number, 100);
+    assert_eq!(before_first.namespace, "ens");
+
+    let exact = index
+        .first_block_at_or_after(OffsetDateTime::from_unix_timestamp(1_700_000_012)?, "ens")
+        .context("exact timestamp should resolve")?;
+    assert_eq!(exact.block_number, 101);
+
+    let between = index
+        .first_block_at_or_after(OffsetDateTime::from_unix_timestamp(1_700_000_013)?, "ens")
+        .context("between timestamps should resolve to the next block")?;
+    assert_eq!(between.block_number, 102);
+
+    assert!(
+        index
+            .first_block_at_or_after(OffsetDateTime::from_unix_timestamp(1_700_000_025)?, "ens",)
+            .is_none()
+    );
 
     Ok(())
 }
@@ -2556,6 +2602,22 @@ fn build_authority_observation_decodes_wrapper_logs() -> Result<()> {
         "sean.decashed.com"
     );
 
+    let nul_label_dns_name = vec![3, b'b', 0, b'd', 3, b'e', b't', b'h', 0];
+    assert_eq!(
+        build_authority_observation(
+            &wrapper_raw_log(
+                vec![
+                    name_wrapped_topic0(),
+                    namehash_hex(&[b"b\0d".to_vec(), b"eth".to_vec()])
+                ],
+                encode_name_wrapped_log_data(&nul_label_dns_name, owner, 0, 0),
+                98,
+            ),
+            &event_topics,
+        )?,
+        None
+    );
+
     let unwrapped_observation = build_authority_observation(
         &wrapper_raw_log(
             vec![name_unwrapped_topic0(), alice.namehash.clone()],
@@ -2728,7 +2790,19 @@ async fn sync_ens_v1_unwrapped_authority_persists_registrar_identity_rows_idempo
     )
     .await?;
 
-    let first = sync_ens_v1_unwrapped_authority(database.pool(), "ethereum-mainnet").await?;
+    let checkpoint_context = crate::ens_v1_subregistry_discovery::ReplayAdapterCheckpointContext {
+        deployment_profile: "test".to_owned(),
+        cursor_kind: "raw_fact_normalized_events".to_owned(),
+        range_start_block_number: 42,
+        target_block_number: 42,
+    };
+    let first = sync_ens_v1_unwrapped_authority_with_replay_checkpoint_and_log_limit(
+        database.pool(),
+        "ethereum-mainnet",
+        &checkpoint_context,
+        100_000,
+    )
+    .await?;
     assert_eq!(first.scanned_log_count, 1);
     assert_eq!(first.matched_log_count, 1);
     assert_eq!(first.total_name_surface_count, 1);
@@ -2748,6 +2822,22 @@ async fn sync_ens_v1_unwrapped_authority_persists_registrar_identity_rows_idempo
     assert_eq!(
         first.by_kind.get(EVENT_KIND_AUTHORITY_EPOCH_CHANGED),
         Some(&1_usize)
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT status FROM normalized_replay_adapter_checkpoints WHERE adapter = 'ens_v1_unwrapped_authority'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "completed"
+    );
+    assert!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM normalized_replay_adapter_checkpoint_items WHERE adapter = 'ens_v1_unwrapped_authority'"
+        )
+        .fetch_one(database.pool())
+        .await?
+            > 0
     );
 
     let second = sync_ens_v1_unwrapped_authority(database.pool(), "ethereum-mainnet").await?;
@@ -2797,6 +2887,127 @@ async fn sync_ens_v1_unwrapped_authority_persists_registrar_identity_rows_idempo
             (EVENT_KIND_REGISTRATION_GRANTED.to_owned(), 1_usize),
             (EVENT_KIND_SURFACE_BOUND.to_owned(), 1_usize),
         ])
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn sync_ens_v1_unwrapped_authority_replay_checkpoint_honors_latched_target_block()
+-> Result<()> {
+    let _permit = crate::acquire_test_db_permit().await;
+    let database = TestDatabase::new().await?;
+
+    let registrar_address = "0x00000000000000000000000000000000000000aa";
+    insert_active_contract_fixture(
+        database.pool(),
+        SOURCE_FAMILY_ENS_V1_REGISTRAR_L1,
+        "registrar",
+        registrar_address,
+        Some("registrar"),
+        "manifests/ens/ens_v1_registrar_l1/v1.toml",
+    )
+    .await?;
+    upsert_raw_blocks(
+        database.pool(),
+        &[
+            raw_block(
+                "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                Some("0x9999999999999999999999999999999999999999999999999999999999999999"),
+                42,
+                1_700_000_042,
+            ),
+            raw_block(
+                "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                Some("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+                43,
+                1_700_000_043,
+            ),
+        ],
+    )
+    .await?;
+    upsert_raw_logs(
+        database.pool(),
+        &[
+            RawLog {
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_owned(),
+                block_number: 42,
+                transaction_hash:
+                    "0xtxaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+                transaction_index: 0,
+                log_index: 0,
+                emitting_address: registrar_address.to_owned(),
+                topics: vec![
+                    name_registered_topic0(),
+                    keccak256_hex(b"alice"),
+                    hex_string(&abi_word_address(
+                        "0x0000000000000000000000000000000000000001",
+                    )),
+                ],
+                data: encode_registrar_name_registered_log_data("alice", 1_700_010_000),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            RawLog {
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                    .to_owned(),
+                block_number: 43,
+                transaction_hash:
+                    "0xtxbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
+                transaction_index: 0,
+                log_index: 0,
+                emitting_address: registrar_address.to_owned(),
+                topics: vec![
+                    name_registered_topic0(),
+                    keccak256_hex(b"bob"),
+                    hex_string(&abi_word_address(
+                        "0x0000000000000000000000000000000000000002",
+                    )),
+                ],
+                data: encode_registrar_name_registered_log_data("bob", 1_700_010_000),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+        ],
+    )
+    .await?;
+
+    let checkpoint_context = crate::ens_v1_subregistry_discovery::ReplayAdapterCheckpointContext {
+        deployment_profile: "test".to_owned(),
+        cursor_kind: "raw_fact_normalized_events".to_owned(),
+        range_start_block_number: 42,
+        target_block_number: 42,
+    };
+    let summary = sync_ens_v1_unwrapped_authority_with_replay_checkpoint_and_log_limit(
+        database.pool(),
+        "ethereum-mainnet",
+        &checkpoint_context,
+        100_000,
+    )
+    .await?;
+
+    assert_eq!(summary.scanned_log_count, 1);
+    assert_eq!(summary.matched_log_count, 1);
+    assert_eq!(summary.total_name_surface_count, 1);
+    assert_eq!(summary.total_normalized_event_count, 5);
+    assert!(
+        load_name_surface(database.pool(), "ens:alice.eth")
+            .await?
+            .is_some()
+    );
+    assert!(
+        load_name_surface(database.pool(), "ens:bob.eth")
+            .await?
+            .is_none()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COALESCE(MAX(block_number), 0) FROM normalized_events"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        42
     );
 
     database.cleanup().await

@@ -6,7 +6,7 @@ use bigname_manifests::{
 
 use super::scoped::replay_source_scope_from_requested_scope;
 use crate::{
-    ens_v1_resolver::SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
+    ens_v1_resolver::{SOURCE_FAMILY_ENS_V1_RESOLVER_L1, generic_resolver_record_topic0s},
     reconciliation::types::{
         RawFactNormalizedEventReplayRequest, RawFactNormalizedEventReplaySelection,
         RawFactNormalizedEventReplaySourceScope,
@@ -79,7 +79,13 @@ pub(super) async fn load_replay_adapter_source_scope(
             )
         })?;
     let include_generic_resolver_scope =
-        active_ens_v1_resolver_manifest_exists(pool, &request.chain).await?;
+        active_ens_v1_resolver_manifest_exists(pool, &request.chain).await?
+            && selected_replay_includes_generic_resolver_logs(
+                pool,
+                &request.chain,
+                &request.selection,
+            )
+            .await?;
     let source_scope = SourceScope::from_watched_contracts(
         &watched_contracts,
         &request.chain,
@@ -89,6 +95,134 @@ pub(super) async fn load_replay_adapter_source_scope(
     );
 
     Ok(source_scope.adapter_sync_scope())
+}
+
+async fn selected_replay_includes_generic_resolver_logs(
+    pool: &sqlx::PgPool,
+    chain: &str,
+    selection: &RawFactNormalizedEventReplaySelection,
+) -> Result<bool> {
+    let topic0s = generic_resolver_record_topic0s()
+        .into_iter()
+        .map(|topic0| topic0.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    match selection {
+        RawFactNormalizedEventReplaySelection::BlockRange {
+            from_block,
+            to_block,
+        } => {
+            selected_range_includes_generic_resolver_logs(
+                pool,
+                chain,
+                *from_block,
+                *to_block,
+                &topic0s,
+            )
+            .await
+        }
+        RawFactNormalizedEventReplaySelection::BlockHashes(block_hashes) => {
+            selected_block_hashes_include_generic_resolver_logs(pool, chain, block_hashes, &topic0s)
+                .await
+        }
+        RawFactNormalizedEventReplaySelection::ScopedBlockRange { .. } => Ok(false),
+    }
+}
+
+async fn selected_range_includes_generic_resolver_logs(
+    pool: &sqlx::PgPool,
+    chain: &str,
+    from_block: i64,
+    to_block: i64,
+    topic0s: &[String],
+) -> Result<bool> {
+    sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM raw_logs AS logs
+            JOIN chain_lineage AS lineage
+              ON lineage.chain_id = logs.chain_id
+             AND lineage.block_hash = logs.block_hash
+            WHERE logs.chain_id = $1
+              AND logs.block_number >= $2
+              AND logs.block_number <= $3
+              AND LOWER(logs.topics[1]) = ANY($4::TEXT[])
+              AND lineage.canonicality_state IN (
+                  'canonical'::canonicality_state,
+                  'safe'::canonicality_state,
+                  'finalized'::canonicality_state
+              )
+              AND logs.canonicality_state IN (
+                  'canonical'::canonicality_state,
+                  'safe'::canonicality_state,
+                  'finalized'::canonicality_state
+              )
+        )
+        "#,
+    )
+    .bind(chain)
+    .bind(from_block)
+    .bind(to_block)
+    .bind(topic0s)
+    .fetch_one(pool)
+    .await
+    .with_context(|| {
+        format!(
+            "failed to check generic ENSv1 resolver replay logs for chain {chain} range {from_block}..={to_block}"
+        )
+    })
+}
+
+async fn selected_block_hashes_include_generic_resolver_logs(
+    pool: &sqlx::PgPool,
+    chain: &str,
+    block_hashes: &[String],
+    topic0s: &[String],
+) -> Result<bool> {
+    if block_hashes.is_empty() {
+        return Ok(false);
+    }
+
+    sqlx::query_scalar::<_, bool>(
+        r#"
+        WITH selected_blocks AS (
+            SELECT DISTINCT block_hash
+            FROM UNNEST($2::TEXT[]) AS selected(block_hash)
+        )
+        SELECT EXISTS (
+            SELECT 1
+            FROM selected_blocks selected
+            JOIN raw_logs AS logs
+              ON logs.chain_id = $1
+             AND logs.block_hash = selected.block_hash
+            JOIN chain_lineage AS lineage
+              ON lineage.chain_id = logs.chain_id
+             AND lineage.block_hash = logs.block_hash
+            WHERE LOWER(logs.topics[1]) = ANY($3::TEXT[])
+              AND lineage.canonicality_state IN (
+                  'canonical'::canonicality_state,
+                  'safe'::canonicality_state,
+                  'finalized'::canonicality_state
+              )
+              AND logs.canonicality_state IN (
+                  'canonical'::canonicality_state,
+                  'safe'::canonicality_state,
+                  'finalized'::canonicality_state
+              )
+        )
+        "#,
+    )
+    .bind(chain)
+    .bind(block_hashes)
+    .bind(topic0s)
+    .fetch_one(pool)
+    .await
+    .with_context(|| {
+        format!(
+            "failed to check generic ENSv1 resolver replay logs for chain {chain} across {} blocks",
+            block_hashes.len()
+        )
+    })
 }
 
 async fn active_ens_v1_resolver_manifest_exists(pool: &sqlx::PgPool, chain: &str) -> Result<bool> {

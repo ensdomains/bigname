@@ -14,10 +14,23 @@ pub(super) struct WatchedRawLogLoad {
     pub(super) event_topics: PreimageObservedEventTopics,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum RawLogCanonicalityFilter {
+    IncludeObserved,
+    CanonicalOnly,
+}
+
+impl RawLogCanonicalityFilter {
+    const fn canonical_only(self) -> bool {
+        matches!(self, Self::CanonicalOnly)
+    }
+}
+
 pub(super) async fn load_scanned_log_count(
     pool: &PgPool,
     chain: &str,
     block_hashes: &[String],
+    canonicality_filter: RawLogCanonicalityFilter,
 ) -> Result<usize> {
     let count = sqlx::query_scalar::<_, i64>(
         r#"
@@ -25,11 +38,25 @@ pub(super) async fn load_scanned_log_count(
         FROM raw_logs
         WHERE chain_id = $1
           AND block_hash = ANY($2::TEXT[])
-          AND canonicality_state <> 'orphaned'::canonicality_state
+          AND (
+              (
+                  $3::BOOLEAN
+                  AND canonicality_state IN (
+                      'canonical'::canonicality_state,
+                      'safe'::canonicality_state,
+                      'finalized'::canonicality_state
+                  )
+              )
+              OR (
+                  NOT $3::BOOLEAN
+                  AND canonicality_state <> 'orphaned'::canonicality_state
+              )
+          )
         "#,
     )
     .bind(chain)
     .bind(block_hashes)
+    .bind(canonicality_filter.canonical_only())
     .fetch_one(pool)
     .await
     .with_context(|| {
@@ -47,6 +74,7 @@ pub(super) async fn load_watched_raw_logs(
     chain: &str,
     block_hashes: &[String],
     source_scope: Option<&[(String, String, i64, i64)]>,
+    canonicality_filter: RawLogCanonicalityFilter,
 ) -> Result<WatchedRawLogLoad> {
     let source_scope = source_scope.map(normalized_source_scope_targets);
     if source_scope.as_ref().is_some_and(Vec::is_empty) {
@@ -122,7 +150,20 @@ pub(super) async fn load_watched_raw_logs(
                     AND rl.block_number BETWEEN scoped.effective_from_block
                         AND scoped.effective_to_block
               )
-              AND rl.canonicality_state <> 'orphaned'::canonicality_state
+              AND (
+                  (
+                      $8::BOOLEAN
+                      AND rl.canonicality_state IN (
+                          'canonical'::canonicality_state,
+                          'safe'::canonicality_state,
+                          'finalized'::canonicality_state
+                      )
+                  )
+                  OR (
+                      NOT $8::BOOLEAN
+                      AND rl.canonicality_state <> 'orphaned'::canonicality_state
+                  )
+              )
             ORDER BY
                 rl.block_number,
                 rl.transaction_index,
@@ -136,6 +177,7 @@ pub(super) async fn load_watched_raw_logs(
         .bind(&scoped_from_blocks)
         .bind(&scoped_to_blocks)
         .bind(&preimage_topic0s)
+        .bind(canonicality_filter.canonical_only())
         .fetch_all(pool)
         .await
         .with_context(|| {
@@ -163,7 +205,20 @@ pub(super) async fn load_watched_raw_logs(
               AND rl.block_hash = ANY($2::TEXT[])
               AND rl.emitting_address = ANY($3::TEXT[])
               AND rl.topics[1] = ANY($4::TEXT[])
-              AND rl.canonicality_state <> 'orphaned'::canonicality_state
+              AND (
+                  (
+                      $5::BOOLEAN
+                      AND rl.canonicality_state IN (
+                          'canonical'::canonicality_state,
+                          'safe'::canonicality_state,
+                          'finalized'::canonicality_state
+                      )
+                  )
+                  OR (
+                      NOT $5::BOOLEAN
+                      AND rl.canonicality_state <> 'orphaned'::canonicality_state
+                  )
+              )
             ORDER BY
                 rl.block_number,
                 rl.transaction_index,
@@ -174,6 +229,7 @@ pub(super) async fn load_watched_raw_logs(
         .bind(block_hashes)
         .bind(&watched_addresses)
         .bind(&preimage_topic0s)
+        .bind(canonicality_filter.canonical_only())
         .fetch_all(pool)
         .await
         .with_context(|| {

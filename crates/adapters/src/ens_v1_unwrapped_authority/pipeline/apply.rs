@@ -40,6 +40,7 @@ pub(super) fn apply_authority_raw_log(
     resolver_profile_gate: &ResolverProfileGate,
     block_index: &CanonicalBlockIndex,
     event_topics: &AuthorityEventTopics,
+    mut checkpoint_delta: Option<&mut UnwrappedAuthorityReplayCheckpointDelta>,
 ) -> Result<bool> {
     let migration_guard = registry_migration_guard_action(raw_log, event_topics)?;
     if migration_guard.suppressed_by(migrated_registry_nodes) {
@@ -48,13 +49,21 @@ pub(super) fn apply_authority_raw_log(
 
     if resolver_profile_gate.rejects_resolver_local_fact(raw_log, event_topics)? {
         if let Some(node) = migration_guard.mark_migrated_node() {
-            migrated_registry_nodes.insert(node.to_owned());
+            if migrated_registry_nodes.insert(node.to_owned())
+                && let Some(delta) = checkpoint_delta.as_deref_mut()
+            {
+                delta.mark_migrated_node(node);
+            }
         }
         return Ok(false);
     }
     let observation = build_authority_observation(raw_log, event_topics)?;
     if let Some(node) = migration_guard.mark_migrated_node() {
-        migrated_registry_nodes.insert(node.to_owned());
+        if migrated_registry_nodes.insert(node.to_owned())
+            && let Some(delta) = checkpoint_delta.as_deref_mut()
+        {
+            delta.mark_migrated_node(node);
+        }
     }
     let Some(observation) = observation else {
         return Ok(false);
@@ -71,6 +80,7 @@ pub(super) fn apply_authority_raw_log(
         same_tx_name_intro_positions,
         reverse_claim_sources,
         block_index,
+        checkpoint_delta.as_deref_mut(),
     )?;
     Ok(true)
 }
@@ -86,6 +96,7 @@ fn apply_authority_observation(
     same_tx_name_intro_positions: &HashMap<String, Vec<RawLogPosition>>,
     reverse_claim_sources: &HashMap<String, ReverseClaimSource>,
     block_index: &CanonicalBlockIndex,
+    mut checkpoint_delta: Option<&mut UnwrappedAuthorityReplayCheckpointDelta>,
 ) -> Result<()> {
     if let Some(name) = learn_record_raw_name_preimage(
         &observation,
@@ -93,8 +104,12 @@ fn apply_authority_observation(
         known_names_by_namehash,
         known_name_refs_by_namehash,
         namehash_to_labelhash,
+        checkpoint_delta.as_deref_mut(),
     ) && let Some(pending) = pending_namehash_observations.remove(&name.namehash)
     {
+        if let Some(delta) = checkpoint_delta.as_deref_mut() {
+            delta.mark_pending_observations(name.namehash.clone());
+        }
         let labelhash = name
             .labelhashes
             .first()
@@ -115,6 +130,7 @@ fn apply_authority_observation(
                 pending_namehash_observations,
                 same_tx_name_intro_positions,
                 block_index,
+                checkpoint_delta.as_deref_mut(),
             )?;
         }
     }
@@ -147,12 +163,13 @@ fn apply_authority_observation(
                 pending_namehash_observations,
                 same_tx_name_intro_positions,
                 block_index,
+                checkpoint_delta.as_deref_mut(),
             );
         } else if !defer_to_same_tx_intro
             && let Some(claim_source) = reverse_claim_sources.get(&normalized_namehash).cloned()
         {
             let history = reverse_histories
-                .entry(normalized_namehash)
+                .entry(normalized_namehash.clone())
                 .or_insert_with(|| ReverseClaimSourceHistory {
                     claim_source,
                     current_resolver: None,
@@ -160,12 +177,18 @@ fn apply_authority_observation(
                     events: Vec::new(),
                 });
             apply_reverse_claim_source_observation(history, observation)?;
+            if let Some(delta) = checkpoint_delta.as_deref_mut() {
+                delta.mark_reverse_history(normalized_namehash);
+            }
             return Ok(());
         } else {
             pending_namehash_observations
-                .entry(normalized_namehash)
+                .entry(normalized_namehash.clone())
                 .or_default()
                 .push(observation);
+            if let Some(delta) = checkpoint_delta.as_deref_mut() {
+                delta.mark_pending_observations(normalized_namehash);
+            }
             return Ok(());
         }
     } else {
@@ -188,6 +211,7 @@ fn apply_authority_observation(
             pending_namehash_observations,
             same_tx_name_intro_positions,
             block_index,
+            checkpoint_delta.as_deref_mut(),
         );
     }
 }
@@ -298,7 +322,11 @@ fn apply_authority_observation_for_history_key(
     pending_namehash_observations: &mut HashMap<String, Vec<AuthorityObservation>>,
     same_tx_name_intro_positions: &HashMap<String, Vec<RawLogPosition>>,
     block_index: &CanonicalBlockIndex,
+    mut checkpoint_delta: Option<&mut UnwrappedAuthorityReplayCheckpointDelta>,
 ) -> Result<()> {
+    if let Some(delta) = checkpoint_delta.as_deref_mut() {
+        delta.mark_history(history_key);
+    }
     let history = histories
         .entry(history_key.to_owned())
         .or_insert_with(|| NameHistory {
@@ -330,10 +358,20 @@ fn apply_authority_observation_for_history_key(
     let learned_name = history.name.clone();
     if let Some(name) = learned_name {
         namehash_to_labelhash.insert(name.namehash.clone(), labelhash.to_owned());
+        if let Some(delta) = checkpoint_delta.as_deref_mut() {
+            delta.mark_namehash_labelhash(name.namehash.clone());
+            delta.mark_known_name(name.namehash.clone());
+            if known_name_ref.is_some() {
+                delta.mark_known_name_ref(name.namehash.clone());
+            }
+        }
         known_names_by_namehash
             .entry(name.namehash.clone())
             .or_insert_with(|| name.clone());
         if let Some(pending) = pending_namehash_observations.remove(&name.namehash) {
+            if let Some(delta) = checkpoint_delta.as_deref_mut() {
+                delta.mark_pending_observations(name.namehash.clone());
+            }
             let name_ref = known_name_refs_by_namehash.get(&name.namehash).cloned();
             for pending_observation in pending {
                 apply_authority_observation_for_history_key(
@@ -349,6 +387,7 @@ fn apply_authority_observation_for_history_key(
                     pending_namehash_observations,
                     same_tx_name_intro_positions,
                     block_index,
+                    checkpoint_delta.as_deref_mut(),
                 )?;
             }
         }
@@ -362,6 +401,7 @@ fn learn_record_raw_name_preimage(
     known_names_by_namehash: &mut HashMap<String, NameMetadata>,
     known_name_refs_by_namehash: &mut HashMap<String, ObservationRef>,
     namehash_to_labelhash: &mut HashMap<String, String>,
+    mut checkpoint_delta: Option<&mut UnwrappedAuthorityReplayCheckpointDelta>,
 ) -> Option<NameMetadata> {
     let AuthorityObservation::RecordChanged(event) = observation else {
         return None;
@@ -385,6 +425,11 @@ fn learn_record_raw_name_preimage(
     known_names_by_namehash
         .entry(name.namehash.clone())
         .or_insert_with(|| name.clone());
+    if let Some(delta) = checkpoint_delta.as_deref_mut() {
+        delta.mark_namehash_labelhash(name.namehash.clone());
+        delta.mark_known_name_ref(name.namehash.clone());
+        delta.mark_known_name(name.namehash.clone());
+    }
     Some(name)
 }
 

@@ -39,7 +39,7 @@ impl EnsV2RegistrarSyncSummary {
         chain: &str,
         block_hashes: &[String],
     ) -> Result<Self> {
-        sync_ens_v2_registrar_with_scope(pool, chain, true, block_hashes, None).await
+        sync_ens_v2_registrar_with_scope(pool, chain, true, block_hashes, None, None).await
     }
 
     pub async fn sync_for_block_hashes_with_source_scope(
@@ -48,7 +48,8 @@ impl EnsV2RegistrarSyncSummary {
         block_hashes: &[String],
         source_scope: &[(String, String, i64, i64)],
     ) -> Result<Self> {
-        sync_ens_v2_registrar_with_scope(pool, chain, true, block_hashes, Some(source_scope)).await
+        sync_ens_v2_registrar_with_scope(pool, chain, true, block_hashes, Some(source_scope), None)
+            .await
     }
 }
 
@@ -56,7 +57,15 @@ pub async fn sync_ens_v2_registrar(
     pool: &PgPool,
     chain: &str,
 ) -> Result<EnsV2RegistrarSyncSummary> {
-    sync_ens_v2_registrar_with_scope(pool, chain, false, &[], None).await
+    sync_ens_v2_registrar_with_scope(pool, chain, false, &[], None, None).await
+}
+
+pub async fn sync_ens_v2_registrar_through_block(
+    pool: &PgPool,
+    chain: &str,
+    target_block_number: i64,
+) -> Result<EnsV2RegistrarSyncSummary> {
+    sync_ens_v2_registrar_with_scope(pool, chain, false, &[], None, Some(target_block_number)).await
 }
 
 async fn sync_ens_v2_registrar_with_scope(
@@ -65,6 +74,7 @@ async fn sync_ens_v2_registrar_with_scope(
     restrict_to_block_hashes: bool,
     block_hashes: &[String],
     source_scope: Option<&[(String, String, i64, i64)]>,
+    max_block_number: Option<i64>,
 ) -> Result<EnsV2RegistrarSyncSummary> {
     let mut active_emitters = load_active_emitters(pool, chain).await?;
     if let Some(source_scope) = source_scope {
@@ -95,6 +105,7 @@ async fn sync_ens_v2_registrar_with_scope(
         restrict_to_block_hashes,
         block_hashes,
         source_scope,
+        max_block_number,
     )
     .await?;
     let scanned_log_count = raw_logs.len();

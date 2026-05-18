@@ -15,7 +15,7 @@ pub use reads::{load_normalized_event_counts_by_kind, load_normalized_events_by_
 pub use types::NormalizedEvent;
 pub use upsert::{
     NormalizedEventUpsertSummary, serialize_jsonb_value, upsert_normalized_events,
-    upsert_normalized_events_with_summary,
+    upsert_normalized_events_count_only, upsert_normalized_events_with_summary,
 };
 
 #[cfg(test)]

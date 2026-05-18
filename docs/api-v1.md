@@ -47,8 +47,9 @@ Validation:
 - Positions that don't satisfy the requested `consistency` floor return `conflict`.
 - A `(chain_id, block_number, block_hash)` that isn't on stored canonical lineage, or that can't be reconciled across chains as one snapshot, returns `conflict`.
 - A coherent selector whose required projection rows aren't built yet returns `stale` rather than reading raw facts.
-- Persisted-readback routes return `stale` or `not_found` when matching output is absent. The exception is supported ENS verified resolution on `GET /v1/resolutions/{namespace}/{name}` and `GET /v1/resolve/{name}`, which may execute on demand against the selected snapshot, persist the outcome, and return it.
+- Persisted-readback routes return `stale` or `not_found` when matching output is absent. The exception is supported ENS verified selectors on `GET /v1/resolutions/{namespace}/{name}`, `GET /v1/resolve/{name}`, `GET /v1/names/{namespace}/{name}/records`, and `GET /v1/resolve/{name}/records`, which may execute on demand against the selected snapshot, persist the outcome, and return it.
 - A current-state row may serve a later selected snapshot only when its stored chain context covers the same required chains and no newer canonical input exists for that row through the selected positions; otherwise `stale`.
+- Historical `at` and explicit `chain_positions` reads require projection or execution rows materialized for the exact selected positions. If rewind/rebuild has not produced that snapshot, the route returns `stale`; it never serves provider `latest`, raw facts, or newer current rows as a substitute.
 
 Cross-chain rules:
 
@@ -294,7 +295,7 @@ For ENSv1 and Basenames, retained current-resolver record events may populate se
 
 ### `CompactRecordSummary`
 
-`resolver_address`, `text_records`, `known_text_keys`, `avatar`, `content_hash`, `coin_addresses`. `known_text_keys` is declared inventory metadata, not verified enumeration. Value source for `text_records`, `avatar`, `content_hash`, `coin_addresses` follows `mode`: declared cache, verified output, or auto. ENSv1 text records are selector-keyed (e.g. `avatar` is `text:avatar`).[^v1-pres-l20] When `mode=auto|verified|both` has no declared selectors to work from, compact routes may probe the basic app profile set: `addr:60`, `avatar`, `contenthash`, and text keys `description`, `url`, `email`. Fallback text keys that resolve to `not_found` are omitted unless requested explicitly.
+`resolver_address`, `text_records`, `known_text_keys`, `avatar`, `content_hash`, `coin_addresses`. `known_text_keys` is declared inventory metadata, not verified enumeration. Value source for `text_records`, `avatar`, `content_hash`, `coin_addresses` follows `mode`: declared cache, verified output, or auto. `mode=auto` uses declared cache only when it can satisfy the requested values from replayable state; explicit declared gaps, unretained declared values, or missing declared selectors fall through to verified output for supported selectors. ENSv1 text records are selector-keyed (e.g. `avatar` is `text:avatar`).[^v1-pres-l20] When `mode=auto|verified|both` has no declared selectors to work from, compact routes may probe the basic app profile set: `addr:60`, `avatar`, `contenthash`, and text keys `description`, `url`, `email`. Fallback text keys that resolve to `not_found` are omitted unless requested explicitly.
 
 ### `CompactHistoryEvent`
 
@@ -389,7 +390,7 @@ Rules:
 - Malformed snapshot selectors, unsupported position slots, missing required slots, mixed-profile positions, and `at` plus `chain_positions` together return `400 invalid_input`.
 - A coherent selector that can't be served from current projections returns `409 stale`.
 - A selector whose supplied lineage, canonicality floor, or cross-chain reconciliation can't form one snapshot returns `409 conflict`.
-- Persisted-readback routes return their documented stale or not-found state when matching output is missing. Supported ENS verified resolution instead executes on demand, then returns `409 stale` with a configuration message if the Ethereum RPC provider is unconfigured or can't serve the selected block.
+- Persisted-readback routes return their documented stale or not-found state when matching output is missing. Supported ENS verified selectors on the resolution and compact records routes instead execute on demand, then return `409 stale` with a configuration message if the Ethereum RPC provider is unconfigured or can't serve the selected block.
 
 ## Versioning
 

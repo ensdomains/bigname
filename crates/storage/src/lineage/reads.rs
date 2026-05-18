@@ -86,21 +86,37 @@ where
 {
     let rows = sqlx::query(
         r#"
-        WITH RECURSIVE lineage_path AS (
-            SELECT chain_id, block_hash, parent_hash, 0 AS depth
+        WITH RECURSIVE stop_block AS (
+            SELECT block_number
+            FROM chain_lineage
+            WHERE chain_id = $1
+              AND block_hash = $3::TEXT
+        ),
+        lineage_path AS (
+            SELECT chain_id, block_hash, parent_hash, block_number, 0 AS depth
             FROM chain_lineage
             WHERE chain_id = $1
               AND block_hash = $2
 
             UNION ALL
 
-            SELECT parent.chain_id, parent.block_hash, parent.parent_hash, lineage_path.depth + 1
+            SELECT
+                parent.chain_id,
+                parent.block_hash,
+                parent.parent_hash,
+                parent.block_number,
+                lineage_path.depth + 1
             FROM chain_lineage AS parent
             JOIN lineage_path
               ON parent.chain_id = lineage_path.chain_id
              AND parent.block_hash = lineage_path.parent_hash
+            LEFT JOIN stop_block ON TRUE
             WHERE $3::TEXT IS NULL
-               OR parent.block_hash <> $3::TEXT
+               OR (
+                    stop_block.block_number IS NOT NULL
+                    AND lineage_path.block_number > stop_block.block_number
+                    AND parent.block_hash <> $3::TEXT
+               )
         )
         SELECT
             lineage.chain_id,
@@ -174,19 +190,28 @@ where
 {
     let contains = sqlx::query_scalar::<_, bool>(
         r#"
-        WITH RECURSIVE lineage_path AS (
-            SELECT chain_id, block_hash, parent_hash
+        WITH RECURSIVE ancestor AS (
+            SELECT block_number
+            FROM chain_lineage
+            WHERE chain_id = $1
+              AND block_hash = $3
+        ),
+        lineage_path AS (
+            SELECT chain_id, block_hash, parent_hash, block_number
             FROM chain_lineage
             WHERE chain_id = $1
               AND block_hash = $2
 
             UNION ALL
 
-            SELECT parent.chain_id, parent.block_hash, parent.parent_hash
+            SELECT parent.chain_id, parent.block_hash, parent.parent_hash, parent.block_number
             FROM chain_lineage AS parent
             JOIN lineage_path
               ON parent.chain_id = lineage_path.chain_id
              AND parent.block_hash = lineage_path.parent_hash
+            JOIN ancestor
+              ON lineage_path.block_number > ancestor.block_number
+            WHERE lineage_path.block_hash <> $3
         )
         SELECT EXISTS (
             SELECT 1

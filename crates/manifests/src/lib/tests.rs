@@ -3891,6 +3891,124 @@ async fn resolver_discovery_edges_do_not_become_transitive_registry_parents() ->
 }
 
 #[tokio::test]
+async fn scoped_discovery_reconciliation_keeps_unrelated_active_addresses() -> Result<()> {
+    let test_dir = TestDir::new()?;
+    let database = TestDatabase::new().await?;
+
+    test_dir.write_manifest(
+        "ens",
+        "ens_v1_registry_l1",
+        "v3",
+        &checked_in_manifest_contents("ens", "ens_v1_registry_l1", "v3")?,
+    )?;
+    sync_repository(database.pool(), &load_repository(&test_dir.path)?).await?;
+
+    let discovery_source = "unit-test-scoped-registry-observations";
+    let registry_address = "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E";
+    let first_child_address = "0x0000000000000000000000000000000000000101";
+    let stale_child_address = "0x0000000000000000000000000000000000000102";
+    let replacement_child_address = "0x0000000000000000000000000000000000000103";
+    let observation =
+        |observation_key: &str, to_address: &str, block_number: i64| DiscoveryObservation {
+            chain: "ethereum-mainnet".to_owned(),
+            from_address: registry_address.to_owned(),
+            to_address: to_address.to_owned(),
+            edge_kind: "subregistry".to_owned(),
+            discovery_source: discovery_source.to_owned(),
+            active_from_block_number: Some(block_number),
+            active_from_block_hash: Some(format!("0x{block_number:064x}")),
+            active_to_block_number: None,
+            active_to_block_hash: None,
+            provenance: serde_json::json!({
+                "provider": "unit-test",
+                "observation_key": observation_key,
+            }),
+        };
+
+    let initial_summary = reconcile_discovery_observations(
+        database.pool(),
+        discovery_source,
+        &[
+            observation("edge-a", first_child_address, 100),
+            observation("edge-b", stale_child_address, 101),
+        ],
+    )
+    .await?;
+    assert_eq!(initial_summary.inserted_edge_count, 2);
+
+    let first_child_id = load_single_contract_instance_for_address(
+        database.pool(),
+        "ethereum-mainnet",
+        first_child_address,
+    )
+    .await?;
+    let stale_child_id = load_single_contract_instance_for_address(
+        database.pool(),
+        "ethereum-mainnet",
+        stale_child_address,
+    )
+    .await?;
+
+    sqlx::query(
+        r#"
+        UPDATE discovery_edges
+        SET deactivated_at = now()
+        WHERE to_contract_instance_id = $1
+          AND deactivated_at IS NULL
+        "#,
+    )
+    .bind(stale_child_id)
+    .execute(database.pool())
+    .await?;
+
+    let scoped_summary = reconcile_scoped_discovery_observations(
+        database.pool(),
+        discovery_source,
+        &[observation("edge-a", replacement_child_address, 102)],
+    )
+    .await?;
+    assert_eq!(scoped_summary.inserted_edge_count, 1);
+    assert_eq!(scoped_summary.deactivated_edge_count, 1);
+
+    let replacement_child_id = load_single_contract_instance_for_address(
+        database.pool(),
+        "ethereum-mainnet",
+        replacement_child_address,
+    )
+    .await?;
+    assert_eq!(
+        query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM contract_instance_addresses WHERE contract_instance_id = $1 AND deactivated_at IS NULL"
+        )
+        .bind(first_child_id)
+        .fetch_one(database.pool())
+        .await?,
+        0
+    );
+    assert_eq!(
+        query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM contract_instance_addresses WHERE contract_instance_id = $1 AND deactivated_at IS NULL"
+        )
+        .bind(replacement_child_id)
+        .fetch_one(database.pool())
+        .await?,
+        1
+    );
+    assert_eq!(
+        query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM contract_instance_addresses WHERE contract_instance_id = $1 AND deactivated_at IS NULL"
+        )
+        .bind(stale_child_id)
+        .fetch_one(database.pool())
+        .await?,
+        1
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn reuses_contract_instance_ids_across_inactive_gaps() -> Result<()> {
     let test_dir = TestDir::new()?;
     let database = TestDatabase::new().await?;

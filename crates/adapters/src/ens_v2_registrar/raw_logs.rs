@@ -34,6 +34,7 @@ pub(super) async fn load_registrar_raw_logs(
     restrict_to_block_hashes: bool,
     block_hashes: &[String],
     source_scope: Option<&[(String, String, i64, i64)]>,
+    max_block_number: Option<i64>,
 ) -> Result<Vec<RegistrarRawLogRow>> {
     if emitters.is_empty() {
         return Ok(Vec::new());
@@ -50,6 +51,8 @@ pub(super) async fn load_registrar_raw_logs(
     if source_scope.is_some() && scope_addresses.is_empty() {
         return Ok(Vec::new());
     }
+    let has_max_block_number = max_block_number.is_some();
+    let max_block_number = max_block_number.unwrap_or(i64::MAX);
     let rows = sqlx::query(
         r#"
         SELECT
@@ -67,6 +70,7 @@ pub(super) async fn load_registrar_raw_logs(
         WHERE chain_id = $1
           AND LOWER(emitting_address) = ANY($2::TEXT[])
           AND ($3::BOOLEAN = FALSE OR block_hash = ANY($4::TEXT[]))
+          AND ($9::BOOLEAN = FALSE OR block_number <= $10::BIGINT)
           AND (
               $5::BOOLEAN = FALSE
               OR EXISTS (
@@ -94,6 +98,8 @@ pub(super) async fn load_registrar_raw_logs(
     .bind(&scope_addresses)
     .bind(&scope_from_blocks)
     .bind(&scope_to_blocks)
+    .bind(has_max_block_number)
+    .bind(max_block_number)
     .fetch_all(pool)
     .await
     .with_context(|| format!("failed to load ENSv2 registrar raw logs for chain {chain}"))?;

@@ -1,4 +1,3 @@
-use alloy_sol_types::sol_data::Address as SolAddress;
 use anyhow::{Context, Result};
 
 use crate::evm_abi;
@@ -14,10 +13,7 @@ pub(super) const ZERO_NODE: &str =
 pub(super) const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 
 pub(super) fn decode_owner_address(data: &[u8]) -> Result<String> {
-    let (owner,) =
-        evm_abi::abi_decode_params::<(SolAddress,)>(data, "registry address payload is malformed")
-            .context("NewOwner log data must encode one address")?;
-    Ok(evm_abi::address_hex(owner))
+    evm_abi::address_hex_from_word(data).context("registry address payload is malformed")
 }
 
 pub(super) fn child_node(parent_node: &str, labelhash: &str) -> Result<String> {
@@ -53,5 +49,23 @@ pub(super) fn null_if_zero_address(address: &str) -> Option<String> {
         None
     } else {
         Some(normalize_address(address))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decode_owner_address;
+
+    #[test]
+    fn decode_owner_address_accepts_dirty_legacy_registry_word() {
+        let dirty_word = [
+            0x93, 0xfc, 0x66, 0x2b, 0x9e, 0x04, 0xa6, 0x87, 0xb1, 0xe9, 0x27, 0x85, 0xd9, 0x82,
+            0x85, 0xf7, 0x56, 0x7f, 0x87, 0x92, 0x84, 0x4f, 0x9b, 0x90, 0x06, 0x0c, 0xf1, 0x35,
+            0x64, 0x8d, 0xfc, 0x80,
+        ];
+
+        let decoded = decode_owner_address(&dirty_word).expect("dirty word should decode");
+
+        assert_eq!(decoded, "0xd98285f7567f8792844f9b90060cf135648dfc80");
     }
 }

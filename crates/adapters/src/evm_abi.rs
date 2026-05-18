@@ -1,21 +1,10 @@
 use std::str::FromStr;
 
 use alloy_primitives::{Address, B256, LogData, U256, hex, keccak256};
-use alloy_sol_types::{SolEvent, SolType, abi::TokenSeq};
+use alloy_sol_types::SolEvent;
 use anyhow::{Context, Result, bail};
 
 const ABI_WORD_BYTES: usize = 32;
-
-pub(crate) fn abi_decode_params<'de, T>(
-    data: &'de [u8],
-    context: &'static str,
-) -> Result<T::RustType>
-where
-    T: SolType,
-    T::Token<'de>: TokenSeq<'de>,
-{
-    T::abi_decode_params_validate(data).context(context)
-}
 
 pub(crate) fn decode_event_log<E>(
     topics: &[String],

@@ -258,6 +258,8 @@ ENSv1 wrapper/resolver mappings: `PreimageObserved`, `SurfaceBound`, `SurfaceUnb
 
 Every normalized event carries: namespace, `logical_name_id` when applicable, `resource_id` when applicable, source family, manifest version, chain position, raw fact reference, derivation kind, canonicality flag, and before/after state where possible.
 
+Normalized events are semantic adapter transitions. A row may be stateless when every payload field is derivable from one selected raw fact, stateful when fields such as `before_state`, resource continuity, authority metadata, resolver state, wrapper state, registrar expiry, and permission provenance depend on the adapter's prior canonical observations, or contextual when identity/resource/discovery fields depend on another adapter-owned output already being stable. Stateful replay is deterministic only from a full closure boundary for that adapter/source graph; contextual replay is deterministic only after dependency closure is stable or inside a topologically ordered closure replay. Source-family slices, target slices, block-hash selections, and IO chunks are not semantic substitutes for those closures.
+
 ## Resolution
 
 `Resolution` is one mixed-route envelope with three declared sections and one verified section: `topology`, `record_inventory`, `record_cache`, `verified_queries`.

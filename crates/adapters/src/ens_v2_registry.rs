@@ -32,7 +32,7 @@ use identity::{
     build_name_surface, build_resource, build_resource_events, build_surface_binding,
     build_token_lineage, upsert_surface_bindings_close_before_open,
 };
-use load::load_registry_raw_logs;
+use load::{RawLogCanonicalityFilter, load_registry_raw_logs};
 use names::initial_registry_suffixes;
 use types::*;
 use util::normalize_address;
@@ -92,8 +92,33 @@ impl EnsV2RegistryResourceSurfaceSyncSummary {
         chain: &str,
         block_hashes: &[String],
     ) -> Result<Self> {
-        sync_ens_v2_registry_resource_surface_with_scope(pool, chain, true, block_hashes, None)
-            .await
+        sync_ens_v2_registry_resource_surface_with_scope(
+            pool,
+            chain,
+            true,
+            block_hashes,
+            None,
+            RawLogCanonicalityFilter::IncludeObserved,
+            None,
+        )
+        .await
+    }
+
+    pub async fn sync_for_block_hashes_canonical_only(
+        pool: &PgPool,
+        chain: &str,
+        block_hashes: &[String],
+    ) -> Result<Self> {
+        sync_ens_v2_registry_resource_surface_with_scope(
+            pool,
+            chain,
+            true,
+            block_hashes,
+            None,
+            RawLogCanonicalityFilter::CanonicalOnly,
+            None,
+        )
+        .await
     }
 
     pub async fn sync_for_block_hashes_with_source_scope(
@@ -108,6 +133,26 @@ impl EnsV2RegistryResourceSurfaceSyncSummary {
             true,
             block_hashes,
             Some(source_scope),
+            RawLogCanonicalityFilter::IncludeObserved,
+            None,
+        )
+        .await
+    }
+
+    pub async fn sync_for_block_hashes_with_source_scope_canonical_only(
+        pool: &PgPool,
+        chain: &str,
+        block_hashes: &[String],
+        source_scope: &[(String, String, i64, i64)],
+    ) -> Result<Self> {
+        sync_ens_v2_registry_resource_surface_with_scope(
+            pool,
+            chain,
+            true,
+            block_hashes,
+            Some(source_scope),
+            RawLogCanonicalityFilter::CanonicalOnly,
+            None,
         )
         .await
     }
@@ -117,7 +162,33 @@ pub async fn sync_ens_v2_registry_resource_surface(
     pool: &PgPool,
     chain: &str,
 ) -> Result<EnsV2RegistryResourceSurfaceSyncSummary> {
-    sync_ens_v2_registry_resource_surface_with_scope(pool, chain, false, &[], None).await
+    sync_ens_v2_registry_resource_surface_with_scope(
+        pool,
+        chain,
+        false,
+        &[],
+        None,
+        RawLogCanonicalityFilter::IncludeObserved,
+        None,
+    )
+    .await
+}
+
+pub async fn sync_ens_v2_registry_resource_surface_through_block(
+    pool: &PgPool,
+    chain: &str,
+    target_block_number: i64,
+) -> Result<EnsV2RegistryResourceSurfaceSyncSummary> {
+    sync_ens_v2_registry_resource_surface_with_scope(
+        pool,
+        chain,
+        false,
+        &[],
+        None,
+        RawLogCanonicalityFilter::CanonicalOnly,
+        Some(target_block_number),
+    )
+    .await
 }
 
 async fn sync_ens_v2_registry_resource_surface_with_scope(
@@ -126,6 +197,8 @@ async fn sync_ens_v2_registry_resource_surface_with_scope(
     restrict_to_block_hashes: bool,
     block_hashes: &[String],
     source_scope: Option<&[(String, String, i64, i64)]>,
+    canonicality_filter: RawLogCanonicalityFilter,
+    max_block_number: Option<i64>,
 ) -> Result<EnsV2RegistryResourceSurfaceSyncSummary> {
     let source_scope = source_scope.map(normalized_source_scope_targets);
     if source_scope.as_ref().is_some_and(Vec::is_empty) {
@@ -162,6 +235,8 @@ async fn sync_ens_v2_registry_resource_surface_with_scope(
         restrict_to_block_hashes,
         block_hashes,
         source_scope.as_deref(),
+        canonicality_filter,
+        max_block_number,
     )
     .await?;
     let scanned_log_count = raw_logs.len();

@@ -6,6 +6,7 @@ use sqlx::{PgPool, postgres::PgRow, types::time::OffsetDateTime};
 pub(in crate::ens_v1_unwrapped_authority) async fn load_canonical_blocks(
     pool: &PgPool,
     chain: &str,
+    target_block_number: Option<i64>,
 ) -> Result<Vec<RawBlockSnapshot>> {
     let rows = sqlx::query(
         r#"
@@ -17,6 +18,7 @@ pub(in crate::ens_v1_unwrapped_authority) async fn load_canonical_blocks(
             canonicality_state::TEXT AS canonicality_state
         FROM chain_lineage
         WHERE chain_id = $1
+          AND ($2::BIGINT IS NULL OR block_number <= $2::BIGINT)
           AND canonicality_state IN (
               'canonical'::canonicality_state,
               'safe'::canonicality_state,
@@ -26,6 +28,7 @@ pub(in crate::ens_v1_unwrapped_authority) async fn load_canonical_blocks(
         "#,
     )
     .bind(chain)
+    .bind(target_block_number)
     .fetch_all(pool)
     .await
     .with_context(|| format!("failed to load canonical raw blocks for chain {chain}"))?;

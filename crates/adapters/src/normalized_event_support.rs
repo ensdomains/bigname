@@ -1,8 +1,12 @@
-use std::collections::{BTreeMap, HashSet};
+use std::{
+    collections::{BTreeMap, HashSet},
+    time::Instant,
+};
 
 use anyhow::{Context, Result, bail};
 use bigname_storage::{NormalizedEvent, upsert_normalized_events};
 use sqlx::PgPool;
+use tracing::info;
 
 pub(crate) struct NormalizedEventSyncCounts {
     pub(crate) synced_by_kind: BTreeMap<String, usize>,
@@ -67,8 +71,31 @@ pub(crate) async fn upsert_normalized_events_with_counts(
     events: &[NormalizedEvent],
     adapter_label: &str,
 ) -> Result<NormalizedEventSyncCounts> {
+    let total_started = Instant::now();
+    let count_started = Instant::now();
     let counts = count_normalized_event_sync(pool, events, adapter_label).await?;
+    let count_existing_ms = count_started.elapsed().as_millis();
+    let total_synced_count = counts.total_synced_count;
+    let total_inserted_count = counts.total_inserted_count;
+    let synced_by_kind = counts.synced_by_kind.clone();
+    let inserted_by_kind = counts.inserted_by_kind.clone();
+
+    let upsert_started = Instant::now();
     upsert_normalized_events(pool, events).await?;
+    let upsert_ms = upsert_started.elapsed().as_millis();
+    info!(
+        service = "adapters",
+        adapter = adapter_label,
+        normalized_event_count = events.len(),
+        total_synced_count,
+        total_inserted_count,
+        synced_by_kind = ?synced_by_kind,
+        inserted_by_kind = ?inserted_by_kind,
+        count_existing_ms,
+        upsert_ms,
+        elapsed_ms = total_started.elapsed().as_millis(),
+        "adapter normalized-event persistence timing completed"
+    );
     Ok(counts)
 }
 
@@ -82,10 +109,37 @@ pub(crate) async fn upsert_normalized_events_in_chunks_with_counts(
         bail!("normalized event upsert chunk size must be positive");
     }
 
+    let total_started = Instant::now();
+    let count_started = Instant::now();
     let counts = count_normalized_event_sync(pool, events, adapter_label).await?;
+    let count_existing_ms = count_started.elapsed().as_millis();
+    let total_synced_count = counts.total_synced_count;
+    let total_inserted_count = counts.total_inserted_count;
+    let synced_by_kind = counts.synced_by_kind.clone();
+    let inserted_by_kind = counts.inserted_by_kind.clone();
+    let mut upsert_ms = 0u128;
+    let mut chunk_count = 0usize;
     for chunk in events.chunks(chunk_size) {
+        chunk_count += 1;
+        let upsert_started = Instant::now();
         upsert_normalized_events(pool, chunk).await?;
+        upsert_ms += upsert_started.elapsed().as_millis();
     }
+    info!(
+        service = "adapters",
+        adapter = adapter_label,
+        normalized_event_count = events.len(),
+        total_synced_count,
+        total_inserted_count,
+        synced_by_kind = ?synced_by_kind,
+        inserted_by_kind = ?inserted_by_kind,
+        chunk_size,
+        chunk_count,
+        count_existing_ms,
+        upsert_ms,
+        elapsed_ms = total_started.elapsed().as_millis(),
+        "adapter chunked normalized-event persistence timing completed"
+    );
     Ok(counts)
 }
 

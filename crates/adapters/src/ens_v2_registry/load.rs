@@ -10,6 +10,18 @@ use super::{
     util::normalize_address,
 };
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum RawLogCanonicalityFilter {
+    IncludeObserved,
+    CanonicalOnly,
+}
+
+impl RawLogCanonicalityFilter {
+    const fn canonical_only(self) -> bool {
+        matches!(self, Self::CanonicalOnly)
+    }
+}
+
 pub(super) async fn load_registry_raw_logs(
     pool: &PgPool,
     chain: &str,
@@ -17,6 +29,8 @@ pub(super) async fn load_registry_raw_logs(
     restrict_to_block_hashes: bool,
     block_hashes: &[String],
     source_scope: Option<&[RegistryRawLogSourceScopeTarget]>,
+    canonicality_filter: RawLogCanonicalityFilter,
+    max_block_number: Option<i64>,
 ) -> Result<Vec<RegistryRawLogRow>> {
     if emitters.is_empty() {
         return Ok(Vec::new());
@@ -46,6 +60,8 @@ pub(super) async fn load_registry_raw_logs(
     let scoped_ranges = source_scope
         .map(|source_scope| scoped_ranges_for_active_emitters(source_scope, emitters))
         .transpose()?;
+    let has_max_block_number = max_block_number.is_some();
+    let max_block_number = max_block_number.unwrap_or(i64::MAX);
     let rows = if let Some(scoped_ranges) = scoped_ranges.as_ref() {
         if scoped_ranges.is_empty() {
             return Ok(Vec::new());
@@ -84,6 +100,7 @@ pub(super) async fn load_registry_raw_logs(
             WHERE rl.chain_id = $1
               AND rl.emitting_address = ANY($2::TEXT[])
               AND ($3::BOOLEAN = FALSE OR rl.block_hash = ANY($4::TEXT[]))
+              AND ($12::BOOLEAN = FALSE OR rl.block_number <= $13::BIGINT)
               AND EXISTS (
                   SELECT 1
                   FROM unnest($5::TEXT[], $6::BIGINT[], $7::BIGINT[]) AS watched(
@@ -106,7 +123,20 @@ pub(super) async fn load_registry_raw_logs(
                     AND rl.block_number BETWEEN scoped.effective_from_block
                         AND scoped.effective_to_block
               )
-              AND rl.canonicality_state <> 'orphaned'::canonicality_state
+              AND (
+                  (
+                      $11::BOOLEAN
+                      AND rl.canonicality_state IN (
+                          'canonical'::canonicality_state,
+                          'safe'::canonicality_state,
+                          'finalized'::canonicality_state
+                      )
+                  )
+                  OR (
+                      NOT $11::BOOLEAN
+                      AND rl.canonicality_state <> 'orphaned'::canonicality_state
+                  )
+              )
             ORDER BY rl.block_number, rl.transaction_index, rl.log_index, rl.emitting_address
             "#,
         )
@@ -120,6 +150,9 @@ pub(super) async fn load_registry_raw_logs(
         .bind(&scoped_addresses)
         .bind(&scoped_from_blocks)
         .bind(&scoped_to_blocks)
+        .bind(canonicality_filter.canonical_only())
+        .bind(has_max_block_number)
+        .bind(max_block_number)
         .fetch_all(pool)
         .await
         .with_context(|| {
@@ -147,7 +180,21 @@ pub(super) async fn load_registry_raw_logs(
             WHERE rl.chain_id = $1
               AND rl.emitting_address = ANY($2::TEXT[])
               AND ($3::BOOLEAN = FALSE OR rl.block_hash = ANY($4::TEXT[]))
-              AND rl.canonicality_state <> 'orphaned'::canonicality_state
+              AND ($6::BOOLEAN = FALSE OR rl.block_number <= $7::BIGINT)
+              AND (
+                  (
+                      $5::BOOLEAN
+                      AND rl.canonicality_state IN (
+                          'canonical'::canonicality_state,
+                          'safe'::canonicality_state,
+                          'finalized'::canonicality_state
+                      )
+                  )
+                  OR (
+                      NOT $5::BOOLEAN
+                      AND rl.canonicality_state <> 'orphaned'::canonicality_state
+                  )
+              )
             ORDER BY rl.block_number, rl.transaction_index, rl.log_index, rl.emitting_address
             "#,
         )
@@ -155,6 +202,9 @@ pub(super) async fn load_registry_raw_logs(
         .bind(&watched_addresses)
         .bind(restrict_to_block_hashes)
         .bind(block_hashes)
+        .bind(canonicality_filter.canonical_only())
+        .bind(has_max_block_number)
+        .bind(max_block_number)
         .fetch_all(pool)
         .await
         .with_context(|| format!("failed to load ENSv2 registry raw logs for chain {chain}"))?

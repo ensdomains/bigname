@@ -1,9 +1,12 @@
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, time::Instant};
 
 use anyhow::{Context, Result, bail};
 use bigname_storage::list_canonical_raw_log_replay_inputs_for_block_hashes;
 use sqlx::Row;
+use tracing::info;
 
+#[path = "replay/classification.rs"]
+mod classification;
 #[path = "replay/profile_scope.rs"]
 mod profile_scope;
 #[path = "replay/scoped.rs"]
@@ -16,10 +19,17 @@ use super::{
         RawFactNormalizedEventReplayRequest, RawFactNormalizedEventReplaySelection,
     },
 };
+use classification::classify_raw_fact_replay_contract;
 use profile_scope::{
     ensure_replay_matches_deployment_profile_scope, load_replay_adapter_source_scope,
 };
 use scoped::load_replay_raw_log_selection_for_scoped_range;
+
+pub(crate) use classification::{
+    NormalizedEventReplayAdapter, RawFactReplayContractPlan,
+    active_closure_or_dependency_replay_adapters, chain_has_closure_or_dependency_replay_adapter,
+    source_scope_includes_adapter, unsupported_closure_replay_adapters,
+};
 
 pub(crate) async fn replay_raw_fact_normalized_events(
     pool: &sqlx::PgPool,
@@ -29,17 +39,18 @@ pub(crate) async fn replay_raw_fact_normalized_events(
         bail!("deployment_profile must not be empty");
     }
 
+    let total_started = Instant::now();
     let selection_kind = request.selection.as_str();
     let source_scope_target_count = request.selection.source_scope_target_count();
+    let selection_started = Instant::now();
     let raw_log_selection = load_replay_raw_log_selection(pool, &request).await?;
-    ensure_replay_matches_deployment_profile_scope(pool, &request, raw_log_selection.range).await?;
+    let load_selection_ms = selection_started.elapsed().as_millis();
 
-    ensure_replay_block_hashes_have_only_canonical_raw_logs(
-        pool,
-        &request.chain,
-        &raw_log_selection.block_hashes,
-    )
-    .await?;
+    let profile_scope_started = Instant::now();
+    ensure_replay_matches_deployment_profile_scope(pool, &request, raw_log_selection.range).await?;
+    let profile_scope_ms = profile_scope_started.elapsed().as_millis();
+
+    let source_scope_started = Instant::now();
     let source_scope = load_replay_adapter_source_scope(
         pool,
         &request,
@@ -47,7 +58,13 @@ pub(crate) async fn replay_raw_fact_normalized_events(
         &raw_log_selection.address_targets,
     )
     .await?;
+    let source_scope_ms = source_scope_started.elapsed().as_millis();
 
+    let replay_contract_plan =
+        classify_raw_fact_replay_contract(pool, &request, &raw_log_selection, &source_scope)
+            .await?;
+
+    let adapter_sync_started = Instant::now();
     let normalized_event_summary = if raw_log_selection.block_hashes.is_empty() {
         PersistedRawPayloadAdapterSyncSummary::default()
     } else if source_scope.is_empty() {
@@ -64,9 +81,35 @@ pub(crate) async fn replay_raw_fact_normalized_events(
             &raw_log_selection.block_hashes,
             Some(&source_scope),
             raw_log_selection.canonical_raw_log_count,
+            replay_contract_plan,
         )
         .await?
     };
+    let adapter_sync_ms = adapter_sync_started.elapsed().as_millis();
+
+    info!(
+        service = "indexer",
+        replay_cursor_kind = "raw_fact_normalized_events",
+        deployment_profile = %request.deployment_profile,
+        chain = %request.chain,
+        selection_kind,
+        requested_source_scope_target_count = source_scope_target_count,
+        selected_block_count = raw_log_selection.block_hashes.len(),
+        address_target_count = raw_log_selection.address_targets.len(),
+        replay_source_scope_target_count = source_scope.len(),
+        closure_or_dependency_replay = replay_contract_plan.permits_nonstateless_adapters(),
+        canonical_raw_log_count = raw_log_selection.canonical_raw_log_count,
+        scanned_raw_log_count = normalized_event_summary.scanned_log_count,
+        matched_raw_log_count = normalized_event_summary.matched_log_count,
+        normalized_event_synced_count = normalized_event_summary.total_synced_count,
+        normalized_event_inserted_count = normalized_event_summary.total_inserted_count,
+        load_selection_ms,
+        profile_scope_ms,
+        source_scope_ms,
+        adapter_sync_ms,
+        elapsed_ms = total_started.elapsed().as_millis(),
+        "raw-fact normalized-event replay timing completed"
+    );
 
     Ok(RawFactNormalizedEventReplayOutcome {
         deployment_profile: request.deployment_profile,
@@ -303,48 +346,4 @@ fn replay_manifest_scope_range_for_raw_logs(
         (None, None) => Ok(None),
         _ => bail!("raw log replay input block range is internally inconsistent"),
     }
-}
-
-async fn ensure_replay_block_hashes_have_only_canonical_raw_logs(
-    pool: &sqlx::PgPool,
-    chain: &str,
-    block_hashes: &[String],
-) -> Result<()> {
-    if block_hashes.is_empty() {
-        return Ok(());
-    }
-
-    let has_noncanonical_logs = sqlx::query_scalar::<_, bool>(
-        r#"
-        SELECT EXISTS (
-            SELECT 1
-            FROM raw_logs
-            WHERE chain_id = $1
-              AND block_hash = ANY($2::TEXT[])
-              AND canonicality_state NOT IN (
-                  'canonical'::canonicality_state,
-                  'safe'::canonicality_state,
-                  'finalized'::canonicality_state
-              )
-        )
-        "#,
-    )
-    .bind(chain)
-    .bind(block_hashes)
-    .fetch_one(pool)
-    .await
-    .with_context(|| {
-        format!(
-            "failed to verify canonical raw log replay guard for chain {chain} across {} blocks",
-            block_hashes.len()
-        )
-    })?;
-
-    if has_noncanonical_logs {
-        bail!(
-            "raw-fact normalized-event replay selected noncanonical raw logs; refusing block-hash-scoped adapter replay"
-        );
-    }
-
-    Ok(())
 }

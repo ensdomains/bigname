@@ -61,7 +61,7 @@ Start with [`docs/architecture.md`](docs/architecture.md) for the model, then di
 - [`docs/projections.md`](docs/projections.md) — current-state read models
 - [`docs/execution.md`](docs/execution.md) — verified resolution and primary names
 - [`docs/consumer-capabilities.md`](docs/consumer-capabilities.md) — what each capability covers
-- [`docs/development.md`](docs/development.md), [`docs/deployment.md`](docs/deployment.md), [`docs/production.md`](docs/production.md) — running it
+- [`docs/development.md`](docs/development.md), [`docs/deployment.md`](docs/deployment.md), [`docs/production.md`](docs/production.md), [`docs/runbooks/`](docs/runbooks/) — running it
 - [`docs/upstream.md`](docs/upstream.md) — pinned upstream refs and intentional divergences
 - [`docs/adrs/`](docs/adrs/) — architecture decisions
 

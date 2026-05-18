@@ -1,5 +1,3 @@
-use std::path::Path;
-
 use anyhow::{Context, Result};
 
 use crate::{
@@ -29,31 +27,25 @@ pub(super) fn source_identity_hash_for_backfill(
 
 pub(crate) fn bootstrap_backfill_idempotency_key(
     deployment_profile: &str,
-    manifests_root: &Path,
     chain: &str,
     source_identity_hash: &str,
     range: BackfillBlockRange,
 ) -> String {
     format!(
-        "indexer-bootstrap-backfill:v1:deployment_profile={deployment_profile}:manifest_root={}:chain={chain}:source_identity_hash={source_identity_hash}:from={}:to={}",
-        manifests_root.display(),
-        range.from_block,
-        range.to_block
+        "indexer-bootstrap-backfill:v3:deployment_profile={deployment_profile}:chain={chain}:source_identity_hash={source_identity_hash}:from={}:to={}",
+        range.from_block, range.to_block
     )
 }
 
 pub(super) fn partitioned_bootstrap_backfill_idempotency_key(
     deployment_profile: &str,
-    manifests_root: &Path,
     chain: &str,
     source_identity_hash: &str,
     range: BackfillBlockRange,
     range_blocks: i64,
 ) -> String {
     format!(
-        "indexer-bootstrap-backfill:v2:deployment_profile={deployment_profile}:manifest_root={}:chain={chain}:source_identity_hash={source_identity_hash}:from={}:to={}:range_blocks={range_blocks}",
-        manifests_root.display(),
-        range.from_block,
-        range.to_block
+        "indexer-bootstrap-backfill:v3:deployment_profile={deployment_profile}:chain={chain}:source_identity_hash={source_identity_hash}:from={}:to={}:range_blocks={range_blocks}",
+        range.from_block, range.to_block
     )
 }

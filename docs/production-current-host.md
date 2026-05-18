@@ -2,6 +2,9 @@
 
 This doc records non-secret operational notes for the current bigname production
 host. General production setup remains in [`production.md`](production.md).
+Use [`runbooks/production-docker.md`](runbooks/production-docker.md) for
+copy-pastable Docker operations, pause/resume commands, monitoring queries, and
+failure handling.
 
 Do not add provider URLs, passwords, tokens, private IPs, wallet keys, cloud
 credentials, or `.env.server` values here. Commit only capacity observations,

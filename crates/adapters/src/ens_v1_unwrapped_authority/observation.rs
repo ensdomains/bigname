@@ -295,13 +295,15 @@ pub(super) fn build_authority_observation(
         && event_topics.matches(NAME_WRAPPED_SIGNATURE, topic0)?
     {
         let decoded = decode_wrapper_name_wrapped_data(raw_log)?;
-        let name = observe_dns_encoded_name_with_reference(
+        let Ok(name) = observe_dns_encoded_name_with_reference(
             &decoded.dns_name,
             &raw_log.reference(),
             &raw_log.normalizer_version,
-        )?;
+        ) else {
+            return Ok(None);
+        };
         if !decoded.namehash.eq_ignore_ascii_case(&name.namehash) {
-            bail!("NameWrapped indexed node does not match decoded DNS name");
+            return Ok(None);
         }
         return Ok(Some(AuthorityObservation::WrapperNameWrapped(
             WrapperNameWrappedObservation {

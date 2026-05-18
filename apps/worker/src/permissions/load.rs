@@ -11,16 +11,23 @@ pub(super) fn stream_target_resource_ids<'a>(
 ) -> impl Stream<Item = Result<Uuid>> + 'a {
     sqlx::query(
         r#"
-        SELECT DISTINCT resource_id
-        FROM normalized_events
-        WHERE event_kind = $1
-          AND resource_id IS NOT NULL
-          AND canonicality_state IN (
+        SELECT DISTINCT ne.resource_id
+        FROM normalized_events ne
+        JOIN resources resource
+          ON resource.resource_id = ne.resource_id
+         AND resource.canonicality_state IN (
               'canonical'::canonicality_state,
               'safe'::canonicality_state,
               'finalized'::canonicality_state
           )
-        ORDER BY resource_id
+        WHERE ne.event_kind = $1
+          AND ne.resource_id IS NOT NULL
+          AND ne.canonicality_state IN (
+              'canonical'::canonicality_state,
+              'safe'::canonicality_state,
+              'finalized'::canonicality_state
+          )
+        ORDER BY ne.resource_id
         "#,
     )
     .bind(EVENT_KIND_PERMISSION_CHANGED)
@@ -52,6 +59,13 @@ pub(super) async fn load_permission_events(
             ne.canonicality_state::TEXT AS canonicality_state,
             ne.after_state
         FROM normalized_events ne
+        JOIN resources resource
+          ON resource.resource_id = ne.resource_id
+         AND resource.canonicality_state IN (
+              'canonical'::canonicality_state,
+              'safe'::canonicality_state,
+              'finalized'::canonicality_state
+          )
         LEFT JOIN chain_lineage rb
           ON rb.chain_id = ne.chain_id
          AND rb.block_hash = ne.block_hash

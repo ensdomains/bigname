@@ -81,6 +81,47 @@ fn parse_required_resource_lookup_name(
     }
 }
 
+async fn ensure_permissions_current_projection_available(
+    pool: &PgPool,
+    route: &'static str,
+) -> ApiResult<()> {
+    let available = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT
+            EXISTS (
+                SELECT 1
+                FROM current_projection_replay_status
+                WHERE projection = 'permissions_current'
+            )
+            OR EXISTS (
+                SELECT 1
+                FROM projection_apply_cursors
+            )
+        "#,
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|load_error| {
+        error!(
+            service = "api",
+            route = route,
+            error = ?load_error,
+            "failed to check permissions_current projection readiness for roles route"
+        );
+        ApiError::internal_error("failed to check roles projection readiness")
+    })?;
+
+    if available {
+        Ok(())
+    } else {
+        Err(ApiError {
+            status: StatusCode::CONFLICT,
+            code: "stale",
+            message: "permissions_current projection is not yet available for roles".to_owned(),
+        })
+    }
+}
+
 async fn load_resource_lookup_row(
     pool: &PgPool,
     namespace: &str,

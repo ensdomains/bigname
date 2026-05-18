@@ -100,45 +100,63 @@ pub(super) async fn load_compact_records_read(
     )?;
 
     let request = parse_compact_name_records_request(&query, default_mode)?;
+    let selected_snapshot = resolve_exact_name_selected_snapshot(
+        &state.pool,
+        namespace,
+        ExactNameSnapshotSelector::default(),
+        namespace == BASENAMES_NAMESPACE && request.mode.includes_verified(),
+    )
+    .await
+    .map_err(|load_error| {
+        error!(
+            service = "api",
+            namespace = %namespace,
+            name = %name,
+            status = %load_error.status,
+            code = %load_error.code,
+            message = %load_error.message,
+            "failed to select compact records snapshot"
+        );
+        map_internal_api_error(
+            load_error,
+            format!("failed to select compact records snapshot for {namespace}/{name}"),
+        )
+    })?;
     let (row, is_wildcard_candidate) =
-        load_compact_records_target(&state.pool, namespace, name).await?;
+        load_compact_records_target(&state.pool, namespace, name, &selected_snapshot).await?;
     let record_inventory_current = if is_wildcard_candidate {
         None
     } else {
-        load_compact_records_current_inventory(&state.pool, &row)
-            .await
-            .map_err(|load_error| {
-                error!(
-                    service = "api",
-                    namespace = %namespace,
-                    name = %name,
-                    logical_name_id = %row.logical_name_id,
-                    status = %load_error.status,
-                    code = %load_error.code,
-                    message = %load_error.message,
-                    "failed to load declared record inventory for compact records route"
-                );
-                map_internal_api_error(
-                    load_error,
-                    format!("failed to load compact records projection for name {namespace}/{name}"),
-                )
-            })?
+        load_compact_records_current_inventory_for_snapshot(
+            &state.pool,
+            namespace,
+            name,
+            &row,
+            &selected_snapshot,
+            request.mode.includes_verified(),
+        )
+        .await?
     };
+    let requested_records =
+        compact_name_records_requested_records(record_inventory_current.as_ref(), &request);
     let value_source =
         if is_wildcard_candidate && request.mode != CompactNameRecordsMode::Declared {
             CompactNameRecordsValueSource::Verified
         } else {
-            compact_name_records_value_source(&row, record_inventory_current.as_ref(), &request)
+            compact_name_records_value_source(
+                &row,
+                record_inventory_current.as_ref(),
+                &requested_records,
+                &request,
+            )
         };
-    let requested_records =
-        compact_name_records_requested_records(record_inventory_current.as_ref(), &request);
     let verified_outcome = load_compact_records_verified_outcome(
         state,
-        namespace,
         &row,
         record_inventory_current.as_ref(),
         &requested_records,
         value_source,
+        &selected_snapshot,
     )
     .await?;
 
@@ -160,7 +178,22 @@ async fn load_resolution_record_inventory_current_for_snapshot(
     mode: ResolutionMode,
     selected_snapshot: &SelectedSnapshot,
 ) -> std::result::Result<Option<RecordInventoryCurrentRow>, SnapshotSelectionError> {
-    let allow_selected_superset = row.namespace == BASENAMES_NAMESPACE && mode.includes_verified();
+    load_record_inventory_current_for_route_snapshot(
+        pool,
+        row,
+        mode.includes_verified(),
+        selected_snapshot,
+    )
+    .await
+}
+
+async fn load_record_inventory_current_for_route_snapshot(
+    pool: &PgPool,
+    row: &NameCurrentRow,
+    includes_verified: bool,
+    selected_snapshot: &SelectedSnapshot,
+) -> std::result::Result<Option<RecordInventoryCurrentRow>, SnapshotSelectionError> {
+    let allow_selected_superset = row.namespace == BASENAMES_NAMESPACE && includes_verified;
     match load_supported_record_inventory_current_for_snapshot(pool, row, selected_snapshot).await {
         Ok(Some(record_inventory_row)) => Ok(Some(record_inventory_row)),
         Ok(None) => {
@@ -192,7 +225,7 @@ async fn load_resolution_record_inventory_current_for_snapshot(
                 return Ok(Some(record_inventory_row));
             }
 
-            if mode.includes_verified() && resolution_verified_support_boundary(row, None).is_none()
+            if includes_verified && resolution_verified_support_boundary(row, None).is_none()
             {
                 return Ok(None);
             }
@@ -207,23 +240,32 @@ async fn load_compact_records_target(
     pool: &PgPool,
     namespace: &str,
     name: &str,
+    selected_snapshot: &SelectedSnapshot,
 ) -> ApiResult<(NameCurrentRow, bool)> {
     let logical_name_id = format!("{namespace}:{name}");
-    let row = load_name_current(pool, &logical_name_id)
-        .await
-        .map_err(|load_error| {
-            error!(
-                service = "api",
-                namespace = %namespace,
-                name = %name,
-                error = ?load_error,
-                "failed to load current exact-name projection for compact records route"
-            );
-            ApiError::internal_error(format!(
-                "failed to load compact records projection for name {namespace}/{name}"
-            ))
+    let row = load_name_current_for_snapshot(
+        pool,
+        &logical_name_id,
+        &selected_snapshot.chain_positions,
+    )
+    .await
+    .map_err(|load_error| {
+        let api_error = snapshot_selection_api_error(load_error);
+        error!(
+            service = "api",
+            namespace = %namespace,
+            name = %name,
+            status = %api_error.status,
+            code = %api_error.code,
+            message = %api_error.message,
+            "failed to load selected-snapshot exact-name projection for compact records route"
+        );
+        map_internal_api_error(
+            api_error,
+            format!("failed to load compact records projection for name {namespace}/{name}"),
+        )
     })?;
-    if let Some(row) = row {
+    if let SnapshotProjectionRead::Found(row) = row {
         return Ok((row, false));
     }
 
@@ -231,7 +273,9 @@ async fn load_compact_records_target(
         return Err(name_not_found_error(namespace, name));
     }
 
-    if let Some(source_row) = load_compact_records_wildcard_source(pool, namespace, name).await? {
+    if let Some(source_row) =
+        load_compact_records_wildcard_source(pool, namespace, name, selected_snapshot).await?
+    {
         return Ok((
             compact_records_wildcard_candidate_row(source_row, namespace, name),
             true,
@@ -245,27 +289,36 @@ async fn load_compact_records_wildcard_source(
     pool: &PgPool,
     namespace: &str,
     name: &str,
+    selected_snapshot: &SelectedSnapshot,
 ) -> ApiResult<Option<NameCurrentRow>> {
     let labels = name.split('.').collect::<Vec<_>>();
     for index in 1..labels.len() {
         let ancestor_name = labels[index..].join(".");
         let logical_name_id = format!("{namespace}:{ancestor_name}");
-        let Some(row) = load_name_current(pool, &logical_name_id)
-            .await
-            .map_err(|load_error| {
-                error!(
-                    service = "api",
-                    namespace = %namespace,
-                    name = %name,
-                    ancestor_name = %ancestor_name,
-                    error = ?load_error,
-                    "failed to load wildcard ancestor projection for compact records route"
-                );
-                ApiError::internal_error(format!(
-                    "failed to load compact records projection for name {namespace}/{name}"
-                ))
-            })?
-        else {
+        let row = load_name_current_for_snapshot(
+            pool,
+            &logical_name_id,
+            &selected_snapshot.chain_positions,
+        )
+        .await
+        .map_err(|load_error| {
+            let api_error = snapshot_selection_api_error(load_error);
+            error!(
+                service = "api",
+                namespace = %namespace,
+                name = %name,
+                ancestor_name = %ancestor_name,
+                status = %api_error.status,
+                code = %api_error.code,
+                message = %api_error.message,
+                "failed to load selected-snapshot wildcard ancestor projection for compact records route"
+            );
+            map_internal_api_error(
+                api_error,
+                format!("failed to load compact records projection for name {namespace}/{name}"),
+            )
+        })?;
+        let SnapshotProjectionRead::Found(row) = row else {
             continue;
         };
         if compact_resolver_address_is_present(&row) {
@@ -296,153 +349,60 @@ fn compact_records_wildcard_candidate_row(
     source_row
 }
 
-async fn load_compact_records_current_inventory(
+async fn load_compact_records_current_inventory_for_snapshot(
     pool: &PgPool,
+    namespace: &str,
+    name: &str,
     row: &NameCurrentRow,
+    selected_snapshot: &SelectedSnapshot,
+    includes_verified: bool,
 ) -> ApiResult<Option<RecordInventoryCurrentRow>> {
-    if let Some(record_inventory_current) = load_supported_record_inventory_current(pool, row)
-        .await
-        .map_err(|error| {
-            ApiError::internal_error(format!(
-                "failed to load current compact record inventory for {}: {error}",
-                row.logical_name_id
-            ))
-        })?
-    {
-        return Ok(Some(record_inventory_current));
-    }
-
-    let Some(resource_id) = row.resource_id else {
-        return Ok(None);
-    };
-    let current_positions =
-        ChainPositions::from_value(&row.chain_positions).map_err(snapshot_selection_api_error)?;
-    let candidates = sqlx::query(
-        r#"
-        SELECT
-            ric.record_version_boundary,
-            ric.coverage,
-            ric.chain_positions,
-            ric.last_recomputed_at
-        FROM record_inventory_current ric
-        JOIN resources resource
-          ON resource.resource_id = ric.resource_id
-        WHERE ric.resource_id = $1
-          AND resource.canonicality_state IN (
-              'canonical'::canonicality_state,
-              'safe'::canonicality_state,
-              'finalized'::canonicality_state
-          )
-        ORDER BY
-          ((ric.coverage ->> 'status') = 'full'
-            AND (ric.coverage ->> 'unsupported_reason') IS NULL) DESC,
-          ric.last_recomputed_at DESC
-        "#,
+    load_record_inventory_current_for_route_snapshot(
+        pool,
+        row,
+        includes_verified,
+        selected_snapshot,
     )
-    .bind(resource_id)
-    .fetch_all(pool)
     .await
-    .map_err(|error| {
-        ApiError::internal_error(format!(
-            "failed to list current compact record inventory candidates for {}: {error}",
-            row.logical_name_id
-        ))
-    })?;
-
-    probe_compact_record_inventory_candidates(pool, row, resource_id, &current_positions, candidates)
-        .await
-}
-
-async fn probe_compact_record_inventory_candidates(
-    pool: &PgPool,
-    row: &NameCurrentRow,
-    resource_id: Uuid,
-    current_positions: &ChainPositions,
-    candidates: Vec<sqlx::postgres::PgRow>,
-) -> ApiResult<Option<RecordInventoryCurrentRow>> {
-    for candidate in candidates {
-        let candidate_positions = candidate
-            .try_get::<JsonValue, _>("chain_positions")
-            .map_err(|error| {
-                ApiError::internal_error(format!(
-                    "record_inventory_current candidate for {} did not include chain_positions: {error}",
-                    row.logical_name_id
-                ))
-            })?;
-        let candidate_positions =
-            ChainPositions::from_value(&candidate_positions).map_err(snapshot_selection_api_error)?;
-        if !current_positions.equivalent_by_chain_id(&candidate_positions) {
-            continue;
-        }
-
-        let record_version_boundary =
-            candidate
-                .try_get::<JsonValue, _>("record_version_boundary")
-                .map_err(|error| {
-                    ApiError::internal_error(format!(
-                        "record_inventory_current candidate for {} did not include record_version_boundary: {error}",
-                        row.logical_name_id
-                    ))
-                })?;
-        return load_record_inventory_current(pool, resource_id, &record_version_boundary)
-            .await
-            .map_err(|error| {
-                ApiError::internal_error(format!(
-                    "failed to load current compact record inventory candidate for {}: {error}",
-                    row.logical_name_id
-                ))
-            });
-    }
-
-    Ok(None)
+    .map_err(|load_error| {
+        let api_error = snapshot_selection_api_error(load_error);
+        error!(
+            service = "api",
+            namespace = %namespace,
+            name = %name,
+            logical_name_id = %row.logical_name_id,
+            status = %api_error.status,
+            code = %api_error.code,
+            message = %api_error.message,
+            "failed to load selected-snapshot declared record inventory for compact records route"
+        );
+        map_internal_api_error(
+            api_error,
+            format!("failed to load compact records projection for name {namespace}/{name}"),
+        )
+    })
 }
 
 async fn load_compact_records_verified_outcome(
     state: &AppState,
-    namespace: &str,
     row: &NameCurrentRow,
     record_inventory_current: Option<&RecordInventoryCurrentRow>,
     requested_records: &[ResolutionRecordKey],
     value_source: CompactNameRecordsValueSource,
+    selected_snapshot: &SelectedSnapshot,
 ) -> ApiResult<Option<ExecutionOutcome>> {
     if value_source != CompactNameRecordsValueSource::Verified || requested_records.is_empty() {
         return Ok(None);
     }
-
-    let selected_snapshot = resolve_exact_name_selected_snapshot(
-        &state.pool,
-        namespace,
-        ExactNameSnapshotSelector::default(),
-        namespace == BASENAMES_NAMESPACE,
-    )
-    .await
-    .map_err(|load_error| {
-        error!(
-            service = "api",
-            namespace = %namespace,
-            logical_name_id = %row.logical_name_id,
-            status = %load_error.status,
-            code = %load_error.code,
-            message = %load_error.message,
-            "failed to select current verified-execution snapshot for compact records route"
-        );
-        map_internal_api_error(
-            load_error,
-            format!(
-                "failed to select compact records verified execution snapshot for {}",
-                row.logical_name_id
-            ),
-        )
-    })?;
 
     load_or_execute_resolution_verified_outcome(
         state,
         row,
         requested_records,
         record_inventory_current,
-        &selected_snapshot,
-        true,
+        selected_snapshot,
         false,
+        true,
     )
     .await
     .map_err(snapshot_selection_api_error)

@@ -96,8 +96,10 @@ pub use identity::{
     load_surface_bindings_by_resource_id,
     load_surface_bindings_by_resource_id_including_noncanonical, load_token_lineage,
     load_token_lineage_including_noncanonical, mark_identity_rows_range_orphaned,
-    mark_surface_binding_range_orphaned, upsert_name_surfaces, upsert_resources,
-    upsert_surface_bindings, upsert_token_lineages,
+    mark_surface_binding_range_orphaned, upsert_name_surfaces,
+    upsert_name_surfaces_without_snapshots, upsert_resources, upsert_resources_without_snapshots,
+    upsert_surface_bindings, upsert_surface_bindings_without_snapshots, upsert_token_lineages,
+    upsert_token_lineages_without_snapshots,
 };
 pub use lineage::{
     CanonicalityState, ChainLineageBlock, chain_lineage_contains_ancestor,
@@ -116,7 +118,8 @@ pub use name_current::{
 pub use normalized_events::{
     NormalizedEvent, NormalizedEventUpsertSummary, load_normalized_event_counts_by_kind,
     load_normalized_events_by_namespace, mark_block_derived_normalized_events_range_orphaned,
-    serialize_jsonb_value, upsert_normalized_events, upsert_normalized_events_with_summary,
+    serialize_jsonb_value, upsert_normalized_events, upsert_normalized_events_count_only,
+    upsert_normalized_events_with_summary,
 };
 pub use permissions::{
     PermissionScope, PermissionsCurrentAccountResourceCursor,

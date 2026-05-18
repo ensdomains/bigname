@@ -10,8 +10,8 @@ use tracing::{info, warn};
 
 use crate::{
     backfill::{
-        BackfillAdapterSyncMode, BackfillBlockRange, hash_pinned_backfill_range_specs,
-        run_resumable_hash_pinned_backfill_job_concurrently,
+        BackfillAdapterSyncMode, BackfillBlockRange, backfill_job_source_identity_payload,
+        hash_pinned_backfill_range_specs, run_resumable_hash_pinned_backfill_job_concurrently,
     },
     backfill_lease_expires_at, default_backfill_lease_owner, deployment_profile_from_manifest_root,
     generated_backfill_lease_token,
@@ -200,11 +200,37 @@ pub(crate) async fn run_startup_bootstrap_backfills(
             };
 
             let mut range = range;
+            let mut checkpoint_source_plan = load_manifest_declared_watched_source_selector_plan(
+                pool,
+                &task.chain,
+                WatchedSourceSelector::WatchedTargetSet(vec![WatchedTargetIdentity {
+                    contract_instance_id: target.contract_instance_id,
+                }]),
+                range.from_block,
+                range.to_block,
+            )
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to build bootstrap watched-target checkpoint source plan for chain {} target {} range {}..={}",
+                    task.chain,
+                    target.contract_instance_id,
+                    range.from_block,
+                    range.to_block
+                )
+            })?;
+            narrow_manifest_bootstrap_source_plan(
+                &mut checkpoint_source_plan,
+                std::slice::from_ref(&target),
+                range,
+            )?;
+            let checkpoint_source_identity =
+                backfill_job_source_identity_payload(&checkpoint_source_plan)?;
             if let Some(stored_checkpoint) = load_bootstrap_target_checkpoint(
                 pool,
                 &deployment_profile,
-                manifests_root,
                 &task.chain,
+                &checkpoint_source_identity,
                 range,
                 &target.contract_instance_id.to_string(),
             )
@@ -255,12 +281,41 @@ pub(crate) async fn run_startup_bootstrap_backfills(
 
         for segment in plan_bootstrap_backfill_segments(target_ranges)? {
             let segment_target_ids = bootstrap_segment_target_ids(&segment.targets);
+            let mut checkpoint_source_plan = load_manifest_declared_watched_source_selector_plan(
+                pool,
+                &task.chain,
+                WatchedSourceSelector::WatchedTargetSet(
+                    segment
+                        .targets
+                        .iter()
+                        .map(|target| WatchedTargetIdentity {
+                            contract_instance_id: target.contract_instance_id,
+                        })
+                        .collect(),
+                ),
+                segment.range.from_block,
+                segment.range.to_block,
+            )
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to build bootstrap segment checkpoint source plan for chain {} range {}..={}",
+                    task.chain, segment.range.from_block, segment.range.to_block
+                )
+            })?;
+            narrow_manifest_bootstrap_source_plan(
+                &mut checkpoint_source_plan,
+                &segment.targets,
+                segment.range,
+            )?;
+            let checkpoint_source_identity =
+                backfill_job_source_identity_payload(&checkpoint_source_plan)?;
             let mut segment_range = segment.range;
             if let Some(stored_checkpoint) = load_bootstrap_segment_checkpoint(
                 pool,
                 &deployment_profile,
-                manifests_root,
                 &task.chain,
+                &checkpoint_source_identity,
                 segment.range,
                 &segment_target_ids,
             )
@@ -337,7 +392,6 @@ pub(crate) async fn run_startup_bootstrap_backfills(
             let idempotency_key = if range_specs.len() == 1 {
                 bootstrap_backfill_idempotency_key(
                     &deployment_profile,
-                    manifests_root,
                     &task.chain,
                     &source_identity_hash,
                     segment_range,
@@ -345,7 +399,6 @@ pub(crate) async fn run_startup_bootstrap_backfills(
             } else {
                 partitioned_bootstrap_backfill_idempotency_key(
                     &deployment_profile,
-                    manifests_root,
                     &task.chain,
                     &source_identity_hash,
                     segment_range,

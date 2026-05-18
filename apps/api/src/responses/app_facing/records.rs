@@ -20,6 +20,10 @@ impl CompactNameRecordsMode {
         matches!(self, Self::Auto | Self::Declared | Self::Both)
     }
 
+    pub(crate) fn includes_verified(self) -> bool {
+        matches!(self, Self::Auto | Self::Verified | Self::Both)
+    }
+
     fn label(self) -> &'static str {
         match self {
             Self::Auto => "auto",
@@ -136,6 +140,7 @@ pub(crate) fn compact_name_records_requested_records(
 pub(crate) fn compact_name_records_value_source(
     row: &NameCurrentRow,
     record_inventory_row: Option<&RecordInventoryCurrentRow>,
+    requested_records: &[ResolutionRecordKey],
     request: &CompactNameRecordsRequest,
 ) -> CompactNameRecordsValueSource {
     match request.mode {
@@ -143,7 +148,11 @@ pub(crate) fn compact_name_records_value_source(
         CompactNameRecordsMode::Verified => CompactNameRecordsValueSource::Verified,
         CompactNameRecordsMode::Both => CompactNameRecordsValueSource::Verified,
         CompactNameRecordsMode::Auto => {
-            if compact_declared_records_are_authoritative(row, record_inventory_row) {
+            if compact_declared_records_satisfy_request(
+                row,
+                record_inventory_row,
+                requested_records,
+            ) {
                 CompactNameRecordsValueSource::Declared
             } else {
                 CompactNameRecordsValueSource::Verified

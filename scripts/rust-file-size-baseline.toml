@@ -9,3 +9,24 @@ new_file_max_loc = 1200
 wiring_target_loc = 300
 wiring_allowlist_required_loc = 500
 wiring_files = ["lib.rs", "main.rs"]
+
+[[files]]
+path = "crates/adapters/src/ens_v1_subregistry_discovery.rs"
+loc = 631
+justification = "Phase 7 allowlist for an oversized production file; future changes should split or shrink it."
+
+[[files]]
+path = "crates/adapters/src/ens_v1_unwrapped_authority/pipeline.rs"
+loc = 649
+justification = "ENSv1 unwrapped-authority full-closure replay orchestration owns checkpointed streaming and target-bounded replay wiring; future changes should split replay orchestration further."
+
+[[files]]
+path = "crates/adapters/src/ens_v1_unwrapped_authority/loading/active_emitters.rs"
+loc = 898
+justification = "ENSv1 unwrapped-authority active-emitter loading keeps exact-block replay probes and full-range replay admission in one stabilization path; split scoped discovery SQL after sync hot-path cleanup."
+
+[[files]]
+path = "crates/storage/src/identity/write_fast.rs"
+loc = 1184
+justification = "No-snapshot identity bulk replay writes carry large SQL statements for token lineages, resources, name surfaces, and surface bindings. Review note: split by row family after sync stabilization so each replay write path can shrink below the oversized-file threshold."
+review_justification = "Explicit review accepted this file above 900 LOC during replay stabilization because splitting the bulk SQL by row family would be higher risk while sync is active; follow-up should split it before adding more replay write behavior."

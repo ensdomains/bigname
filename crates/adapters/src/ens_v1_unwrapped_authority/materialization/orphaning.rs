@@ -12,22 +12,45 @@ pub(super) async fn orphan_stale_overlapping_surface_bindings(
 
     let mut surface_binding_ids = Vec::with_capacity(candidates.len());
     let mut resource_ids = Vec::with_capacity(candidates.len());
-    for (surface_binding_id, resource_id) in candidates {
-        surface_binding_ids.push(surface_binding_id);
-        resource_ids.push(resource_id);
+    let mut logical_name_ids = Vec::with_capacity(candidates.len());
+    let mut authority_keys = Vec::with_capacity(candidates.len());
+    let mut active_from_epochs = Vec::with_capacity(candidates.len());
+    for candidate in candidates.values() {
+        surface_binding_ids.push(candidate.surface_binding_id);
+        resource_ids.push(candidate.resource_id);
+        logical_name_ids.push(candidate.logical_name_id.clone());
+        authority_keys.push(candidate.authority_key.clone());
+        active_from_epochs.push(candidate.active_from_epoch);
     }
 
     let rows = sqlx::query_scalar::<_, Uuid>(
         r#"
-        WITH candidate(surface_binding_id, resource_id) AS (
+        WITH candidate(
+            surface_binding_id,
+            resource_id,
+            logical_name_id,
+            authority_key,
+            active_from_epoch
+        ) AS (
             SELECT *
-            FROM unnest($1::UUID[], $2::UUID[])
+            FROM unnest(
+                $1::UUID[],
+                $2::UUID[],
+                $3::TEXT[],
+                $4::TEXT[],
+                $5::BIGINT[]
+            )
         ),
         event_backed AS (
-            SELECT DISTINCT normalized_events.resource_id
+            SELECT DISTINCT candidate.surface_binding_id
             FROM normalized_events
             JOIN candidate
-              ON candidate.resource_id = normalized_events.resource_id
+              ON normalized_events.logical_name_id = candidate.logical_name_id
+             AND normalized_events.resource_id = candidate.resource_id
+             AND normalized_events.event_kind = $6
+             AND normalized_events.after_state->>'authority_key'
+                 IS NOT DISTINCT FROM candidate.authority_key
+             AND normalized_events.after_state->>'active_from' = candidate.active_from_epoch::TEXT
             WHERE normalized_events.canonicality_state IN ('canonical', 'safe', 'finalized')
         )
         UPDATE surface_bindings
@@ -40,13 +63,17 @@ pub(super) async fn orphan_stale_overlapping_surface_bindings(
           AND NOT EXISTS (
               SELECT 1
               FROM event_backed
-              WHERE event_backed.resource_id = candidate.resource_id
+              WHERE event_backed.surface_binding_id = candidate.surface_binding_id
           )
         RETURNING surface_bindings.surface_binding_id
         "#,
     )
     .bind(&surface_binding_ids)
     .bind(&resource_ids)
+    .bind(&logical_name_ids)
+    .bind(&authority_keys)
+    .bind(&active_from_epochs)
+    .bind(EVENT_KIND_SURFACE_BOUND)
     .fetch_all(pool)
     .await
     .context(
@@ -69,10 +96,19 @@ pub(super) async fn orphan_stale_overlapping_surface_bindings(
     Ok(orphaned_ids.len())
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct StaleSurfaceBindingCandidate {
+    pub(super) surface_binding_id: Uuid,
+    pub(super) resource_id: Uuid,
+    pub(super) logical_name_id: String,
+    pub(super) authority_key: Option<String>,
+    pub(super) active_from_epoch: i64,
+}
+
 pub(super) fn stale_overlapping_surface_binding_candidates(
     incoming: &[SurfaceBinding],
     existing: &[SurfaceBinding],
-) -> BTreeMap<Uuid, Uuid> {
+) -> BTreeMap<Uuid, StaleSurfaceBindingCandidate> {
     let mut incoming_by_name = BTreeMap::<&str, Vec<&SurfaceBinding>>::new();
     for binding in incoming
         .iter()
@@ -98,7 +134,20 @@ pub(super) fn stale_overlapping_surface_binding_candidates(
             incoming.surface_binding_id != existing.surface_binding_id
                 && surface_binding_ranges_overlap(existing, incoming)
         }) {
-            candidates.insert(existing.surface_binding_id, existing.resource_id);
+            candidates.insert(
+                existing.surface_binding_id,
+                StaleSurfaceBindingCandidate {
+                    surface_binding_id: existing.surface_binding_id,
+                    resource_id: existing.resource_id,
+                    logical_name_id: existing.logical_name_id.clone(),
+                    authority_key: existing
+                        .provenance
+                        .get("authority_key")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned),
+                    active_from_epoch: existing.active_from.unix_timestamp(),
+                },
+            );
         }
     }
 

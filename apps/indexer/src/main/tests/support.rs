@@ -970,7 +970,7 @@ async fn create_ops_catchup_backfill_job_tables(pool: &PgPool) -> Result<()> {
             backfill_job_id BIGINT NOT NULL REFERENCES backfill_jobs (backfill_job_id) ON DELETE CASCADE,
             range_start_block_number BIGINT NOT NULL CHECK (range_start_block_number >= 0),
             range_end_block_number BIGINT NOT NULL CHECK (range_end_block_number >= range_start_block_number),
-            checkpoint_block_number BIGINT NOT NULL CHECK (checkpoint_block_number >= range_start_block_number AND checkpoint_block_number <= range_end_block_number),
+            checkpoint_block_number BIGINT NOT NULL CHECK (checkpoint_block_number >= range_start_block_number - 1 AND checkpoint_block_number <= range_end_block_number),
             status backfill_lifecycle_status NOT NULL DEFAULT 'pending',
             lease_token TEXT,
             lease_owner TEXT,

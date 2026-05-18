@@ -8,11 +8,11 @@ use crate::registry_migration_cache::MigratedRegistryNodes;
 use anyhow::{Context, Result, bail};
 use bigname_storage::{
     CanonicalityState, NameSurface, NormalizedEvent, Resource, SurfaceBinding, SurfaceBindingKind,
-    TokenLineage, load_name_surface_including_noncanonical, load_resource_including_noncanonical,
-    load_surface_binding_including_noncanonical, load_token_lineage_including_noncanonical,
-    upsert_name_surfaces, upsert_normalized_events_with_summary, upsert_resources,
-    upsert_surface_bindings, upsert_token_lineages,
+    TokenLineage, upsert_name_surfaces_without_snapshots, upsert_normalized_events_count_only,
+    upsert_resources_without_snapshots, upsert_surface_bindings_without_snapshots,
+    upsert_token_lineages_without_snapshots,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sqlx::{
     PgPool, Row,
@@ -105,11 +105,12 @@ struct AuthorityRawLogRow {
     contract_role: Option<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct ObservationRef {
     chain_id: String,
     block_hash: String,
     block_number: i64,
+    #[serde(with = "time::serde::timestamp")]
     block_timestamp: OffsetDateTime,
     transaction_hash: Option<String>,
     transaction_index: Option<i64>,
@@ -121,31 +122,33 @@ struct ObservationRef {
     manifest_version: i64,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct RawLogPosition {
     block_hash: String,
     transaction_hash: String,
     log_index: i64,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct NameRegistrationObservation {
     label: String,
     labelhash: String,
     registrant: String,
+    #[serde(with = "time::serde::timestamp")]
     expiry: OffsetDateTime,
     reference: ObservationRef,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct NameRenewalObservation {
     label: String,
     labelhash: String,
+    #[serde(with = "time::serde::timestamp")]
     expiry: OffsetDateTime,
     reference: ObservationRef,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct TokenTransferObservation {
     labelhash: String,
     from_address: String,
@@ -153,28 +156,28 @@ struct TokenTransferObservation {
     reference: ObservationRef,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct RegistryOwnerObservation {
     labelhash: String,
     owner: String,
     reference: ObservationRef,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct ResolverObservation {
     namehash: String,
     resolver: String,
     reference: ObservationRef,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct RecordSelector {
     record_key: String,
     record_family: String,
     selector_key: Option<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct RecordChangeObservation {
     namehash: String,
     resolver: String,
@@ -184,7 +187,7 @@ struct RecordChangeObservation {
     reference: ObservationRef,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct RecordVersionObservation {
     namehash: String,
     resolver: String,
@@ -192,37 +195,39 @@ struct RecordVersionObservation {
     reference: ObservationRef,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct WrapperNameWrappedObservation {
     name: NameMetadata,
     owner: String,
     fuses: i64,
+    #[serde(with = "time::serde::timestamp")]
     expiry: OffsetDateTime,
     reference: ObservationRef,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct WrapperNameUnwrappedObservation {
     namehash: String,
     owner: String,
     reference: ObservationRef,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct WrapperFusesObservation {
     namehash: String,
     fuses: i64,
     reference: ObservationRef,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct WrapperExpiryObservation {
     namehash: String,
+    #[serde(with = "time::serde::timestamp")]
     expiry: OffsetDateTime,
     reference: ObservationRef,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct WrapperTokenTransferObservation {
     namehash: String,
     from_address: String,
@@ -231,7 +236,7 @@ struct WrapperTokenTransferObservation {
     reference: ObservationRef,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 enum AuthorityObservation {
     RegistrationGranted(NameRegistrationObservation),
     RegistrationRenewed(NameRenewalObservation),
@@ -247,7 +252,7 @@ enum AuthorityObservation {
     WrapperTokenTransferred(WrapperTokenTransferObservation),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct ReverseClaimProvenance {
     source_family: String,
     contract_role: String,
@@ -255,7 +260,7 @@ struct ReverseClaimProvenance {
     emitting_address: Option<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct ReverseClaimSource {
     address: String,
     namespace: String,
@@ -265,7 +270,7 @@ struct ReverseClaimSource {
     claim_provenance: ReverseClaimProvenance,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct ReverseClaimSourceHistory {
     claim_source: ReverseClaimSource,
     current_resolver: Option<String>,
@@ -296,7 +301,7 @@ struct CanonicalBlockIndex {
     blocks: Vec<RawBlockSnapshot>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct NameMetadata {
     namespace: String,
     logical_name_id: String,
@@ -309,38 +314,41 @@ struct NameMetadata {
     normalizer_version: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct RegistrationLease {
     authority_key: String,
     labelhash: String,
     registrant: String,
+    #[serde(with = "time::serde::timestamp")]
     expiry: OffsetDateTime,
     release_ref: Option<BoundaryRef>,
     start_ref: ObservationRef,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct WrapperAuthority {
     authority_key: String,
     node: String,
     owner: String,
     fuses: i64,
+    #[serde(with = "time::serde::timestamp")]
     expiry: OffsetDateTime,
     start_ref: ObservationRef,
     end_ref: Option<ObservationRef>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct BoundaryRef {
     chain_id: String,
     block_hash: String,
     block_number: i64,
+    #[serde(with = "time::serde::timestamp")]
     block_timestamp: OffsetDateTime,
     canonicality_state: CanonicalityState,
     namespace: String,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 enum AuthorityKind {
     RegistryOnly,
     Registrar,
@@ -372,7 +380,7 @@ impl PermissionAction {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct AuthorityAnchor {
     kind: AuthorityKind,
     authority_key: String,
@@ -383,24 +391,27 @@ struct AuthorityAnchor {
     binding_manifest_id: i64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct OpenBinding {
     surface_binding_id: Uuid,
     authority: AuthorityAnchor,
+    #[serde(with = "time::serde::timestamp")]
     active_from: OffsetDateTime,
     anchor_ref: BoundaryRef,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct BindingSegment {
     surface_binding_id: Uuid,
     authority: AuthorityAnchor,
+    #[serde(with = "time::serde::timestamp")]
     active_from: OffsetDateTime,
+    #[serde(with = "time::serde::timestamp::option")]
     active_to: Option<OffsetDateTime>,
     anchor_ref: BoundaryRef,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct NameHistory {
     name: Option<NameMetadata>,
     labelhash: String,
@@ -430,6 +441,7 @@ mod apply_registrar;
 mod apply_registry;
 mod apply_resolver;
 mod apply_wrapper;
+mod checkpoint;
 mod constants;
 mod event_builders;
 mod event_state;
@@ -450,13 +462,18 @@ mod reverse_claims;
 mod scope;
 mod transition;
 
-pub use self::pipeline::sync_ens_v1_unwrapped_authority;
+pub use self::pipeline::{
+    sync_ens_v1_unwrapped_authority,
+    sync_ens_v1_unwrapped_authority_with_replay_checkpoint_and_log_limit,
+};
+pub use checkpoint::clear_replay_adapter_checkpoints;
 
 use self::{
     abi::*, apply::*, apply_registrar::*, apply_registry::*, apply_resolver::*, apply_wrapper::*,
-    event_builders::*, event_state::*, event_topics::*, finalization::*, ids::*, loading::*,
-    materialization::*, migration_guard::*, names::*, observation::*, permissions::*, preload::*,
-    profiles::*, release_events::*, resolver_gate::*, reverse_claims::*, scope::*, transition::*,
+    checkpoint::*, event_builders::*, event_state::*, event_topics::*, finalization::*, ids::*,
+    loading::*, materialization::*, migration_guard::*, names::*, observation::*, permissions::*,
+    preload::*, profiles::*, release_events::*, resolver_gate::*, reverse_claims::*, scope::*,
+    transition::*,
 };
 use constants::*;
 

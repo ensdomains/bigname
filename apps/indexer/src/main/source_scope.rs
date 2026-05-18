@@ -61,6 +61,11 @@ impl SourceScope {
             if contract.chain != chain {
                 continue;
             }
+            if include_generic_resolver_scope
+                && contract.source_family == SOURCE_FAMILY_ENS_V1_RESOLVER_L1
+            {
+                continue;
+            }
 
             let effective_from_block = contract
                 .active_from_block_number
@@ -191,6 +196,16 @@ mod tests {
                 source_manifest_id: Some(1),
                 active_from_block_number: Some(12),
                 active_to_block_number: Some(18),
+            },
+            WatchedContract {
+                chain: "ethereum-mainnet".to_owned(),
+                source_family: "ens_v1_resolver_l1".to_owned(),
+                address: "0x2222222222222222222222222222222222222222".to_owned(),
+                contract_instance_id: sqlx::types::Uuid::nil(),
+                source: WatchedContractSource::DiscoveryEdge,
+                source_manifest_id: Some(1),
+                active_from_block_number: Some(13),
+                active_to_block_number: Some(17),
             },
             WatchedContract {
                 chain: "base-mainnet".to_owned(),

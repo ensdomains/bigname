@@ -19,6 +19,8 @@ mod types;
 pub(crate) use adapter_sync::{
     sync_adapter_state_from_persisted_raw_payloads,
     sync_adapter_state_from_scoped_persisted_raw_payloads,
+    sync_full_closure_normalized_events_from_persisted_raw_payloads,
+    sync_live_adapter_backlog_after_normalized_replay,
     sync_live_adapter_state_from_persisted_raw_payloads,
 };
 #[allow(unused_imports)]
@@ -55,7 +57,10 @@ pub(crate) use persistence::{
     persist_reconciled_raw_code_hashes, persist_reconciled_raw_payloads,
 };
 #[allow(unused_imports)]
-pub(crate) use replay::replay_raw_fact_normalized_events;
+pub(crate) use replay::{
+    active_closure_or_dependency_replay_adapters, chain_has_closure_or_dependency_replay_adapter,
+    replay_raw_fact_normalized_events, unsupported_closure_replay_adapters,
+};
 #[allow(unused_imports)]
 pub(crate) use types::{
     CanonicalReconciliation, CanonicalReconciliationStatus, ChainReconciliationOutcome,
