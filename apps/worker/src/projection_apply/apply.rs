@@ -29,6 +29,7 @@ struct ClaimedInvalidation {
 pub(super) async fn apply_pending_invalidations(
     pool: &PgPool,
     batch_limit: i64,
+    text_hydration_config: Option<&record_inventory::RecordInventoryTextHydrationConfig>,
 ) -> Result<ProjectionInvalidationApplySummary> {
     if batch_limit <= 0 {
         bail!("projection apply batch limit must be positive, got {batch_limit}");
@@ -42,7 +43,7 @@ pub(super) async fn apply_pending_invalidations(
     };
 
     for invalidation in invalidations {
-        match apply_one(pool, &invalidation).await {
+        match apply_one(pool, &invalidation, text_hydration_config).await {
             Ok(()) => {
                 complete_invalidation(pool, &invalidation).await?;
                 summary.applied_invalidation_count += 1;
@@ -128,7 +129,11 @@ async fn claim_pending_invalidations(
         .collect()
 }
 
-async fn apply_one(pool: &PgPool, invalidation: &ClaimedInvalidation) -> Result<()> {
+async fn apply_one(
+    pool: &PgPool,
+    invalidation: &ClaimedInvalidation,
+    text_hydration_config: Option<&record_inventory::RecordInventoryTextHydrationConfig>,
+) -> Result<()> {
     match invalidation.projection.as_str() {
         "name_current" => {
             name_current::rebuild_name_current(pool, Some(&invalidation.projection_key)).await?;
@@ -146,6 +151,18 @@ async fn apply_one(pool: &PgPool, invalidation: &ClaimedInvalidation) -> Result<
                 Some(&invalidation.projection_key),
             )
             .await?;
+            if let Some(config) = text_hydration_config {
+                let hydration_summary = record_inventory::hydrate_record_inventory_text_values(
+                    pool,
+                    Some(&invalidation.projection_key),
+                    config.clone(),
+                )
+                .await?;
+                record_inventory::log_text_hydration_summary(
+                    Some(&invalidation.projection_key),
+                    &hydration_summary,
+                );
+            }
         }
         "resolver_current" => {
             let chain_id = payload_str(&invalidation.key_payload, "chain_id")?;

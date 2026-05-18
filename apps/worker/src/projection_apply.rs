@@ -9,6 +9,8 @@ use anyhow::{Context, Result};
 use sqlx::PgPool;
 use tracing::info;
 
+use crate::record_inventory;
+
 pub(crate) use derive::{normalized_event_cursor_exists, seed_normalized_event_cursor_if_absent};
 
 const NORMALIZED_EVENT_CURSOR: &str = "normalized_events_to_projection_invalidations";
@@ -38,11 +40,19 @@ impl ProjectionApplyIterationSummary {
     }
 }
 
-pub(crate) async fn run_once(pool: &PgPool) -> Result<ProjectionApplyIterationSummary> {
+pub(crate) async fn run_once(
+    pool: &PgPool,
+    text_hydration_config: Option<&record_inventory::RecordInventoryTextHydrationConfig>,
+) -> Result<ProjectionApplyIterationSummary> {
     let derived =
         derive::derive_normalized_event_invalidations(pool, NORMALIZED_EVENT_DERIVE_BATCH_LIMIT)
             .await?;
-    let applied = apply::apply_pending_invalidations(pool, PROJECTION_APPLY_BATCH_LIMIT).await?;
+    let applied = apply::apply_pending_invalidations(
+        pool,
+        PROJECTION_APPLY_BATCH_LIMIT,
+        text_hydration_config,
+    )
+    .await?;
 
     let summary = ProjectionApplyIterationSummary {
         scanned_event_count: derived.scanned_event_count,
@@ -81,4 +91,20 @@ pub(crate) async fn load_normalized_event_change_watermark(
     .await
     .context("failed to load normalized-event projection apply watermark")
     .map(|change_id| NormalizedEventChangeCursor { change_id })
+}
+
+pub(crate) async fn load_chain_checkpoint_max_block(pool: &PgPool) -> Result<Option<i64>> {
+    sqlx::query_scalar::<_, Option<i64>>(
+        r#"
+        SELECT NULLIF(MAX(GREATEST(
+            COALESCE(canonical_block_number, -1),
+            COALESCE(safe_block_number, -1),
+            COALESCE(finalized_block_number, -1)
+        )), -1)
+        FROM chain_checkpoints
+        "#,
+    )
+    .fetch_one(pool)
+    .await
+    .context("failed to load chain-checkpoint projection replay target block")
 }

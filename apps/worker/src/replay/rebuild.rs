@@ -19,21 +19,30 @@ use super::{
 
 pub async fn rebuild_all_current_projections(
     pool: &PgPool,
+    text_hydration_config: Option<&record_inventory::RecordInventoryTextHydrationConfig>,
 ) -> Result<AllCurrentProjectionsReplaySummary> {
-    rebuild_all_current_projections_inner(pool, None, false).await
+    rebuild_all_current_projections_inner(pool, None, false, text_hydration_config).await
 }
 
 pub async fn rebuild_pending_all_current_projections(
     pool: &PgPool,
     normalized_target_block: Option<i64>,
+    text_hydration_config: Option<&record_inventory::RecordInventoryTextHydrationConfig>,
 ) -> Result<AllCurrentProjectionsReplaySummary> {
-    rebuild_all_current_projections_inner(pool, normalized_target_block, true).await
+    rebuild_all_current_projections_inner(
+        pool,
+        normalized_target_block,
+        true,
+        text_hydration_config,
+    )
+    .await
 }
 
 async fn rebuild_all_current_projections_inner(
     pool: &PgPool,
     normalized_target_block: Option<i64>,
     skip_completed: bool,
+    text_hydration_config: Option<&record_inventory::RecordInventoryTextHydrationConfig>,
 ) -> Result<AllCurrentProjectionsReplaySummary> {
     let mut steps = Vec::with_capacity(ALL_CURRENT_PROJECTION_ORDER.len());
 
@@ -75,11 +84,36 @@ async fn rebuild_all_current_projections_inner(
         permissions::rebuild_permissions_current(pool, None),
         requested_resource_count
     ));
-    steps.push(replay_step!(
-        "record_inventory_current",
-        record_inventory::rebuild_record_inventory_current(pool, None),
-        requested_resource_count
-    ));
+    steps.push(
+        replay_projection_step(
+            pool,
+            "record_inventory_current",
+            normalized_target_block,
+            skip_completed,
+            async {
+                let summary = record_inventory::rebuild_record_inventory_current(pool, None)
+                    .await
+                    .context("failed to replay record_inventory_current")?;
+                if let Some(config) = text_hydration_config {
+                    let hydration_summary = record_inventory::hydrate_record_inventory_text_values(
+                        pool,
+                        None,
+                        config.clone(),
+                    )
+                    .await
+                    .context("failed to hydrate record_inventory_current text values")?;
+                    record_inventory::log_text_hydration_summary(None, &hydration_summary);
+                }
+                Ok(CurrentProjectionReplayStepSummary {
+                    projection: "record_inventory_current",
+                    requested_key_count: summary.requested_resource_count,
+                    upserted_row_count: summary.upserted_row_count,
+                    deleted_row_count: summary.deleted_row_count,
+                })
+            },
+        )
+        .await?,
+    );
     steps.push(replay_step!(
         "resolver_current",
         resolver::rebuild_resolver_current(pool, None, None),

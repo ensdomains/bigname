@@ -4,7 +4,7 @@ use sqlx::{PgPool, Postgres, pool::PoolConnection};
 use tokio::time::{Duration, sleep};
 use tracing::{debug, info, warn};
 
-use crate::{cli::RunArgs, projection_apply, replay};
+use crate::{cli::RunArgs, projection_apply, record_inventory, replay};
 
 const CURSOR_KIND_RAW_FACT_NORMALIZED_EVENTS: &str = "raw_fact_normalized_events";
 const ALL_CURRENT_PROJECTIONS_MIN_DATABASE_CONNECTIONS: u32 = 64;
@@ -32,6 +32,12 @@ pub(crate) fn all_current_projections_database_config(
 pub(crate) async fn run_worker(args: RunArgs) -> Result<()> {
     let database = all_current_projections_database_config(args.database);
     let pool = bigname_storage::connect(&database).await?;
+    let text_hydration_config =
+        record_inventory::RecordInventoryTextHydrationConfig::from_chain_rpc_url_entries(
+            &args.chain_rpc_urls,
+            args.text_hydration_multicall3_address,
+            args.text_hydration_batch_size,
+        )?;
 
     info!(
         service = "worker",
@@ -40,11 +46,16 @@ pub(crate) async fn run_worker(args: RunArgs) -> Result<()> {
         poll_interval_secs = args.poll_interval_secs,
         database_max_connections = database.max_connections,
         automatic_projection_replay = true,
+        record_inventory_text_hydration = text_hydration_config.is_some(),
         "worker booted"
     );
 
     tokio::select! {
-        () = run_automatic_current_projection_replay(pool, args.poll_interval_secs) => {}
+        () = run_automatic_current_projection_replay(
+            pool,
+            args.poll_interval_secs,
+            text_hydration_config,
+        ) => {}
         signal = tokio::signal::ctrl_c() => {
             signal.context("failed to listen for shutdown signal")?;
         }
@@ -54,9 +65,14 @@ pub(crate) async fn run_worker(args: RunArgs) -> Result<()> {
     Ok(())
 }
 
-pub(crate) async fn run_automatic_current_projection_replay(pool: PgPool, poll_interval_secs: u64) {
+pub(crate) async fn run_automatic_current_projection_replay(
+    pool: PgPool,
+    poll_interval_secs: u64,
+    text_hydration_config: Option<record_inventory::RecordInventoryTextHydrationConfig>,
+) {
     let poll_interval = Duration::from_secs(poll_interval_secs.max(1));
     let mut bootstrap_completed = false;
+    let mut bootstrap_text_hydration_completed = text_hydration_config.is_none();
 
     loop {
         let mut progressed = false;
@@ -84,7 +100,9 @@ pub(crate) async fn run_automatic_current_projection_replay(pool: PgPool, poll_i
         }
 
         if !bootstrap_completed {
-            match replay_all_current_projections_when_ready(&pool).await {
+            match replay_all_current_projections_when_ready(&pool, text_hydration_config.as_ref())
+                .await
+            {
                 Ok(true) => {
                     bootstrap_completed = true;
                     progressed = true;
@@ -102,7 +120,29 @@ pub(crate) async fn run_automatic_current_projection_replay(pool: PgPool, poll_i
         }
 
         if bootstrap_completed {
-            match projection_apply::run_once(&pool).await {
+            if !bootstrap_text_hydration_completed {
+                match hydrate_record_inventory_text_values_after_bootstrap(
+                    &pool,
+                    text_hydration_config.as_ref(),
+                )
+                .await
+                {
+                    Ok(()) => {
+                        bootstrap_text_hydration_completed = true;
+                        progressed = true;
+                    }
+                    Err(error) => {
+                        warn!(
+                            service = "worker",
+                            projection = "record_inventory_current",
+                            error = %format!("{error:#}"),
+                            "automatic record_inventory_current text hydration failed"
+                        );
+                    }
+                }
+            }
+
+            match projection_apply::run_once(&pool, text_hydration_config.as_ref()).await {
                 Ok(summary) => {
                     progressed |= summary.made_progress();
                 }
@@ -123,7 +163,23 @@ pub(crate) async fn run_automatic_current_projection_replay(pool: PgPool, poll_i
     }
 }
 
-async fn replay_all_current_projections_when_ready(pool: &PgPool) -> Result<bool> {
+async fn hydrate_record_inventory_text_values_after_bootstrap(
+    pool: &PgPool,
+    text_hydration_config: Option<&record_inventory::RecordInventoryTextHydrationConfig>,
+) -> Result<()> {
+    let Some(config) = text_hydration_config else {
+        return Ok(());
+    };
+    let summary =
+        record_inventory::hydrate_record_inventory_text_values(pool, None, config.clone()).await?;
+    record_inventory::log_text_hydration_summary(None, &summary);
+    Ok(())
+}
+
+async fn replay_all_current_projections_when_ready(
+    pool: &PgPool,
+    text_hydration_config: Option<&record_inventory::RecordInventoryTextHydrationConfig>,
+) -> Result<bool> {
     let readiness = load_projection_replay_readiness(pool).await?;
     if !readiness.is_ready() {
         debug!(
@@ -155,27 +211,30 @@ async fn replay_all_current_projections_when_ready(pool: &PgPool) -> Result<bool
         return Ok(false);
     }
 
+    let cursor_exists = projection_apply::normalized_event_cursor_exists(pool).await?;
+    let should_seed_apply_cursor = should_seed_apply_cursor_after_bootstrap(cursor_exists);
+    let bootstrap_watermark =
+        projection_apply::load_normalized_event_change_watermark(pool).await?;
+    let chain_checkpoint_max_block =
+        projection_apply::load_chain_checkpoint_max_block(pool).await?;
+    let replay_target_block = projection_bootstrap_replay_target_block(
+        readiness.normalized_replay_max_target_block,
+        chain_checkpoint_max_block,
+    );
     info!(
         service = "worker",
         replay = "all_current_projections",
         normalized_replay_cursor_count = readiness.normalized_replay_cursor_count,
         normalized_replay_max_target_block = readiness.normalized_replay_max_target_block,
+        chain_checkpoint_max_block,
+        projection_replay_target_block = replay_target_block,
+        bootstrap_change_watermark = bootstrap_watermark.change_id,
         "automatic all-current projection replay started"
     );
-
-    let cursor_exists = projection_apply::normalized_event_cursor_exists(pool).await?;
-    let existing_replay_marker_count = if cursor_exists {
-        0
-    } else {
-        load_existing_projection_replay_marker_count(pool).await?
-    };
-    let should_seed_apply_cursor =
-        should_seed_apply_cursor_after_bootstrap(cursor_exists, existing_replay_marker_count);
-    let bootstrap_watermark =
-        projection_apply::load_normalized_event_change_watermark(pool).await?;
     let replay_result = replay::rebuild_pending_all_current_projections(
         pool,
-        readiness.normalized_replay_max_target_block,
+        replay_target_block,
+        text_hydration_config,
     )
     .await;
     release_replay_lock(&mut replay_lock).await?;
@@ -212,11 +271,8 @@ async fn projection_bootstrap_already_handed_off_to_apply(pool: &PgPool) -> Resu
     ))
 }
 
-fn should_seed_apply_cursor_after_bootstrap(
-    cursor_exists: bool,
-    existing_replay_marker_count: i64,
-) -> bool {
-    !cursor_exists && existing_replay_marker_count == 0
+fn should_seed_apply_cursor_after_bootstrap(cursor_exists: bool) -> bool {
+    !cursor_exists
 }
 
 fn should_skip_bootstrap_for_existing_apply_cursor(
@@ -224,6 +280,18 @@ fn should_skip_bootstrap_for_existing_apply_cursor(
     complete_marker_count: i64,
 ) -> bool {
     cursor_exists && complete_marker_count == replay::ALL_CURRENT_PROJECTION_ORDER.len() as i64
+}
+
+fn projection_bootstrap_replay_target_block(
+    normalized_replay_target_block: Option<i64>,
+    chain_checkpoint_max_block: Option<i64>,
+) -> Option<i64> {
+    match (normalized_replay_target_block, chain_checkpoint_max_block) {
+        (Some(replay), Some(checkpoint)) => Some(replay.max(checkpoint)),
+        (Some(replay), None) => Some(replay),
+        (None, Some(checkpoint)) => Some(checkpoint),
+        (None, None) => None,
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -301,18 +369,6 @@ async fn missing_projection_index_count(pool: &PgPool) -> Result<i64> {
         .fetch_one(pool)
         .await
         .context("failed to inspect deferred normalized-event projection indexes")
-}
-
-async fn load_existing_projection_replay_marker_count(pool: &PgPool) -> Result<i64> {
-    sqlx::query_scalar::<_, i64>(
-        r#"
-        SELECT COUNT(*)::BIGINT
-        FROM current_projection_replay_status
-        "#,
-    )
-    .fetch_one(pool)
-    .await
-    .context("failed to inspect existing projection replay markers")
 }
 
 async fn load_current_projection_replay_marker_count(pool: &PgPool) -> Result<i64> {
@@ -442,10 +498,21 @@ mod tests {
     }
 
     #[test]
-    fn apply_cursor_is_seeded_only_for_fresh_bootstrap_without_old_markers() {
-        assert!(should_seed_apply_cursor_after_bootstrap(false, 0));
-        assert!(!should_seed_apply_cursor_after_bootstrap(false, 1));
-        assert!(!should_seed_apply_cursor_after_bootstrap(true, 0));
+    fn apply_cursor_is_seeded_after_bootstrap_when_absent() {
+        assert!(should_seed_apply_cursor_after_bootstrap(false));
+        assert!(!should_seed_apply_cursor_after_bootstrap(true));
+    }
+
+    #[test]
+    fn bootstrap_target_covers_live_checkpoint_head() {
+        assert_eq!(
+            projection_bootstrap_replay_target_block(Some(10), Some(15)),
+            Some(15)
+        );
+        assert_eq!(
+            projection_bootstrap_replay_target_block(Some(15), Some(10)),
+            Some(15)
+        );
     }
 
     #[test]

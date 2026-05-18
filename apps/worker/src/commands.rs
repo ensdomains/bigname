@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-use bigname_execution::ChainRpcUrls;
 use tracing::info;
 
 mod execution_invalidation;
@@ -206,7 +205,13 @@ async fn replay_all_current_projections(args: AllCurrentProjectionsArgs) -> Resu
     let database =
         automatic_projection_replay::all_current_projections_database_config(args.database);
     let pool = bigname_storage::connect(&database).await?;
-    let summary = replay::rebuild_all_current_projections(&pool).await?;
+    let text_hydration_config = optional_text_hydration_config(
+        &args.chain_rpc_urls,
+        args.text_hydration_multicall3_address,
+        args.text_hydration_batch_size,
+    )?;
+    let summary =
+        replay::rebuild_all_current_projections(&pool, text_hydration_config.as_ref()).await?;
 
     if args.json {
         let payload = summary
@@ -258,7 +263,10 @@ async fn rebuild_record_inventory_current(args: RecordInventoryCurrentRebuildArg
             hydration_config,
         )
         .await?;
-        log_text_hydration_summary(args.resource_id.as_deref(), &hydration_summary);
+        record_inventory::log_text_hydration_summary(
+            args.resource_id.as_deref(),
+            &hydration_summary,
+        );
     }
 
     Ok(())
@@ -279,7 +287,7 @@ async fn hydrate_record_inventory_text_values(
         hydration_config,
     )
     .await?;
-    log_text_hydration_summary(args.resource_id.as_deref(), &summary);
+    record_inventory::log_text_hydration_summary(args.resource_id.as_deref(), &summary);
     Ok(())
 }
 
@@ -288,33 +296,24 @@ fn text_hydration_config(
     multicall3_address: String,
     batch_size: usize,
 ) -> Result<record_inventory::RecordInventoryTextHydrationConfig> {
-    let chain_rpc_urls = ChainRpcUrls::from_entries(chain_rpc_url_entries)?;
-    if chain_rpc_urls.is_empty() {
-        anyhow::bail!("text hydration requires --chain-rpc-url <chain>=<url>");
-    }
-    let mut config = record_inventory::RecordInventoryTextHydrationConfig::new(chain_rpc_urls);
-    config.multicall3_address = multicall3_address;
-    config.batch_size = batch_size.max(1);
-    Ok(config)
+    record_inventory::RecordInventoryTextHydrationConfig::from_chain_rpc_url_entries(
+        chain_rpc_url_entries,
+        multicall3_address,
+        batch_size,
+    )?
+    .context("text hydration requires --chain-rpc-url <chain>=<url>")
 }
 
-fn log_text_hydration_summary(
-    resource_id: Option<&str>,
-    summary: &record_inventory::RecordInventoryTextHydrationSummary,
-) {
-    info!(
-        service = "worker",
-        projection = "record_inventory_current",
-        candidate_row_count = summary.candidate_row_count,
-        candidate_entry_count = summary.candidate_entry_count,
-        hydrated_entry_count = summary.hydrated_entry_count,
-        not_found_entry_count = summary.not_found_entry_count,
-        skipped_entry_count = summary.skipped_entry_count,
-        failed_entry_count = summary.failed_entry_count,
-        updated_row_count = summary.updated_row_count,
-        resource_id = resource_id.unwrap_or("all"),
-        "record_inventory_current text hydration completed"
-    );
+fn optional_text_hydration_config(
+    chain_rpc_url_entries: &[String],
+    multicall3_address: String,
+    batch_size: usize,
+) -> Result<Option<record_inventory::RecordInventoryTextHydrationConfig>> {
+    record_inventory::RecordInventoryTextHydrationConfig::from_chain_rpc_url_entries(
+        chain_rpc_url_entries,
+        multicall3_address,
+        batch_size,
+    )
 }
 
 async fn rebuild_resolver_current(args: ResolverCurrentRebuildArgs) -> Result<()> {
