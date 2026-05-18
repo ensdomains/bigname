@@ -449,7 +449,7 @@ async fn hash_pinned_backfill_persists_range_and_is_idempotent_without_advancing
         .lock()
         .expect("request log must not be poisoned")
         .clone();
-    assert_eq!(requests.len(), 15);
+    assert_eq!(requests.len(), 21);
     let tagged_head_requests = requests
         .iter()
         .filter(|request| {
@@ -466,8 +466,32 @@ async fn hash_pinned_backfill_persists_range_and_is_idempotent_without_advancing
             .iter()
             .map(|request| request.params.first().and_then(Value::as_str))
             .collect::<Vec<_>>(),
-        vec![Some("latest"), Some("safe"), Some("finalized")]
+        vec![
+            Some("latest"),
+            Some("safe"),
+            Some("finalized"),
+            Some("latest"),
+            Some("safe"),
+            Some("finalized")
+        ]
     );
+    for batch in tagged_head_requests.chunks(3) {
+        assert_eq!(
+            batch
+                .iter()
+                .map(|request| request.params.first().and_then(Value::as_str))
+                .collect::<Vec<_>>(),
+            vec![Some("latest"), Some("safe"), Some("finalized")]
+        );
+    }
+    let head_hash_requests = requests
+        .iter()
+        .filter(|request| {
+            request.method == "eth_getBlockByHash"
+                && request.params.get(1) == Some(&Value::Bool(false))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(head_hash_requests.len(), 2);
     let block_number_requests = requests
         .iter()
         .filter(|request| {
@@ -479,13 +503,20 @@ async fn hash_pinned_backfill_persists_range_and_is_idempotent_without_advancing
                     .is_some_and(|value| value.starts_with("0x"))
         })
         .collect::<Vec<_>>();
-    assert_eq!(block_number_requests.len(), 4);
+    assert_eq!(block_number_requests.len(), 6);
     assert_eq!(
         block_number_requests
             .iter()
             .map(|request| request.params.first().and_then(Value::as_str))
             .collect::<Vec<_>>(),
-        vec![Some("0x2a"), Some("0x2b"), Some("0x2a"), Some("0x2b")]
+        vec![
+            Some("0x2a"),
+            Some("0x2b"),
+            Some("0x2a"),
+            Some("0x2b"),
+            Some("0x2a"),
+            Some("0x2b")
+        ]
     );
     for batch in block_number_requests.chunks(2) {
         assert_eq!(batch.len(), 2);
@@ -501,6 +532,10 @@ async fn hash_pinned_backfill_persists_range_and_is_idempotent_without_advancing
     assert_ne!(
         block_number_requests[0].http_request_id, block_number_requests[2].http_request_id,
         "post-log hash validation must re-fetch block numbers after the range log request"
+    );
+    assert_ne!(
+        block_number_requests[2].http_request_id, block_number_requests[4].http_request_id,
+        "canonicality assignment must revalidate block hashes after the hash-pinned bundle fetch"
     );
     assert_eq!(requests[4].method, "eth_getBlockByNumber");
     assert_eq!(
@@ -564,6 +599,29 @@ async fn hash_pinned_backfill_persists_range_and_is_idempotent_without_advancing
             .params
             .first()
             .and_then(Value::as_str),
+        Some(block_43.block_hash.as_str())
+    );
+    let receipt_requests = requests
+        .iter()
+        .filter(|request| request.method == "eth_getBlockReceipts")
+        .collect::<Vec<_>>();
+    assert_eq!(receipt_requests.len(), 2);
+    assert_eq!(receipt_requests[0].batch_size, 2);
+    assert!(
+        receipt_requests
+            .iter()
+            .all(
+                |request| request.http_request_id == receipt_requests[0].http_request_id
+                    && request.batch_size == 2
+            ),
+        "hash-pinned receipt hydration must share one JSON-RPC batch HTTP request"
+    );
+    assert_eq!(
+        receipt_requests[0].params.first().and_then(Value::as_str),
+        Some(block_42.block_hash.as_str())
+    );
+    assert_eq!(
+        receipt_requests[1].params.first().and_then(Value::as_str),
         Some(block_43.block_hash.as_str())
     );
     let code_requests = requests

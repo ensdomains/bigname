@@ -239,7 +239,7 @@ async fn load_scoped_discovery_watched_contracts(
                 FROM scoped_targets scoped
                 JOIN contract_instance_addresses cia
                   ON cia.chain_id = $1
-                 AND cia.address = scoped.address
+                 AND lower(cia.address) = scoped.address
                  AND cia.deactivated_at IS NULL
                  AND (
                      cia.active_from_block_number IS NULL
@@ -444,7 +444,7 @@ async fn load_scoped_discovery_watched_contracts(
             FROM scoped_targets scoped
             JOIN contract_instance_addresses cia
               ON cia.chain_id = $1
-             AND cia.address = scoped.address
+             AND lower(cia.address) = scoped.address
              AND cia.deactivated_at IS NULL
         ),
         direct_other_edge_sources AS (
@@ -733,7 +733,7 @@ fn filter_watched_contracts_by_scope(
         .filter(|contract| {
             source_scope.iter().any(|target| {
                 target.source_family == contract.source_family
-                    && target.address == contract.address
+                    && target.address.eq_ignore_ascii_case(&contract.address)
                     && watched_contract_intersects_source_scope(contract, target)
             })
         })
@@ -751,7 +751,7 @@ fn source_scope_covered_by_watched_contracts(
         .all(|target| {
             watched_contracts.iter().any(|contract| {
                 target.source_family == contract.source_family
-                    && target.address == contract.address
+                    && target.address.eq_ignore_ascii_case(&contract.address)
                     && watched_contract_intersects_source_scope(contract, target)
             })
         })

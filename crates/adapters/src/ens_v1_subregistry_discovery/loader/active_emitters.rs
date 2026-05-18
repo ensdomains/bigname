@@ -257,7 +257,7 @@ async fn load_scoped_discovery_active_emitters(
                 FROM scoped_targets scoped
                 JOIN contract_instance_addresses cia
                   ON cia.chain_id = $1
-                 AND cia.address = scoped.address
+                 AND lower(cia.address) = scoped.address
                  AND cia.deactivated_at IS NULL
                  AND (
                      cia.active_from_block_number IS NULL
@@ -350,7 +350,7 @@ async fn load_scoped_discovery_active_emitters(
             FROM scoped_targets scoped
             JOIN contract_instance_addresses cia
               ON cia.chain_id = $1
-             AND cia.address = scoped.address
+             AND lower(cia.address) = scoped.address
              AND cia.deactivated_at IS NULL
         ),
         active_registry_manifests AS (
@@ -512,7 +512,7 @@ async fn load_manifest_declared_active_emitters(
                   address
               )
               WHERE scoped.source_family = mv.source_family
-                AND scoped.address = cia.address
+                AND scoped.address = lower(cia.address)
           )
         ORDER BY lower(cia.address), source_rank, source_manifest_id, contract_instance_id
         "#,

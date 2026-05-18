@@ -51,7 +51,7 @@ async fn load_watched_contracts_by_addresses_scoped(
         SELECT
             target.chain AS chain,
             mv.source_family AS source_family,
-            cia.address AS address,
+            LOWER(cia.address) AS address,
             mci.contract_instance_id AS contract_instance_id,
             CASE
                 WHEN mci.declaration_kind = 'root' THEN 'manifest_root'
@@ -67,7 +67,7 @@ async fn load_watched_contracts_by_addresses_scoped(
         FROM target_addresses target
         JOIN contract_instance_addresses cia
           ON cia.chain_id = target.chain
-         AND cia.address = target.address
+         AND LOWER(cia.address) = target.address
          AND cia.deactivated_at IS NULL
         JOIN manifest_contract_instances mci
           ON mci.contract_instance_id = cia.contract_instance_id
@@ -114,7 +114,7 @@ async fn load_watched_contracts_by_addresses_scoped(
         SELECT
             de.chain_id AS chain,
             COALESCE(target_mv.source_family, mv.source_family) AS source_family,
-            cia.address AS address,
+            LOWER(cia.address) AS address,
             de.to_contract_instance_id AS contract_instance_id,
             'discovery_edge'::TEXT AS source,
             COALESCE(target_mv.manifest_id, de.source_manifest_id) AS source_manifest_id,
@@ -131,7 +131,7 @@ async fn load_watched_contracts_by_addresses_scoped(
         FROM target_addresses target
         JOIN contract_instance_addresses cia
           ON cia.chain_id = target.chain
-         AND cia.address = target.address
+         AND LOWER(cia.address) = target.address
          AND cia.deactivated_at IS NULL
         JOIN discovery_edges de
           ON de.chain_id = target.chain

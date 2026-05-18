@@ -5,16 +5,16 @@ mod apply;
 mod flush;
 mod identity;
 mod materialize;
+mod summary;
 
 use apply::*;
 use flush::*;
 use identity::*;
 use materialize::{AuthorityMaterialization, materialize_authority_histories};
+use summary::empty_summary;
 
 const FULL_REPLAY_RAW_LOG_STREAM_MAX_BLOCK_SCAN_SPAN: i64 = 262_144;
 const FULL_REPLAY_RAW_LOG_STREAM_DEFAULT_MAX_LOGS_PER_PAGE: usize = 100_000;
-const FULL_REPLAY_CHECKPOINT_PAGE_INTERVAL: usize = 1;
-const FULL_REPLAY_PROGRESS_PAGE_INTERVAL: usize = 1;
 
 pub async fn sync_ens_v1_unwrapped_authority(
     pool: &PgPool,
@@ -42,19 +42,6 @@ pub async fn sync_ens_v1_unwrapped_authority_with_replay_checkpoint_and_log_limi
 }
 
 impl EnsV1UnwrappedAuthoritySyncSummary {
-    fn empty(scanned_log_count: usize) -> Self {
-        Self {
-            scanned_log_count,
-            matched_log_count: 0,
-            total_name_surface_count: 0,
-            total_resource_count: 0,
-            total_surface_binding_count: 0,
-            total_normalized_event_count: 0,
-            total_normalized_event_inserted_count: 0,
-            by_kind: BTreeMap::new(),
-        }
-    }
-
     pub async fn sync_for_block_hashes(
         pool: &PgPool,
         chain: &str,
@@ -108,9 +95,8 @@ async fn sync_ens_v1_unwrapped_authority_with_scope(
     let source_scope = source_scope.map(normalized_authority_source_scope_targets);
     let total_started = Instant::now();
     if source_scope.as_ref().is_some_and(Vec::is_empty) {
-        return Ok(EnsV1UnwrappedAuthoritySyncSummary::empty(0));
+        return Ok(empty_summary(0));
     }
-
     let active_emitters_started = Instant::now();
     let generic_resolver_event_sources =
         load_generic_resolver_event_sources(pool, chain, source_scope.as_deref()).await?;
@@ -125,7 +111,7 @@ async fn sync_ens_v1_unwrapped_authority_with_scope(
         .collect::<Vec<_>>();
     let active_emitters_ms = active_emitters_started.elapsed().as_millis();
     if active_emitters.is_empty() && generic_resolver_event_sources.is_empty() {
-        return Ok(EnsV1UnwrappedAuthoritySyncSummary::empty(0));
+        return Ok(empty_summary(0));
     }
     let event_topics = AuthorityEventTopics::load_for_authority_sources(
         pool,
@@ -134,7 +120,6 @@ async fn sync_ens_v1_unwrapped_authority_with_scope(
         &generic_resolver_event_sources,
     )
     .await?;
-
     let mut histories = BTreeMap::<String, NameHistory>::new();
     let mut reverse_histories = BTreeMap::<String, ReverseClaimSourceHistory>::new();
     let mut known_names_by_namehash = HashMap::<String, NameMetadata>::new();
@@ -157,7 +142,6 @@ async fn sync_ens_v1_unwrapped_authority_with_scope(
     let mut preload_restricted_histories_ms = 0;
     let mut migrated_registry_nodes_ms = 0;
     let apply_ms;
-
     if !restrict_to_block_hashes && source_scope.is_none() {
         if let Some(context) = replay_checkpoint {
             let checkpoint =
@@ -167,7 +151,6 @@ async fn sync_ens_v1_unwrapped_authority_with_scope(
             }
             active_replay_checkpoint = Some(checkpoint);
         }
-
         let canonical_blocks_started = Instant::now();
         let canonical_blocks = load_canonical_blocks(
             pool,
@@ -179,7 +162,7 @@ async fn sync_ens_v1_unwrapped_authority_with_scope(
         .await?;
         canonical_blocks_ms = canonical_blocks_started.elapsed().as_millis();
         if canonical_blocks.is_empty() {
-            return Ok(EnsV1UnwrappedAuthoritySyncSummary::empty(0));
+            return Ok(empty_summary(0));
         }
         block_index = CanonicalBlockIndex {
             blocks: canonical_blocks,
@@ -314,11 +297,7 @@ async fn sync_ens_v1_unwrapped_authority_with_scope(
             )
             .await?;
             stream_page_count += 1;
-            let should_save_checkpoint = active_replay_checkpoint.is_some()
-                && (stream_page_count == 1
-                    || stream_page_count % FULL_REPLAY_CHECKPOINT_PAGE_INTERVAL == 0
-                    || page_to_block == head_block.block_number);
-            if should_save_checkpoint {
+            if active_replay_checkpoint.is_some() {
                 drop(stream_conn.take());
                 let flushed_event_count = flush_staged_replay_events(
                     pool,
@@ -330,7 +309,7 @@ async fn sync_ens_v1_unwrapped_authority_with_scope(
                 .await?;
                 let checkpoint = active_replay_checkpoint
                     .as_mut()
-                    .expect("checkpoint existence was checked before saving");
+                    .context("authority replay checkpoint disappeared before saving")?;
                 checkpoint
                     .save_progress(
                         pool,
@@ -372,23 +351,20 @@ async fn sync_ens_v1_unwrapped_authority_with_scope(
                 );
                 checkpoint_delta.clear();
             }
-            if stream_page_count == 1 || stream_page_count % FULL_REPLAY_PROGRESS_PAGE_INTERVAL == 0
-            {
-                tracing::info!(
-                    service = "adapters",
-                    adapter = DERIVATION_KIND_ENS_V1_UNWRAPPED_AUTHORITY,
-                    chain,
-                    page_from_block,
-                    page_to_block,
-                    raw_log_scan_to_block,
-                    stream_page_count,
-                    max_raw_logs_per_page,
-                    scanned_log_count = total_scanned_log_count,
-                    matched_log_count,
-                    elapsed_ms = stream_apply_started.elapsed().as_millis(),
-                    "ENSv1 unwrapped-authority replay stream progress"
-                );
-            }
+            tracing::info!(
+                service = "adapters",
+                adapter = DERIVATION_KIND_ENS_V1_UNWRAPPED_AUTHORITY,
+                chain,
+                page_from_block,
+                page_to_block,
+                raw_log_scan_to_block,
+                stream_page_count,
+                max_raw_logs_per_page,
+                scanned_log_count = total_scanned_log_count,
+                matched_log_count,
+                elapsed_ms = stream_apply_started.elapsed().as_millis(),
+                "ENSv1 unwrapped-authority replay stream progress"
+            );
             page_from_block = page_to_block
                 .checked_add(1)
                 .context("authority raw-log stream page boundary overflowed")?;
@@ -417,7 +393,7 @@ async fn sync_ens_v1_unwrapped_authority_with_scope(
         raw_log_load_ms = raw_log_load_started.elapsed().as_millis();
         scanned_log_count = raw_logs.len();
         if raw_logs.is_empty() {
-            return Ok(EnsV1UnwrappedAuthoritySyncSummary::empty(scanned_log_count));
+            return Ok(empty_summary(scanned_log_count));
         }
 
         let canonical_blocks_started = Instant::now();
@@ -430,7 +406,7 @@ async fn sync_ens_v1_unwrapped_authority_with_scope(
         .await?;
         canonical_blocks_ms = canonical_blocks_started.elapsed().as_millis();
         if canonical_blocks.is_empty() {
-            return Ok(EnsV1UnwrappedAuthoritySyncSummary::empty(scanned_log_count));
+            return Ok(empty_summary(scanned_log_count));
         }
         block_index = CanonicalBlockIndex {
             blocks: canonical_blocks,
@@ -530,7 +506,7 @@ async fn sync_ens_v1_unwrapped_authority_with_scope(
     }
 
     if scanned_log_count == 0 {
-        return Ok(EnsV1UnwrappedAuthoritySyncSummary::empty(scanned_log_count));
+        return Ok(empty_summary(scanned_log_count));
     }
 
     let head_block = block_index
