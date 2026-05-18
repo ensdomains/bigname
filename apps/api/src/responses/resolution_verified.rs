@@ -147,7 +147,7 @@ mod resolution_verified {
     }
 
     #[cfg(test)]
-    pub(super) fn record_inventory_chain_positions_match_selected_snapshot(
+    pub(crate) fn record_inventory_chain_positions_match_selected_snapshot(
         projected: &ChainPositions,
         selected_snapshot: &SelectedSnapshot,
         allow_selected_superset: bool,
@@ -178,4 +178,4 @@ use self::resolution_verified::{
 };
 
 #[cfg(test)]
-use self::resolution_verified::record_inventory_chain_positions_match_selected_snapshot;
+pub(crate) use self::resolution_verified::record_inventory_chain_positions_match_selected_snapshot;
