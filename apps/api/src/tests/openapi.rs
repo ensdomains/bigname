@@ -1133,6 +1133,11 @@ async fn openapi_docs_route_serves_viewer() -> Result<()> {
     assert!(content_type.starts_with("text/html"));
     assert!(body.contains("bigname API docs"));
     assert!(body.contains("/openapi.json"));
+    assert!(body.contains("Try request"));
+    assert!(body.contains("Response headers"));
+    assert!(body.contains("performance.now()"));
+    assert!(body.contains("0x8e8Db5CcEF88cca9d624701Db544989C996E3216"));
+    assert!(body.contains("taytems.eth"));
 
     Ok(())
 }
