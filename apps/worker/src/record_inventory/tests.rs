@@ -2658,6 +2658,239 @@ async fn rebuild_keeps_records_across_same_resolver_refresh() -> Result<()> {
 }
 
 #[tokio::test]
+async fn rebuild_drops_records_from_prior_same_address_resolver_tenure() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let resource_id = Uuid::from_u128(0x9928);
+    let resolver_a_contract_instance_id = Uuid::from_u128(0x9929);
+    let resolver_b_contract_instance_id = Uuid::from_u128(0x9930);
+    let resolver_a_address = "0x4976fb03C32e5B8cfe2b6cCB31c09Ba78EBaBa41";
+    let resolver_b_address = "0x0000000000000000000000000000000000009930";
+
+    let registry_manifest_id = insert_manifest_version(
+        database.pool(),
+        SOURCE_FAMILY_ENS_V1_REGISTRY_L1,
+        "manifests/ens/ens_v1_registry_l1/v3.toml",
+    )
+    .await?;
+    let resolver_manifest_id = insert_manifest_version(
+        database.pool(),
+        SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
+        "manifests/ens/ens_v1_resolver_l1/v1.toml",
+    )
+    .await?;
+    insert_contract_instance(
+        database.pool(),
+        resolver_a_contract_instance_id,
+        resolver_a_address,
+        resolver_manifest_id,
+    )
+    .await?;
+    insert_contract_instance(
+        database.pool(),
+        resolver_b_contract_instance_id,
+        resolver_b_address,
+        resolver_manifest_id,
+    )
+    .await?;
+    insert_manifest_contract_instance(
+        database.pool(),
+        resolver_manifest_id,
+        "public_resolver_4976fb03",
+        resolver_a_contract_instance_id,
+        resolver_a_address,
+    )
+    .await?;
+
+    let mut stale_email_record = record_changed_event_with_value(
+        "prior-tenure-email",
+        "ens:taytems.eth",
+        resource_id,
+        "text:email",
+        "text",
+        Some("email"),
+        json!("old@taytems.xyz"),
+        1091,
+        0,
+    );
+    stale_email_record.source_family = SOURCE_FAMILY_ENS_V1_RESOLVER_L1.to_owned();
+    stale_email_record.source_manifest_id = Some(resolver_manifest_id);
+    let mut current_twitter_record = record_changed_event_with_value(
+        "current-tenure-twitter",
+        "ens:taytems.eth",
+        resource_id,
+        "text:com.twitter",
+        "text",
+        Some("com.twitter"),
+        json!("taytems"),
+        1095,
+        0,
+    );
+    current_twitter_record.source_family = SOURCE_FAMILY_ENS_V1_RESOLVER_L1.to_owned();
+    current_twitter_record.source_manifest_id = Some(resolver_manifest_id);
+    let mut current_github_record = record_changed_event_with_value(
+        "current-tenure-github",
+        "ens:taytems.eth",
+        resource_id,
+        "text:com.github",
+        "text",
+        Some("com.github"),
+        json!("taytems"),
+        1097,
+        0,
+    );
+    current_github_record.source_family = SOURCE_FAMILY_ENS_V1_RESOLVER_L1.to_owned();
+    current_github_record.source_manifest_id = Some(resolver_manifest_id);
+
+    seed_resources(database.pool(), &[resource_id]).await?;
+    seed_raw_blocks(
+        database.pool(),
+        &[
+            raw_block("ethereum-mainnet", "0xrec1090", 1090, 1_776_200_090),
+            raw_block("ethereum-mainnet", "0xrec1091", 1091, 1_776_200_091),
+            raw_block("ethereum-mainnet", "0xrec1092", 1092, 1_776_200_092),
+            raw_block("ethereum-mainnet", "0xrec1094", 1094, 1_776_200_094),
+            raw_block("ethereum-mainnet", "0xrec1095", 1095, 1_776_200_095),
+            raw_block("ethereum-mainnet", "0xrec1096", 1096, 1_776_200_096),
+            raw_block("ethereum-mainnet", "0xrec1097", 1097, 1_776_200_097),
+        ],
+    )
+    .await?;
+    seed_raw_logs(
+        database.pool(),
+        &[
+            raw_log(
+                "ethereum-mainnet",
+                "0xrec1091",
+                1091,
+                "0xtx1091",
+                0,
+                resolver_a_address,
+            ),
+            raw_log(
+                "ethereum-mainnet",
+                "0xrec1095",
+                1095,
+                "0xtx1095",
+                0,
+                resolver_a_address,
+            ),
+            raw_log(
+                "ethereum-mainnet",
+                "0xrec1097",
+                1097,
+                "0xtx1097",
+                0,
+                resolver_a_address,
+            ),
+        ],
+    )
+    .await?;
+    seed_events(
+        database.pool(),
+        &[
+            resolver_changed_event(
+                "initial-resolver-a",
+                "ens:taytems.eth",
+                resource_id,
+                resolver_a_address,
+                registry_manifest_id,
+                1090,
+                0,
+            ),
+            stale_email_record,
+            resolver_changed_event(
+                "resolver-b",
+                "ens:taytems.eth",
+                resource_id,
+                resolver_b_address,
+                registry_manifest_id,
+                1092,
+                0,
+            ),
+            resolver_changed_event(
+                "resolver-a-again",
+                "ens:taytems.eth",
+                resource_id,
+                resolver_a_address,
+                registry_manifest_id,
+                1094,
+                0,
+            ),
+            current_twitter_record,
+            resolver_changed_event(
+                "resolver-a-refresh",
+                "ens:taytems.eth",
+                resource_id,
+                resolver_a_address,
+                registry_manifest_id,
+                1096,
+                0,
+            ),
+            current_github_record,
+        ],
+    )
+    .await?;
+
+    rebuild_record_inventory_current(database.pool(), Some(&resource_id.to_string())).await?;
+
+    let row = load_record_inventory_current(
+        database.pool(),
+        resource_id,
+        &record_version_boundary(
+            "ens:taytems.eth",
+            resource_id,
+            None,
+            None,
+            1096,
+            "0xrec1096",
+            1_776_200_096,
+            "ethereum-mainnet",
+        ),
+    )
+    .await?
+    .context("current resolver tenure row must exist")?;
+
+    assert_eq!(
+        row.selectors,
+        json!([
+            {
+                "record_key": "text:com.github",
+                "record_family": "text",
+                "selector_key": "com.github",
+                "cacheable": true,
+            },
+            {
+                "record_key": "text:com.twitter",
+                "record_family": "text",
+                "selector_key": "com.twitter",
+                "cacheable": true,
+            }
+        ])
+    );
+    assert_eq!(
+        row.entries,
+        json!([
+            {
+                "record_key": "text:com.github",
+                "record_family": "text",
+                "selector_key": "com.github",
+                "status": "success",
+                "value": "taytems",
+            },
+            {
+                "record_key": "text:com.twitter",
+                "record_family": "text",
+                "selector_key": "com.twitter",
+                "status": "success",
+                "value": "taytems",
+            }
+        ])
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn rebuild_keeps_current_resolver_records_from_predecessor_resource() -> Result<()> {
     let database = TestDatabase::new().await?;
     let predecessor_resource_id = Uuid::from_u128(0x9925);
