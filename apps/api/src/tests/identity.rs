@@ -603,6 +603,169 @@ async fn identity_reverse_returns_primary_names_across_namespaces() -> Result<()
 }
 
 #[tokio::test]
+async fn identity_reverse_paginates_only_reachable_name_records() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+
+    database
+        .seed_name_current_binding_migrated(
+            "ens:aaa-missing.eth",
+            Uuid::from_u128(0x2d0151),
+            Uuid::from_u128(0x2d0152),
+            Uuid::from_u128(0x2d0153),
+        )
+        .await?;
+    bigname_storage::upsert_address_names_current_rows(
+        &database.pool,
+        &[address_name_current_row(
+            address,
+            "ens:aaa-missing.eth",
+            bigname_storage::AddressNameRelation::Registrant,
+            "aaa-missing.eth",
+            "aaa-missing.eth",
+            "namehash:aaa-missing.eth",
+            Uuid::from_u128(0x2d0153),
+            Uuid::from_u128(0x2d0151),
+            Some(Uuid::from_u128(0x2d0152)),
+            53,
+        )],
+    )
+    .await?;
+    database
+        .seed_name_current_binding_migrated(
+            "ens:aab-unreadable.eth",
+            Uuid::from_u128(0x2d0171),
+            Uuid::from_u128(0x2d0172),
+            Uuid::from_u128(0x2d0173),
+        )
+        .await?;
+    bigname_storage::upsert_address_names_current_rows(
+        &database.pool,
+        &[address_name_current_row(
+            address,
+            "ens:aab-unreadable.eth",
+            bigname_storage::AddressNameRelation::Registrant,
+            "aab-unreadable.eth",
+            "aab-unreadable.eth",
+            "namehash:aab-unreadable.eth",
+            Uuid::from_u128(0x2d0173),
+            Uuid::from_u128(0x2d0171),
+            Some(Uuid::from_u128(0x2d0172)),
+            54,
+        )],
+    )
+    .await?;
+    let unreadable_resource_id = Uuid::from_u128(0x2d0181);
+    let unreadable_binding_id = Uuid::from_u128(0x2d0183);
+    sqlx::query(
+        r#"
+        INSERT INTO resources (
+            resource_id,
+            chain_id,
+            block_hash,
+            block_number,
+            canonicality_state
+        )
+        VALUES (
+            $1,
+            'ethereum-mainnet',
+            '0xidentity-unreadable-resource',
+            55,
+            'orphaned'
+        )
+        "#,
+    )
+    .bind(unreadable_resource_id)
+    .execute(&database.pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO surface_bindings (
+            surface_binding_id,
+            logical_name_id,
+            resource_id,
+            binding_kind,
+            active_from,
+            chain_id,
+            block_hash,
+            block_number,
+            canonicality_state
+        )
+        VALUES (
+            $1,
+            'ens:aab-unreadable.eth',
+            $2,
+            'declared_registry_path',
+            '2026-04-17T00:00:55Z',
+            'ethereum-mainnet',
+            '0xidentity-unreadable-binding',
+            55,
+            'orphaned'
+        )
+        "#,
+    )
+    .bind(unreadable_binding_id)
+    .bind(unreadable_resource_id)
+    .execute(&database.pool)
+    .await?;
+    database
+        .insert_name_current_row(address_name_name_current_row(
+            "ens:aab-unreadable.eth",
+            "aab-unreadable.eth",
+            "aab-unreadable.eth",
+            "namehash:aab-unreadable.eth",
+            unreadable_binding_id,
+            unreadable_resource_id,
+            None,
+            55,
+            compact_name_declared_summary(
+                address,
+                address,
+                address,
+                1_900_000_000,
+                "2026-04-17T00:00:21Z",
+                "2026-04-17T00:00:11Z",
+            ),
+        ))
+        .await?;
+    seed_identity_name(
+        &database,
+        "ens:reachable.eth",
+        "Reachable.eth",
+        "reachable.eth",
+        "namehash:reachable.eth",
+        Uuid::from_u128(0x2d0161),
+        Uuid::from_u128(0x2d0162),
+        Uuid::from_u128(0x2d0163),
+        address,
+        bigname_storage::AddressNameRelation::Registrant,
+        56,
+    )
+    .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/identity/addresses/{address}/names?coin_type=60&roles=OWNED&page_size=1"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("identity reverse reachable-page request failed")?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["records"][0]["name"], json!("Reachable.eth"));
+    assert_eq!(payload["pagination"]["has_more"], json!(false));
+    assert_eq!(payload["pagination"]["next_page_cursor"], Value::Null);
+    assert_eq!(payload["pagination"]["total_count"], json!(1));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn identity_reverse_total_count_tracks_visible_rows_and_relation_updates() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let address = "0x0000000000000000000000000000000000000abc";
@@ -775,6 +938,59 @@ async fn indexing_status_degrades_for_chain_without_checkpoint() -> Result<()> {
     );
     assert_eq!(
         payload["chains"]["ethereum-mainnet"]["latest_projected_block"],
+        Value::Null
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn indexing_status_degrades_for_active_or_shadow_manifest_without_checkpoint() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    database
+        .insert_manifest(
+            "basenames",
+            "basenames_base_registry",
+            "base-mainnet",
+            "basenames_v1",
+            1,
+            "active",
+            "uts46-v1",
+        )
+        .await?;
+    database
+        .insert_manifest(
+            "basenames",
+            "basenames_base_registry_shadow",
+            "base-sepolia",
+            "basenames_shadow",
+            1,
+            "shadow",
+            "uts46-v1",
+        )
+        .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/status/indexing")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("manifest-only indexing status request failed")?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["status"], json!("degraded"));
+    assert_eq!(payload["chains"]["base-mainnet"]["canonical_block"], Value::Null);
+    assert_eq!(
+        payload["chains"]["base-mainnet"]["latest_projected_block"],
+        Value::Null
+    );
+    assert_eq!(payload["chains"]["base-sepolia"]["canonical_block"], Value::Null);
+    assert_eq!(
+        payload["chains"]["base-sepolia"]["latest_projected_block"],
         Value::Null
     );
 

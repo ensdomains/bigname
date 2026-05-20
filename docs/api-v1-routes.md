@@ -197,7 +197,7 @@ Rules:
 - `roles` defaults to `BOTH`; `OWNED` maps to token-holder and registrant current relations, while `MANAGED` maps to effective-controller current relations.
 - `is_primary=true` only when `primary_names_current(address, coin_type, namespace)` has a successful normalized claim matching the record's normalized name.
 - For reverse responses, nested `NameRecord.primary_address` is selected from the requested `addr:<coin_type>` when that retained address record is available. Forward responses keep `addr:60` as the default `primary_address`.
-- `pagination.total_count` is always populated from the indexed `address_names_current_identity_counts` sidecar and does not run a count scan on the request path.
+- `pagination.total_count` is always populated from the indexed `address_names_current_identity_counts` sidecar, using the same readable `name_current` eligibility as the reverse page, and does not run a count scan on the request path.
 - Empty result sets are valid.
 - Stable ordering is `is_primary desc`, role priority, `normalized_name asc`, `namespace asc`, `namehash asc`.
 
@@ -248,7 +248,7 @@ Rules:
 - Deduplicates identical storage reads internally while preserving requested pagination per input.
 - Omitting `page_size` defaults to `1` for batched feed rendering. Pass a larger `page_size` when using the batch route for profile-style expansion.
 - Empty result sets are successful.
-- `pagination.total_count` is always populated for each result group from the indexed `address_names_current_identity_counts` sidecar.
+- `pagination.total_count` is always populated for each result group from the indexed `address_names_current_identity_counts` sidecar, using the same readable `name_current` eligibility as the reverse page.
 - Batch limit defaults to `1000` and is configurable through `BIGNAME_API_IDENTITY_BATCH_LIMIT`.
 
 ## `GET /v1/status/indexing`
@@ -274,7 +274,7 @@ Response:
 }
 ```
 
-Uses `chain_checkpoints`, retained `chain_lineage`, `projection_normalized_event_changes`, `projection_apply_cursors`, and `projection_invalidations` where available. Fields stay `null` when the deployment has not yet retained the corresponding operational metadata. If no chain readiness data exists, or if pending direct invalidations cannot be tied to a normalized-event chain position, `status` is `degraded`.
+Uses active/shadow `manifest_versions` to include chains expected by the loaded profile, plus `chain_checkpoints`, retained `chain_lineage`, `projection_normalized_event_changes`, `projection_apply_cursors`, and `projection_invalidations` where available. Fields stay `null` when the deployment has not yet retained the corresponding operational metadata. If no chain readiness data exists for an expected chain, or if pending direct invalidations cannot be tied to a normalized-event chain position, `status` is `degraded`.
 
 ## `GET /v1/names`
 

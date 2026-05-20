@@ -16,6 +16,13 @@ pub async fn load_indexing_status(pool: &PgPool) -> Result<IndexingStatusRead> {
             SELECT chain_id
             FROM normalized_events
             WHERE chain_id IS NOT NULL
+            UNION
+            SELECT chain AS chain_id
+            FROM manifest_versions
+            WHERE rollout_status IN (
+                'active'::manifest_rollout_status,
+                'shadow'::manifest_rollout_status
+            )
         ),
         apply_cursor AS (
             SELECT COALESCE((

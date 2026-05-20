@@ -42,6 +42,37 @@ const DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER: &str = r#"
   )
 "#;
 
+const DEFAULT_IDENTITY_NAME_CURRENT_READ_FILTER: &str = r#"
+  AND identity_nc_surface.canonicality_state IN (
+      'canonical'::canonicality_state,
+      'safe'::canonicality_state,
+      'finalized'::canonicality_state
+  )
+  AND (
+      identity_nc.surface_binding_id IS NULL
+      OR (
+          identity_nc_resource.canonicality_state IN (
+              'canonical'::canonicality_state,
+              'safe'::canonicality_state,
+              'finalized'::canonicality_state
+          )
+          AND identity_nc_binding.canonicality_state IN (
+              'canonical'::canonicality_state,
+              'safe'::canonicality_state,
+              'finalized'::canonicality_state
+          )
+          AND (
+              identity_nc.token_lineage_id IS NULL
+              OR identity_nc_token_lineage.canonicality_state IN (
+                  'canonical'::canonicality_state,
+                  'safe'::canonicality_state,
+                  'finalized'::canonicality_state
+              )
+          )
+      )
+  )
+"#;
+
 const DEFAULT_RECORD_INVENTORY_CURRENT_READ_FILTER: &str = r#"
   AND resource.canonicality_state IN (
       'canonical'::canonicality_state,

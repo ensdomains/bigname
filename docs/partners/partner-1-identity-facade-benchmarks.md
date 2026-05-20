@@ -7,13 +7,13 @@ Environment:
 - API/Postgres host-local measurement via `http://127.0.0.1:3000`.
 - Public route smoke-tested through `https://bigname.taytems.xyz`.
 - Ethereum Mainnet indexing was synced at measurement time with `projection_lag_blocks=0`.
-- Base remains unconfigured by operator choice; `/v1/status/indexing` is therefore `degraded` until Base RPC/source intake is enabled.
+- Base remains unconfigured by operator choice; `/v1/status/indexing` is therefore `degraded` while active/shadow Base manifests have no checkpoint/source-intake readiness.
 
 ## Changes Measured
 
 - Forward and reverse identity record loading no longer reads large `name_current.provenance` or unused record-inventory JSON fields.
 - Reverse batch defaults to `page_size=1`, matching feed rendering. Reverse single keeps the profile-style `page_size=100` default.
-- Reverse `total_count` is read from `address_names_current_identity_counts`, an indexed sidecar maintained from `address_names_current`, rather than counted on the request path.
+- Reverse `total_count` is read from `address_names_current_identity_counts`, an indexed sidecar maintained from `address_names_current` and readable `name_current` eligibility, rather than counted on the request path.
 - ENS token IDs fall back to the current surface labelhash as a uint256 string for second-level `.eth` names when projected authority/registration/control summaries do not carry a token ID.
 
 ## Before / After

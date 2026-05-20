@@ -6,9 +6,10 @@ use sqlx::PgPool;
 use crate::primary_name::PrimaryNameClaimStatus;
 
 use super::{
-    DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER, IdentityNameRecordRow, IdentityPrimaryNameSnapshot,
-    ReverseIdentityCursor, ReverseIdentityGroup, ReverseIdentityRecordRow,
-    ReverseIdentityStorageInput, counts::load_reverse_identity_total_counts, dedupe_in_order,
+    DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER, DEFAULT_IDENTITY_NAME_CURRENT_READ_FILTER,
+    IdentityNameRecordRow, IdentityPrimaryNameSnapshot, ReverseIdentityCursor,
+    ReverseIdentityGroup, ReverseIdentityRecordRow, ReverseIdentityStorageInput,
+    counts::load_reverse_identity_total_counts, dedupe_in_order,
     forward::load_identity_records_by_names,
 };
 
@@ -57,14 +58,14 @@ pub async fn load_reverse_identity_records(
         .enumerate()
         .map(|(input_index, input)| {
             let input_rows = rows_by_input.get(&input_index).cloned().unwrap_or_default();
-            let has_more = input_rows.len() as i64 > input.page_size;
-            let entries = input_rows
+            let mut entries = input_rows
                 .into_iter()
-                .take(input.page_size.max(0) as usize)
                 .filter_map(|row| {
                     reverse_identity_record(&name_records, &primary_names, input, row)
                 })
-                .collect();
+                .collect::<Vec<_>>();
+            let has_more = entries.len() as i64 > input.page_size;
+            entries.truncate(input.page_size.max(0) as usize);
 
             ReverseIdentityGroup {
                 input: input.clone(),
@@ -230,6 +231,16 @@ async fn load_reverse_identity_page_rows(
                               ON binding.surface_binding_id = anc.surface_binding_id
                             LEFT JOIN token_lineages token_lineage
                               ON token_lineage.token_lineage_id = anc.token_lineage_id
+                            JOIN name_current identity_nc
+                              ON identity_nc.logical_name_id = anc.logical_name_id
+                            JOIN name_surfaces identity_nc_surface
+                              ON identity_nc_surface.logical_name_id = identity_nc.logical_name_id
+                            LEFT JOIN resources identity_nc_resource
+                              ON identity_nc_resource.resource_id = identity_nc.resource_id
+                            LEFT JOIN surface_bindings identity_nc_binding
+                              ON identity_nc_binding.surface_binding_id = identity_nc.surface_binding_id
+                            LEFT JOIN token_lineages identity_nc_token_lineage
+                              ON identity_nc_token_lineage.token_lineage_id = identity_nc.token_lineage_id
                             WHERE pnc.address = requested.address
                               AND pnc.coin_type = requested.coin_type
                               AND pnc.claim_status = 'success'
@@ -268,6 +279,7 @@ async fn load_reverse_identity_page_rows(
                                   )
                               )
                             {DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER}
+                            {DEFAULT_IDENTITY_NAME_CURRENT_READ_FILTER}
                             ORDER BY role_rank ASC, anc.normalized_name ASC, anc.namespace ASC, anc.namehash ASC
                         )
                         UNION ALL
@@ -288,6 +300,16 @@ async fn load_reverse_identity_page_rows(
                               ON binding.surface_binding_id = anc.surface_binding_id
                             LEFT JOIN token_lineages token_lineage
                               ON token_lineage.token_lineage_id = anc.token_lineage_id
+                            JOIN name_current identity_nc
+                              ON identity_nc.logical_name_id = anc.logical_name_id
+                            JOIN name_surfaces identity_nc_surface
+                              ON identity_nc_surface.logical_name_id = identity_nc.logical_name_id
+                            LEFT JOIN resources identity_nc_resource
+                              ON identity_nc_resource.resource_id = identity_nc.resource_id
+                            LEFT JOIN surface_bindings identity_nc_binding
+                              ON identity_nc_binding.surface_binding_id = identity_nc.surface_binding_id
+                            LEFT JOIN token_lineages identity_nc_token_lineage
+                              ON identity_nc_token_lineage.token_lineage_id = identity_nc.token_lineage_id
                             LEFT JOIN primary_names_current pnc
                               ON pnc.address = requested.address
                              AND pnc.coin_type = requested.coin_type
@@ -312,6 +334,7 @@ async fn load_reverse_identity_page_rows(
                                   )
                               )
                             {DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER}
+                            {DEFAULT_IDENTITY_NAME_CURRENT_READ_FILTER}
                             ORDER BY anc.normalized_name ASC, anc.namespace ASC, anc.namehash ASC, anc.logical_name_id ASC
                             LIMIT requested.page_size + 1
                         )
@@ -333,6 +356,16 @@ async fn load_reverse_identity_page_rows(
                               ON binding.surface_binding_id = anc.surface_binding_id
                             LEFT JOIN token_lineages token_lineage
                               ON token_lineage.token_lineage_id = anc.token_lineage_id
+                            JOIN name_current identity_nc
+                              ON identity_nc.logical_name_id = anc.logical_name_id
+                            JOIN name_surfaces identity_nc_surface
+                              ON identity_nc_surface.logical_name_id = identity_nc.logical_name_id
+                            LEFT JOIN resources identity_nc_resource
+                              ON identity_nc_resource.resource_id = identity_nc.resource_id
+                            LEFT JOIN surface_bindings identity_nc_binding
+                              ON identity_nc_binding.surface_binding_id = identity_nc.surface_binding_id
+                            LEFT JOIN token_lineages identity_nc_token_lineage
+                              ON identity_nc_token_lineage.token_lineage_id = identity_nc.token_lineage_id
                             LEFT JOIN primary_names_current pnc
                               ON pnc.address = requested.address
                              AND pnc.coin_type = requested.coin_type
@@ -357,6 +390,7 @@ async fn load_reverse_identity_page_rows(
                                   )
                               )
                             {DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER}
+                            {DEFAULT_IDENTITY_NAME_CURRENT_READ_FILTER}
                             ORDER BY anc.normalized_name ASC, anc.namespace ASC, anc.namehash ASC, anc.logical_name_id ASC
                             LIMIT requested.page_size + 1
                         )
@@ -378,6 +412,16 @@ async fn load_reverse_identity_page_rows(
                               ON binding.surface_binding_id = anc.surface_binding_id
                             LEFT JOIN token_lineages token_lineage
                               ON token_lineage.token_lineage_id = anc.token_lineage_id
+                            JOIN name_current identity_nc
+                              ON identity_nc.logical_name_id = anc.logical_name_id
+                            JOIN name_surfaces identity_nc_surface
+                              ON identity_nc_surface.logical_name_id = identity_nc.logical_name_id
+                            LEFT JOIN resources identity_nc_resource
+                              ON identity_nc_resource.resource_id = identity_nc.resource_id
+                            LEFT JOIN surface_bindings identity_nc_binding
+                              ON identity_nc_binding.surface_binding_id = identity_nc.surface_binding_id
+                            LEFT JOIN token_lineages identity_nc_token_lineage
+                              ON identity_nc_token_lineage.token_lineage_id = identity_nc.token_lineage_id
                             LEFT JOIN primary_names_current pnc
                               ON pnc.address = requested.address
                              AND pnc.coin_type = requested.coin_type
@@ -402,6 +446,7 @@ async fn load_reverse_identity_page_rows(
                                   )
                               )
                             {DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER}
+                            {DEFAULT_IDENTITY_NAME_CURRENT_READ_FILTER}
                             ORDER BY anc.normalized_name ASC, anc.namespace ASC, anc.namehash ASC, anc.logical_name_id ASC
                             LIMIT requested.page_size + 1
                         )
