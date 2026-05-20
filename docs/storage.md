@@ -116,7 +116,7 @@ For ENSv2, `resource_id` keys by `(chain_id, registry_contract_instance_id, upst
 | `name_surfaces`, `surface_bindings`, `resources`, `token_lineages` | adapters | stable identity anchors |
 | `normalized_events` | adapters | append-only normalized protocol events |
 | `projection_*` | projection workers | disposable read models |
-| `address_names_current_identity_counts` | storage trigger on `address_names_current` | exact reverse identity total counts by address and role filter for the partner-compatible identity façade |
+| `address_names_current_identity_counts` | storage triggers on `address_names_current` plus supporting identity-anchor canonicality changes | exact reverse identity total counts by address and role filter for the partner-compatible identity façade, using the same canonical/read-safe row eligibility as reverse identity pages |
 | `current_projection_replay_status` | projection workers | durable operational completion markers for bootstrap/full all-current projection replay |
 | `projection_normalized_event_changes` | normalized-event storage trigger; projection workers consume | append-only downstream change log for normalized-event inserts and canonicality-state updates |
 | `projection_apply_cursors`, `projection_invalidations` | projection workers | durable projection apply watermarks and key-scoped projection invalidation queue |

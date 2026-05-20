@@ -269,7 +269,6 @@ async fn load_reverse_identity_page_rows(
                               )
                             {DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER}
                             ORDER BY role_rank ASC, anc.normalized_name ASC, anc.namespace ASC, anc.namehash ASC
-                            LIMIT 1
                         )
                         UNION ALL
                         (

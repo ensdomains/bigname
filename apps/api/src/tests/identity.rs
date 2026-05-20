@@ -374,6 +374,201 @@ async fn identity_reverse_marks_primary_orders_and_batches_by_input() -> Result<
 }
 
 #[tokio::test]
+async fn identity_reverse_returns_primary_names_across_namespaces() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+
+    seed_identity_name(
+        &database,
+        "ens:alpha.eth",
+        "Alpha.eth",
+        "alpha.eth",
+        "namehash:alpha.eth",
+        Uuid::from_u128(0x2d0101),
+        Uuid::from_u128(0x2d0102),
+        Uuid::from_u128(0x2d0103),
+        address,
+        bigname_storage::AddressNameRelation::TokenHolder,
+        51,
+    )
+    .await?;
+    seed_identity_name(
+        &database,
+        "basenames:beta.base.eth",
+        "beta.base.eth",
+        "beta.base.eth",
+        "namehash:beta.base.eth",
+        Uuid::from_u128(0x2d0111),
+        Uuid::from_u128(0x2d0112),
+        Uuid::from_u128(0x2d0113),
+        address,
+        bigname_storage::AddressNameRelation::TokenHolder,
+        52,
+    )
+    .await?;
+    bigname_storage::upsert_primary_name_current_snapshots(
+        &database.pool,
+        &[
+            bigname_storage::PrimaryNameCurrentSnapshot {
+                row: bigname_storage::PrimaryNameCurrentRow {
+                    address: address.to_owned(),
+                    namespace: "ens".to_owned(),
+                    coin_type: "60".to_owned(),
+                    claim_status: bigname_storage::PrimaryNameClaimStatus::Success,
+                    raw_claim_name: None,
+                    claim_provenance: json!({"source": "identity_test"}),
+                },
+                normalized_claim_name: Some("alpha.eth".to_owned()),
+            },
+            bigname_storage::PrimaryNameCurrentSnapshot {
+                row: bigname_storage::PrimaryNameCurrentRow {
+                    address: address.to_owned(),
+                    namespace: "basenames".to_owned(),
+                    coin_type: "60".to_owned(),
+                    claim_status: bigname_storage::PrimaryNameClaimStatus::Success,
+                    raw_claim_name: None,
+                    claim_provenance: json!({"source": "identity_test"}),
+                },
+                normalized_claim_name: Some("beta.base.eth".to_owned()),
+            },
+        ],
+    )
+    .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/identity/addresses/{address}/names?coin_type=60&roles=BOTH&page_size=10"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("identity reverse multi-namespace primary request failed")?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    let records = payload["records"]
+        .as_array()
+        .expect("records must be an array");
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0]["name"], json!("Alpha.eth"));
+    assert_eq!(records[0]["network"], json!("ethereum"));
+    assert_eq!(records[0]["is_primary"], json!(true));
+    assert_eq!(records[1]["name"], json!("beta.base.eth"));
+    assert_eq!(records[1]["network"], json!("base"));
+    assert_eq!(records[1]["is_primary"], json!(true));
+    assert_eq!(payload["pagination"]["has_more"], json!(false));
+    assert_eq!(payload["pagination"]["total_count"], json!(2));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn identity_reverse_total_count_tracks_visible_rows_and_relation_updates() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    let resource_id = Uuid::from_u128(0x2d0201);
+
+    seed_identity_name(
+        &database,
+        "ens:counted.eth",
+        "Counted.eth",
+        "counted.eth",
+        "namehash:counted.eth",
+        resource_id,
+        Uuid::from_u128(0x2d0202),
+        Uuid::from_u128(0x2d0203),
+        address,
+        bigname_storage::AddressNameRelation::Registrant,
+        53,
+    )
+    .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/identity/addresses/{address}/names?coin_type=60&roles=OWNED&page_size=10"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("identity reverse initial count request failed")?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["records"][0]["name"], json!("Counted.eth"));
+    assert_eq!(payload["pagination"]["total_count"], json!(1));
+
+    sqlx::query(
+        r#"
+        UPDATE address_names_current
+        SET relation = 'token_holder'
+        WHERE address = $1
+          AND logical_name_id = 'ens:counted.eth'
+          AND relation = 'registrant'
+        "#,
+    )
+    .bind(address)
+    .execute(&database.pool)
+    .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/identity/addresses/{address}/names?coin_type=60&roles=OWNED&page_size=10"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("identity reverse relation-transition count request failed")?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["records"][0]["relation_facets"], json!(["OWNED"]));
+    assert_eq!(payload["pagination"]["total_count"], json!(1));
+
+    sqlx::query(
+        r#"
+        UPDATE resources
+        SET canonicality_state = 'orphaned'::canonicality_state
+        WHERE resource_id = $1
+        "#,
+    )
+    .bind(resource_id)
+    .execute(&database.pool)
+    .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/identity/addresses/{address}/names?coin_type=60&roles=OWNED&page_size=10"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("identity reverse noncanonical count request failed")?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(
+        payload["records"]
+            .as_array()
+            .expect("records must be array")
+            .len(),
+        0
+    );
+    assert_eq!(payload["pagination"]["total_count"], json!(0));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn indexing_status_reports_projection_lag_by_chain() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     sqlx::query(
