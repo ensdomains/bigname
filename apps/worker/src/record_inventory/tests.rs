@@ -3052,6 +3052,186 @@ async fn rebuild_does_not_pull_future_resolver_records_from_successor_resource()
 }
 
 #[tokio::test]
+async fn rebuild_uses_cross_resource_resolver_boundaries_for_predecessor_records() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let predecessor_resource_id = Uuid::from_u128(0x992d);
+    let current_resource_id = Uuid::from_u128(0x992e);
+    let resolver_a_contract_instance_id = Uuid::from_u128(0x992f);
+    let resolver_b_contract_instance_id = Uuid::from_u128(0x9931);
+    let resolver_a_address = "0x4976fb03C32e5B8cfe2b6cCB31c09Ba78EBaBa41";
+    let resolver_b_address = "0x0000000000000000000000000000000000009931";
+
+    let registry_manifest_id = insert_manifest_version(
+        database.pool(),
+        SOURCE_FAMILY_ENS_V1_REGISTRY_L1,
+        "manifests/ens/ens_v1_registry_l1/v3.toml",
+    )
+    .await?;
+    let resolver_manifest_id = insert_manifest_version(
+        database.pool(),
+        SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
+        "manifests/ens/ens_v1_resolver_l1/v1.toml",
+    )
+    .await?;
+    insert_contract_instance(
+        database.pool(),
+        resolver_a_contract_instance_id,
+        resolver_a_address,
+        resolver_manifest_id,
+    )
+    .await?;
+    insert_contract_instance(
+        database.pool(),
+        resolver_b_contract_instance_id,
+        resolver_b_address,
+        resolver_manifest_id,
+    )
+    .await?;
+    insert_manifest_contract_instance(
+        database.pool(),
+        resolver_manifest_id,
+        "public_resolver_4976fb03",
+        resolver_a_contract_instance_id,
+        resolver_a_address,
+    )
+    .await?;
+
+    let mut stale_email_record = record_changed_event_with_value(
+        "cross-resource-prior-tenure-email",
+        "ens:taytems.eth",
+        predecessor_resource_id,
+        "text:email",
+        "text",
+        Some("email"),
+        json!("old@taytems.xyz"),
+        1103,
+        0,
+    );
+    stale_email_record.source_family = SOURCE_FAMILY_ENS_V1_RESOLVER_L1.to_owned();
+    stale_email_record.source_manifest_id = Some(resolver_manifest_id);
+    let mut current_twitter_record = record_changed_event_with_value(
+        "cross-resource-current-twitter",
+        "ens:taytems.eth",
+        current_resource_id,
+        "text:com.twitter",
+        "text",
+        Some("com.twitter"),
+        json!("taytems"),
+        1106,
+        0,
+    );
+    current_twitter_record.source_family = SOURCE_FAMILY_ENS_V1_RESOLVER_L1.to_owned();
+    current_twitter_record.source_manifest_id = Some(resolver_manifest_id);
+
+    seed_resources(
+        database.pool(),
+        &[predecessor_resource_id, current_resource_id],
+    )
+    .await?;
+    seed_raw_blocks(
+        database.pool(),
+        &[
+            raw_block("ethereum-mainnet", "0xrec1102", 1102, 1_776_200_102),
+            raw_block("ethereum-mainnet", "0xrec1103", 1103, 1_776_200_103),
+            raw_block("ethereum-mainnet", "0xrec1104", 1104, 1_776_200_104),
+            raw_block("ethereum-mainnet", "0xrec1105", 1105, 1_776_200_105),
+            raw_block("ethereum-mainnet", "0xrec1106", 1106, 1_776_200_106),
+        ],
+    )
+    .await?;
+    seed_raw_logs(
+        database.pool(),
+        &[
+            raw_log(
+                "ethereum-mainnet",
+                "0xrec1103",
+                1103,
+                "0xtx1103",
+                0,
+                resolver_a_address,
+            ),
+            raw_log(
+                "ethereum-mainnet",
+                "0xrec1106",
+                1106,
+                "0xtx1106",
+                0,
+                resolver_a_address,
+            ),
+        ],
+    )
+    .await?;
+    seed_events(
+        database.pool(),
+        &[
+            resolver_changed_event(
+                "cross-resource-predecessor-resolver-a",
+                "ens:taytems.eth",
+                predecessor_resource_id,
+                resolver_a_address,
+                registry_manifest_id,
+                1102,
+                0,
+            ),
+            stale_email_record,
+            resolver_changed_event(
+                "cross-resource-predecessor-resolver-b",
+                "ens:taytems.eth",
+                predecessor_resource_id,
+                resolver_b_address,
+                registry_manifest_id,
+                1104,
+                0,
+            ),
+            resolver_changed_event(
+                "cross-resource-current-resolver-a",
+                "ens:taytems.eth",
+                current_resource_id,
+                resolver_a_address,
+                registry_manifest_id,
+                1105,
+                0,
+            ),
+            current_twitter_record,
+        ],
+    )
+    .await?;
+
+    rebuild_record_inventory_current(database.pool(), Some(&current_resource_id.to_string()))
+        .await?;
+
+    let row = load_record_inventory_current(
+        database.pool(),
+        current_resource_id,
+        &record_version_boundary(
+            "ens:taytems.eth",
+            current_resource_id,
+            None,
+            None,
+            1105,
+            "0xrec1105",
+            1_776_200_105,
+            "ethereum-mainnet",
+        ),
+    )
+    .await?
+    .context("current resource row must use cross-resource resolver boundaries")?;
+
+    assert_eq!(
+        row.entries,
+        json!([{
+            "record_key": "text:com.twitter",
+            "record_family": "text",
+            "selector_key": "com.twitter",
+            "status": "success",
+            "value": "taytems",
+        }])
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn rebuild_keeps_current_resolver_records_from_predecessor_resource() -> Result<()> {
     let database = TestDatabase::new().await?;
     let predecessor_resource_id = Uuid::from_u128(0x9925);

@@ -64,14 +64,26 @@ pub(super) async fn load_relevant_events(
         .collect::<Vec<_>>();
     if !logical_name_ids.is_empty() {
         let latest_target_event_sort_key = rows.iter().map(event_sort_key).max();
+        let latest_target_resolver_sort_key = rows
+            .iter()
+            .filter(|event| event.event_kind == EVENT_KIND_RESOLVER_CHANGED)
+            .map(event_sort_key)
+            .max();
         rows.extend(
             load_logical_name_resolver_events(pool, &logical_name_ids)
                 .await?
                 .into_iter()
                 .filter(|event| {
-                    event.resource_id == resource_id
-                        || latest_target_event_sort_key
-                            .is_some_and(|sort_key| event_sort_key(event) <= sort_key)
+                    if event.resource_id == resource_id {
+                        return true;
+                    }
+                    if event.event_kind == EVENT_KIND_RESOLVER_CHANGED {
+                        return latest_target_resolver_sort_key
+                            .is_some_and(|sort_key| event_sort_key(event) <= sort_key);
+                    }
+
+                    latest_target_event_sort_key
+                        .is_some_and(|sort_key| event_sort_key(event) <= sort_key)
                 }),
         );
         rows.sort_by(|left, right| {
@@ -171,6 +183,7 @@ async fn load_logical_name_resolver_events(
     logical_name_ids: &[String],
 ) -> Result<Vec<RelevantEvent>> {
     let derivation_kinds = record_inventory_derivation_kinds();
+    let resolver_event_namespaces = resolver_event_namespaces();
     let resolver_local_source_families = resolver_local_source_families();
     let rows = sqlx::query_as::<_, RelevantEvent>(&format!(
         r#"
@@ -207,9 +220,18 @@ async fn load_logical_name_resolver_events(
          AND rl.block_hash = ne.block_hash
          AND rl.log_index = ne.log_index
         WHERE ne.derivation_kind = ANY($1::TEXT[])
-          AND ne.event_kind IN ($2, $3)
-          AND ne.source_family = ANY($4::TEXT[])
-          AND ne.logical_name_id = ANY($5::TEXT[])
+          AND ne.event_kind IN ($2, $3, $4)
+          AND (
+              (
+                  ne.event_kind IN ($2, $3)
+                  AND ne.source_family = ANY($5::TEXT[])
+              )
+              OR (
+                  ne.event_kind = $4
+                  AND ne.namespace = ANY($6::TEXT[])
+              )
+          )
+          AND ne.logical_name_id = ANY($7::TEXT[])
           AND ne.resource_id IS NOT NULL
           AND ne.chain_id IS NOT NULL
           AND ne.block_number IS NOT NULL
@@ -224,7 +246,9 @@ async fn load_logical_name_resolver_events(
     .bind(&derivation_kinds)
     .bind(EVENT_KIND_RECORD_CHANGED)
     .bind(EVENT_KIND_RECORD_VERSION_CHANGED)
+    .bind(EVENT_KIND_RESOLVER_CHANGED)
     .bind(&resolver_local_source_families)
+    .bind(&resolver_event_namespaces)
     .bind(logical_name_ids)
     .fetch_all(pool)
     .await
