@@ -1128,7 +1128,13 @@ async fn seed_supported_basenames_rebuild_inputs(
         .insert_capability_flag(manifest_id, "verified_resolution", "supported", None)
         .await?;
     insert_basenames_execution_manifest_contract(database, manifest_id).await?;
-    database.rebuild_name_current(logical_name_id).await
+    database.rebuild_name_current(logical_name_id).await?;
+    let row = bigname_storage::load_name_current(&database.pool, logical_name_id)
+        .await?
+        .context("supported Basenames rebuild input must create name_current row")?;
+    database
+        .seed_snapshot_selector_chain_positions(&row.chain_positions)
+        .await
 }
 
 async fn insert_chain_checkpoint(
@@ -2986,7 +2992,8 @@ async fn get_resolution_both_mode_reads_persisted_basenames_transport_direct_ans
                     "record_key": "text:com.twitter",
                     "record_family": "text",
                     "selector_key": "com.twitter",
-                    "status": "not_found",
+                    "status": "unsupported",
+                    "unsupported_reason": "resolver_family_pending",
                 },
                 {
                     "record_key": "addr:60",
