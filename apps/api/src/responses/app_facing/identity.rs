@@ -19,6 +19,13 @@ pub(crate) fn build_identity_name_response(
 pub(crate) fn build_name_record_response(
     record: &bigname_storage::IdentityNameRecordRow,
 ) -> NameRecordResponse {
+    build_name_record_response_for_coin_type(record, "60")
+}
+
+fn build_name_record_response_for_coin_type(
+    record: &bigname_storage::IdentityNameRecordRow,
+    primary_coin_type: &str,
+) -> NameRecordResponse {
     let coin_type_addresses = identity_coin_type_addresses(record.record_inventory_current.as_ref());
     let text_records = identity_text_records(record.record_inventory_current.as_ref());
     let mut unsupported_fields = identity_unsupported_fields(record);
@@ -47,7 +54,8 @@ pub(crate) fn build_name_record_response(
         &["registration", "token_id"],
         &["registration", "upstream_resource"],
         &["control", "token_id"],
-    ]);
+    ])
+    .or_else(|| identity_labelhash_token_id(record.row.labelhash.as_deref()));
 
     if owner_address.is_none() {
         unsupported_fields.insert("owner_address".to_owned());
@@ -67,7 +75,7 @@ pub(crate) fn build_name_record_response(
         namehash: record.row.namehash.clone(),
         owner_address,
         manager_address,
-        primary_address: coin_type_addresses.get("60").cloned(),
+        primary_address: coin_type_addresses.get(primary_coin_type).cloned(),
         coin_type_addresses,
         text_records,
         resolver_address,
@@ -100,7 +108,10 @@ pub(crate) fn build_reverse_name_record_response(
     });
 
     ReverseNameRecordResponse {
-        record: build_name_record_response(&record.name_record),
+        record: build_name_record_response_for_coin_type(
+            &record.name_record,
+            &record.requested_coin_type,
+        ),
         is_primary,
         relation_facets: identity_relation_facets(&record.relation_facets),
     }
@@ -143,7 +154,7 @@ pub(crate) fn build_indexing_status_response(
 }
 
 fn identity_coin_type_addresses(
-    inventory: Option<&bigname_storage::RecordInventoryCurrentRow>,
+    inventory: Option<&bigname_storage::IdentityRecordInventoryRow>,
 ) -> BTreeMap<String, String> {
     identity_success_record_entries(inventory, "addr")
         .filter_map(|entry| {
@@ -159,7 +170,7 @@ fn identity_coin_type_addresses(
 }
 
 fn identity_text_records(
-    inventory: Option<&bigname_storage::RecordInventoryCurrentRow>,
+    inventory: Option<&bigname_storage::IdentityRecordInventoryRow>,
 ) -> BTreeMap<String, String> {
     let mut records = BTreeMap::new();
     for entry in identity_success_record_entries(inventory, "text") {
@@ -183,7 +194,7 @@ fn identity_text_records(
 }
 
 fn identity_success_record_entries<'a>(
-    inventory: Option<&'a bigname_storage::RecordInventoryCurrentRow>,
+    inventory: Option<&'a bigname_storage::IdentityRecordInventoryRow>,
     record_family: &'static str,
 ) -> impl Iterator<Item = &'a JsonValue> {
     inventory
@@ -202,6 +213,14 @@ fn identity_record_value_string(entry: &JsonValue) -> Option<String> {
     provenance_field(value, "value")
         .and_then(value_to_string)
         .or_else(|| value_to_string(value))
+}
+
+fn identity_labelhash_token_id(labelhash: Option<&str>) -> Option<String> {
+    let labelhash = labelhash?;
+    let hex = labelhash.strip_prefix("0x").unwrap_or(labelhash);
+    alloy_primitives::U256::from_str_radix(hex, 16)
+        .ok()
+        .map(|value| value.to_string())
 }
 
 fn identity_unsupported_fields(
@@ -292,7 +311,7 @@ fn json_path<'a>(mut value: &'a JsonValue, path: &[&str]) -> Option<&'a JsonValu
     Some(value)
 }
 
-fn identity_network(row: &NameCurrentRow) -> String {
+fn identity_network(row: &bigname_storage::IdentityNameCurrentRow) -> String {
     match row.namespace.as_str() {
         "basenames" => "base".to_owned(),
         "ens" => "ethereum".to_owned(),
@@ -300,7 +319,7 @@ fn identity_network(row: &NameCurrentRow) -> String {
     }
 }
 
-fn identity_record_status(row: &NameCurrentRow) -> String {
+fn identity_record_status(row: &bigname_storage::IdentityNameCurrentRow) -> String {
     match string_field(provenance_field(&row.coverage, "status")).as_deref() {
         Some("stale") => "stale".to_owned(),
         Some("unsupported") => "unsupported".to_owned(),

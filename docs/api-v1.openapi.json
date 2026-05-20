@@ -792,6 +792,7 @@
             "items": {
               "type": "string"
             },
+            "maxItems": 1000,
             "type": "array"
           }
         },
@@ -947,6 +948,7 @@
           }
         },
         "required": [
+          "total_count",
           "has_more"
         ],
         "type": "object"
@@ -1864,6 +1866,8 @@
                   "type": "string"
                 },
                 "page_size": {
+                  "default": 1,
+                  "description": "Per-input reverse page size. Defaults to 1 for batched feed rendering; pass a larger value for profile-style expansion.",
                   "maximum": 200,
                   "minimum": 1,
                   "type": "integer"
@@ -1884,6 +1888,7 @@
               ],
               "type": "object"
             },
+            "maxItems": 1000,
             "type": "array"
           }
         },

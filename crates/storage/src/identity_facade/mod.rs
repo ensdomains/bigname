@@ -1,3 +1,4 @@
+mod counts;
 mod forward;
 mod reverse;
 mod status;
@@ -9,9 +10,10 @@ pub use forward::load_identity_records_by_names;
 pub use reverse::load_reverse_identity_records;
 pub use status::load_indexing_status;
 pub use types::{
-    IdentityAddressRelationRow, IdentityNameRecordRow, IdentityPrimaryNameSnapshot,
-    IndexingStatusChainRow, IndexingStatusRead, ReverseIdentityCursor, ReverseIdentityGroup,
-    ReverseIdentityRecordRow, ReverseIdentityRoles, ReverseIdentityStorageInput,
+    IdentityAddressRelationRow, IdentityNameCurrentRow, IdentityNameRecordRow,
+    IdentityPrimaryNameSnapshot, IdentityRecordInventoryRow, IndexingStatusChainRow,
+    IndexingStatusRead, ReverseIdentityCursor, ReverseIdentityGroup, ReverseIdentityRecordRow,
+    ReverseIdentityRoles, ReverseIdentityStorageInput,
 };
 
 const DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER: &str = r#"

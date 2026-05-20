@@ -123,7 +123,7 @@ pub(super) async fn identity_address_names(
         .unwrap_or_else(|| bigname_storage::ReverseIdentityGroup {
             input: fallback_input,
             entries: Vec::new(),
-            total_count: None,
+            total_count: Some(0),
             has_more: false,
         });
     let (records, pagination) = render_reverse_identity_page(

@@ -349,7 +349,9 @@ fn ens_v1_resolver_profile_admitted(profile: &str) -> bool {
     )
 }
 
-fn resolver_source_family_for_resolver_event(source_family: &str) -> Option<&'static str> {
+pub(super) fn resolver_source_family_for_resolver_event(
+    source_family: &str,
+) -> Option<&'static str> {
     match source_family {
         SOURCE_FAMILY_ENS_V1_REGISTRY_L1 | SOURCE_FAMILY_ENS_V1_REGISTRAR_L1 => {
             Some(SOURCE_FAMILY_ENS_V1_RESOLVER_L1)
@@ -447,7 +449,7 @@ fn resolver_record_fact_families(
     }
 }
 
-fn resolver_address_from_event(event: &RelevantEvent) -> Option<String> {
+pub(super) fn resolver_address_from_event(event: &RelevantEvent) -> Option<String> {
     event
         .after_state
         .get("resolver")

@@ -8,7 +8,8 @@ use crate::primary_name::PrimaryNameClaimStatus;
 use super::{
     DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER, IdentityNameRecordRow, IdentityPrimaryNameSnapshot,
     ReverseIdentityCursor, ReverseIdentityGroup, ReverseIdentityRecordRow,
-    ReverseIdentityStorageInput, dedupe_in_order, forward::load_identity_records_by_names,
+    ReverseIdentityStorageInput, counts::load_reverse_identity_total_counts, dedupe_in_order,
+    forward::load_identity_records_by_names,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -25,6 +26,7 @@ pub async fn load_reverse_identity_records(
         return Ok(Vec::new());
     }
 
+    let counts_future = load_reverse_identity_total_counts(pool, inputs);
     let primary_names_future = load_identity_primary_name_snapshots(pool, inputs);
     let page_records_future = async {
         let page_rows = load_reverse_identity_page_rows(pool, inputs).await?;
@@ -39,8 +41,8 @@ pub async fn load_reverse_identity_records(
         Result::<_>::Ok((page_rows, name_records))
     };
 
-    let ((page_rows, name_records), primary_names) =
-        futures_util::try_join!(page_records_future, primary_names_future)?;
+    let ((page_rows, name_records), primary_names, total_counts) =
+        futures_util::try_join!(page_records_future, primary_names_future, counts_future)?;
 
     let rows_by_input = page_rows.into_iter().fold(
         BTreeMap::<usize, Vec<ReverseIdentityPageRow>>::new(),
@@ -67,7 +69,11 @@ pub async fn load_reverse_identity_records(
             ReverseIdentityGroup {
                 input: input.clone(),
                 entries,
-                total_count: None,
+                total_count: Some(
+                    *total_counts
+                        .get(&(input.address.clone(), input.roles))
+                        .unwrap_or(&0),
+                ),
                 has_more,
             }
         })
@@ -105,6 +111,7 @@ fn reverse_identity_record(
         name_record,
         relation_facets,
         primary_name,
+        requested_coin_type: input.coin_type.clone(),
     })
 }
 

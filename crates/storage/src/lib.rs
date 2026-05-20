@@ -103,10 +103,11 @@ pub use identity::{
     upsert_token_lineages_without_snapshots,
 };
 pub use identity_facade::{
-    IdentityAddressRelationRow, IdentityNameRecordRow, IdentityPrimaryNameSnapshot,
-    IndexingStatusChainRow, IndexingStatusRead, ReverseIdentityCursor, ReverseIdentityGroup,
-    ReverseIdentityRecordRow, ReverseIdentityRoles, ReverseIdentityStorageInput,
-    load_identity_records_by_names, load_indexing_status, load_reverse_identity_records,
+    IdentityAddressRelationRow, IdentityNameCurrentRow, IdentityNameRecordRow,
+    IdentityPrimaryNameSnapshot, IdentityRecordInventoryRow, IndexingStatusChainRow,
+    IndexingStatusRead, ReverseIdentityCursor, ReverseIdentityGroup, ReverseIdentityRecordRow,
+    ReverseIdentityRoles, ReverseIdentityStorageInput, load_identity_records_by_names,
+    load_indexing_status, load_reverse_identity_records,
 };
 pub use lineage::{
     CanonicalityState, ChainLineageBlock, chain_lineage_contains_ancestor,

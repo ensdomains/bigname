@@ -101,7 +101,7 @@ pub(super) fn reverse_name_record_schema() -> JsonValue {
 pub(super) fn identity_pagination_schema() -> JsonValue {
     json!({
         "type": "object",
-        "required": ["has_more"],
+        "required": ["total_count", "has_more"],
         "properties": {
             "next_page_cursor": { "type": "string" },
             "total_count": {
@@ -131,6 +131,7 @@ pub(super) fn forward_identity_batch_input_schema() -> JsonValue {
         "properties": {
             "names": {
                 "type": "array",
+                "maxItems": 1000,
                 "items": { "type": "string" },
             },
         },
@@ -205,6 +206,7 @@ pub(super) fn reverse_identity_batch_input_schema() -> JsonValue {
         "properties": {
             "inputs": {
                 "type": "array",
+                "maxItems": 1000,
                 "items": {
                     "type": "object",
                     "required": ["address", "coin_type"],
@@ -223,6 +225,8 @@ pub(super) fn reverse_identity_batch_input_schema() -> JsonValue {
                             "type": "integer",
                             "minimum": 1,
                             "maximum": crate::MAX_PAGE_SIZE,
+                            "default": 1,
+                            "description": "Per-input reverse page size. Defaults to 1 for batched feed rendering; pass a larger value for profile-style expansion.",
                         },
                         "page_cursor": { "type": "string" },
                     },

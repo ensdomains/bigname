@@ -159,9 +159,12 @@ Façade not-found behavior is adapter-compatible rather than core-route `404` be
 - `GET /v1/identity/names/{name}` returns `200` with `{ "status": "not_found", "record": null }` for a forward miss.
 - Reverse misses return `records: []`.
 - Batch routes preserve input order and return per-input status objects.
-- Batch limits default to `250` inputs and may be configured with `BIGNAME_API_IDENTITY_BATCH_LIMIT`.
+- Batch limits default to `1000` inputs and may be configured with `BIGNAME_API_IDENTITY_BATCH_LIMIT`.
+- Reverse single defaults to profile-style `page_size=100`; reverse batch defaults to feed-style `page_size=1` unless the input item asks for a larger page.
 
 `NameRecord.status` uses `success`, `not_found`, `unsupported`, or `stale`. Nullable fields stay `null` when no backed value is available. `unsupported_fields` lists fields that the façade could not prove from the current projections without inventing a value.
+
+Reverse identity pagination always includes `total_count`. The count is read from the indexed `address_names_current_identity_counts` sidecar maintained with `address_names_current`, so the default feed path does not run an exact count scan.
 
 ## Shared objects
 

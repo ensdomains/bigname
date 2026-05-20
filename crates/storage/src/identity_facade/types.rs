@@ -1,13 +1,38 @@
-use crate::{
-    address_names::AddressNameRelation, name_current::NameCurrentRow,
-    primary_name::PrimaryNameClaimStatus, record_inventory::RecordInventoryCurrentRow,
-};
+use serde_json::Value;
+use sqlx::types::time::OffsetDateTime;
+use uuid::Uuid;
+
+use crate::{address_names::AddressNameRelation, primary_name::PrimaryNameClaimStatus};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IdentityNameRecordRow {
-    pub row: NameCurrentRow,
-    pub record_inventory_current: Option<RecordInventoryCurrentRow>,
+    pub row: IdentityNameCurrentRow,
+    pub record_inventory_current: Option<IdentityRecordInventoryRow>,
     pub relations: Vec<IdentityAddressRelationRow>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IdentityNameCurrentRow {
+    pub logical_name_id: String,
+    pub namespace: String,
+    pub canonical_display_name: String,
+    pub normalized_name: String,
+    pub namehash: String,
+    pub labelhash: Option<String>,
+    pub resource_id: Option<Uuid>,
+    pub declared_summary: Value,
+    pub coverage: Value,
+    pub chain_positions: Value,
+    pub last_recomputed_at: OffsetDateTime,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IdentityRecordInventoryRow {
+    pub resource_id: Uuid,
+    pub entries: Value,
+    pub unsupported_families: Value,
+    pub chain_positions: Value,
+    pub last_recomputed_at: OffsetDateTime,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -17,7 +42,7 @@ pub struct IdentityAddressRelationRow {
     pub relation: AddressNameRelation,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum ReverseIdentityRoles {
     Owned,
     Managed,
@@ -76,6 +101,7 @@ pub struct ReverseIdentityRecordRow {
     pub name_record: IdentityNameRecordRow,
     pub relation_facets: Vec<AddressNameRelation>,
     pub primary_name: Option<IdentityPrimaryNameSnapshot>,
+    pub requested_coin_type: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

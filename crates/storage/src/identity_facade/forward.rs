@@ -1,18 +1,15 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, bail};
-use serde_json::Value;
 use sqlx::{PgPool, postgres::PgRow};
 use uuid::Uuid;
 
-use crate::{
-    address_names::AddressNameRelation, name_current::load_name_current_by_logical_name_ids,
-    record_inventory::RecordInventoryCurrentRow, resolution_record_inventory_lookup_key,
-};
+use crate::{address_names::AddressNameRelation, name_current::DEFAULT_NAME_CURRENT_READ_FILTER};
 
 use super::{
     DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER, DEFAULT_RECORD_INVENTORY_CURRENT_READ_FILTER,
-    IdentityAddressRelationRow, IdentityNameRecordRow, dedupe_in_order,
+    IdentityAddressRelationRow, IdentityNameCurrentRow, IdentityNameRecordRow,
+    IdentityRecordInventoryRow, dedupe_in_order,
 };
 
 pub async fn load_identity_records_by_names(
@@ -25,7 +22,7 @@ pub async fn load_identity_records_by_names(
     }
 
     let (name_rows, relations) = futures_util::try_join!(
-        load_name_current_by_logical_name_ids(pool, &requested_ids),
+        load_identity_name_current_rows(pool, &requested_ids),
         load_identity_address_relations_by_logical_names(pool, &requested_ids),
     )?;
     let inventory_resource_ids = name_rows
@@ -49,17 +46,9 @@ pub async fn load_identity_records_by_names(
         .into_iter()
         .filter_map(|logical_name_id| {
             let row = name_rows.get(&logical_name_id)?.clone();
-            let record_inventory_current = resolution_record_inventory_lookup_key(&row)
-                .and_then(|(resource_id, boundary)| {
-                    inventories
-                        .by_lookup_key
-                        .get(&(resource_id, stable_json_key(&boundary)))
-                        .cloned()
-                })
-                .or_else(|| {
-                    row.resource_id
-                        .and_then(|resource_id| inventories.by_resource.get(&resource_id).cloned())
-                });
+            let record_inventory_current = row
+                .resource_id
+                .and_then(|resource_id| inventories.by_resource.get(&resource_id).cloned());
             Some(IdentityNameRecordRow {
                 row,
                 record_inventory_current,
@@ -76,8 +65,61 @@ pub async fn load_identity_records_by_names(
 
 #[derive(Default)]
 struct IdentityRecordInventoryLookup {
-    by_lookup_key: BTreeMap<(Uuid, String), RecordInventoryCurrentRow>,
-    by_resource: BTreeMap<Uuid, RecordInventoryCurrentRow>,
+    by_resource: BTreeMap<Uuid, IdentityRecordInventoryRow>,
+}
+
+async fn load_identity_name_current_rows(
+    pool: &PgPool,
+    logical_name_ids: &[String],
+) -> Result<BTreeMap<String, IdentityNameCurrentRow>> {
+    if logical_name_ids.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+
+    let rows = sqlx::query(&format!(
+        r#"
+        SELECT
+            nc.logical_name_id,
+            nc.namespace,
+            nc.canonical_display_name,
+            nc.normalized_name,
+            nc.namehash,
+            surface.labelhashes[1] AS labelhash,
+            nc.resource_id,
+            nc.declared_summary,
+            nc.coverage,
+            nc.chain_positions,
+            nc.last_recomputed_at
+        FROM name_current nc
+        JOIN name_surfaces surface
+          ON surface.logical_name_id = nc.logical_name_id
+        LEFT JOIN resources resource
+          ON resource.resource_id = nc.resource_id
+        LEFT JOIN surface_bindings binding
+          ON binding.surface_binding_id = nc.surface_binding_id
+        LEFT JOIN token_lineages token_lineage
+          ON token_lineage.token_lineage_id = nc.token_lineage_id
+        WHERE nc.logical_name_id = ANY($1::TEXT[])
+        {DEFAULT_NAME_CURRENT_READ_FILTER}
+        ORDER BY nc.logical_name_id
+        "#,
+    ))
+    .bind(logical_name_ids)
+    .fetch_all(pool)
+    .await
+    .with_context(|| {
+        format!(
+            "failed to batch load identity name_current rows for {} logical_name_id values",
+            logical_name_ids.len()
+        )
+    })?;
+
+    rows.into_iter()
+        .map(|row| {
+            let row = decode_identity_name_current_row(row)?;
+            Ok((row.logical_name_id.clone(), row))
+        })
+        .collect()
 }
 
 async fn load_record_inventory_current_by_resource_ids(
@@ -99,19 +141,9 @@ async fn load_record_inventory_current_by_resource_ids(
         r#"
         SELECT
             ric.resource_id,
-            ric.record_version_boundary_key,
-            ric.record_version_boundary,
-            ric.enumeration_basis,
-            ric.selectors,
-            ric.explicit_gaps,
             ric.unsupported_families,
-            ric.last_change,
             ric.entries,
-            ric.provenance,
-            ric.coverage,
             ric.chain_positions,
-            ric.canonicality_summary,
-            ric.manifest_version,
             ric.last_recomputed_at
         FROM record_inventory_current ric
         JOIN resources resource
@@ -134,15 +166,10 @@ async fn load_record_inventory_current_by_resource_ids(
     let mut inventories = IdentityRecordInventoryLookup::default();
     for row in rows {
         let inventory = decode_record_inventory_current_row(row)?;
-        let key = (
-            inventory.resource_id,
-            stable_json_key(&inventory.record_version_boundary),
-        );
         inventories
             .by_resource
             .entry(inventory.resource_id)
             .or_insert_with(|| inventory.clone());
-        inventories.by_lookup_key.insert(key, inventory);
     }
 
     Ok(inventories)
@@ -206,21 +233,28 @@ async fn load_identity_address_relations_by_logical_names(
         .collect()
 }
 
-fn decode_record_inventory_current_row(row: PgRow) -> Result<RecordInventoryCurrentRow> {
-    Ok(RecordInventoryCurrentRow {
+fn decode_identity_name_current_row(row: PgRow) -> Result<IdentityNameCurrentRow> {
+    Ok(IdentityNameCurrentRow {
+        logical_name_id: crate::sql_row::get(&row, "logical_name_id")?,
+        namespace: crate::sql_row::get(&row, "namespace")?,
+        canonical_display_name: crate::sql_row::get(&row, "canonical_display_name")?,
+        normalized_name: crate::sql_row::get(&row, "normalized_name")?,
+        namehash: crate::sql_row::get(&row, "namehash")?,
+        labelhash: crate::sql_row::get(&row, "labelhash")?,
         resource_id: crate::sql_row::get(&row, "resource_id")?,
-        record_version_boundary: crate::sql_row::get(&row, "record_version_boundary")?,
-        enumeration_basis: crate::sql_row::get(&row, "enumeration_basis")?,
-        selectors: crate::sql_row::get(&row, "selectors")?,
-        explicit_gaps: crate::sql_row::get(&row, "explicit_gaps")?,
-        unsupported_families: crate::sql_row::get(&row, "unsupported_families")?,
-        last_change: crate::sql_row::get(&row, "last_change")?,
-        entries: crate::sql_row::get(&row, "entries")?,
-        provenance: crate::sql_row::get(&row, "provenance")?,
+        declared_summary: crate::sql_row::get(&row, "declared_summary")?,
         coverage: crate::sql_row::get(&row, "coverage")?,
         chain_positions: crate::sql_row::get(&row, "chain_positions")?,
-        canonicality_summary: crate::sql_row::get(&row, "canonicality_summary")?,
-        manifest_version: crate::sql_row::get(&row, "manifest_version")?,
+        last_recomputed_at: crate::sql_row::get(&row, "last_recomputed_at")?,
+    })
+}
+
+fn decode_record_inventory_current_row(row: PgRow) -> Result<IdentityRecordInventoryRow> {
+    Ok(IdentityRecordInventoryRow {
+        resource_id: crate::sql_row::get(&row, "resource_id")?,
+        unsupported_families: crate::sql_row::get(&row, "unsupported_families")?,
+        entries: crate::sql_row::get(&row, "entries")?,
+        chain_positions: crate::sql_row::get(&row, "chain_positions")?,
         last_recomputed_at: crate::sql_row::get(&row, "last_recomputed_at")?,
     })
 }
@@ -232,8 +266,4 @@ fn parse_address_name_relation(value: &str) -> Result<AddressNameRelation> {
         "effective_controller" => Ok(AddressNameRelation::EffectiveController),
         _ => bail!("unknown identity address-name relation {value}"),
     }
-}
-
-fn stable_json_key(value: &Value) -> String {
-    serde_json::to_string(value).expect("JSON values from storage must serialize")
 }

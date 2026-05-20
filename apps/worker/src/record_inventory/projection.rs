@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use bigname_storage::{
-    RecordInventoryCurrentRow, clear_record_inventory_current, upsert_record_inventory_current_rows,
+    RecordInventoryCurrentRow, clear_record_inventory_current, normalize_evm_address,
+    upsert_record_inventory_current_rows,
 };
 use futures_util::{TryStreamExt, pin_mut};
 use serde_json::{Value, json};
@@ -20,7 +21,10 @@ use super::{
         gap_value, resolver_family_status_value,
     },
     loading::{load_relevant_events, stream_target_resource_ids},
-    profile::{ResolverProfileGate, ResolverRecordFamilyStatuses, resolver_local_source_family},
+    profile::{
+        ResolverProfileGate, ResolverRecordFamilyStatuses, resolver_address_from_event,
+        resolver_local_source_family, resolver_source_family_for_resolver_event,
+    },
     types::{RecordInventoryCurrentRebuildSummary, RelevantEvent},
 };
 
@@ -222,19 +226,17 @@ async fn build_row_from_events(
         return Ok(None);
     }
 
-    let latest_resolver_event = events
+    let latest_resolver_index = events
         .iter()
-        .rev()
-        .find(|event| event.event_kind == EVENT_KIND_RESOLVER_CHANGED);
+        .rposition(|event| event.event_kind == EVENT_KIND_RESOLVER_CHANGED);
+    let latest_resolver_event = latest_resolver_index.and_then(|index| events.get(index));
     let latest_resolver_record_statuses = latest_resolver_event
         .and_then(|resolver_event| profile_gate.current_record_family_statuses(resolver_event));
 
-    let boundary_index = events.iter().rposition(|event| {
-        event.event_kind == EVENT_KIND_RECORD_VERSION_CHANGED
-            || event.event_kind == EVENT_KIND_RESOLVER_CHANGED
-    });
-    let scoped_events = &events[boundary_index.unwrap_or(0)..];
-    let boundary_anchor = match boundary_index {
+    let record_scope_index = record_scope_boundary_index(events, latest_resolver_event);
+    let topology_boundary_index = record_scope_index.or(latest_resolver_index);
+    let scoped_events = &events[record_scope_index.unwrap_or(0)..];
+    let boundary_anchor = match topology_boundary_index {
         Some(index) => events
             .get(index)
             .context("record_inventory_current rebuild boundary index out of range")?,
@@ -250,6 +252,7 @@ async fn build_row_from_events(
         .iter()
         .filter(|event| {
             event.event_kind == EVENT_KIND_RECORD_CHANGED
+                && resolver_local_event_in_current_scope(event, latest_resolver_event)
                 && profile_gate.allows_event_for_current_resolver(event, latest_resolver_event)
         })
         .collect::<Vec<_>>();
@@ -273,7 +276,8 @@ async fn build_row_from_events(
         .filter(|event| {
             event.event_kind == EVENT_KIND_RESOLVER_CHANGED
                 || resolver_local_source_family(&event.source_family).is_none()
-                || profile_gate.allows_event_for_current_resolver(event, latest_resolver_event)
+                || (resolver_local_event_in_current_scope(event, latest_resolver_event)
+                    && profile_gate.allows_event_for_current_resolver(event, latest_resolver_event))
         })
         .cloned()
         .collect::<Vec<_>>();
@@ -343,4 +347,46 @@ async fn build_row_from_events(
             .max()
             .unwrap_or(OffsetDateTime::UNIX_EPOCH),
     }))
+}
+
+fn record_scope_boundary_index(
+    events: &[RelevantEvent],
+    latest_resolver_event: Option<&RelevantEvent>,
+) -> Option<usize> {
+    events.iter().rposition(|event| {
+        if event.event_kind != EVENT_KIND_RECORD_VERSION_CHANGED {
+            return false;
+        }
+
+        match latest_resolver_event {
+            Some(current_resolver_event) => {
+                resolver_local_event_in_current_scope(event, Some(current_resolver_event))
+            }
+            None => true,
+        }
+    })
+}
+
+fn resolver_local_event_in_current_scope(
+    event: &RelevantEvent,
+    latest_resolver_event: Option<&RelevantEvent>,
+) -> bool {
+    let Some(event_source_family) = resolver_local_source_family(&event.source_family) else {
+        return true;
+    };
+    let Some(current_resolver_event) = latest_resolver_event else {
+        return true;
+    };
+    if resolver_source_family_for_resolver_event(&current_resolver_event.source_family)
+        != Some(event_source_family)
+        || current_resolver_event.chain_id != event.chain_id
+    {
+        return false;
+    }
+
+    let Some(emitting_address) = event.emitting_address.as_deref() else {
+        return event.normalized_event_id >= current_resolver_event.normalized_event_id;
+    };
+    resolver_address_from_event(current_resolver_event)
+        .is_some_and(|resolver_address| normalize_evm_address(emitting_address) == resolver_address)
 }

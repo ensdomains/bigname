@@ -134,6 +134,7 @@ Rules:
 - The route reads `name_current`, `record_inventory_current`, and address relation projections where available.
 - `primary_address` is the declared `addr:60` value when retained; other retained `addr:<coin_type>` records appear in `coin_type_addresses`.
 - `manager_address` is populated only when current relation rows identify one unambiguous effective controller. Ambiguous or unbacked manager values stay `null` and add `manager_address` to `unsupported_fields`.
+- `token_id` is read from projected authority/registration/control summaries first, then falls back to the current surface labelhash as a uint256 string for ENS names with namespace-local ERC-721 identity.
 - Production ENSv2/L2 record coverage remains deferred to a separate manifest/admission workstream.
 
 ## `POST /v1/identity/names:batch`
@@ -164,7 +165,7 @@ Rules:
 
 - Preserves input order.
 - Deduplicates internally by inferred logical name.
-- Batch limit defaults to `250` and is configurable through `BIGNAME_API_IDENTITY_BATCH_LIMIT`.
+- Batch limit defaults to `1000` and is configurable through `BIGNAME_API_IDENTITY_BATCH_LIMIT`.
 - Over-limit or malformed request bodies return `400 invalid_input`; per-name misses are returned as `status=not_found`.
 
 ## `GET /v1/identity/addresses/{address}/names`
@@ -184,6 +185,7 @@ Response:
   },
   "records": [],
   "pagination": {
+    "total_count": 0,
     "has_more": false
   }
 }
@@ -194,6 +196,8 @@ Rules:
 - `coin_type` is required and scopes primary-name marking.
 - `roles` defaults to `BOTH`; `OWNED` maps to token-holder and registrant current relations, while `MANAGED` maps to effective-controller current relations.
 - `is_primary=true` only when `primary_names_current(address, coin_type, namespace)` has a successful normalized claim matching the record's normalized name.
+- For reverse responses, nested `NameRecord.primary_address` is selected from the requested `addr:<coin_type>` when that retained address record is available. Forward responses keep `addr:60` as the default `primary_address`.
+- `pagination.total_count` is always populated from the indexed `address_names_current_identity_counts` sidecar and does not run a count scan on the request path.
 - Empty result sets are valid.
 - Stable ordering is `is_primary desc`, role priority, `normalized_name asc`, `namespace asc`, `namehash asc`.
 
@@ -208,7 +212,7 @@ Request:
       "address": "0x0000000000000000000000000000000000000000",
       "coin_type": 60,
       "roles": "BOTH",
-      "page_size": 100,
+      "page_size": 1,
       "page_cursor": null
     }
   ]
@@ -228,6 +232,7 @@ Response:
       },
       "records": [],
       "pagination": {
+        "total_count": 0,
         "has_more": false
       },
       "status": "success"
@@ -241,8 +246,10 @@ Rules:
 - Preserves one result group per input.
 - Requires `coin_type` per input.
 - Deduplicates identical storage reads internally while preserving requested pagination per input.
+- Omitting `page_size` defaults to `1` for batched feed rendering. Pass a larger `page_size` when using the batch route for profile-style expansion.
 - Empty result sets are successful.
-- Batch limit defaults to `250` and is configurable through `BIGNAME_API_IDENTITY_BATCH_LIMIT`.
+- `pagination.total_count` is always populated for each result group from the indexed `address_names_current_identity_counts` sidecar.
+- Batch limit defaults to `1000` and is configurable through `BIGNAME_API_IDENTITY_BATCH_LIMIT`.
 
 ## `GET /v1/status/indexing`
 

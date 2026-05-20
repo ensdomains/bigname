@@ -1,7 +1,8 @@
 use super::*;
 
-const DEFAULT_IDENTITY_BATCH_LIMIT: usize = 250;
+const DEFAULT_IDENTITY_BATCH_LIMIT: usize = 1000;
 const DEFAULT_IDENTITY_PAGE_SIZE: u64 = 100;
+const DEFAULT_IDENTITY_BATCH_PAGE_SIZE: u64 = 1;
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub(super) struct ReverseIdentityRequestKey {
@@ -107,7 +108,7 @@ pub(super) fn empty_reverse_identity_group(
             cursor: None,
         },
         entries: Vec::new(),
-        total_count: None,
+        total_count: Some(0),
         has_more: false,
     }
 }
@@ -256,7 +257,8 @@ pub(super) fn parse_reverse_batch_item(
         message: "coin_type is required for every reverse identity batch input".to_owned(),
     })?;
     let roles = parse_identity_roles(item.roles.as_deref())?;
-    let pagination = parse_identity_pagination(item.page_cursor.as_deref(), item.page_size)?;
+    let pagination =
+        parse_identity_pagination_with_default(item.page_cursor.as_deref(), item.page_size, DEFAULT_IDENTITY_BATCH_PAGE_SIZE)?;
 
     Ok(ReverseIdentityRequestKey {
         address,
@@ -293,13 +295,21 @@ pub(super) fn parse_identity_pagination(
     cursor: Option<&str>,
     page_size: Option<u64>,
 ) -> ApiResult<PaginationRequest> {
+    parse_identity_pagination_with_default(cursor, page_size, DEFAULT_IDENTITY_PAGE_SIZE)
+}
+
+pub(super) fn parse_identity_pagination_with_default(
+    cursor: Option<&str>,
+    page_size: Option<u64>,
+    default_page_size: u64,
+) -> ApiResult<PaginationRequest> {
     let cursor = cursor
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_owned);
     let active = cursor.is_some() || page_size.is_some();
     let page_size = match page_size {
-        None => DEFAULT_IDENTITY_PAGE_SIZE,
+        None => default_page_size,
         Some(value) if !(1..=MAX_PAGE_SIZE).contains(&value) => {
             return Err(ApiError {
                 status: StatusCode::BAD_REQUEST,
