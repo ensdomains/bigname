@@ -148,7 +148,7 @@ pub(crate) fn build_indexing_status_response(
         .collect::<BTreeMap<_, _>>();
 
     IndexingStatusResponse {
-        status: indexing_status_label(chains.values()),
+        status: indexing_status_label(chains.values(), read.has_unscoped_pending_invalidations),
         chains,
     }
 }
@@ -382,8 +382,9 @@ fn identity_relation_facets(relations: &[bigname_storage::AddressNameRelation]) 
 
 fn indexing_status_label<'a>(
     chains: impl Iterator<Item = &'a IndexingStatusChainResponse>,
+    has_unscoped_pending_invalidations: bool,
 ) -> String {
-    let mut saw_degraded = false;
+    let mut saw_degraded = has_unscoped_pending_invalidations;
     let mut saw_chain = false;
     for chain in chains {
         saw_chain = true;

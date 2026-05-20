@@ -274,7 +274,7 @@ Response:
 }
 ```
 
-Uses `chain_checkpoints`, retained `chain_lineage`, `projection_normalized_event_changes`, `projection_apply_cursors`, and `projection_invalidations` where available. Fields stay `null` when the deployment has not yet retained the corresponding operational metadata. If no chain readiness data exists, `status` is `degraded`.
+Uses `chain_checkpoints`, retained `chain_lineage`, `projection_normalized_event_changes`, `projection_apply_cursors`, and `projection_invalidations` where available. Fields stay `null` when the deployment has not yet retained the corresponding operational metadata. If no chain readiness data exists, or if pending direct invalidations cannot be tied to a normalized-event chain position, `status` is `degraded`.
 
 ## `GET /v1/names`
 

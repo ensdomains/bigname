@@ -138,5 +138,28 @@ pub async fn load_indexing_status(pool: &PgPool) -> Result<IndexingStatusRead> {
         })
         .collect::<Result<Vec<_>>>()?;
 
-    Ok(IndexingStatusRead { chains })
+    let has_unscoped_pending_invalidations = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM projection_invalidations invalidation
+            LEFT JOIN normalized_events event
+              ON event.normalized_event_id = COALESCE(
+                  invalidation.first_normalized_event_id,
+                  invalidation.last_normalized_event_id
+              )
+            WHERE event.normalized_event_id IS NULL
+               OR event.chain_id IS NULL
+               OR event.block_number IS NULL
+        )
+        "#,
+    )
+    .fetch_one(pool)
+    .await
+    .context("failed to load unscoped indexing invalidation status")?;
+
+    Ok(IndexingStatusRead {
+        chains,
+        has_unscoped_pending_invalidations,
+    })
 }

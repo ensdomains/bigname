@@ -783,6 +783,91 @@ async fn indexing_status_degrades_for_chain_without_checkpoint() -> Result<()> {
 }
 
 #[tokio::test]
+async fn indexing_status_degrades_for_direct_pending_invalidations() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    sqlx::query(
+        r#"
+        INSERT INTO chain_lineage (
+            chain_id,
+            block_hash,
+            block_number,
+            block_timestamp,
+            canonicality_state
+        )
+        VALUES (
+            'ethereum-mainnet',
+            '0xstatusdirect10',
+            10,
+            '2026-04-17T00:00:10Z',
+            'canonical'
+        )
+        "#,
+    )
+    .execute(&database.pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO chain_checkpoints (
+            chain_id,
+            canonical_block_hash,
+            canonical_block_number,
+            safe_block_hash,
+            safe_block_number,
+            finalized_block_hash,
+            finalized_block_number
+        )
+        VALUES (
+            'ethereum-mainnet',
+            '0xstatusdirect10',
+            10,
+            '0xstatusdirect10',
+            10,
+            '0xstatusdirect10',
+            10
+        )
+        "#,
+    )
+    .execute(&database.pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO projection_invalidations (
+            projection,
+            projection_key,
+            key_payload
+        )
+        VALUES (
+            'record_inventory_current',
+            'direct:resolver',
+            '{"source": "direct_test"}'::jsonb
+        )
+        "#,
+    )
+    .execute(&database.pool)
+    .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/status/indexing")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("direct invalidation indexing status request failed")?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["status"], json!("degraded"));
+    assert_eq!(
+        payload["chains"]["ethereum-mainnet"]["latest_projected_block"],
+        json!(10)
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn indexing_status_reports_projection_lag_by_chain() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     sqlx::query(

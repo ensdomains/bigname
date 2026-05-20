@@ -117,6 +117,7 @@ pub struct IdentityPrimaryNameSnapshot {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IndexingStatusRead {
     pub chains: Vec<IndexingStatusChainRow>,
+    pub has_unscoped_pending_invalidations: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

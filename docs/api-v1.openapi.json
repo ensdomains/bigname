@@ -1863,7 +1863,10 @@
                   "type": "integer"
                 },
                 "page_cursor": {
-                  "type": "string"
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "page_size": {
                   "default": 1,

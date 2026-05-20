@@ -5,6 +5,8 @@
 **Audience:** engineering agent or implementation planner
 **Purpose:** scope whether an ENS Labs hosted indexer can satisfy partner-1's indexed name-data requirements across L1 ENS, ENSv2, and Basenames.
 
+This document is a partner-supplied requirements snapshot. Protocol-like names, event names, coin-type examples, and coverage examples should be treated as partner input, not bigname support claims or upstream protocol claims, unless a statement carries an explicit pinned `.refs/` citation.
+
 ## Agent task
 
 Evaluate the current ENS Labs indexing/API stack against this requirements document and produce an implementation plan that separates:
@@ -82,11 +84,13 @@ Requirements:
 
 ## Required namespace and chain coverage
 
+This table records partner-1's requested product coverage and wording. It is not an upstream protocol assertion, a bigname support claim, or evidence that the corresponding source families are admitted in this branch.
+
 | Domain | Required | Notes |
 | --- | --- | --- |
-| L1 ENS canonical names | Yes | Ethereum Mainnet. |
-| ENSv2 names with onchain records | Yes | Records may live on L1 or on canonical ENSv2 L2 destination chains. |
-| Basenames | Yes | Base Mainnet. |
+| L1 ENS canonical names | Yes | partner-1 requests Ethereum Mainnet coverage. |
+| ENSv2 names with onchain records | Yes | partner-1 requests coverage for records on L1 or on ENSv2 L2 destination chains once those source families are admitted. |
+| Basenames | Yes | partner-1 requests Base Mainnet coverage. |
 
 The caller should not need to fan out by namespace. A single API call should be able to span L1 ENS, ENSv2, and Basenames where applicable.
 
@@ -121,7 +125,7 @@ Forward resolution returns this record shape. Reverse resolution returns the sam
 | `owner_address` | `string` | Yes | Wallet address holding the NFT. |
 | `manager_address` | `string` | Yes | Address with manager/controller permissions. |
 | `primary_address` | `string` | Yes | Reverse-record target for the relevant name. |
-| `coin_type_addresses` | `map[uint64]bytes` | Yes | SLIP-44 coin type to address bytes, per ENSIP-9 multichain address records. |
+| `coin_type_addresses` | `map[uint64]bytes` | Yes | partner-1 expects a map from coin type to address bytes. |
 | `text_records` | `map[string]string` | Yes | All currently set text records, such as `avatar`, `description`, `url`, etc. |
 | `resolver_address` | `string` | Yes | Active resolver contract. |
 | `expiration` | Unix timestamp seconds | Yes | Expiration timestamp. |
@@ -152,14 +156,14 @@ Return one shared name record.
 
 Resolve an address and coin type to indexed names.
 
-This must be ENSIP-19 compliant. Reverse resolution is scoped by SLIP-44 / ENSIP-11 coin type. The same address can have different primary names per coin type, so `coin_type` is required.
+partner-1 requires reverse resolution to be scoped by coin type. The same address may have different primary-name results per requested coin type in partner-1's expected model, so `coin_type` is required.
 
 ### Input
 
 | Field | Type | Required | Notes |
 | --- | --- | --- | --- |
 | `address` | `string` | Yes | EVM address. |
-| `coin_type` | `uint64` | Yes | SLIP-44 / ENSIP-11 coin type that scopes reverse resolution per ENSIP-19. Examples: `60` for ETH mainnet, `2147492101` for Base. |
+| `coin_type` | `uint64` | Yes | Coin type that scopes reverse resolution in partner-1's expected model. Examples supplied by partner-1 include `60` for ETH mainnet and `2147492101` for Base. |
 | `roles` | enum | No | Filter by `OWNED`, `MANAGED`, or both. |
 | `page_size` | `uint` | No | Pagination size. |
 | `page_cursor` | `string` | No | Pagination cursor. |
@@ -170,7 +174,7 @@ Return a paginated list of shared name records. Each record must also include:
 
 | Field | Type | Required | Notes |
 | --- | --- | --- | --- |
-| `is_primary` | `bool` | Yes | True for the address's primary name for the requested coin type, per ENSIP-19. |
+| `is_primary` | `bool` | Yes | True when the row matches partner-1's requested primary-name result for the requested coin type. |
 
 Pagination metadata:
 
@@ -300,7 +304,7 @@ Confirm whether a single API call can span:
 
 - L1 ENS,
 - Basenames,
-- ENSv2 onchain records on L1 and canonical L2 destinations.
+- ENSv2 onchain records on L1 and partner-1-requested L2 destinations.
 
 The desired behavior is no per-namespace fan-out by the caller for either forward or reverse resolution.
 
@@ -333,7 +337,7 @@ The agent should answer or route these questions.
 
 1. What is the current ENS API surface? Provide the GraphQL schema or REST endpoint catalog.
 2. What namespace and chain coverage already exists?
-3. What is net-new for this scope, especially Basenames and ENSv2 onchain records on canonical L2 destinations?
+3. What is net-new for this scope, especially Basenames and ENSv2 onchain records on partner-1-requested L2 destinations?
 4. Can forward and reverse queries span L1 ENS, Basenames, and ENSv2 without caller-side fan-out?
 5. What is the buildout timeline for missing functionality?
 6. Should the API be exposed as a public good, and if so, what operational/SLA boundaries are needed?

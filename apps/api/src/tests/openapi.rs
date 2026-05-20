@@ -507,6 +507,12 @@ fn openapi_document_freezes_query_params_and_shared_envelopes() {
         Some(&json!({ "$ref": "#/components/schemas/ResolutionResponse" }))
     );
 
+    let reverse_identity_batch_input = openapi_schema(&document, "ReverseIdentityBatchInput");
+    assert_eq!(
+        reverse_identity_batch_input.pointer("/properties/inputs/items/properties/page_cursor/type"),
+        Some(&json!(["string", "null"]))
+    );
+
     let events = openapi_operation(&document, "/v1/events");
     assert_eq!(
         openapi_parameter_names(events),

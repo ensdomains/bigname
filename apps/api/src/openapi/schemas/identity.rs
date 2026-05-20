@@ -228,7 +228,7 @@ pub(super) fn reverse_identity_batch_input_schema() -> JsonValue {
                             "default": 1,
                             "description": "Per-input reverse page size. Defaults to 1 for batched feed rendering; pass a larger value for profile-style expansion.",
                         },
-                        "page_cursor": { "type": "string" },
+                        "page_cursor": { "type": ["string", "null"] },
                     },
                     "additionalProperties": false,
                 },
