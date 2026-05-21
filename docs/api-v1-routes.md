@@ -75,7 +75,8 @@ Rules:
 - `data` matches `GET /v1/names/{namespace}/{name}` for the inferred namespace, normalized name, and selected snapshot.
 - `declared_state` is present for `mode=declared|both` and contains compact `topology`, `record_inventory`, and `record_cache` by default.
 - `verified_state` is present for `mode=verified|both` and contains compact `verified_queries` by default.
-- The route does not accept caller-selected `records`. It derives the profile selector set from the selected snapshot's declared state: every `record_inventory.selectors[*].record_key`, every `record_inventory.explicit_gaps[*].record_key`, and every `record_cache.entries[*].record_key`, deduped in that order. If a supported declared inventory exists but that declared set is empty, it falls back to the bounded app profile set `addr:60`, `avatar`, `contenthash`, `text:description`, `text:url`, and `text:email`. Missing or explicitly unsupported declared inventory does not use the fallback set.
+- Record selection is server-owned. The route does not accept caller-selected `records`, and `mode=verified|both` executes every selected profile record rather than a caller-supplied subset. The selector set is derived from the selected snapshot's declared state: every `record_inventory.selectors[*].record_key`, every `record_inventory.explicit_gaps[*].record_key`, and every `record_cache.entries[*].record_key`, deduped in that order. If that derived set is non-empty, it is the complete profile record set for this route.
+- Default profile records are used only for a supported but empty declared inventory. In that case the route falls back to the bounded app profile set `addr:60`, `avatar`, `contenthash`, `text:description`, `text:url`, and `text:email`. Missing inventory, stale inventory, or explicitly unsupported inventory does not use fallback records.
 - Supplying `records` on this route returns `400 invalid_input`; selector-specific reads belong on the compact records route.
 - Use `GET /v1/names/{namespace}/{name}/records` for selector-specific app reads. Use `GET /v1/explain/resolutions/{namespace}/{name}/execution` for persisted execution diagnostics of an explicit selector set.
 - Supported ENS cache misses execute through the configured Ethereum RPC provider at the selected stored snapshot and persist the trace/outcome before joining it. On-demand execution never targets provider `latest` independently of the selected stored snapshot.
@@ -119,7 +120,7 @@ Compact routes advertise only the knobs they own:
 | Route | `view` | `mode` | `meta` |
 | --- | --- | --- | --- |
 | `GET /v1/names` | `compact` only; `full` is reserved and rejected | none | `none`, `summary`, `full` |
-| `GET /v1/profiles/names/{name}` | full profile; selector set is server-derived from declared state, with bounded defaults when none exist | `declared`, `verified`, `both` | `none`, `summary`, `full` |
+| `GET /v1/profiles/names/{name}` | full profile; selector set is server-derived from declared state, with bounded defaults only for supported empty inventory | `declared`, `verified`, `both` | `none`, `summary`, `full` |
 | `GET /v1/names/{namespace}/{name}/children` | `compact`, `full` | none | `none`, `summary`, `full` |
 | `GET /v1/names/{namespace}/{name}/records` | `compact` only; `full` is reserved and rejected | `auto`, `declared`, `verified`, `both` | `none`, `summary`, `full` |
 | `GET /v1/names/{namespace}/{name}/roles` | `compact` only; `full` is reserved and rejected | none | `none`, `summary`, `full` |

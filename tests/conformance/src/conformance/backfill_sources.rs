@@ -168,7 +168,7 @@ pub(crate) async fn run_backfill_sources_auto_bootstrap() -> Result<()> {
         ReplayRoute {
             label: "auto-bootstrap-losing-resolver-after-replay",
             uri: format!(
-                "/v1/resolvers/{}/{}",
+                "/v1/resolvers/{}/{}/overview?meta=full",
                 corpus.resolver_chain_id, corpus.losing_resolver_address
             ),
         },
@@ -285,7 +285,7 @@ pub(crate) async fn run_backfill_source_family_existing_response_lock() -> Resul
         ReplayRoute {
             label: "existing-response-source-family-losing-resolver-after-replay",
             uri: format!(
-                "/v1/resolvers/{}/{}",
+                "/v1/resolvers/{}/{}/overview?meta=full",
                 corpus.resolver_chain_id, corpus.losing_resolver_address
             ),
         },

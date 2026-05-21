@@ -73,12 +73,6 @@
                 ),
             },
             OpenApiConformanceCoverage {
-                path: "/v1/addresses/{address}/names/count",
-                scope: OpenApiConformanceScope::HarnessOwner(
-                    "apps/api tests::names_collection address count; full first-party cutover still needs app call-site mapping",
-                ),
-            },
-            OpenApiConformanceCoverage {
                 path: "/v1/coverage/{namespace}/{name}",
                 scope: OpenApiConformanceScope::HarnessOwner(
                     "exact_name.rs::coverage_contract_*",
@@ -181,27 +175,9 @@
                 ),
             },
             OpenApiConformanceCoverage {
-                path: "/v1/resolutions/{namespace}/{name}",
+                path: "/v1/profiles/names/{name}",
                 scope: OpenApiConformanceScope::HarnessOwner(
-                    "resolution_and_permissions.rs::resolution_contract_*",
-                ),
-            },
-            OpenApiConformanceCoverage {
-                path: "/v1/resolve/{name}",
-                scope: OpenApiConformanceScope::HarnessOwner(
-                    "resolution_and_permissions.rs::resolution_inferred_route_*",
-                ),
-            },
-            OpenApiConformanceCoverage {
-                path: "/v1/resolve/{name}/records",
-                scope: OpenApiConformanceScope::HarnessOwner(
-                    "apps/api tests::records resolve records; full first-party cutover still needs app call-site mapping",
-                ),
-            },
-            OpenApiConformanceCoverage {
-                path: "/v1/resolvers/{chain_id}/{resolver_address}",
-                scope: OpenApiConformanceScope::HarnessOwner(
-                    "resolution_and_permissions.rs::resolver_overview_contract_*",
+                    "apps/api tests::resolution profile fast path; conformance replay smoke covers route stability",
                 ),
             },
             OpenApiConformanceCoverage {
@@ -1250,14 +1226,13 @@
             match parts.as_slice() {
                 ["v1", "names", namespace, name] => Some((namespace, name)),
                 ["v1", "coverage", namespace, name] => Some((namespace, name)),
-                ["v1", "resolutions", namespace, name] => Some((namespace, name)),
+                ["v1", "profiles", "names", name] => {
+                    Some((infer_conformance_resolution_namespace(name), name))
+                }
                 ["v1", "explain", "names", namespace, name, "surface-binding"]
                 | ["v1", "explain", "names", namespace, name, "authority-control"]
                 | ["v1", "explain", "resolutions", namespace, name, "execution"] => {
                     Some((namespace, name))
-                }
-                ["v1", "resolve", name] => {
-                    Some((infer_conformance_resolution_namespace(name), name))
                 }
                 _ => None,
             }

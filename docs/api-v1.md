@@ -47,7 +47,7 @@ Validation:
 - Positions that don't satisfy the requested `consistency` floor return `conflict`.
 - A `(chain_id, block_number, block_hash)` that isn't on stored canonical lineage, or that can't be reconciled across chains as one snapshot, returns `conflict`.
 - A coherent selector whose required projection rows aren't built yet returns `stale` rather than reading raw facts.
-- Persisted-readback routes return `stale` or `not_found` when matching output is absent. The exception is supported ENS verified selectors on `GET /v1/profiles/names/{name}` and `GET /v1/names/{namespace}/{name}/records`, which may execute on demand against the selected snapshot, persist the outcome, and return it. The profile route selects its records server-side from declared state and falls back to the bounded app profile set only when a supported declared inventory exists but has no declared selectors, gaps, or cache entries; missing or explicitly unsupported inventory does not use fallback records.
+- Persisted-readback routes return `stale` or `not_found` when matching output is absent. The exception is supported ENS verified selectors on `GET /v1/profiles/names/{name}` and `GET /v1/names/{namespace}/{name}/records`, which may execute on demand against the selected snapshot, persist the outcome, and return it. The profile route has no caller-selected `records` parameter: it selects all profile records server-side from declared inventory selectors, explicit gaps, and record-cache entries. It falls back to the bounded app profile set only when a supported declared inventory exists but has no declared selectors, gaps, or cache entries; missing, stale, or explicitly unsupported inventory does not use fallback records.
 - A current-state row may serve a later selected snapshot only when its stored chain context covers the same required chains and no newer canonical input exists for that row through the selected positions; otherwise `stale`.
 - Historical `at` and explicit `chain_positions` reads require projection or execution rows materialized for the exact selected positions. If rewind/rebuild has not produced that snapshot, the route returns `stale`; it never serves provider `latest`, raw facts, or newer current rows as a substitute.
 
@@ -80,7 +80,7 @@ Rules:
 - A `name_current` or `record_inventory_current` row whose stored position predates the selected snapshot stays eligible only when no newer canonical input exists for the same `logical_name_id` or `resource_id` through the selected positions, and the chain set matches.
 - `coverage` for `{namespace, name}` matches between `GET /v1/names/{namespace}/{name}` and `GET /v1/coverage/{namespace}/{name}`.
 - The two explain routes resolve the same `logical_name_id`, `resource_id`, `token_lineage_id`, `surface_binding_id`, and `binding_kind` as the exact-name route at the same snapshot.
-- `mode=verified|both`: persisted verified output joins only when its stored chain positions exactly match the selected snapshot. If matching output is missing for a supported ENS selector, the route executes against the selected snapshot, persists the outcome, and returns it. Verified execution never advances positions mid-request.
+- `mode=verified|both`: persisted verified output joins only when its stored chain positions exactly match the selected snapshot. `GET /v1/profiles/names/{name}` executes every server-selected profile record derived from declared state; it never accepts a caller-supplied selector subset. If matching output is missing for a supported ENS selector, the route executes against the selected snapshot, persists the outcome, and returns it. Verified execution never advances positions mid-request.
 - Without `at` or `chain_positions`, the snapshot is `consistency=head` at the latest stored checkpoint, and live execution targets that.
 - Live ENS verified resolution requires an Ethereum RPC provider on the API process. If unconfigured or unable to serve the selected block, supported selectors return `409 stale` with a configuration message; declared cache is not a fallback.
 - Handlers serve from projections and execution output. Raw facts and adapter-owned normalized events are never read directly.
@@ -338,11 +338,11 @@ For ENSv1 and Basenames, retained current-resolver record events may populate se
 
 ### `ResolverOverviewBindingItem`
 
-`logical_name_id`, `canonical_display_name`, `normalized_name`, `namehash`, `resource_id`, `surface_binding_id`, `binding_kind`. Ordered by `canonical_display_name`, then `logical_name_id`, then `surface_binding_id`.
+`namespace`, `name`, `normalized_name`, `namehash`. Used in compact resolver `nodes` and `aliases` arrays. `name` is the route-owned surface string for display/order, and `namehash` is the stable name identity key.
 
-### `ResolverOverviewBindingSummary`
+### `ResolverOverviewRoleItem`
 
-`status: "supported"`, `count`, `items`. Used for supported `declared_state.bindings` and `declared_state.aliases`. `count = items.length`. `aliases` narrows `items` to the `binding_kind=resolver_alias_path` subset.
+`subject`, `resource_count`, `permission_row_count`, `effective_powers`, `resource_ids`. Row-granular grant and revocation lineage stays on `GET /v1/resources/{resource_id}/permissions`.
 
 ## Route catalog
 
