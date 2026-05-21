@@ -1,0 +1,186 @@
+use std::{env, time::Duration};
+
+use anyhow::{Context, Result, bail};
+use reqwest::{StatusCode, header};
+use serde::Deserialize;
+use serde_json::{Value, json};
+
+use super::{rate_limit::CoinbaseSqlRateLimiter, rows::CoinbaseSqlLogRow};
+use crate::backfill::CoinbaseSqlBackfillConfig;
+
+const MAX_SQL_ATTEMPTS: usize = 5;
+
+#[derive(Clone)]
+pub(super) struct CoinbaseSqlClient {
+    url: String,
+    bearer_token: String,
+    http: reqwest::Client,
+    rate_limiter: CoinbaseSqlRateLimiter,
+}
+
+impl CoinbaseSqlClient {
+    pub(super) fn new(
+        url: &str,
+        bearer_token_env: &str,
+        config: &CoinbaseSqlBackfillConfig,
+    ) -> Result<Self> {
+        validate_coinbase_sql_url(url)?;
+        let bearer_token = env::var(bearer_token_env).with_context(|| {
+            format!("missing Coinbase SQL bearer token env var {bearer_token_env}")
+        })?;
+        if bearer_token.trim().is_empty() {
+            bail!("Coinbase SQL bearer token env var {bearer_token_env} is empty");
+        }
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(config.query_timeout_secs))
+            .build()
+            .context("failed to build Coinbase SQL HTTP client")?;
+        Ok(Self {
+            url: url.to_owned(),
+            bearer_token,
+            http,
+            rate_limiter: CoinbaseSqlRateLimiter::new(config.rate_limit_qps),
+        })
+    }
+
+    pub(super) async fn run_query(&self, sql: &str) -> Result<CoinbaseSqlQueryResponse> {
+        let mut retry_count = 0usize;
+        for attempt in 0..MAX_SQL_ATTEMPTS {
+            self.rate_limiter.wait().await;
+            let response = self
+                .http
+                .post(&self.url)
+                .bearer_auth(&self.bearer_token)
+                .header(header::CONTENT_TYPE, "application/json")
+                .json(&json!({ "sql": sql }))
+                .send()
+                .await;
+
+            match response {
+                Ok(response) if response.status().is_success() => {
+                    let body = response
+                        .json::<CoinbaseSqlRunResponse>()
+                        .await
+                        .context("failed to decode Coinbase SQL response")?;
+                    let rows = body
+                        .result
+                        .into_iter()
+                        .map(CoinbaseSqlLogRow::from_value)
+                        .collect::<Result<Vec<_>>>()?;
+                    return Ok(CoinbaseSqlQueryResponse { rows, retry_count });
+                }
+                Ok(response)
+                    if should_retry_status(response.status()) && attempt + 1 < MAX_SQL_ATTEMPTS =>
+                {
+                    retry_count += 1;
+                    sleep_before_retry(response.headers(), attempt).await;
+                }
+                Ok(response) => {
+                    let status = response.status();
+                    let body = response.text().await.unwrap_or_default();
+                    bail!("Coinbase SQL request failed with status {status}: {body}");
+                }
+                Err(error) if should_retry_error(&error) && attempt + 1 < MAX_SQL_ATTEMPTS => {
+                    retry_count += 1;
+                    sleep_backoff(attempt).await;
+                }
+                Err(error) => {
+                    return Err(error).context("Coinbase SQL request failed");
+                }
+            }
+        }
+
+        bail!("Coinbase SQL request exhausted retry attempts")
+    }
+}
+
+fn validate_coinbase_sql_url(url: &str) -> Result<()> {
+    let parsed = reqwest::Url::parse(url)
+        .with_context(|| format!("failed to parse Coinbase SQL URL {url}"))?;
+    if parsed.scheme() != "https" {
+        bail!("Coinbase SQL URL must use https://; refusing to send bearer token to {url}");
+    }
+
+    Ok(())
+}
+
+pub(super) struct CoinbaseSqlQueryResponse {
+    pub(super) rows: Vec<CoinbaseSqlLogRow>,
+    pub(super) retry_count: usize,
+}
+
+#[derive(Deserialize)]
+struct CoinbaseSqlRunResponse {
+    #[serde(default)]
+    result: Vec<Value>,
+}
+
+fn should_retry_status(status: StatusCode) -> bool {
+    status == StatusCode::TOO_MANY_REQUESTS
+        || status == StatusCode::INTERNAL_SERVER_ERROR
+        || status == StatusCode::BAD_GATEWAY
+        || status == StatusCode::SERVICE_UNAVAILABLE
+        || status == StatusCode::GATEWAY_TIMEOUT
+}
+
+fn should_retry_error(error: &reqwest::Error) -> bool {
+    error.is_timeout() || error.is_connect() || error.is_request()
+}
+
+async fn sleep_before_retry(headers: &header::HeaderMap, attempt: usize) {
+    if let Some(delay) = retry_after_delay(headers) {
+        tokio::time::sleep(delay).await;
+        return;
+    }
+    sleep_backoff(attempt).await;
+}
+
+async fn sleep_backoff(attempt: usize) {
+    let millis = 250_u64.saturating_mul(1_u64 << attempt.min(4));
+    tokio::time::sleep(Duration::from_millis(millis)).await;
+}
+
+fn retry_after_delay(headers: &header::HeaderMap) -> Option<Duration> {
+    headers
+        .get(header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_secs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backfill::{
+        CoinbaseSqlValidationMode, DEFAULT_COINBASE_SQL_INITIAL_WINDOW_BLOCKS,
+        DEFAULT_COINBASE_SQL_MAX_WINDOW_BLOCKS, DEFAULT_COINBASE_SQL_PAGE_LIMIT,
+        DEFAULT_COINBASE_SQL_QUERY_CHAR_LIMIT, DEFAULT_COINBASE_SQL_QUERY_TIMEOUT_SECS,
+        DEFAULT_COINBASE_SQL_RATE_LIMIT_QPS,
+    };
+
+    #[test]
+    fn client_rejects_non_https_url_before_reading_bearer_token() {
+        let error = match CoinbaseSqlClient::new(
+            "http://127.0.0.1:8080/sql",
+            "BIGNAME_TEST_MISSING_COINBASE_TOKEN",
+            &test_config(),
+        ) {
+            Ok(_) => panic!("Coinbase SQL client must reject non-HTTPS URLs"),
+            Err(error) => error,
+        };
+
+        assert!(format!("{error:#}").contains("must use https://"));
+    }
+
+    fn test_config() -> CoinbaseSqlBackfillConfig {
+        CoinbaseSqlBackfillConfig {
+            initial_window_blocks: DEFAULT_COINBASE_SQL_INITIAL_WINDOW_BLOCKS,
+            max_window_blocks: DEFAULT_COINBASE_SQL_MAX_WINDOW_BLOCKS,
+            page_limit: DEFAULT_COINBASE_SQL_PAGE_LIMIT,
+            sql_char_limit: DEFAULT_COINBASE_SQL_QUERY_CHAR_LIMIT,
+            query_timeout_secs: DEFAULT_COINBASE_SQL_QUERY_TIMEOUT_SECS,
+            rate_limit_qps: DEFAULT_COINBASE_SQL_RATE_LIMIT_QPS,
+            validation_mode: CoinbaseSqlValidationMode::Full,
+        }
+    }
+}

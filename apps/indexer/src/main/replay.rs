@@ -126,6 +126,19 @@ mod tests {
             manifests_root: PathBuf::from("manifests/mainnet"),
             chain_rpc_urls: Vec::new(),
             chain_reth_db_sources: Vec::new(),
+            backfill_source: crate::backfill::BackfillSourceKind::HashPinned,
+            coinbase_sql_urls: Vec::new(),
+            coinbase_sql_bearer_token_env: crate::backfill::DEFAULT_COINBASE_SQL_BEARER_TOKEN_ENV
+                .to_owned(),
+            coinbase_sql_initial_window_blocks:
+                crate::backfill::DEFAULT_COINBASE_SQL_INITIAL_WINDOW_BLOCKS,
+            coinbase_sql_max_window_blocks: crate::backfill::DEFAULT_COINBASE_SQL_MAX_WINDOW_BLOCKS,
+            coinbase_sql_page_limit: crate::backfill::DEFAULT_COINBASE_SQL_PAGE_LIMIT,
+            coinbase_sql_query_char_limit: crate::backfill::DEFAULT_COINBASE_SQL_QUERY_CHAR_LIMIT,
+            coinbase_sql_query_timeout_secs:
+                crate::backfill::DEFAULT_COINBASE_SQL_QUERY_TIMEOUT_SECS,
+            coinbase_sql_rate_limit_qps: crate::backfill::DEFAULT_COINBASE_SQL_RATE_LIMIT_QPS,
+            coinbase_sql_validation_mode: crate::backfill::CoinbaseSqlValidationMode::Full,
             chain: "ethereum-mainnet".to_owned(),
             from_block: 1,
             to_block: 2,

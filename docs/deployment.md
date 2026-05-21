@@ -162,6 +162,30 @@ each materialized push with
 split before transaction and receipt fetch/persist work. The older
 `BIGNAME_INDEXER_HASH_PINNED_BACKFILL_MAX_LOGS_PER_RANGE` name is still accepted
 as a fallback.
+
+Manual Base historical backfills can select Coinbase CDP SQL with
+`BIGNAME_INDEXER_BACKFILL_SOURCE=coinbase-sql` or allow Base-only automatic
+selection with `BIGNAME_INDEXER_BACKFILL_SOURCE=auto` plus
+`BIGNAME_INDEXER_COINBASE_SQL_URLS=base-mainnet=default`. The `default` URL is
+the CDP SQL `/run` endpoint; custom URLs must use `https://` because the runner
+sends a bearer token. This source is backfill-only and finite-range-only:
+it is unavailable to `run` live following, `ops-catchup`, repair, chain-head
+promotion, and checkpoint promotion. Operators must still configure
+`BIGNAME_INDEXER_CHAIN_RPC_URLS` or `BIGNAME_INDEXER_CHAIN_RETH_DB_SOURCES` for
+the same Base chain so the validation provider owns block hashes, headers,
+canonicality evidence, code observations, and transaction/receipt fills. The
+Coinbase SQL runner respects `BIGNAME_INDEXER_COINBASE_SQL_PAGE_LIMIT`,
+`BIGNAME_INDEXER_COINBASE_SQL_QUERY_CHAR_LIMIT`,
+`BIGNAME_INDEXER_COINBASE_SQL_QUERY_TIMEOUT_SECS`, and
+`BIGNAME_INDEXER_COINBASE_SQL_RATE_LIMIT_QPS`; row, query length, and timeout
+defaults match the [CDP SQL REST API reference](https://docs.cdp.coinbase.com/api-reference/v2/rest-api/onchain-data/run-sql-query),
+while the QPS default is a conservative per-process guardrail and remains
+operator-configurable if product limits change. The default validation mode is
+`full`, so the validation provider fetches the same address/topic log span and
+fails the range if Coinbase SQL omitted or added a selected log identity.
+`sample` is accepted for CLI compatibility with the intended rollout shape, but
+this first slice treats it conservatively as the same completeness check.
+
 Automatic normalized-event replay catch-up keeps its block cursor, but also caps
 each replay chunk with `BIGNAME_INDEXER_NORMALIZED_REPLAY_CATCHUP_MAX_LOGS_PER_CHUNK`
 so sparse eras can move in large block jumps while dense spans are bounded by

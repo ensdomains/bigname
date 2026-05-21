@@ -1614,6 +1614,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "reqwest 0.13.2",
  "reth-ethereum",
  "serde",
  "serde_json",
