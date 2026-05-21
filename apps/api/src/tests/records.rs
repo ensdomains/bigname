@@ -192,7 +192,7 @@ async fn get_name_records_maps_declared_text_avatar_to_avatar_field() -> Result<
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolve/alice.eth/records?avatar=true&mode=declared")
+                .uri("/v1/names/ens/alice.eth/records?avatar=true&mode=declared")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -297,7 +297,7 @@ async fn get_resolve_records_infers_basenames_namespace() -> Result<()> {
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolve/Alice.Base.eth/records?texts=com.twitter&known_text_keys=true&mode=declared")
+                .uri("/v1/names/basenames/alice.base.eth/records?texts=com.twitter&known_text_keys=true&mode=declared")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -327,7 +327,7 @@ async fn get_resolve_records_rejects_unnormalizable_name() -> Result<()> {
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolve/bad%20name.eth/records")
+                .uri("/v1/profiles/names/bad%20name.eth")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -380,7 +380,7 @@ async fn get_resolve_records_defaults_auto_to_declared_all_available_records() -
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolve/alice.eth/records")
+                .uri("/v1/names/ens/alice.eth/records?mode=auto")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -506,7 +506,7 @@ async fn get_resolve_records_returns_stale_when_default_snapshot_outruns_project
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolve/alice.eth/records")
+                .uri("/v1/names/ens/alice.eth/records?mode=auto")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -596,7 +596,7 @@ async fn get_resolve_records_auto_uses_verified_for_pending_resolver_profile() -
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolve/alice.eth/records?include=coins&coin_types=60")
+                .uri("/v1/names/ens/alice.eth/records?include=coins&coin_types=60&mode=auto")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -740,7 +740,7 @@ async fn get_resolve_records_auto_uses_verified_when_declared_inventory_has_no_s
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolve/alice.eth/records")
+                .uri("/v1/names/ens/alice.eth/records?mode=auto")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -847,7 +847,7 @@ async fn get_resolve_records_auto_uses_verified_when_declared_cache_value_is_unr
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolve/alice.eth/records?include=avatar")
+                .uri("/v1/names/ens/alice.eth/records?include=avatar&mode=auto")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -970,7 +970,7 @@ async fn get_resolve_records_auto_probes_basic_verified_records_without_declared
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolve/alice.eth/records")
+                .uri("/v1/names/ens/alice.eth/records?mode=auto")
                 .body(Body::empty())
                 .expect("request must build"),
         )

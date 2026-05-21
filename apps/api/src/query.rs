@@ -78,16 +78,6 @@ pub(crate) struct NamesQuery {
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
-pub(crate) struct AddressNamesCountQuery {
-    pub(crate) namespace: Option<String>,
-    pub(crate) relation: Option<String>,
-    pub(crate) prefix: Option<String>,
-    pub(crate) contains: Option<String>,
-    pub(crate) contains_nocase: Option<String>,
-    pub(crate) resolver: Option<String>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
 pub(crate) struct AddressHistoryQuery {
     pub(crate) namespace: Option<String>,
     pub(crate) relation: Option<String>,
@@ -106,18 +96,13 @@ pub(crate) struct ExactNameSnapshotQuery {
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
-pub(crate) struct ResolutionQuery {
+pub(crate) struct NameProfileQuery {
     pub(crate) at: Option<String>,
     pub(crate) chain_positions: Option<String>,
     pub(crate) consistency: Option<String>,
     pub(crate) mode: Option<String>,
     pub(crate) records: Option<String>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
-pub(crate) struct InferredResolutionQuery {
-    pub(crate) mode: Option<String>,
-    pub(crate) records: Option<String>,
+    pub(crate) meta: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]

@@ -83,7 +83,7 @@ async fn get_resolution_execution_explain_returns_persisted_verified_state_and_r
     let resolution_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=verified&records=text:com.twitter,addr:60")
+                .uri("/v1/profiles/names/alice.eth?mode=verified&records=text:com.twitter,addr:60&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -336,7 +336,7 @@ async fn get_resolution_execution_explain_reads_persisted_alias_only_avatar_answ
     let resolution_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=verified&records=avatar,text:com.twitter")
+                .uri("/v1/profiles/names/alice.eth?mode=verified&records=avatar,text:com.twitter&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -1624,7 +1624,7 @@ async fn get_resolution_inferred_route_infers_base_eth_as_ens() -> Result<()> {
     let inferred_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolve/base.eth")
+                .uri("/v1/profiles/names/base.eth?mode=declared&meta=full")
                 .body(Body::empty())
                 .expect("inferred request must build"),
         )
@@ -1633,7 +1633,7 @@ async fn get_resolution_inferred_route_infers_base_eth_as_ens() -> Result<()> {
     let canonical_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/base.eth")
+                .uri("/v1/profiles/names/base.eth?mode=declared&meta=full")
                 .body(Body::empty())
                 .expect("canonical request must build"),
         )
@@ -1677,7 +1677,7 @@ async fn get_resolution_inferred_route_infers_non_base_eth_name_as_ens() -> Resu
     let inferred_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolve/Alice.eth")
+                .uri("/v1/profiles/names/Alice.eth?mode=declared&meta=full")
                 .body(Body::empty())
                 .expect("inferred request must build"),
         )
@@ -1686,7 +1686,7 @@ async fn get_resolution_inferred_route_infers_non_base_eth_name_as_ens() -> Resu
     let canonical_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth")
+                .uri("/v1/profiles/names/alice.eth?mode=declared&meta=full")
                 .body(Body::empty())
                 .expect("canonical request must build"),
         )
@@ -1716,7 +1716,7 @@ async fn get_resolution_inferred_route_rejects_unnormalizable_name() -> Result<(
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolve/bad%20name.eth")
+                .uri("/v1/profiles/names/bad%20name.eth?mode=declared&meta=full")
                 .body(Body::empty())
                 .expect("inferred invalid-name request must build"),
         )
@@ -1752,7 +1752,7 @@ async fn get_resolution_inferred_route_infers_child_base_eth_as_basenames() -> R
     let inferred_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolve/alice.base.eth")
+                .uri("/v1/profiles/names/alice.base.eth?mode=declared&meta=full")
                 .body(Body::empty())
                 .expect("inferred request must build"),
         )
@@ -1761,7 +1761,7 @@ async fn get_resolution_inferred_route_infers_child_base_eth_as_basenames() -> R
     let canonical_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/basenames/alice.base.eth")
+                .uri("/v1/profiles/names/alice.base.eth?mode=declared&meta=full")
                 .body(Body::empty())
                 .expect("canonical request must build"),
         )
@@ -1866,47 +1866,17 @@ async fn get_resolution_inferred_basenames_verified_does_not_fallback_to_ens() -
     )
     .await?;
 
-    let canonical_ens_response = app_router(database.app_state())
-        .oneshot(
-            Request::builder()
-                .uri("/v1/resolutions/ens/alice.base.eth?mode=verified&records=addr:60")
-                .body(Body::empty())
-                .expect("canonical ENS request must build"),
-        )
-        .await
-        .context("canonical ENS alice.base.eth resolution request failed")?;
     let inferred_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolve/alice.base.eth?mode=verified&records=addr:60")
+                .uri("/v1/profiles/names/alice.base.eth?mode=verified&records=addr:60&meta=full")
                 .body(Body::empty())
                 .expect("inferred request must build"),
         )
         .await
         .context("inferred alice.base.eth verified resolution request failed")?;
 
-    assert_eq!(canonical_ens_response.status(), StatusCode::OK);
     assert_eq!(inferred_response.status(), StatusCode::CONFLICT);
-
-    let canonical_ens_payload: ResolutionResponse = read_json(canonical_ens_response).await?;
-    assert_eq!(
-        canonical_ens_payload.verified_state,
-        Some(json!({
-            "verified_queries": [
-                {
-                    "record_key": "addr:60",
-                    "status": "success",
-                    "value": {
-                        "coin_type": "60",
-                        "value": "0x00000000000000000000000000000000000000aa"
-                    },
-                    "provenance": {
-                        "execution_trace_id": execution_trace_id.to_string()
-                    }
-                }
-            ]
-        }))
-    );
 
     let inferred_error: ErrorResponse = read_json(inferred_response).await?;
     assert_eq!(inferred_error.error.code, "stale");
@@ -2472,7 +2442,7 @@ async fn assert_basenames_deferred_verified_path_case_stays_selector_local(
     let declared_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/basenames/alice.base.eth?mode=declared&records=text:com.twitter,addr:60")
+                .uri("/v1/profiles/names/alice.base.eth?mode=declared&records=text:com.twitter,addr:60&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -2663,7 +2633,7 @@ async fn assert_basenames_deferred_verified_path_case_stays_selector_local(
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/basenames/alice.base.eth?mode=both&records=text:com.twitter,addr:60")
+                .uri("/v1/profiles/names/alice.base.eth?mode=both&records=text:com.twitter,addr:60&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -2788,7 +2758,7 @@ async fn get_resolution_both_mode_reads_persisted_basenames_transport_direct_ans
         .oneshot(
             Request::builder()
                 .uri(
-                    "/v1/resolutions/basenames/alice.base.eth?mode=declared&records=text:com.twitter,addr:60",
+                    "/v1/profiles/names/alice.base.eth?mode=declared&records=text:com.twitter,addr:60&meta=full",
                 )
                 .body(Body::empty())
                 .expect("request must build"),
@@ -2964,7 +2934,7 @@ async fn get_resolution_both_mode_reads_persisted_basenames_transport_direct_ans
         .oneshot(
             Request::builder()
                 .uri(
-                    "/v1/resolutions/basenames/alice.base.eth?mode=both&records=text:com.twitter,addr:60",
+                    "/v1/profiles/names/alice.base.eth?mode=both&records=text:com.twitter,addr:60&meta=full",
                 )
                 .body(Body::empty())
                 .expect("request must build"),
@@ -3218,7 +3188,7 @@ async fn get_resolution_keeps_basenames_transport_explicit_without_ethereum_posi
     let declared_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/basenames/alice.base.eth?mode=declared&records=text:com.twitter,addr:60")
+                .uri("/v1/profiles/names/alice.base.eth?mode=declared&records=text:com.twitter,addr:60&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -3418,7 +3388,7 @@ async fn get_resolution_keeps_basenames_transport_explicit_without_ethereum_posi
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/basenames/alice.base.eth?mode=both&records=text:com.twitter,addr:60")
+                .uri("/v1/profiles/names/alice.base.eth?mode=both&records=text:com.twitter,addr:60&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -3494,7 +3464,7 @@ async fn get_resolution_keeps_basenames_transport_explicit_without_projected_top
     let declared_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/basenames/alice.base.eth?mode=declared&records=text:com.twitter,addr:60")
+                .uri("/v1/profiles/names/alice.base.eth?mode=declared&records=text:com.twitter,addr:60&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -3665,7 +3635,7 @@ async fn get_resolution_keeps_basenames_transport_explicit_without_projected_top
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/basenames/alice.base.eth?mode=both&records=text:com.twitter,addr:60")
+                .uri("/v1/profiles/names/alice.base.eth?mode=both&records=text:com.twitter,addr:60&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -3837,7 +3807,7 @@ async fn get_resolution_keeps_out_of_class_basenames_transport_explicit() -> Res
     let declared_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/basenames/alice.base.eth?mode=declared&records=text:com.twitter,addr:60")
+                .uri("/v1/profiles/names/alice.base.eth?mode=declared&records=text:com.twitter,addr:60&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -3912,7 +3882,7 @@ async fn get_resolution_keeps_out_of_class_basenames_transport_explicit() -> Res
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/basenames/alice.base.eth?mode=both&records=text:com.twitter,addr:60")
+                .uri("/v1/profiles/names/alice.base.eth?mode=both&records=text:com.twitter,addr:60&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -4065,7 +4035,7 @@ async fn get_resolution_ensv2_sepolia_dev_verified_and_explain_stay_unsupported(
             .oneshot(
                 Request::builder()
                     .uri(format!(
-                        "/v1/resolutions/ens/{normalized_name}?mode=verified&records=addr:60&chain_positions={chain_positions_query}"
+                        "/v1/profiles/names/{normalized_name}?mode=verified&records=addr:60&chain_positions={chain_positions_query}&meta=full"
                     ))
                     .body(Body::empty())
                     .expect("ENSv2 Sepolia verified request must build"),
@@ -4171,7 +4141,7 @@ async fn get_resolution_ensv2_sepolia_dev_declared_record_sections_stay_unsuppor
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v1/resolutions/ens/{normalized_name}?mode=declared&records=addr:60,text:com.twitter&chain_positions={chain_positions_query}"
+                    "/v1/profiles/names/{normalized_name}?mode=declared&records=addr:60,text:com.twitter&chain_positions={chain_positions_query}&meta=full"
                 ))
                 .body(Body::empty())
                 .expect("ENSv2 Sepolia declared request must build"),
@@ -4283,7 +4253,7 @@ async fn get_resolution_verified_state_uses_supported_persisted_answers_and_pres
     let verified_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=verified&records=text:com.twitter,addr:60")
+                .uri("/v1/profiles/names/alice.eth?mode=verified&records=text:com.twitter,addr:60&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -4292,7 +4262,7 @@ async fn get_resolution_verified_state_uses_supported_persisted_answers_and_pres
     let both_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=both&records=text:com.twitter,addr:60")
+                .uri("/v1/profiles/names/alice.eth?mode=both&records=text:com.twitter,addr:60&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -4416,7 +4386,7 @@ async fn get_resolution_verified_modes_return_stale_when_persisted_outcome_omits
             .oneshot(
                 Request::builder()
                     .uri(format!(
-                        "/v1/resolutions/ens/alice.eth?mode={mode}&records=text:com.twitter,addr:60"
+                        "/v1/profiles/names/alice.eth?mode={mode}&records=text:com.twitter,addr:60&meta=full"
                     ))
                     .body(Body::empty())
                     .expect("request must build"),
@@ -4520,7 +4490,7 @@ async fn get_resolution_verified_state_reads_avatar_only_persisted_answer() -> R
             .oneshot(
                 Request::builder()
                     .uri(format!(
-                        "/v1/resolutions/ens/alice.eth?mode={mode}&records=avatar"
+                        "/v1/profiles/names/alice.eth?mode={mode}&records=avatar&meta=full"
                     ))
                     .body(Body::empty())
                     .expect("avatar-only request must build"),
@@ -4621,7 +4591,7 @@ async fn get_resolution_verified_modes_keep_missing_avatar_output_stale_for_sele
                 .oneshot(
                     Request::builder()
                         .uri(format!(
-                            "/v1/resolutions/ens/alice.eth?mode={mode}&records={records}"
+                            "/v1/profiles/names/alice.eth?mode={mode}&records={records}&meta=full"
                         ))
                         .body(Body::empty())
                         .expect("missing-avatar request must build"),
@@ -4727,7 +4697,7 @@ async fn get_resolution_both_mode_reads_persisted_alias_only_avatar_answers_for_
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=both&records=avatar,text:com.twitter")
+                .uri("/v1/profiles/names/alice.eth?mode=both&records=avatar,text:com.twitter&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -4885,7 +4855,7 @@ async fn get_resolution_verified_state_surfaces_persisted_avatar_answers_and_pre
     let verified_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=verified&records=avatar,text:com.twitter,contenthash,addr:60")
+                .uri("/v1/profiles/names/alice.eth?mode=verified&records=avatar,text:com.twitter,contenthash,addr:60&meta=full")
                 .body(Body::empty())
                 .expect("verified request must build"),
         )
@@ -4894,7 +4864,7 @@ async fn get_resolution_verified_state_surfaces_persisted_avatar_answers_and_pre
     let both_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=both&records=avatar,text:com.twitter,contenthash,addr:60")
+                .uri("/v1/profiles/names/alice.eth?mode=both&records=avatar,text:com.twitter,contenthash,addr:60&meta=full")
                 .body(Body::empty())
                 .expect("mixed request must build"),
         )
@@ -5118,7 +5088,7 @@ async fn get_resolution_execution_explain_surfaces_persisted_avatar_answers_and_
     let resolution_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=verified&records=avatar,text:com.twitter,contenthash,addr:60")
+                .uri("/v1/profiles/names/alice.eth?mode=verified&records=avatar,text:com.twitter,contenthash,addr:60&meta=full")
                 .body(Body::empty())
                 .expect("resolution request must build"),
         )
@@ -5385,7 +5355,7 @@ async fn get_resolution_mode_parsing_populates_expected_sections() -> Result<()>
     let default_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth")
+                .uri("/v1/profiles/names/alice.eth?meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -5394,7 +5364,7 @@ async fn get_resolution_mode_parsing_populates_expected_sections() -> Result<()>
     let declared_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=declared&records=text")
+                .uri("/v1/profiles/names/alice.eth?mode=declared&records=text&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -5403,7 +5373,7 @@ async fn get_resolution_mode_parsing_populates_expected_sections() -> Result<()>
     let verified_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=verified&records=text,addr:60")
+                .uri("/v1/profiles/names/alice.eth?mode=verified&records=text,addr:60&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -5412,7 +5382,7 @@ async fn get_resolution_mode_parsing_populates_expected_sections() -> Result<()>
     let both_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=both&records=text")
+                .uri("/v1/profiles/names/alice.eth?mode=both&records=text&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -5430,7 +5400,10 @@ async fn get_resolution_mode_parsing_populates_expected_sections() -> Result<()>
     let both_payload: ResolutionResponse = read_json(both_response).await?;
 
     assert!(default_payload.declared_state.is_some());
-    assert_eq!(default_payload.verified_state, None);
+    assert_eq!(
+        default_payload.verified_state,
+        Some(json!({ "verified_queries": [] }))
+    );
     assert!(declared_payload.declared_state.is_some());
     assert_eq!(declared_payload.verified_state, None);
     assert_eq!(verified_error.error.code, "stale");
@@ -5507,7 +5480,7 @@ async fn get_resolution_verified_modes_keep_missing_supported_output_stale_for_s
                 .oneshot(
                     Request::builder()
                         .uri(format!(
-                            "/v1/resolutions/ens/alice.eth?mode={mode}&records=text:com.twitter,addr:60{selector_query}"
+                            "/v1/profiles/names/alice.eth?mode={mode}&records=text:com.twitter,addr:60{selector_query}&meta=full"
                         ))
                         .body(Body::empty())
                         .expect("request must build"),
@@ -5628,7 +5601,7 @@ async fn get_resolution_execution_explain_supports_projected_wildcard_topology()
     let resolution_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=verified&records=addr:60")
+                .uri("/v1/profiles/names/alice.eth?mode=verified&records=addr:60&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -5791,7 +5764,7 @@ async fn get_resolution_both_mode_preserves_projected_topology_for_deferred_ance
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=both&records=text:com.twitter")
+                .uri("/v1/profiles/names/alice.eth?mode=both&records=text:com.twitter&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -5937,7 +5910,7 @@ async fn get_resolution_both_mode_preserves_projected_transport_for_deferred_tra
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=both&records=addr:60")
+                .uri("/v1/profiles/names/alice.eth?mode=both&records=addr:60&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -6208,47 +6181,6 @@ async fn get_resolution_execution_explain_returns_not_found_for_deferred_transpo
     database.cleanup().await?;
     Ok(())
 }
-
-#[tokio::test]
-async fn get_resolution_requires_records_for_verified_modes() -> Result<()> {
-    let database = TestDatabase::new_with_schemas(false, true).await?;
-
-    let verified_response = app_router(database.app_state())
-        .oneshot(
-            Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=verified")
-                .body(Body::empty())
-                .expect("request must build"),
-        )
-        .await
-        .context("verified resolution request failed")?;
-    let both_response = app_router(database.app_state())
-        .oneshot(
-            Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=both")
-                .body(Body::empty())
-                .expect("request must build"),
-        )
-        .await
-        .context("mixed resolution request failed")?;
-
-    assert_eq!(verified_response.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(both_response.status(), StatusCode::BAD_REQUEST);
-
-    let verified_payload: ErrorResponse = read_json(verified_response).await?;
-    let both_payload: ErrorResponse = read_json(both_response).await?;
-    assert_eq!(verified_payload.error.code, "invalid_input");
-    assert_eq!(both_payload.error.code, "invalid_input");
-    assert_eq!(
-        verified_payload.error.message,
-        "records is required when mode is verified or both"
-    );
-    assert_eq!(both_payload.error.message, verified_payload.error.message);
-
-    database.cleanup().await?;
-    Ok(())
-}
-
 #[tokio::test]
 async fn get_resolution_rejects_duplicate_records_for_verified_modes() -> Result<()> {
     let database = TestDatabase::new_with_schemas(false, true).await?;
@@ -6256,7 +6188,7 @@ async fn get_resolution_rejects_duplicate_records_for_verified_modes() -> Result
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=verified&records=text,text")
+                .uri("/v1/profiles/names/alice.eth?mode=verified&records=text,text&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -6284,7 +6216,7 @@ async fn get_resolution_rejects_malformed_records() -> Result<()> {
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=declared&records=:avatar")
+                .uri("/v1/profiles/names/alice.eth?mode=declared&records=:avatar&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -6345,7 +6277,7 @@ async fn get_resolution_rejects_invalid_snapshot_selectors_as_invalid_input() ->
             .oneshot(
                 Request::builder()
                     .uri(format!(
-                        "/v1/resolutions/ens/alice.eth?mode=declared&records=text:com.twitter&{query}"
+                        "/v1/profiles/names/alice.eth?mode=declared&records=text:com.twitter&{query}&meta=full"
                     ))
                     .body(Body::empty())
                     .expect("request must build"),
@@ -6377,7 +6309,7 @@ async fn get_resolution_returns_not_found_when_exact_surface_projection_is_missi
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=declared&records=text:com.twitter")
+                .uri("/v1/profiles/names/alice.eth?mode=declared&records=text:com.twitter&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -6435,7 +6367,7 @@ async fn get_resolution_returns_supported_topology_for_direct_ens_binding() -> R
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth")
+                .uri("/v1/profiles/names/alice.eth?mode=declared&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -6698,7 +6630,7 @@ async fn get_resolution_preserves_worker_record_inventory_boundary_pointer() -> 
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth")
+                .uri("/v1/profiles/names/alice.eth?mode=declared&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -6779,7 +6711,7 @@ async fn get_resolution_returns_unsupported_record_inventory_sections_when_proje
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth")
+                .uri("/v1/profiles/names/alice.eth?mode=declared&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -6907,7 +6839,7 @@ async fn get_resolution_dynamic_resolver_publicresolver_profile_reads_supported_
     let resolution_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=both&records=avatar,text:com.twitter,addr:60")
+                .uri("/v1/profiles/names/alice.eth?mode=both&records=avatar,text:com.twitter,addr:60&meta=full")
                 .body(Body::empty())
                 .expect("resolution request must build"),
         )
@@ -7100,7 +7032,7 @@ async fn get_resolution_dynamic_resolver_profile_non_graduation_keeps_ensv1_reco
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=declared&records=addr:60,text:com.twitter,contenthash")
+                .uri("/v1/profiles/names/alice.eth?mode=declared&records=addr:60,text:com.twitter,contenthash&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -7267,7 +7199,7 @@ async fn get_resolution_dynamic_resolver_pending_profile_returns_observed_addr_w
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=declared&records=addr:60,text:com.twitter")
+                .uri("/v1/profiles/names/alice.eth?mode=declared&records=addr:60,text:com.twitter&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -7386,7 +7318,7 @@ async fn get_resolution_dynamic_resolver_pending_profile_keeps_missing_verified_
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=both&records=addr:60,text:com.twitter,contenthash")
+                .uri("/v1/profiles/names/alice.eth?mode=both&records=addr:60,text:com.twitter,contenthash&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -7487,7 +7419,7 @@ async fn get_resolution_dynamic_resolver_pending_profile_reads_persisted_verifie
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=both&records=addr:60")
+                .uri("/v1/profiles/names/alice.eth?mode=both&records=addr:60&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -7588,7 +7520,7 @@ async fn get_resolution_dynamic_resolver_l2resolver_profile_reads_supported_base
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/basenames/alice.base.eth?mode=declared&records=text")
+                .uri("/v1/profiles/names/alice.base.eth?mode=declared&records=text&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -7751,7 +7683,7 @@ async fn get_resolution_dynamic_resolver_profile_non_graduation_keeps_basenames_
             .oneshot(
                 Request::builder()
                     .uri(format!(
-                        "/v1/resolutions/basenames/{normalized_name}?mode=declared&records=addr:60,text:com.twitter"
+                        "/v1/profiles/names/{normalized_name}?mode=declared&records=addr:60,text:com.twitter&meta=full"
                     ))
                     .body(Body::empty())
                     .expect("request must build"),
@@ -7866,7 +7798,7 @@ async fn get_resolution_declared_records_narrow_record_cache_in_request_order() 
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=declared&records=text:com.twitter,addr:60,avatar")
+                .uri("/v1/profiles/names/alice.eth?mode=declared&records=text:com.twitter,addr:60,avatar&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -7991,7 +7923,7 @@ async fn get_resolution_declared_records_reuse_inventory_projection_for_later_ch
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=declared&records=addr:60")
+                .uri("/v1/profiles/names/alice.eth?mode=declared&records=addr:60&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -8162,7 +8094,7 @@ async fn get_resolution_declared_records_return_not_found_cache_entry_for_explic
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=declared&records=contenthash")
+                .uri("/v1/profiles/names/alice.eth?mode=declared&records=contenthash&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -8252,7 +8184,7 @@ async fn get_resolution_declared_records_synthesize_unsupported_family_entries()
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=declared&records=abi:json,addr:60,pubkey,text")
+                .uri("/v1/profiles/names/alice.eth?mode=declared&records=abi:json,addr:60,pubkey,text&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -8347,7 +8279,7 @@ async fn get_resolution_returns_unsupported_topology_for_non_direct_bindings() -
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth")
+                .uri("/v1/profiles/names/alice.eth?mode=declared&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -8425,7 +8357,7 @@ async fn get_resolution_supported_topology_uses_terminal_null_hop_when_no_resolv
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=declared&records=addr:60")
+                .uri("/v1/profiles/names/alice.eth?mode=declared&records=addr:60&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -8624,7 +8556,7 @@ async fn get_resolution_basenames_no_declared_resolver_addr60_stays_not_found_wi
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/basenames/no-resolver.base.eth?mode=declared&records=addr:60")
+                .uri("/v1/profiles/names/no-resolver.base.eth?mode=declared&records=addr:60&meta=full")
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -8706,7 +8638,7 @@ async fn get_resolution_reuses_exact_name_envelope_fields() -> Result<()> {
     let resolution_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/resolutions/ens/alice.eth?mode=declared&records=text,addr:60")
+                .uri("/v1/profiles/names/alice.eth?mode=declared&records=text,addr:60")
                 .body(Body::empty())
                 .expect("request must build"),
         )

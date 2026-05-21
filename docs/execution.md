@@ -27,7 +27,7 @@ For Basenames on the shipped mainnet profile, the entrypoint is active `basename
 
 ### On-demand execution
 
-`GET /v1/resolutions/{namespace}/{name}` and `GET /v1/resolve/{name}` with `mode=verified` or `mode=both` are cache-or-live-execute reads for supported Universal Resolver selectors.[^v1-iur-l44][^v1-iur-l52] The route first looks for matching persisted execution output at the selected exact-name snapshot. On miss, the API performs Universal Resolver execution against that selected chain position, persists the trace and outcome, and returns the persisted outcome in the same response.
+`GET /v1/profiles/names/{name}` with `mode=verified` or `mode=both`, and `GET /v1/names/{namespace}/{name}/records` with verified selectors, are cache-or-live-execute reads for supported Universal Resolver selectors.[^v1-iur-l44][^v1-iur-l52] The route first looks for matching persisted execution output at the selected exact-name snapshot. On miss, the API performs Universal Resolver execution against that selected chain position, persists the trace and outcome, and returns the persisted outcome in the same response.
 
 Live-execution rules:
 
@@ -37,11 +37,11 @@ Live-execution rules:
 - unsupported selector families and unsupported verified path classes stay selector-local `status=unsupported`; on-demand execution does not widen the support boundary
 - `GET /v1/explain/resolutions/{namespace}/{name}/execution` is persisted-trace readback only
 
-The compact records routes — `GET /v1/names/{namespace}/{name}/records` and `GET /v1/resolve/{name}/records` — use the same supported-selector boundary and selected stored snapshot as the canonical resolution route. When they need on-demand ENS verified values, they execute against that snapshot, persist the trace and outcome, and fail closed with `409 stale` when the provider cannot serve the selected block. They never target provider `latest` independently of the selected snapshot.
+The compact records route `GET /v1/names/{namespace}/{name}/records` uses the same supported-selector boundary and selected stored snapshot as the full profile route. When it needs on-demand ENS verified values, it executes against that snapshot, persists the trace and outcome, and fails closed with `409 stale` when the provider cannot serve the selected block. It never targets provider `latest` independently of the selected snapshot.
 
 ### Namespace inference
 
-For `GET /v1/resolve/{name}`, inference happens before step 1 and produces the canonical `{namespace, name}` tuple:
+For `GET /v1/profiles/names/{name}`, inference happens before step 1 and produces the canonical `{namespace, name}` tuple:
 
 - exact `base.eth` resolves as `namespace=ens`
 - `*.base.eth` resolves as `namespace=basenames`
@@ -127,7 +127,7 @@ Persisted outcomes live in `execution_cache_outcomes`, keyed by:
 - topology version boundary
 - record version boundary
 
-For resolution, the request key includes the normalized explicit selector set so the cache boundary matches `verified_queries`. For `GET /v1/resolve/{name}`, the resolution request key is built from the inferred namespace, normalized name, and normalized selector set — a namespace-inferred request and the equivalent canonical request share cache identity after inference. The raw convenience path is not a separate cache namespace.
+For resolution, the request key includes the normalized explicit selector set so the cache boundary matches `verified_queries`. For `GET /v1/profiles/names/{name}`, the resolution request key is built from the inferred namespace, normalized name, and normalized selector set. Namespace inference does not create a separate cache namespace.
 
 For verified primary, the request key is the normalized tuple `{namespace}:{normalized_address}:{coin_type}`. The matching `primary_names_current(address, coin_type, namespace)` row is the only admitted claim-side lookup/invalidation anchor; projection updates may invalidate request-matching answers but the projection does not persist verified payloads or trace IDs.
 
@@ -172,7 +172,7 @@ Basenames verified resolution on the shipped mainnet profile uses active `basena
 
 CCIP-participating traces are eligible for that class rather than `unsupported`, because upstream `L1Resolver` initiates `OffchainLookup` for non-`base.eth` requests and completes them through `resolveWithProof`.[^bn-l1resolver-l154][^bn-l1resolver-l173][^bn-l1resolver-l191] Explain surfaces the resulting persisted CCIP steps without inventing a second trace family. Other Basenames paths remain `unsupported`. The verified-resolution boundary does not widen route-level primary-name coverage beyond the exact-tuple persisted-readback class and does not add manifest flags.
 
-`GET /v1/resolve/{name}` does not widen this boundary. Inferred Basenames verified selectors return `unsupported` unless the requested snapshot satisfies the same frozen Basenames class.
+`GET /v1/profiles/names/{name}` does not widen this boundary. Inferred Basenames verified selectors return `unsupported` unless the requested snapshot satisfies the same frozen Basenames class.
 
 ENS and Basenames primary-name coverage is graduated only for the exact-tuple persisted-readback class; supported tuples return `coverage.status=partial` with `exhaustiveness=non_enumerable`. Out-of-class tuples, fallback claim sources, richer claimed payloads, fresh verified-primary execution, and namespace-wide claims remain `unsupported` or out of scope. Manifest rollout, capability state, reverse-tuple lookup, and resolver-backed verification detail do not by themselves widen the contract.
 

@@ -7,6 +7,10 @@ use sqlx::types::{JsonValue, time::OffsetDateTime};
 
 use crate::pagination::HistoryPageResponse;
 
+fn json_value_is_null(value: &JsonValue) -> bool {
+    value.is_null()
+}
+
 #[derive(Serialize)]
 pub(crate) struct HealthResponse {
     pub(crate) service: &'static str,
@@ -264,6 +268,7 @@ pub(crate) struct NameResponse {
     pub(crate) data: JsonValue,
     pub(crate) declared_state: JsonValue,
     pub(crate) verified_state: Option<()>,
+    #[serde(default, skip_serializing_if = "json_value_is_null")]
     pub(crate) provenance: JsonValue,
     pub(crate) coverage: JsonValue,
     pub(crate) chain_positions: JsonValue,
@@ -276,6 +281,7 @@ pub(crate) struct ResolutionResponse {
     pub(crate) data: JsonValue,
     pub(crate) declared_state: Option<JsonValue>,
     pub(crate) verified_state: Option<JsonValue>,
+    #[serde(default, skip_serializing_if = "json_value_is_null")]
     pub(crate) provenance: JsonValue,
     pub(crate) coverage: JsonValue,
     pub(crate) chain_positions: JsonValue,
@@ -288,14 +294,13 @@ pub(crate) struct PrimaryNameResponse {
     pub(crate) data: JsonValue,
     pub(crate) declared_state: Option<JsonValue>,
     pub(crate) verified_state: Option<JsonValue>,
+    #[serde(default, skip_serializing_if = "json_value_is_null")]
     pub(crate) provenance: JsonValue,
     pub(crate) coverage: JsonValue,
     pub(crate) chain_positions: JsonValue,
     pub(crate) consistency: String,
     pub(crate) last_updated: String,
 }
-
-pub(crate) type ResolverResponse = NameResponse;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum PrimaryNameTupleState {
@@ -323,6 +328,7 @@ pub(crate) struct HistoryResponse {
     pub(crate) data: Vec<JsonValue>,
     pub(crate) declared_state: JsonValue,
     pub(crate) verified_state: Option<()>,
+    #[serde(default, skip_serializing_if = "json_value_is_null")]
     pub(crate) provenance: JsonValue,
     pub(crate) coverage: CoverageResponse,
     pub(crate) chain_positions: JsonValue,
@@ -336,6 +342,7 @@ pub(crate) struct ChildrenResponse {
     pub(crate) data: Vec<JsonValue>,
     pub(crate) declared_state: JsonValue,
     pub(crate) verified_state: Option<()>,
+    #[serde(default, skip_serializing_if = "json_value_is_null")]
     pub(crate) provenance: JsonValue,
     pub(crate) coverage: CoverageResponse,
     pub(crate) chain_positions: JsonValue,
@@ -349,6 +356,7 @@ pub(crate) struct AddressNamesResponse {
     pub(crate) data: Vec<JsonValue>,
     pub(crate) declared_state: JsonValue,
     pub(crate) verified_state: Option<()>,
+    #[serde(default, skip_serializing_if = "json_value_is_null")]
     pub(crate) provenance: JsonValue,
     pub(crate) coverage: CoverageResponse,
     pub(crate) chain_positions: JsonValue,
@@ -387,6 +395,7 @@ pub(crate) struct ResourcePermissionsResponse {
     pub(crate) data: Vec<JsonValue>,
     pub(crate) declared_state: JsonValue,
     pub(crate) verified_state: Option<()>,
+    #[serde(default, skip_serializing_if = "json_value_is_null")]
     pub(crate) provenance: JsonValue,
     pub(crate) coverage: CoverageResponse,
     pub(crate) chain_positions: JsonValue,

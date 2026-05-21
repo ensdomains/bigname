@@ -89,12 +89,13 @@ providers that expose only HTTPS.
 
 ## Live API Execution Configuration
 
-`GET /v1/resolutions/{namespace}/{name}` and `GET /v1/resolve/{name}` in
-`mode=verified|both` may execute supported ENS verified-resolution selectors on
-demand when matching persisted execution output is absent. That live execution
-uses the selected exact-name snapshot: no `at` and no `chain_positions` means
-`consistency=head` and the latest stored Ethereum checkpoint, and the API call
-targets that selected block rather than provider latest.
+`GET /v1/profiles/names/{name}` in `mode=verified|both`, and
+`GET /v1/names/{namespace}/{name}/records` when it needs verified values, may
+execute supported ENS verified-resolution selectors on demand when matching
+persisted execution output is absent. That live execution uses the selected
+exact-name snapshot: no `at` and no `chain_positions` means `consistency=head`
+and the latest stored Ethereum checkpoint, and the API call targets that
+selected block rather than provider latest.
 
 Configure `BIGNAME_API_CHAIN_RPC_URLS=ethereum-mainnet=<http-url>` for the API
 process before relying on live ENS verified resolution. This is separate from

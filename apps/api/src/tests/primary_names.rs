@@ -123,10 +123,7 @@ async fn get_primary_names_freezes_bootstrap_mode_envelopes() -> Result<()> {
     );
     assert_eq!(both_payload.verified_state, verified_payload.verified_state);
     assert_eq!(default_payload.coverage, primary_name_unsupported_coverage());
-    assert_eq!(
-        default_payload.provenance.get("derivation_kind"),
-        Some(&json!("primary_name_route_bootstrap"))
-    );
+    assert!(default_payload.provenance.is_null());
     assert_eq!(default_payload.chain_positions, json!({}));
     assert_eq!(default_payload.consistency, "head");
     assert!(default_payload.last_updated.ends_with('Z'));
@@ -202,10 +199,7 @@ async fn get_primary_names_returns_not_found_for_tuple_miss_when_projection_exis
             }
         }))
     );
-    assert_eq!(
-        payload.provenance.get("execution_trace_id"),
-        Some(&Value::Null)
-    );
+    assert!(payload.provenance.is_null());
     assert_eq!(payload.coverage, primary_name_unsupported_coverage());
 
     database.cleanup().await?;
@@ -537,7 +531,7 @@ async fn get_primary_names_reads_declared_claim_provenance_for_exact_tuple() -> 
 }
 
 #[tokio::test]
-async fn get_primary_names_promote_declared_claim_provenance_to_top_level_route_summary()
+async fn get_primary_names_omit_declared_claim_provenance_from_top_level_route_summary()
 -> Result<()> {
     let database = TestDatabase::new(false).await?;
     database.create_primary_names_current_table().await?;
@@ -584,7 +578,7 @@ async fn get_primary_names_promote_declared_claim_provenance_to_top_level_route_
                 .expect("request must build"),
         )
         .await
-        .context("declared primary-name top-level provenance request failed")?;
+        .context("declared primary-name route provenance request failed")?;
     let both_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
@@ -595,30 +589,15 @@ async fn get_primary_names_promote_declared_claim_provenance_to_top_level_route_
                 .expect("request must build"),
         )
         .await
-        .context("mixed primary-name top-level provenance request failed")?;
+        .context("mixed primary-name route provenance request failed")?;
 
     assert_eq!(declared_response.status(), StatusCode::OK);
     assert_eq!(both_response.status(), StatusCode::OK);
 
     let declared_payload: PrimaryNameResponse = read_json(declared_response).await?;
     let both_payload: PrimaryNameResponse = read_json(both_response).await?;
-    let expected_provenance = json!({
-        "normalized_event_ids": ["101", "102"],
-        "raw_fact_refs": [{
-            "kind": "raw_log",
-            "block_number": 101,
-        }],
-        "manifest_versions": [{
-            "manifest_version": 7,
-            "source_family": "ens_v1_reverse_l1",
-            "source_manifest_id": null,
-        }],
-        "execution_trace_id": null,
-        "derivation_kind": "primary_name_projection_rebuild",
-    });
-
-    assert_eq!(declared_payload.provenance, expected_provenance);
-    assert_eq!(both_payload.provenance, expected_provenance);
+    assert!(declared_payload.provenance.is_null());
+    assert!(both_payload.provenance.is_null());
 
     database.cleanup().await?;
     Ok(())
@@ -934,17 +913,8 @@ async fn get_primary_names_reads_persisted_verified_primary_name_for_exact_tuple
         }))
     );
     assert_eq!(both_payload.verified_state, verified_payload.verified_state);
-    assert_eq!(
-        verified_payload.provenance,
-        json!({
-            "normalized_event_ids": [],
-            "raw_fact_refs": [],
-            "manifest_versions": primary_name_execution_manifest_versions(),
-            "execution_trace_id": execution_trace_id.to_string(),
-            "derivation_kind": "primary_name_route_bootstrap",
-        })
-    );
-    assert_eq!(both_payload.provenance, verified_payload.provenance);
+    assert!(verified_payload.provenance.is_null());
+    assert!(both_payload.provenance.is_null());
     let verified_primary_name = verified_payload
         .verified_state
         .as_ref()
@@ -959,13 +929,13 @@ async fn get_primary_names_reads_persisted_verified_primary_name_for_exact_tuple
         verified_primary_name
             .get("provenance")
             .and_then(|provenance| provenance.get("execution_trace_id")),
-        verified_payload.provenance.get("execution_trace_id"),
+        Some(&json!(execution_trace_id.to_string())),
     );
     assert_eq!(
         verified_primary_name
             .get("provenance")
             .and_then(|provenance| provenance.get("manifest_versions")),
-        verified_payload.provenance.get("manifest_versions"),
+        Some(&primary_name_execution_manifest_versions()),
     );
     assert_eq!(verified_payload.coverage, primary_name_supported_coverage("ens"));
     assert_eq!(both_payload.coverage, verified_payload.coverage);
@@ -1114,17 +1084,8 @@ async fn get_primary_names_reads_persisted_basenames_verified_primary_name_for_e
         }))
     );
     assert_eq!(both_payload.verified_state, verified_payload.verified_state);
-    assert_eq!(
-        verified_payload.provenance,
-        json!({
-            "normalized_event_ids": [],
-            "raw_fact_refs": [],
-            "manifest_versions": primary_name_execution_manifest_versions_for_namespace("basenames"),
-            "execution_trace_id": execution_trace_id.to_string(),
-            "derivation_kind": "primary_name_route_bootstrap",
-        })
-    );
-    assert_eq!(both_payload.provenance, verified_payload.provenance);
+    assert!(verified_payload.provenance.is_null());
+    assert!(both_payload.provenance.is_null());
     assert_eq!(
         verified_payload.coverage,
         primary_name_supported_coverage("basenames")
@@ -1239,17 +1200,8 @@ async fn get_primary_names_reads_persisted_basenames_verified_primary_name_not_f
         }))
     );
     assert_eq!(both_payload.verified_state, verified_payload.verified_state);
-    assert_eq!(
-        verified_payload.provenance,
-        json!({
-            "normalized_event_ids": [],
-            "raw_fact_refs": [],
-            "manifest_versions": primary_name_execution_manifest_versions_for_namespace("basenames"),
-            "execution_trace_id": execution_trace_id.to_string(),
-            "derivation_kind": "primary_name_route_bootstrap",
-        })
-    );
-    assert_eq!(both_payload.provenance, verified_payload.provenance);
+    assert!(verified_payload.provenance.is_null());
+    assert!(both_payload.provenance.is_null());
     assert_eq!(
         verified_payload.coverage,
         primary_name_supported_coverage("basenames")
@@ -1377,17 +1329,8 @@ async fn get_primary_names_reads_persisted_basenames_verified_primary_name_inval
         !claimed_primary_name.contains_key("name"),
         "invalid_name readback must not backfill claimed_primary_name.name"
     );
-    assert_eq!(
-        verified_payload.provenance,
-        json!({
-            "normalized_event_ids": [],
-            "raw_fact_refs": [],
-            "manifest_versions": primary_name_execution_manifest_versions_for_namespace("basenames"),
-            "execution_trace_id": execution_trace_id.to_string(),
-            "derivation_kind": "primary_name_route_bootstrap",
-        })
-    );
-    assert_eq!(both_payload.provenance, verified_payload.provenance);
+    assert!(verified_payload.provenance.is_null());
+    assert!(both_payload.provenance.is_null());
     assert_eq!(
         verified_payload.coverage,
         primary_name_supported_coverage("basenames")
@@ -1517,13 +1460,13 @@ async fn get_primary_names_reads_persisted_verified_primary_name_mismatch_for_ex
         verified_primary_name
             .get("provenance")
             .and_then(|provenance| provenance.get("execution_trace_id")),
-        verified_payload.provenance.get("execution_trace_id"),
+        Some(&json!(execution_trace_id.to_string())),
     );
     assert_eq!(
         verified_primary_name
             .get("provenance")
             .and_then(|provenance| provenance.get("manifest_versions")),
-        verified_payload.provenance.get("manifest_versions"),
+        Some(&primary_name_execution_manifest_versions()),
     );
     assert_eq!(verified_payload.coverage, primary_name_supported_coverage("ens"));
     assert_eq!(both_payload.coverage, verified_payload.coverage);
@@ -1817,15 +1760,8 @@ async fn get_primary_names_omits_verified_section_provenance_for_unsupported_bou
     );
     assert!(!verified_primary_name.contains_key("provenance"));
     assert_eq!(both_verified_primary_name, verified_primary_name);
-    assert_eq!(
-        verified_payload.provenance.get("execution_trace_id"),
-        Some(&Value::Null)
-    );
-    assert_eq!(
-        verified_payload.provenance.get("manifest_versions"),
-        Some(&json!([]))
-    );
-    assert_eq!(both_payload.provenance, verified_payload.provenance);
+    assert!(verified_payload.provenance.is_null());
+    assert!(both_payload.provenance.is_null());
 
     database.cleanup().await?;
     Ok(())

@@ -191,7 +191,7 @@ const HISTORY_VIEW_QUERY: ApiRouteParameter = ApiRouteParameter::query(
     "Response view selector.",
     ApiParameterSchema::StringEnumDefault {
         values: &["compact", "full"],
-        default: "full",
+        default: "compact",
     },
 );
 const COMPACT_FULL_VIEW_QUERY: ApiRouteParameter = ApiRouteParameter::query(
@@ -231,14 +231,6 @@ const PAGE_SIZE_QUERY: ApiRouteParameter = ApiRouteParameter::query(
         maximum: crate::MAX_PAGE_SIZE,
     },
 );
-const RESOLUTION_MODE_QUERY: ApiRouteParameter = ApiRouteParameter::query(
-    "mode",
-    "Resolution read mode.",
-    ApiParameterSchema::StringEnumDefault {
-        values: &["declared", "verified", "both"],
-        default: "declared",
-    },
-);
 const PRIMARY_NAME_MODE_QUERY: ApiRouteParameter = ApiRouteParameter::query(
     "mode",
     "Primary-name read mode.",
@@ -246,11 +238,6 @@ const PRIMARY_NAME_MODE_QUERY: ApiRouteParameter = ApiRouteParameter::query(
         values: &["declared", "verified", "both"],
         default: "declared",
     },
-);
-const RECORDS_QUERY: ApiRouteParameter = ApiRouteParameter::csv_query(
-    "records",
-    "Comma-separated record selectors. Required when `mode` is `verified` or `both`.",
-    ApiParameterSchema::String,
 );
 const ORDER_QUERY: ApiRouteParameter = ApiRouteParameter::query(
     "order",
@@ -341,32 +328,6 @@ pub(crate) const ADDRESS_NAMES_PARAMETERS: &[ApiRouteParameter] = &[
     ),
     CURSOR_QUERY,
     PAGE_SIZE_QUERY,
-];
-
-pub(crate) const ADDRESS_NAMES_COUNT_PARAMETERS: &[ApiRouteParameter] = &[
-    ADDRESS_PATH,
-    NAMESPACE_QUERY,
-    APP_RELATION_QUERY,
-    ApiRouteParameter::query(
-        "prefix",
-        "Normalized-name prefix search filter.",
-        ApiParameterSchema::String,
-    ),
-    ApiRouteParameter::query(
-        "contains",
-        "Normalized-name contains search filter.",
-        ApiParameterSchema::String,
-    ),
-    ApiRouteParameter::query(
-        "contains_nocase",
-        "Case-insensitive normalized-name contains search filter.",
-        ApiParameterSchema::String,
-    ),
-    ApiRouteParameter::query(
-        "resolver",
-        "Current declared resolver address filter.",
-        ApiParameterSchema::String,
-    ),
 ];
 
 pub(crate) const ADDRESS_HISTORY_PARAMETERS: &[ApiRouteParameter] = &[

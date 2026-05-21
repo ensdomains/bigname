@@ -280,13 +280,6 @@ fn parse_names_include(include: Option<&str>) -> ApiResult<NamesInclude> {
     Ok(parsed)
 }
 
-fn parse_app_relation(
-    relation: Option<&str>,
-) -> ApiResult<bigname_storage::NameCurrentAddressRelationFilter> {
-    Ok(parse_optional_app_relation(relation)?
-        .unwrap_or(bigname_storage::NameCurrentAddressRelationFilter::Any))
-}
-
 fn parse_optional_app_relation(
     relation: Option<&str>,
 ) -> ApiResult<Option<bigname_storage::NameCurrentAddressRelationFilter>> {

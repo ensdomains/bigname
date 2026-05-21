@@ -201,10 +201,6 @@ pub(super) fn openapi_components() -> JsonValue {
                 schema_ref("ExactNameData"),
                 schema_ref("JsonObject"),
             ),
-            "ResolverResponse": declared_response_schema(
-                schema_ref("ResolverData"),
-                schema_ref("JsonObject"),
-            ),
             "ResolutionResponse": mixed_response_schema(schema_ref("ExactNameData")),
             "PrimaryNameResponse": primary_name_response_schema(),
             "CollectionResponse": paginated_declared_response_schema(
@@ -220,13 +216,9 @@ pub(super) fn openapi_components() -> JsonValue {
             "CompactHistoryEvent": compact_history_event_schema(),
             "RoleRow": role_row_schema(),
             "ResourceLookupData": resource_lookup_data_schema(),
-            "AddressNamesCountData": address_names_count_data_schema(),
             "ResolverOverviewCompact": resolver_overview_compact_schema(),
             "CompactNamesResponse": compact_collection_response_schema(
                 schema_ref("CompactDomainSummary"),
-            ),
-            "AddressNamesCountResponse": compact_single_response_schema(
-                schema_ref("AddressNamesCountData"),
             ),
             "CompactNameRecordsResponse": compact_single_response_schema(
                 schema_ref("CompactRecordSummary"),
@@ -404,11 +396,6 @@ fn role_row_schema() -> JsonValue {
 #[rustfmt::skip]
 fn resource_lookup_data_schema() -> JsonValue {
     compact_object_schema(&["namespace", "name", "normalized_name", "resource_id", "resource_hex"], &["namespace", "name", "normalized_name", "resource_id", "resource_hex"])
-}
-
-#[rustfmt::skip]
-fn address_names_count_data_schema() -> JsonValue {
-    compact_object_schema(&["address", "count"], &["address", "namespace", "relation", "count"])
 }
 
 #[rustfmt::skip]

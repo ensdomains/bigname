@@ -40,7 +40,6 @@ History reads consume canonical normalized events plus thin cursor support. Ther
 | Route | Owner |
 | --- | --- |
 | `GET /v1/names` | `name_current` for exact and search rows; `address_names_current` for relation membership; `children_current` and `record_inventory_current` only for compact counts |
-| `GET /v1/addresses/{address}/names/count` | `address_names_current` with the same name and search joins as `GET /v1/names` |
 | `GET /v1/names/{namespace}/{name}/records` | `name_current` resolver summary plus `record_inventory_current`; verified sections are execution-owned |
 | `POST /v1/identity:lookup` | app-facing native identity read over `name_current`, `address_names_current`, `address_names_current_identity_counts`, `address_names_current_identity_feed`, `record_inventory_current`, `primary_names_current`, and projection checkpoint metadata; reverse pages, counts, and compact feed identity rows share the same readable `name_current` eligibility |
 | `GET /v1/events`, history `view=compact` | canonical normalized events plus existing history anchor selection |
@@ -89,7 +88,7 @@ For `namespace=basenames`, membership and relation facets derive from the same B
 
 ENSv1 `TextChanged` events that carry a key and value produce selector-specific records (`text:avatar`, etc.) and retain the emitted value in `record_inventory_current.entries`. They are never collapsed into a generic `text` selector.[^v1-itextres-l5][^v1-textres-l21]
 
-Sort keys `name`, `expiry_date`, `registration_date`, `created_at` are projection-backed and replay-stable; ties break by `(namespace, normalized_name, namehash)`. App-facing total counts and `GET /v1/addresses/{address}/names/count` count the filtered projection row universe before cursor slicing. Unsupported filter and count combinations are explicit; they never fall back to raw fact scans.
+Sort keys `name`, `expiry_date`, `registration_date`, `created_at` are projection-backed and replay-stable; ties break by `(namespace, normalized_name, namehash)`. App-facing total counts count the filtered projection row universe before cursor slicing. Unsupported filter and count combinations are explicit; they never fall back to raw fact scans.
 
 `resolved_address` filtering is deferred until a declared record-value equality projection exists for the namespace and selector family.
 
@@ -139,7 +138,7 @@ For ENSv1 and Basenames, `resolver_current` summarizes a resolver only after tha
 
 ## Resolution
 
-`GET /v1/resolutions/{namespace}/{name}` uses the same exact-name snapshot selector for `data`, declared topology, route-level coverage, record-inventory and cache joins, verified support checks, and verified execution target selection.
+`GET /v1/profiles/names/{name}` uses the same exact-name snapshot selector for `data`, declared topology, route-level coverage, record-inventory and cache joins, verified support checks, and verified execution target selection after normalizing the input and inferring the namespace.
 
 Persisted verified output joins the public response only when its stored requested chain positions exactly match the selected exact-name `ChainPositions`. In `mode=verified|both`, missing persisted output for supported ENS Universal Resolver selectors triggers API-driven execution at the selected snapshot; the trace and outcome persist before the response joins them. No `at` and no `chain_positions` means `consistency=head` at the latest stored checkpoint.[^v1-iuniv-l44][^v1-iuniv-l52]
 
@@ -179,7 +178,7 @@ The exact-tuple persisted-readback class is the only primary-name coverage suppo
 
 The Basenames exact-tuple `verified_primary_name` support class stays execution-derived under `basenames_execution`. It uses the same route tuple, the request key `{namespace}:{normalized_address}:{coin_type}`, and execution identity `request_type=verified_primary_name`. The matching `primary_names_current` row is the only claim-side anchor.[^bn-revreg-l193][^bn-l1resolver-l13]
 
-The `verified_primary_name.provenance` invariant is additive to public publication. When admitted on the exact-tuple persisted-readback class, it reuses `Provenance` as a verification-local section refinement over execution output: `execution_trace_id` plus `manifest_versions` only, with `verified_primary_name.provenance.execution_trace_id` equal to top-level `provenance.execution_trace_id`. Top-level `provenance` stays the only route-level join between declared claim inputs and the persisted verification trace.
+The `verified_primary_name.provenance` invariant is additive to public publication. When admitted on the exact-tuple persisted-readback class, it reuses `Provenance` as a verification-local section refinement over execution output: `execution_trace_id` plus `manifest_versions` only. The primary-name route omits top-level route provenance by default, so clients must read persisted-verification provenance from `verified_primary_name.provenance`.
 
 Tuple presence is a lookup and invalidation hook only. It does not widen claim precedence, admit fallback sources, change route-level coverage outside the exact-tuple class, or imply richer claimed payload support.
 

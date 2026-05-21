@@ -730,6 +730,7 @@
           matches: [
             /^\/v1\/names$/,
             /^\/v1\/names\/\{namespace\}\/\{name\}$/,
+            /^\/v1\/profiles\/names\/\{name\}$/,
             /^\/v1\/names\/\{namespace\}\/\{name\}\/records$/,
             /^\/v1\/names\/\{namespace\}\/\{name\}\/children$/,
             /^\/v1\/addresses\/\{address\}\/names$/,
@@ -760,15 +761,12 @@
         {
           id: "explorer-audit",
           title: "Explorer And Audit",
-          description: "Deeper resolver, role, resource, resolution, count, and history routes for specialist views.",
+          description: "Specialist history and role views that remain outside the partner latency path.",
           matches: [
-            /^\/v1\/addresses\/\{address\}\/names\/count$/,
             /^\/v1\/history\//,
             /^\/v1\/names\/\{namespace\}\/\{name\}\/roles$/,
             /^\/v1\/resources\/lookup$/,
-            /^\/v1\/resolvers\//,
-            /^\/v1\/resolutions\//,
-            /^\/v1\/resolve\//,
+            /^\/v1\/resolvers\/\{chain_id\}\/\{resolver_address\}\/overview$/,
             /^\/v1\/roles$/
           ]
         }
@@ -801,6 +799,10 @@
         "/v1/names": {
           namespace: "ens",
           name: "taytems.eth"
+        },
+        "/v1/profiles/names/{name}": {
+          mode: "both",
+          records: "addr:60,text:avatar,contenthash"
         },
         "/v1/roles": {
           namespace: "ens",

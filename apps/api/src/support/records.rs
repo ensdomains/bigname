@@ -91,15 +91,15 @@ pub(super) fn route_name_normalization_api_error(error: RouteNameNormalizationEr
     }
 }
 
-pub(super) async fn load_resolution_records_read(
+pub(super) async fn load_name_profile_records_read(
     state: &AppState,
     namespace: &str,
     name: &str,
-    query: ResolutionQuery,
+    query: NameProfileQuery,
 ) -> ApiResult<ResolutionRecordsRead> {
     let pool = &state.pool;
-    let mode = parse_resolution_mode(query.mode.as_deref())?;
-    let records = parse_resolution_record_keys(query.records.as_deref(), mode)?;
+    let mode = parse_resolution_mode(query.mode.as_deref().or(Some("both")))?;
+    let mut records = parse_optional_resolution_record_keys(query.records.as_deref(), mode)?;
     let ExactNameRead {
         row,
         selected_snapshot,
@@ -117,6 +117,10 @@ pub(super) async fn load_resolution_records_read(
     } else {
         None
     };
+
+    if records.is_empty() && (mode.includes_declared() || mode.includes_verified()) {
+        records = profile_default_record_keys(record_inventory_current.as_ref());
+    }
 
     let persisted_verified_outcome = if mode.includes_verified() {
         load_or_execute_resolution_verified_outcome(
@@ -142,6 +146,28 @@ pub(super) async fn load_resolution_records_read(
         record_inventory_current,
         persisted_verified_outcome,
     })
+}
+
+fn profile_default_record_keys(
+    record_inventory_row: Option<&RecordInventoryCurrentRow>,
+) -> Vec<ResolutionRecordKey> {
+    let mut seen = BTreeSet::new();
+    record_inventory_row
+        .and_then(|row| row.selectors.as_array())
+        .into_iter()
+        .flatten()
+        .filter(|selector| {
+            provenance_field(selector, "cacheable").and_then(JsonValue::as_bool) == Some(true)
+        })
+        .filter_map(|selector| string_field(provenance_field(selector, "record_key")))
+        .filter_map(|record_key| {
+            if seen.insert(record_key.clone()) {
+                parse_resolution_record_key(&record_key)
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 pub(super) async fn load_compact_records_read(

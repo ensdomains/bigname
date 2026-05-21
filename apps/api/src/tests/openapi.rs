@@ -208,7 +208,6 @@ fn openapi_document_publishes_only_shipped_routes() {
         actual,
         vec![
             "/v1/addresses/{address}/names".to_owned(),
-            "/v1/addresses/{address}/names/count".to_owned(),
             "/v1/coverage/{namespace}/{name}".to_owned(),
             "/v1/events".to_owned(),
             "/v1/explain/names/{namespace}/{name}/authority-control".to_owned(),
@@ -226,10 +225,7 @@ fn openapi_document_publishes_only_shipped_routes() {
             "/v1/names/{namespace}/{name}/roles".to_owned(),
             "/v1/namespaces/{namespace}".to_owned(),
             "/v1/primary-names/{address}".to_owned(),
-            "/v1/resolutions/{namespace}/{name}".to_owned(),
-            "/v1/resolve/{name}".to_owned(),
-            "/v1/resolve/{name}/records".to_owned(),
-            "/v1/resolvers/{chain_id}/{resolver_address}".to_owned(),
+            "/v1/profiles/names/{name}".to_owned(),
             "/v1/resolvers/{chain_id}/{resolver_address}/overview".to_owned(),
             "/v1/resources/lookup".to_owned(),
             "/v1/resources/{resource_id}/permissions".to_owned(),
@@ -309,21 +305,6 @@ fn openapi_document_freezes_query_params_and_shared_envelopes() {
     assert_compact_only_view_meta_parameters(names, "summary");
     assert_no_not_implemented_response(names);
 
-    let address_names_count = openapi_operation(&document, "/v1/addresses/{address}/names/count");
-    assert_eq!(
-        openapi_parameter_names(address_names_count),
-        vec![
-            "address",
-            "namespace",
-            "relation",
-            "prefix",
-            "contains",
-            "contains_nocase",
-            "resolver",
-        ]
-    );
-    assert_no_not_implemented_response(address_names_count);
-
     let address_history = openapi_operation(&document, "/v1/history/addresses/{address}");
     assert_eq!(
         openapi_parameter_names(address_history),
@@ -347,7 +328,7 @@ fn openapi_document_freezes_query_params_and_shared_envelopes() {
             "default": "both",
         }))
     );
-    assert_view_meta_parameters(address_history, "full", "summary");
+    assert_view_meta_parameters(address_history, "compact", "summary");
 
     let children = openapi_operation(&document, "/v1/names/{namespace}/{name}/children");
     assert_eq!(
@@ -398,36 +379,45 @@ fn openapi_document_freezes_query_params_and_shared_envelopes() {
         );
     }
 
-    let resolutions = openapi_operation(&document, "/v1/resolutions/{namespace}/{name}");
+    let name_profile = openapi_operation(&document, "/v1/profiles/names/{name}");
     assert_exact_name_snapshot_parameters(
-        resolutions,
+        name_profile,
         &[
-            "namespace",
             "name",
             "at",
             "chain_positions",
             "consistency",
             "mode",
             "records",
+            "meta",
         ],
-        "Point-in-time selector for the exact-name snapshot used by resolution joins. Mutually exclusive with `chain_positions`.",
+        "Point-in-time selector for the exact-name snapshot used by the profile read. Mutually exclusive with `chain_positions`.",
     );
     assert_eq!(
-        openapi_response_description(resolutions, "409"),
+        openapi_response_description(name_profile, "409"),
         "Snapshot conflict or stale projection"
     );
-    let mode = openapi_parameter(resolutions, "mode");
+    let mode = openapi_parameter(name_profile, "mode");
     assert_eq!(
         mode.get("schema"),
         Some(&json!({
             "type": "string",
             "enum": ["declared", "verified", "both"],
-            "default": "declared",
+            "default": "both",
         }))
     );
-    let records = openapi_parameter(resolutions, "records");
+    let records = openapi_parameter(name_profile, "records");
     assert_eq!(records.get("style"), Some(&json!("form")));
     assert_eq!(records.get("explode"), Some(&json!(false)));
+    let meta = openapi_parameter(name_profile, "meta");
+    assert_eq!(
+        meta.get("schema"),
+        Some(&json!({
+            "type": "string",
+            "enum": ["none", "summary", "full"],
+            "default": "summary",
+        }))
+    );
 
     let name_records = openapi_operation(&document, "/v1/names/{namespace}/{name}/records");
     assert_eq!(
@@ -460,57 +450,6 @@ fn openapi_document_freezes_query_params_and_shared_envelopes() {
     );
     assert_compact_only_view_meta_parameters(name_records, "summary");
     assert_no_not_implemented_response(name_records);
-
-    let inferred_name_records = openapi_operation(&document, "/v1/resolve/{name}/records");
-    assert_eq!(
-        openapi_parameter_names(inferred_name_records),
-        vec![
-            "name",
-            "mode",
-            "texts",
-            "known_text_keys",
-            "avatar",
-            "content_hash",
-            "coin_types",
-            "include",
-            "view",
-            "meta",
-        ]
-    );
-    assert_eq!(
-        openapi_parameter(inferred_name_records, "mode").get("schema"),
-        Some(&json!({
-            "type": "string",
-            "enum": ["auto", "declared", "verified", "both"],
-            "default": "auto",
-        }))
-    );
-    assert_eq!(
-        openapi_parameter(inferred_name_records, "include").get("style"),
-        Some(&json!("form"))
-    );
-    assert_compact_only_view_meta_parameters(inferred_name_records, "summary");
-    assert_no_not_implemented_response(inferred_name_records);
-
-    let inferred_resolutions = openapi_operation(&document, "/v1/resolve/{name}");
-    assert_eq!(
-        openapi_parameter_names(inferred_resolutions),
-        vec!["name", "mode", "records"]
-    );
-    let inferred_mode = openapi_parameter(inferred_resolutions, "mode");
-    assert_eq!(inferred_mode.get("schema"), mode.get("schema"));
-    let inferred_records = openapi_parameter(inferred_resolutions, "records");
-    assert_eq!(inferred_records.get("style"), Some(&json!("form")));
-    assert_eq!(inferred_records.get("explode"), Some(&json!(false)));
-    assert_eq!(
-        inferred_resolutions
-            .get("responses")
-            .and_then(|responses| responses.get("200"))
-            .and_then(|response| response.get("content"))
-            .and_then(|content| content.get("application/json"))
-            .and_then(|content_type| content_type.get("schema")),
-        Some(&json!({ "$ref": "#/components/schemas/ResolutionResponse" }))
-    );
 
     let identity_lookup = openapi_post_operation(&document, "/v1/identity:lookup");
     assert_eq!(
@@ -617,7 +556,7 @@ fn openapi_document_freezes_query_params_and_shared_envelopes() {
         openapi_parameter_names(resolver_overview),
         vec!["chain_id", "resolver_address", "include", "view", "meta"]
     );
-    assert_view_meta_parameters(resolver_overview, "compact", "summary");
+    assert_compact_only_view_meta_parameters(resolver_overview, "summary");
     assert_no_not_implemented_response(resolver_overview);
 
     let resolution_execution = openapi_operation(
@@ -682,7 +621,6 @@ fn openapi_document_freezes_query_params_and_shared_envelopes() {
             "data",
             "declared_state",
             "verified_state",
-            "provenance",
             "coverage",
             "chain_positions",
             "consistency",
@@ -704,7 +642,6 @@ fn openapi_document_freezes_query_params_and_shared_envelopes() {
             "data",
             "declared_state",
             "verified_state",
-            "provenance",
             "coverage",
             "chain_positions",
             "consistency",
@@ -1096,10 +1033,6 @@ async fn compact_only_routes_keep_full_view_compatibility_rejection() -> Result<
             "view=full is not supported for compact name records",
         ),
         (
-            "/v1/resolve/alice.eth/records?view=full",
-            "view=full is not supported for compact name records",
-        ),
-        (
             "/v1/names/ens/alice.eth/roles?view=full",
             "view=full is not supported for compact name roles",
         ),
@@ -1114,6 +1047,10 @@ async fn compact_only_routes_keep_full_view_compatibility_rejection() -> Result<
         (
             "/v1/events?view=full",
             "view=full is reserved for /v1/events until the full event shape is documented",
+        ),
+        (
+            "/v1/resolvers/ethereum-mainnet/0x0000000000000000000000000000000000000001/overview?view=full",
+            "view=full is not supported for compact resolver overview",
         ),
     ] {
         let response = app_router(openapi_docs_test_state())

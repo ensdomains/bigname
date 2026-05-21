@@ -9,10 +9,10 @@ Use these sets when choosing a public route:
 | Set | Routes | Intended consumers |
 | --- | --- | --- |
 | Native slim identity | `POST /v1/identity:lookup`, `GET /v1/status` | partner-1 style feeds, profile aggregation, and shadow comparison. Feed rendering should use `profile=feed`, which is backed by compact count/identity sidecars. |
-| Canonical product reads | `/v1/names*`, `/v1/addresses/{address}/names`, `/v1/primary-names*`, `/v1/resources/{resource_id}/permissions`, `/v1/events` | first-party app, explorer, and public API integrations that want the bigname contract. |
+| Canonical product reads | `/v1/names*`, `/v1/profiles/names/*`, `/v1/addresses/{address}/names`, `/v1/primary-names*`, `/v1/resources/{resource_id}/permissions`, `/v1/events` | first-party app, explorer, and public API integrations that want the bigname contract. |
 | Metadata/control plane | `/v1/namespaces/*`, `/v1/manifests/*`, `/healthz` | manifest, namespace, and liveness introspection. |
 | Diagnostics/provenance | `/v1/coverage/*`, `/v1/explain/*` | debugging completeness, support, derivation, persisted execution, and audit paths. |
-| Explorer/audit adjuncts | `/v1/resolve*`, `/v1/resolutions*`, `/v1/resolvers*`, `/v1/roles`, `/v1/names/*/roles`, `/v1/resources/lookup`, `/v1/history/*`, `/v1/addresses/*/names/count` | supported routes for explorer views, audit paths, and narrow adjuncts. Prefer the canonical product routes above for new integrations when they satisfy the use case. |
+| Specialist adjuncts | `/v1/roles`, `/v1/names/*/roles`, `/v1/resources/lookup`, `/v1/history/*`, `/v1/resolvers/*/overview` | supported routes for specialist views and narrow adjuncts. Prefer the canonical product reads above when they satisfy the use case. |
 
 ## Capability matrix
 
@@ -31,7 +31,7 @@ Use these sets when choosing a public route:
 | resolver-centric overview | resolver pages | `Resolver` |
 | claimed vs verified primary name | dashboard and profile | `PrimaryName.claimed_primary_name` + `PrimaryName.verified_primary_name` |
 | compact name search and suggestions | dashboard search and explorer search | `GET /v1/names` |
-| compact resolver records | profile records and record panels | `GET /v1/resolve/{name}/records` or `GET /v1/names/{namespace}/{name}/records` |
+| compact resolver records | profile records and record panels | `GET /v1/names/{namespace}/{name}/records` |
 | compact events | activity tables | `GET /v1/events` and history routes with `view=compact` |
 | roles by account/resource/name | resolver and role pages | `GET /v1/roles`, `GET /v1/names/{namespace}/{name}/roles`, `GET /v1/resources/lookup` |
 | compact resolver overview | resolver overview pages | `GET /v1/resolvers/{chain_id}/{resolver_address}/overview` |
@@ -41,17 +41,17 @@ Use these sets when choosing a public route:
 
 | Capability | Route | Notes |
 | --- | --- | --- |
-| exact name profile | `GET /v1/names/{namespace}/{name}` (full), `GET /v1/names?namespace=...&name=...` (compact exact-name filter) | Compact hides provenance and projection metadata and returns zero or one `CompactDomainSummary`; full keeps the canonical exact-name envelope. Coverage is reported at `GET /v1/coverage/{namespace}/{name}`. |
-| names by address | `GET /v1/names?account=...&relation=token_holder|any` with optional `contains=`, `prefix=`, `sort=name|expiry_date|registration_date` | Compact `CompactDomainSummary` rows. Count via `GET /v1/addresses/{address}/names/count` or `include=total_count`. |
+| exact name profile | `GET /v1/names/{namespace}/{name}`, `GET /v1/profiles/names/{name}`, `GET /v1/names?namespace=...&name=...` | Exact-name lookup suppresses routine route-level provenance; profile adds declared topology/cache and verified record results. Coverage is reported at `GET /v1/coverage/{namespace}/{name}`. |
+| names by address | `GET /v1/names?account=...&relation=token_holder|any` with optional `contains=`, `prefix=`, `sort=name|expiry_date|registration_date` | Compact `CompactDomainSummary` rows. Counts use collection metadata where supported. |
 | names by address with role summary | `GET /v1/addresses/{address}/names?include=role_summary` | Additive expansion over the same address-to-surface collection — not a separate route. Adds `role_summary`, `subname_count`, `record_count`, `status`, `expiry`. |
 | declared children | `GET /v1/names/{namespace}/{name}/children?include=counts` | Declared direct-child bucket only. Linked, alias, and wildcard buckets are not enumerated. |
-| record inventory and cache | `GET /v1/resolutions/{namespace}/{name}` (full), `GET /v1/resolve/{name}/records` and `GET /v1/names/{namespace}/{name}/records` (compact) | `record_inventory` defines the stable selector space; `record_cache` is the last-known declared value over that space. The compact route defaults to `mode=auto`: declared cache when it can satisfy the requested values from replayable local state, verified resolution for supported selectors otherwise, and a bounded basic-profile probe when no declared selectors exist. |
-| verified record reads | `GET /v1/resolutions/{namespace}/{name}` `verified_queries` plus the execution explain route | Verified queries are execution-derived. They do not backfill `record_inventory` or `record_cache` in the same response. |
+| record inventory and cache | `GET /v1/profiles/names/{name}` (full profile), `GET /v1/names/{namespace}/{name}/records` (compact) | `record_inventory` defines the stable selector space; `record_cache` is the last-known declared value over that space. The compact route defaults to `mode=declared`; callers can opt into `mode=auto`, `verified`, or `both` when they want verified selector fallback or execution-backed values. |
+| verified record reads | `GET /v1/profiles/names/{name}` `verified_queries` plus the execution explain route | Verified queries are execution-derived. They do not backfill `record_inventory` or `record_cache` in the same response. |
 | name history | `GET /v1/history/names/{namespace}/{name}` | Canonical normalized-event reads with `scope=surface|resource|both`. |
 | address history | `GET /v1/history/addresses/{address}` | Address-anchor composition over the same history contract. |
 | role holders | `GET /v1/resources/{resource_id}/permissions` | One current row per `(resource_id, subject, scope)`. |
 | role history | `GET /v1/history/resources/{resource_id}` | Permission events filtered out of the same history contract. |
-| resolver overview | `GET /v1/resolvers/{chain_id}/{resolver_address}` (full), `GET /v1/resolvers/{chain_id}/{resolver_address}/overview` (compact) | Each nested section (bindings, aliases, roles, events) is supported only when a projection owns the fan-in; unsupported sections return explicit `UnsupportedSummary`. |
+| resolver overview | `GET /v1/resolvers/{chain_id}/{resolver_address}/overview` | Each nested section (bindings, aliases, roles, events) is supported only when a projection owns the fan-in; unsupported sections return explicit compact metadata. |
 | primary name | `GET /v1/primary-names/{address}` | `claimed_primary_name` is candidate-only; `verified_primary_name` is authoritative only when `success`. Route-level coverage is `partial` for the ENS and Basenames exact-tuple persisted-readback class and explicit `unsupported` outside it. |
 | compact name search | `GET /v1/names?namespace=...&prefix=...` or `contains=...` | Search only — no availability, pricing, or registration workflow semantics. |
 | compact events | `GET /v1/events` and history routes with `view=compact` | Canonical normalized events. Selector-specific record history beyond type filters is not enumerated. |
@@ -62,7 +62,7 @@ Compact defaults suppress full provenance, full coverage, internal projection id
 
 `GET /v1/names` keeps the namespace-omitted bridge where an omitted `namespace` spans supported public namespaces. First-party replacement mappings should pass an explicit namespace whenever the app knows it; omitted namespace is not an ENS-only shortcut.
 
-`GET /v1/resolve/{name}` and `GET /v1/resolve/{name}/records` are convenience entries to the same `Resolution` and compact-records capabilities. Exact `base.eth` infers `namespace=ens`, `*.base.eth` infers `namespace=basenames`, other supported ENS names infer `namespace=ens`. Inferred Basenames requests use Basenames-local selector and topology support and do not fall back to ENS.
+The slim surface removes namespace-inferred `/v1/resolve*` aliases. Canonical name collection, exact-name, records, children, and role routes keep explicit `{namespace}`. The app full-profile fast path is the deliberate namespace-inferred exception: `GET /v1/profiles/names/{name}` normalizes the input, infers the namespace, and returns the inferred namespace on `data.namespace`.
 
 `POST /v1/identity:lookup` uses the same namespace inference rule and reads only current projections plus persisted projection metadata. It is the native slim read surface for partner-style feeds, profile aggregation, and shadow comparison, not a replacement core model. `profile=feed` intentionally narrows reverse responses to one compact identity row per input address and reads precomputed count/identity sidecars, so feed rendering does not pay for full `IdentityRecord` hydration, live first-row joins, or deep provenance. Production ENSv2 source-family manifests remain outside this slice; the existing ENSv2 rule stays limited to the `sepolia-dev` exact-name profile until production deployment metadata is admitted through the manifest process.
 

@@ -5,7 +5,7 @@ fn build_name_response(
 ) -> NameResponse {
     let declared_state = build_name_declared_state(&row, record_inventory_row);
 
-    build_name_declared_response(row, declared_state, selected_snapshot)
+    build_name_declared_response(row, declared_state, selected_snapshot, false)
 }
 
 fn build_name_coverage_response(
@@ -14,7 +14,7 @@ fn build_name_coverage_response(
 ) -> NameResponse {
     let declared_state = build_name_coverage_declared_state(&row.coverage);
 
-    build_name_declared_response(row, declared_state, selected_snapshot)
+    build_name_declared_response(row, declared_state, selected_snapshot, true)
 }
 
 fn build_name_surface_binding_explain_response(
@@ -23,7 +23,7 @@ fn build_name_surface_binding_explain_response(
 ) -> NameResponse {
     let declared_state = build_name_surface_binding_explain_declared_state(&row);
 
-    build_name_declared_response(row, declared_state, selected_snapshot)
+    build_name_declared_response(row, declared_state, selected_snapshot, true)
 }
 
 fn build_name_authority_control_explain_response(
@@ -32,19 +32,24 @@ fn build_name_authority_control_explain_response(
 ) -> NameResponse {
     let declared_state = build_name_authority_control_explain_declared_state(&row);
 
-    build_name_declared_response(row, declared_state, selected_snapshot)
+    build_name_declared_response(row, declared_state, selected_snapshot, true)
 }
 
 fn build_name_declared_response(
     row: NameCurrentRow,
     declared_state: JsonValue,
     selected_snapshot: &SelectedSnapshot,
+    include_provenance: bool,
 ) -> NameResponse {
     NameResponse {
         data: build_name_data(&row),
         declared_state,
         verified_state: None,
-        provenance: build_name_provenance(&row.provenance),
+        provenance: if include_provenance {
+            build_name_provenance(&row.provenance)
+        } else {
+            JsonValue::Null
+        },
         coverage: build_name_coverage(&row.coverage),
         chain_positions: selected_snapshot.chain_positions_value(),
         consistency: selected_snapshot.consistency.as_str().to_owned(),
@@ -59,6 +64,7 @@ fn build_resolution_response(
     record_inventory_row: Option<&RecordInventoryCurrentRow>,
     persisted_verified_outcome: Option<&ExecutionOutcome>,
     selected_snapshot: &SelectedSnapshot,
+    include_provenance: bool,
 ) -> Result<ResolutionResponse> {
     let data = build_name_data(&row);
     let declared_state = mode
@@ -68,10 +74,14 @@ fn build_resolution_response(
         .includes_verified()
         .then(|| build_resolution_verified_state(&row, records, persisted_verified_outcome))
         .transpose()?;
-    let provenance = build_name_provenance_with_execution_trace(
-        &row.provenance,
-        persisted_verified_outcome.map(|outcome| outcome.execution_trace_id),
-    );
+    let provenance = if include_provenance {
+        build_name_provenance_with_execution_trace(
+            &row.provenance,
+            persisted_verified_outcome.map(|outcome| outcome.execution_trace_id),
+        )
+    } else {
+        JsonValue::Null
+    };
     let coverage = build_name_coverage(&row.coverage);
     let chain_positions = selected_snapshot.chain_positions_value();
     let consistency = selected_snapshot.consistency.as_str().to_owned();
@@ -140,24 +150,11 @@ fn build_primary_name_response(
         data,
         declared_state,
         verified_state,
-        provenance: primary_name_route_provenance(lookup_state),
+        provenance: JsonValue::Null,
         coverage: primary_name_route_coverage(&namespace, lookup_state),
         chain_positions: empty_object(),
         consistency: "head".to_owned(),
         last_updated: primary_name_last_updated(lookup_state.persisted_verified.as_ref()),
-    }
-}
-
-fn build_resolver_response(row: ResolverCurrentRow) -> ResolverResponse {
-    ResolverResponse {
-        data: build_resolver_data(&row),
-        declared_state: build_resolver_declared_state(&row.declared_summary),
-        verified_state: None,
-        provenance: build_name_provenance(&row.provenance),
-        coverage: build_name_coverage(&row.coverage),
-        chain_positions: ensure_object(&row.chain_positions),
-        consistency: canonicality_consistency(&row.canonicality_summary).to_owned(),
-        last_updated: format_timestamp(row.last_recomputed_at),
     }
 }
 
@@ -231,72 +228,6 @@ fn primary_name_unsupported_result(reason: &str) -> JsonValue {
         "status": "unsupported",
         "unsupported_reason": reason,
     })
-}
-
-fn primary_name_bootstrap_provenance() -> JsonValue {
-    json!({
-        "normalized_event_ids": [],
-        "raw_fact_refs": [],
-        "manifest_versions": [],
-        "execution_trace_id": null,
-        "derivation_kind": "primary_name_route_bootstrap",
-    })
-}
-
-fn primary_name_declared_route_provenance(row: &PrimaryNameCurrentRow) -> JsonValue {
-    let mut provenance = primary_name_bootstrap_provenance();
-    insert_value_field(
-        &mut provenance,
-        "normalized_event_ids",
-        array_value_strings(provenance_field(&row.claim_provenance, "normalized_event_ids")),
-    );
-    insert_value_field(
-        &mut provenance,
-        "raw_fact_refs",
-        array_or_empty(provenance_field(&row.claim_provenance, "raw_fact_refs")),
-    );
-    insert_value_field(
-        &mut provenance,
-        "manifest_versions",
-        array_or_empty(provenance_field(&row.claim_provenance, "manifest_versions")),
-    );
-    insert_string_field(
-        &mut provenance,
-        "derivation_kind",
-        string_field(provenance_field(&row.claim_provenance, "derivation_kind"))
-            .unwrap_or_else(|| "primary_name_route_bootstrap".to_owned()),
-    );
-    provenance
-}
-
-fn primary_name_route_provenance(lookup_state: &PrimaryNameLookupState) -> JsonValue {
-    let mut provenance = match &lookup_state.tuple_state {
-        PrimaryNameTupleState::TuplePresent(row) => primary_name_declared_route_provenance(row),
-        PrimaryNameTupleState::ProjectionUnavailable | PrimaryNameTupleState::TupleMissing => {
-            primary_name_bootstrap_provenance()
-        }
-    };
-
-    if let Some(persisted_verified) = lookup_state.persisted_verified.as_ref() {
-        insert_value_field(
-            &mut provenance,
-            "manifest_versions",
-            array_or_empty(provenance_field(
-                &persisted_verified.provenance,
-                "manifest_versions",
-            )),
-        );
-        insert_nullable_string_field(
-            &mut provenance,
-            "execution_trace_id",
-            string_field(provenance_field(
-                &persisted_verified.provenance,
-                "execution_trace_id",
-            )),
-        );
-    }
-
-    provenance
 }
 
 fn primary_name_verified_readback_provenance(
