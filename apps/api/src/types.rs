@@ -317,7 +317,22 @@ pub(crate) enum PrimaryNameTupleState {
 pub(crate) struct PrimaryNameLookupState {
     pub(crate) tuple_state: PrimaryNameTupleState,
     pub(crate) normalized_claim_name: Option<String>,
+    pub(crate) on_demand_claim: OnDemandPrimaryNameClaimState,
     pub(crate) persisted_verified: Option<PersistedPrimaryNameVerifiedReadback>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum OnDemandPrimaryNameClaimState {
+    NotAttempted,
+    Unavailable,
+    NotFound,
+    Found(OnDemandPrimaryNameClaim),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct OnDemandPrimaryNameClaim {
+    pub(crate) normalized_name: String,
+    pub(crate) resolver_address: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

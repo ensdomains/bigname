@@ -14,6 +14,7 @@ pub(super) async fn load_primary_name_lookup_state(
                 .includes_declared()
                 .then_some(snapshot.normalized_claim_name)
                 .flatten(),
+            on_demand_claim: OnDemandPrimaryNameClaimState::NotAttempted,
             persisted_verified: if mode.includes_verified() {
                 load_persisted_primary_name_verified_readback(pool, address, namespace, coin_type)
                     .await?
@@ -24,12 +25,14 @@ pub(super) async fn load_primary_name_lookup_state(
         Ok(None) => Ok(PrimaryNameLookupState {
             tuple_state: PrimaryNameTupleState::TupleMissing,
             normalized_claim_name: None,
+            on_demand_claim: OnDemandPrimaryNameClaimState::NotAttempted,
             persisted_verified: None,
         }),
         Err(load_error) if primary_name_projection_unavailable(&load_error) => {
             Ok(PrimaryNameLookupState {
                 tuple_state: PrimaryNameTupleState::ProjectionUnavailable,
                 normalized_claim_name: None,
+                on_demand_claim: OnDemandPrimaryNameClaimState::NotAttempted,
                 persisted_verified: None,
             })
         }
@@ -340,4 +343,66 @@ pub(super) fn primary_name_verified_request_key(
     coin_type: &str,
 ) -> String {
     format!("{namespace}:{address}:{coin_type}")
+}
+
+pub(super) async fn load_on_demand_primary_name_claim(
+    state: &AppState,
+    address: &str,
+    namespace: &str,
+    coin_type: &str,
+) -> ApiResult<OnDemandPrimaryNameClaimState> {
+    if namespace != bigname_storage::ENS_NAMESPACE || coin_type != "60" {
+        return Ok(OnDemandPrimaryNameClaimState::NotAttempted);
+    }
+
+    let Some(on_demand) = (match bigname_execution::lookup_ens_reverse_primary_name(
+        bigname_execution::OnDemandEnsPrimaryNameRequest {
+            normalized_address: address,
+            chain_rpc_urls: &state.chain_rpc_urls,
+        },
+    )
+    .await
+    {
+        Ok(on_demand) => on_demand,
+        Err(error) => {
+            warn!(
+                service = "api",
+                address = %address,
+                namespace = %namespace,
+                coin_type = %coin_type,
+                error_kind = ?error.kind(),
+                error = %error.message(),
+                "on-demand primary-name reverse lookup failed"
+            );
+            return Ok(OnDemandPrimaryNameClaimState::Unavailable);
+        }
+    }) else {
+        return Ok(OnDemandPrimaryNameClaimState::NotFound);
+    };
+
+    let parsed = match normalize_inferred_route_name(&on_demand.name) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            warn!(
+                service = "api",
+                address = %address,
+                namespace = %namespace,
+                coin_type = %coin_type,
+                raw_name = %on_demand.name,
+                error = %error.message,
+                "on-demand primary-name reverse lookup returned an unnormalizable name"
+            );
+            return Ok(OnDemandPrimaryNameClaimState::NotFound);
+        }
+    };
+    if parsed.namespace != namespace {
+        return Ok(OnDemandPrimaryNameClaimState::NotFound);
+    }
+
+    Ok(OnDemandPrimaryNameClaimState::Found(
+        OnDemandPrimaryNameClaim {
+        normalized_name: parsed.normalized_name,
+        resolver_address: on_demand.resolver_address,
+        },
+    ))
 }

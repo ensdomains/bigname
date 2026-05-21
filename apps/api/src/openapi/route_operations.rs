@@ -152,9 +152,11 @@ impl ApiParameterSchema {
             Self::String => json!({ "type": "string" }),
             Self::Boolean => json!({ "type": "boolean" }),
             Self::UuidString => json!({ "type": "string", "format": "uuid" }),
-            Self::StringPattern(pattern) => json!({ "type": "string", "pattern": pattern }),
             Self::StringEnum(values) => json!({ "type": "string", "enum": values }),
             Self::StringDefault(default) => json!({ "type": "string", "default": default }),
+            Self::StringPatternDefault { pattern, default } => {
+                json!({ "type": "string", "pattern": pattern, "default": default })
+            }
             Self::StringEnumDefault { values, default } => {
                 json!({ "type": "string", "enum": values, "default": default })
             }

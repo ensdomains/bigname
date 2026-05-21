@@ -582,9 +582,10 @@ Rules:
 
 ## `GET /v1/primary-names/{address}`
 
-Claimed and verified primary name for one `(address, namespace, coin_type)` tuple.
+Claimed and verified primary name for one address. The app fast path defaults to the ENS
+coin type 60 tuple while still allowing explicit tuple selectors.
 
-Query: `mode=declared|verified|both`, `coin_type` (required), `namespace` (required).
+Query: `mode=declared|verified|both`, `coin_type` (default `60`), `namespace` (default `ens`).
 
 `data`: `address`, `namespace`, `coin_type`.
 
@@ -596,19 +597,23 @@ Rules:
 
 - Head-only. No `at` or `consistency`.
 - `claimed_primary_name` is the candidate only; it never implies verification.
-- For ENS, the admitted claim source is `ens_v1_reverse_l1` reverse intake at `0xa58E81fe9b61B5c3fE2AFD33CF304c454AbFc7Cb`.[^v1-revreg-deploy][^v1-revreg-l15][^v1-revreg-l19][^v1-revreg-l74][^v1-revreg-l83][^v1-revreg-l84] The route doesn't trigger fresh reverse lookups while serving the declared response. Missing or unsupported claims don't fall back to registry, resolver, or other claim-setting surfaces.
-- `claimed_primary_name.name` comes only from the exact requested `primary_names_current(address, coin_type, namespace)` row's declared normalized claim-identity source. Never synthesized from manifest presence, resolver-backed name data, verified execution identity, tuple presence, or another tuple's stored identity.
+- For ENS, the persisted admitted claim source is `ens_v1_reverse_l1` reverse intake at `0xa58E81fe9b61B5c3fE2AFD33CF304c454AbFc7Cb`.[^v1-revreg-deploy][^v1-revreg-l15][^v1-revreg-l19][^v1-revreg-l74][^v1-revreg-l83][^v1-revreg-l84]
+- `namespace` defaults to `ens` and `coin_type` defaults to `60`. Supplying both selectors keeps the exact tuple behavior for non-default use.
+- Declared lookup first reads `primary_names_current(address, coin_type, namespace)`. If that tuple is missing and the request is the default ENS/60 tuple, the route may perform an on-demand Ethereum Mainnet RPC lookup against the current reverse node resolver and return the normalized `name(bytes32)` value as `claimed_primary_name.name`.[^v1-registry-deploy][^v1-revreg-l137][^v1-registry-l137][^v1-nameresolver-l7][^v1-nameresolverimpl-l25]
+- On-demand ENS/60 fallback provenance is `{source_family: "ens_reverse_rpc", resolver_address}`. It is route-local read provenance, not projection lineage, and does not populate `primary_names_current`.
+- A successful on-demand lookup with no resolver, empty name, wrong namespace, or unnormalizable reverse name returns `claimed_primary_name.status=not_found` with ENS reverse-RPC partial coverage. Missing or failing API RPC configuration suppresses the fallback and keeps the route in the persisted/no-fallback coverage class.
+- Persisted `claimed_primary_name.name` comes only from the exact requested `primary_names_current(address, coin_type, namespace)` row's declared normalized claim-identity source. Outside the ENS/60 on-demand fallback, it is never synthesized from manifest presence, resolver-backed name data, verified execution identity, tuple presence, or another tuple's stored identity.
 - For Basenames, the admitted claim family is `basenames_base_primary` at `0x79ea96012eea67a83431f1701b3dff7e37f9e282`.[^bn-readme-l33][^bn-revreg-l12][^bn-revreg-l150] Claim intake only — does not replace the Base registry/registrar/resolver families for declared truth on exact-name, address-name, or children reads.
 - `claimed_primary_name.raw_claim_name` may appear only when `status=invalid_name` for the exact requested tuple, copied verbatim from `primary_names_current.raw_claim_name`. Blank or whitespace-only raw claims become `not_found`; `invalid_name` is for nonblank claims that fail normalization.
-- `claimed_primary_name.provenance` is exact-tuple declared provenance from the requested `primary_names_current` row. It strips any verified-primary lookup/invalidation hook material and omits `execution_trace_id`.
+- `claimed_primary_name.provenance` is exact-tuple declared provenance from the requested `primary_names_current` row, or route-local `ens_reverse_rpc` provenance for the ENS/60 on-demand fallback. Persisted declared provenance strips any verified-primary lookup/invalidation hook material and omits `execution_trace_id`.
 - `verified_primary_name` field boundary: `{status, name?, unsupported_reason?, failure_reason?, provenance?}`. `name` uses `NameRef` and appears only for `success` or `mismatch`. `raw_claim_name` never appears here.
 - `verified_primary_name.provenance` (when present) is the section-local `{execution_trace_id, manifest_versions}` for the same tuple. The primary-name route does not emit top-level route provenance by default.
 - `verified_primary_name` is authoritative only on `status=success`. `status=mismatch` means the claim normalizes and the verified target resolves for the requested `coin_type` but doesn't equal the requested `{address}`.
 - `failure_reason` on `verified_primary_name` is verification-local and may appear only for `mismatch`, `invalid_name`, or `execution_failed`.
 - Verified persisted-readback uses execution identity `request_type=verified_primary_name` keyed on `{namespace}:{normalized_address}:{coin_type}` (lowercased address).
-- `primary_names_current(address, coin_type, namespace)` is the only claim-side lookup/invalidation anchor.
+- `primary_names_current(address, coin_type, namespace)` remains the only claim-side lookup/invalidation anchor for persisted claim and verified-primary readback.
 - For Basenames in `mode=verified|both`, persisted `verified_primary_name` results are returned for the exact requested tuple via `basenames_execution`. Declared and verified stay separate because upstream keeps reverse-name writes on the Base ReverseRegistrar while verified resolution enters through the L1 Resolver.[^bn-readme-l22][^bn-readme-l33][^bn-revreg-l12][^bn-revreg-l193][^bn-l1resolver-l13]
-- Invalid address syntax, missing `namespace` or `coin_type`, or a malformed tuple returns `400 invalid_input`.
+- Invalid address syntax or malformed `namespace` / `coin_type` returns `400 invalid_input`.
 - Unsupported public namespace returns `404 not_found`.
 - No declared or verified answer for the tuple returns `200` with `status=not_found`.
 - Unsupported claim surfaces or verified entrypoints return `200` with the corresponding object `status=unsupported`.
@@ -618,10 +623,11 @@ Rules:
 Local to the requested tuple. Not the single-name `Coverage` from `GET /v1/coverage/{namespace}/{name}`.
 
 - ENS mainnet supported tuple class: `coverage.status=partial`, `exhaustiveness=non_enumerable`, `source_classes_considered=["ens_v1_reverse_l1","ens_execution"]`, `enumeration_basis=primary_name_lookup`.[^v1-revreg-deploy][^v1-ur-deploy]
+- ENS/60 on-demand fallback class: `coverage.status=partial`, `exhaustiveness=non_enumerable`, `source_classes_considered=["ens_reverse_rpc"]`, `enumeration_basis=primary_name_lookup`.
 - Basenames mainnet supported tuple class: `coverage.status=partial`, `exhaustiveness=non_enumerable`, `source_classes_considered=["basenames_base_primary","basenames_execution"]`, `enumeration_basis=primary_name_lookup`.
 - Out of class: `coverage.status=unsupported`, `exhaustiveness=not_applicable`, `source_classes_considered=[]`, `enumeration_basis=primary_name_lookup`, `unsupported_reason="primary-name exact-tuple persisted readback is not supported for the requested tuple"`. Out-of-class verified objects use `verified_primary_name.status=unsupported`.
 
-Tuple presence, absence, mismatch, or resolver-backed verification detail doesn't change these states. Class membership chooses route-level coverage; result-object `status` describes the tuple answer inside that class.
+Persisted class membership, ENS/60 fallback availability, and result-object status are separate: `claimed_primary_name.status` describes the answer, while route-level coverage describes whether the answer came from the persisted exact-tuple class, the on-demand ENS/60 reverse RPC class, or neither.
 
 ## App-facing examples
 
@@ -739,12 +745,17 @@ GET /v1/resolvers/ethereum-mainnet/0x0000.../overview?include=nodes,aliases,role
 [^v1-iur-l52]: (upstream: .refs/ens_v1/contracts/universalResolver/IUniversalResolver.sol:L52 @ ens_v1@91c966f)
 [^v1-ur-deploy]: (upstream: .refs/ens_v1/deployments/mainnet/UniversalResolver.json:L2 @ ens_v1@91c966f)
 
+[^v1-registry-deploy]: (upstream: .refs/ens_v1/deployments/mainnet/ENSRegistry.json:L2 @ ens_v1@91c966f)
 [^v1-revreg-deploy]: (upstream: .refs/ens_v1/deployments/mainnet/ReverseRegistrar.json:L2 @ ens_v1@91c966f)
 [^v1-revreg-l15]: (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L15 @ ens_v1@91c966f)
 [^v1-revreg-l19]: (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L19 @ ens_v1@91c966f)
 [^v1-revreg-l74]: (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L74 @ ens_v1@91c966f)
 [^v1-revreg-l83]: (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L83 @ ens_v1@91c966f)
 [^v1-revreg-l84]: (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L84 @ ens_v1@91c966f)
+[^v1-revreg-l137]: (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L137 @ ens_v1@91c966f)
+[^v1-registry-l137]: (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L137 @ ens_v1@91c966f)
+[^v1-nameresolver-l7]: (upstream: .refs/ens_v1/contracts/resolvers/profiles/INameResolver.sol:L7 @ ens_v1@91c966f)
+[^v1-nameresolverimpl-l25]: (upstream: .refs/ens_v1/contracts/resolvers/profiles/NameResolver.sol:L25 @ ens_v1@91c966f)
 
 [^v2-deploy-ethreg]: (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistry.json:L2 @ ens_v2@554c309)
 [^v2-deploy-ethrc]: (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistrar.json:L2 @ ens_v2@554c309)

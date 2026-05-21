@@ -98,11 +98,16 @@ and the latest stored Ethereum checkpoint, and the API call targets that
 selected block rather than provider latest.
 
 Configure `BIGNAME_API_CHAIN_RPC_URLS=ethereum-mainnet=<http-url>` for the API
-process before relying on live ENS verified resolution. This is separate from
+process before relying on live ENS verified resolution or the ENS/60
+primary-name reverse RPC fallback. This is separate from
 `BIGNAME_INDEXER_CHAIN_RPC_URLS`, which feeds indexer intake and checkpoint
 state only. If the API Ethereum provider is not configured, supported live ENS
 verified selectors fail closed with `409 stale` and a configuration message
-instead of falling back to declared record cache.
+instead of falling back to declared record cache. For
+`GET /v1/primary-names/{address}` defaulting to `namespace=ens&coin_type=60`,
+missing provider configuration or provider failure logs a warning and suppresses
+only the route-local fallback; successful fallback misses still return
+`claimed_primary_name.status=not_found` with ENS reverse-RPC partial coverage.
 
 Deployments with a local Reth database can also set
 `BIGNAME_INDEXER_CHAIN_RETH_DB_SOURCES` to a comma-delimited list of

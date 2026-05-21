@@ -24,9 +24,12 @@ pub(crate) enum ApiParameterSchema {
     String,
     Boolean,
     UuidString,
-    StringPattern(&'static str),
     StringEnum(&'static [&'static str]),
     StringDefault(&'static str),
+    StringPatternDefault {
+        pattern: &'static str,
+        default: &'static str,
+    },
     StringEnumDefault {
         values: &'static [&'static str],
         default: &'static str,
@@ -157,8 +160,16 @@ const NAMESPACE_QUERY: ApiRouteParameter = ApiRouteParameter::query(
 );
 const REQUIRED_NAMESPACE_QUERY: ApiRouteParameter = ApiRouteParameter::required_query(
     "namespace",
-    "Required namespace identifier for the requested primary-name tuple.",
+    "Required namespace identifier.",
     ApiParameterSchema::StringEnum(crate::PUBLIC_NAMESPACES),
+);
+const PRIMARY_NAMESPACE_QUERY: ApiRouteParameter = ApiRouteParameter::query(
+    "namespace",
+    "Primary-name namespace. Defaults to ENS for the app fast path.",
+    ApiParameterSchema::StringEnumDefault {
+        values: crate::PUBLIC_NAMESPACES,
+        default: "ens",
+    },
 );
 const RELATION_QUERY: ApiRouteParameter = ApiRouteParameter::query(
     "relation",
@@ -343,11 +354,14 @@ pub(crate) const ADDRESS_HISTORY_PARAMETERS: &[ApiRouteParameter] = &[
 
 pub(crate) const PRIMARY_NAMES_PARAMETERS: &[ApiRouteParameter] = &[
     ADDRESS_PATH,
-    REQUIRED_NAMESPACE_QUERY,
-    ApiRouteParameter::required_query(
+    PRIMARY_NAMESPACE_QUERY,
+    ApiRouteParameter::query(
         "coin_type",
-        "Required `coin_type` selector for the requested primary-name tuple.",
-        ApiParameterSchema::StringPattern("^[0-9]+$"),
+        "`coin_type` selector. Defaults to 60 for the app fast path.",
+        ApiParameterSchema::StringPatternDefault {
+            pattern: "^[0-9]+$",
+            default: "60",
+        },
     ),
     PRIMARY_NAME_MODE_QUERY,
 ];

@@ -583,21 +583,23 @@ fn openapi_document_freezes_query_params_and_shared_envelopes() {
 
     let primary_names = openapi_operation(&document, "/v1/primary-names/{address}");
     let primary_namespace = openapi_parameter(primary_names, "namespace");
-    assert_eq!(primary_namespace.get("required"), Some(&json!(true)));
+    assert_eq!(primary_namespace.get("required"), Some(&json!(false)));
     assert_eq!(
         primary_namespace.get("schema"),
         Some(&json!({
             "type": "string",
             "enum": ["ens", "basenames"],
+            "default": "ens",
         }))
     );
     let primary_coin_type = openapi_parameter(primary_names, "coin_type");
-    assert_eq!(primary_coin_type.get("required"), Some(&json!(true)));
+    assert_eq!(primary_coin_type.get("required"), Some(&json!(false)));
     assert_eq!(
         primary_coin_type.get("schema"),
         Some(&json!({
             "type": "string",
             "pattern": "^[0-9]+$",
+            "default": "60",
         }))
     );
     let primary_mode = openapi_parameter(primary_names, "mode");

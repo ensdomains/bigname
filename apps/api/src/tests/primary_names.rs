@@ -24,6 +24,325 @@ fn primary_name_unsupported_coverage() -> Value {
     })
 }
 
+async fn spawn_primary_name_mock_rpc(
+    responses: Vec<Value>,
+) -> Result<(String, tokio::task::JoinHandle<Result<Vec<Value>>>)> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .context("failed to bind mock primary-name RPC listener")?;
+    let url = format!("http://{}", listener.local_addr()?);
+    let handle = tokio::spawn(async move {
+        let mut requests = Vec::new();
+        for response_result in responses {
+            let (mut socket, _) = listener
+                .accept()
+                .await
+                .context("failed to accept mock primary-name RPC request")?;
+            let request_payload = read_primary_name_mock_rpc_request(&mut socket).await?;
+            requests.push(request_payload);
+            write_primary_name_mock_rpc_response(&mut socket, response_result).await?;
+        }
+        Ok(requests)
+    });
+
+    Ok((url, handle))
+}
+
+async fn read_primary_name_mock_rpc_request(socket: &mut tokio::net::TcpStream) -> Result<Value> {
+    use tokio::io::AsyncReadExt;
+
+    let mut buffer = Vec::new();
+    let mut scratch = [0_u8; 1024];
+    let (body_start, content_length) = loop {
+        let bytes_read = socket
+            .read(&mut scratch)
+            .await
+            .context("failed to read mock primary-name RPC request")?;
+        if bytes_read == 0 {
+            anyhow::bail!("mock primary-name RPC request closed before headers finished");
+        }
+        buffer.extend_from_slice(&scratch[..bytes_read]);
+        if let Some(body_start) = primary_name_mock_header_end(&buffer) {
+            let headers = std::str::from_utf8(&buffer[..body_start])
+                .context("mock primary-name RPC request headers were not utf8")?;
+            let content_length = primary_name_mock_content_length(headers)?;
+            break (body_start, content_length);
+        }
+    };
+
+    while buffer.len() < body_start + content_length {
+        let bytes_read = socket
+            .read(&mut scratch)
+            .await
+            .context("failed to read mock primary-name RPC request body")?;
+        if bytes_read == 0 {
+            anyhow::bail!("mock primary-name RPC request closed before body finished");
+        }
+        buffer.extend_from_slice(&scratch[..bytes_read]);
+    }
+
+    serde_json::from_slice(&buffer[body_start..body_start + content_length])
+        .context("failed to parse mock primary-name RPC request body")
+}
+
+fn primary_name_mock_header_end(buffer: &[u8]) -> Option<usize> {
+    buffer
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|position| position + 4)
+}
+
+fn primary_name_mock_content_length(headers: &str) -> Result<usize> {
+    headers
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse::<usize>())
+        })
+        .transpose()
+        .context("mock primary-name RPC request content-length was invalid")?
+        .with_context(|| "mock primary-name RPC request did not include content-length")
+}
+
+async fn write_primary_name_mock_rpc_response(
+    socket: &mut tokio::net::TcpStream,
+    result: Value,
+) -> Result<()> {
+    use tokio::io::AsyncWriteExt;
+
+    let body = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "result": result,
+    })
+    .to_string();
+    let response = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nconnection: close\r\ncontent-length: {}\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    socket
+        .write_all(response.as_bytes())
+        .await
+        .context("failed to write mock primary-name RPC response")
+}
+
+async fn join_primary_name_mock_rpc_requests(
+    handle: tokio::task::JoinHandle<Result<Vec<Value>>>,
+) -> Result<Vec<Value>> {
+    handle
+        .await
+        .context("mock primary-name RPC task panicked or was cancelled")?
+}
+
+#[test]
+fn primary_name_response_uses_on_demand_claim_for_default_tuple_miss() {
+    let lookup_state = PrimaryNameLookupState {
+        tuple_state: PrimaryNameTupleState::TupleMissing,
+        normalized_claim_name: None,
+        on_demand_claim: OnDemandPrimaryNameClaimState::Found(OnDemandPrimaryNameClaim {
+            normalized_name: "taytems.eth".to_owned(),
+            resolver_address: "0xa2c122be93b0074270ebee7f6b7292c7deb45047".to_owned(),
+        }),
+        persisted_verified: None,
+    };
+
+    let payload = build_primary_name_response(
+        "0x8e8db5ccef88cca9d624701db544989c996e3216".to_owned(),
+        "ens".to_owned(),
+        "60".to_owned(),
+        ResolutionMode::Both,
+        &lookup_state,
+    );
+
+    assert_eq!(
+        payload.declared_state,
+        Some(json!({
+            "claimed_primary_name": {
+                "status": "success",
+                "name": "taytems.eth",
+                "provenance": {
+                    "source_family": "ens_reverse_rpc",
+                    "resolver_address": "0xa2c122be93b0074270ebee7f6b7292c7deb45047",
+                },
+            }
+        }))
+    );
+    assert_eq!(
+        payload.verified_state,
+        Some(json!({
+            "verified_primary_name": {
+                "status": "unsupported",
+                "unsupported_reason": "verified primary-name readback is not available for on-demand reverse lookup",
+            }
+        }))
+    );
+    assert_eq!(
+        payload.coverage,
+        json!({
+            "status": "partial",
+            "exhaustiveness": "non_enumerable",
+            "source_classes_considered": ["ens_reverse_rpc"],
+            "enumeration_basis": "primary_name_lookup",
+            "unsupported_reason": null,
+        })
+    );
+}
+
+#[tokio::test]
+async fn get_primary_names_uses_configured_on_demand_rpc_for_default_tuple_miss() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![
+        json!("0x000000000000000000000000a2c122be93b0074270ebee7f6b7292c7deb45047"),
+        json!(
+            "0x0000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000000b74617974656d732e657468000000000000000000000000000000000000000000"
+        ),
+    ])
+    .await?;
+    let chain_rpc_urls =
+        bigname_execution::ChainRpcUrls::from_entries(&[format!("ethereum-mainnet={rpc_url}")])?;
+
+    let response = app_router(database.app_state_with_chain_rpc_urls(chain_rpc_urls))
+        .oneshot(
+            Request::builder()
+                .uri("/v1/primary-names/0x8e8db5ccef88cca9d624701db544989c996e3216")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("primary-name on-demand tuple miss request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: PrimaryNameResponse = read_json(response).await?;
+    assert_eq!(
+        payload.declared_state,
+        Some(json!({
+            "claimed_primary_name": {
+                "status": "success",
+                "name": "taytems.eth",
+                "provenance": {
+                    "source_family": "ens_reverse_rpc",
+                    "resolver_address": "0xa2c122be93b0074270ebee7f6b7292c7deb45047",
+                },
+            }
+        }))
+    );
+    assert_eq!(payload.verified_state, None);
+    assert_eq!(
+        payload.coverage,
+        json!({
+            "status": "partial",
+            "exhaustiveness": "non_enumerable",
+            "source_classes_considered": ["ens_reverse_rpc"],
+            "enumeration_basis": "primary_name_lookup",
+            "unsupported_reason": null,
+        })
+    );
+
+    let rpc_requests = join_primary_name_mock_rpc_requests(rpc_handle).await?;
+    assert_eq!(rpc_requests.len(), 2);
+    assert_eq!(rpc_requests[0]["method"], "eth_call");
+    assert_eq!(
+        rpc_requests[0]["params"][0]["to"],
+        bigname_execution::ENS_REGISTRY_ADDRESS
+    );
+    assert_eq!(rpc_requests[0]["params"][1], "latest");
+    assert_eq!(rpc_requests[1]["method"], "eth_call");
+    assert_eq!(
+        rpc_requests[1]["params"][0]["to"],
+        "0xa2c122be93b0074270ebee7f6b7292c7deb45047"
+    );
+    assert_eq!(rpc_requests[1]["params"][1], "latest");
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_primary_names_reports_partial_coverage_for_on_demand_rpc_miss() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![json!(
+        "0x0000000000000000000000000000000000000000000000000000000000000000"
+    )])
+    .await?;
+    let chain_rpc_urls =
+        bigname_execution::ChainRpcUrls::from_entries(&[format!("ethereum-mainnet={rpc_url}")])?;
+
+    let response = app_router(database.app_state_with_chain_rpc_urls(chain_rpc_urls))
+        .oneshot(
+            Request::builder()
+                .uri("/v1/primary-names/0x8e8db5ccef88cca9d624701db544989c996e3216")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("primary-name on-demand miss request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: PrimaryNameResponse = read_json(response).await?;
+    assert_eq!(
+        payload.declared_state,
+        Some(json!({
+            "claimed_primary_name": {
+                "status": "not_found",
+            }
+        }))
+    );
+    assert_eq!(payload.verified_state, None);
+    assert_eq!(
+        payload.coverage,
+        json!({
+            "status": "partial",
+            "exhaustiveness": "non_enumerable",
+            "source_classes_considered": ["ens_reverse_rpc"],
+            "enumeration_basis": "primary_name_lookup",
+            "unsupported_reason": null,
+        })
+    );
+
+    let rpc_requests = join_primary_name_mock_rpc_requests(rpc_handle).await?;
+    assert_eq!(rpc_requests.len(), 1);
+    assert_eq!(rpc_requests[0]["method"], "eth_call");
+    assert_eq!(
+        rpc_requests[0]["params"][0]["to"],
+        bigname_execution::ENS_REGISTRY_ADDRESS
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_primary_names_keeps_tuple_unsupported_when_on_demand_rpc_unconfigured() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/primary-names/0x8e8db5ccef88cca9d624701db544989c996e3216")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("unconfigured primary-name fallback request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: PrimaryNameResponse = read_json(response).await?;
+    assert_eq!(
+        payload.declared_state,
+        Some(json!({
+            "claimed_primary_name": {
+                "status": "not_found",
+            }
+        }))
+    );
+    assert_eq!(payload.coverage, primary_name_unsupported_coverage());
+
+    database.cleanup().await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn get_primary_names_freezes_bootstrap_mode_envelopes() -> Result<()> {
     let database = TestDatabase::new(false).await?;
@@ -1812,10 +2131,19 @@ async fn get_primary_names_freezes_bootstrap_behavior_for_tuple_present() -> Res
 }
 
 #[tokio::test]
-async fn get_primary_names_requires_namespace_and_coin_type() -> Result<()> {
+async fn get_primary_names_defaults_namespace_and_coin_type() -> Result<()> {
     let database = TestDatabase::new(false).await?;
 
-    let missing_namespace = app_router(database.app_state())
+    let default_tuple = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/primary-names/0x0000000000000000000000000000000000000abc")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("default tuple request failed")?;
+    let default_namespace = app_router(database.app_state())
         .oneshot(
             Request::builder()
                 .uri("/v1/primary-names/0x0000000000000000000000000000000000000abc?coin_type=60")
@@ -1823,32 +2151,22 @@ async fn get_primary_names_requires_namespace_and_coin_type() -> Result<()> {
                 .expect("request must build"),
         )
         .await
-        .context("missing-namespace request failed")?;
-    let missing_coin_type = app_router(database.app_state())
-        .oneshot(
-            Request::builder()
-                .uri("/v1/primary-names/0x0000000000000000000000000000000000000abc?namespace=ens")
-                .body(Body::empty())
-                .expect("request must build"),
-        )
-        .await
-        .context("missing-coin-type request failed")?;
+        .context("default namespace request failed")?;
 
-    assert_eq!(missing_namespace.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(missing_coin_type.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(default_tuple.status(), StatusCode::OK);
+    assert_eq!(default_namespace.status(), StatusCode::OK);
 
-    let missing_namespace_payload: ErrorResponse = read_json(missing_namespace).await?;
-    let missing_coin_type_payload: ErrorResponse = read_json(missing_coin_type).await?;
-    assert_eq!(missing_namespace_payload.error.code, "invalid_input");
+    let default_tuple_payload: PrimaryNameResponse = read_json(default_tuple).await?;
+    let default_namespace_payload: PrimaryNameResponse = read_json(default_namespace).await?;
     assert_eq!(
-        missing_namespace_payload.error.message,
-        "namespace is required"
+        default_tuple_payload.data,
+        json!({
+            "address": "0x0000000000000000000000000000000000000abc",
+            "namespace": "ens",
+            "coin_type": "60",
+        })
     );
-    assert_eq!(missing_coin_type_payload.error.code, "invalid_input");
-    assert_eq!(
-        missing_coin_type_payload.error.message,
-        "coin_type is required"
-    );
+    assert_eq!(default_namespace_payload.data, default_tuple_payload.data);
 
     database.cleanup().await?;
     Ok(())

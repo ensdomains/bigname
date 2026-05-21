@@ -4185,11 +4185,12 @@
             }
           },
           {
-            "description": "Required namespace identifier for the requested primary-name tuple.",
+            "description": "Primary-name namespace. Defaults to ENS for the app fast path.",
             "in": "query",
             "name": "namespace",
-            "required": true,
+            "required": false,
             "schema": {
+              "default": "ens",
               "enum": [
                 "ens",
                 "basenames"
@@ -4198,11 +4199,12 @@
             }
           },
           {
-            "description": "Required `coin_type` selector for the requested primary-name tuple.",
+            "description": "`coin_type` selector. Defaults to 60 for the app fast path.",
             "in": "query",
             "name": "coin_type",
-            "required": true,
+            "required": false,
             "schema": {
+              "default": "60",
               "pattern": "^[0-9]+$",
               "type": "string"
             }
@@ -4528,7 +4530,7 @@
         "operationId": "resource_lookup",
         "parameters": [
           {
-            "description": "Required namespace identifier for the requested primary-name tuple.",
+            "description": "Required namespace identifier.",
             "in": "query",
             "name": "namespace",
             "required": true,

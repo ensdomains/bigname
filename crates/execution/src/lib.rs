@@ -1,5 +1,6 @@
 //! ENS verified-resolution exact-surface execution persistence bootstrap.
 
+mod ens_primary_name;
 mod ens_resolution;
 mod ens_resolution_abi;
 mod ens_resolution_call;
@@ -15,6 +16,10 @@ mod validation;
 pub use bigname_storage::{
     CanonicalityState, ExecutionTraceStep, load_execution_outcome, load_execution_trace,
     load_raw_call_snapshots_by_block_hash,
+};
+pub use ens_primary_name::{
+    OnDemandEnsPrimaryName, OnDemandEnsPrimaryNameError, OnDemandEnsPrimaryNameErrorKind,
+    OnDemandEnsPrimaryNameRequest, lookup_ens_reverse_primary_name,
 };
 pub use ens_resolution::{
     EnsResolutionRecord, OnDemandEnsResolutionError, OnDemandEnsResolutionErrorKind,
@@ -41,6 +46,7 @@ pub const BASENAMES_NAMESPACE: &str = bigname_storage::BASENAMES_NAMESPACE;
 pub const BASE_MAINNET_CHAIN_ID: &str = bigname_storage::BASE_MAINNET_CHAIN_ID;
 pub const ETHEREUM_MAINNET_CHAIN_ID: &str = bigname_storage::ETHEREUM_MAINNET_CHAIN_ID;
 pub const ENS_EXECUTION_SOURCE_FAMILY: &str = "ens_execution";
+pub const ENS_REGISTRY_ADDRESS: &str = "0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e";
 pub const ENS_UNIVERSAL_RESOLVER_ROLE: &str = "universal_resolver";
 pub const ENS_UNIVERSAL_RESOLVER_ADDRESS: &str = "0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe";
 pub const BASENAMES_EXECUTION_SOURCE_FAMILY: &str = "basenames_execution";

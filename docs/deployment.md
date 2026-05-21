@@ -49,7 +49,7 @@ manifest/watch state, but provider-backed live ingestion remains idle. Current
 bootstrap RPC support accepts `http://` endpoints.
 
 The API service also needs its own Ethereum JSON-RPC provider for live ENS
-verified resolution, configured as
+verified resolution and the ENS/60 primary-name reverse RPC fallback, configured as
 `BIGNAME_API_CHAIN_RPC_URLS=ethereum-mainnet=<http-url>`. `GET /v1/profiles/names/{name}`
 in `mode=verified|both`, and `GET /v1/names/{namespace}/{name}/records` when it
 needs verified values, first use matching persisted execution output; when
@@ -62,6 +62,15 @@ configuration or a provider that cannot serve the selected block must fail
 closed with `409 stale` plus a configuration message; it must not fall back
 to declared record cache. The indexer RPC setting and Reth DB source settings do
 not satisfy this API live-execution provider requirement by themselves.
+
+The primary-name fallback is deliberately softer than verified resolution: when
+`GET /v1/primary-names/{address}` defaults to `namespace=ens&coin_type=60` and
+the persisted tuple is missing, a configured API provider lets the route read
+the current Ethereum Mainnet reverse resolver. A zero resolver, empty name,
+wrong namespace, or unnormalizable reverse name is a supported fallback miss.
+Missing provider configuration or provider failure is logged and suppresses the
+fallback, leaving the route to return the persisted/no-fallback response instead
+of failing the request.
 
 The worker may use the same provider shape for projection-owned ENSv1 text
 hydration, configured as

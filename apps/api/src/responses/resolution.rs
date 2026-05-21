@@ -304,7 +304,21 @@ fn primary_name_claim_result(lookup_state: &PrimaryNameLookupState) -> JsonValue
         PrimaryNameTupleState::ProjectionUnavailable => primary_name_unsupported_result(
             "declared primary-name claim surface is not yet supported",
         ),
-        PrimaryNameTupleState::TupleMissing => primary_name_not_found_result(),
+        PrimaryNameTupleState::TupleMissing => {
+            if let OnDemandPrimaryNameClaimState::Found(on_demand_claim) =
+                &lookup_state.on_demand_claim
+            {
+                return json!({
+                    "status": "success",
+                    "name": on_demand_claim.normalized_name.clone(),
+                    "provenance": {
+                        "source_family": "ens_reverse_rpc",
+                        "resolver_address": on_demand_claim.resolver_address.clone(),
+                    },
+                });
+            }
+            primary_name_not_found_result()
+        }
         PrimaryNameTupleState::TuplePresent(row) => {
             let mut result = json!({
                 "status": row.claim_status.as_str(),
@@ -353,6 +367,16 @@ fn primary_name_verified_result(lookup_state: &PrimaryNameLookupState) -> JsonVa
     }
 
     match lookup_state.tuple_state {
+        PrimaryNameTupleState::TupleMissing
+            if matches!(
+                lookup_state.on_demand_claim,
+                OnDemandPrimaryNameClaimState::Found(_) | OnDemandPrimaryNameClaimState::NotFound
+            ) =>
+        {
+            primary_name_unsupported_result(
+                "verified primary-name readback is not available for on-demand reverse lookup",
+            )
+        }
         PrimaryNameTupleState::TupleMissing => primary_name_not_found_result(),
         PrimaryNameTupleState::ProjectionUnavailable | PrimaryNameTupleState::TuplePresent(_) => {
             primary_name_unsupported_result("verified primary-name entrypoint is not yet supported")
@@ -464,6 +488,14 @@ fn primary_name_route_coverage(
             }
             _ => {}
         }
+    }
+
+    if matches!(
+        lookup_state.on_demand_claim,
+        OnDemandPrimaryNameClaimState::Found(_) | OnDemandPrimaryNameClaimState::NotFound
+    ) && namespace == "ens"
+    {
+        return primary_name_exact_tuple_coverage(&["ens_reverse_rpc"]);
     }
 
     primary_name_unsupported_exact_tuple_coverage()
