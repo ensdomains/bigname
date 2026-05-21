@@ -622,6 +622,14 @@ async fn identity_batch_routes_map_json_rejections_to_invalid_input() -> Result<
         ("/v1/identity/names:batch", r#"{"names":"#),
         ("/v1/identity/addresses:names:batch", r#"{"inputs":"#),
         ("/v1/identity/addresses:feed", r#"{"inputs":"#),
+        (
+            "/v1/identity/addresses:feed",
+            r#"{"inputs":[{"address":"0x0000000000000000000000000000000000000abc","coin_type":60}],"page_size":1}"#,
+        ),
+        (
+            "/v1/identity/addresses:feed",
+            r#"{"inputs":[{"address":"0x0000000000000000000000000000000000000abc","coin_type":60,"page_size":1}]}"#,
+        ),
     ] {
         let response = app_router(database.app_state())
             .oneshot(

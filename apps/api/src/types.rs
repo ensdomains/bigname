@@ -30,21 +30,25 @@ pub(crate) struct HealthDatabaseResponse {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ForwardIdentityBatchInput {
     pub(crate) names: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ReverseIdentityBatchInput {
     pub(crate) inputs: Vec<ReverseIdentityBatchInputItem>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ReverseIdentityFeedInput {
     pub(crate) inputs: Vec<ReverseIdentityFeedInputItem>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ReverseIdentityBatchInputItem {
     pub(crate) address: String,
     pub(crate) coin_type: Option<u64>,
@@ -54,6 +58,7 @@ pub(crate) struct ReverseIdentityBatchInputItem {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ReverseIdentityFeedInputItem {
     pub(crate) address: String,
     pub(crate) coin_type: Option<u64>,

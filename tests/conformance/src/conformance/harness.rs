@@ -127,6 +127,12 @@
                 ),
             },
             OpenApiConformanceCoverage {
+                path: "/v1/identity/addresses:feed",
+                scope: OpenApiConformanceScope::HarnessOwner(
+                    "apps/api tests::identity_reverse_marks_primary_orders_and_batches_by_input, identity_reverse_paginates_only_reachable_name_records, and identity_batch_routes_map_json_rejections_to_invalid_input; partner-1 latency facade compatibility surface",
+                ),
+            },
+            OpenApiConformanceCoverage {
                 path: "/v1/identity/addresses:names:batch",
                 scope: OpenApiConformanceScope::HarnessOwner(
                     "apps/api tests::identity_reverse_marks_primary_orders_and_batches_by_input and identity_batch_routes_map_json_rejections_to_invalid_input; partner-1 facade compatibility surface",
