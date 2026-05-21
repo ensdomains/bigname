@@ -238,6 +238,7 @@ fn openapi_document_publishes_only_shipped_routes() {
         ]
     );
     assert!(!openapi_paths(&document).contains_key("/healthz"));
+    assert!(!openapi_paths(&document).contains_key("/"));
     assert!(!openapi_paths(&document).contains_key("/openapi.json"));
     assert!(!openapi_paths(&document).contains_key("/docs"));
 }
@@ -1060,6 +1061,7 @@ fn openapi_document_matches_checked_in_artifact() {
     let checked_in: Value =
         serde_json::from_str(&checked_in).expect("checked-in OpenAPI artifact must be valid JSON");
     assert!(!openapi_paths(&checked_in).contains_key("/healthz"));
+    assert!(!openapi_paths(&checked_in).contains_key("/"));
     assert!(!openapi_paths(&checked_in).contains_key("/openapi.json"));
     assert!(!openapi_paths(&checked_in).contains_key("/docs"));
 }
@@ -1137,35 +1139,36 @@ async fn compact_only_routes_keep_full_view_compatibility_rejection() -> Result<
 
 #[tokio::test]
 async fn openapi_docs_route_serves_viewer() -> Result<()> {
-    let response = app_router(openapi_docs_test_state())
-        .oneshot(
-            Request::builder()
-                .uri("/docs")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await?;
+    for path in ["/", "/docs"] {
+        let response = app_router(openapi_docs_test_state())
+            .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+            .await?;
 
-    assert_eq!(response.status(), StatusCode::OK);
-    let content_type = response
-        .headers()
-        .get(axum::http::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or_default()
-        .to_owned();
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .context("failed to read OpenAPI docs body")?;
-    let body = String::from_utf8(body.to_vec()).context("OpenAPI docs body must be UTF-8")?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let content_type = response
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_owned();
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .context("failed to read OpenAPI docs body")?;
+        let body = String::from_utf8(body.to_vec()).context("OpenAPI docs body must be UTF-8")?;
 
-    assert!(content_type.starts_with("text/html"));
-    assert!(body.contains("bigname API docs"));
-    assert!(body.contains("/openapi.json"));
-    assert!(body.contains("Try request"));
-    assert!(body.contains("Response headers"));
-    assert!(body.contains("performance.now()"));
-    assert!(body.contains("0x8e8Db5CcEF88cca9d624701Db544989C996E3216"));
-    assert!(body.contains("taytems.eth"));
+        assert!(content_type.starts_with("text/html"));
+        assert!(body.contains("bigname API docs"));
+        assert!(body.contains("/openapi.json"));
+        assert!(body.contains("Native Identity And Status"));
+        assert!(body.contains("Canonical Product Reads"));
+        assert!(body.contains("Coverage And Explain"));
+        assert!(body.contains("Explorer And Audit"));
+        assert!(body.contains("Try request"));
+        assert!(body.contains("Response headers"));
+        assert!(body.contains("performance.now()"));
+        assert!(body.contains("0x8e8Db5CcEF88cca9d624701Db544989C996E3216"));
+        assert!(body.contains("taytems.eth"));
+    }
 
     Ok(())
 }

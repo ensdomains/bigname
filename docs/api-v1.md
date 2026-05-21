@@ -145,7 +145,7 @@ Rules:
 - Route-level `coverage` and per-section support are independent: a read may be authoritative while one declared section returns `UnsupportedSummary`.
 - Top-level `provenance` is the route-level summary. Mixed declared+verified routes may add section-local `provenance` where derivations differ.
 - `meta=none` omits `meta` (collection `page` stays). `meta=summary` includes route-level support, unsupported filters/fields, count metadata, and snapshot summary. `meta=full` adds the full-envelope `coverage`, `chain_positions`, `consistency`, `last_updated`, and route-level `provenance` summaries.
-- `view=full` returns the full envelope only when the route documents a full view. Compact-only routes keep `view=full` as a compatibility-reserved input that returns `400 invalid_input`; OpenAPI advertises only `view=compact` for those routes.
+- `view=full` returns the full envelope only when the route documents a full view. Compact-only routes keep `view=full` as a reserved input that returns `400 invalid_input`; OpenAPI advertises only `view=compact` for those routes.
 - Compact responses never expose raw facts, full provenance, or projection internals as a substitute for `meta`. Explain detail belongs on explain/audit routes.
 
 ## Identity
@@ -345,7 +345,7 @@ For ENSv1 and Basenames, retained current-resolver record events may populate se
 
 ## Route catalog
 
-The actual published routes are listed below. Per-route semantics are in [`api-v1-routes.md`](api-v1-routes.md). The grouping is normative for product guidance: native slim identity routes are the latency-critical partner/feed surface, canonical product routes are the preferred public API for app and explorer reads, diagnostics carry coverage/provenance detail, and compatibility/explorer routes remain supported without being the primary integration surface.
+The actual published routes are listed below. Per-route semantics are in [`api-v1-routes.md`](api-v1-routes.md). The grouping is normative for product guidance: native slim identity routes are the latency-critical partner/feed surface, canonical product routes are the preferred public API for app and explorer reads, diagnostics carry coverage/provenance detail, and explorer/audit adjuncts remain supported without being the primary integration surface.
 
 ### Native slim identity
 
@@ -358,7 +358,7 @@ The actual published routes are listed below. Per-route semantics are in [`api-v
 
 | Route | Purpose |
 | --- | --- |
-| `GET /v1/names` | Compact name search, compatibility exact filter, address relations, suggestions. |
+| `GET /v1/names` | Compact name search, exact-name filter, address relations, suggestions. |
 | `GET /v1/names/{namespace}/{name}` | Exact name lookup (full envelope). |
 | `GET /v1/names/{namespace}/{name}/children` | Direct children, compact by default, full via `view=full`. |
 | `GET /v1/names/{namespace}/{name}/records` | Compact resolver records over declared inventory/cache and verified selectors; compact view only. |
@@ -384,7 +384,7 @@ The actual published routes are listed below. Per-route semantics are in [`api-v
 | `GET /v1/explain/names/{namespace}/{name}/authority-control` | Current authority/control explain view. |
 | `GET /v1/explain/resolutions/{namespace}/{name}/execution` | Persisted verified execution explain. |
 
-### Compatibility and explorer adjuncts
+### Explorer and audit adjuncts
 
 | Route | Purpose |
 | --- | --- |
@@ -401,7 +401,7 @@ The actual published routes are listed below. Per-route semantics are in [`api-v
 | `GET /v1/history/resources/{resource_id}` | Resource history. |
 | `GET /v1/history/addresses/{address}` | Address activity history. |
 
-The running API also serves `GET /openapi.json` and `GET /docs` as helpers. They aren't `v1` business routes and don't appear in `docs/api-v1.openapi.json` as path entries.
+The running API also serves `GET /`, `GET /docs`, and `GET /openapi.json` as helpers. They aren't `v1` business routes and don't appear in `docs/api-v1.openapi.json` as path entries.
 
 ## Sorting and pagination
 

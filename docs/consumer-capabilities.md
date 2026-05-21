@@ -12,7 +12,7 @@ Use these sets when choosing a public route:
 | Canonical product reads | `/v1/names*`, `/v1/addresses/{address}/names`, `/v1/primary-names*`, `/v1/resources/{resource_id}/permissions`, `/v1/events` | first-party app, explorer, and public API integrations that want the bigname contract. |
 | Metadata/control plane | `/v1/namespaces/*`, `/v1/manifests/*`, `/healthz` | manifest, namespace, and liveness introspection. |
 | Diagnostics/provenance | `/v1/coverage/*`, `/v1/explain/*` | debugging completeness, support, derivation, persisted execution, and audit paths. |
-| Compatibility/explorer adjuncts | `/v1/resolve*`, `/v1/resolutions*`, `/v1/resolvers*`, `/v1/roles`, `/v1/names/*/roles`, `/v1/resources/lookup`, `/v1/history/*`, `/v1/addresses/*/names/count` | supported routes for existing clients, explorer views, and narrow adjuncts. Prefer the canonical product routes above for new integrations when they satisfy the use case. |
+| Explorer/audit adjuncts | `/v1/resolve*`, `/v1/resolutions*`, `/v1/resolvers*`, `/v1/roles`, `/v1/names/*/roles`, `/v1/resources/lookup`, `/v1/history/*`, `/v1/addresses/*/names/count` | supported routes for explorer views, audit paths, and narrow adjuncts. Prefer the canonical product routes above for new integrations when they satisfy the use case. |
 
 ## Capability matrix
 
@@ -41,7 +41,7 @@ Use these sets when choosing a public route:
 
 | Capability | Route | Notes |
 | --- | --- | --- |
-| exact name profile | `GET /v1/names/{namespace}/{name}` (full), `GET /v1/names?namespace=...&name=...` (compact compatibility filter) | Compact hides provenance and projection metadata and returns zero or one `CompactDomainSummary`; full keeps the canonical exact-name envelope. Coverage is reported at `GET /v1/coverage/{namespace}/{name}`. |
+| exact name profile | `GET /v1/names/{namespace}/{name}` (full), `GET /v1/names?namespace=...&name=...` (compact exact-name filter) | Compact hides provenance and projection metadata and returns zero or one `CompactDomainSummary`; full keeps the canonical exact-name envelope. Coverage is reported at `GET /v1/coverage/{namespace}/{name}`. |
 | names by address | `GET /v1/names?account=...&relation=token_holder|any` with optional `contains=`, `prefix=`, `sort=name|expiry_date|registration_date` | Compact `CompactDomainSummary` rows. Count via `GET /v1/addresses/{address}/names/count` or `include=total_count`. |
 | names by address with role summary | `GET /v1/addresses/{address}/names?include=role_summary` | Additive expansion over the same address-to-surface collection — not a separate route. Adds `role_summary`, `subname_count`, `record_count`, `status`, `expiry`. |
 | declared children | `GET /v1/names/{namespace}/{name}/children?include=counts` | Declared direct-child bucket only. Linked, alias, and wildcard buckets are not enumerated. |
@@ -58,9 +58,9 @@ Use these sets when choosing a public route:
 | compact roles | `GET /v1/roles`, `GET /v1/names/{namespace}/{name}/roles`, `GET /v1/resources/lookup` | `RoleRow` exposes opaque `resource_id`, nullable `resource_hex`, projected `role_bitmap`, and effective powers. |
 | native slim identity | `POST /v1/identity:lookup`, `GET /v1/status` | App-facing native surface for partner-1 style indexed reads. `profile=feed` is the compact latency path for feeds and timelines; `profile=detail` preserves full native identity rows. Requirements reference: [`docs/partners/partner-1-indexing-requirements.md`](partners/partner-1-indexing-requirements.md). It does not create partner-specific identity composition and does not widen source-family admission. |
 
-Compact defaults suppress full provenance, full coverage, internal projection identifiers, source bookkeeping, and raw normalized-event payloads. Routes may expose route-owned compact provenance or `meta=full` only where their contract says so; compact-only routes keep `view=full` compatibility-reserved and return `400 invalid_input` for it. Use canonical full routes or explain/audit surfaces for full envelopes and trace detail.
+Compact defaults suppress full provenance, full coverage, internal projection identifiers, source bookkeeping, and raw normalized-event payloads. Routes may expose route-owned compact provenance or `meta=full` only where their contract says so; compact-only routes keep `view=full` reserved and return `400 invalid_input` for it. Use canonical full routes or explain/audit surfaces for full envelopes and trace detail.
 
-`GET /v1/names` keeps the compatibility bridge where an omitted `namespace` spans supported public namespaces. First-party replacement mappings should pass an explicit namespace whenever the app knows it; omitted namespace is not an ENS-only shortcut.
+`GET /v1/names` keeps the namespace-omitted bridge where an omitted `namespace` spans supported public namespaces. First-party replacement mappings should pass an explicit namespace whenever the app knows it; omitted namespace is not an ENS-only shortcut.
 
 `GET /v1/resolve/{name}` and `GET /v1/resolve/{name}/records` are convenience entries to the same `Resolution` and compact-records capabilities. Exact `base.eth` infers `namespace=ens`, `*.base.eth` infers `namespace=basenames`, other supported ENS names infer `namespace=ens`. Inferred Basenames requests use Basenames-local selector and topology support and do not fall back to ENS.
 
