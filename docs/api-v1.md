@@ -148,29 +148,33 @@ Rules:
 - `view=full` returns the full envelope only when the route documents a full view. Compact-only routes keep `view=full` as a compatibility-reserved input that returns `400 invalid_input`; OpenAPI advertises only `view=compact` for those routes.
 - Compact responses never expose raw facts, full provenance, or projection internals as a substitute for `meta`. Explain detail belongs on explain/audit routes.
 
-## Identity Façade
+## Identity
 
-The `/v1/identity/*` routes are an app-facing compatibility façade for partner-style indexed identity reads. They flatten existing current projections into `NameRecord` and `ReverseNameRecord` DTOs; they do not replace the canonical name, resolution, address-name, primary-name, or permission contracts.
+`POST /v1/identity:lookup` is the native slim app-facing route for partner-style indexed identity reads. It flattens existing current projections into native `IdentityRecord` DTOs, with result-level `input` and `normalization` metadata for name inputs. Native records use `name` as the canonical normalized name string and do not include routine `normalized_name` or `corrected_input_normalization` peers.
 
-The façade has two reverse-read profiles:
+The identity route has three read profiles:
 
-- Feed profile: `POST /v1/identity/addresses:feed` returns at most one compact identity row per input address, plus `total_count`. It is the partner-1 latency path for feeds and timelines and intentionally excludes full `NameRecord` fields, record inventory, text records, coin-address maps, and deep provenance.
-- Profile/detail profile: `GET /v1/identity/addresses/{address}/names` and `POST /v1/identity/addresses:names:batch` return full `ReverseNameRecord` rows for profile aggregation, account switchers, and compatibility shims. They may carry larger payloads and pagination.
+- Feed profile: `POST /v1/identity:lookup` with `profile=feed` returns at most one compact identity row per input address, plus `total_count`. It is the partner-1 latency path for feeds and timelines and intentionally excludes full `IdentityRecord` fields, record inventory, text records, coin-address maps, and deep provenance.
+- Profile/detail profile: `POST /v1/identity:lookup` with `profile=detail` returns full native `IdentityRecord` rows for profile aggregation, account switchers, and compatibility shims. It may carry larger payloads and pagination.
+- Shadow profile: `POST /v1/identity:lookup` with `profile=shadow` follows the detail response shape for deterministic migration comparison.
 
-Namespace inference matches `GET /v1/resolve/{name}` after route-name normalization: exact `base.eth` is ENS, `*.base.eth` is Basenames, and other supported names are ENS. Façade reads are projection-backed by default and do not run live verified execution. Production ENSv2/L2 manifest admission remains a separate workstream; this façade does not widen the documented ENSv2 `sepolia-dev` support boundary.
+Namespace inference matches `GET /v1/resolve/{name}` after route-name normalization: exact `base.eth` is ENS, `*.base.eth` is Basenames, and other supported names are ENS. Identity reads are projection-backed by default and do not run live verified execution. Production ENSv2/L2 manifest admission remains a separate workstream; this route does not widen the documented ENSv2 `sepolia-dev` support boundary.
 
-Façade not-found behavior is adapter-compatible rather than core-route `404` behavior:
+Identity not-found behavior is adapter-compatible rather than core-route `404` behavior:
 
-- `GET /v1/identity/names/{name}` returns `200` with `{ "status": "not_found", "record": null }` for a forward miss.
-- Unnormalizable forward name inputs return `200` with `status=unnormalizable_input` and `record=null`; forward batches report that status per input.
-- Reverse misses return `records: []`.
-- Batch routes preserve input order and return per-input status objects.
+- Name inputs return `record=null` with `status=not_found` for a miss.
+- Unnormalizable name inputs return `status=unnormalizable_input`, `record=null`, and result-level `normalization.reason`.
+- Address misses return `records=[]`, `status=success`, and `total_count=0`.
+- Explicit `namespace=ens|basenames` filters are currently supported for name inputs only; address inputs use public namespace semantics and reject explicit namespace filters.
+- The route preserves input order and returns one result object per input.
 - Batch limits default to `1000` inputs and may be configured with `BIGNAME_API_IDENTITY_BATCH_LIMIT`.
-- Reverse single defaults to profile-style `page_size=100`; reverse batch defaults to feed-style `page_size=1` unless the input item asks for a larger page.
+- Address inputs default to `page_size=1` unless the input item asks for a larger page.
 
-`NameRecord` includes the projected display `name`, the canonical `normalized_name`, and `corrected_input_normalization` for forward reads. Reverse records set correction metadata to `false` because the input is an address tuple rather than a name string. Forward response and batch-result statuses can use `unnormalizable_input` before a record exists; nested `NameRecord.status` uses `success`, `not_found`, `unsupported`, or `stale`. Nullable fields stay `null` when no backed value is available. `unsupported_fields` lists fields that the façade could not prove from the current projections without inventing a value.
+`IdentityRecord` includes canonical `name`, `namespace`, `namehash`, optional owner/manager/primary/record fields where projected, `network`, optional primary/relation facets for reverse reads, `status`, and `unsupported_fields`. Name result statuses can use `unnormalizable_input` before a record exists; nested `IdentityRecord.status` uses `success`, `not_found`, `unsupported`, or `stale`. Optional fields are omitted when no backed value is available. `unsupported_fields` lists fields that the identity route could not prove from the current projections without inventing a value.
 
-Reverse identity pagination and feed results always include `total_count`. The count is read from the indexed `address_names_current_identity_counts` sidecar maintained with `address_names_current` and readable `name_current` eligibility, so the default feed path does not run an exact count scan and the count matches the reachable reverse page universe. The compact feed display row is read from `address_names_current_identity_feed`, a sidecar that materializes the same readable first-row ordering per address, role set, and primary-name coin type.
+Reverse identity pagination and feed results always include `total_count`. The count is read from the indexed `address_names_current_identity_counts` sidecar maintained with `address_names_current` and readable `name_current` eligibility, so the default feed path does not run an exact count scan and the count matches the reachable reverse page universe. The compact feed identity row is read from `address_names_current_identity_feed`, a sidecar that materializes the same readable first-row ordering per address, role set, and primary-name coin type.
+
+The older `/v1/identity/*` routes and `/v1/status/indexing` remain compatibility aliases. They may temporarily expose partner-shaped `normalized_name` and `corrected_input_normalization` fields during migration; native clients should not depend on those aliases.
 
 ## Shared objects
 
@@ -343,18 +347,14 @@ For ENSv1 and Basenames, retained current-resolver record events may populate se
 
 ## Route catalog
 
-The actual published routes are listed below. Per-route semantics are in [`api-v1-routes.md`](api-v1-routes.md). The grouping is normative for product guidance: partner/feed routes are the latency-critical façade, canonical product routes are the preferred public API for app and explorer reads, diagnostics carry coverage/provenance detail, and compatibility/explorer routes remain supported without being the primary integration surface.
+The actual published routes are listed below. Per-route semantics are in [`api-v1-routes.md`](api-v1-routes.md). The grouping is normative for product guidance: native slim identity routes are the latency-critical partner/feed surface, canonical product routes are the preferred public API for app and explorer reads, diagnostics carry coverage/provenance detail, and compatibility/explorer routes remain supported without being the primary integration surface.
 
-### Partner/feed identity
+### Native slim identity
 
 | Route | Purpose |
 | --- | --- |
-| `GET /v1/identity/names/{name}` | Partner-compatible forward identity lookup. |
-| `POST /v1/identity/names:batch` | Partner-compatible batched forward identity lookup. |
-| `POST /v1/identity/addresses:feed` | Latency-optimized reverse feed lookup, one compact row per input. |
-| `GET /v1/identity/addresses/{address}/names` | Profile/detail reverse identity lookup. |
-| `POST /v1/identity/addresses:names:batch` | Batched profile/detail reverse identity lookup. |
-| `GET /v1/status/indexing` | Projection/indexing status by chain. |
+| `POST /v1/identity:lookup` | Native slim identity lookup. `profile=feed` is the partner-1 latency path; `profile=detail` is profile aggregation. |
+| `GET /v1/status` | Public projection/indexing readiness by chain. |
 
 ### Canonical product reads
 
@@ -402,6 +402,12 @@ The actual published routes are listed below. Per-route semantics are in [`api-v
 | `GET /v1/history/names/{namespace}/{name}` | Surface or combined history. |
 | `GET /v1/history/resources/{resource_id}` | Resource history. |
 | `GET /v1/history/addresses/{address}` | Address activity history. |
+| `GET /v1/identity/names/{name}` | Partner-shaped forward identity compatibility alias. Prefer `POST /v1/identity:lookup`. |
+| `POST /v1/identity/names:batch` | Partner-shaped batched forward identity compatibility alias. Prefer `POST /v1/identity:lookup`. |
+| `POST /v1/identity/addresses:feed` | Partner-shaped feed compatibility alias. Prefer `POST /v1/identity:lookup` with `profile=feed`. |
+| `GET /v1/identity/addresses/{address}/names` | Partner-shaped reverse identity compatibility alias. Prefer `POST /v1/identity:lookup` with `profile=detail`. |
+| `POST /v1/identity/addresses:names:batch` | Partner-shaped batched reverse identity compatibility alias. Prefer `POST /v1/identity:lookup`. |
+| `GET /v1/status/indexing` | Partner-shaped status compatibility alias. Prefer `GET /v1/status`. |
 
 The running API also serves `GET /openapi.json` and `GET /docs` as helpers. They aren't `v1` business routes and don't appear in `docs/api-v1.openapi.json` as path entries.
 

@@ -151,6 +151,12 @@
                 ),
             },
             OpenApiConformanceCoverage {
+                path: "/v1/identity:lookup",
+                scope: OpenApiConformanceScope::HarnessOwner(
+                    "apps/api tests::identity_lookup_returns_native_slim_shape; native partner-1 slim identity and latency feed surface",
+                ),
+            },
+            OpenApiConformanceCoverage {
                 path: "/v1/events",
                 scope: OpenApiConformanceScope::HarnessOwner(
                     "apps/api tests::events; full first-party cutover still needs app call-site mapping",
@@ -256,6 +262,12 @@
                 path: "/v1/status/indexing",
                 scope: OpenApiConformanceScope::HarnessOwner(
                     "apps/api tests::indexing_status_reports_projection_lag_by_chain; partner-1 facade readiness surface",
+                ),
+            },
+            OpenApiConformanceCoverage {
+                path: "/v1/status",
+                scope: OpenApiConformanceScope::HarnessOwner(
+                    "apps/api tests::indexing_status_degrades_without_chain_readiness_data; native slim public readiness surface",
                 ),
             },
         ];

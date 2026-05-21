@@ -960,6 +960,202 @@
         ],
         "type": "object"
       },
+      "IdentityLookupInput": {
+        "additionalProperties": false,
+        "properties": {
+          "inputs": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "address": {
+                  "type": "string"
+                },
+                "coin_type": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "cursor": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "id": {
+                  "type": "string"
+                },
+                "kind": {
+                  "enum": [
+                    "name",
+                    "address"
+                  ],
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "page_size": {
+                  "default": 1,
+                  "maximum": 200,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "roles": {
+                  "items": {
+                    "enum": [
+                      "owned",
+                      "managed",
+                      "registrant",
+                      "effective_controller",
+                      "both",
+                      "any"
+                    ],
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "id",
+                "kind"
+              ],
+              "type": "object"
+            },
+            "maxItems": 1000,
+            "type": "array"
+          },
+          "namespace": {
+            "default": "public",
+            "enum": [
+              "auto",
+              "public",
+              "ens",
+              "basenames"
+            ],
+            "type": "string"
+          },
+          "profile": {
+            "default": "detail",
+            "enum": [
+              "feed",
+              "detail",
+              "shadow"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "inputs"
+        ],
+        "type": "object"
+      },
+      "IdentityLookupPage": {
+        "additionalProperties": false,
+        "properties": {
+          "has_more": {
+            "type": "boolean"
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "total_count": {
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "next_cursor",
+          "total_count",
+          "has_more"
+        ],
+        "type": "object"
+      },
+      "IdentityLookupResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "results": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "input": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "address": {
+                      "type": "string"
+                    },
+                    "coin_type": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "roles": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "type": "object"
+                },
+                "kind": {
+                  "enum": [
+                    "name",
+                    "address"
+                  ],
+                  "type": "string"
+                },
+                "normalization": {
+                  "$ref": "#/components/schemas/NormalizationInfo"
+                },
+                "page": {
+                  "$ref": "#/components/schemas/IdentityLookupPage"
+                },
+                "record": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/NativeIdentityRecord"
+                    },
+                    {
+                      "$ref": "#/components/schemas/NullValue"
+                    }
+                  ]
+                },
+                "records": {
+                  "items": {
+                    "$ref": "#/components/schemas/NativeIdentityRecord"
+                  },
+                  "type": "array"
+                },
+                "status": {
+                  "$ref": "#/components/schemas/IdentityStatus"
+                }
+              },
+              "required": [
+                "id",
+                "kind",
+                "status",
+                "input"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "results"
+        ],
+        "type": "object"
+      },
       "IdentityNameResponse": {
         "properties": {
           "record": {
@@ -1376,6 +1572,109 @@
         ],
         "type": "object"
       },
+      "NativeIdentityRecord": {
+        "additionalProperties": false,
+        "properties": {
+          "coin_type_addresses": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "expiration": {
+            "type": "integer"
+          },
+          "is_primary": {
+            "type": "boolean"
+          },
+          "manager_address": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "namehash": {
+            "type": "string"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "network": {
+            "type": "string"
+          },
+          "owner_address": {
+            "type": "string"
+          },
+          "primary_address": {
+            "type": "string"
+          },
+          "relation_facets": {
+            "items": {
+              "enum": [
+                "owned",
+                "managed",
+                "registrant",
+                "effective_controller"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "resolver_address": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/NameRecordStatus"
+          },
+          "text_records": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "token_id": {
+            "type": "string"
+          },
+          "unsupported_fields": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "namespace",
+          "namehash",
+          "network",
+          "status"
+        ],
+        "type": "object"
+      },
+      "NormalizationInfo": {
+        "additionalProperties": false,
+        "properties": {
+          "changed": {
+            "type": "boolean"
+          },
+          "input_name": {
+            "type": "string"
+          },
+          "reason": {
+            "enum": [
+              "case_normalized",
+              "invalid_normalized_name"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "changed",
+          "input_name",
+          "reason"
+        ],
+        "type": "object"
+      },
       "NullValue": {
         "type": "null"
       },
@@ -1652,6 +1951,18 @@
           "manifest_versions",
           "execution_trace_id",
           "derivation_kind"
+        ],
+        "type": "object"
+      },
+      "PublicStatusResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/IndexingStatusResponse"
+          }
+        },
+        "required": [
+          "data"
         ],
         "type": "object"
       },
@@ -3824,6 +4135,58 @@
         ]
       }
     },
+    "/v1/identity:lookup": {
+      "post": {
+        "operationId": "identity_lookup",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IdentityLookupInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IdentityLookupResponse"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "summary": "Native slim identity lookup",
+        "tags": [
+          "Identity"
+        ]
+      }
+    },
     "/v1/manifests/{namespace}": {
       "get": {
         "operationId": "namespace_manifests",
@@ -5794,6 +6157,38 @@
         "summary": "App-facing role rows by account, resource, or name filters",
         "tags": [
           "Collections"
+        ]
+      }
+    },
+    "/v1/status": {
+      "get": {
+        "operationId": "status",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicStatusResponse"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "summary": "Projection indexing status by chain",
+        "tags": [
+          "Status"
         ]
       }
     },

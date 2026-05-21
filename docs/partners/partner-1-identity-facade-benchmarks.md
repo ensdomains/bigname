@@ -15,7 +15,7 @@ Environment:
 - Reverse batch defaults to `page_size=1`, matching feed rendering. Reverse single keeps the profile-style `page_size=100` default.
 - Reverse `total_count` is read from `address_names_current_identity_counts`, an indexed sidecar maintained from `address_names_current` and readable `name_current` eligibility, rather than counted on the request path.
 - ENS token IDs fall back to the current surface labelhash as a uint256 string for second-level `.eth` names when projected authority/registration/control summaries do not carry a token ID.
-- `POST /v1/identity/addresses:feed` is the compact feed DTO for latency-sensitive identity rendering. It returns one display record per address plus `total_count`, skips full `NameRecord` hydration, and is backed by indexed count/display sidecars.
+- `POST /v1/identity:lookup` with `profile=feed` is the native compact feed DTO for latency-sensitive identity rendering. It returns one identity record per address plus `total_count`, skips full `IdentityRecord` hydration, and is backed by the same indexed count/identity sidecars measured below through the older `POST /v1/identity/addresses:feed` compatibility route.
 
 ## Before / After
 
@@ -48,9 +48,21 @@ Measured against the live Docker API on `http://127.0.0.1:3000` using one keep-a
 | `POST /v1/identity/addresses:feed`, 250 inputs | 100.88 KB | 5.03 ms |
 | `POST /v1/identity/addresses:feed`, 1000 inputs | 407.09 KB | 20.79 ms |
 
+## 2026-05-21 Native Lookup Verification
+
+Measured against the live Docker API on `http://127.0.0.1:3000` using one keep-alive HTTP connection, 10 warmup requests per case, and 200 measured requests per case except the 1000-input case, which used 80 measured requests. The worker's automatic all-current replay was paused during this steady-state API measurement because the redeploy triggered a full `name_current` rebuild over roughly 3.5M names.
+
+| Case | Response size | p95 |
+| --- | ---: | ---: |
+| `POST /v1/identity:lookup` `profile=feed`, 1 input | 0.49 KB | 1.12 ms |
+| `POST /v1/identity:lookup` `profile=feed`, 10 inputs | 4.68 KB | 1.07 ms |
+| `POST /v1/identity:lookup` `profile=feed`, 100 inputs | 46.28 KB | 2.31 ms |
+| `POST /v1/identity:lookup` `profile=feed`, 250 inputs | 116.03 KB | 4.45 ms |
+| `POST /v1/identity:lookup` `profile=feed`, 1000 inputs | 465.99 KB | 15.98 ms |
+
 ## Interpretation
 
-The compact feed route meets an under-10 ms p95 local/server-side proxy for the latency-sensitive tens-to-hundreds feed-rendering band measured here through 250 inputs. This measurement uses the readable-row-safe `address_names_current_identity_feed` sidecar, not the earlier live first-row shortcut. It is not a substitute for a final AWS `us-east` vantage measurement in the deployed environment, but it demonstrates that the API and database path are under the budget on the running Docker stack. The 1000-input ceiling remains supported for bulk/batch compatibility, but it is not the latency target: the compact response is already about 407 KB at 1000 inputs, and p95 is dominated by response size and serialization. Full shared-record reverse batches remain the profile/detail path and are intentionally not the feed latency contract.
+The compact feed route meets an under-10 ms p95 local/server-side proxy for the latency-sensitive tens-to-hundreds feed-rendering band measured here through 250 inputs. The native `POST /v1/identity:lookup` feed profile is now the product route for that target, while `POST /v1/identity/addresses:feed` remains the compatibility alias. These measurements use the readable-row-safe `address_names_current_identity_feed` sidecar, not the earlier live first-row shortcut. They are not a substitute for a final AWS `us-east` vantage measurement in the deployed environment, but they demonstrate that the API and database path are under the budget on the running Docker stack. The 1000-input ceiling remains supported for bulk/batch compatibility, but it is not the latency target: the native compact response is already about 466 KB at 1000 inputs, and p95 is dominated by response size and serialization. Full reverse profile/detail batches remain intentionally outside the feed latency contract.
 
 ## Unsupported Fields Sample
 

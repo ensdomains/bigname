@@ -107,8 +107,9 @@ pub use identity_facade::{
     IdentityPrimaryNameSnapshot, IdentityRecordInventoryRow, IndexingStatusChainRow,
     IndexingStatusRead, ReverseIdentityCursor, ReverseIdentityFeedGroup, ReverseIdentityFeedInput,
     ReverseIdentityFeedRecordRow, ReverseIdentityGroup, ReverseIdentityRecordRow,
-    ReverseIdentityRoles, ReverseIdentityStorageInput, load_identity_records_by_names,
-    load_indexing_status, load_reverse_identity_feed_records, load_reverse_identity_records,
+    ReverseIdentityRoles, ReverseIdentityStorageInput, load_identity_name_feed_records_by_names,
+    load_identity_records_by_names, load_indexing_status, load_reverse_identity_feed_records,
+    load_reverse_identity_records,
 };
 pub use lineage::{
     CanonicalityState, ChainLineageBlock, chain_lineage_contains_ancestor,

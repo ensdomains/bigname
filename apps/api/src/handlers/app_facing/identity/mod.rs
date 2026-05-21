@@ -1,8 +1,10 @@
+mod lookup;
 mod support;
 
 use axum::extract::rejection::JsonRejection;
 
 use super::*;
+pub(super) use lookup::identity_lookup;
 use support::*;
 
 pub(super) async fn identity_name(
@@ -286,6 +288,18 @@ pub(super) async fn identity_address_feed(
 pub(super) async fn indexing_status(
     State(state): State<AppState>,
 ) -> ApiResult<Json<IndexingStatusResponse>> {
+    Ok(Json(load_indexing_status_response(&state).await?))
+}
+
+pub(super) async fn public_status(
+    State(state): State<AppState>,
+) -> ApiResult<Json<PublicStatusResponse>> {
+    Ok(Json(PublicStatusResponse {
+        data: load_indexing_status_response(&state).await?,
+    }))
+}
+
+async fn load_indexing_status_response(state: &AppState) -> ApiResult<IndexingStatusResponse> {
     let read = bigname_storage::load_indexing_status(&state.pool)
         .await
         .map_err(|load_error| {
@@ -297,5 +311,5 @@ pub(super) async fn indexing_status(
             ApiError::internal_error("failed to load indexing status")
         })?;
 
-    Ok(Json(build_indexing_status_response(&read)))
+    Ok(build_indexing_status_response(&read))
 }

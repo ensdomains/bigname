@@ -47,6 +47,27 @@ pub(crate) struct ReverseIdentityFeedInput {
     pub(crate) inputs: Vec<ReverseIdentityFeedInputItem>,
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct IdentityLookupInput {
+    pub(crate) profile: Option<String>,
+    pub(crate) namespace: Option<String>,
+    pub(crate) inputs: Vec<IdentityLookupInputItem>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct IdentityLookupInputItem {
+    pub(crate) id: String,
+    pub(crate) kind: String,
+    pub(crate) name: Option<String>,
+    pub(crate) address: Option<String>,
+    pub(crate) coin_type: Option<u64>,
+    pub(crate) roles: Option<Vec<String>>,
+    pub(crate) page_size: Option<u64>,
+    pub(crate) cursor: Option<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ReverseIdentityBatchInputItem {
@@ -121,6 +142,53 @@ pub(crate) struct ReverseIdentityFeedResult {
     pub(crate) status: String,
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub(crate) struct IdentityLookupResponse {
+    pub(crate) results: Vec<IdentityLookupResult>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub(crate) struct IdentityLookupResult {
+    pub(crate) id: String,
+    pub(crate) kind: String,
+    pub(crate) status: String,
+    pub(crate) input: IdentityLookupResultInput,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) normalization: Option<NormalizationInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) record: Option<Option<NativeIdentityRecordResponse>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) records: Option<Vec<NativeIdentityRecordResponse>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) page: Option<IdentityLookupPageResponse>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub(crate) struct IdentityLookupResultInput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) address: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) coin_type: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) roles: Option<Vec<String>>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct NormalizationInfo {
+    pub(crate) changed: bool,
+    pub(crate) input_name: String,
+    pub(crate) reason: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct IdentityLookupPageResponse {
+    pub(crate) next_cursor: Option<String>,
+    pub(crate) total_count: Option<u64>,
+    pub(crate) has_more: bool,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct ReverseNamesInputResponse {
     pub(crate) address: String,
@@ -178,6 +246,37 @@ pub(crate) struct IdentityFeedRecordResponse {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct NativeIdentityRecordResponse {
+    pub(crate) name: String,
+    pub(crate) namespace: String,
+    pub(crate) namehash: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) owner_address: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) manager_address: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) primary_address: Option<String>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) coin_type_addresses: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) text_records: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) resolver_address: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) expiration: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) token_id: Option<String>,
+    pub(crate) network: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) is_primary: Option<bool>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) relation_facets: Vec<String>,
+    pub(crate) status: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) unsupported_fields: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct IdentityAsOfResponse {
     pub(crate) chain_positions: JsonValue,
     pub(crate) as_of_timestamp: Option<String>,
@@ -187,6 +286,11 @@ pub(crate) struct IdentityAsOfResponse {
 pub(crate) struct IndexingStatusResponse {
     pub(crate) status: String,
     pub(crate) chains: BTreeMap<String, IndexingStatusChainResponse>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct PublicStatusResponse {
+    pub(crate) data: IndexingStatusResponse,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

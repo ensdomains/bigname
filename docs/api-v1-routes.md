@@ -8,7 +8,8 @@ Use the route groups as integration guidance, not just documentation order:
 
 | Set | Routes | Use for |
 | --- | --- | --- |
-| Partner/feed identity | `/v1/identity/*`, `/v1/status/indexing` | Partner-1 feed/profile compatibility, migration shims, and shadow comparison. |
+| Native slim identity | `POST /v1/identity:lookup`, `GET /v1/status` | Partner-1 feed/profile reads, migration shims, and shadow comparison. Use `profile=feed` for the under-10 ms p95 feed target. |
+| Identity compatibility aliases | `/v1/identity/*`, `/v1/status/indexing` | Temporary partner-shaped DTOs for migration compatibility. New native clients should not build against routine `normalized_name` or `corrected_input_normalization` fields from these aliases. |
 | Canonical product reads | `/v1/names*`, `/v1/addresses/{address}/names`, `/v1/primary-names*`, `/v1/resources/{resource_id}/permissions`, `/v1/events` | New app, explorer, and public API integrations that want bigname-native semantics. |
 | Metadata/control plane | `/v1/namespaces/*`, `/v1/manifests/*`, `/healthz` | Namespace, manifest, and process/database liveness introspection. |
 | Diagnostics/provenance | `/v1/coverage/*`, `/v1/explain/*` | Completeness, freshness, derivation, persisted execution, and audit detail. |
@@ -112,17 +113,186 @@ Compact routes advertise only the knobs they own:
 
 `GET /v1/names` keeps its compatibility bridge: omitting `namespace` spans supported public namespaces. First-party app replacement code should pass an explicit namespace when it knows one. `GET /v1/names?name=...` is a compact collection filter that returns zero or one `CompactDomainSummary`; the canonical exact-name profile remains `GET /v1/names/{namespace}/{name}`.
 
-## Identity Façade Routes
+## Identity Routes
+
+`POST /v1/identity:lookup` is the native slim identity primitive for partner-1 feeds, profile aggregation, migration shims, and shadow comparison. The older `/v1/identity/*` routes remain as compatibility aliases during migration and keep their partner-shaped DTOs.
+
+Names supplied by callers are normalized before lookup.
+
+In native bigname response DTOs, `name` is the canonical normalized name string returned by the API. Clients should render `name` by default and use `namespace + namehash` as the stable identity key.
+
+The caller-supplied name is echoed only under `input.name` on lookup result objects.
+
+A `normalization` object may appear on lookup results when caller input was transformed or rejected. Do not include `normalized_name` as a routine peer of `name` in native DTOs.
+
+### `NormalizationInfo`
+
+Only present on name lookup results when relevant.
+
+```json
+{
+  "changed": true,
+  "input_name": "Alice.eth",
+  "reason": "case_normalized"
+}
+```
+
+Rules:
+
+- `record.name` is the normalized output name.
+- `input.name` is the caller-supplied input.
+- `normalization.changed=true` means the API accepted the input but canonicalized it.
+- `status=unnormalizable_input` uses `record=null` and may include `normalization.reason`.
+
+Native `IdentityRecord` detail shape:
+
+```json
+{
+  "name": "alice.eth",
+  "namespace": "ens",
+  "namehash": "0x...",
+  "owner_address": "0x...",
+  "manager_address": "0x...",
+  "primary_address": "0x...",
+  "coin_type_addresses": { "60": "0x..." },
+  "text_records": { "avatar": "ipfs://..." },
+  "resolver_address": "0x...",
+  "expiration": 1770000000,
+  "token_id": "123",
+  "network": "ethereum",
+  "is_primary": true,
+  "relation_facets": ["owned"],
+  "status": "success",
+  "unsupported_fields": []
+}
+```
+
+Native feed profile subset:
+
+```json
+{
+  "name": "alice.eth",
+  "namespace": "ens",
+  "namehash": "0x...",
+  "network": "ethereum",
+  "is_primary": true,
+  "relation_facets": ["owned"],
+  "status": "success"
+}
+```
+
+Compatibility note: older partner-shaped DTOs may temporarily expose `normalized_name` and `corrected_input_normalization` during migration. Those fields are compatibility aliases and should not appear in the native slim API shape. Native clients should use `record.name` plus result-level `input`/`normalization` metadata.
+
+## `POST /v1/identity:lookup`
+
+Single/batch identity primitive.
+
+Request:
+
+```json
+{
+  "profile": "feed",
+  "namespace": "public",
+  "inputs": [
+    {
+      "id": "name-1",
+      "kind": "name",
+      "name": "Alice.eth"
+    },
+    {
+      "id": "addr-1",
+      "kind": "address",
+      "address": "0x0000000000000000000000000000000000000000",
+      "coin_type": 60,
+      "roles": ["owned", "managed"],
+      "page_size": 1,
+      "cursor": null
+    }
+  ]
+}
+```
+
+Response:
+
+```json
+{
+  "results": [
+    {
+      "id": "name-1",
+      "kind": "name",
+      "status": "success",
+      "input": { "name": "Alice.eth" },
+      "normalization": {
+        "changed": true,
+        "input_name": "Alice.eth",
+        "reason": "case_normalized"
+      },
+      "record": {
+        "name": "alice.eth",
+        "namespace": "ens",
+        "namehash": "0x..."
+      }
+    },
+    {
+      "id": "addr-1",
+      "kind": "address",
+      "status": "success",
+      "input": {
+        "address": "0x0000000000000000000000000000000000000000",
+        "coin_type": 60,
+        "roles": ["owned", "managed"]
+      },
+      "records": [],
+      "page": {
+        "next_cursor": null,
+        "total_count": 0,
+        "has_more": false
+      }
+    }
+  ]
+}
+```
+
+Unnormalizable input example:
+
+```json
+{
+  "id": "name-1",
+  "kind": "name",
+  "status": "unnormalizable_input",
+  "input": { "name": "bad name" },
+  "normalization": {
+    "changed": false,
+    "input_name": "bad name",
+    "reason": "invalid_normalized_name"
+  },
+  "record": null
+}
+```
+
+Rules:
+
+- `profile=feed` is the partner-1 latency path. Address inputs return at most one compact identity row plus `total_count`, backed by indexed feed/count sidecars.
+- `profile=detail` is the profile aggregation path. Address inputs return paged full native `IdentityRecord` rows and name inputs return full native `IdentityRecord`.
+- `profile=shadow` currently follows `detail` response shape for deterministic migration comparison.
+- Address inputs require `coin_type` per input. Address misses return `records=[]`, `status=success`, and `total_count=0` unless the input itself is invalid.
+- Explicit `namespace=ens|basenames` is supported for name inputs only in this slice. Address inputs use `namespace=public`/`auto` semantics and reject explicit namespace filters; use canonical address routes for namespace-scoped address collections.
+- Name misses return `record=null`, `status=not_found`.
+- Input order and grouping are preserved. Backend planning may coalesce identical internal reads by normalized input key, selected namespace, `coin_type`, roles, and page request.
+- Native identity record equality is `namespace + namehash`; deterministic name-order pagination may still sort by `(namespace, name, namehash)`.
+- `profile=feed` is the only identity profile counted against partner-1 feed latency SLOs. `profile=detail`, `profile=shadow`, and full coverage/provenance diagnostics are outside that SLO.
+
+## Identity Compatibility Aliases
 
 These routes are app-facing compatibility routes for the immutable partner-1 requirements in [`docs/partners/partner-1-indexing-requirements.md`](partners/partner-1-indexing-requirements.md). They assemble flat DTOs from existing current projections and persisted projection metadata. They do not run live verified execution by default, do not create partner-specific identity composition, and do not add production ENSv2 manifests.
 
 Use the route profiles intentionally:
 
-- Feed rendering uses `POST /v1/identity/addresses:feed`. It is the target path for partner-1's under-10 ms p95 identity-rendering requirement because it returns one compact record per address and avoids full record inventory hydration.
-- Profile aggregation and compatibility shims use `GET /v1/identity/addresses/{address}/names` or `POST /v1/identity/addresses:names:batch`. These routes preserve the full `ReverseNameRecord` shape and pagination contract.
-- Forward detail and batch detail use `GET /v1/identity/names/{name}` and `POST /v1/identity/names:batch`.
+- Feed compatibility uses `POST /v1/identity/addresses:feed`. New native clients should use `POST /v1/identity:lookup` with `profile=feed`.
+- Profile aggregation and compatibility shims use `GET /v1/identity/addresses/{address}/names` or `POST /v1/identity/addresses:names:batch`.
+- Forward detail and batch compatibility use `GET /v1/identity/names/{name}` and `POST /v1/identity/names:batch`.
 
-`NameRecord`:
+Compatibility `NameRecord`:
 
 - `name`, `normalized_name`, `corrected_input_normalization`, `namehash`
 - `owner_address`, `manager_address`, `primary_address`
@@ -131,7 +301,7 @@ Use the route profiles intentionally:
 - `as_of.chain_positions`, `as_of.as_of_timestamp`
 - `status`, `unsupported_fields`
 
-`ReverseNameRecord` is `NameRecord` plus `is_primary` and `relation_facets`.
+Compatibility `ReverseNameRecord` is `NameRecord` plus `is_primary` and `relation_facets`.
 
 ## `GET /v1/identity/names/{name}`
 
@@ -276,7 +446,7 @@ Rules:
 - Returns at most one compact `record` per input, ordered by the same primary-first and role-priority rules as reverse pagination.
 - A miss returns `record=null`, `status=not_found`, and `total_count=0`.
 - `total_count` is always populated from the indexed `address_names_current_identity_counts` sidecar.
-- The compact display row is read from the indexed `address_names_current_identity_feed` sidecar. That sidecar is maintained from `address_names_current`, `primary_names_current`, canonicality dependencies, and readable `name_current` eligibility so feed requests do not run live first-row/provenance joins.
+- The compact identity row is read from the indexed `address_names_current_identity_feed` sidecar. That sidecar is maintained from `address_names_current`, `primary_names_current`, canonicality dependencies, and readable `name_current` eligibility so feed requests do not run live first-row/provenance joins.
 - The compact `record` intentionally omits `NameRecord` fields that require record-inventory hydration: `owner_address`, `manager_address`, `primary_address`, `coin_type_addresses`, `text_records`, `resolver_address`, `expiration`, `token_id`, and `as_of`.
 - Batch limit defaults to `1000` and is configurable through `BIGNAME_API_IDENTITY_BATCH_LIMIT`.
 
@@ -330,30 +500,36 @@ Rules:
 - `pagination.total_count` is always populated for each result group from the indexed `address_names_current_identity_counts` sidecar, using the same readable `name_current` eligibility as the reverse page.
 - Batch limit defaults to `1000` and is configurable through `BIGNAME_API_IDENTITY_BATCH_LIMIT`.
 
-## `GET /v1/status/indexing`
+## `GET /v1/status`
 
-Projection/indexing status by chain. This is not `/healthz`; `/healthz` remains process and database liveness.
+Projection/indexing readiness and chain lag. This is not `/healthz`; `/healthz` remains process and database liveness.
 
 Response:
 
 ```json
 {
-  "status": "ready",
-  "chains": {
-    "ethereum-mainnet": {
-      "canonical_block": 0,
-      "safe_block": 0,
-      "finalized_block": 0,
-      "latest_projected_block": 0,
-      "latest_projected_timestamp": null,
-      "projection_lag_blocks": 0,
-      "projection_lag_seconds": null
+  "data": {
+    "status": "ready",
+    "chains": {
+      "ethereum-mainnet": {
+        "canonical_block": 0,
+        "safe_block": 0,
+        "finalized_block": 0,
+        "latest_projected_block": 0,
+        "latest_projected_timestamp": null,
+        "projection_lag_blocks": 0,
+        "projection_lag_seconds": null
+      }
     }
   }
 }
 ```
 
 Uses active/shadow `manifest_versions` to include chains expected by the loaded profile, plus `chain_checkpoints`, retained `chain_lineage`, `projection_normalized_event_changes`, `projection_apply_cursors`, and `projection_invalidations` where available. Fields stay `null` when the deployment has not yet retained the corresponding operational metadata. If no chain readiness data exists for an expected chain, or if pending direct invalidations cannot be tied to a normalized-event chain position, `status` is `degraded`.
+
+## `GET /v1/status/indexing`
+
+Compatibility alias for the older partner-shaped status response. New native clients should use `GET /v1/status`.
 
 ## `GET /v1/names`
 
@@ -390,7 +566,7 @@ Each compact item: `name`, `normalized_name`, `label_name`, `labelhash`, `nameha
 Rules:
 
 - `view=compact` is the default. `view=full` returns the existing full-envelope declared child collection.
-- `name` is the child display name; `label_name` is the single child label relative to the requested parent.
+- `name` is the child identity name; `label_name` is the single child label relative to the requested parent.
 - `labelhash` is `null` when the projection doesn't carry a stable label hash.
 - `owner` and `registrant` are `null` when not projected for that child; this doesn't imply route-level unsupported.
 - `include=counts` adds `subname_count` per child where projected. When unprojected, the field is `null` and `meta.unsupported_fields` includes `subname_count` unless `meta=none`.

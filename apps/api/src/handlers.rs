@@ -33,7 +33,7 @@ use self::{
     handler_app_facing_events::events,
     handler_app_facing_identity::{
         identity_address_feed, identity_address_names, identity_address_names_batch, identity_name,
-        identity_names_batch, indexing_status,
+        identity_lookup, identity_names_batch, indexing_status, public_status,
     },
     handler_app_facing_names_collection::{address_names_count, names},
     handler_app_facing_records::{

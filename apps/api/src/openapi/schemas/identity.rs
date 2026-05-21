@@ -416,3 +416,14 @@ pub(super) fn indexing_status_response_schema() -> JsonValue {
         },
     })
 }
+
+pub(super) fn public_status_response_schema() -> JsonValue {
+    json!({
+        "type": "object",
+        "required": ["data"],
+        "properties": {
+            "data": schema_ref("IndexingStatusResponse"),
+        },
+        "additionalProperties": false,
+    })
+}

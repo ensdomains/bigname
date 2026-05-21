@@ -222,6 +222,7 @@ fn openapi_document_publishes_only_shipped_routes() {
             "/v1/identity/addresses:names:batch".to_owned(),
             "/v1/identity/names/{name}".to_owned(),
             "/v1/identity/names:batch".to_owned(),
+            "/v1/identity:lookup".to_owned(),
             "/v1/manifests/{namespace}".to_owned(),
             "/v1/names".to_owned(),
             "/v1/names/{namespace}/{name}".to_owned(),
@@ -238,6 +239,7 @@ fn openapi_document_publishes_only_shipped_routes() {
             "/v1/resources/lookup".to_owned(),
             "/v1/resources/{resource_id}/permissions".to_owned(),
             "/v1/roles".to_owned(),
+            "/v1/status".to_owned(),
             "/v1/status/indexing".to_owned(),
         ]
     );
@@ -534,6 +536,29 @@ fn openapi_document_freezes_query_params_and_shared_envelopes() {
             .and_then(|content| content.get("application/json"))
             .and_then(|content_type| content_type.get("schema")),
         Some(&json!({ "$ref": "#/components/schemas/ReverseIdentityFeedResponse" }))
+    );
+    let identity_lookup = openapi_post_operation(&document, "/v1/identity:lookup");
+    assert_eq!(
+        identity_lookup
+            .get("requestBody")
+            .and_then(|request_body| request_body.get("content"))
+            .and_then(|content| content.get("application/json"))
+            .and_then(|content_type| content_type.get("schema")),
+        Some(&json!({ "$ref": "#/components/schemas/IdentityLookupInput" }))
+    );
+    assert_eq!(
+        identity_lookup
+            .get("responses")
+            .and_then(|responses| responses.get("200"))
+            .and_then(|response| response.get("content"))
+            .and_then(|content| content.get("application/json"))
+            .and_then(|content_type| content_type.get("schema")),
+        Some(&json!({ "$ref": "#/components/schemas/IdentityLookupResponse" }))
+    );
+    let native_identity_record = openapi_schema(&document, "NativeIdentityRecord");
+    assert_schema_omits(
+        native_identity_record,
+        &["normalized_name", "corrected_input_normalization", "as_of"],
     );
 
     let events = openapi_operation(&document, "/v1/events");

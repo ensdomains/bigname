@@ -9,7 +9,7 @@ mod types;
 
 use std::collections::BTreeSet;
 
-pub use forward::load_identity_records_by_names;
+pub use forward::{load_identity_name_feed_records_by_names, load_identity_records_by_names};
 pub use reverse::load_reverse_identity_records;
 pub use reverse_feed::load_reverse_identity_feed_records;
 pub use status::load_indexing_status;

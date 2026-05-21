@@ -7,6 +7,8 @@ use crate::PUBLIC_NAMESPACES;
 mod primary_name;
 #[path = "schemas/identity.rs"]
 mod identity;
+#[path = "schemas/identity_native.rs"]
+mod identity_native;
 
 use super::responses::{
     declared_response_schema, mixed_response_schema, paginated_declared_response_schema,
@@ -16,10 +18,14 @@ use identity::{
     forward_identity_batch_input_schema, forward_identity_batch_response_schema,
     identity_as_of_schema, identity_feed_record_schema, identity_name_response_schema,
     identity_pagination_schema, identity_status_schema, indexing_status_response_schema,
-    name_record_schema, name_record_status_schema, reverse_identity_batch_input_schema,
-    reverse_identity_batch_response_schema, reverse_identity_feed_input_schema,
-    reverse_identity_feed_response_schema, reverse_name_record_schema, reverse_names_input_schema,
-    reverse_names_response_schema,
+    name_record_schema, name_record_status_schema, public_status_response_schema,
+    reverse_identity_batch_input_schema, reverse_identity_batch_response_schema,
+    reverse_identity_feed_input_schema, reverse_identity_feed_response_schema,
+    reverse_name_record_schema, reverse_names_input_schema, reverse_names_response_schema,
+};
+use identity_native::{
+    identity_lookup_input_schema, identity_lookup_page_schema, identity_lookup_response_schema,
+    native_identity_record_schema, normalization_info_schema,
 };
 use primary_name::{
     primary_name_claimed_result_schema, primary_name_verified_result_provenance_schema,
@@ -174,7 +180,12 @@ pub(super) fn openapi_components() -> JsonValue {
             "NameRecord": name_record_schema(),
             "ReverseNameRecord": reverse_name_record_schema(),
             "IdentityFeedRecord": identity_feed_record_schema(),
+            "NativeIdentityRecord": native_identity_record_schema(),
+            "NormalizationInfo": normalization_info_schema(),
+            "IdentityLookupPage": identity_lookup_page_schema(),
             "IdentityPagination": identity_pagination_schema(),
+            "IdentityLookupInput": identity_lookup_input_schema(),
+            "IdentityLookupResponse": identity_lookup_response_schema(),
             "IdentityNameResponse": identity_name_response_schema(),
             "ForwardIdentityBatchInput": forward_identity_batch_input_schema(),
             "ForwardIdentityBatchResponse": forward_identity_batch_response_schema(),
@@ -185,6 +196,7 @@ pub(super) fn openapi_components() -> JsonValue {
             "ReverseIdentityFeedInput": reverse_identity_feed_input_schema(),
             "ReverseIdentityFeedResponse": reverse_identity_feed_response_schema(),
             "IndexingStatusResponse": indexing_status_response_schema(),
+            "PublicStatusResponse": public_status_response_schema(),
             "PrimaryNameClaimedResult": primary_name_claimed_result_schema(),
             "PrimaryNameDeclaredState": json!({
                 "type": "object",

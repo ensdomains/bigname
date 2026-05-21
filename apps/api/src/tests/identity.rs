@@ -408,6 +408,179 @@ async fn identity_forward_normalizes_inferred_name_inputs() -> Result<()> {
 }
 
 #[tokio::test]
+async fn identity_lookup_returns_native_slim_shape() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    seed_identity_name(
+        &database,
+        "ens:case.eth",
+        "Case.eth",
+        "case.eth",
+        "namehash:case.eth",
+        Uuid::from_u128(0x1d0351),
+        Uuid::from_u128(0x1d0352),
+        Uuid::from_u128(0x1d0353),
+        address,
+        bigname_storage::AddressNameRelation::TokenHolder,
+        38,
+    )
+    .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/identity:lookup")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&json!({
+                        "profile": "feed",
+                        "namespace": "public",
+                        "inputs": [
+                            {"id": "name-1", "kind": "name", "name": "Case.eth"},
+                            {"id": "name-2", "kind": "name", "name": "bad name.eth"},
+                            {
+                                "id": "addr-1",
+                                "kind": "address",
+                                "address": address,
+                                "coin_type": 60,
+                                "roles": ["owned", "managed"],
+                                "page_size": 1
+                            }
+                        ]
+                    }))
+                    .expect("body must serialize"),
+                ))
+                .expect("request must build"),
+        )
+        .await
+        .context("native identity lookup request failed")?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+
+    assert_eq!(payload["results"][0]["id"], json!("name-1"));
+    assert_eq!(payload["results"][0]["kind"], json!("name"));
+    assert_eq!(payload["results"][0]["status"], json!("success"));
+    assert_eq!(payload["results"][0]["input"], json!({"name": "Case.eth"}));
+    assert_eq!(
+        payload["results"][0]["normalization"],
+        json!({
+            "changed": true,
+            "input_name": "Case.eth",
+            "reason": "case_normalized",
+        })
+    );
+    assert_eq!(payload["results"][0]["record"]["name"], json!("case.eth"));
+    assert_eq!(payload["results"][0]["record"]["namespace"], json!("ens"));
+    let name_record = payload["results"][0]["record"]
+        .as_object()
+        .expect("native name record must be an object");
+    assert!(!name_record.contains_key("normalized_name"));
+    assert!(!name_record.contains_key("corrected_input_normalization"));
+    assert!(!name_record.contains_key("as_of"));
+    assert!(!name_record.contains_key("owner_address"));
+    assert!(!name_record.contains_key("unsupported_fields"));
+
+    assert_eq!(payload["results"][1]["status"], json!("unnormalizable_input"));
+    assert_eq!(payload["results"][1]["record"], Value::Null);
+    assert_eq!(
+        payload["results"][1]["normalization"],
+        json!({
+            "changed": false,
+            "input_name": "bad name.eth",
+            "reason": "invalid_normalized_name",
+        })
+    );
+
+    assert_eq!(payload["results"][2]["kind"], json!("address"));
+    assert_eq!(payload["results"][2]["status"], json!("success"));
+    assert_eq!(
+        payload["results"][2]["input"],
+        json!({
+            "address": address,
+            "coin_type": 60,
+            "roles": ["owned", "managed"],
+        })
+    );
+    assert_eq!(payload["results"][2]["records"][0]["name"], json!("case.eth"));
+    assert_eq!(
+        payload["results"][2]["records"][0]["relation_facets"],
+        json!(["owned"])
+    );
+    assert_eq!(payload["results"][2]["page"]["total_count"], json!(1));
+    assert_eq!(payload["results"][2]["page"]["next_cursor"], Value::Null);
+    let feed_record = payload["results"][2]["records"][0]
+        .as_object()
+        .expect("native feed record must be an object");
+    assert!(!feed_record.contains_key("normalized_name"));
+    assert!(!feed_record.contains_key("owner_address"));
+    assert!(!feed_record.contains_key("unsupported_fields"));
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/identity:lookup")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&json!({
+                        "profile": "feed",
+                        "namespace": "ens",
+                        "inputs": [
+                            {"id": "name-1", "kind": "name", "name": "Case.eth"}
+                        ]
+                    }))
+                    .expect("body must serialize"),
+                ))
+                .expect("request must build"),
+        )
+        .await
+        .context("native identity lookup explicit namespace name request failed")?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["results"][0]["record"]["namespace"], json!("ens"));
+    assert_eq!(payload["results"][0]["record"]["name"], json!("case.eth"));
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/identity:lookup")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&json!({
+                        "profile": "feed",
+                        "namespace": "ens",
+                        "inputs": [
+                            {
+                                "id": "addr-1",
+                                "kind": "address",
+                                "address": address,
+                                "coin_type": 60
+                            }
+                        ]
+                    }))
+                    .expect("body must serialize"),
+                ))
+                .expect("request must build"),
+        )
+        .await
+        .context("native identity lookup explicit namespace address request failed")?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["error"]["code"], json!("invalid_input"));
+    assert!(
+        payload["error"]["message"]
+            .as_str()
+            .expect("error message must be a string")
+            .contains("explicit namespace filters")
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn identity_network_uses_runtime_chain_positions() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let address = "0x0000000000000000000000000000000000000abc";
@@ -1428,6 +1601,26 @@ async fn indexing_status_degrades_without_chain_readiness_data() -> Result<()> {
     assert_eq!(payload["status"], json!("degraded"));
     assert_eq!(
         payload["chains"]
+            .as_object()
+            .expect("chains must be an object")
+            .len(),
+        0
+    );
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/status")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("public status request failed")?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["data"]["status"], json!("degraded"));
+    assert_eq!(
+        payload["data"]["chains"]
             .as_object()
             .expect("chains must be an object")
             .len(),

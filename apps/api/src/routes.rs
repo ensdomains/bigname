@@ -124,7 +124,9 @@ impl ApiRouteErrorResponses {
 #[derive(Clone, Copy)]
 pub(crate) enum ApiRouteId {
     Health,
+    PublicStatus,
     IndexingStatus,
+    IdentityLookup,
     IdentityName,
     IdentityNamesBatch,
     IdentityAddressNames,
@@ -161,6 +163,18 @@ pub(crate) enum ApiRouteId {
 pub(crate) const API_ROUTE_DEFINITIONS: &[ApiRouteDefinition] = &[
     ApiRouteDefinition::private_get(ApiRouteId::Health, "/healthz"),
     ApiRouteDefinition::public_get(
+        ApiRouteId::PublicStatus,
+        "/v1/status",
+        ApiRouteContract::new(
+            "status",
+            "Projection indexing status by chain",
+            "Status",
+            &[],
+            "PublicStatusResponse",
+            ApiRouteErrorResponses::new(false, false),
+        ),
+    ),
+    ApiRouteDefinition::public_get(
         ApiRouteId::IndexingStatus,
         "/v1/status/indexing",
         ApiRouteContract::new(
@@ -171,6 +185,19 @@ pub(crate) const API_ROUTE_DEFINITIONS: &[ApiRouteDefinition] = &[
             "IndexingStatusResponse",
             ApiRouteErrorResponses::new(false, false),
         ),
+    ),
+    ApiRouteDefinition::public_post(
+        ApiRouteId::IdentityLookup,
+        "/v1/identity:lookup",
+        ApiRouteContract::new(
+            "identity_lookup",
+            "Native slim identity lookup",
+            "Identity",
+            &[],
+            "IdentityLookupResponse",
+            ApiRouteErrorResponses::new(true, false),
+        )
+        .with_request_schema("IdentityLookupInput"),
     ),
     ApiRouteDefinition::public_get(
         ApiRouteId::IdentityName,

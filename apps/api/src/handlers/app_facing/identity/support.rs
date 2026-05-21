@@ -25,7 +25,16 @@ pub(super) struct ReverseIdentityStorageKey {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct IdentityNameLookup {
     pub(super) logical_name_id: String,
+    pub(super) namespace: String,
+    pub(super) normalized_name: String,
     pub(super) corrected_input_normalization: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum IdentityLookupProfile {
+    Feed,
+    Detail,
+    Shadow,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -295,6 +304,80 @@ pub(super) fn parse_reverse_feed_item(
     })
 }
 
+pub(super) fn parse_identity_lookup_profile(
+    value: Option<&str>,
+) -> ApiResult<IdentityLookupProfile> {
+    match value.unwrap_or("detail").trim().to_ascii_lowercase().as_str() {
+        "feed" => Ok(IdentityLookupProfile::Feed),
+        "detail" => Ok(IdentityLookupProfile::Detail),
+        "shadow" => Ok(IdentityLookupProfile::Shadow),
+        _ => Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            code: "invalid_input",
+            message: "profile must be one of: feed, detail, shadow".to_owned(),
+        }),
+    }
+}
+
+pub(super) fn parse_identity_lookup_namespace(value: Option<&str>) -> ApiResult<Option<&str>> {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        None | Some("auto") | Some("public") => Ok(None),
+        Some("ens") => Ok(Some("ens")),
+        Some("basenames") => Ok(Some("basenames")),
+        _ => Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            code: "invalid_input",
+            message: "namespace must be one of: auto, public, ens, basenames".to_owned(),
+        }),
+    }
+}
+
+pub(super) fn parse_identity_lookup_roles(values: Option<&[String]>) -> ApiResult<IdentityRoles> {
+    let Some(values) = values else {
+        return Ok(IdentityRoles::Both);
+    };
+    if values.is_empty() {
+        return Ok(IdentityRoles::Both);
+    }
+
+    let mut owned = false;
+    let mut managed = false;
+    for value in values {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "owned" | "registrant" | "token_holder" => owned = true,
+            "managed" | "effective_controller" => managed = true,
+            "both" | "any" => {
+                owned = true;
+                managed = true;
+            }
+            _ => {
+                return Err(ApiError {
+                    status: StatusCode::BAD_REQUEST,
+                    code: "invalid_input",
+                    message:
+                        "roles must contain only owned, managed, registrant, effective_controller, both, or any"
+                            .to_owned(),
+                });
+            }
+        }
+    }
+
+    match (owned, managed) {
+        (true, true) => Ok(IdentityRoles::Both),
+        (true, false) => Ok(IdentityRoles::Owned),
+        (false, true) => Ok(IdentityRoles::Managed),
+        (false, false) => Ok(IdentityRoles::Both),
+    }
+}
+
+pub(super) fn native_identity_roles(values: IdentityRoles) -> Vec<String> {
+    match values {
+        IdentityRoles::Owned => vec!["owned".to_owned()],
+        IdentityRoles::Managed => vec!["managed".to_owned()],
+        IdentityRoles::Both => vec!["owned".to_owned(), "managed".to_owned()],
+    }
+}
+
 pub(super) fn parse_identity_coin_type(value: Option<&str>) -> ApiResult<u64> {
     let parsed = parse_primary_name_coin_type(value)?;
     parsed.parse::<u64>().map_err(|_| ApiError {
@@ -419,9 +502,19 @@ fn canonical_reverse_identity_cursor(
 pub(super) fn parse_identity_name_lookup(
     name: &str,
 ) -> Result<IdentityNameLookup, RouteNameNormalizationError> {
+    parse_identity_name_lookup_with_namespace(name, None)
+}
+
+pub(super) fn parse_identity_name_lookup_with_namespace(
+    name: &str,
+    namespace: Option<&str>,
+) -> Result<IdentityNameLookup, RouteNameNormalizationError> {
     let parsed = normalize_inferred_route_name(name)?;
+    let namespace = namespace.unwrap_or(parsed.namespace).to_owned();
     Ok(IdentityNameLookup {
-        logical_name_id: format!("{}:{}", parsed.namespace, parsed.normalized_name),
+        logical_name_id: format!("{}:{}", namespace, parsed.normalized_name),
+        namespace,
+        normalized_name: parsed.normalized_name,
         corrected_input_normalization: parsed.corrected_input_normalization,
     })
 }
