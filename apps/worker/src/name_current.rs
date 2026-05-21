@@ -207,7 +207,7 @@ async fn rebuild_one_name_current(
 
 async fn build_name_current_row(pool: &PgPool, name: &NameSurfaceSeed) -> Result<NameCurrentRow> {
     let current_binding = load_current_binding_context(pool, &name.logical_name_id).await?;
-    let events = load_relevant_events(pool, name).await?;
+    let events = load_relevant_events(pool, name, current_binding.as_ref()).await?;
     let history_heads = load_history_heads(pool, &name.logical_name_id).await?;
     let basenames_execution_manifest =
         load_active_basenames_execution_manifest(pool, &name.namespace).await?;

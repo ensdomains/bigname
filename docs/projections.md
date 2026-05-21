@@ -9,7 +9,7 @@ This document defines the shipped projection set, replay semantics, invalidation
 - Projections rebuild from canonical facts and normalized events.
 - Every row carries provenance, manifest version, and chain-position context.
 - Only projection workers write projection tables. Adapters never do. The partner identity
-  reverse count sidecar is a bounded storage-trigger exception documented in
+  reverse count/display sidecars are a bounded storage-trigger exception documented in
   [`adrs/0005-identity-count-sidecar.md`](adrs/0005-identity-count-sidecar.md).
 - Exact-name reads resolve `at`, `chain_positions`, `consistency` first; the selected positions then key one coherent join across `name_current`, `address_names_current`, `permissions_current`, `record_inventory_current`, `resolver_current`.
 - A reader fails closed when the selected positions can't be served from current rows. It does not patch a missing snapshot from raw facts, adapter internals, or a newer projection row.
@@ -40,9 +40,8 @@ History reads consume canonical normalized events plus thin cursor support. Ther
 | Route | Owner |
 | --- | --- |
 | `GET /v1/names` | `name_current` for exact and search rows; `address_names_current` for relation membership; `children_current` and `record_inventory_current` only for compact counts |
-| `GET /v1/addresses/{address}/names/count` | `address_names_current` with the same name and search joins as `GET /v1/names` |
 | `GET /v1/names/{namespace}/{name}/records` | `name_current` resolver summary plus `record_inventory_current`; verified sections are execution-owned |
-| `/v1/identity/*` | app-facing façade over `name_current`, `address_names_current`, `address_names_current_identity_counts`, `record_inventory_current`, `primary_names_current`, and projection checkpoint metadata; reverse pages and counts share the same readable `name_current` eligibility |
+| `POST /v1/identity:lookup` | app-facing native identity read over `name_current`, `address_names_current`, `address_names_current_identity_counts`, `address_names_current_identity_feed`, `record_inventory_current`, `primary_names_current`, and projection checkpoint metadata; reverse pages, counts, and compact feed identity rows share the same readable `name_current` eligibility |
 | `GET /v1/events`, history `view=compact` | canonical normalized events plus existing history anchor selection |
 | `GET /v1/roles`, `GET /v1/names/{namespace}/{name}/roles` | `permissions_current`; `name_current` only for name-to-resource lookup |
 | `GET /v1/resources/lookup` | `name_current` |
@@ -89,7 +88,7 @@ For `namespace=basenames`, membership and relation facets derive from the same B
 
 ENSv1 `TextChanged` events that carry a key and value produce selector-specific records (`text:avatar`, etc.) and retain the emitted value in `record_inventory_current.entries`. They are never collapsed into a generic `text` selector.[^v1-itextres-l5][^v1-textres-l21]
 
-Sort keys `name`, `expiry_date`, `registration_date`, `created_at` are projection-backed and replay-stable; ties break by `(namespace, normalized_name, namehash)`. App-facing total counts and `GET /v1/addresses/{address}/names/count` count the filtered projection row universe before cursor slicing. Unsupported filter and count combinations are explicit; they never fall back to raw fact scans.
+Sort keys `name`, `expiry_date`, `registration_date`, `created_at` are projection-backed and replay-stable; ties break by `(namespace, normalized_name, namehash)`. App-facing total counts count the filtered projection row universe before cursor slicing. Unsupported filter and count combinations are explicit; they never fall back to raw fact scans.
 
 `resolved_address` filtering is deferred until a declared record-value equality projection exists for the namespace and selector family.
 
@@ -139,7 +138,7 @@ For ENSv1 and Basenames, `resolver_current` summarizes a resolver only after tha
 
 ## Resolution
 
-`GET /v1/resolutions/{namespace}/{name}` uses the same exact-name snapshot selector for `data`, declared topology, route-level coverage, record-inventory and cache joins, verified support checks, and verified execution target selection.
+`GET /v1/profiles/names/{name}` uses the same exact-name snapshot selector for `data`, declared topology, route-level coverage, record-inventory and cache joins, verified support checks, and verified execution target selection after normalizing the input and inferring the namespace.
 
 Persisted verified output joins the public response only when its stored requested chain positions exactly match the selected exact-name `ChainPositions`. In `mode=verified|both`, missing persisted output for supported ENS Universal Resolver selectors triggers API-driven execution at the selected snapshot; the trace and outcome persist before the response joins them. No `at` and no `chain_positions` means `consistency=head` at the latest stored checkpoint.[^v1-iuniv-l44][^v1-iuniv-l52]
 
@@ -163,23 +162,23 @@ After a `record_inventory_current` rebuild, and once after worker bootstrap hand
 
 Keyed by `(address, coin_type, namespace)`. The row is the exact-tuple declared claim anchor plus invalidation context for current exact-tuple handling.
 
-For ENS on Ethereum Mainnet, declared claim precedence is reverse-only through `ens_v1_reverse_l1`.[^v1-revreg-deploy][^v1-revreg-l15][^v1-revreg-l74][^v1-revreg-l83][^v1-revreg-l84] Missing or unsupported reverse claims do not fall back to registry, resolver, or other claim-setting surfaces. For Basenames, `basenames_base_primary` is the declared primary-claim intake owner. `primary_names_current` carries claim-local lookup and invalidation inputs; it does not become the declared truth family for exact-name, address-name, or children reads.[^bn-readme-l33][^bn-revreg-l12][^bn-revreg-l150]
+For ENS on Ethereum Mainnet, persisted declared claim precedence is reverse-only through `ens_v1_reverse_l1`.[^v1-revreg-deploy][^v1-revreg-l15][^v1-revreg-l74][^v1-revreg-l83][^v1-revreg-l84] The app route may use an ENS/60 on-demand reverse RPC fallback when the persisted tuple is missing; that fallback builds the `addr.reverse` node, reads its ENS registry resolver, calls resolver `name(bytes32)`, and stays route-local without populating `primary_names_current`.[^v1-registry-deploy][^v1-revreg-l137][^v1-registry-l137][^v1-nameresolver-l7][^v1-nameresolverimpl-l25] In verified modes, the same route-local fallback can verify the claim by calling `addr:60` through the ENS Universal Resolver proxy at provider `latest`; that verified object is not persisted into the projection or execution cache.[^v1-ur-deploy][^v1-iur-l44][^v1-iur-l52] For Basenames, `basenames_base_primary` is the declared primary-claim intake owner. `primary_names_current` carries claim-local lookup and invalidation inputs; it does not become the declared truth family for exact-name, address-name, or children reads.[^bn-readme-l33][^bn-revreg-l12][^bn-revreg-l150]
 
 Route-level `claimed_primary_name` and `verified_primary_name` share `ResultStatus` but stay distinct: declared claim state and verified execution state never collapse into one projection-owned field. `primary_names_current` does not persist or backfill `verified_primary_name`.[^bn-l1resolver-l13]
 
 Projection-owned `claimed_primary_name` is limited to `success|not_found|unsupported|invalid_name`. Public claimed-local fields beyond bare status are exact-tuple declared `claimed_primary_name.name`, exact-tuple declared `claimed_primary_name.provenance`, and `raw_claim_name` for `invalid_name`.
 
-- `claimed_primary_name.name` comes only from the requested row's declared normalized claim-identity source, aligned with the current reverse-only claim precedence.[^v1-revreg-l100][^v1-revreg-l123][^v1-revreg-l129][^v1-revreg-l130] It is not synthesized from manifest presence, resolver identity, verified execution identity, tuple presence alone, a different tuple, or any fallback claim source. It stays distinct from execution-derived `verified_primary_name.name`.
-- `claimed_primary_name.provenance`, when published, is exact-tuple declared-only provenance from the requested row's claim-local inputs. The worker strips any `verified_primary_name_lookup` or `verified_primary_name_invalidation` hook material and omits `execution_trace_id`.
+- `claimed_primary_name.name` comes from the requested row's declared normalized claim-identity source, aligned with the current reverse-only claim precedence, or from the route-local ENS/60 on-demand reverse RPC fallback when the persisted tuple is missing.[^v1-revreg-l100][^v1-revreg-l123][^v1-revreg-l129][^v1-revreg-l130][^v1-revreg-l137][^v1-registry-l137][^v1-nameresolver-l7] It is not synthesized from manifest presence, resolver identity, verified execution identity, tuple presence alone, or a different tuple. It stays distinct from execution-derived `verified_primary_name.name`.
+- `claimed_primary_name.provenance`, when published, is exact-tuple declared-only provenance from the requested row's claim-local inputs, or route-local `ens_reverse_rpc` resolver provenance for the ENS/60 on-demand fallback. The worker strips any `verified_primary_name_lookup` or `verified_primary_name_invalidation` hook material and omits `execution_trace_id`.
 - `raw_claim_name` is copied verbatim from `primary_names_current.raw_claim_name` for the same exact tuple and only when `claim_status=invalid_name`. Blank or whitespace-only raw claim names are `not_found`; `invalid_name` is reserved for nonblank raw claim names that cannot be normalized. It is never copied into `verified_primary_name`.
 
-The row owns claim-side inputs and invalidation context only — not fallback-source selection beyond reverse-only, execution `request_type`, execution request key, `execution_trace_id`, verified status, verified name identity, verification-local failure payloads, or the route-level join between claim-side and verification-side provenance.
+The row owns claim-side inputs and invalidation context only — not route-local on-demand fallback selection, execution `request_type`, execution request key, `execution_trace_id`, verified status, verified name identity, verification-local failure payloads, or the route-level join between claim-side and verification-side provenance.
 
-The exact-tuple persisted-readback class is the only primary-name coverage support class. ENS uses `source_classes_considered=["ens_v1_reverse_l1","ens_execution"]`; Basenames uses `["basenames_base_primary","basenames_execution"]`. Both publish route-level `status=partial`, `exhaustiveness=non_enumerable`, `enumeration_basis=primary_name_lookup`, `unsupported_reason=null` only for the requested tuple.[^v1-revreg-deploy][^v1-ur-deploy][^bn-readme-l22][^bn-readme-l33] Out-of-class tuples, fallback claim sources, fresh verified-primary execution, and broader address or namespace coverage stay explicit `unsupported` with `source_classes_considered=[]`.
+The exact-tuple persisted-readback class and ENS/60 on-demand fallback are the primary-name coverage support classes. Persisted ENS uses `source_classes_considered=["ens_v1_reverse_l1","ens_execution"]`; Basenames uses `["basenames_base_primary","basenames_execution"]`; ENS/60 declared-only fallback uses `["ens_reverse_rpc"]`; ENS/60 fallback with route-local verification uses `["ens_reverse_rpc","ens_execution_rpc"]`. Supported classes publish route-level `status=partial`, `exhaustiveness=non_enumerable`, `enumeration_basis=primary_name_lookup`, and `unsupported_reason=null`.[^v1-revreg-deploy][^v1-ur-deploy][^bn-readme-l22][^bn-readme-l33] Out-of-class tuples, non-ENS/60 fresh verified-primary execution, and broader address or namespace coverage stay explicit `unsupported` with `source_classes_considered=[]`.
 
 The Basenames exact-tuple `verified_primary_name` support class stays execution-derived under `basenames_execution`. It uses the same route tuple, the request key `{namespace}:{normalized_address}:{coin_type}`, and execution identity `request_type=verified_primary_name`. The matching `primary_names_current` row is the only claim-side anchor.[^bn-revreg-l193][^bn-l1resolver-l13]
 
-The `verified_primary_name.provenance` invariant is additive to public publication. When admitted on the exact-tuple persisted-readback class, it reuses `Provenance` as a verification-local section refinement over execution output: `execution_trace_id` plus `manifest_versions` only, with `verified_primary_name.provenance.execution_trace_id` equal to top-level `provenance.execution_trace_id`. Top-level `provenance` stays the only route-level join between declared claim inputs and the persisted verification trace.
+The `verified_primary_name.provenance` invariant is additive to public publication. When admitted on the exact-tuple persisted-readback class, it reuses `Provenance` as a verification-local section refinement over execution output: `execution_trace_id` plus `manifest_versions` only. Route-local ENS/60 on-demand verification omits this field because it has no persisted execution trace. The primary-name route omits top-level route provenance by default, so clients must read persisted-verification provenance from `verified_primary_name.provenance`.
 
 Tuple presence is a lookup and invalidation hook only. It does not widen claim precedence, admit fallback sources, change route-level coverage outside the exact-tuple class, or imply richer claimed payload support.
 
@@ -334,6 +333,8 @@ Workers own one family each: `name_current`, `address_names_current`, `children_
 
 [^v1-revreg-deploy]: (upstream: .refs/ens_v1/deployments/mainnet/ReverseRegistrar.json:L2 @ ens_v1@91c966f)
 [^v1-ur-deploy]: (upstream: .refs/ens_v1/deployments/mainnet/UniversalResolver.json:L2 @ ens_v1@91c966f)
+[^v1-iur-l44]: (upstream: .refs/ens_v1/contracts/universalResolver/IUniversalResolver.sol:L44 @ ens_v1@91c966f)
+[^v1-iur-l52]: (upstream: .refs/ens_v1/contracts/universalResolver/IUniversalResolver.sol:L52 @ ens_v1@91c966f)
 [^v1-revreg-l15]: (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L15 @ ens_v1@91c966f)
 [^v1-revreg-l74]: (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L74 @ ens_v1@91c966f)
 [^v1-revreg-l83]: (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L83 @ ens_v1@91c966f)
@@ -342,6 +343,11 @@ Workers own one family each: `name_current`, `address_names_current`, `children_
 [^v1-revreg-l123]: (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L123 @ ens_v1@91c966f)
 [^v1-revreg-l129]: (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L129 @ ens_v1@91c966f)
 [^v1-revreg-l130]: (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L130 @ ens_v1@91c966f)
+[^v1-registry-deploy]: (upstream: .refs/ens_v1/deployments/mainnet/ENSRegistry.json:L2 @ ens_v1@91c966f)
+[^v1-revreg-l137]: (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L137 @ ens_v1@91c966f)
+[^v1-registry-l137]: (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L137 @ ens_v1@91c966f)
+[^v1-nameresolver-l7]: (upstream: .refs/ens_v1/contracts/resolvers/profiles/INameResolver.sol:L7 @ ens_v1@91c966f)
+[^v1-nameresolverimpl-l25]: (upstream: .refs/ens_v1/contracts/resolvers/profiles/NameResolver.sol:L25 @ ens_v1@91c966f)
 
 [^v1-iuniv-l44]: (upstream: .refs/ens_v1/contracts/universalResolver/IUniversalResolver.sol:L44 @ ens_v1@91c966f)
 [^v1-iuniv-l52]: (upstream: .refs/ens_v1/contracts/universalResolver/IUniversalResolver.sol:L52 @ ens_v1@91c966f)

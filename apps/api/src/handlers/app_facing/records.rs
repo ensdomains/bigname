@@ -19,25 +19,6 @@ pub(super) async fn name_records(
     ))
 }
 
-pub(super) async fn resolve_records(
-    Path(name): Path<String>,
-    Query(query): Query<NameRecordsQuery>,
-    State(state): State<AppState>,
-) -> ApiResult<Json<CompactNameRecordsResponse>> {
-    let parsed = normalize_inferred_route_name(&name).map_err(route_name_normalization_api_error)?;
-
-    Ok(Json(
-        compact_name_records_response_for_name(
-            &state,
-            parsed.namespace,
-            &parsed.normalized_name,
-            query,
-            CompactNameRecordsDefaultMode::Auto,
-        )
-        .await?,
-    ))
-}
-
 include!("records_warmup.rs");
 
 async fn compact_name_records_response_for_name(
