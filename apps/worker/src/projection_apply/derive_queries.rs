@@ -185,6 +185,10 @@ record_inventory_changed_events AS (
       AND block_number IS NOT NULL
       AND block_hash IS NOT NULL
 ),
+record_inventory_changed_names AS (
+    SELECT DISTINCT logical_name_id
+    FROM record_inventory_changed_events
+),
 target_resource_events AS (
     SELECT DISTINCT
         target.resource_id,
@@ -192,6 +196,8 @@ target_resource_events AS (
         target.block_number,
         COALESCE(target.log_index, -1::BIGINT) AS log_index
     FROM normalized_events target
+    JOIN record_inventory_changed_names changed_name
+      ON changed_name.logical_name_id = target.logical_name_id
     JOIN resources resource
       ON resource.resource_id = target.resource_id
      AND resource.canonicality_state IN (

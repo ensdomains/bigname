@@ -1321,20 +1321,8 @@ async fn indexing_status_degrades_for_chain_without_checkpoint() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     sqlx::query(
         r#"
-        INSERT INTO chain_lineage (
-            chain_id,
-            block_hash,
-            block_number,
-            block_timestamp,
-            canonicality_state
-        )
-        VALUES (
-            'ethereum-mainnet',
-            '0xstatus-missing-checkpoint',
-            10,
-            '2026-04-17T00:00:10Z',
-            'canonical'
-        )
+        INSERT INTO chain_checkpoints (chain_id)
+        VALUES ('ethereum-mainnet')
         "#,
     )
     .execute(&database.pool)
