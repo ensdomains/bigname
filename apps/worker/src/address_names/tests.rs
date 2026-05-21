@@ -439,7 +439,7 @@ async fn rebuild_uses_resource_permission_subject_as_tokenized_effective_control
             json!({
                 "scope": {"kind": "resource"},
                 "subject": controller,
-                "effective_powers": [],
+                "effective_powers": ["set_records"],
                 "revocation_source": {
                     "kind": "ens_v1_authority",
                     "authority_kind": "registry_only",

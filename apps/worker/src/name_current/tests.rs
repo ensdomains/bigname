@@ -2400,6 +2400,12 @@ async fn rebuild_projects_resource_permission_subject_as_registry_owner() -> Res
                 504,
                 1_717_171_904,
             ),
+            raw_block(
+                "ethereum-mainnet",
+                "0xmanager-downgrade",
+                505,
+                1_717_171_905,
+            ),
         ],
     )
     .await?;
@@ -2514,6 +2520,32 @@ async fn rebuild_projects_resource_permission_subject_as_registry_owner() -> Res
                 }),
             ),
             old_resource_control,
+            with_source_family(
+                authority_event(
+                    &binding,
+                    "manager-control-downgrade",
+                    "PermissionChanged",
+                    "0xmanager-downgrade",
+                    505,
+                    Some(0),
+                    json!({
+                        "scope": {"kind": "resource"},
+                        "subject": controller,
+                        "effective_powers": ["resource_control", "set_records"],
+                    }),
+                    json!({
+                        "scope": {"kind": "resource"},
+                        "subject": controller,
+                        "effective_powers": ["set_records"],
+                        "revocation_source": {
+                            "kind": "ens_v1_authority",
+                            "authority_kind": "registry_only",
+                            "source_event_kind": "AuthorityTransferred"
+                        }
+                    }),
+                ),
+                "ens_v1_registry_l1",
+            ),
         ],
     )
     .await?;
@@ -2527,13 +2559,10 @@ async fn rebuild_projects_resource_permission_subject_as_registry_owner() -> Res
         row.declared_summary["registration"]["registrant"],
         Value::String(token_holder.to_owned())
     );
-    assert_eq!(
-        row.declared_summary["control"]["registry_owner"],
-        Value::String(controller.to_owned())
-    );
+    assert!(row.declared_summary["control"]["registry_owner"].is_null());
     assert_eq!(
         row.declared_summary["control"]["latest_event_kind"],
-        Value::String("AuthorityEpochChanged".to_owned())
+        Value::String("AuthorityTransferred".to_owned())
     );
 
     database.cleanup().await

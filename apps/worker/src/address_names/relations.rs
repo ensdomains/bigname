@@ -75,7 +75,10 @@ fn resource_control_revocation_subject(event: &RelevantEvent) -> Option<String> 
         .after_state
         .get("effective_powers")
         .and_then(|value| value.as_array())?;
-    if !powers.is_empty() {
+    if powers
+        .iter()
+        .any(|value| value.as_str() == Some("resource_control"))
+    {
         return None;
     }
     json_str(&event.after_state, &["subject"]).map(normalize_address)

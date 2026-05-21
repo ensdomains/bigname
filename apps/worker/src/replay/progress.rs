@@ -3,7 +3,7 @@ use sqlx::PgPool;
 
 use super::CurrentProjectionReplayStepSummary;
 
-pub const CURRENT_PROJECTION_REPLAY_VERSION: i32 = 2;
+pub const CURRENT_PROJECTION_REPLAY_VERSION: i32 = 3;
 
 pub(super) async fn projection_replay_completed(
     pool: &PgPool,
