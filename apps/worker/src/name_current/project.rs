@@ -346,19 +346,6 @@ pub(super) fn project_facts(
                 facts.registry_owner = json_str(&event.after_state, &["owner"]);
                 facts.latest_control_event_kind = Some(event.event_kind.clone());
             }
-            "PermissionChanged" if event_matches_current_resource(event, current_binding) => {
-                if let Some(subject) = resource_control_subject(event) {
-                    facts.registry_owner = Some(subject);
-                    facts.latest_control_event_kind = permission_source_event_kind(event)
-                        .or_else(|| Some(event.event_kind.clone()));
-                } else if let Some(subject) = resource_control_revocation_subject(event)
-                    && facts.registry_owner.as_deref() == Some(subject.as_str())
-                {
-                    facts.registry_owner = None;
-                    facts.latest_control_event_kind = permission_source_event_kind(event)
-                        .or_else(|| Some(event.event_kind.clone()));
-                }
-            }
             "AuthorityEpochChanged" => {
                 facts.authority_kind = json_str(&event.after_state, &["authority_kind"]);
                 facts.authority_key = json_str(&event.after_state, &["authority_key"]);
@@ -413,56 +400,6 @@ pub(super) fn project_facts(
         .map(history_pointer_from_event);
 
     Ok(facts)
-}
-
-fn resource_control_subject(event: &RelevantEvent) -> Option<String> {
-    if json_str(&event.after_state, &["scope", "kind"]).as_deref() != Some("resource") {
-        return None;
-    }
-    if !has_effective_power(&event.after_state, "resource_control") {
-        return None;
-    }
-    json_str(&event.after_state, &["subject"])
-}
-
-fn event_matches_current_resource(
-    event: &RelevantEvent,
-    current_binding: Option<&CurrentBindingContext>,
-) -> bool {
-    current_binding.is_some_and(|binding| event.resource_id == Some(binding.resource_id))
-}
-
-fn resource_control_revocation_subject(event: &RelevantEvent) -> Option<String> {
-    if json_str(&event.after_state, &["scope", "kind"]).as_deref() != Some("resource") {
-        return None;
-    }
-    let powers = event
-        .after_state
-        .get("effective_powers")
-        .and_then(|value| value.as_array())?;
-    if powers
-        .iter()
-        .any(|value| value.as_str() == Some("resource_control"))
-    {
-        return None;
-    }
-    json_str(&event.after_state, &["subject"])
-}
-
-fn permission_source_event_kind(event: &RelevantEvent) -> Option<String> {
-    json_str(&event.after_state, &["grant_source", "source_event_kind"]).or_else(|| {
-        json_str(
-            &event.after_state,
-            &["revocation_source", "source_event_kind"],
-        )
-    })
-}
-
-fn has_effective_power(state: &Value, power: &str) -> bool {
-    state
-        .get("effective_powers")
-        .and_then(|value| value.as_array())
-        .is_some_and(|values| values.iter().any(|value| value.as_str() == Some(power)))
 }
 
 fn is_authority_epoch_resolver_boundary(event: &RelevantEvent) -> bool {

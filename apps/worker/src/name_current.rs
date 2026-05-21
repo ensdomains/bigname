@@ -84,7 +84,6 @@ const RELEVANT_EVENT_KINDS: &[&str] = &[
     "RegistrationGranted",
     "RegistrationReleased",
     "RegistrationRenewed",
-    "PermissionChanged",
     EVENT_KIND_RECORD_VERSION_CHANGED,
     EVENT_KIND_RESOLVER_CHANGED,
     "SurfaceBound",

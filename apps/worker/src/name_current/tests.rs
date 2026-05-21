@@ -2380,10 +2380,11 @@ async fn rebuild_keeps_same_binding_for_renewal_and_transfer() -> Result<()> {
 }
 
 #[tokio::test]
-async fn rebuild_projects_resource_permission_subject_as_registry_owner() -> Result<()> {
+async fn rebuild_keeps_resource_permission_manager_out_of_registry_owner() -> Result<()> {
     let database = TestDatabase::new().await?;
     let binding = IdentityBinding::new("ens:manager.eth", "manager.eth", 0x9100, 0x9200, 0x9300);
     let token_holder = "0x0000000000000000000000000000000000000bbb";
+    let registry_owner = "0x0000000000000000000000000000000000000aaa";
     let controller = "0x0000000000000000000000000000000000000ccc";
     let old_token_lineage_id = Uuid::from_u128(0x9101);
     let old_resource_id = Uuid::from_u128(0x9201);
@@ -2392,8 +2393,8 @@ async fn rebuild_projects_resource_permission_subject_as_registry_owner() -> Res
         database.pool(),
         &[
             raw_block("ethereum-mainnet", "0xmanager-grant", 501, 1_717_171_901),
-            raw_block("ethereum-mainnet", "0xmanager-control", 502, 1_717_171_902),
-            raw_block("ethereum-mainnet", "0xmanager-renew", 503, 1_717_171_903),
+            raw_block("ethereum-mainnet", "0xmanager-owner", 502, 1_717_171_902),
+            raw_block("ethereum-mainnet", "0xmanager-control", 503, 1_717_171_903),
             raw_block(
                 "ethereum-mainnet",
                 "0xmanager-old-control",
@@ -2480,10 +2481,27 @@ async fn rebuild_projects_resource_permission_subject_as_registry_owner() -> Res
             with_source_family(
                 authority_event(
                     &binding,
+                    "manager-owner",
+                    "AuthorityTransferred",
+                    "0xmanager-owner",
+                    502,
+                    Some(0),
+                    json!({
+                        "owner": token_holder,
+                    }),
+                    json!({
+                        "owner": registry_owner,
+                    }),
+                ),
+                "ens_v1_registry_l1",
+            ),
+            with_source_family(
+                authority_event(
+                    &binding,
                     "manager-control",
                     "PermissionChanged",
                     "0xmanager-control",
-                    502,
+                    503,
                     Some(0),
                     json!({
                         "scope": {"kind": "resource"},
@@ -2502,22 +2520,6 @@ async fn rebuild_projects_resource_permission_subject_as_registry_owner() -> Res
                     }),
                 ),
                 "ens_v1_registry_l1",
-            ),
-            authority_event(
-                &binding,
-                "manager-renewal-epoch",
-                "AuthorityEpochChanged",
-                "0xmanager-renew",
-                503,
-                None,
-                json!({
-                    "authority_kind": "registry_only",
-                    "authority_key": "registry:ethereum-mainnet:manager",
-                }),
-                json!({
-                    "authority_kind": "registrar",
-                    "authority_key": "registrar:ethereum-mainnet:7:manager",
-                }),
             ),
             old_resource_control,
             with_source_family(
@@ -2559,10 +2561,17 @@ async fn rebuild_projects_resource_permission_subject_as_registry_owner() -> Res
         row.declared_summary["registration"]["registrant"],
         Value::String(token_holder.to_owned())
     );
-    assert!(row.declared_summary["control"]["registry_owner"].is_null());
+    assert_eq!(
+        row.declared_summary["control"]["registry_owner"],
+        Value::String(registry_owner.to_owned())
+    );
     assert_eq!(
         row.declared_summary["control"]["latest_event_kind"],
         Value::String("AuthorityTransferred".to_owned())
+    );
+    assert!(
+        !row.provenance.to_string().contains(controller),
+        "name_current provenance should not inline resource permission manager events"
     );
 
     database.cleanup().await
