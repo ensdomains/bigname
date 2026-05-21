@@ -1,5 +1,3 @@
--- no-transaction
-
 -- Materialize the compact reverse-identity feed winner per address, role set,
 -- and primary-name coin type. The partner feed route needs to avoid live
 -- canonicality/name_current joins for high-cardinality batches while still
