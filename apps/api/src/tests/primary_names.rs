@@ -687,7 +687,7 @@ async fn get_primary_names_reads_raw_claim_name_for_invalid_name_exact_tuple() -
 }
 
 #[tokio::test]
-async fn get_primary_names_rejects_non_ascii_claim_name_for_exact_tuple() -> Result<()> {
+async fn get_primary_names_rejects_invalid_claim_name_for_exact_tuple() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let address = "0x0000000000000000000000000000000000000abc";
     upsert_normalized_events(
@@ -702,10 +702,10 @@ async fn get_primary_names_rejects_non_ascii_claim_name_for_exact_tuple() -> Res
                 CanonicalityState::Canonical,
             ),
             primary_name_reverse_linked_name_event(
-                "record-a-60-non-ascii",
+                "record-a-60-invalid-name",
                 address,
                 "60",
-                Some("Älice.eth"),
+                Some("Ni\u{200d}ck.eth"),
                 351,
                 0,
                 CanonicalityState::Canonical,
@@ -731,7 +731,7 @@ async fn get_primary_names_rejects_non_ascii_claim_name_for_exact_tuple() -> Res
                 .expect("request must build"),
         )
         .await
-        .context("mixed non-ascii primary-name request failed")?;
+        .context("invalid primary-name request failed")?;
 
     assert_eq!(response.status(), StatusCode::OK);
 
@@ -749,11 +749,11 @@ async fn get_primary_names_rejects_non_ascii_claim_name_for_exact_tuple() -> Res
     );
     assert_eq!(
         claimed_primary_name.get("raw_claim_name"),
-        Some(&json!("Älice.eth"))
+        Some(&json!("Ni\u{200d}ck.eth"))
     );
     assert!(
         !claimed_primary_name.contains_key("name"),
-        "non-ascii raw claims must not publish claimed_primary_name.name in bootstrap mode"
+        "invalid raw claims must not publish claimed_primary_name.name in bootstrap mode"
     );
     let provenance = claimed_primary_name
         .get("provenance")

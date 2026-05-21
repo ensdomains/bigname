@@ -1376,7 +1376,7 @@ async fn indexing_status_degrades_for_active_or_shadow_manifest_without_checkpoi
             "basenames_v1",
             1,
             "active",
-            "uts46-v1",
+            "ensip15@ens-normalize-0.1.0",
         )
         .await?;
     database
@@ -1387,7 +1387,7 @@ async fn indexing_status_degrades_for_active_or_shadow_manifest_without_checkpoi
             "basenames_shadow",
             1,
             "shadow",
-            "uts46-v1",
+            "ensip15@ens-normalize-0.1.0",
         )
         .await?;
 

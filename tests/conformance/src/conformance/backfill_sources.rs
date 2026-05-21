@@ -647,7 +647,7 @@ async fn seed_source_family_raw_retention_probe(
             "ens_v1",
             81,
             "active",
-            "uts46-v1",
+            "ensip15@ens-normalize-0.1.0",
         )
         .await?;
     let contract_instance_id = Uuid::parse_str(target.contract_instance_id).with_context(|| {
@@ -806,7 +806,7 @@ async fn seed_historical_replay_retention_probe(
             "ens_v1",
             91,
             "active",
-            "uts46-v1",
+            "ensip15@ens-normalize-0.1.0",
         )
         .await?;
     seed_active_replay_contract(
@@ -949,7 +949,7 @@ async fn seed_ens_registry_old_migration_replay_probe(
             "ens_v1",
             106,
             "active",
-            "uts46-v1",
+            "ensip15@ens-normalize-0.1.0",
         )
         .await?;
     let current_contract_instance_id =
@@ -3125,7 +3125,7 @@ async fn insert_auto_bootstrap_manifest(
             file_path,
             manifest_payload
         )
-        VALUES (1, $1, $2, $3, 'auto-bootstrap-conformance', 'active', 'uts46-v1', $4, $5::jsonb)
+        VALUES (1, $1, $2, $3, 'auto-bootstrap-conformance', 'active', 'ensip15@ens-normalize-0.1.0', $4, $5::jsonb)
         RETURNING manifest_id
         "#,
     )

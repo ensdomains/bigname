@@ -126,7 +126,7 @@ async fn insert_manifest_version(pool: &PgPool, seed: ManifestVersionSeed<'_>) -
             $4,
             $5,
             $6::manifest_rollout_status,
-            'uts46-v1',
+            'ensip15@ens-normalize-0.1.0',
             $7,
             '{}'::jsonb
         )

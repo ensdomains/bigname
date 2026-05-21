@@ -72,6 +72,8 @@ Historical backfill does not turn empty blocks into hot payload archives. A bloc
 
 `logical_name_id = "<namespace>:<normalized_name>"` — stable, human-auditable, derivable without database lookup.
 
+`normalized_name` is the output of the single ENSIP-15 normalizer declared as `ensip15@ens-normalize-0.1.0`; storage validation and projection inputs must not substitute IDNA/UTS-46 conversion, ASCII lowercasing, or trimming. Name-surface DNS wire names, namehashes, and labelhash paths are derived from the same normalized labels.
+
 ENSv1 name-surface materialization does not admit embedded NUL bytes in registrar labels, wrapper DNS labels, or resolver `name` record preimages. Those observations may still remain as raw facts and, where applicable, resolver-record normalized events, but they do not mint or update `NameSurface` rows or label preimage state. This keeps displayable name identity distinct from literal onchain strings that reference indexers also treat as invalid or unnormalizable for label/name interpretation.[^ens-subgraph-label-null][^ens-subgraph-name-null][^ensnode-null-label]
 
 ### Opaque UUIDs

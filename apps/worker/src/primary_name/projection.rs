@@ -140,24 +140,20 @@ fn primary_name_row(
     tuple: &ReverseClaimTuple,
     claim_observation: Option<&NameClaimObservation>,
 ) -> Result<PrimaryNameCurrentSnapshot> {
-    let (claim_status, raw_claim_name) = match claim_observation
-        .and_then(|observation| observation.raw_name.as_deref())
-    {
-        Some(raw_name) if raw_name.trim().is_empty() => (PrimaryNameClaimStatus::NotFound, None),
-        Some(raw_name) if claim_name_looks_normalizable(raw_name) => {
-            (PrimaryNameClaimStatus::Success, None)
-        }
+    let raw_claim = claim_observation.and_then(|observation| observation.raw_name.as_deref());
+    let normalized_claim = raw_claim
+        .filter(|raw_name| !raw_name.is_empty())
+        .and_then(|raw_name| bigname_domain::normalization::normalize_name(raw_name).ok());
+    let (claim_status, raw_claim_name) = match raw_claim {
+        Some(raw_name) if raw_name.is_empty() => (PrimaryNameClaimStatus::NotFound, None),
+        Some(raw_name) if normalized_claim.is_some() => (PrimaryNameClaimStatus::Success, None),
         Some(raw_name) => (
             PrimaryNameClaimStatus::InvalidName,
             Some(raw_name.to_owned()),
         ),
         None => (PrimaryNameClaimStatus::NotFound, None),
     };
-
-    let normalized_claim_name = claim_observation
-        .and_then(|observation| observation.raw_name.as_deref())
-        .filter(|_| claim_status == PrimaryNameClaimStatus::Success)
-        .map(normalize_claim_name);
+    let normalized_claim_name = normalized_claim.map(|name| name.normalized_name);
 
     Ok(PrimaryNameCurrentSnapshot {
         row: PrimaryNameCurrentRow {
@@ -214,28 +210,6 @@ fn verified_primary_name_invalidation_hook(
         );
     }
     Value::Object(invalidation)
-}
-
-fn claim_name_looks_normalizable(raw_name: &str) -> bool {
-    if raw_name.is_empty()
-        || raw_name.trim() != raw_name
-        || raw_name.len() > 255
-        || !raw_name.is_ascii()
-    {
-        return false;
-    }
-
-    raw_name.split('.').all(|label| {
-        !label.is_empty()
-            && label.len() <= 63
-            && !label
-                .chars()
-                .any(|character| character.is_control() || character.is_whitespace())
-    })
-}
-
-fn normalize_claim_name(raw_name: &str) -> String {
-    raw_name.to_ascii_lowercase()
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

@@ -98,7 +98,9 @@ This separation captures: one resource under multiple public names, alias-resolv
 
 ## Normalization and preimage observation
 
-Normalization is version-pinned via `normalizer_version`. The canonical `NameSurface` carries one representative result; alternate spellings persist as immutable preimage observation facts.
+Normalization is version-pinned via `normalizer_version`. The active normalizer is `ensip15@ens-normalize-0.1.0`, backed by the Rust `ens-normalize` crate and its embedded ENSIP-15 data. API input normalization, adapter name-surface admission, reverse-claim claim-name normalization, resolver alias target normalization, DNS-encoded name handling, `namehash`, `labelhashes`, and DNS wire-name derivation all use that one boundary. IDNA/UTS-46 conversion, ASCII lowercasing, trimming, or route-local normalization are not fallback normalizers.
+
+The canonical `NameSurface` carries one representative result; alternate spellings persist as immutable preimage observation facts.
 
 `PreimageObserved` facts may come from registrar/registry events with explicit labels, wrapper events with human-readable names, reverse/primary flows that reveal names, and metadata when a manifest allows. Invalid input is never silently coerced into a valid identity.
 
