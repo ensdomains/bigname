@@ -77,6 +77,35 @@ async fn derives_key_scoped_invalidations_from_normalized_event_changes() -> Res
     insert_event(
         &database,
         EventSeed {
+            event_identity: "projection-apply:resource-permission",
+            namespace: "ens",
+            logical_name_id: Some("ens:alice.eth"),
+            resource_id: Some(resource_id),
+            event_kind: "PermissionChanged",
+            source_family: "ens_v1_registry_l1",
+            derivation_kind: "ens_v1_unwrapped_authority",
+            chain_id: Some("ethereum-mainnet"),
+            block_number: Some(11),
+            block_hash: Some("0xblock11"),
+            before_state: json!({
+                "scope": {
+                    "kind": "resource"
+                },
+                "subject": "0x0000000000000000000000000000000000000aa1"
+            }),
+            after_state: json!({
+                "scope": {
+                    "kind": "resource"
+                },
+                "subject": "0x0000000000000000000000000000000000000aa2"
+            }),
+            observed_at,
+        },
+    )
+    .await?;
+    insert_event(
+        &database,
+        EventSeed {
             event_identity: "projection-apply:address",
             namespace: "ens",
             logical_name_id: Some("ens:alice.eth"),
@@ -139,8 +168,8 @@ async fn derives_key_scoped_invalidations_from_normalized_event_changes() -> Res
     .await?;
 
     let summary = derive_normalized_event_invalidations(database.pool(), 100).await?;
-    assert_eq!(summary.scanned_event_count, 5);
-    assert!(summary.enqueued_invalidation_count >= 8);
+    assert_eq!(summary.scanned_event_count, 6);
+    assert!(summary.enqueued_invalidation_count >= 10);
 
     let invalidations = load_invalidations(&database).await?;
     assert!(has_key(&invalidations, "name_current", "ens:alice.eth"));
@@ -181,6 +210,16 @@ async fn derives_key_scoped_invalidations_from_normalized_event_changes() -> Res
     ));
     assert!(has_key(
         &invalidations,
+        "address_names_current",
+        "0x0000000000000000000000000000000000000aa1"
+    ));
+    assert!(has_key(
+        &invalidations,
+        "address_names_current",
+        "0x0000000000000000000000000000000000000aa2"
+    ));
+    assert!(has_key(
+        &invalidations,
         "primary_names_current",
         "0x0000000000000000000000000000000000000eee:ens:60"
     ));
@@ -203,6 +242,56 @@ async fn derives_key_scoped_invalidations_from_normalized_event_changes() -> Res
     assert_eq!(summary.scanned_event_count, 1);
     let generation = invalidation_generation(&database, "name_current", "ens:alice.eth").await?;
     assert_eq!(generation, 1);
+
+    sqlx::query("DELETE FROM projection_invalidations")
+        .execute(database.pool())
+        .await
+        .context("failed to clear generated projection invalidations")?;
+    insert_event(
+        &database,
+        EventSeed {
+            event_identity: "projection-apply:resource-permission-revoked",
+            namespace: "ens",
+            logical_name_id: Some("ens:alice.eth"),
+            resource_id: Some(resource_id),
+            event_kind: "PermissionChanged",
+            source_family: "ens_v1_registry_l1",
+            derivation_kind: "ens_v1_unwrapped_authority",
+            chain_id: Some("ethereum-mainnet"),
+            block_number: Some(15),
+            block_hash: Some("0xblock15"),
+            before_state: json!({
+                "scope": {
+                    "kind": "resource"
+                },
+                "subject": "0x0000000000000000000000000000000000000aa2",
+                "effective_powers": ["resource_control"]
+            }),
+            after_state: json!({
+                "scope": {
+                    "kind": "resource"
+                },
+                "subject": "0x0000000000000000000000000000000000000aa2",
+                "effective_powers": []
+            }),
+            observed_at,
+        },
+    )
+    .await?;
+
+    let summary = derive_normalized_event_invalidations(database.pool(), 100).await?;
+    assert_eq!(summary.scanned_event_count, 1);
+    let invalidations = load_invalidations(&database).await?;
+    assert!(has_key(
+        &invalidations,
+        "address_names_current",
+        "0x0000000000000000000000000000000000000aa2"
+    ));
+    assert!(has_key(
+        &invalidations,
+        "address_names_current",
+        "0x0000000000000000000000000000000000000ddd"
+    ));
 
     database.cleanup().await
 }
