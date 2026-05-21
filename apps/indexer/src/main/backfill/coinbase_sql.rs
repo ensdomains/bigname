@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, bail};
 
@@ -146,6 +146,7 @@ impl HistoricalBackfillSourceOps for CoinbaseSqlBackfillSource {
         let receipts_by_block = BTreeMap::<i64, Vec<ProviderReceipt>>::new();
         let mut stats = super::CoinbaseSqlFetchStats::default();
         let mut validation_filters = Vec::new();
+        let mut seen_log_identities = BTreeSet::new();
         let resolved_by_number = request
             .resolved_blocks
             .iter()
@@ -176,7 +177,7 @@ impl HistoricalBackfillSourceOps for CoinbaseSqlBackfillSource {
                 for row in pages.rows {
                     row.validate_against_filter_pack(&split_pack, &resolved_by_number)?;
                     let log = row.to_provider_log()?;
-                    logs_by_block.entry(log.block_number).or_default().push(log);
+                    push_deduped_log(&mut logs_by_block, &mut seen_log_identities, log);
                 }
             }
         }
@@ -198,5 +199,36 @@ impl HistoricalBackfillSourceOps for CoinbaseSqlBackfillSource {
             validation_mode: request.validation_mode,
             source_stats: stats,
         })
+    }
+}
+
+fn push_deduped_log(
+    logs_by_block: &mut BTreeMap<i64, Vec<ProviderLog>>,
+    seen_log_identities: &mut BTreeSet<CoinbaseSqlLogIdentity>,
+    log: ProviderLog,
+) {
+    if seen_log_identities.insert(CoinbaseSqlLogIdentity::from_log(&log)) {
+        logs_by_block.entry(log.block_number).or_default().push(log);
+    }
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct CoinbaseSqlLogIdentity {
+    block_hash: String,
+    transaction_hash: String,
+    transaction_index: i64,
+    log_index: i64,
+    address: String,
+}
+
+impl CoinbaseSqlLogIdentity {
+    fn from_log(log: &ProviderLog) -> Self {
+        Self {
+            block_hash: log.block_hash.to_ascii_lowercase(),
+            transaction_hash: log.transaction_hash.to_ascii_lowercase(),
+            transaction_index: log.transaction_index,
+            log_index: log.log_index,
+            address: log.address.to_ascii_lowercase(),
+        }
     }
 }

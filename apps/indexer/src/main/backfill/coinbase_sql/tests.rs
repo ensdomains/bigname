@@ -9,6 +9,7 @@ use sqlx::types::Uuid;
 
 use super::{
     planner::build_filter_packs,
+    push_deduped_log,
     query::{CoinbaseSqlFilterPack, build_or_split_filter_pack, build_query},
     rows::CoinbaseSqlLogRow,
 };
@@ -17,7 +18,7 @@ use crate::{
         BackfillBlockRange, BackfillTopicPlan, CoinbaseSqlValidationMode,
         HistoricalLogPayloadRequest, selection::SelectedTargetIntervalIndex,
     },
-    provider::ProviderResolvedBlock,
+    provider::{ProviderLog, ProviderResolvedBlock},
 };
 
 fn pack(addresses: Vec<String>, topic0s: Vec<String>) -> CoinbaseSqlFilterPack {
@@ -223,6 +224,30 @@ fn planner_does_not_cartesian_product_addresses_and_topics() -> Result<()> {
     assert_eq!(packs[1].addresses, vec![address_b.to_owned()]);
     assert_eq!(packs[1].topic0s, vec![topic_b]);
     Ok(())
+}
+
+#[test]
+fn duplicate_sql_pack_log_identities_are_deduped() {
+    let log = ProviderLog {
+        block_hash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+        block_number: 10,
+        transaction_hash: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            .to_owned(),
+        transaction_index: 1,
+        log_index: 2,
+        address: "0x1111111111111111111111111111111111111111".to_owned(),
+        topics: vec![
+            "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_owned(),
+        ],
+        data: "0x".to_owned(),
+    };
+    let mut logs_by_block = BTreeMap::new();
+    let mut seen = BTreeSet::new();
+
+    push_deduped_log(&mut logs_by_block, &mut seen, log.clone());
+    push_deduped_log(&mut logs_by_block, &mut seen, log);
+
+    assert_eq!(logs_by_block[&10].len(), 1);
 }
 
 #[test]
