@@ -27,10 +27,17 @@ pub async fn load_reverse_identity_records(
         return Ok(Vec::new());
     }
 
+    let first_page_feed = inputs
+        .iter()
+        .all(|input| input.page_size == 1 && input.cursor.is_none());
     let counts_future = load_reverse_identity_total_counts(pool, inputs);
     let primary_names_future = load_identity_primary_name_snapshots(pool, inputs);
     let page_records_future = async {
-        let page_rows = load_reverse_identity_page_rows(pool, inputs).await?;
+        let page_rows = if first_page_feed {
+            load_reverse_identity_first_page_rows(pool, inputs).await?
+        } else {
+            load_reverse_identity_page_rows(pool, inputs).await?
+        };
         let logical_name_ids =
             dedupe_in_order(page_rows.iter().map(|row| row.logical_name_id.clone()));
         let name_records = load_identity_records_by_names(pool, &logical_name_ids)
@@ -64,17 +71,20 @@ pub async fn load_reverse_identity_records(
                     reverse_identity_record(&name_records, &primary_names, input, row)
                 })
                 .collect::<Vec<_>>();
-            let has_more = entries.len() as i64 > input.page_size;
+            let total_count = *total_counts
+                .get(&(input.address.clone(), input.roles))
+                .unwrap_or(&0);
+            let has_more = if first_page_feed {
+                total_count > input.page_size.max(0) as u64 && !entries.is_empty()
+            } else {
+                entries.len() as i64 > input.page_size
+            };
             entries.truncate(input.page_size.max(0) as usize);
 
             ReverseIdentityGroup {
                 input: input.clone(),
                 entries,
-                total_count: Some(
-                    *total_counts
-                        .get(&(input.address.clone(), input.roles))
-                        .unwrap_or(&0),
-                ),
+                total_count: Some(total_count),
                 has_more,
             }
         })
@@ -114,6 +124,196 @@ fn reverse_identity_record(
         primary_name,
         requested_coin_type: input.coin_type.clone(),
     })
+}
+
+async fn load_reverse_identity_first_page_rows(
+    pool: &PgPool,
+    inputs: &[ReverseIdentityStorageInput],
+) -> Result<Vec<ReverseIdentityPageRow>> {
+    let input_indexes = (0..inputs.len() as i32).collect::<Vec<_>>();
+    let addresses = inputs
+        .iter()
+        .map(|input| input.address.clone())
+        .collect::<Vec<_>>();
+    let coin_types = inputs
+        .iter()
+        .map(|input| input.coin_type.clone())
+        .collect::<Vec<_>>();
+    let roles = inputs
+        .iter()
+        .map(|input| input.roles.storage_value().to_owned())
+        .collect::<Vec<_>>();
+
+    let rows = sqlx::query(&format!(
+        r#"
+        WITH requested AS (
+            SELECT *
+            FROM UNNEST($1::INT[], $2::TEXT[], $3::TEXT[], $4::TEXT[])
+              AS requested(input_index, address, coin_type, roles)
+        )
+        SELECT
+            requested.input_index,
+            page.logical_name_id
+        FROM requested
+        CROSS JOIN LATERAL (
+            SELECT candidate.logical_name_id
+            FROM (
+                (
+                    SELECT
+                        anc.logical_name_id,
+                        TRUE AS is_primary,
+                        CASE
+                            WHEN anc.relation IN ('registrant', 'token_holder') THEN 0::SMALLINT
+                            ELSE 1::SMALLINT
+                        END AS role_rank,
+                        anc.normalized_name,
+                        anc.namespace,
+                        anc.namehash
+                    FROM primary_names_current pnc
+                    JOIN address_names_current anc
+                      ON anc.address = requested.address
+                     AND anc.namespace = pnc.namespace
+                     AND anc.normalized_name = pnc.normalized_claim_name
+                    JOIN name_surfaces surface
+                      ON surface.logical_name_id = anc.logical_name_id
+                    JOIN resources resource
+                      ON resource.resource_id = anc.resource_id
+                    JOIN surface_bindings binding
+                      ON binding.surface_binding_id = anc.surface_binding_id
+                    LEFT JOIN token_lineages token_lineage
+                      ON token_lineage.token_lineage_id = anc.token_lineage_id
+                    JOIN name_current identity_nc
+                      ON identity_nc.logical_name_id = anc.logical_name_id
+                    JOIN name_surfaces identity_nc_surface
+                      ON identity_nc_surface.logical_name_id = identity_nc.logical_name_id
+                    LEFT JOIN resources identity_nc_resource
+                      ON identity_nc_resource.resource_id = identity_nc.resource_id
+                    LEFT JOIN surface_bindings identity_nc_binding
+                      ON identity_nc_binding.surface_binding_id = identity_nc.surface_binding_id
+                    LEFT JOIN token_lineages identity_nc_token_lineage
+                      ON identity_nc_token_lineage.token_lineage_id = identity_nc.token_lineage_id
+                    WHERE pnc.address = requested.address
+                      AND pnc.coin_type = requested.coin_type
+                      AND pnc.claim_status = 'success'
+                      AND (
+                          requested.roles = 'both'
+                          OR (
+                              requested.roles = 'owned'
+                              AND anc.relation IN ('registrant', 'token_holder')
+                          )
+                          OR (
+                              requested.roles = 'managed'
+                              AND anc.relation = 'effective_controller'
+                          )
+                      )
+                    {DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER}
+                    {DEFAULT_IDENTITY_NAME_CURRENT_READ_FILTER}
+                    ORDER BY
+                        CASE
+                            WHEN anc.relation IN ('registrant', 'token_holder') THEN 0
+                            ELSE 1
+                        END,
+                        anc.normalized_name ASC,
+                        anc.namespace ASC,
+                        anc.namehash ASC,
+                        anc.logical_name_id ASC
+                    LIMIT 1
+                )
+                UNION ALL
+                (
+                    SELECT
+                        anc.logical_name_id,
+                        FALSE AS is_primary,
+                        CASE
+                            WHEN anc.relation IN ('registrant', 'token_holder') THEN 0::SMALLINT
+                            ELSE 1::SMALLINT
+                        END AS role_rank,
+                        anc.normalized_name,
+                        anc.namespace,
+                        anc.namehash
+                    FROM address_names_current anc
+                    JOIN name_surfaces surface
+                      ON surface.logical_name_id = anc.logical_name_id
+                    JOIN resources resource
+                      ON resource.resource_id = anc.resource_id
+                    JOIN surface_bindings binding
+                      ON binding.surface_binding_id = anc.surface_binding_id
+                    LEFT JOIN token_lineages token_lineage
+                      ON token_lineage.token_lineage_id = anc.token_lineage_id
+                    JOIN name_current identity_nc
+                      ON identity_nc.logical_name_id = anc.logical_name_id
+                    JOIN name_surfaces identity_nc_surface
+                      ON identity_nc_surface.logical_name_id = identity_nc.logical_name_id
+                    LEFT JOIN resources identity_nc_resource
+                      ON identity_nc_resource.resource_id = identity_nc.resource_id
+                    LEFT JOIN surface_bindings identity_nc_binding
+                      ON identity_nc_binding.surface_binding_id = identity_nc.surface_binding_id
+                    LEFT JOIN token_lineages identity_nc_token_lineage
+                      ON identity_nc_token_lineage.token_lineage_id = identity_nc.token_lineage_id
+                    LEFT JOIN primary_names_current pnc
+                      ON pnc.address = requested.address
+                     AND pnc.coin_type = requested.coin_type
+                     AND pnc.namespace = anc.namespace
+                     AND pnc.claim_status = 'success'
+                    WHERE anc.address = requested.address
+                      AND (
+                          requested.roles = 'both'
+                          OR (
+                              requested.roles = 'owned'
+                              AND anc.relation IN ('registrant', 'token_holder')
+                          )
+                          OR (
+                              requested.roles = 'managed'
+                              AND anc.relation = 'effective_controller'
+                          )
+                      )
+                      AND pnc.normalized_claim_name IS DISTINCT FROM anc.normalized_name
+                    {DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER}
+                    {DEFAULT_IDENTITY_NAME_CURRENT_READ_FILTER}
+                    ORDER BY
+                        CASE
+                            WHEN anc.relation IN ('registrant', 'token_holder') THEN 0
+                            ELSE 1
+                        END,
+                        anc.normalized_name ASC,
+                        anc.namespace ASC,
+                        anc.namehash ASC,
+                        anc.logical_name_id ASC
+                    LIMIT 1
+                )
+            ) candidate
+            ORDER BY
+                candidate.is_primary DESC,
+                candidate.role_rank ASC,
+                candidate.normalized_name ASC,
+                candidate.namespace ASC,
+                candidate.namehash ASC
+            LIMIT 1
+        ) page
+        ORDER BY requested.input_index ASC
+        "#,
+    ))
+    .bind(&input_indexes)
+    .bind(&addresses)
+    .bind(&coin_types)
+    .bind(&roles)
+    .fetch_all(pool)
+    .await
+    .with_context(|| {
+        format!(
+            "failed to load reverse identity first-page feed rows for {} inputs",
+            inputs.len()
+        )
+    })?;
+
+    rows.into_iter()
+        .map(|row| {
+            Ok(ReverseIdentityPageRow {
+                input_index: crate::sql_row::get::<i32>(&row, "input_index")? as usize,
+                logical_name_id: crate::sql_row::get(&row, "logical_name_id")?,
+            })
+        })
+        .collect()
 }
 
 async fn load_reverse_identity_page_rows(
