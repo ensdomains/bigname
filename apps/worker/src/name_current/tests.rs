@@ -2380,6 +2380,204 @@ async fn rebuild_keeps_same_binding_for_renewal_and_transfer() -> Result<()> {
 }
 
 #[tokio::test]
+async fn rebuild_keeps_resource_permission_manager_out_of_registry_owner() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let binding = IdentityBinding::new("ens:manager.eth", "manager.eth", 0x9100, 0x9200, 0x9300);
+    let token_holder = "0x0000000000000000000000000000000000000bbb";
+    let registry_owner = "0x0000000000000000000000000000000000000aaa";
+    let controller = "0x0000000000000000000000000000000000000ccc";
+    let old_token_lineage_id = Uuid::from_u128(0x9101);
+    let old_resource_id = Uuid::from_u128(0x9201);
+
+    seed_raw_blocks(
+        database.pool(),
+        &[
+            raw_block("ethereum-mainnet", "0xmanager-grant", 501, 1_717_171_901),
+            raw_block("ethereum-mainnet", "0xmanager-owner", 502, 1_717_171_902),
+            raw_block("ethereum-mainnet", "0xmanager-control", 503, 1_717_171_903),
+            raw_block(
+                "ethereum-mainnet",
+                "0xmanager-old-control",
+                504,
+                1_717_171_904,
+            ),
+            raw_block(
+                "ethereum-mainnet",
+                "0xmanager-downgrade",
+                505,
+                1_717_171_905,
+            ),
+        ],
+    )
+    .await?;
+    seed_identity(
+        database.pool(),
+        &binding,
+        "0xmanager-grant",
+        501,
+        1_717_171_901,
+    )
+    .await?;
+    upsert_token_lineages(
+        database.pool(),
+        &[token_lineage(
+            old_token_lineage_id,
+            "0xmanager-old-control",
+            504,
+        )],
+    )
+    .await?;
+    upsert_resources(
+        database.pool(),
+        &[resource(
+            old_resource_id,
+            old_token_lineage_id,
+            "0xmanager-old-control",
+            504,
+        )],
+    )
+    .await?;
+    let mut old_resource_control = with_source_family(
+        authority_event(
+            &binding,
+            "manager-old-control",
+            "PermissionChanged",
+            "0xmanager-old-control",
+            504,
+            Some(0),
+            json!({}),
+            json!({
+                "scope": {"kind": "resource"},
+                "subject": token_holder,
+                "effective_powers": ["resource_control"],
+                "grant_source": {
+                    "kind": "ens_v1_authority",
+                    "authority_kind": "registrar",
+                    "source_event_kind": "TokenControlTransferred"
+                }
+            }),
+        ),
+        "ens_v1_registry_l1",
+    );
+    old_resource_control.resource_id = Some(old_resource_id);
+    seed_events(
+        database.pool(),
+        &[
+            authority_event(
+                &binding,
+                "manager-grant",
+                "RegistrationGranted",
+                "0xmanager-grant",
+                501,
+                Some(0),
+                json!({}),
+                json!({
+                    "authority_kind": "registrar",
+                    "authority_key": "registrar:ethereum-mainnet:7:manager",
+                    "registrant": token_holder,
+                    "expiry": 1_800_000_000_i64,
+                }),
+            ),
+            with_source_family(
+                authority_event(
+                    &binding,
+                    "manager-owner",
+                    "AuthorityTransferred",
+                    "0xmanager-owner",
+                    502,
+                    Some(0),
+                    json!({
+                        "owner": token_holder,
+                    }),
+                    json!({
+                        "owner": registry_owner,
+                    }),
+                ),
+                "ens_v1_registry_l1",
+            ),
+            with_source_family(
+                authority_event(
+                    &binding,
+                    "manager-control",
+                    "PermissionChanged",
+                    "0xmanager-control",
+                    503,
+                    Some(0),
+                    json!({
+                        "scope": {"kind": "resource"},
+                        "subject": token_holder,
+                        "effective_powers": ["resource_control"],
+                    }),
+                    json!({
+                        "scope": {"kind": "resource"},
+                        "subject": controller,
+                        "effective_powers": ["resource_control"],
+                        "grant_source": {
+                            "kind": "ens_v1_authority",
+                            "authority_kind": "registry_only",
+                            "source_event_kind": "AuthorityTransferred"
+                        }
+                    }),
+                ),
+                "ens_v1_registry_l1",
+            ),
+            old_resource_control,
+            with_source_family(
+                authority_event(
+                    &binding,
+                    "manager-control-downgrade",
+                    "PermissionChanged",
+                    "0xmanager-downgrade",
+                    505,
+                    Some(0),
+                    json!({
+                        "scope": {"kind": "resource"},
+                        "subject": controller,
+                        "effective_powers": ["resource_control", "set_records"],
+                    }),
+                    json!({
+                        "scope": {"kind": "resource"},
+                        "subject": controller,
+                        "effective_powers": ["set_records"],
+                        "revocation_source": {
+                            "kind": "ens_v1_authority",
+                            "authority_kind": "registry_only",
+                            "source_event_kind": "AuthorityTransferred"
+                        }
+                    }),
+                ),
+                "ens_v1_registry_l1",
+            ),
+        ],
+    )
+    .await?;
+
+    rebuild_name_current(database.pool(), Some(&binding.logical_name_id)).await?;
+
+    let row = load_name_current(database.pool(), &binding.logical_name_id)
+        .await?
+        .context("rebuilt manager row must exist")?;
+    assert_eq!(
+        row.declared_summary["registration"]["registrant"],
+        Value::String(token_holder.to_owned())
+    );
+    assert_eq!(
+        row.declared_summary["control"]["registry_owner"],
+        Value::String(registry_owner.to_owned())
+    );
+    assert_eq!(
+        row.declared_summary["control"]["latest_event_kind"],
+        Value::String("AuthorityTransferred".to_owned())
+    );
+    assert!(
+        !row.provenance.to_string().contains(controller),
+        "name_current provenance should not inline resource permission manager events"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn rebuild_switches_to_rebound_authority_epoch_binding() -> Result<()> {
     let database = TestDatabase::new().await?;
     let binding = IdentityBinding::new("ens:alice.eth", "alice.eth", 0x5100, 0x5200, 0x5300);

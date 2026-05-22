@@ -3232,6 +3232,196 @@ async fn rebuild_uses_cross_resource_resolver_boundaries_for_predecessor_records
 }
 
 #[tokio::test]
+async fn rebuild_ignores_predecessor_record_version_boundary_before_current_resolver() -> Result<()>
+{
+    let database = TestDatabase::new().await?;
+    let predecessor_resource_id = Uuid::from_u128(0x9932);
+    let current_resource_id = Uuid::from_u128(0x9933);
+    let resolver_contract_instance_id = Uuid::from_u128(0x9934);
+    let resolver_address = "0x4976fb03C32e5B8cfe2b6cCB31c09Ba78EBaBa41";
+
+    let registry_manifest_id = insert_manifest_version(
+        database.pool(),
+        SOURCE_FAMILY_ENS_V1_REGISTRY_L1,
+        "manifests/ens/ens_v1_registry_l1/v3.toml",
+    )
+    .await?;
+    let resolver_manifest_id = insert_manifest_version(
+        database.pool(),
+        SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
+        "manifests/ens/ens_v1_resolver_l1/v1.toml",
+    )
+    .await?;
+    insert_contract_instance(
+        database.pool(),
+        resolver_contract_instance_id,
+        resolver_address,
+        resolver_manifest_id,
+    )
+    .await?;
+    insert_manifest_contract_instance(
+        database.pool(),
+        resolver_manifest_id,
+        "public_resolver_4976fb03",
+        resolver_contract_instance_id,
+        resolver_address,
+    )
+    .await?;
+
+    let mut predecessor_version = record_version_changed_event(
+        "predecessor-version-before-current-resolver",
+        "ens:taytems.eth",
+        predecessor_resource_id,
+        2,
+        1111,
+        0,
+    );
+    predecessor_version.source_family = SOURCE_FAMILY_ENS_V1_RESOLVER_L1.to_owned();
+    predecessor_version.source_manifest_id = Some(resolver_manifest_id);
+    let mut predecessor_email = record_changed_event_with_value(
+        "predecessor-email-after-version",
+        "ens:taytems.eth",
+        predecessor_resource_id,
+        "text:email",
+        "text",
+        Some("email"),
+        json!("hello@taytems.xyz"),
+        1111,
+        1,
+    );
+    predecessor_email.source_family = SOURCE_FAMILY_ENS_V1_RESOLVER_L1.to_owned();
+    predecessor_email.source_manifest_id = Some(resolver_manifest_id);
+    let mut current_twitter = record_changed_event_with_value(
+        "current-twitter-after-current-resolver",
+        "ens:taytems.eth",
+        current_resource_id,
+        "text:com.twitter",
+        "text",
+        Some("com.twitter"),
+        json!("taytems"),
+        1113,
+        0,
+    );
+    current_twitter.source_family = SOURCE_FAMILY_ENS_V1_RESOLVER_L1.to_owned();
+    current_twitter.source_manifest_id = Some(resolver_manifest_id);
+
+    seed_resources(
+        database.pool(),
+        &[predecessor_resource_id, current_resource_id],
+    )
+    .await?;
+    seed_raw_blocks(
+        database.pool(),
+        &[
+            raw_block("ethereum-mainnet", "0xrec1110", 1110, 1_776_200_110),
+            raw_block("ethereum-mainnet", "0xrec1111", 1111, 1_776_200_111),
+            raw_block("ethereum-mainnet", "0xrec1112", 1112, 1_776_200_112),
+            raw_block("ethereum-mainnet", "0xrec1113", 1113, 1_776_200_113),
+        ],
+    )
+    .await?;
+    seed_raw_logs(
+        database.pool(),
+        &[
+            raw_log(
+                "ethereum-mainnet",
+                "0xrec1111",
+                1111,
+                "0xtx1111",
+                0,
+                resolver_address,
+            ),
+            raw_log(
+                "ethereum-mainnet",
+                "0xrec1111",
+                1111,
+                "0xtx1111",
+                1,
+                resolver_address,
+            ),
+            raw_log(
+                "ethereum-mainnet",
+                "0xrec1113",
+                1113,
+                "0xtx1113",
+                0,
+                resolver_address,
+            ),
+        ],
+    )
+    .await?;
+    seed_events(
+        database.pool(),
+        &[
+            resolver_changed_event(
+                "predecessor-same-resolver",
+                "ens:taytems.eth",
+                predecessor_resource_id,
+                resolver_address,
+                registry_manifest_id,
+                1110,
+                0,
+            ),
+            predecessor_version,
+            predecessor_email,
+            resolver_changed_event(
+                "current-same-resolver",
+                "ens:taytems.eth",
+                current_resource_id,
+                resolver_address,
+                registry_manifest_id,
+                1112,
+                0,
+            ),
+            current_twitter,
+        ],
+    )
+    .await?;
+
+    rebuild_record_inventory_current(database.pool(), Some(&current_resource_id.to_string()))
+        .await?;
+
+    let row = load_record_inventory_current(
+        database.pool(),
+        current_resource_id,
+        &record_version_boundary(
+            "ens:taytems.eth",
+            current_resource_id,
+            None,
+            None,
+            1112,
+            "0xrec1112",
+            1_776_200_112,
+            "ethereum-mainnet",
+        ),
+    )
+    .await?
+    .context("current resource row must use its own resolver boundary")?;
+
+    assert_eq!(
+        row.entries,
+        json!([
+            {
+                "record_key": "text:com.twitter",
+                "record_family": "text",
+                "selector_key": "com.twitter",
+                "status": "success",
+                "value": "taytems",
+            },
+            {
+                "record_key": "text:email",
+                "record_family": "text",
+                "selector_key": "email",
+                "status": "success",
+                "value": "hello@taytems.xyz",
+            }
+        ])
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn rebuild_keeps_current_resolver_records_from_predecessor_resource() -> Result<()> {
     let database = TestDatabase::new().await?;
     let predecessor_resource_id = Uuid::from_u128(0x9925);

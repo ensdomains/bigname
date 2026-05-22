@@ -68,6 +68,48 @@ pub async fn load_identity_records_by_names(
     Ok(records)
 }
 
+pub async fn load_identity_name_feed_records_by_names(
+    pool: &PgPool,
+    logical_name_ids: &[String],
+) -> Result<Vec<IdentityNameRecordRow>> {
+    let requested_ids = dedupe_in_order(logical_name_ids.iter().cloned());
+    if requested_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let (name_rows, relations) = futures_util::try_join!(
+        load_identity_name_current_rows(pool, &requested_ids),
+        load_identity_address_relations_by_logical_names(pool, &requested_ids),
+    )?;
+    let relations_by_name = relations.into_iter().fold(
+        BTreeMap::<String, Vec<IdentityAddressRelationRow>>::new(),
+        |mut grouped, relation| {
+            grouped
+                .entry(relation.logical_name_id.clone())
+                .or_default()
+                .push(relation);
+            grouped
+        },
+    );
+
+    let records = requested_ids
+        .into_iter()
+        .filter_map(|logical_name_id| {
+            let row = name_rows.get(&logical_name_id)?.clone();
+            Some(IdentityNameRecordRow {
+                row,
+                record_inventory_current: None,
+                relations: relations_by_name
+                    .get(&logical_name_id)
+                    .cloned()
+                    .unwrap_or_default(),
+            })
+        })
+        .collect();
+
+    Ok(records)
+}
+
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct IdentityRecordInventoryRequest {
     resource_id: Uuid,
