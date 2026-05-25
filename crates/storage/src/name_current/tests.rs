@@ -667,6 +667,92 @@ async fn name_current_replacement_rolls_back_when_one_row_is_invalid() -> Result
 }
 
 #[tokio::test]
+async fn name_current_replacement_rejects_duplicate_logical_name_ids() -> Result<()> {
+    let database = test_database().await?;
+    let logical_name_id = "ens:alice.eth";
+
+    seed_binding_references(
+        &database,
+        logical_name_id,
+        "alice.eth",
+        Uuid::from_u128(0x9210),
+        Uuid::from_u128(0x9110),
+        Uuid::from_u128(0x9310),
+    )
+    .await?;
+
+    let existing = name_current_row(
+        logical_name_id,
+        Uuid::from_u128(0x9310),
+        Uuid::from_u128(0x9210),
+        Uuid::from_u128(0x9110),
+    );
+    upsert_name_current_rows(database.pool(), std::slice::from_ref(&existing)).await?;
+
+    let mut first_replacement = existing.clone();
+    first_replacement.declared_summary = json!({"status": "first"});
+    let mut second_replacement = existing.clone();
+    second_replacement.declared_summary = json!({"status": "second"});
+    second_replacement.manifest_version = 2;
+
+    replace_name_current_rows(
+        database.pool(),
+        &[first_replacement, second_replacement],
+        &[logical_name_id.to_owned()],
+    )
+    .await
+    .expect_err("duplicate replacement logical_name_id must fail closed");
+
+    assert_eq!(
+        load_name_current(database.pool(), logical_name_id).await?,
+        Some(existing)
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn name_current_replacement_updates_last_recomputed_at_only() -> Result<()> {
+    let database = test_database().await?;
+    let logical_name_id = "ens:alice.eth";
+
+    seed_binding_references(
+        &database,
+        logical_name_id,
+        "alice.eth",
+        Uuid::from_u128(0x9610),
+        Uuid::from_u128(0x9510),
+        Uuid::from_u128(0x9710),
+    )
+    .await?;
+
+    let existing = name_current_row(
+        logical_name_id,
+        Uuid::from_u128(0x9710),
+        Uuid::from_u128(0x9610),
+        Uuid::from_u128(0x9510),
+    );
+    upsert_name_current_rows(database.pool(), std::slice::from_ref(&existing)).await?;
+
+    let mut replacement = existing.clone();
+    replacement.last_recomputed_at = timestamp(1_817_171_717);
+
+    let upserted = replace_name_current_rows(
+        database.pool(),
+        std::slice::from_ref(&replacement),
+        &[logical_name_id.to_owned()],
+    )
+    .await?;
+    assert_eq!(upserted, (1, 0));
+    assert_eq!(
+        load_name_current(database.pool(), logical_name_id).await?,
+        Some(replacement)
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn name_current_replacement_stages_batches_before_atomic_publish() -> Result<()> {
     let database = test_database().await?;
     let first_logical_name_id = "ens:alice.eth";

@@ -35,11 +35,14 @@ use tracing::info;
 pub use address_names::{
     AddressNameCurrentEntry, AddressNameCurrentRow, AddressNameRelation,
     AddressNamesCurrentCountFilter, AddressNamesCurrentCursor, AddressNamesCurrentDedupe,
-    AddressNamesCurrentPage, AddressNamesCurrentProvenanceSummary, AddressNamesCurrentSummary,
+    AddressNamesCurrentFullRebuild, AddressNamesCurrentPage, AddressNamesCurrentProvenanceSummary,
+    AddressNamesCurrentSummary, begin_address_names_current_full_rebuild,
     clear_address_names_current, collapse_address_name_current_rows,
     count_address_names_current_for_app_filter, delete_address_names_current,
+    drop_address_names_current_full_rebuild, insert_address_names_current_full_rebuild_rows,
     load_address_names_current, load_address_names_current_including_noncanonical,
-    load_address_names_current_page, upsert_address_names_current_rows,
+    load_address_names_current_page, publish_address_names_current_full_rebuild,
+    rebuild_address_names_current_identity_sidecars, upsert_address_names_current_rows,
 };
 pub use audit::{
     CanonicalityInspection, CanonicalityInspectionStatus, ManifestDriftAlertInspection,

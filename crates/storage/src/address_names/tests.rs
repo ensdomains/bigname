@@ -16,9 +16,9 @@ use uuid::Uuid;
 
 use super::*;
 use crate::{
-    CanonicalityState, NameSurface, Resource, SurfaceBinding, SurfaceBindingKind, TokenLineage,
-    default_database_url, upsert_name_surfaces, upsert_resources, upsert_surface_bindings,
-    upsert_token_lineages,
+    CanonicalityState, NameCurrentRow, NameSurface, Resource, SurfaceBinding, SurfaceBindingKind,
+    TokenLineage, default_database_url, upsert_name_current_rows, upsert_name_surfaces,
+    upsert_resources, upsert_surface_bindings, upsert_token_lineages,
 };
 
 static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
@@ -275,6 +275,31 @@ fn address_name_current_row(seed: AddressNameCurrentRowSeed<'_>) -> AddressNameC
     }
 }
 
+fn name_current_row(row: &AddressNameCurrentRow) -> NameCurrentRow {
+    NameCurrentRow {
+        logical_name_id: row.logical_name_id.clone(),
+        namespace: row.namespace.clone(),
+        canonical_display_name: row.canonical_display_name.clone(),
+        normalized_name: row.normalized_name.clone(),
+        namehash: row.namehash.clone(),
+        surface_binding_id: Some(row.surface_binding_id),
+        resource_id: Some(row.resource_id),
+        token_lineage_id: row.token_lineage_id,
+        binding_kind: Some(row.binding_kind),
+        declared_summary: json!({
+            "registration": {
+                "status": "registered"
+            }
+        }),
+        provenance: row.provenance.clone(),
+        coverage: row.coverage.clone(),
+        chain_positions: row.chain_positions.clone(),
+        canonicality_summary: row.canonicality_summary.clone(),
+        manifest_version: row.manifest_version,
+        last_recomputed_at: row.last_recomputed_at,
+    }
+}
+
 fn expected_summary(entries: &[AddressNameCurrentEntry]) -> AddressNamesCurrentSummary {
     AddressNamesCurrentSummary {
         grouped_entry_count: entries.len() as u64,
@@ -506,6 +531,194 @@ async fn address_names_current_filters_noncanonical_supporting_identity_rows() -
         load_address_names_current_including_noncanonical(database.pool(), address, None, None)
             .await?,
         vec![canonical, noncanonical]
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn address_names_current_full_rebuild_counts_use_name_current_readability() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+
+    seed_relation_references(
+        &database,
+        "ens:visible.eth",
+        "visible.eth",
+        Uuid::from_u128(0x2501),
+        Some(Uuid::from_u128(0x2401)),
+        Uuid::from_u128(0x2601),
+        CanonicalityState::Finalized,
+    )
+    .await?;
+    seed_relation_references(
+        &database,
+        "ens:hidden.eth",
+        "hidden.eth",
+        Uuid::from_u128(0x3501),
+        Some(Uuid::from_u128(0x3401)),
+        Uuid::from_u128(0x3601),
+        CanonicalityState::Finalized,
+    )
+    .await?;
+
+    let visible = address_name_current_row(AddressNameCurrentRowSeed {
+        address,
+        logical_name_id: "ens:visible.eth",
+        display_name: "visible.eth",
+        relation: AddressNameRelation::Registrant,
+        surface_binding_id: Uuid::from_u128(0x2601),
+        resource_id: Uuid::from_u128(0x2501),
+        token_lineage_id: Some(Uuid::from_u128(0x2401)),
+        manifest_version: 1,
+    });
+    let hidden = address_name_current_row(AddressNameCurrentRowSeed {
+        address,
+        logical_name_id: "ens:hidden.eth",
+        display_name: "hidden.eth",
+        relation: AddressNameRelation::TokenHolder,
+        surface_binding_id: Uuid::from_u128(0x3601),
+        resource_id: Uuid::from_u128(0x3501),
+        token_lineage_id: Some(Uuid::from_u128(0x3401)),
+        manifest_version: 1,
+    });
+
+    upsert_name_current_rows(database.pool(), &[name_current_row(&visible)]).await?;
+    let rebuild = begin_address_names_current_full_rebuild(database.pool()).await?;
+    assert_eq!(rebuild.previous_row_count(), 0);
+    insert_address_names_current_full_rebuild_rows(
+        database.pool(),
+        &rebuild,
+        &[visible.clone(), hidden],
+    )
+    .await?;
+    publish_address_names_current_full_rebuild(database.pool(), &rebuild).await?;
+    drop_address_names_current_full_rebuild(database.pool(), &rebuild).await?;
+
+    let owned_total = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT total_count
+        FROM address_names_current_identity_counts
+        WHERE address = $1 AND roles = 'owned'
+        "#,
+    )
+    .bind(address)
+    .fetch_optional(database.pool())
+    .await?
+    .unwrap_or_default();
+    let both_total = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT total_count
+        FROM address_names_current_identity_counts
+        WHERE address = $1 AND roles = 'both'
+        "#,
+    )
+    .bind(address)
+    .fetch_optional(database.pool())
+    .await?
+    .unwrap_or_default();
+    let owned_feed_count = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)::BIGINT
+        FROM address_names_current_identity_feed
+        WHERE address = $1 AND roles = 'owned' AND coin_type = ''
+        "#,
+    )
+    .bind(address)
+    .fetch_one(database.pool())
+    .await?;
+
+    assert_eq!(owned_total, 1);
+    assert_eq!(both_total, 1);
+    assert_eq!(owned_feed_count, 1);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn address_names_current_full_rebuild_keeps_public_rows_until_publish() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+
+    seed_relation_references(
+        &database,
+        "ens:existing.eth",
+        "existing.eth",
+        Uuid::from_u128(0x4501),
+        Some(Uuid::from_u128(0x4401)),
+        Uuid::from_u128(0x4601),
+        CanonicalityState::Finalized,
+    )
+    .await?;
+    seed_relation_references(
+        &database,
+        "ens:replacement.eth",
+        "replacement.eth",
+        Uuid::from_u128(0x5501),
+        Some(Uuid::from_u128(0x5401)),
+        Uuid::from_u128(0x5601),
+        CanonicalityState::Finalized,
+    )
+    .await?;
+
+    let existing = address_name_current_row(AddressNameCurrentRowSeed {
+        address,
+        logical_name_id: "ens:existing.eth",
+        display_name: "existing.eth",
+        relation: AddressNameRelation::Registrant,
+        surface_binding_id: Uuid::from_u128(0x4601),
+        resource_id: Uuid::from_u128(0x4501),
+        token_lineage_id: Some(Uuid::from_u128(0x4401)),
+        manifest_version: 1,
+    });
+    let replacement = address_name_current_row(AddressNameCurrentRowSeed {
+        address,
+        logical_name_id: "ens:replacement.eth",
+        display_name: "replacement.eth",
+        relation: AddressNameRelation::TokenHolder,
+        surface_binding_id: Uuid::from_u128(0x5601),
+        resource_id: Uuid::from_u128(0x5501),
+        token_lineage_id: Some(Uuid::from_u128(0x5401)),
+        manifest_version: 2,
+    });
+    upsert_name_current_rows(
+        database.pool(),
+        &[name_current_row(&existing), name_current_row(&replacement)],
+    )
+    .await?;
+    upsert_address_names_current_rows(database.pool(), std::slice::from_ref(&existing)).await?;
+    rebuild_address_names_current_identity_sidecars(database.pool()).await?;
+
+    let rebuild = begin_address_names_current_full_rebuild(database.pool()).await?;
+    assert_eq!(rebuild.previous_row_count(), 1);
+    insert_address_names_current_full_rebuild_rows(
+        database.pool(),
+        &rebuild,
+        std::slice::from_ref(&replacement),
+    )
+    .await?;
+
+    assert_eq!(
+        load_address_names_current(database.pool(), address, None, None).await?,
+        vec![existing.clone()]
+    );
+    let owned_total = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT total_count
+        FROM address_names_current_identity_counts
+        WHERE address = $1 AND roles = 'owned'
+        "#,
+    )
+    .bind(address)
+    .fetch_optional(database.pool())
+    .await?
+    .unwrap_or_default();
+    assert_eq!(owned_total, 1);
+
+    drop_address_names_current_full_rebuild(database.pool(), &rebuild).await?;
+    assert_eq!(
+        load_address_names_current(database.pool(), address, None, None).await?,
+        vec![existing]
     );
 
     database.cleanup().await
