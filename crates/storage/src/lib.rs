@@ -34,14 +34,17 @@ use tracing::info;
 
 pub use address_names::{
     AddressNameCurrentEntry, AddressNameCurrentRow, AddressNameRelation,
-    AddressNamesCurrentCountFilter, AddressNamesCurrentCursor, AddressNamesCurrentDedupe,
-    AddressNamesCurrentFullRebuild, AddressNamesCurrentPage, AddressNamesCurrentProvenanceSummary,
-    AddressNamesCurrentSummary, begin_address_names_current_full_rebuild,
+    AddressNamesCurrentAddressReplacement, AddressNamesCurrentCountFilter,
+    AddressNamesCurrentCursor, AddressNamesCurrentDedupe, AddressNamesCurrentFullRebuild,
+    AddressNamesCurrentPage, AddressNamesCurrentProvenanceSummary, AddressNamesCurrentSummary,
+    begin_address_names_current_address_replacement, begin_address_names_current_full_rebuild,
     clear_address_names_current, collapse_address_name_current_rows,
     count_address_names_current_for_app_filter, delete_address_names_current,
-    drop_address_names_current_full_rebuild, insert_address_names_current_full_rebuild_rows,
-    load_address_names_current, load_address_names_current_including_noncanonical,
-    load_address_names_current_page, publish_address_names_current_full_rebuild,
+    drop_address_names_current_address_replacement, drop_address_names_current_full_rebuild,
+    insert_address_names_current_address_replacement_rows,
+    insert_address_names_current_full_rebuild_rows, load_address_names_current,
+    load_address_names_current_including_noncanonical, load_address_names_current_page,
+    publish_address_names_current_address_replacement, publish_address_names_current_full_rebuild,
     rebuild_address_names_current_identity_sidecars, upsert_address_names_current_rows,
 };
 pub use audit::{

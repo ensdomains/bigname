@@ -33,19 +33,7 @@ pub async fn begin_address_names_current_full_rebuild(
     .await
     .context("failed to count address_names_current rows before full rebuild")?;
 
-    let table_name = format!("address_names_current_rebuild_{}", Uuid::new_v4().simple());
-    let table_sql = quote_identifier(&table_name)?;
-
-    sqlx::query(&format!(
-        r#"
-        CREATE UNLOGGED TABLE {table_sql} (
-            LIKE address_names_current INCLUDING DEFAULTS INCLUDING CONSTRAINTS INCLUDING INDEXES
-        )
-        "#
-    ))
-    .execute(pool)
-    .await
-    .context("failed to create address_names_current full rebuild staging table")?;
+    let table_name = create_address_names_current_staging_table(pool, "full rebuild").await?;
 
     Ok(AddressNamesCurrentFullRebuild {
         table_name,
@@ -57,11 +45,7 @@ pub async fn drop_address_names_current_full_rebuild(
     pool: &PgPool,
     rebuild: &AddressNamesCurrentFullRebuild,
 ) -> Result<()> {
-    sqlx::query(&format!("DROP TABLE IF EXISTS {}", rebuild.table_sql()))
-        .execute(pool)
-        .await
-        .context("failed to drop address_names_current full rebuild staging table")?;
-    Ok(())
+    drop_address_names_current_staging_table(pool, &rebuild.table_sql(), "full rebuild").await
 }
 
 pub async fn insert_address_names_current_full_rebuild_rows(
@@ -74,23 +58,67 @@ pub async fn insert_address_names_current_full_rebuild_rows(
     }
 
     let table_sql = rebuild.table_sql();
-    let mut transaction = pool
-        .begin()
+    insert_address_names_current_staging_rows(pool, &table_sql, rows, "full rebuild").await
+}
+
+async fn create_address_names_current_staging_table(
+    pool: &PgPool,
+    purpose: &str,
+) -> Result<String> {
+    let table_name = format!("address_names_current_rebuild_{}", Uuid::new_v4().simple());
+    let table_sql = quote_identifier(&table_name)?;
+
+    sqlx::query(&format!(
+        r#"
+        CREATE UNLOGGED TABLE {table_sql} (
+            LIKE address_names_current INCLUDING DEFAULTS INCLUDING CONSTRAINTS INCLUDING INDEXES
+        )
+        "#
+    ))
+    .execute(pool)
+    .await
+    .with_context(|| format!("failed to create address_names_current {purpose} staging table"))?;
+
+    Ok(table_name)
+}
+
+async fn drop_address_names_current_staging_table(
+    pool: &PgPool,
+    table_sql: &str,
+    purpose: &str,
+) -> Result<()> {
+    sqlx::query(&format!("DROP TABLE IF EXISTS {table_sql}"))
+        .execute(pool)
         .await
-        .context("failed to open transaction for address_names_current full rebuild staging")?;
+        .with_context(|| format!("failed to drop address_names_current {purpose} staging table"))?;
+    Ok(())
+}
+
+async fn insert_address_names_current_staging_rows(
+    pool: &PgPool,
+    table_sql: &str,
+    rows: &[AddressNameCurrentRow],
+    purpose: &str,
+) -> Result<Vec<AddressNameCurrentRow>> {
+    if rows.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut transaction = pool.begin().await.with_context(|| {
+        format!("failed to open transaction for address_names_current {purpose} staging")
+    })?;
 
     let mut snapshots = Vec::with_capacity(rows.len());
     for row in rows {
         snapshots.push(
-            write::upsert_address_name_current_row_into_table(&mut transaction, &table_sql, row)
+            write::upsert_address_name_current_row_into_table(&mut transaction, table_sql, row)
                 .await?,
         );
     }
 
-    transaction
-        .commit()
-        .await
-        .context("failed to commit address_names_current full rebuild staging batch")?;
+    transaction.commit().await.with_context(|| {
+        format!("failed to commit address_names_current {purpose} staging batch")
+    })?;
 
     Ok(snapshots)
 }
