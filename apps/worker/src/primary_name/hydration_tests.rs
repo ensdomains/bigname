@@ -1,0 +1,1341 @@
+use std::{
+    collections::BTreeMap,
+    str::FromStr,
+    sync::atomic::{AtomicU64, Ordering},
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+use anyhow::{Context, Result};
+use bigname_storage::{
+    CanonicalityState, ENS_NAMESPACE, ETHEREUM_MAINNET_CHAIN_ID, NormalizedEvent,
+    PrimaryNameClaimStatus, default_database_url, load_primary_name_current_snapshot,
+    upsert_normalized_events,
+};
+use futures_util::{FutureExt, future::BoxFuture};
+use serde_json::{Value, json};
+use sqlx::{
+    PgPool,
+    postgres::{PgConnectOptions, PgPoolOptions},
+};
+
+use super::super::rebuild_primary_names_current;
+use super::*;
+
+static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
+
+struct TestDatabase {
+    admin_pool: PgPool,
+    pool: PgPool,
+    database_name: String,
+}
+
+impl TestDatabase {
+    async fn new() -> Result<Self> {
+        let database_url = std::env::var("BIGNAME_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| default_database_url().to_owned());
+        let base_options = PgConnectOptions::from_str(&database_url)
+            .context("failed to parse database URL for legacy reverse hydration tests")?;
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .context("system clock is before unix epoch")?
+            .as_nanos();
+        let sequence = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
+        let database_name = format!("bn_wpn_hyd_{}_{}_{}", std::process::id(), unique, sequence);
+
+        let admin_pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with(base_options.clone().database("postgres"))
+            .await
+            .context("failed to connect admin pool for legacy reverse hydration tests")?;
+
+        sqlx::query(&format!(r#"CREATE DATABASE "{}""#, database_name))
+            .execute(&admin_pool)
+            .await
+            .with_context(|| format!("failed to create test database {database_name}"))?;
+
+        let pool = PgPoolOptions::new()
+            .max_connections(5)
+            .connect_with(base_options.database(&database_name))
+            .await
+            .context("failed to connect legacy reverse hydration test pool")?;
+
+        bigname_storage::MIGRATOR
+            .run(&pool)
+            .await
+            .context("failed to apply migrations for legacy reverse hydration tests")?;
+
+        Ok(Self {
+            admin_pool,
+            pool,
+            database_name,
+        })
+    }
+
+    fn pool(&self) -> &PgPool {
+        &self.pool
+    }
+
+    async fn cleanup(self) -> Result<()> {
+        self.pool.close().await;
+        sqlx::query(&format!(
+            r#"DROP DATABASE IF EXISTS "{}" WITH (FORCE)"#,
+            self.database_name
+        ))
+        .execute(&self.admin_pool)
+        .await
+        .with_context(|| format!("failed to drop test database {}", self.database_name))?;
+        self.admin_pool.close().await;
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug)]
+struct MockReverseNameHydrationClient {
+    outcomes_by_node: BTreeMap<String, ReverseNameHydrationOutcome>,
+}
+
+impl ReverseNameHydrationClient for MockReverseNameHydrationClient {
+    fn hydrate<'a>(
+        &'a self,
+        _chain_id: &'a str,
+        _position: &'a ReverseNameHydrationChainPosition,
+        calls: &'a [ReverseNameHydrationCall],
+    ) -> BoxFuture<'a, Result<Vec<ReverseNameHydrationOutcome>>> {
+        async move {
+            calls
+                .iter()
+                .map(|call| {
+                    self.outcomes_by_node
+                        .get(&call.reverse_node)
+                        .cloned()
+                        .with_context(|| format!("missing mock outcome for {}", call.reverse_node))
+                })
+                .collect()
+        }
+        .boxed()
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ResolverCheckingHydrationClient {
+    expected_resolver_address: String,
+    outcomes_by_node: BTreeMap<String, ReverseNameHydrationOutcome>,
+}
+
+impl ReverseNameHydrationClient for ResolverCheckingHydrationClient {
+    fn hydrate<'a>(
+        &'a self,
+        _chain_id: &'a str,
+        _position: &'a ReverseNameHydrationChainPosition,
+        calls: &'a [ReverseNameHydrationCall],
+    ) -> BoxFuture<'a, Result<Vec<ReverseNameHydrationOutcome>>> {
+        async move {
+            calls
+                .iter()
+                .map(|call| {
+                    if call.resolver_address != self.expected_resolver_address {
+                        anyhow::bail!(
+                            "expected resolver {}, got {}",
+                            self.expected_resolver_address,
+                            call.resolver_address
+                        );
+                    }
+                    self.outcomes_by_node
+                        .get(&call.reverse_node)
+                        .cloned()
+                        .with_context(|| format!("missing mock outcome for {}", call.reverse_node))
+                })
+                .collect()
+        }
+        .boxed()
+    }
+}
+
+#[tokio::test]
+async fn hydrates_current_legacy_reverse_resolver_primary_name() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let address = "0x0000000000000000000000000000000000000aaa";
+    let reverse_block = 100;
+    let reverse_node = reverse_node_for_block(reverse_block);
+
+    insert_chain_checkpoint(database.pool(), 300).await?;
+    upsert_normalized_events(
+        database.pool(),
+        &[
+            reverse_changed_event("reverse-claim", address, reverse_block, 0),
+            reverse_resolver_changed_event(
+                "reverse-resolver",
+                address,
+                reverse_block,
+                LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESS,
+                120,
+                0,
+            ),
+        ],
+    )
+    .await?;
+    rebuild_primary_names_current(database.pool(), None, None, None).await?;
+
+    let before = load_primary_name_current_snapshot(database.pool(), address, ENS_NAMESPACE, "60")
+        .await?
+        .expect("reverse claim should create primary_names_current row");
+    assert_eq!(before.row.claim_status, PrimaryNameClaimStatus::NotFound);
+    assert_eq!(before.normalized_claim_name, None);
+
+    let client = MockReverseNameHydrationClient {
+        outcomes_by_node: BTreeMap::from([(
+            reverse_node.clone(),
+            ReverseNameHydrationOutcome::Success("Vitalik.eth".to_owned()),
+        )]),
+    };
+    let summary = hydrate_legacy_reverse_resolver_primary_names_with_client(
+        database.pool(),
+        &[LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESS.to_owned()],
+        &client,
+    )
+    .await?;
+    assert_eq!(
+        summary,
+        PrimaryNameLegacyReverseHydrationSummary {
+            candidate_tuple_count: 1,
+            queried_tuple_count: 1,
+            upserted_row_count: 1,
+            success_row_count: 1,
+            not_found_row_count: 0,
+            invalid_name_row_count: 0,
+            failed_lookup_count: 0,
+        }
+    );
+
+    let hydrated =
+        load_primary_name_current_snapshot(database.pool(), address, ENS_NAMESPACE, "60")
+            .await?
+            .expect("hydration should preserve primary_names_current row");
+    assert_eq!(hydrated.row.claim_status, PrimaryNameClaimStatus::Success);
+    assert_eq!(
+        hydrated.normalized_claim_name.as_deref(),
+        Some("vitalik.eth")
+    );
+    assert_eq!(
+        hydrated.row.claim_provenance[HYDRATION_PROVENANCE_KEY],
+        json!({
+            "source_family": SOURCE_FAMILY_ENS_V1_REVERSE_L1,
+            "derivation_kind": DERIVATION_KIND_LEGACY_REVERSE_RESOLVER_HYDRATION,
+            "chain_id": ETHEREUM_MAINNET_CHAIN_ID,
+            "resolver_address": LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESS,
+            "reverse_node": reverse_node,
+            "block_number": 300,
+            "block_hash": block_hash_for(300),
+            "latest_successful_call_block_number": Value::Null,
+            "latest_successful_call_block_hash": Value::Null,
+            "latest_successful_call_transaction_hash": Value::Null,
+            "latest_successful_call_transaction_index": Value::Null,
+        })
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn rehydrates_after_new_successful_live_call_to_legacy_resolver() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let address = "0x0000000000000000000000000000000000000bbb";
+    let reverse_block = 101;
+    let reverse_node = reverse_node_for_block(reverse_block);
+
+    insert_chain_checkpoint(database.pool(), 300).await?;
+    upsert_normalized_events(
+        database.pool(),
+        &[
+            reverse_changed_event("reverse-claim", address, reverse_block, 0),
+            reverse_resolver_changed_event(
+                "reverse-resolver",
+                address,
+                reverse_block,
+                LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESS,
+                120,
+                0,
+            ),
+        ],
+    )
+    .await?;
+    rebuild_primary_names_current(database.pool(), None, None, None).await?;
+
+    let first_client = MockReverseNameHydrationClient {
+        outcomes_by_node: BTreeMap::from([(
+            reverse_node.clone(),
+            ReverseNameHydrationOutcome::Success("first.eth".to_owned()),
+        )]),
+    };
+    hydrate_legacy_reverse_resolver_primary_names_with_client(
+        database.pool(),
+        &[LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESS.to_owned()],
+        &first_client,
+    )
+    .await?;
+
+    let skipped = hydrate_legacy_reverse_resolver_primary_names_with_client(
+        database.pool(),
+        &[LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESS.to_owned()],
+        &first_client,
+    )
+    .await?;
+    assert_eq!(skipped.candidate_tuple_count, 0);
+
+    insert_chain_checkpoint(database.pool(), 350).await?;
+    insert_successful_direct_call(
+        database.pool(),
+        LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESS,
+        320,
+    )
+    .await?;
+    let second_client = MockReverseNameHydrationClient {
+        outcomes_by_node: BTreeMap::from([(
+            reverse_node,
+            ReverseNameHydrationOutcome::Success("second.eth".to_owned()),
+        )]),
+    };
+    let refreshed = hydrate_legacy_reverse_resolver_primary_names_with_client(
+        database.pool(),
+        &[LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESS.to_owned()],
+        &second_client,
+    )
+    .await?;
+    assert_eq!(refreshed.candidate_tuple_count, 1);
+    assert_eq!(refreshed.upserted_row_count, 1);
+
+    let hydrated =
+        load_primary_name_current_snapshot(database.pool(), address, ENS_NAMESPACE, "60")
+            .await?
+            .expect("hydration should preserve primary_names_current row");
+    assert_eq!(
+        hydrated.normalized_claim_name.as_deref(),
+        Some("second.eth")
+    );
+    assert_eq!(
+        hydrated.row.claim_provenance[HYDRATION_PROVENANCE_KEY]["latest_successful_call_block_number"],
+        json!(320)
+    );
+    assert_eq!(
+        hydrated.row.claim_provenance[HYDRATION_PROVENANCE_KEY]["latest_successful_call_block_hash"],
+        json!(block_hash_for(320))
+    );
+    assert_eq!(
+        hydrated.row.claim_provenance[HYDRATION_PROVENANCE_KEY]["latest_successful_call_transaction_hash"],
+        json!(transaction_hash_for(320))
+    );
+    assert_eq!(
+        hydrated.row.claim_provenance[HYDRATION_PROVENANCE_KEY]["latest_successful_call_transaction_index"],
+        json!(0)
+    );
+    assert_eq!(
+        hydrated.row.claim_provenance[HYDRATION_PROVENANCE_KEY]["block_number"],
+        json!(350)
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn ignores_live_call_observation_ahead_of_hydration_checkpoint_until_checkpoint_catches_up()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let address = "0x0000000000000000000000000000000000000333";
+    let reverse_block = 108;
+    let reverse_node = reverse_node_for_block(reverse_block);
+
+    insert_chain_checkpoint(database.pool(), 300).await?;
+    upsert_normalized_events(
+        database.pool(),
+        &[
+            reverse_changed_event("reverse-claim", address, reverse_block, 0),
+            reverse_resolver_changed_event(
+                "reverse-resolver",
+                address,
+                reverse_block,
+                LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESS,
+                120,
+                0,
+            ),
+        ],
+    )
+    .await?;
+    rebuild_primary_names_current(database.pool(), None, None, None).await?;
+    insert_successful_direct_call(
+        database.pool(),
+        LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESS,
+        320,
+    )
+    .await?;
+
+    let before_checkpoint_client = MockReverseNameHydrationClient {
+        outcomes_by_node: BTreeMap::from([(
+            reverse_node.clone(),
+            ReverseNameHydrationOutcome::Success("before-checkpoint.eth".to_owned()),
+        )]),
+    };
+    let before_checkpoint = hydrate_legacy_reverse_resolver_primary_names_with_client(
+        database.pool(),
+        &[LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESS.to_owned()],
+        &before_checkpoint_client,
+    )
+    .await?;
+    assert_eq!(before_checkpoint.candidate_tuple_count, 1);
+    assert_eq!(before_checkpoint.upserted_row_count, 1);
+
+    let hydrated_before =
+        load_primary_name_current_snapshot(database.pool(), address, ENS_NAMESPACE, "60")
+            .await?
+            .expect("hydration should preserve primary_names_current row");
+    assert_eq!(
+        hydrated_before.normalized_claim_name.as_deref(),
+        Some("before-checkpoint.eth")
+    );
+    assert_eq!(
+        hydrated_before.row.claim_provenance[HYDRATION_PROVENANCE_KEY]["block_number"],
+        json!(300)
+    );
+    assert_eq!(
+        hydrated_before.row.claim_provenance[HYDRATION_PROVENANCE_KEY]["latest_successful_call_block_number"],
+        Value::Null
+    );
+
+    let skipped = hydrate_legacy_reverse_resolver_primary_names_with_client(
+        database.pool(),
+        &[LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESS.to_owned()],
+        &before_checkpoint_client,
+    )
+    .await?;
+    assert_eq!(skipped.candidate_tuple_count, 0);
+
+    insert_chain_checkpoint(database.pool(), 350).await?;
+    let after_checkpoint_client = MockReverseNameHydrationClient {
+        outcomes_by_node: BTreeMap::from([(
+            reverse_node,
+            ReverseNameHydrationOutcome::Success("after-checkpoint.eth".to_owned()),
+        )]),
+    };
+    let after_checkpoint = hydrate_legacy_reverse_resolver_primary_names_with_client(
+        database.pool(),
+        &[LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESS.to_owned()],
+        &after_checkpoint_client,
+    )
+    .await?;
+    assert_eq!(after_checkpoint.candidate_tuple_count, 1);
+    assert_eq!(after_checkpoint.upserted_row_count, 1);
+
+    let hydrated_after =
+        load_primary_name_current_snapshot(database.pool(), address, ENS_NAMESPACE, "60")
+            .await?
+            .expect("checkpoint-caught-up hydration should preserve row");
+    assert_eq!(
+        hydrated_after.normalized_claim_name.as_deref(),
+        Some("after-checkpoint.eth")
+    );
+    assert_eq!(
+        hydrated_after.row.claim_provenance[HYDRATION_PROVENANCE_KEY]["block_number"],
+        json!(350)
+    );
+    assert_eq!(
+        hydrated_after.row.claim_provenance[HYDRATION_PROVENANCE_KEY]["latest_successful_call_block_number"],
+        json!(320)
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn ignores_future_reverse_and_resolver_events_until_hydration_checkpoint_catches_up()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let address = "0x0000000000000000000000000000000000000444";
+    let initial_reverse_block = 109;
+    let future_reverse_block = 320;
+    let initial_reverse_node = reverse_node_for_block(initial_reverse_block);
+    let future_reverse_node = reverse_node_for_block(future_reverse_block);
+    let replacement_resolver = "0x00000000000000000000000000000000000000f4";
+
+    insert_chain_checkpoint(database.pool(), 300).await?;
+    upsert_normalized_events(
+        database.pool(),
+        &[
+            reverse_changed_event("reverse-claim", address, initial_reverse_block, 0),
+            reverse_resolver_changed_event(
+                "reverse-resolver",
+                address,
+                initial_reverse_block,
+                LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESS,
+                120,
+                0,
+            ),
+        ],
+    )
+    .await?;
+    rebuild_primary_names_current(database.pool(), None, None, None).await?;
+
+    let first_client = MockReverseNameHydrationClient {
+        outcomes_by_node: BTreeMap::from([(
+            initial_reverse_node,
+            ReverseNameHydrationOutcome::Success("before-future-events.eth".to_owned()),
+        )]),
+    };
+    hydrate_legacy_reverse_resolver_primary_names_with_client(
+        database.pool(),
+        &[LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESS.to_owned()],
+        &first_client,
+    )
+    .await?;
+
+    upsert_normalized_events(
+        database.pool(),
+        &[
+            reverse_changed_event("future-reverse-claim", address, future_reverse_block, 0),
+            reverse_resolver_changed_event(
+                "future-reverse-resolver",
+                address,
+                future_reverse_block,
+                replacement_resolver,
+                future_reverse_block,
+                1,
+            ),
+        ],
+    )
+    .await?;
+    let skipped = hydrate_legacy_reverse_resolver_primary_names_with_client(
+        database.pool(),
+        &[
+            LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESS.to_owned(),
+            replacement_resolver.to_owned(),
+        ],
+        &first_client,
+    )
+    .await?;
+    assert_eq!(skipped.candidate_tuple_count, 0);
+
+    insert_chain_checkpoint(database.pool(), 350).await?;
+    let replacement_client = ResolverCheckingHydrationClient {
+        expected_resolver_address: replacement_resolver.to_owned(),
+        outcomes_by_node: BTreeMap::from([(
+            future_reverse_node.clone(),
+            ReverseNameHydrationOutcome::Success("after-future-events.eth".to_owned()),
+        )]),
+    };
+    let refreshed = hydrate_legacy_reverse_resolver_primary_names_with_client(
+        database.pool(),
+        &[
+            LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESS.to_owned(),
+            replacement_resolver.to_owned(),
+        ],
+        &replacement_client,
+    )
+    .await?;
+    assert_eq!(refreshed.candidate_tuple_count, 1);
+    assert_eq!(refreshed.queried_tuple_count, 1);
+    assert_eq!(refreshed.upserted_row_count, 1);
+
+    let hydrated =
+        load_primary_name_current_snapshot(database.pool(), address, ENS_NAMESPACE, "60")
+            .await?
+            .expect("checkpoint-caught-up hydration should preserve row");
+    assert_eq!(
+        hydrated.normalized_claim_name.as_deref(),
+        Some("after-future-events.eth")
+    );
+    assert_eq!(
+        hydrated.row.claim_provenance[HYDRATION_PROVENANCE_KEY]["resolver_address"],
+        json!(replacement_resolver)
+    );
+    assert_eq!(
+        hydrated.row.claim_provenance[HYDRATION_PROVENANCE_KEY]["reverse_node"],
+        json!(future_reverse_node)
+    );
+    assert_eq!(
+        hydrated.row.claim_provenance[HYDRATION_PROVENANCE_KEY]["block_number"],
+        json!(350)
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn restores_event_replayed_row_when_resolver_changes_away_from_configured_set() -> Result<()>
+{
+    let database = TestDatabase::new().await?;
+    let address = "0x0000000000000000000000000000000000000eee";
+    let reverse_block = 104;
+    let reverse_node = reverse_node_for_block(reverse_block);
+    let unconfigured_resolver = "0x00000000000000000000000000000000000000f1";
+
+    insert_chain_checkpoint(database.pool(), 300).await?;
+    upsert_normalized_events(
+        database.pool(),
+        &[
+            reverse_changed_event("reverse-claim", address, reverse_block, 0),
+            reverse_resolver_changed_event(
+                "reverse-resolver",
+                address,
+                reverse_block,
+                LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESS,
+                120,
+                0,
+            ),
+        ],
+    )
+    .await?;
+    rebuild_primary_names_current(database.pool(), None, None, None).await?;
+
+    let first_client = MockReverseNameHydrationClient {
+        outcomes_by_node: BTreeMap::from([(
+            reverse_node,
+            ReverseNameHydrationOutcome::Success("stale.eth".to_owned()),
+        )]),
+    };
+    hydrate_legacy_reverse_resolver_primary_names_with_client(
+        database.pool(),
+        &[LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESS.to_owned()],
+        &first_client,
+    )
+    .await?;
+
+    upsert_normalized_events(
+        database.pool(),
+        &[reverse_resolver_changed_event(
+            "reverse-resolver-away",
+            address,
+            reverse_block,
+            unconfigured_resolver,
+            130,
+            0,
+        )],
+    )
+    .await?;
+    let restore_client = MockReverseNameHydrationClient {
+        outcomes_by_node: BTreeMap::new(),
+    };
+    let summary = hydrate_legacy_reverse_resolver_primary_names_with_client(
+        database.pool(),
+        &[LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESS.to_owned()],
+        &restore_client,
+    )
+    .await?;
+    assert_eq!(
+        summary,
+        PrimaryNameLegacyReverseHydrationSummary {
+            candidate_tuple_count: 1,
+            queried_tuple_count: 0,
+            upserted_row_count: 1,
+            success_row_count: 0,
+            not_found_row_count: 1,
+            invalid_name_row_count: 0,
+            failed_lookup_count: 0,
+        }
+    );
+
+    let restored =
+        load_primary_name_current_snapshot(database.pool(), address, ENS_NAMESPACE, "60")
+            .await?
+            .expect("restored row should preserve primary_names_current tuple");
+    assert_eq!(restored.row.claim_status, PrimaryNameClaimStatus::NotFound);
+    assert_eq!(restored.normalized_claim_name, None);
+    assert!(
+        restored
+            .row
+            .claim_provenance
+            .get(HYDRATION_PROVENANCE_KEY)
+            .is_none()
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn rehydrates_when_current_resolver_changes_to_another_configured_address() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let address = "0x0000000000000000000000000000000000000fff";
+    let reverse_block = 105;
+    let reverse_node = reverse_node_for_block(reverse_block);
+    let replacement_resolver = "0x00000000000000000000000000000000000000f2";
+
+    insert_chain_checkpoint(database.pool(), 300).await?;
+    upsert_normalized_events(
+        database.pool(),
+        &[
+            reverse_changed_event("reverse-claim", address, reverse_block, 0),
+            reverse_resolver_changed_event(
+                "reverse-resolver",
+                address,
+                reverse_block,
+                LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESS,
+                120,
+                0,
+            ),
+        ],
+    )
+    .await?;
+    rebuild_primary_names_current(database.pool(), None, None, None).await?;
+
+    let first_client = MockReverseNameHydrationClient {
+        outcomes_by_node: BTreeMap::from([(
+            reverse_node.clone(),
+            ReverseNameHydrationOutcome::Success("before.eth".to_owned()),
+        )]),
+    };
+    hydrate_legacy_reverse_resolver_primary_names_with_client(
+        database.pool(),
+        &[LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESS.to_owned()],
+        &first_client,
+    )
+    .await?;
+
+    insert_chain_checkpoint(database.pool(), 360).await?;
+    upsert_normalized_events(
+        database.pool(),
+        &[reverse_resolver_changed_event(
+            "reverse-resolver-replacement",
+            address,
+            reverse_block,
+            replacement_resolver,
+            140,
+            0,
+        )],
+    )
+    .await?;
+    let replacement_client = ResolverCheckingHydrationClient {
+        expected_resolver_address: replacement_resolver.to_owned(),
+        outcomes_by_node: BTreeMap::from([(
+            reverse_node,
+            ReverseNameHydrationOutcome::Success("after.eth".to_owned()),
+        )]),
+    };
+    let summary = hydrate_legacy_reverse_resolver_primary_names_with_client(
+        database.pool(),
+        &[
+            LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESS.to_owned(),
+            replacement_resolver.to_owned(),
+        ],
+        &replacement_client,
+    )
+    .await?;
+    assert_eq!(summary.candidate_tuple_count, 1);
+    assert_eq!(summary.queried_tuple_count, 1);
+    assert_eq!(summary.upserted_row_count, 1);
+
+    let hydrated =
+        load_primary_name_current_snapshot(database.pool(), address, ENS_NAMESPACE, "60")
+            .await?
+            .expect("replacement resolver hydration should preserve row");
+    assert_eq!(hydrated.normalized_claim_name.as_deref(), Some("after.eth"));
+    assert_eq!(
+        hydrated.row.claim_provenance[HYDRATION_PROVENANCE_KEY]["resolver_address"],
+        json!(replacement_resolver)
+    );
+    assert_eq!(
+        hydrated.row.claim_provenance[HYDRATION_PROVENANCE_KEY]["latest_successful_call_block_number"],
+        Value::Null
+    );
+    assert_eq!(
+        hydrated.row.claim_provenance[HYDRATION_PROVENANCE_KEY]["block_number"],
+        json!(360)
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn failed_rehydration_after_previous_success_restores_event_replayed_row() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let address = "0x0000000000000000000000000000000000000111";
+    let reverse_block = 106;
+    let reverse_node = reverse_node_for_block(reverse_block);
+
+    insert_chain_checkpoint(database.pool(), 300).await?;
+    upsert_normalized_events(
+        database.pool(),
+        &[
+            reverse_changed_event("reverse-claim", address, reverse_block, 0),
+            reverse_resolver_changed_event(
+                "reverse-resolver",
+                address,
+                reverse_block,
+                LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESS,
+                120,
+                0,
+            ),
+        ],
+    )
+    .await?;
+    rebuild_primary_names_current(database.pool(), None, None, None).await?;
+
+    let first_client = MockReverseNameHydrationClient {
+        outcomes_by_node: BTreeMap::from([(
+            reverse_node.clone(),
+            ReverseNameHydrationOutcome::Success("before-failure.eth".to_owned()),
+        )]),
+    };
+    hydrate_legacy_reverse_resolver_primary_names_with_client(
+        database.pool(),
+        &[LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESS.to_owned()],
+        &first_client,
+    )
+    .await?;
+
+    insert_chain_checkpoint(database.pool(), 350).await?;
+    insert_successful_direct_call(
+        database.pool(),
+        LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESS,
+        320,
+    )
+    .await?;
+    let failing_client = MockReverseNameHydrationClient {
+        outcomes_by_node: BTreeMap::from([(
+            reverse_node,
+            ReverseNameHydrationOutcome::Failed("provider reverted".to_owned()),
+        )]),
+    };
+    let failed = hydrate_legacy_reverse_resolver_primary_names_with_client(
+        database.pool(),
+        &[LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESS.to_owned()],
+        &failing_client,
+    )
+    .await?;
+    assert_eq!(
+        failed,
+        PrimaryNameLegacyReverseHydrationSummary {
+            candidate_tuple_count: 1,
+            queried_tuple_count: 1,
+            upserted_row_count: 1,
+            success_row_count: 0,
+            not_found_row_count: 1,
+            invalid_name_row_count: 0,
+            failed_lookup_count: 1,
+        }
+    );
+
+    let restored =
+        load_primary_name_current_snapshot(database.pool(), address, ENS_NAMESPACE, "60")
+            .await?
+            .expect("failed rehydration should keep event-replayed row");
+    assert_eq!(restored.row.claim_status, PrimaryNameClaimStatus::NotFound);
+    assert_eq!(restored.normalized_claim_name, None);
+    assert!(
+        restored
+            .row
+            .claim_provenance
+            .get(HYDRATION_PROVENANCE_KEY)
+            .is_none()
+    );
+
+    let repeated_failure = hydrate_legacy_reverse_resolver_primary_names_with_client(
+        database.pool(),
+        &[LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESS.to_owned()],
+        &failing_client,
+    )
+    .await?;
+    assert_eq!(repeated_failure.candidate_tuple_count, 1);
+    assert_eq!(repeated_failure.failed_lookup_count, 1);
+    assert_eq!(repeated_failure.upserted_row_count, 0);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn rehydrates_when_latest_direct_call_observation_disappears_after_reorg() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let address = "0x0000000000000000000000000000000000000222";
+    let reverse_block = 107;
+    let reverse_node = reverse_node_for_block(reverse_block);
+
+    insert_chain_checkpoint(database.pool(), 340).await?;
+    upsert_normalized_events(
+        database.pool(),
+        &[
+            reverse_changed_event("reverse-claim", address, reverse_block, 0),
+            reverse_resolver_changed_event(
+                "reverse-resolver",
+                address,
+                reverse_block,
+                LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESS,
+                120,
+                0,
+            ),
+        ],
+    )
+    .await?;
+    rebuild_primary_names_current(database.pool(), None, None, None).await?;
+    insert_successful_direct_call(
+        database.pool(),
+        LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESS,
+        320,
+    )
+    .await?;
+    let first_client = MockReverseNameHydrationClient {
+        outcomes_by_node: BTreeMap::from([(
+            reverse_node.clone(),
+            ReverseNameHydrationOutcome::Success("with-trigger.eth".to_owned()),
+        )]),
+    };
+    hydrate_legacy_reverse_resolver_primary_names_with_client(
+        database.pool(),
+        &[LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESS.to_owned()],
+        &first_client,
+    )
+    .await?;
+
+    orphan_event_silent_call_observation(database.pool(), &block_hash_for(320)).await?;
+    insert_chain_checkpoint(database.pool(), 360).await?;
+
+    let second_client = MockReverseNameHydrationClient {
+        outcomes_by_node: BTreeMap::from([(
+            reverse_node,
+            ReverseNameHydrationOutcome::Success("after-orphan.eth".to_owned()),
+        )]),
+    };
+    let refreshed = hydrate_legacy_reverse_resolver_primary_names_with_client(
+        database.pool(),
+        &[LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESS.to_owned()],
+        &second_client,
+    )
+    .await?;
+    assert_eq!(refreshed.candidate_tuple_count, 1);
+    assert_eq!(refreshed.upserted_row_count, 1);
+
+    let hydrated =
+        load_primary_name_current_snapshot(database.pool(), address, ENS_NAMESPACE, "60")
+            .await?
+            .expect("hydration should preserve primary_names_current row");
+    assert_eq!(
+        hydrated.normalized_claim_name.as_deref(),
+        Some("after-orphan.eth")
+    );
+    assert_eq!(
+        hydrated.row.claim_provenance[HYDRATION_PROVENANCE_KEY]["latest_successful_call_block_number"],
+        Value::Null
+    );
+    assert_eq!(
+        hydrated.row.claim_provenance[HYDRATION_PROVENANCE_KEY]["latest_successful_call_block_hash"],
+        Value::Null
+    );
+    assert_eq!(
+        hydrated.row.claim_provenance[HYDRATION_PROVENANCE_KEY]["block_number"],
+        json!(360)
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn hydrates_from_durable_call_observation_after_raw_staging_compaction() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let address = "0x0000000000000000000000000000000000000ccc";
+    let reverse_block = 102;
+    let reverse_node = reverse_node_for_block(reverse_block);
+
+    insert_chain_checkpoint(database.pool(), 330).await?;
+    upsert_normalized_events(
+        database.pool(),
+        &[
+            reverse_changed_event("reverse-claim", address, reverse_block, 0),
+            reverse_resolver_changed_event(
+                "reverse-resolver",
+                address,
+                reverse_block,
+                LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESS,
+                121,
+                0,
+            ),
+        ],
+    )
+    .await?;
+    rebuild_primary_names_current(database.pool(), None, None, None).await?;
+    insert_successful_direct_call(
+        database.pool(),
+        LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESS,
+        320,
+    )
+    .await?;
+    delete_raw_direct_call_staging(database.pool()).await?;
+
+    let client = MockReverseNameHydrationClient {
+        outcomes_by_node: BTreeMap::from([(
+            reverse_node,
+            ReverseNameHydrationOutcome::Success("compacted.eth".to_owned()),
+        )]),
+    };
+    let summary = hydrate_legacy_reverse_resolver_primary_names_with_client(
+        database.pool(),
+        &[LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESS.to_owned()],
+        &client,
+    )
+    .await?;
+    assert_eq!(summary.candidate_tuple_count, 1);
+
+    let hydrated =
+        load_primary_name_current_snapshot(database.pool(), address, ENS_NAMESPACE, "60")
+            .await?
+            .expect("hydration should preserve primary_names_current row");
+    assert_eq!(
+        hydrated.normalized_claim_name.as_deref(),
+        Some("compacted.eth")
+    );
+    assert_eq!(
+        hydrated.row.claim_provenance[HYDRATION_PROVENANCE_KEY]["latest_successful_call_block_hash"],
+        json!(block_hash_for(320))
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn rehydrates_when_live_call_trigger_reorgs_at_same_height() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let address = "0x0000000000000000000000000000000000000ddd";
+    let reverse_block = 103;
+    let reverse_node = reverse_node_for_block(reverse_block);
+
+    insert_chain_checkpoint(database.pool(), 340).await?;
+    upsert_normalized_events(
+        database.pool(),
+        &[
+            reverse_changed_event("reverse-claim", address, reverse_block, 0),
+            reverse_resolver_changed_event(
+                "reverse-resolver",
+                address,
+                reverse_block,
+                LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESS,
+                122,
+                0,
+            ),
+        ],
+    )
+    .await?;
+    rebuild_primary_names_current(database.pool(), None, None, None).await?;
+    insert_successful_direct_call(
+        database.pool(),
+        LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESS,
+        320,
+    )
+    .await?;
+    let first_client = MockReverseNameHydrationClient {
+        outcomes_by_node: BTreeMap::from([(
+            reverse_node.clone(),
+            ReverseNameHydrationOutcome::Success("branch-a.eth".to_owned()),
+        )]),
+    };
+    hydrate_legacy_reverse_resolver_primary_names_with_client(
+        database.pool(),
+        &[LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESS.to_owned()],
+        &first_client,
+    )
+    .await?;
+
+    orphan_event_silent_call_observation(database.pool(), &block_hash_for(320)).await?;
+    insert_successful_direct_call_with_identity(
+        database.pool(),
+        LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESS,
+        320,
+        "0x000000000000000000000000000000000000000000000000000000000000beef",
+        "0xtx-reorg",
+        1,
+    )
+    .await?;
+    insert_chain_checkpoint(database.pool(), 360).await?;
+
+    let second_client = MockReverseNameHydrationClient {
+        outcomes_by_node: BTreeMap::from([(
+            reverse_node,
+            ReverseNameHydrationOutcome::Success("branch-b.eth".to_owned()),
+        )]),
+    };
+    let refreshed = hydrate_legacy_reverse_resolver_primary_names_with_client(
+        database.pool(),
+        &[LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESS.to_owned()],
+        &second_client,
+    )
+    .await?;
+    assert_eq!(refreshed.candidate_tuple_count, 1);
+
+    let hydrated =
+        load_primary_name_current_snapshot(database.pool(), address, ENS_NAMESPACE, "60")
+            .await?
+            .expect("hydration should preserve primary_names_current row");
+    assert_eq!(
+        hydrated.normalized_claim_name.as_deref(),
+        Some("branch-b.eth")
+    );
+    assert_eq!(
+        hydrated.row.claim_provenance[HYDRATION_PROVENANCE_KEY]["latest_successful_call_block_hash"],
+        json!("0x000000000000000000000000000000000000000000000000000000000000beef")
+    );
+    assert_eq!(
+        hydrated.row.claim_provenance[HYDRATION_PROVENANCE_KEY]["latest_successful_call_transaction_hash"],
+        json!("0xtx-reorg")
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+fn reverse_changed_event(
+    event_identity: &str,
+    address: &str,
+    block_number: i64,
+    log_index: i64,
+) -> NormalizedEvent {
+    let normalized_address = address.to_ascii_lowercase();
+    let reverse_label = normalized_address.trim_start_matches("0x").to_owned();
+
+    NormalizedEvent {
+        event_identity: event_identity.to_owned(),
+        namespace: ENS_NAMESPACE.to_owned(),
+        logical_name_id: None,
+        resource_id: None,
+        event_kind: EVENT_KIND_REVERSE_CHANGED.to_owned(),
+        source_family: SOURCE_FAMILY_ENS_V1_REVERSE_L1.to_owned(),
+        manifest_version: 1,
+        source_manifest_id: None,
+        chain_id: Some(ETHEREUM_MAINNET_CHAIN_ID.to_owned()),
+        block_number: Some(block_number),
+        block_hash: Some(block_hash_for(block_number)),
+        transaction_hash: Some(format!("0xtx{block_number:064x}")),
+        log_index: Some(log_index),
+        raw_fact_ref: json!({
+            "kind": "raw_log",
+            "chain_id": ETHEREUM_MAINNET_CHAIN_ID,
+            "block_number": block_number,
+            "log_index": log_index,
+        }),
+        derivation_kind: "ens_v1_reverse_claim".to_owned(),
+        canonicality_state: CanonicalityState::Canonical,
+        before_state: json!({}),
+        after_state: json!({
+            "source_event": "ReverseClaimed",
+            "address": normalized_address,
+            "coin_type": "60",
+            "namespace": ENS_NAMESPACE,
+            "reverse_namespace": ENS_NAMESPACE,
+            "reverse_label": reverse_label,
+            "reverse_name": format!("{reverse_label}.addr.reverse"),
+            "reverse_node": reverse_node_for_block(block_number),
+            "claim_provenance": claim_provenance(block_number),
+        }),
+    }
+}
+
+fn reverse_resolver_changed_event(
+    event_identity: &str,
+    address: &str,
+    reverse_block_number: i64,
+    resolver_address: &str,
+    block_number: i64,
+    log_index: i64,
+) -> NormalizedEvent {
+    let normalized_address = address.to_ascii_lowercase();
+    let reverse_label = normalized_address.trim_start_matches("0x").to_owned();
+
+    NormalizedEvent {
+        event_identity: event_identity.to_owned(),
+        namespace: ENS_NAMESPACE.to_owned(),
+        logical_name_id: None,
+        resource_id: None,
+        event_kind: EVENT_KIND_RESOLVER_CHANGED.to_owned(),
+        source_family: "ens_v1_registry_l1".to_owned(),
+        manifest_version: 1,
+        source_manifest_id: None,
+        chain_id: Some(ETHEREUM_MAINNET_CHAIN_ID.to_owned()),
+        block_number: Some(block_number),
+        block_hash: Some(block_hash_for(block_number)),
+        transaction_hash: Some(format!("0xtx{block_number:064x}")),
+        log_index: Some(log_index),
+        raw_fact_ref: json!({
+            "kind": "raw_log",
+            "chain_id": ETHEREUM_MAINNET_CHAIN_ID,
+            "block_number": block_number,
+            "log_index": log_index,
+        }),
+        derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+        canonicality_state: CanonicalityState::Canonical,
+        before_state: json!({}),
+        after_state: json!({
+            "resolver": resolver_address,
+            "namehash": reverse_node_for_block(reverse_block_number),
+            "primary_claim_source": {
+                "address": normalized_address,
+                "namespace": ENS_NAMESPACE,
+                "coin_type": "60",
+                "reverse_name": format!("{reverse_label}.addr.reverse"),
+                "reverse_node": reverse_node_for_block(reverse_block_number),
+                "claim_provenance": claim_provenance(reverse_block_number),
+            },
+        }),
+    }
+}
+
+async fn insert_chain_checkpoint(pool: &PgPool, block_number: i64) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO chain_checkpoints (chain_id, canonical_block_hash, canonical_block_number)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (chain_id) DO UPDATE
+        SET
+            canonical_block_hash = EXCLUDED.canonical_block_hash,
+            canonical_block_number = EXCLUDED.canonical_block_number
+        "#,
+    )
+    .bind(ETHEREUM_MAINNET_CHAIN_ID)
+    .bind(block_hash_for(block_number))
+    .bind(block_number)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn insert_successful_direct_call(
+    pool: &PgPool,
+    resolver_address: &str,
+    block_number: i64,
+) -> Result<()> {
+    insert_successful_direct_call_with_identity(
+        pool,
+        resolver_address,
+        block_number,
+        &block_hash_for(block_number),
+        &transaction_hash_for(block_number),
+        0,
+    )
+    .await
+}
+
+async fn insert_successful_direct_call_with_identity(
+    pool: &PgPool,
+    resolver_address: &str,
+    block_number: i64,
+    block_hash: &str,
+    transaction_hash: &str,
+    transaction_index: i64,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO raw_transactions (
+            chain_id,
+            block_hash,
+            block_number,
+            transaction_hash,
+            transaction_index,
+            from_address,
+            to_address,
+            canonicality_state
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, 'canonical'::canonicality_state)
+        "#,
+    )
+    .bind(ETHEREUM_MAINNET_CHAIN_ID)
+    .bind(block_hash)
+    .bind(block_number)
+    .bind(transaction_hash)
+    .bind(transaction_index)
+    .bind("0x0000000000000000000000000000000000000001")
+    .bind(resolver_address)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO event_silent_resolver_call_observations (
+            chain_id,
+            resolver_address,
+            block_hash,
+            block_number,
+            transaction_hash,
+            transaction_index,
+            canonicality_state
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, 'canonical'::canonicality_state)
+        "#,
+    )
+    .bind(ETHEREUM_MAINNET_CHAIN_ID)
+    .bind(resolver_address)
+    .bind(block_hash)
+    .bind(block_number)
+    .bind(transaction_hash)
+    .bind(transaction_index)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO raw_receipts (
+            chain_id,
+            block_hash,
+            block_number,
+            transaction_hash,
+            transaction_index,
+            status,
+            canonicality_state
+        )
+        VALUES ($1, $2, $3, $4, $5, TRUE, 'canonical'::canonicality_state)
+        "#,
+    )
+    .bind(ETHEREUM_MAINNET_CHAIN_ID)
+    .bind(block_hash)
+    .bind(block_number)
+    .bind(transaction_hash)
+    .bind(transaction_index)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn delete_raw_direct_call_staging(pool: &PgPool) -> Result<()> {
+    sqlx::query("DELETE FROM raw_transactions")
+        .execute(pool)
+        .await?;
+    sqlx::query("DELETE FROM raw_receipts")
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+async fn orphan_event_silent_call_observation(pool: &PgPool, block_hash: &str) -> Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE event_silent_resolver_call_observations
+        SET canonicality_state = 'orphaned'::canonicality_state
+        WHERE chain_id = $1
+          AND block_hash = $2
+        "#,
+    )
+    .bind(ETHEREUM_MAINNET_CHAIN_ID)
+    .bind(block_hash)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+fn claim_provenance(block_number: i64) -> Value {
+    json!({
+        "source_family": SOURCE_FAMILY_ENS_V1_REVERSE_L1,
+        "contract_role": "reverse_registrar",
+        "contract_instance_id": format!("00000000-0000-0000-0000-{block_number:012x}"),
+        "emitting_address": "0x00000000000000000000000000000000000000ad",
+    })
+}
+
+fn reverse_node_for_block(block_number: i64) -> String {
+    format!("0x{block_number:064x}")
+}
+
+fn block_hash_for(block_number: i64) -> String {
+    format!("0x{block_number:064x}")
+}
+
+fn transaction_hash_for(block_number: i64) -> String {
+    format!("0xtx{block_number:064x}")
+}

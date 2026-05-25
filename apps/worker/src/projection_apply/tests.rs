@@ -150,6 +150,33 @@ async fn derives_key_scoped_invalidations_from_normalized_event_changes() -> Res
     insert_event(
         &database,
         EventSeed {
+            event_identity: "projection-apply:primary-resolver",
+            namespace: "ens",
+            logical_name_id: None,
+            resource_id: None,
+            event_kind: "ResolverChanged",
+            source_family: "ens_v1_registry_l1",
+            derivation_kind: "ens_v1_unwrapped_authority",
+            chain_id: Some("ethereum-mainnet"),
+            block_number: Some(14),
+            block_hash: Some("0xblock14"),
+            before_state: json!({}),
+            after_state: json!({
+                "resolver": "0x0000000000000000000000000000000000000abc",
+                "primary_claim_source": {
+                    "address": "0x0000000000000000000000000000000000000fff",
+                    "namespace": "ens",
+                    "coin_type": "60",
+                    "reverse_node": "0xreverse"
+                }
+            }),
+            observed_at,
+        },
+    )
+    .await?;
+    insert_event(
+        &database,
+        EventSeed {
             event_identity: "projection-apply:children",
             namespace: "ens",
             logical_name_id: Some("ens:parent.eth"),
@@ -158,8 +185,8 @@ async fn derives_key_scoped_invalidations_from_normalized_event_changes() -> Res
             source_family: "ens_v1_registry_l1",
             derivation_kind: "ens_v1_subregistry_changed",
             chain_id: Some("ethereum-mainnet"),
-            block_number: Some(14),
-            block_hash: Some("0xblock14"),
+            block_number: Some(15),
+            block_hash: Some("0xblock15"),
             before_state: json!({}),
             after_state: json!({}),
             observed_at,
@@ -168,7 +195,7 @@ async fn derives_key_scoped_invalidations_from_normalized_event_changes() -> Res
     .await?;
 
     let summary = derive_normalized_event_invalidations(database.pool(), 100).await?;
-    assert_eq!(summary.scanned_event_count, 6);
+    assert_eq!(summary.scanned_event_count, 7);
     assert!(summary.enqueued_invalidation_count >= 10);
 
     let invalidations = load_invalidations(&database).await?;
@@ -222,6 +249,11 @@ async fn derives_key_scoped_invalidations_from_normalized_event_changes() -> Res
         &invalidations,
         "primary_names_current",
         "0x0000000000000000000000000000000000000eee:ens:60"
+    ));
+    assert!(has_key(
+        &invalidations,
+        "primary_names_current",
+        "0x0000000000000000000000000000000000000fff:ens:60"
     ));
 
     sqlx::query(

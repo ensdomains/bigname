@@ -486,6 +486,37 @@ candidate_keys AS (
       AND COALESCE(tuple.claim_source ->> 'namespace', ne.namespace) <> ''
       AND tuple.claim_source ->> 'coin_type' IS NOT NULL
       AND tuple.claim_source ->> 'coin_type' <> ''
+
+    UNION ALL
+
+    SELECT
+        'primary_names_current'::TEXT AS projection,
+        lower(tuple.claim_source ->> 'address')
+            || ':' || COALESCE(tuple.claim_source ->> 'namespace', ne.namespace)
+            || ':' || (tuple.claim_source ->> 'coin_type') AS projection_key,
+        jsonb_build_object(
+            'address', lower(tuple.claim_source ->> 'address'),
+            'namespace', COALESCE(tuple.claim_source ->> 'namespace', ne.namespace),
+            'coin_type', tuple.claim_source ->> 'coin_type'
+        ) AS key_payload,
+        ne.normalized_event_id,
+        ne.change_id,
+        ne.changed_at
+    FROM changed_events ne
+    CROSS JOIN LATERAL (
+        VALUES
+            (ne.after_state -> 'primary_claim_source'),
+            (ne.before_state -> 'primary_claim_source')
+    ) AS tuple(claim_source)
+    WHERE ne.event_kind = 'ResolverChanged'
+      AND ne.logical_name_id IS NULL
+      AND ne.resource_id IS NULL
+      AND tuple.claim_source ->> 'address' IS NOT NULL
+      AND tuple.claim_source ->> 'address' <> ''
+      AND COALESCE(tuple.claim_source ->> 'namespace', ne.namespace) IS NOT NULL
+      AND COALESCE(tuple.claim_source ->> 'namespace', ne.namespace) <> ''
+      AND tuple.claim_source ->> 'coin_type' IS NOT NULL
+      AND tuple.claim_source ->> 'coin_type' <> ''
 )
 "#;
 

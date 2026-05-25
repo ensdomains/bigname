@@ -71,6 +71,12 @@ pub(crate) struct RunArgs {
     )]
     pub(crate) chain_reth_db_sources: Vec<String>,
     #[arg(
+        long = "event-silent-reverse-resolver-address",
+        env = "BIGNAME_INDEXER_EVENT_SILENT_REVERSE_RESOLVER_ADDRESSES",
+        value_delimiter = ','
+    )]
+    pub(crate) event_silent_reverse_resolver_addresses: Vec<String>,
+    #[arg(
         long = "hash-pinned-chunk-blocks",
         env = "BIGNAME_INDEXER_HASH_PINNED_BACKFILL_CHUNK_BLOCKS",
         default_value_t = DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS

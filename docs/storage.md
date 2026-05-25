@@ -32,6 +32,7 @@ Postgres is the hot indexed and replay-focused store. It retains:
 - lineage and header anchors needed to reconcile forks, prove ancestry, promote checkpoints, audit canonicality
 - selected/admitted target logs and the minimal transaction and receipt fields while they are needed to decode those logs, route them through adapters, and append normalized events
 - block-scoped call snapshots and enrichments retained by an explicit replay contract for normalized events, projections, or execution artifacts
+- durable event-silent resolver call observations used as projection-invalidation inputs after selected transaction and receipt staging rows are compacted
 - code-hash observations and discovery/proxy evidence used by manifests, adapter routing, and audit tooling
 - compact metadata and optional digests for full payloads fetched as cache
 
@@ -48,7 +49,7 @@ Hash-addressed object storage is a durability boundary only for raw payload clas
 
 Switching modes is operational policy. It does not change route coverage, projection truth, canonicality semantics, manifest rollout, or consumer-replacement meaning.
 
-Live polling may retain selected `raw_transactions` and `raw_receipts` for successful direct transactions to watched event-silent resolver addresses even when those transactions do not emit selected logs. This is a projection-invalidation trigger for explicitly documented hydration repairs, such as legacy ENSv1 reverse-resolver primary-name hydration. It does not authorize adapters to synthesize normalized events from calldata or receipts, does not make raw facts an API fallback, and does not change minimal/log-audit compaction boundaries once downstream normalized replay and projection inputs are durable.
+Live polling may retain selected `raw_transactions` and `raw_receipts` for successful direct transactions to configured event-silent resolver addresses even when those transactions do not emit selected logs. Intake copies the chain id, resolver address, block number/hash, transaction hash/index, and canonicality into `event_silent_resolver_call_observations` before those staging rows become compactable. The durable observation row is the projection-invalidation trigger for explicitly documented hydration repairs, such as legacy ENSv1 reverse-resolver primary-name hydration. It does not authorize adapters to synthesize normalized events from calldata or receipts, does not make raw facts an API fallback, and does not change minimal/log-audit compaction boundaries once downstream normalized replay and projection inputs are durable.
 
 `bigname-worker raw-facts compact-log-staging` is the manual compaction boundary for minimal mode. It refuses to compact unless the `raw_fact_normalized_events` replay cursor is caught up and failure-free, and only operates on raw-log staging families. Log-audit deployments do not run it for retained ranges.
 
@@ -121,6 +122,7 @@ For ENSv2, `resource_id` keys by `(chain_id, registry_contract_instance_id, upst
 | `name_surfaces`, `surface_bindings`, `resources`, `token_lineages` | adapters | stable identity anchors |
 | `name_surface_normalization_repair_findings` | indexer repair | audit table for retained name-surface rows that reject or remap under the active normalizer and therefore need explicit semantic follow-up rather than silent metadata rewrite |
 | `normalized_events` | adapters | append-only normalized protocol events |
+| `event_silent_resolver_call_observations` | intake | durable block-scoped direct-call observations for documented projection hydration invalidation where the watched resolver emits no usable event |
 | `projection_*` | projection workers | disposable read models |
 | `address_names_current_identity_counts`, `address_names_current_identity_feed` | storage triggers on `address_names_current`, `primary_names_current`, and supporting identity-anchor and `name_current` readability changes | exact reverse identity total counts and compact feed display rows by address, role filter, and primary-name coin type for the partner-compatible identity façade, using the same canonical/read-safe and reachable-`name_current` row eligibility as reverse identity pages; this is the bounded exception in [`adrs/0005-identity-count-sidecar.md`](adrs/0005-identity-count-sidecar.md) |
 | `current_projection_replay_status` | projection workers | durable operational completion markers for bootstrap/full all-current projection replay |

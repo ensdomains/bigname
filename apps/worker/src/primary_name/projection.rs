@@ -136,9 +136,17 @@ async fn rebuild_one_primary_name(
     })
 }
 
-fn primary_name_row(
+pub(super) fn primary_name_row(
     tuple: &ReverseClaimTuple,
     claim_observation: Option<&NameClaimObservation>,
+) -> Result<PrimaryNameCurrentSnapshot> {
+    primary_name_row_with_provenance_extensions(tuple, claim_observation, [])
+}
+
+pub(super) fn primary_name_row_with_provenance_extensions<const N: usize>(
+    tuple: &ReverseClaimTuple,
+    claim_observation: Option<&NameClaimObservation>,
+    extensions: [(&str, Value); N],
 ) -> Result<PrimaryNameCurrentSnapshot> {
     let raw_claim = claim_observation.and_then(|observation| observation.raw_name.as_deref());
     let normalized_claim = raw_claim
@@ -164,7 +172,12 @@ fn primary_name_row(
             coin_type: tuple.key.coin_type.clone(),
             claim_status,
             raw_claim_name,
-            claim_provenance: build_claim_provenance(tuple, claim_status, claim_observation)?,
+            claim_provenance: build_claim_provenance(
+                tuple,
+                claim_status,
+                claim_observation,
+                extensions,
+            )?,
         },
         normalized_claim_name,
     })
@@ -174,16 +187,20 @@ fn raw_claim_name_source_is_blank(raw_name: &str) -> bool {
     raw_name.is_empty() || raw_name.chars().all(char::is_whitespace)
 }
 
-fn build_claim_provenance(
+fn build_claim_provenance<'a>(
     tuple: &ReverseClaimTuple,
     claim_status: PrimaryNameClaimStatus,
     claim_observation: Option<&NameClaimObservation>,
+    extensions: impl IntoIterator<Item = (&'a str, Value)>,
 ) -> Result<Value> {
     let mut claim_provenance = tuple
         .claim_provenance
         .as_object()
         .cloned()
         .context("reverse-claim claim_provenance must be a JSON object")?;
+    for (key, value) in extensions {
+        claim_provenance.insert(key.to_owned(), value);
+    }
     claim_provenance.insert(
         VERIFIED_PRIMARY_NAME_LOOKUP_KEY.to_owned(),
         verified_primary_name_lookup_hook(&tuple.key),

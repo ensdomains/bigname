@@ -4,7 +4,7 @@ use sqlx::{PgPool, Postgres, pool::PoolConnection};
 use tokio::time::{Duration, sleep};
 use tracing::{debug, info, warn};
 
-use crate::{cli::RunArgs, projection_apply, record_inventory, replay};
+use crate::{cli::RunArgs, primary_name, projection_apply, record_inventory, replay};
 
 const CURSOR_KIND_RAW_FACT_NORMALIZED_EVENTS: &str = "raw_fact_normalized_events";
 const ALL_CURRENT_PROJECTIONS_MIN_DATABASE_CONNECTIONS: u32 = 64;
@@ -35,8 +35,15 @@ pub(crate) async fn run_worker(args: RunArgs) -> Result<()> {
     let text_hydration_config =
         record_inventory::RecordInventoryTextHydrationConfig::from_chain_rpc_url_entries(
             &args.chain_rpc_urls,
-            args.text_hydration_multicall3_address,
+            args.text_hydration_multicall3_address.clone(),
             args.text_hydration_batch_size,
+        )?;
+    let primary_hydration_config =
+        primary_name::PrimaryNameLegacyReverseHydrationConfig::from_chain_rpc_url_entries(
+            &args.chain_rpc_urls,
+            args.legacy_reverse_hydration_multicall3_address,
+            args.legacy_reverse_hydration_batch_size,
+            &args.legacy_reverse_resolver_addresses,
         )?;
 
     info!(
@@ -47,6 +54,7 @@ pub(crate) async fn run_worker(args: RunArgs) -> Result<()> {
         database_max_connections = database.max_connections,
         automatic_projection_replay = true,
         record_inventory_text_hydration = text_hydration_config.is_some(),
+        primary_name_legacy_reverse_hydration = primary_hydration_config.is_some(),
         "worker booted"
     );
 
@@ -55,6 +63,7 @@ pub(crate) async fn run_worker(args: RunArgs) -> Result<()> {
             pool,
             args.poll_interval_secs,
             text_hydration_config,
+            primary_hydration_config,
         ) => {}
         signal = tokio::signal::ctrl_c() => {
             signal.context("failed to listen for shutdown signal")?;
@@ -69,6 +78,7 @@ pub(crate) async fn run_automatic_current_projection_replay(
     pool: PgPool,
     poll_interval_secs: u64,
     text_hydration_config: Option<record_inventory::RecordInventoryTextHydrationConfig>,
+    primary_hydration_config: Option<primary_name::PrimaryNameLegacyReverseHydrationConfig>,
 ) {
     let poll_interval = Duration::from_secs(poll_interval_secs.max(1));
     let mut bootstrap_completed = false;
@@ -100,8 +110,12 @@ pub(crate) async fn run_automatic_current_projection_replay(
         }
 
         if !bootstrap_completed {
-            match replay_all_current_projections_when_ready(&pool, text_hydration_config.as_ref())
-                .await
+            match replay_all_current_projections_when_ready(
+                &pool,
+                text_hydration_config.as_ref(),
+                primary_hydration_config.as_ref(),
+            )
+            .await
             {
                 Ok(true) => {
                     bootstrap_completed = true;
@@ -155,6 +169,25 @@ pub(crate) async fn run_automatic_current_projection_replay(
                     );
                 }
             }
+
+            match hydrate_primary_names_legacy_reverse_resolver(
+                &pool,
+                primary_hydration_config.as_ref(),
+            )
+            .await
+            {
+                Ok(summary) => {
+                    progressed |= summary.upserted_row_count > 0;
+                }
+                Err(error) => {
+                    warn!(
+                        service = "worker",
+                        projection = "primary_names_current",
+                        error = %format!("{error:#}"),
+                        "automatic primary_names_current legacy reverse-resolver hydration failed"
+                    );
+                }
+            }
         }
 
         if !progressed {
@@ -176,9 +209,25 @@ async fn hydrate_record_inventory_text_values_after_bootstrap(
     Ok(())
 }
 
+async fn hydrate_primary_names_legacy_reverse_resolver(
+    pool: &PgPool,
+    primary_hydration_config: Option<&primary_name::PrimaryNameLegacyReverseHydrationConfig>,
+) -> Result<primary_name::PrimaryNameLegacyReverseHydrationSummary> {
+    let Some(config) = primary_hydration_config else {
+        return Ok(primary_name::PrimaryNameLegacyReverseHydrationSummary::default());
+    };
+    let summary =
+        primary_name::hydrate_legacy_reverse_resolver_primary_names(pool, config.clone()).await?;
+    if summary.candidate_tuple_count > 0 || summary.failed_lookup_count > 0 {
+        primary_name::log_legacy_reverse_hydration_summary(&summary);
+    }
+    Ok(summary)
+}
+
 async fn replay_all_current_projections_when_ready(
     pool: &PgPool,
     text_hydration_config: Option<&record_inventory::RecordInventoryTextHydrationConfig>,
+    primary_hydration_config: Option<&primary_name::PrimaryNameLegacyReverseHydrationConfig>,
 ) -> Result<bool> {
     let readiness = load_projection_replay_readiness(pool).await?;
     if !readiness.is_ready() {
@@ -235,6 +284,7 @@ async fn replay_all_current_projections_when_ready(
         pool,
         replay_target_block,
         text_hydration_config,
+        primary_hydration_config,
     )
     .await;
     release_replay_lock(&mut replay_lock).await?;

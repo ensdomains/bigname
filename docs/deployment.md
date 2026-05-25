@@ -86,6 +86,20 @@ Missing worker RPC configuration leaves those projection cache entries explicit
 `unsupported`; it must not make the worker query provider `latest` or mutate
 normalized events.
 
+The same worker RPC setting enables projection-owned legacy ENSv1 reverse
+resolver hydration for `primary_names_current`. The built-in configured legacy
+reverse resolver set can be extended with
+`BIGNAME_INDEXER_EVENT_SILENT_REVERSE_RESOLVER_ADDRESSES` on the indexer and
+`BIGNAME_WORKER_PRIMARY_NAME_LEGACY_REVERSE_RESOLVER_ADDRESSES` on the worker;
+deployment-specific additions must use the same comma-delimited address list in
+both places so live direct-call observation and worker hydration stay aligned.
+Operators may tune the Multicall3 target and batch size with
+`BIGNAME_WORKER_PRIMARY_NAME_LEGACY_REVERSE_HYDRATION_MULTICALL3_ADDRESS` and
+`BIGNAME_WORKER_PRIMARY_NAME_LEGACY_REVERSE_HYDRATION_BATCH_SIZE`. The pass runs
+after replay/bootstrap and during continuous apply, evaluates reverse-claim,
+resolver, claim-name, and retained direct-call inputs at or behind the stored
+Ethereum Mainnet checkpoint, and writes only `primary_names_current`.
+
 Deployments with a same-host Reth database can layer
 `docker-compose.reth-db.yml` on top of the server compose file. Set
 `BIGNAME_INDEXER_RETH_DATADIR_HOST` to the host Reth datadir,
