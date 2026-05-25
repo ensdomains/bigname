@@ -60,6 +60,8 @@ After the API image was rebuilt from this branch, the latency check was repeated
 
 The 100-input row is from a 400-request measured rerun after a 50-request warmup. Worker/indexer replay was paused for the benchmark and restarted afterward; measuring while a full projection replay is actively scanning/writing `name_current` can push p95 above the feed SLO and is not the steady-state API-path measurement.
 
+Re-run the live validation with `scripts/identity-10k-normalization-check`. The script samples reverse-address feed rows and API-readable current forward names from the live projection database, checks `/v1/identity:lookup`, and fails if current surfaces still carry unclassified normalization drift without a recorded normalization-repair finding.
+
 ## Interpretation
 
 The compact feed route meets an under-10 ms p95 local/server-side proxy for the latency-sensitive tens-to-hundreds feed-rendering band measured here through 250 inputs. The native `POST /v1/identity:lookup` feed profile is the product route for that target. These measurements use the readable-row-safe `address_names_current_identity_feed` sidecar, not the earlier live first-row shortcut. They are not a substitute for a final AWS `us-east` vantage measurement in the deployed environment, but they demonstrate that the API and database path are under the budget on the running Docker stack. The 1000-input ceiling remains supported for bulk/batch compatibility, but it is not the latency target: the native compact response is already about 466 KB at 1000 inputs, and p95 is dominated by response size and serialization. Full reverse profile/detail batches remain intentionally outside the feed latency contract.

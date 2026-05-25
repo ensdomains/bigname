@@ -301,7 +301,7 @@ async fn batch_upsert_preserves_input_order_after_sorted_locking() -> Result<()>
 }
 
 #[tokio::test]
-async fn rejects_mixed_case_normalized_claim_name_sources() -> Result<()> {
+async fn rejects_non_normalized_claim_name_sources() -> Result<()> {
     let database = TestDatabase::new().await?;
 
     let error = upsert_primary_name_current_snapshots(
@@ -319,12 +319,12 @@ async fn rejects_mixed_case_normalized_claim_name_sources() -> Result<()> {
         }],
     )
     .await
-    .expect_err("mixed-case claimed names must be rejected");
+    .expect_err("non-normalized claimed names must be rejected");
 
     assert!(
         error
             .to_string()
-            .contains("must already be ASCII-normalized")
+            .contains("must already be ENSIP-15-normalized")
     );
 
     database.cleanup().await

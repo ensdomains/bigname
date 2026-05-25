@@ -19,6 +19,7 @@ use crate::ops_catchup::{
 };
 use crate::repair::{
     DEFAULT_ENS_V1_TEXT_RECORD_REPAIR_CHUNK_BLOCKS, DEFAULT_ENS_V1_TEXT_RECORD_REPAIR_PAGE_SIZE,
+    DEFAULT_NAME_SURFACE_NORMALIZATION_REPAIR_PAGE_SIZE,
 };
 
 #[derive(Parser, Debug)]
@@ -315,6 +316,7 @@ pub(crate) enum ReplayCommand {
 #[derive(Subcommand, Debug)]
 pub(crate) enum RepairCommand {
     EnsV1TextRecords(RepairEnsV1TextRecordsArgs),
+    NameSurfaceNormalization(RepairNameSurfaceNormalizationArgs),
 }
 
 #[derive(Args, Debug)]
@@ -365,4 +367,26 @@ pub(crate) struct RepairEnsV1TextRecordsArgs {
         default_value_t = DEFAULT_ENS_V1_TEXT_RECORD_REPAIR_PAGE_SIZE
     )]
     pub(crate) candidate_page_size: i64,
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct RepairNameSurfaceNormalizationArgs {
+    #[command(flatten)]
+    pub(crate) database: DatabaseConfig,
+    #[arg(
+        long,
+        default_value = bigname_domain::normalization::ENS_NORMALIZER_VERSION
+    )]
+    pub(crate) expected_normalizer: String,
+    #[arg(
+        long = "page-size",
+        default_value_t = DEFAULT_NAME_SURFACE_NORMALIZATION_REPAIR_PAGE_SIZE
+    )]
+    pub(crate) page_size: i64,
+    #[arg(long)]
+    pub(crate) limit: Option<i64>,
+    #[arg(long, requires = "record_findings")]
+    pub(crate) apply_compatible: bool,
+    #[arg(long)]
+    pub(crate) record_findings: bool,
 }

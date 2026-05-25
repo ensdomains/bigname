@@ -422,7 +422,7 @@ async fn seed_ensv1_dynamic_resolver_profile_fixture(
             "ens_v1",
             31,
             "active",
-            "uts46-v1",
+            "ensip15@ens-normalize-0.1.1",
         )
         .await?;
     let resolver_manifest_id = database
@@ -433,7 +433,7 @@ async fn seed_ensv1_dynamic_resolver_profile_fixture(
             "ens_v1",
             32,
             "active",
-            "uts46-v1",
+            "ensip15@ens-normalize-0.1.1",
         )
         .await?;
     let registry_contract_instance_id = Uuid::from_u128(0x9d600);
@@ -653,7 +653,7 @@ async fn seed_basenames_l2resolver_dynamic_profile_fixture(
             "basenames_v1",
             41,
             "active",
-            "ensip15@2026-04-16",
+            "ensip15@ens-normalize-0.1.1",
         )
         .await?;
     let resolver_manifest_id = database
@@ -664,7 +664,7 @@ async fn seed_basenames_l2resolver_dynamic_profile_fixture(
             "basenames_v1",
             42,
             "active",
-            "ensip15@2026-04-16",
+            "ensip15@ens-normalize-0.1.1",
         )
         .await?;
     let registry_contract_instance_id = Uuid::from_u128(0x9b600);

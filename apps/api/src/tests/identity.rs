@@ -325,11 +325,13 @@ async fn identity_forward_normalizes_inferred_name_inputs() -> Result<()> {
     assert_eq!(
         payload["results"][3]["normalization"],
         json!({
-            "changed": true,
+            "changed": false,
             "input_name": "case.eth ",
-            "reason": "case_normalized",
+            "reason": "invalid_normalized_name",
         })
     );
+    assert_eq!(payload["results"][3]["status"], json!("unnormalizable_input"));
+    assert_eq!(payload["results"][3]["record"], Value::Null);
 
     database.cleanup().await?;
     Ok(())
@@ -367,6 +369,7 @@ async fn identity_lookup_returns_native_slim_shape() -> Result<()> {
                         "inputs": [
                             {"id": "name-1", "kind": "name", "name": "Case.eth"},
                             {"id": "name-2", "kind": "name", "name": "bad name.eth"},
+                            {"id": "name-3", "kind": "name", "name": "case.eth "},
                             {
                                 "id": "addr-1",
                                 "kind": "address",
@@ -419,25 +422,35 @@ async fn identity_lookup_returns_native_slim_shape() -> Result<()> {
             "reason": "invalid_normalized_name",
         })
     );
-
-    assert_eq!(payload["results"][2]["kind"], json!("address"));
-    assert_eq!(payload["results"][2]["status"], json!("success"));
+    assert_eq!(payload["results"][2]["status"], json!("unnormalizable_input"));
+    assert_eq!(payload["results"][2]["record"], Value::Null);
     assert_eq!(
-        payload["results"][2]["input"],
+        payload["results"][2]["normalization"],
+        json!({
+            "changed": false,
+            "input_name": "case.eth ",
+            "reason": "invalid_normalized_name",
+        })
+    );
+
+    assert_eq!(payload["results"][3]["kind"], json!("address"));
+    assert_eq!(payload["results"][3]["status"], json!("success"));
+    assert_eq!(
+        payload["results"][3]["input"],
         json!({
             "address": address,
             "coin_type": 60,
             "roles": ["owned", "managed"],
         })
     );
-    assert_eq!(payload["results"][2]["records"][0]["name"], json!("case.eth"));
+    assert_eq!(payload["results"][3]["records"][0]["name"], json!("case.eth"));
     assert_eq!(
-        payload["results"][2]["records"][0]["relation_facets"],
+        payload["results"][3]["records"][0]["relation_facets"],
         json!(["owned"])
     );
-    assert_eq!(payload["results"][2]["page"]["total_count"], json!(1));
-    assert_eq!(payload["results"][2]["page"]["next_cursor"], Value::Null);
-    let feed_record = payload["results"][2]["records"][0]
+    assert_eq!(payload["results"][3]["page"]["total_count"], json!(1));
+    assert_eq!(payload["results"][3]["page"]["next_cursor"], Value::Null);
+    let feed_record = payload["results"][3]["records"][0]
         .as_object()
         .expect("native feed record must be an object");
     assert!(!feed_record.contains_key("normalized_name"));
@@ -1631,7 +1644,7 @@ async fn indexing_status_degrades_for_active_or_shadow_manifest_without_checkpoi
             "basenames_v1",
             1,
             "active",
-            "uts46-v1",
+            "ensip15@ens-normalize-0.1.1",
         )
         .await?;
     database
@@ -1642,7 +1655,7 @@ async fn indexing_status_degrades_for_active_or_shadow_manifest_without_checkpoi
             "basenames_shadow",
             1,
             "shadow",
-            "uts46-v1",
+            "ensip15@ens-normalize-0.1.1",
         )
         .await?;
 

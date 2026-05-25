@@ -158,12 +158,14 @@ async fn rebuild_all_name_current(pool: &PgPool) -> Result<NameCurrentRebuildSum
         replacement.stage_rows(&rows).await?;
         rows.clear();
     }
-    let (upserted_row_count, deleted_row_count) = replacement.publish().await?;
+    let upserted_row_count = replacement.staged_row_count();
+    let (published_row_count, deleted_row_count) = replacement.publish().await?;
     tracing::info!(
         projection = "name_current",
         requested_name_count,
         completed_name_count,
         upserted_row_count,
+        published_row_count,
         deleted_row_count,
         "name_current rebuild replacement published"
     );
