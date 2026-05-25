@@ -300,6 +300,37 @@ fn name_current_row(row: &AddressNameCurrentRow) -> NameCurrentRow {
     }
 }
 
+async fn identity_count(pool: &PgPool, address: &str, roles: &str) -> Result<i64> {
+    sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT total_count
+        FROM address_names_current_identity_counts
+        WHERE address = $1 AND roles = $2
+        "#,
+    )
+    .bind(address)
+    .bind(roles)
+    .fetch_optional(pool)
+    .await
+    .map(|count| count.unwrap_or_default())
+    .context("failed to load address_names_current identity count")
+}
+
+async fn identity_feed_count(pool: &PgPool, address: &str, roles: &str) -> Result<i64> {
+    sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)::BIGINT
+        FROM address_names_current_identity_feed
+        WHERE address = $1 AND roles = $2
+        "#,
+    )
+    .bind(address)
+    .bind(roles)
+    .fetch_one(pool)
+    .await
+    .context("failed to count address_names_current identity feed rows")
+}
+
 fn expected_summary(entries: &[AddressNameCurrentEntry]) -> AddressNamesCurrentSummary {
     AddressNamesCurrentSummary {
         grouped_entry_count: entries.len() as u64,
@@ -719,6 +750,269 @@ async fn address_names_current_full_rebuild_keeps_public_rows_until_publish() ->
     assert_eq!(
         load_address_names_current(database.pool(), address, None, None).await?,
         vec![existing]
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn address_names_current_address_replacement_swaps_one_address_and_sidecars() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let target = "0x0000000000000000000000000000000000000abc";
+    let other = "0x0000000000000000000000000000000000000def";
+
+    for (logical_name_id, display_name, resource_id, token_lineage_id, surface_binding_id) in [
+        (
+            "ens:old-owned.eth",
+            "old-owned.eth",
+            Uuid::from_u128(0x6501),
+            Uuid::from_u128(0x6401),
+            Uuid::from_u128(0x6601),
+        ),
+        (
+            "ens:old-managed.eth",
+            "old-managed.eth",
+            Uuid::from_u128(0x7501),
+            Uuid::from_u128(0x7401),
+            Uuid::from_u128(0x7601),
+        ),
+        (
+            "ens:replacement.eth",
+            "replacement.eth",
+            Uuid::from_u128(0x8501),
+            Uuid::from_u128(0x8401),
+            Uuid::from_u128(0x8601),
+        ),
+        (
+            "ens:other.eth",
+            "other.eth",
+            Uuid::from_u128(0x9501),
+            Uuid::from_u128(0x9401),
+            Uuid::from_u128(0x9601),
+        ),
+    ] {
+        seed_relation_references(
+            &database,
+            logical_name_id,
+            display_name,
+            resource_id,
+            Some(token_lineage_id),
+            surface_binding_id,
+            CanonicalityState::Finalized,
+        )
+        .await?;
+    }
+
+    let old_owned = address_name_current_row(AddressNameCurrentRowSeed {
+        address: target,
+        logical_name_id: "ens:old-owned.eth",
+        display_name: "old-owned.eth",
+        relation: AddressNameRelation::Registrant,
+        surface_binding_id: Uuid::from_u128(0x6601),
+        resource_id: Uuid::from_u128(0x6501),
+        token_lineage_id: Some(Uuid::from_u128(0x6401)),
+        manifest_version: 1,
+    });
+    let old_managed = address_name_current_row(AddressNameCurrentRowSeed {
+        address: target,
+        logical_name_id: "ens:old-managed.eth",
+        display_name: "old-managed.eth",
+        relation: AddressNameRelation::EffectiveController,
+        surface_binding_id: Uuid::from_u128(0x7601),
+        resource_id: Uuid::from_u128(0x7501),
+        token_lineage_id: Some(Uuid::from_u128(0x7401)),
+        manifest_version: 1,
+    });
+    let replacement_row = address_name_current_row(AddressNameCurrentRowSeed {
+        address: target,
+        logical_name_id: "ens:replacement.eth",
+        display_name: "replacement.eth",
+        relation: AddressNameRelation::TokenHolder,
+        surface_binding_id: Uuid::from_u128(0x8601),
+        resource_id: Uuid::from_u128(0x8501),
+        token_lineage_id: Some(Uuid::from_u128(0x8401)),
+        manifest_version: 2,
+    });
+    let other_row = address_name_current_row(AddressNameCurrentRowSeed {
+        address: other,
+        logical_name_id: "ens:other.eth",
+        display_name: "other.eth",
+        relation: AddressNameRelation::Registrant,
+        surface_binding_id: Uuid::from_u128(0x9601),
+        resource_id: Uuid::from_u128(0x9501),
+        token_lineage_id: Some(Uuid::from_u128(0x9401)),
+        manifest_version: 1,
+    });
+
+    upsert_name_current_rows(
+        database.pool(),
+        &[
+            name_current_row(&old_owned),
+            name_current_row(&old_managed),
+            name_current_row(&replacement_row),
+            name_current_row(&other_row),
+        ],
+    )
+    .await?;
+    upsert_address_names_current_rows(
+        database.pool(),
+        &[old_owned, old_managed, other_row.clone()],
+    )
+    .await?;
+    rebuild_address_names_current_identity_sidecars(database.pool()).await?;
+
+    let replacement =
+        begin_address_names_current_address_replacement(database.pool(), target).await?;
+    insert_address_names_current_address_replacement_rows(
+        database.pool(),
+        &replacement,
+        std::slice::from_ref(&replacement_row),
+    )
+    .await?;
+    let (deleted_row_count, inserted_row_count) =
+        publish_address_names_current_address_replacement(database.pool(), &replacement).await?;
+    drop_address_names_current_address_replacement(database.pool(), &replacement).await?;
+
+    assert_eq!((deleted_row_count, inserted_row_count), (2, 1));
+    assert_eq!(
+        load_address_names_current(database.pool(), target, None, None).await?,
+        vec![replacement_row]
+    );
+    assert_eq!(
+        load_address_names_current(database.pool(), other, None, None).await?,
+        vec![other_row]
+    );
+    assert_eq!(identity_count(database.pool(), target, "owned").await?, 1);
+    assert_eq!(identity_count(database.pool(), target, "managed").await?, 0);
+    assert_eq!(identity_count(database.pool(), target, "both").await?, 1);
+    assert_eq!(
+        identity_feed_count(database.pool(), target, "owned").await?,
+        1
+    );
+    assert_eq!(
+        identity_feed_count(database.pool(), target, "managed").await?,
+        0
+    );
+    assert_eq!(
+        identity_feed_count(database.pool(), target, "both").await?,
+        1
+    );
+    assert_eq!(identity_count(database.pool(), other, "owned").await?, 1);
+    assert_eq!(
+        identity_feed_count(database.pool(), other, "both").await?,
+        1
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn address_names_current_address_replacement_matches_trigger_lock_order() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    let replacement =
+        begin_address_names_current_address_replacement(database.pool(), address).await?;
+    let mut writer = database.pool().begin().await?;
+
+    sqlx::query(
+        r#"
+        LOCK TABLE address_names_current IN ROW EXCLUSIVE MODE
+        "#,
+    )
+    .execute(&mut *writer)
+    .await
+    .context("failed to simulate trigger-maintained address_names_current write lock")?;
+
+    let publish_task = {
+        let pool = database.pool().clone();
+        let replacement = replacement.clone();
+        tokio::spawn(async move {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                publish_address_names_current_address_replacement(&pool, &replacement),
+            )
+            .await
+        })
+    };
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    sqlx::query("SET LOCAL lock_timeout = '500ms'")
+        .execute(&mut *writer)
+        .await
+        .context("failed to set lock timeout for trigger lock-order regression")?;
+    sqlx::query(
+        r#"
+        SELECT address_names_current_identity_counts_lock_address($1)
+        "#,
+    )
+    .bind(address)
+    .execute(&mut *writer)
+    .await
+    .context("address replacement publish held the advisory lock before the table lock")?;
+
+    writer
+        .rollback()
+        .await
+        .context("failed to release simulated writer lock")?;
+
+    let publish_summary = publish_task
+        .await
+        .context("address replacement publish task failed")?
+        .context("address replacement publish timed out behind writer lock")??;
+    assert_eq!(publish_summary, (0, 0));
+
+    drop_address_names_current_address_replacement(database.pool(), &replacement).await?;
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn address_names_current_address_replacement_can_clear_an_address() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+
+    seed_relation_references(
+        &database,
+        "ens:cleared.eth",
+        "cleared.eth",
+        Uuid::from_u128(0xa501),
+        Some(Uuid::from_u128(0xa401)),
+        Uuid::from_u128(0xa601),
+        CanonicalityState::Finalized,
+    )
+    .await?;
+
+    let row = address_name_current_row(AddressNameCurrentRowSeed {
+        address,
+        logical_name_id: "ens:cleared.eth",
+        display_name: "cleared.eth",
+        relation: AddressNameRelation::Registrant,
+        surface_binding_id: Uuid::from_u128(0xa601),
+        resource_id: Uuid::from_u128(0xa501),
+        token_lineage_id: Some(Uuid::from_u128(0xa401)),
+        manifest_version: 1,
+    });
+
+    upsert_name_current_rows(database.pool(), &[name_current_row(&row)]).await?;
+    upsert_address_names_current_rows(database.pool(), std::slice::from_ref(&row)).await?;
+    rebuild_address_names_current_identity_sidecars(database.pool()).await?;
+
+    let replacement =
+        begin_address_names_current_address_replacement(database.pool(), address).await?;
+    let (deleted_row_count, inserted_row_count) =
+        publish_address_names_current_address_replacement(database.pool(), &replacement).await?;
+    drop_address_names_current_address_replacement(database.pool(), &replacement).await?;
+
+    assert_eq!((deleted_row_count, inserted_row_count), (1, 0));
+    assert!(
+        load_address_names_current(database.pool(), address, None, None)
+            .await?
+            .is_empty()
+    );
+    assert_eq!(identity_count(database.pool(), address, "owned").await?, 0);
+    assert_eq!(
+        identity_feed_count(database.pool(), address, "both").await?,
+        0
     );
 
     database.cleanup().await

@@ -1,3 +1,4 @@
+mod address_replacement;
 mod collapse;
 mod count;
 mod decode;
@@ -8,6 +9,12 @@ mod read;
 mod types;
 mod write;
 
+pub use address_replacement::{
+    AddressNamesCurrentAddressReplacement, begin_address_names_current_address_replacement,
+    drop_address_names_current_address_replacement,
+    insert_address_names_current_address_replacement_rows,
+    publish_address_names_current_address_replacement,
+};
 pub use collapse::collapse_address_name_current_rows;
 pub use count::{AddressNamesCurrentCountFilter, count_address_names_current_for_app_filter};
 pub use full_rebuild::{
