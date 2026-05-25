@@ -365,8 +365,9 @@ mod tests {
 
     #[tokio::test]
     async fn guarded_update_clears_only_rows_that_were_stamped() -> Result<()> {
-        let database_url = std::env::var("DATABASE_URL")
-            .context("DATABASE_URL is required for name-surface normalization storage tests")?;
+        let database_url = std::env::var("BIGNAME_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| bigname_storage::default_database_url().to_owned());
         let pool = PgPoolOptions::new()
             .max_connections(1)
             .connect(&database_url)
