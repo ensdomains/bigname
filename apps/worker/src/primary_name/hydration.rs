@@ -2,8 +2,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result};
 use bigname_execution::{
-    ChainRpcUrls, EnsReverseNameMulticallBlock, EnsReverseNameMulticallRequest,
-    EnsReverseNameMulticallResult, MULTICALL3_ADDRESS, execute_ens_reverse_name_multicall,
+    ChainRpcUrls, EnsForwardAddressLookupRequest, EnsReverseNameMulticallBlock,
+    EnsReverseNameMulticallRequest, EnsReverseNameMulticallResult, MULTICALL3_ADDRESS,
+    execute_ens_reverse_name_multicall, lookup_ens_forward_address_at_block,
 };
 use bigname_storage::{ENS_LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESSES, normalize_evm_address};
 use futures_util::{FutureExt, future::BoxFuture};
@@ -13,12 +14,18 @@ use sqlx::PgPool;
 use super::{
     PrimaryNameLegacyReverseHydrationSummary,
     projection::{primary_name_row, primary_name_row_with_provenance_extensions},
-    types::{NameClaimObservation, ReverseClaimTuple},
+    types::{NameClaimObservation, PrimaryNameTupleKey, ReverseClaimTuple},
 };
 
 #[path = "hydration_query.rs"]
 mod hydration_query;
+#[path = "hydration/resolver_edge.rs"]
+mod resolver_edge;
+#[path = "hydration/resolver_edge_query.rs"]
+mod resolver_edge_query;
 use hydration_query::load_legacy_reverse_hydration_candidates;
+use resolver_edge::hydrate_resolver_edge_candidates;
+use resolver_edge_query::load_legacy_reverse_resolver_edge_hydration_candidates;
 
 #[cfg(test)]
 const LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESS: &str =
@@ -31,6 +38,8 @@ const HYDRATION_PROVENANCE_KEY: &str = "legacy_reverse_resolver_hydration";
 const DERIVATION_KIND_LEGACY_REVERSE_RESOLVER_HYDRATION: &str =
     "ens_v1_legacy_reverse_resolver_hydration";
 const SOURCE_FAMILY_ENS_V1_REVERSE_L1: &str = "ens_v1_reverse_l1";
+const TUPLE_SOURCE_REVERSE_CLAIM: &str = "reverse_claim";
+const TUPLE_SOURCE_RESOLVER_EDGE_FORWARD_CONFIRMED: &str = "resolver_edge_forward_confirmed";
 const DEFAULT_LEGACY_REVERSE_HYDRATION_BATCH_SIZE: usize = 250;
 
 #[derive(Clone, Debug)]
@@ -74,6 +83,24 @@ struct ReverseNameHydrationTarget {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+struct ResolverEdgeHydrationCandidate {
+    existing_key: Option<PrimaryNameTupleKey>,
+    hydration_target: Option<ResolverEdgeHydrationTarget>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ResolverEdgeHydrationTarget {
+    chain_id: String,
+    resolver_address: String,
+    reverse_node: String,
+    position: ReverseNameHydrationChainPosition,
+    latest_successful_call_block_number: Option<i64>,
+    latest_successful_call_block_hash: Option<String>,
+    latest_successful_call_transaction_hash: Option<String>,
+    latest_successful_call_transaction_index: Option<i64>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct ReverseNameHydrationCall {
     resolver_address: String,
     reverse_node: String,
@@ -99,6 +126,15 @@ trait ReverseNameHydrationClient: Sync {
         position: &'a ReverseNameHydrationChainPosition,
         calls: &'a [ReverseNameHydrationCall],
     ) -> BoxFuture<'a, Result<Vec<ReverseNameHydrationOutcome>>>;
+
+    fn lookup_forward_address<'a>(
+        &'a self,
+        _chain_id: &'a str,
+        _position: &'a ReverseNameHydrationChainPosition,
+        _normalized_name: &'a str,
+    ) -> BoxFuture<'a, Result<Option<String>>> {
+        async { Ok(None) }.boxed()
+    }
 }
 
 struct MulticallReverseNameHydrationClient {
@@ -151,6 +187,32 @@ impl ReverseNameHydrationClient for MulticallReverseNameHydrationClient {
         }
         .boxed()
     }
+
+    fn lookup_forward_address<'a>(
+        &'a self,
+        chain_id: &'a str,
+        position: &'a ReverseNameHydrationChainPosition,
+        normalized_name: &'a str,
+    ) -> BoxFuture<'a, Result<Option<String>>> {
+        async move {
+            if chain_id != bigname_storage::ETHEREUM_MAINNET_CHAIN_ID {
+                anyhow::bail!(
+                    "legacy reverse-resolver forward confirmation only supports {}",
+                    bigname_storage::ETHEREUM_MAINNET_CHAIN_ID
+                );
+            }
+            lookup_ens_forward_address_at_block(EnsForwardAddressLookupRequest {
+                normalized_name,
+                chain_rpc_urls: &self.config.chain_rpc_urls,
+                block_number: position.block_number,
+                block_hash: &position.block_hash,
+                follow_ccip_read: false,
+            })
+            .await
+            .map_err(anyhow::Error::from)
+        }
+        .boxed()
+    }
 }
 
 pub(super) async fn hydrate_legacy_reverse_resolver_primary_names(
@@ -173,11 +235,13 @@ async fn hydrate_legacy_reverse_resolver_primary_names_with_client(
     }
 
     let candidates = load_legacy_reverse_hydration_candidates(pool, resolver_addresses).await?;
+    let resolver_edge_candidates =
+        load_legacy_reverse_resolver_edge_hydration_candidates(pool, resolver_addresses).await?;
     let mut summary = PrimaryNameLegacyReverseHydrationSummary {
-        candidate_tuple_count: candidates.len(),
+        candidate_tuple_count: candidates.len() + resolver_edge_candidates.len(),
         ..PrimaryNameLegacyReverseHydrationSummary::default()
     };
-    if candidates.is_empty() {
+    if candidates.is_empty() && resolver_edge_candidates.is_empty() {
         return Ok(summary);
     }
 
@@ -294,6 +358,15 @@ async fn hydrate_legacy_reverse_resolver_primary_names_with_client(
         }
     }
 
+    hydrate_resolver_edge_candidates(
+        pool,
+        &resolver_edge_candidates,
+        client,
+        &mut summary,
+        &mut snapshots,
+    )
+    .await?;
+
     summary.upserted_row_count =
         bigname_storage::upsert_primary_name_current_snapshots(pool, &snapshots)
             .await?
@@ -332,6 +405,7 @@ fn hydration_provenance(
     json!({
         "source_family": SOURCE_FAMILY_ENS_V1_REVERSE_L1,
         "derivation_kind": DERIVATION_KIND_LEGACY_REVERSE_RESOLVER_HYDRATION,
+        "tuple_source": TUPLE_SOURCE_REVERSE_CLAIM,
         "chain_id": target.chain_id,
         "resolver_address": target.resolver_address,
         "reverse_node": target.reverse_node,
@@ -365,5 +439,5 @@ fn normalize_node(node: &str) -> String {
 }
 
 #[cfg(test)]
-#[path = "hydration_tests.rs"]
+#[path = "hydration/tests.rs"]
 mod hydration_tests;

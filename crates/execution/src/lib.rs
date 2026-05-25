@@ -19,9 +19,10 @@ pub use bigname_storage::{
     load_raw_call_snapshots_by_block_hash,
 };
 pub use ens_primary_name::{
-    OnDemandEnsPrimaryName, OnDemandEnsPrimaryNameError, OnDemandEnsPrimaryNameErrorKind,
-    OnDemandEnsPrimaryNameRequest, OnDemandEnsPrimaryNameVerification,
-    OnDemandEnsPrimaryNameVerificationRequest, lookup_ens_reverse_primary_name,
+    EnsForwardAddressLookupRequest, OnDemandEnsPrimaryName, OnDemandEnsPrimaryNameError,
+    OnDemandEnsPrimaryNameErrorKind, OnDemandEnsPrimaryNameRequest,
+    OnDemandEnsPrimaryNameVerification, OnDemandEnsPrimaryNameVerificationRequest,
+    lookup_ens_forward_address_at_block, lookup_ens_reverse_primary_name,
     verify_ens_primary_name_forward_address,
 };
 pub use ens_resolution::{

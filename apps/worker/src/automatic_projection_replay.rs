@@ -177,7 +177,7 @@ pub(crate) async fn run_automatic_current_projection_replay(
             .await
             {
                 Ok(summary) => {
-                    progressed |= summary.upserted_row_count > 0;
+                    progressed |= summary.upserted_row_count > 0 || summary.deleted_row_count > 0;
                 }
                 Err(error) => {
                     warn!(
