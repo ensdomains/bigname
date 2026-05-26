@@ -6,10 +6,13 @@ use bigname_execution::{
     EnsReverseNameMulticallRequest, EnsReverseNameMulticallResult, MULTICALL3_ADDRESS,
     execute_ens_reverse_name_multicall, lookup_ens_forward_address_at_block,
 };
-use bigname_storage::{ENS_LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESSES, normalize_evm_address};
+use bigname_storage::{
+    ENS_LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESSES, ETHEREUM_MAINNET_CHAIN_ID,
+    normalize_evm_address,
+};
 use futures_util::{FutureExt, future::BoxFuture};
 use serde_json::{Value, json};
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 
 use super::{
     PrimaryNameLegacyReverseHydrationSummary,
@@ -59,6 +62,15 @@ impl PrimaryNameLegacyReverseHydrationConfig {
             resolver_addresses: default_legacy_event_silent_reverse_resolver_addresses(),
         }
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PrimaryNameLegacyReverseHydrationTrigger {
+    pub resolver_address: String,
+    pub block_number: i64,
+    pub block_hash: String,
+    pub transaction_hash: String,
+    pub transaction_index: i64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -223,6 +235,80 @@ pub(super) async fn hydrate_legacy_reverse_resolver_primary_names(
     let client = MulticallReverseNameHydrationClient { config };
     hydrate_legacy_reverse_resolver_primary_names_with_client(pool, &resolver_addresses, &client)
         .await
+}
+
+pub(super) async fn load_legacy_reverse_resolver_call_triggers(
+    pool: &PgPool,
+    config: &PrimaryNameLegacyReverseHydrationConfig,
+) -> Result<Vec<PrimaryNameLegacyReverseHydrationTrigger>> {
+    let resolver_addresses = normalize_resolver_addresses(&config.resolver_addresses);
+    if resolver_addresses.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let rows = sqlx::query(
+        r#"
+        WITH chain_positions AS (
+            SELECT
+                chain_id,
+                canonical_block_number AS hydration_block_number,
+                canonical_block_hash AS hydration_block_hash
+            FROM chain_checkpoints
+            WHERE chain_id = $2
+              AND canonical_block_number IS NOT NULL
+              AND canonical_block_hash IS NOT NULL
+        )
+        SELECT DISTINCT ON (LOWER(esc.resolver_address))
+            LOWER(esc.resolver_address) AS resolver_address,
+            esc.block_number,
+            esc.block_hash,
+            esc.transaction_hash,
+            esc.transaction_index
+        FROM event_silent_resolver_call_observations esc
+        JOIN chain_positions
+          ON chain_positions.chain_id = esc.chain_id
+         AND esc.block_number <= chain_positions.hydration_block_number
+        WHERE esc.chain_id = $2
+          AND LOWER(esc.resolver_address) = ANY($1::TEXT[])
+          AND esc.canonicality_state IN (
+              'canonical'::canonicality_state,
+              'safe'::canonicality_state,
+              'finalized'::canonicality_state
+          )
+        ORDER BY
+            LOWER(esc.resolver_address) ASC,
+            esc.block_number DESC,
+            esc.transaction_index DESC,
+            esc.transaction_hash DESC
+        "#,
+    )
+    .bind(&resolver_addresses)
+    .bind(ETHEREUM_MAINNET_CHAIN_ID)
+    .fetch_all(pool)
+    .await
+    .context("failed to load latest legacy reverse-resolver direct-call triggers")?;
+
+    rows.into_iter()
+        .map(|row| {
+            Ok(PrimaryNameLegacyReverseHydrationTrigger {
+                resolver_address: row
+                    .try_get("resolver_address")
+                    .context("missing legacy reverse hydration trigger resolver_address")?,
+                block_number: row
+                    .try_get("block_number")
+                    .context("missing legacy reverse hydration trigger block_number")?,
+                block_hash: row
+                    .try_get("block_hash")
+                    .context("missing legacy reverse hydration trigger block_hash")?,
+                transaction_hash: row
+                    .try_get("transaction_hash")
+                    .context("missing legacy reverse hydration trigger transaction_hash")?,
+                transaction_index: row
+                    .try_get("transaction_index")
+                    .context("missing legacy reverse hydration trigger transaction_index")?,
+            })
+        })
+        .collect()
 }
 
 async fn hydrate_legacy_reverse_resolver_primary_names_with_client(

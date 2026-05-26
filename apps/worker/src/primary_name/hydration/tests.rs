@@ -294,13 +294,23 @@ async fn hydrates_resolver_edge_only_legacy_reverse_resolver_primary_name() -> R
     insert_chain_checkpoint(database.pool(), 300).await?;
     upsert_normalized_events(
         database.pool(),
-        &[generic_reverse_resolver_changed_event(
-            "resolver-edge-only",
-            &reverse_node,
-            LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESS,
-            120,
-            0,
-        )],
+        &[
+            generic_reverse_resolver_changed_event(
+                "resolver-edge-only",
+                &reverse_node,
+                LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESS,
+                120,
+                0,
+            ),
+            named_non_reverse_resolver_changed_event(
+                "named-non-reverse-resolver-edge",
+                "ens:vitalik.eth",
+                "0xee6c4522d8d8a00e60990788803eea11e0408ed6cb672574ab9fbf0b389a558f",
+                LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESS,
+                121,
+                1,
+            ),
+        ],
     )
     .await?;
     rebuild_primary_names_current(database.pool(), None, None, None).await?;
@@ -805,6 +815,99 @@ async fn ignores_live_call_observation_ahead_of_hydration_checkpoint_until_check
     assert_eq!(
         hydrated_after.row.claim_provenance[HYDRATION_PROVENANCE_KEY]["latest_successful_call_block_number"],
         json!(320)
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn legacy_reverse_resolver_call_trigger_waits_for_hydration_checkpoint() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let config = PrimaryNameLegacyReverseHydrationConfig::new(
+        bigname_execution::ChainRpcUrls::from_entries(&[format!(
+            "{ETHEREUM_MAINNET_CHAIN_ID}=http://127.0.0.1:1"
+        )])?,
+    );
+
+    insert_chain_checkpoint(database.pool(), 300).await?;
+    insert_successful_direct_call(
+        database.pool(),
+        LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESS,
+        320,
+    )
+    .await?;
+
+    let before_checkpoint =
+        load_legacy_reverse_resolver_call_triggers(database.pool(), &config).await?;
+    assert_eq!(before_checkpoint, Vec::new());
+
+    insert_chain_checkpoint(database.pool(), 350).await?;
+    let after_checkpoint =
+        load_legacy_reverse_resolver_call_triggers(database.pool(), &config).await?;
+    assert_eq!(
+        after_checkpoint,
+        vec![PrimaryNameLegacyReverseHydrationTrigger {
+            resolver_address: LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESS.to_owned(),
+            block_number: 320,
+            block_hash: block_hash_for(320),
+            transaction_hash: transaction_hash_for(320),
+            transaction_index: 0,
+        }]
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn legacy_reverse_resolver_call_triggers_track_each_configured_resolver() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let other_resolver = "0x0000000000000000000000000000000000000123";
+    let mut config = PrimaryNameLegacyReverseHydrationConfig::new(
+        bigname_execution::ChainRpcUrls::from_entries(&[format!(
+            "{ETHEREUM_MAINNET_CHAIN_ID}=http://127.0.0.1:1"
+        )])?,
+    );
+    config.resolver_addresses = vec![
+        LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESS.to_owned(),
+        other_resolver.to_owned(),
+    ];
+
+    insert_chain_checkpoint(database.pool(), 400).await?;
+    insert_successful_direct_call(
+        database.pool(),
+        LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESS,
+        320,
+    )
+    .await?;
+    insert_successful_direct_call(
+        database.pool(),
+        LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESS,
+        330,
+    )
+    .await?;
+    insert_successful_direct_call(database.pool(), other_resolver, 310).await?;
+
+    let triggers = load_legacy_reverse_resolver_call_triggers(database.pool(), &config).await?;
+    assert_eq!(
+        triggers,
+        vec![
+            PrimaryNameLegacyReverseHydrationTrigger {
+                resolver_address: bigname_storage::normalize_evm_address(other_resolver),
+                block_number: 310,
+                block_hash: block_hash_for(310),
+                transaction_hash: transaction_hash_for(310),
+                transaction_index: 0,
+            },
+            PrimaryNameLegacyReverseHydrationTrigger {
+                resolver_address: LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESS.to_owned(),
+                block_number: 330,
+                block_hash: block_hash_for(330),
+                transaction_hash: transaction_hash_for(330),
+                transaction_index: 0,
+            },
+        ]
     );
 
     database.cleanup().await?;
@@ -1528,7 +1631,45 @@ fn generic_reverse_resolver_changed_event(
         before_state: json!({}),
         after_state: json!({
             "resolver": resolver_address,
-            "node": reverse_node,
+            "namehash": reverse_node,
+        }),
+    }
+}
+
+fn named_non_reverse_resolver_changed_event(
+    event_identity: &str,
+    logical_name_id: &str,
+    namehash: &str,
+    resolver_address: &str,
+    block_number: i64,
+    log_index: i64,
+) -> NormalizedEvent {
+    NormalizedEvent {
+        event_identity: event_identity.to_owned(),
+        namespace: ENS_NAMESPACE.to_owned(),
+        logical_name_id: Some(logical_name_id.to_owned()),
+        resource_id: None,
+        event_kind: EVENT_KIND_RESOLVER_CHANGED.to_owned(),
+        source_family: "ens_v1_registry_l1".to_owned(),
+        manifest_version: 1,
+        source_manifest_id: None,
+        chain_id: Some(ETHEREUM_MAINNET_CHAIN_ID.to_owned()),
+        block_number: Some(block_number),
+        block_hash: Some(block_hash_for(block_number)),
+        transaction_hash: Some(format!("0xtx{block_number:064x}")),
+        log_index: Some(log_index),
+        raw_fact_ref: json!({
+            "kind": "raw_log",
+            "chain_id": ETHEREUM_MAINNET_CHAIN_ID,
+            "block_number": block_number,
+            "log_index": log_index,
+        }),
+        derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+        canonicality_state: CanonicalityState::Canonical,
+        before_state: json!({}),
+        after_state: json!({
+            "resolver": resolver_address,
+            "namehash": namehash,
         }),
     }
 }

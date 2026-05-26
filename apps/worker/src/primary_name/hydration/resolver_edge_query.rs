@@ -28,17 +28,28 @@ pub(super) async fn load_legacy_reverse_resolver_edge_hydration_candidates(
         ),
         resolver_events AS (
             SELECT
-                LOWER(COALESCE(
-                    ne.after_state->>'node',
-                    ne.after_state->>'namehash',
-                    ne.after_state->'primary_claim_source'->>'reverse_node'
-                )) AS reverse_node,
+                LOWER(resolver_event_nodes.reverse_node) AS reverse_node,
                 ne.chain_id,
                 LOWER(ne.after_state->>'resolver') AS resolver_address,
                 ne.block_number,
                 ne.log_index,
                 ne.normalized_event_id
             FROM normalized_events ne
+            CROSS JOIN LATERAL (
+                SELECT COALESCE(
+                    ne.after_state->'primary_claim_source'->>'reverse_node',
+                    CASE
+                        WHEN ne.logical_name_id IS NULL
+                         AND ne.resource_id IS NULL
+                            THEN ne.after_state->>'node'
+                    END,
+                    CASE
+                        WHEN ne.logical_name_id IS NULL
+                         AND ne.resource_id IS NULL
+                            THEN ne.after_state->>'namehash'
+                    END
+                ) AS reverse_node
+            ) resolver_event_nodes
             JOIN chain_positions
               ON chain_positions.chain_id = ne.chain_id
             WHERE ne.event_kind = $6
@@ -50,16 +61,8 @@ pub(super) async fn load_legacy_reverse_resolver_edge_hydration_candidates(
                   'safe'::canonicality_state,
                   'finalized'::canonicality_state
               )
-              AND COALESCE(
-                    ne.after_state->>'node',
-                    ne.after_state->>'namehash',
-                    ne.after_state->'primary_claim_source'->>'reverse_node'
-                  ) IS NOT NULL
-              AND COALESCE(
-                    ne.after_state->>'node',
-                    ne.after_state->>'namehash',
-                    ne.after_state->'primary_claim_source'->>'reverse_node'
-                  ) <> ''
+              AND resolver_event_nodes.reverse_node IS NOT NULL
+              AND resolver_event_nodes.reverse_node <> ''
               AND ne.after_state->>'resolver' IS NOT NULL
               AND ne.after_state->>'resolver' <> ''
         ),

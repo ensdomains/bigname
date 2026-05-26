@@ -6,6 +6,9 @@ use tracing::{debug, info, warn};
 
 use crate::{cli::RunArgs, primary_name, projection_apply, record_inventory, replay};
 
+#[path = "automatic_projection_replay/primary_hydration.rs"]
+mod primary_hydration;
+
 const CURSOR_KIND_RAW_FACT_NORMALIZED_EVENTS: &str = "raw_fact_normalized_events";
 const ALL_CURRENT_PROJECTIONS_MIN_DATABASE_CONNECTIONS: u32 = 64;
 const ALL_CURRENT_PROJECTIONS_REPLAY_LOCK_KEY: i64 = 0x4249474e414d4501_i64;
@@ -83,6 +86,10 @@ pub(crate) async fn run_automatic_current_projection_replay(
     let poll_interval = Duration::from_secs(poll_interval_secs.max(1));
     let mut bootstrap_completed = false;
     let mut bootstrap_text_hydration_completed = text_hydration_config.is_none();
+    let mut bootstrap_primary_hydration_completed = primary_hydration_config.is_none();
+    let mut last_primary_hydration_trigger =
+        primary_hydration::LegacyReverseHydrationTriggerState::default();
+    let mut primary_hydration_due_after_projection_apply = false;
 
     loop {
         let mut progressed = false;
@@ -156,9 +163,15 @@ pub(crate) async fn run_automatic_current_projection_replay(
                 }
             }
 
+            let mut projection_apply_ready_for_primary_hydration = false;
             match projection_apply::run_once(&pool, text_hydration_config.as_ref()).await {
                 Ok(summary) => {
-                    progressed |= summary.made_progress();
+                    let apply_progressed = summary.made_progress();
+                    if apply_progressed && primary_hydration_config.is_some() {
+                        primary_hydration_due_after_projection_apply = true;
+                    }
+                    progressed |= apply_progressed;
+                    projection_apply_ready_for_primary_hydration = !apply_progressed;
                 }
                 Err(error) => {
                     warn!(
@@ -170,22 +183,55 @@ pub(crate) async fn run_automatic_current_projection_replay(
                 }
             }
 
-            match hydrate_primary_names_legacy_reverse_resolver(
-                &pool,
-                primary_hydration_config.as_ref(),
-            )
-            .await
-            {
-                Ok(summary) => {
-                    progressed |= summary.upserted_row_count > 0 || summary.deleted_row_count > 0;
-                }
-                Err(error) => {
-                    warn!(
-                        service = "worker",
-                        projection = "primary_names_current",
-                        error = %format!("{error:#}"),
-                        "automatic primary_names_current legacy reverse-resolver hydration failed"
-                    );
+            if projection_apply_ready_for_primary_hydration {
+                if !bootstrap_primary_hydration_completed {
+                    match primary_hydration::hydrate_after_bootstrap(
+                        &pool,
+                        primary_hydration_config.as_ref(),
+                        &mut last_primary_hydration_trigger,
+                    )
+                    .await
+                    {
+                        Ok(summary) => {
+                            bootstrap_primary_hydration_completed =
+                                summary.failed_lookup_count == 0;
+                            progressed |=
+                                primary_hydration::bootstrap_hydration_made_progress(&summary);
+                            if bootstrap_primary_hydration_completed {
+                                primary_hydration_due_after_projection_apply = false;
+                            }
+                        }
+                        Err(error) => {
+                            warn!(
+                                service = "worker",
+                                projection = "primary_names_current",
+                                error = %format!("{error:#}"),
+                                "automatic primary_names_current legacy reverse-resolver bootstrap hydration failed"
+                            );
+                        }
+                    }
+                } else {
+                    match primary_hydration::hydrate_if_projection_changed_or_triggered(
+                        &pool,
+                        primary_hydration_config.as_ref(),
+                        &mut last_primary_hydration_trigger,
+                        &mut primary_hydration_due_after_projection_apply,
+                    )
+                    .await
+                    {
+                        Ok(summary) => {
+                            progressed |=
+                                summary.upserted_row_count > 0 || summary.deleted_row_count > 0;
+                        }
+                        Err(error) => {
+                            warn!(
+                                service = "worker",
+                                projection = "primary_names_current",
+                                error = %format!("{error:#}"),
+                                "automatic primary_names_current legacy reverse-resolver hydration failed"
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -207,21 +253,6 @@ async fn hydrate_record_inventory_text_values_after_bootstrap(
         record_inventory::hydrate_record_inventory_text_values(pool, None, config.clone()).await?;
     record_inventory::log_text_hydration_summary(None, &summary);
     Ok(())
-}
-
-async fn hydrate_primary_names_legacy_reverse_resolver(
-    pool: &PgPool,
-    primary_hydration_config: Option<&primary_name::PrimaryNameLegacyReverseHydrationConfig>,
-) -> Result<primary_name::PrimaryNameLegacyReverseHydrationSummary> {
-    let Some(config) = primary_hydration_config else {
-        return Ok(primary_name::PrimaryNameLegacyReverseHydrationSummary::default());
-    };
-    let summary =
-        primary_name::hydrate_legacy_reverse_resolver_primary_names(pool, config.clone()).await?;
-    if summary.candidate_tuple_count > 0 || summary.failed_lookup_count > 0 {
-        primary_name::log_legacy_reverse_hydration_summary(&summary);
-    }
-    Ok(summary)
 }
 
 async fn replay_all_current_projections_when_ready(
@@ -473,113 +504,5 @@ async fn release_replay_lock(connection: &mut PoolConnection<Postgres>) -> Resul
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn ready_status() -> ProjectionReplayReadiness {
-        ProjectionReplayReadiness {
-            normalized_replay_cursor_count: 1,
-            incomplete_normalized_replay_cursor_count: 0,
-            failed_normalized_replay_cursor_count: 0,
-            active_index_build_count: 0,
-            missing_projection_index_count: 0,
-            normalized_replay_max_target_block: Some(42),
-        }
-    }
-
-    #[test]
-    fn all_current_projection_pool_size_raises_low_default() {
-        let database = all_current_projections_database_config(DatabaseConfig {
-            database_url: None,
-            max_connections: 10,
-        });
-
-        assert_eq!(database.max_connections, 64);
-    }
-
-    #[test]
-    fn all_current_projection_pool_size_preserves_higher_override() {
-        let database = all_current_projections_database_config(DatabaseConfig {
-            database_url: None,
-            max_connections: 96,
-        });
-
-        assert_eq!(database.max_connections, 96);
-    }
-
-    #[test]
-    fn projection_replay_waits_for_normalized_replay_cursor() {
-        let status = ProjectionReplayReadiness {
-            normalized_replay_cursor_count: 0,
-            ..ready_status()
-        };
-
-        assert!(!status.is_ready());
-    }
-
-    #[test]
-    fn projection_replay_waits_for_complete_normalized_replay() {
-        let status = ProjectionReplayReadiness {
-            incomplete_normalized_replay_cursor_count: 1,
-            ..ready_status()
-        };
-
-        assert!(!status.is_ready());
-    }
-
-    #[test]
-    fn projection_replay_waits_for_projection_indexes() {
-        let status = ProjectionReplayReadiness {
-            active_index_build_count: 1,
-            ..ready_status()
-        };
-        assert!(!status.is_ready());
-
-        let status = ProjectionReplayReadiness {
-            missing_projection_index_count: 1,
-            ..ready_status()
-        };
-        assert!(!status.is_ready());
-    }
-
-    #[test]
-    fn projection_replay_runs_when_normalized_replay_and_indexes_are_ready() {
-        assert!(ready_status().is_ready());
-    }
-
-    #[test]
-    fn apply_cursor_is_seeded_after_bootstrap_when_absent() {
-        assert!(should_seed_apply_cursor_after_bootstrap(false));
-        assert!(!should_seed_apply_cursor_after_bootstrap(true));
-    }
-
-    #[test]
-    fn bootstrap_target_covers_live_checkpoint_head() {
-        assert_eq!(
-            projection_bootstrap_replay_target_block(Some(10), Some(15)),
-            Some(15)
-        );
-        assert_eq!(
-            projection_bootstrap_replay_target_block(Some(15), Some(10)),
-            Some(15)
-        );
-    }
-
-    #[test]
-    fn restart_bootstrap_skip_requires_apply_cursor_and_all_current_markers() {
-        let complete_marker_count = replay::ALL_CURRENT_PROJECTION_ORDER.len() as i64;
-
-        assert!(should_skip_bootstrap_for_existing_apply_cursor(
-            true,
-            complete_marker_count
-        ));
-        assert!(!should_skip_bootstrap_for_existing_apply_cursor(
-            false,
-            complete_marker_count
-        ));
-        assert!(!should_skip_bootstrap_for_existing_apply_cursor(
-            true,
-            complete_marker_count - 1
-        ));
-    }
-}
+#[path = "automatic_projection_replay/tests.rs"]
+mod tests;

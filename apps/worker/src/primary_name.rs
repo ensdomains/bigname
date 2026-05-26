@@ -12,7 +12,9 @@ use bigname_execution::ChainRpcUrls;
 use sqlx::PgPool;
 use tracing::info;
 
-pub use hydration::PrimaryNameLegacyReverseHydrationConfig;
+pub use hydration::{
+    PrimaryNameLegacyReverseHydrationConfig, PrimaryNameLegacyReverseHydrationTrigger,
+};
 pub use projection::rebuild_primary_names_current;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -42,6 +44,13 @@ pub async fn hydrate_legacy_reverse_resolver_primary_names(
     config: PrimaryNameLegacyReverseHydrationConfig,
 ) -> Result<PrimaryNameLegacyReverseHydrationSummary> {
     hydration::hydrate_legacy_reverse_resolver_primary_names(pool, config).await
+}
+
+pub async fn load_legacy_reverse_resolver_call_triggers(
+    pool: &PgPool,
+    config: &PrimaryNameLegacyReverseHydrationConfig,
+) -> Result<Vec<PrimaryNameLegacyReverseHydrationTrigger>> {
+    hydration::load_legacy_reverse_resolver_call_triggers(pool, config).await
 }
 
 impl PrimaryNameLegacyReverseHydrationConfig {
