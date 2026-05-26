@@ -725,6 +725,69 @@ async fn keeps_resolver_edge_row_when_forward_confirmation_requires_offchain_loo
 }
 
 #[tokio::test]
+async fn treats_offchain_required_new_resolver_edge_as_non_confirmation() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let address = "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045";
+    let normalized_address = bigname_storage::normalize_evm_address(address);
+    let reverse_node = reverse_node_for_address(address)?;
+
+    insert_chain_checkpoint(database.pool(), 300).await?;
+    upsert_normalized_events(
+        database.pool(),
+        &[generic_reverse_resolver_changed_event(
+            "resolver-edge-only",
+            &reverse_node,
+            LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESS,
+            120,
+            0,
+        )],
+    )
+    .await?;
+    rebuild_primary_names_current(database.pool(), None, None, None).await?;
+
+    let client = ForwardCheckingHydrationClient {
+        outcomes_by_node: BTreeMap::from([(
+            reverse_node,
+            ReverseNameHydrationOutcome::Success("ccip-only.eth".to_owned()),
+        )]),
+        forward_errors_by_name: BTreeMap::from([(
+            "ccip-only.eth".to_owned(),
+            ForwardLookupError::PrimaryName {
+                message:
+                    "ENS primary-name RPC call failed: execution reverted (OffchainLookup required)"
+                        .to_owned(),
+                plain_execution_revert: false,
+                offchain_lookup_required: true,
+            },
+        )]),
+        ..Default::default()
+    };
+    let summary = hydrate_legacy_reverse_resolver_primary_names_with_client(
+        database.pool(),
+        &[LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESS.to_owned()],
+        &client,
+    )
+    .await?;
+    assert_eq!(summary.candidate_tuple_count, 1);
+    assert_eq!(summary.queried_tuple_count, 1);
+    assert_eq!(summary.upserted_row_count, 0);
+    assert_eq!(summary.deleted_row_count, 0);
+    assert_eq!(summary.failed_lookup_count, 0);
+
+    let skipped = load_primary_name_current_snapshot(
+        database.pool(),
+        &normalized_address,
+        ENS_NAMESPACE,
+        "60",
+    )
+    .await?;
+    assert_eq!(skipped, None);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn keeps_resolver_edge_row_when_checkpoint_is_missing() -> Result<()> {
     let database = TestDatabase::new().await?;
     let address = "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045";

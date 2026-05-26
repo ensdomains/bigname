@@ -130,7 +130,9 @@ pub(super) async fn hydrate_resolver_edge_candidates(
                     continue;
                 }
                 Err(error) => {
-                    if is_universal_resolver_non_confirmation(&error) {
+                    if is_universal_resolver_non_confirmation(&error)
+                        || is_new_row_offchain_non_confirmation(candidate, &error)
+                    {
                         delete_existing_resolver_edge_row(pool, candidate, summary).await?;
                     } else {
                         summary.failed_lookup_count += 1;
@@ -218,6 +220,17 @@ fn is_universal_resolver_non_confirmation(error: &anyhow::Error) -> bool {
         .chain()
         .filter_map(|cause| cause.downcast_ref::<OnDemandEnsPrimaryNameError>())
         .any(OnDemandEnsPrimaryNameError::is_plain_execution_revert)
+}
+
+fn is_new_row_offchain_non_confirmation(
+    candidate: &ResolverEdgeHydrationCandidate,
+    error: &anyhow::Error,
+) -> bool {
+    candidate.existing_key.is_none()
+        && error
+            .chain()
+            .filter_map(|cause| cause.downcast_ref::<OnDemandEnsPrimaryNameError>())
+            .any(OnDemandEnsPrimaryNameError::is_offchain_lookup_required)
 }
 
 fn resolver_edge_tuple(address: &str) -> ReverseClaimTuple {
