@@ -9,8 +9,8 @@ use anyhow::{Context, Result};
 use bigname_execution::ens_namehash_hex;
 use bigname_storage::{
     CanonicalityState, ENS_NAMESPACE, ETHEREUM_MAINNET_CHAIN_ID, NormalizedEvent,
-    PrimaryNameClaimStatus, default_database_url, load_primary_name_current_snapshot,
-    upsert_normalized_events,
+    PrimaryNameClaimStatus, PrimaryNameCurrentRow, PrimaryNameCurrentSnapshot,
+    default_database_url, load_primary_name_current_snapshot, upsert_normalized_events,
 };
 use futures_util::{FutureExt, future::BoxFuture};
 use serde_json::{Value, json};
@@ -219,6 +219,107 @@ impl ReverseNameHydrationClient for ForwardCheckingHydrationClient {
         }
         .boxed()
     }
+}
+
+#[tokio::test]
+async fn upserts_hydration_snapshots_in_bounded_batches() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let snapshots = (0..3)
+        .map(|index| PrimaryNameCurrentSnapshot {
+            row: PrimaryNameCurrentRow {
+                address: format!("0x{index:040x}"),
+                namespace: ENS_NAMESPACE.to_owned(),
+                coin_type: "60".to_owned(),
+                claim_status: PrimaryNameClaimStatus::Success,
+                raw_claim_name: None,
+                claim_provenance: json!({
+                    "source_family": SOURCE_FAMILY_ENS_V1_REVERSE_L1,
+                    "test_index": index,
+                }),
+            },
+            normalized_claim_name: Some(format!("batch-{index}.eth")),
+        })
+        .collect::<Vec<_>>();
+
+    let upserted_row_count =
+        upsert_hydration_snapshots_in_batches(database.pool(), &snapshots, 2).await?;
+    assert_eq!(upserted_row_count, 3);
+
+    for snapshot in &snapshots {
+        let persisted = load_primary_name_current_snapshot(
+            database.pool(),
+            &snapshot.row.address,
+            &snapshot.row.namespace,
+            &snapshot.row.coin_type,
+        )
+        .await?
+        .expect("bounded hydration upsert should persist row");
+        assert_eq!(persisted, *snapshot);
+    }
+
+    let zero_batch_error = upsert_hydration_snapshots_in_batches(database.pool(), &snapshots, 0)
+        .await
+        .expect_err("zero batch size should be rejected");
+    assert!(
+        format!("{zero_batch_error:#}")
+            .contains("legacy reverse hydration upsert batch size must be positive")
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn rerun_repairs_partial_hydration_snapshot_publish() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let snapshots = (0..3)
+        .map(|index| PrimaryNameCurrentSnapshot {
+            row: PrimaryNameCurrentRow {
+                address: format!("0x{:040x}", index + 10),
+                namespace: ENS_NAMESPACE.to_owned(),
+                coin_type: "60".to_owned(),
+                claim_status: PrimaryNameClaimStatus::Success,
+                raw_claim_name: None,
+                claim_provenance: json!({
+                    "source_family": SOURCE_FAMILY_ENS_V1_REVERSE_L1,
+                    "test_index": index,
+                }),
+            },
+            normalized_claim_name: Some(format!("repair-{index}.eth")),
+        })
+        .collect::<Vec<_>>();
+
+    let partial_count =
+        upsert_hydration_snapshots_in_batches(database.pool(), &snapshots[..2], 2).await?;
+    assert_eq!(partial_count, 2);
+    assert!(
+        load_primary_name_current_snapshot(
+            database.pool(),
+            &snapshots[2].row.address,
+            &snapshots[2].row.namespace,
+            &snapshots[2].row.coin_type,
+        )
+        .await?
+        .is_none()
+    );
+
+    let repaired_count =
+        upsert_hydration_snapshots_in_batches(database.pool(), &snapshots, 2).await?;
+    assert_eq!(repaired_count, 3);
+    for snapshot in &snapshots {
+        let persisted = load_primary_name_current_snapshot(
+            database.pool(),
+            &snapshot.row.address,
+            &snapshot.row.namespace,
+            &snapshot.row.coin_type,
+        )
+        .await?
+        .expect("rerun should repair missing hydration row");
+        assert_eq!(persisted, *snapshot);
+    }
+
+    database.cleanup().await?;
+    Ok(())
 }
 
 #[tokio::test]

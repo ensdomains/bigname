@@ -44,6 +44,7 @@ const SOURCE_FAMILY_ENS_V1_REVERSE_L1: &str = "ens_v1_reverse_l1";
 const TUPLE_SOURCE_REVERSE_CLAIM: &str = "reverse_claim";
 const TUPLE_SOURCE_RESOLVER_EDGE_FORWARD_CONFIRMED: &str = "resolver_edge_forward_confirmed";
 const DEFAULT_LEGACY_REVERSE_HYDRATION_BATCH_SIZE: usize = 250;
+const LEGACY_REVERSE_HYDRATION_UPSERT_BATCH_SIZE: usize = 1_000;
 
 #[derive(Clone, Debug)]
 pub struct PrimaryNameLegacyReverseHydrationConfig {
@@ -453,11 +454,37 @@ async fn hydrate_legacy_reverse_resolver_primary_names_with_client(
     )
     .await?;
 
-    summary.upserted_row_count =
-        bigname_storage::upsert_primary_name_current_snapshots(pool, &snapshots)
-            .await?
-            .len();
+    summary.upserted_row_count = upsert_hydration_snapshots_in_batches(
+        pool,
+        &snapshots,
+        LEGACY_REVERSE_HYDRATION_UPSERT_BATCH_SIZE,
+    )
+    .await?;
     Ok(summary)
+}
+
+async fn upsert_hydration_snapshots_in_batches(
+    pool: &PgPool,
+    snapshots: &[bigname_storage::PrimaryNameCurrentSnapshot],
+    batch_size: usize,
+) -> Result<usize> {
+    if snapshots.is_empty() {
+        return Ok(0);
+    }
+    if batch_size == 0 {
+        anyhow::bail!("legacy reverse hydration upsert batch size must be positive");
+    }
+
+    let mut upserted_row_count = 0usize;
+    for (batch_index, chunk) in snapshots.chunks(batch_size).enumerate() {
+        upserted_row_count += bigname_storage::upsert_primary_name_current_snapshots(pool, chunk)
+            .await
+            .with_context(|| {
+                format!("failed to upsert legacy reverse hydration snapshot batch {batch_index}")
+            })?
+            .len();
+    }
+    Ok(upserted_row_count)
 }
 
 fn baseline_snapshot(
