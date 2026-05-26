@@ -5,6 +5,7 @@ mod ens_resolution;
 mod ens_resolution_abi;
 mod ens_resolution_call;
 mod ens_resolution_ccip;
+mod ens_reverse_names;
 mod ens_text_records;
 mod json_helpers;
 mod persistence;
@@ -18,14 +19,19 @@ pub use bigname_storage::{
     load_raw_call_snapshots_by_block_hash,
 };
 pub use ens_primary_name::{
-    OnDemandEnsPrimaryName, OnDemandEnsPrimaryNameError, OnDemandEnsPrimaryNameErrorKind,
-    OnDemandEnsPrimaryNameRequest, OnDemandEnsPrimaryNameVerification,
-    OnDemandEnsPrimaryNameVerificationRequest, lookup_ens_reverse_primary_name,
+    EnsForwardAddressLookupRequest, OnDemandEnsPrimaryName, OnDemandEnsPrimaryNameError,
+    OnDemandEnsPrimaryNameErrorKind, OnDemandEnsPrimaryNameRequest,
+    OnDemandEnsPrimaryNameVerification, OnDemandEnsPrimaryNameVerificationRequest,
+    lookup_ens_forward_address_at_block, lookup_ens_reverse_primary_name,
     verify_ens_primary_name_forward_address,
 };
 pub use ens_resolution::{
     EnsResolutionRecord, OnDemandEnsResolutionError, OnDemandEnsResolutionErrorKind,
     OnDemandEnsResolutionRequest, execute_ens_universal_resolver_verified_resolution,
+};
+pub use ens_reverse_names::{
+    EnsReverseNameMulticallBlock, EnsReverseNameMulticallRequest, EnsReverseNameMulticallResult,
+    execute_ens_reverse_name_multicall,
 };
 pub use ens_text_records::{
     EnsTextRecordMulticallBlock, EnsTextRecordMulticallRequest, EnsTextRecordMulticallResult,

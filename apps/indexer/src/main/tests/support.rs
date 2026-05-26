@@ -618,6 +618,25 @@ impl TestDatabase {
         .context("failed to create raw_receipts table for indexer tests")?;
         sqlx::query(
             r#"
+                CREATE TABLE event_silent_resolver_call_observations (
+                    event_silent_resolver_call_observation_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                    chain_id TEXT NOT NULL,
+                    resolver_address TEXT NOT NULL,
+                    block_hash TEXT NOT NULL,
+                    block_number BIGINT NOT NULL,
+                    transaction_hash TEXT NOT NULL,
+                    transaction_index BIGINT NOT NULL,
+                    canonicality_state canonicality_state NOT NULL DEFAULT 'observed',
+                    observed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    UNIQUE (chain_id, block_hash, transaction_index)
+                )
+                "#,
+        )
+        .execute(&pool)
+        .await
+        .context("failed to create event_silent_resolver_call_observations table for indexer tests")?;
+        sqlx::query(
+            r#"
                 CREATE TABLE raw_logs (
                     raw_log_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
                     chain_id TEXT NOT NULL,
