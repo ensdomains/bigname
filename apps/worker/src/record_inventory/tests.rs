@@ -3724,6 +3724,129 @@ async fn hydrate_text_values_fills_selectorized_ensv1_public_resolver_cache() ->
 }
 
 #[tokio::test]
+async fn hydrate_text_values_skips_malformed_resolver_text_strings() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let resource_id = Uuid::from_u128(0x9919);
+    let resolver_contract_instance_id = Uuid::from_u128(0x991a);
+    let resolver_address = "0x4976fb03C32e5B8cfe2b6cCB31c09Ba78EBaBa41";
+
+    let registry_manifest_id = insert_manifest_version(
+        database.pool(),
+        SOURCE_FAMILY_ENS_V1_REGISTRY_L1,
+        "manifests/ens/ens_v1_registry_l1/v3.toml",
+    )
+    .await?;
+    let resolver_manifest_id = insert_manifest_version(
+        database.pool(),
+        SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
+        "manifests/ens/ens_v1_resolver_l1/v1.toml",
+    )
+    .await?;
+    insert_contract_instance(
+        database.pool(),
+        resolver_contract_instance_id,
+        resolver_address,
+        resolver_manifest_id,
+    )
+    .await?;
+    insert_manifest_contract_instance(
+        database.pool(),
+        resolver_manifest_id,
+        "public_resolver_4976fb03",
+        resolver_contract_instance_id,
+        resolver_address,
+    )
+    .await?;
+
+    let mut text_record = record_changed_event(
+        "malformed-token",
+        "ens:ilmarefilm.eth",
+        resource_id,
+        "text:token",
+        "text",
+        Some("token"),
+        2077,
+        0,
+    );
+    text_record.source_family = SOURCE_FAMILY_ENS_V1_RESOLVER_L1.to_owned();
+    text_record.source_manifest_id = Some(resolver_manifest_id);
+
+    seed_resources(database.pool(), &[resource_id]).await?;
+    seed_raw_blocks(
+        database.pool(),
+        &[
+            raw_block("ethereum-mainnet", "0xrec2076", 2076, 1_776_200_076),
+            raw_block("ethereum-mainnet", "0xrec2077", 2077, 1_776_200_077),
+        ],
+    )
+    .await?;
+    seed_chain_checkpoint(database.pool(), "ethereum-mainnet", "0xrec2077", 2077).await?;
+    seed_events(
+        database.pool(),
+        &[
+            resolver_changed_event(
+                "malformed-resolver",
+                "ens:ilmarefilm.eth",
+                resource_id,
+                resolver_address,
+                registry_manifest_id,
+                2076,
+                0,
+            ),
+            text_record,
+        ],
+    )
+    .await?;
+
+    rebuild_record_inventory_current(database.pool(), Some(&resource_id.to_string())).await?;
+
+    let boundary = record_version_boundary(
+        "ens:ilmarefilm.eth",
+        resource_id,
+        None,
+        None,
+        2076,
+        "0xrec2076",
+        1_776_200_076,
+        "ethereum-mainnet",
+    );
+    let before = load_record_inventory_current(database.pool(), resource_id, &boundary)
+        .await?
+        .context("record_inventory_current row before hydration must exist")?;
+
+    let summary = hydration::tests_support::hydrate_with_failed_values(
+        database.pool(),
+        Some(&resource_id.to_string()),
+        &[(
+            resolver_address,
+            "ilmarefilm.eth",
+            "token",
+            "resolver text call return data is malformed: string return data is not valid ABI string",
+        )],
+    )
+    .await?;
+    assert_eq!(
+        summary,
+        RecordInventoryTextHydrationSummary {
+            candidate_row_count: 1,
+            candidate_entry_count: 1,
+            hydrated_entry_count: 0,
+            not_found_entry_count: 0,
+            skipped_entry_count: 1,
+            failed_entry_count: 0,
+            updated_row_count: 0,
+        }
+    );
+
+    let after = load_record_inventory_current(database.pool(), resource_id, &boundary)
+        .await?
+        .context("record_inventory_current row after hydration must exist")?;
+    assert_eq!(after.entries, before.entries);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn rebuild_rejects_multicoin_addr_for_eth_only_legacy_ensv1_resolver() -> Result<()> {
     let database = TestDatabase::new().await?;
     let resource_id = Uuid::from_u128(0x9920);

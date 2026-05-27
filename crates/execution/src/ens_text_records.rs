@@ -39,7 +39,7 @@ mod abi {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EnsTextRecordMulticallRequest {
     pub resolver_address: String,
-    pub name: String,
+    pub namehash: String,
     pub text_key: String,
 }
 
@@ -165,8 +165,7 @@ fn finalize_text_multicall_results(
 
 fn multicall_call_for_text_request(request: &EnsTextRecordMulticallRequest) -> Result<abi::Call3> {
     let target = parse_address(&request.resolver_address, "resolver")?;
-    let node = namehash(&request.name)
-        .with_context(|| format!("failed to namehash ENS name {}", request.name))?;
+    let node = parse_namehash(&request.namehash)?;
     let calldata = resolver_calldata(
         &SupportedVerifiedResolutionRecordKey::Text,
         &format!("text:{}", request.text_key),
@@ -213,6 +212,14 @@ fn decode_multicall_results(return_data: &[u8]) -> Result<Vec<EnsTextRecordMulti
 
 fn parse_address(value: &str, context: &str) -> Result<Address> {
     Address::from_str(value).with_context(|| format!("failed to parse {context} address {value}"))
+}
+
+fn parse_namehash(value: &str) -> Result<[u8; 32]> {
+    let bytes = hex_to_bytes(value)
+        .with_context(|| format!("ENS text record Multicall3 namehash {value} is invalid"))?;
+    <[u8; 32]>::try_from(bytes.as_slice()).with_context(|| {
+        format!("ENS text record Multicall3 namehash {value} must contain exactly 32 bytes")
+    })
 }
 
 fn format_address(address: Address) -> String {
@@ -398,7 +405,7 @@ mod tests {
     fn encodes_text_call_targets() -> Result<()> {
         let call = multicall_call_for_text_request(&EnsTextRecordMulticallRequest {
             resolver_address: "0x4976fb03c32e5b8cfe2b6ccb31c09ba78ebaba41".to_owned(),
-            name: "taytems.eth".to_owned(),
+            namehash: ens_namehash_hex("taytems.eth")?,
             text_key: "avatar".to_owned(),
         })?;
 
@@ -412,16 +419,16 @@ mod tests {
     }
 
     #[test]
-    fn invalid_text_call_targets_fail_per_request() -> Result<()> {
+    fn invalid_text_call_namehashes_fail_per_request() -> Result<()> {
         let requests = vec![
             EnsTextRecordMulticallRequest {
                 resolver_address: "0x4976fb03c32e5b8cfe2b6ccb31c09ba78ebaba41".to_owned(),
-                name: "taytems.eth".to_owned(),
+                namehash: ens_namehash_hex("taytems.eth")?,
                 text_key: "avatar".to_owned(),
             },
             EnsTextRecordMulticallRequest {
                 resolver_address: "0x4976fb03c32e5b8cfe2b6ccb31c09ba78ebaba41".to_owned(),
-                name: "\u{278a}\u{278a}\u{278a}\u{278a}\u{278a}.eth".to_owned(),
+                namehash: "not-a-namehash".to_owned(),
                 text_key: "avatar".to_owned(),
             },
         ];
@@ -431,9 +438,12 @@ mod tests {
         assert_eq!(call_indices, vec![0]);
         assert!(partial_results[0].is_none());
         let Some(EnsTextRecordMulticallResult::Failed { message }) = &partial_results[1] else {
-            panic!("invalid ENS name must become a failed per-request result");
+            panic!("invalid ENS namehash must become a failed per-request result");
         };
-        assert!(message.contains("failed to namehash ENS name"), "{message}");
+        assert!(
+            message.contains("namehash not-a-namehash is invalid"),
+            "{message}"
+        );
         Ok(())
     }
 
@@ -458,12 +468,12 @@ mod tests {
             &[
                 EnsTextRecordMulticallRequest {
                     resolver_address: "0x4976fb03c32e5b8cfe2b6ccb31c09ba78ebaba41".to_owned(),
-                    name: "taytems.eth".to_owned(),
+                    namehash: ens_namehash_hex("taytems.eth")?,
                     text_key: "avatar".to_owned(),
                 },
                 EnsTextRecordMulticallRequest {
                     resolver_address: "0x4976fb03c32e5b8cfe2b6ccb31c09ba78ebaba41".to_owned(),
-                    name: "\u{278a}\u{278a}\u{278a}\u{278a}\u{278a}.eth".to_owned(),
+                    namehash: "0x1234".to_owned(),
                     text_key: "avatar".to_owned(),
                 },
             ],
@@ -478,9 +488,12 @@ mod tests {
             }
         );
         let EnsTextRecordMulticallResult::Failed { message } = &results[1] else {
-            panic!("invalid ENS name must stay aligned with the original request");
+            panic!("invalid ENS namehash must stay aligned with the original request");
         };
-        assert!(message.contains("failed to namehash ENS name"), "{message}");
+        assert!(
+            message.contains("namehash 0x1234 must contain exactly 32 bytes"),
+            "{message}"
+        );
 
         let request = join_request(handle).await?;
         assert_eq!(request["method"], "eth_call");

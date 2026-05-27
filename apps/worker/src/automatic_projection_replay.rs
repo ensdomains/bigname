@@ -1,3 +1,8 @@
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
+
 use anyhow::{Context, Result};
 use bigname_storage::DatabaseConfig;
 use sqlx::{PgPool, Postgres, pool::PoolConnection};
@@ -8,6 +13,8 @@ use crate::{cli::RunArgs, primary_name, projection_apply, record_inventory, repl
 
 #[path = "automatic_projection_replay/primary_hydration.rs"]
 mod primary_hydration;
+#[path = "automatic_projection_replay/primary_hydration_loop.rs"]
+mod primary_hydration_loop;
 
 const CURSOR_KIND_RAW_FACT_NORMALIZED_EVENTS: &str = "raw_fact_normalized_events";
 const ALL_CURRENT_PROJECTIONS_MIN_DATABASE_CONNECTIONS: u32 = 64;
@@ -81,15 +88,13 @@ pub(crate) async fn run_automatic_current_projection_replay(
     pool: PgPool,
     poll_interval_secs: u64,
     text_hydration_config: Option<record_inventory::RecordInventoryTextHydrationConfig>,
-    primary_hydration_config: Option<primary_name::PrimaryNameLegacyReverseHydrationConfig>,
+    mut primary_hydration_config: Option<primary_name::PrimaryNameLegacyReverseHydrationConfig>,
 ) {
     let poll_interval = Duration::from_secs(poll_interval_secs.max(1));
     let mut bootstrap_completed = false;
     let mut bootstrap_text_hydration_completed = text_hydration_config.is_none();
-    let mut bootstrap_primary_hydration_completed = primary_hydration_config.is_none();
-    let mut last_primary_hydration_trigger =
-        primary_hydration::LegacyReverseHydrationTriggerState::default();
-    let mut primary_hydration_due_after_projection_apply = false;
+    let mut primary_hydration_started = primary_hydration_config.is_none();
+    let projection_apply_generation = Arc::new(AtomicU64::new(0));
 
     loop {
         let mut progressed = false;
@@ -141,7 +146,24 @@ pub(crate) async fn run_automatic_current_projection_replay(
         }
 
         if bootstrap_completed {
-            if !bootstrap_text_hydration_completed {
+            let hydration_schedule = bootstrap_hydration_schedule(
+                bootstrap_text_hydration_completed,
+                primary_hydration_started,
+            );
+
+            if hydration_schedule.start_primary_hydration {
+                if let Some(config) = primary_hydration_config.take() {
+                    primary_hydration_loop::spawn(
+                        pool.clone(),
+                        poll_interval_secs,
+                        config,
+                        Arc::clone(&projection_apply_generation),
+                    );
+                }
+                primary_hydration_started = true;
+            }
+
+            if hydration_schedule.run_text_hydration {
                 match hydrate_record_inventory_text_values_after_bootstrap(
                     &pool,
                     text_hydration_config.as_ref(),
@@ -163,15 +185,13 @@ pub(crate) async fn run_automatic_current_projection_replay(
                 }
             }
 
-            let mut projection_apply_ready_for_primary_hydration = false;
             match projection_apply::run_once(&pool, text_hydration_config.as_ref()).await {
                 Ok(summary) => {
                     let apply_progressed = summary.made_progress();
-                    if apply_progressed && primary_hydration_config.is_some() {
-                        primary_hydration_due_after_projection_apply = true;
+                    if apply_progressed {
+                        projection_apply_generation.fetch_add(1, Ordering::AcqRel);
                     }
                     progressed |= apply_progressed;
-                    projection_apply_ready_for_primary_hydration = !apply_progressed;
                 }
                 Err(error) => {
                     warn!(
@@ -182,63 +202,27 @@ pub(crate) async fn run_automatic_current_projection_replay(
                     );
                 }
             }
-
-            if projection_apply_ready_for_primary_hydration {
-                if !bootstrap_primary_hydration_completed {
-                    match primary_hydration::hydrate_after_bootstrap(
-                        &pool,
-                        primary_hydration_config.as_ref(),
-                        &mut last_primary_hydration_trigger,
-                    )
-                    .await
-                    {
-                        Ok(summary) => {
-                            bootstrap_primary_hydration_completed =
-                                summary.failed_lookup_count == 0;
-                            progressed |=
-                                primary_hydration::bootstrap_hydration_made_progress(&summary);
-                            if bootstrap_primary_hydration_completed {
-                                primary_hydration_due_after_projection_apply = false;
-                            }
-                        }
-                        Err(error) => {
-                            warn!(
-                                service = "worker",
-                                projection = "primary_names_current",
-                                error = %format!("{error:#}"),
-                                "automatic primary_names_current legacy reverse-resolver bootstrap hydration failed"
-                            );
-                        }
-                    }
-                } else {
-                    match primary_hydration::hydrate_if_projection_changed_or_triggered(
-                        &pool,
-                        primary_hydration_config.as_ref(),
-                        &mut last_primary_hydration_trigger,
-                        &mut primary_hydration_due_after_projection_apply,
-                    )
-                    .await
-                    {
-                        Ok(summary) => {
-                            progressed |=
-                                summary.upserted_row_count > 0 || summary.deleted_row_count > 0;
-                        }
-                        Err(error) => {
-                            warn!(
-                                service = "worker",
-                                projection = "primary_names_current",
-                                error = %format!("{error:#}"),
-                                "automatic primary_names_current legacy reverse-resolver hydration failed"
-                            );
-                        }
-                    }
-                }
-            }
         }
 
         if !progressed {
             sleep(poll_interval).await;
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct BootstrapHydrationSchedule {
+    start_primary_hydration: bool,
+    run_text_hydration: bool,
+}
+
+fn bootstrap_hydration_schedule(
+    bootstrap_text_hydration_completed: bool,
+    primary_hydration_started: bool,
+) -> BootstrapHydrationSchedule {
+    BootstrapHydrationSchedule {
+        start_primary_hydration: !primary_hydration_started,
+        run_text_hydration: !bootstrap_text_hydration_completed,
     }
 }
 
