@@ -106,3 +106,21 @@ fn restart_bootstrap_skip_requires_apply_cursor_and_all_current_markers() {
         complete_marker_count - 1
     ));
 }
+
+#[test]
+fn primary_hydration_start_is_independent_from_text_hydration_completion() {
+    assert_eq!(
+        bootstrap_hydration_schedule(false, false),
+        BootstrapHydrationSchedule {
+            start_primary_hydration: true,
+            run_text_hydration: true,
+        }
+    );
+    assert_eq!(
+        bootstrap_hydration_schedule(false, true),
+        BootstrapHydrationSchedule {
+            start_primary_hydration: false,
+            run_text_hydration: true,
+        }
+    );
+}
