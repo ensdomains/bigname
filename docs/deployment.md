@@ -105,10 +105,12 @@ Deployments with a same-host Reth database can layer
 `BIGNAME_INDEXER_RETH_DATADIR_HOST` to the host Reth datadir,
 `BIGNAME_INDEXER_RETH_DATADIR_CONTAINER` to the in-container mount path, and
 `BIGNAME_INDEXER_CHAIN_RETH_DB_SOURCES` to comma-delimited `<chain>=<path>`
-entries that use that in-container path. The override clears
-`BIGNAME_INDEXER_CHAIN_RPC_URLS` for the indexer so each chain still has only
-one provider source. Reth DB sources remain operational intake sources; they do
-not replace bigname raw facts or normalized-event `raw_fact_ref` identities.
+entries that use that in-container path. `BIGNAME_INDEXER_CHAIN_RPC_URLS` may
+still provide RPC sources for other active watched chains, for example
+Base Mainnet while Ethereum Mainnet uses same-host Reth. Do not configure the
+same chain in both settings; duplicate provider sources fail at startup. Reth
+DB sources remain operational intake sources; they do not replace bigname raw
+facts or normalized-event `raw_fact_ref` identities.
 The repository Dockerfile builds `bigname-indexer` with the
 `bigname-indexer/reth-db` Cargo feature so this override keeps the Reth provider
 path available. Custom images that omit that feature fail fast when
@@ -139,6 +141,7 @@ chunk immediately for small ranges and enable broad runtime refreshes.
 ```sh
 BIGNAME_INDEXER_RETH_DATADIR_HOST=/var/lib/reth \
 BIGNAME_INDEXER_RETH_DATADIR_CONTAINER=/reth-data \
+BIGNAME_INDEXER_CHAIN_RPC_URLS=base-mainnet=http://host.docker.internal:9545 \
 BIGNAME_INDEXER_CHAIN_RETH_DB_SOURCES=ethereum-mainnet=/reth-data \
 BIGNAME_INDEXER_RETH_DB_USER=0:0 \
 BIGNAME_INDEXER_RETH_DB_NOFILE_SOFT=1048576 \
