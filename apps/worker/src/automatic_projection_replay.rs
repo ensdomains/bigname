@@ -6,6 +6,7 @@ use std::sync::{
 use anyhow::{Context, Result};
 use bigname_storage::DatabaseConfig;
 use sqlx::{PgPool, Postgres, pool::PoolConnection};
+use tokio::sync::Mutex;
 use tokio::time::{Duration, sleep};
 use tracing::{debug, info, warn};
 
@@ -95,6 +96,7 @@ pub(crate) async fn run_automatic_current_projection_replay(
     let mut bootstrap_text_hydration_completed = text_hydration_config.is_none();
     let mut primary_hydration_started = primary_hydration_config.is_none();
     let projection_apply_generation = Arc::new(AtomicU64::new(0));
+    let projection_apply_hydration_lock = Arc::new(Mutex::new(()));
 
     loop {
         let mut progressed = false;
@@ -158,6 +160,7 @@ pub(crate) async fn run_automatic_current_projection_replay(
                         poll_interval_secs,
                         config,
                         Arc::clone(&projection_apply_generation),
+                        Arc::clone(&projection_apply_hydration_lock),
                     );
                 }
                 primary_hydration_started = true;
@@ -185,6 +188,7 @@ pub(crate) async fn run_automatic_current_projection_replay(
                 }
             }
 
+            let _apply_hydration_guard = projection_apply_hydration_lock.lock().await;
             match projection_apply::run_once(&pool, text_hydration_config.as_ref()).await {
                 Ok(summary) => {
                     let apply_progressed = summary.made_progress();

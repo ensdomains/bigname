@@ -4,6 +4,7 @@ use std::sync::{
 };
 
 use sqlx::PgPool;
+use tokio::sync::Mutex;
 use tokio::time::{Duration, sleep};
 use tracing::{info, warn};
 
@@ -15,6 +16,7 @@ pub(super) fn spawn(
     poll_interval_secs: u64,
     config: primary_name::PrimaryNameLegacyReverseHydrationConfig,
     projection_apply_generation: Arc<AtomicU64>,
+    projection_apply_hydration_lock: Arc<Mutex<()>>,
 ) {
     tokio::spawn(async move {
         run(
@@ -22,6 +24,7 @@ pub(super) fn spawn(
             poll_interval_secs,
             config,
             projection_apply_generation,
+            projection_apply_hydration_lock,
         )
         .await;
     });
@@ -32,6 +35,7 @@ async fn run(
     poll_interval_secs: u64,
     config: primary_name::PrimaryNameLegacyReverseHydrationConfig,
     projection_apply_generation: Arc<AtomicU64>,
+    projection_apply_hydration_lock: Arc<Mutex<()>>,
 ) {
     let poll_interval = Duration::from_secs(poll_interval_secs.max(1));
     let mut bootstrap_completed = false;
@@ -46,8 +50,10 @@ async fn run(
 
     loop {
         let mut progressed = false;
+        let apply_hydration_guard = projection_apply_hydration_lock.lock().await;
         match projection_apply::has_primary_hydration_blocking_work(&pool).await {
             Ok(true) => {
+                drop(apply_hydration_guard);
                 sleep(poll_interval).await;
                 continue;
             }
@@ -59,6 +65,7 @@ async fn run(
                     error = %format!("{error:#}"),
                     "failed to inspect projection apply work before primary-name hydration"
                 );
+                drop(apply_hydration_guard);
                 sleep(poll_interval).await;
                 continue;
             }
@@ -116,6 +123,7 @@ async fn run(
                 }
             }
         }
+        drop(apply_hydration_guard);
 
         if !progressed {
             sleep(poll_interval).await;
