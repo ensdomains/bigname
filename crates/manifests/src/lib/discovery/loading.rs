@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result};
-use sqlx::{PgPool, Row};
+use sqlx::{PgPool, Row, postgres::PgConnection};
 
 use super::admission::DiscoveryAdmissionState;
 use super::provenance::TRANSITIVE_DISCOVERY_EDGE_KIND;
@@ -21,18 +21,22 @@ struct DiscoveryAdmissionScope {
 }
 
 pub async fn load_discovery_admission_state(pool: &PgPool) -> Result<DiscoveryAdmissionState> {
-    load_discovery_admission_state_inner(pool, None, None).await
+    let mut connection = pool
+        .acquire()
+        .await
+        .context("failed to acquire connection for discovery admission state loading")?;
+    load_discovery_admission_state_inner(&mut *connection, None, None).await
 }
 
 pub(super) async fn load_discovery_admission_state_with_excluded_source(
-    pool: &PgPool,
+    executor: &mut PgConnection,
     excluded_discovery_source: Option<&str>,
 ) -> Result<DiscoveryAdmissionState> {
-    load_discovery_admission_state_inner(pool, excluded_discovery_source, None).await
+    load_discovery_admission_state_inner(executor, excluded_discovery_source, None).await
 }
 
 pub(super) async fn load_scoped_discovery_admission_state_with_excluded_source(
-    pool: &PgPool,
+    executor: &mut PgConnection,
     excluded_discovery_source: Option<&str>,
     observations: &[DiscoveryObservation],
 ) -> Result<DiscoveryAdmissionState> {
@@ -54,7 +58,7 @@ pub(super) async fn load_scoped_discovery_admission_state_with_excluded_source(
         }));
 
     load_discovery_admission_state_inner(
-        pool,
+        executor,
         excluded_discovery_source,
         Some(DiscoveryAdmissionScope {
             active_contract_chains,
@@ -67,7 +71,7 @@ pub(super) async fn load_scoped_discovery_admission_state_with_excluded_source(
 }
 
 async fn load_discovery_admission_state_inner(
-    pool: &PgPool,
+    executor: &mut PgConnection,
     excluded_discovery_source: Option<&str>,
     scope: Option<DiscoveryAdmissionScope>,
 ) -> Result<DiscoveryAdmissionState> {
@@ -91,7 +95,7 @@ async fn load_discovery_admission_state_inner(
     let active_manifest_count = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*)::BIGINT FROM manifest_versions WHERE rollout_status = 'active'",
     )
-    .fetch_one(pool)
+    .fetch_one(&mut *executor)
     .await
     .context("failed to count active manifest versions")? as usize;
 
@@ -107,7 +111,7 @@ async fn load_discovery_admission_state_inner(
           AND mci.declaration_kind = 'root'
         "#,
     )
-    .fetch_all(pool)
+    .fetch_all(&mut *executor)
     .await
     .context("failed to load active manifest roots")?;
 
@@ -123,7 +127,7 @@ async fn load_discovery_admission_state_inner(
           AND mci.declaration_kind = 'contract'
         "#,
     )
-    .fetch_all(pool)
+    .fetch_all(&mut *executor)
     .await
     .context("failed to load active manifest contracts")?;
 
@@ -162,7 +166,7 @@ async fn load_discovery_admission_state_inner(
         .bind(TRANSITIVE_DISCOVERY_EDGE_KIND)
         .bind(&active_contract_scope_chains)
         .bind(&active_contract_scope_addresses)
-        .fetch_all(pool)
+        .fetch_all(&mut *executor)
         .await
     } else {
         sqlx::query(
@@ -190,7 +194,7 @@ async fn load_discovery_admission_state_inner(
         .bind(PROPAGATED_ROLE_PROVENANCE_FIELD)
         .bind(excluded_discovery_source)
         .bind(TRANSITIVE_DISCOVERY_EDGE_KIND)
-        .fetch_all(pool)
+        .fetch_all(&mut *executor)
         .await
     }
     .context("failed to load active transitive discovery parents")?;
@@ -203,7 +207,7 @@ async fn load_discovery_admission_state_inner(
         WHERE mv.rollout_status = 'active'
         "#,
     )
-    .fetch_all(pool)
+    .fetch_all(&mut *executor)
     .await
     .context("failed to load active discovery rules")?;
 
@@ -224,7 +228,7 @@ async fn load_discovery_admission_state_inner(
         )
         .bind(&known_address_scope_chains)
         .bind(&known_address_scope_addresses)
-        .fetch_all(pool)
+        .fetch_all(&mut *executor)
         .await
     } else {
         sqlx::query(
@@ -234,7 +238,7 @@ async fn load_discovery_admission_state_inner(
             ORDER BY chain_id, address, (deactivated_at IS NULL) DESC, admitted_at DESC
             "#,
         )
-        .fetch_all(pool)
+        .fetch_all(&mut *executor)
         .await
     }
     .context("failed to load known contract-instance addresses")?;

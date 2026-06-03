@@ -10,8 +10,8 @@ use sqlx::{PgPool, types::Uuid};
 
 use super::admission::DiscoveryAdmissionState;
 use super::loading::{
-    load_discovery_admission_state_with_excluded_source,
-    load_scoped_discovery_admission_state_with_excluded_source,
+    load_discovery_admission_state_with_excluded_source as load_admission_state,
+    load_scoped_discovery_admission_state_with_excluded_source as load_scoped_admission_state,
 };
 use super::provenance::{
     discovery_edge_propagates_role, discovery_edge_provenance, is_zero_address, observation_key,
@@ -147,7 +147,7 @@ pub async fn reconcile_discovery_observations(
     lock_discovery_reconciliation(transaction.as_mut(), discovery_source).await?;
 
     let admission_state =
-        load_discovery_admission_state_with_excluded_source(pool, Some(discovery_source)).await?;
+        load_admission_state(transaction.as_mut(), Some(discovery_source)).await?;
     let direct_terminal_states_by_key = observation_terminal_states(observations)?;
     let observations_by_key = observations
         .iter()
@@ -273,12 +273,9 @@ pub async fn reconcile_scoped_discovery_observations(
         );
     }
 
-    let admission_state = load_scoped_discovery_admission_state_with_excluded_source(
-        pool,
-        Some(discovery_source),
-        observations,
-    )
-    .await?;
+    let admission_state =
+        load_scoped_admission_state(transaction.as_mut(), Some(discovery_source), observations)
+            .await?;
     let direct_terminal_states_by_key = observation_terminal_states(observations)?;
     let observations_by_key = observations
         .iter()

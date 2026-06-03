@@ -80,7 +80,7 @@ justification = "Phase 7 allowlist for an oversized production file; future chan
 
 [[files]]
 path = "crates/manifests/src/lib/discovery/reconciliation.rs"
-loc = 647
+loc = 644
 justification = "Phase 7 allowlist for an oversized production file; future changes should split or shrink it."
 
 [[files]]

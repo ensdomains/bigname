@@ -20,7 +20,9 @@ pub(crate) async fn fill_log_payloads_from_validation_provider(
     let mut provider_logs_by_identity = BTreeMap::<LogIdentity, ProviderLog>::new();
     for validation_filter in &validation_filters {
         let filter_blocks = resolved_blocks_for_filter(resolved_blocks, validation_filter);
-        if filter_blocks.is_empty() || validation_filter.addresses.is_empty() {
+        if filter_blocks.is_empty()
+            || (validation_filter.addresses.is_empty() && validation_filter.topic0s.is_empty())
+        {
             continue;
         }
         let provider_logs_by_block = if validation_filter.topic0s.is_empty() {
@@ -294,6 +296,25 @@ mod tests {
         assert_eq!(filled[&10][0].data, "0x1234");
     }
 
+    #[tokio::test]
+    async fn scan_all_topic_validation_fetches_provider_payload_without_addresses() {
+        let provider = LogProvider::new(vec![provider_log("0x1234")]);
+        let mut coinbase_logs = BTreeMap::new();
+        coinbase_logs.insert(10, vec![provider_log("0x")]);
+
+        let filled = fill_log_payloads_from_validation_provider(
+            &provider,
+            &resolved_blocks(),
+            coinbase_logs,
+            &[scan_all_validation_filter()],
+            CoinbaseSqlValidationMode::Full,
+        )
+        .await
+        .expect("scan-all topic validation should fetch provider payloads without address filters");
+
+        assert_eq!(filled[&10][0].data, "0x1234");
+    }
+
     fn resolved_blocks() -> Vec<ProviderResolvedBlock> {
         vec![ProviderResolvedBlock {
             block_number: 10,
@@ -306,6 +327,15 @@ mod tests {
             from_block: 10,
             to_block: 10,
             addresses: vec![ADDRESS.to_owned()],
+            topic0s: vec![TOPIC0.to_owned()],
+        }
+    }
+
+    fn scan_all_validation_filter() -> HistoricalLogValidationFilter {
+        HistoricalLogValidationFilter {
+            from_block: 10,
+            to_block: 10,
+            addresses: Vec::new(),
             topic0s: vec![TOPIC0.to_owned()],
         }
     }
@@ -360,7 +390,10 @@ mod tests {
                 .filter_map(|(block_number, logs)| {
                     let logs = logs
                         .iter()
-                        .filter(|log| addresses.contains(&log.address.to_ascii_lowercase()))
+                        .filter(|log| {
+                            addresses.is_empty()
+                                || addresses.contains(&log.address.to_ascii_lowercase())
+                        })
                         .filter(|log| {
                             topic0s.is_empty()
                                 || log.topics.first().is_some_and(|topic0| {
