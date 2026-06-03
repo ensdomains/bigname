@@ -535,7 +535,7 @@ async fn run_coinbase_sql_backfill_window(
     Ok(outcome)
 }
 
-fn effective_coinbase_sql_adapter_sync_mode(
+pub(crate) fn effective_coinbase_sql_adapter_sync_mode(
     source_plan: &WatchedSourceSelectorPlan,
     topic_plan: &BackfillTopicPlan,
     requested_mode: crate::backfill::BackfillAdapterSyncMode,

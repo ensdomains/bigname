@@ -14,7 +14,7 @@ use super::{
     coinbase_sql::load_backfill_topic_plan,
     reservation_execution::{
         backfill_lease_duration_secs, create_coinbase_sql_backfill_job_with_ranges,
-        create_hash_pinned_backfill_job_with_ranges,
+        create_hash_pinned_backfill_job_with_ranges, effective_coinbase_sql_adapter_sync_mode,
         ensure_coinbase_sql_registry_range_start_is_replay_safe,
         refreshed_backfill_lease_expires_at, run_reserved_coinbase_sql_backfill_range,
         run_reserved_hash_pinned_backfill_range, validate_hash_pinned_chunk_blocks,
@@ -179,9 +179,10 @@ pub(crate) async fn run_resumable_coinbase_sql_backfill_job_concurrently<
     if worker_count == 0 {
         bail!("Coinbase SQL backfill worker count must be positive");
     }
-    config.adapter_sync_mode = config.adapter_sync_mode.hash_pinned_backfill_mode();
     coinbase_config.validate()?;
     let topic_plan = load_backfill_topic_plan(pool, source_plan).await?;
+    config.adapter_sync_mode =
+        effective_concurrent_coinbase_sql_adapter_sync_mode(source_plan, &topic_plan, &config);
     ensure_coinbase_sql_registry_range_start_is_replay_safe(
         source_plan,
         &topic_plan,
@@ -331,4 +332,98 @@ pub(crate) async fn run_resumable_coinbase_sql_backfill_job_concurrently<
         record.job.backfill_job_id,
         job.status.as_str()
     );
+}
+
+fn effective_concurrent_coinbase_sql_adapter_sync_mode(
+    source_plan: &WatchedSourceSelectorPlan,
+    topic_plan: &BackfillTopicPlan,
+    config: &BackfillJobRunConfig,
+) -> super::BackfillAdapterSyncMode {
+    effective_coinbase_sql_adapter_sync_mode(source_plan, topic_plan, config.adapter_sync_mode)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use bigname_manifests::{
+        WatchedBackfillTarget, WatchedChainPlan, WatchedSourceSelectorKind,
+        WatchedSourceSelectorPlan,
+    };
+    use sqlx::types::{Uuid, time::OffsetDateTime};
+
+    use super::*;
+    use crate::{backfill::BackfillAdapterSyncMode, reconciliation::HeaderAuditMode};
+
+    fn source_plan_for_family(source_family: &str) -> WatchedSourceSelectorPlan {
+        let address = "0x1111111111111111111111111111111111111111";
+        WatchedSourceSelectorPlan {
+            chain: "base-mainnet".to_owned(),
+            selector_kind: WatchedSourceSelectorKind::WholeActiveWatchedChain,
+            source_family: Some(source_family.to_owned()),
+            requested_watched_targets: Vec::new(),
+            selected_targets: vec![WatchedBackfillTarget {
+                source_family: source_family.to_owned(),
+                contract_instance_id: Uuid::from_u128(1),
+                address: address.to_owned(),
+                effective_from_block: 1,
+                effective_to_block: 8_192,
+            }],
+            watched_chain_plan: WatchedChainPlan {
+                chain: "base-mainnet".to_owned(),
+                addresses: vec![address.to_owned()],
+                manifest_root_entry_count: 0,
+                manifest_contract_entry_count: 1,
+                discovery_edge_entry_count: 0,
+            },
+        }
+    }
+
+    fn registry_topic_plan() -> BackfillTopicPlan {
+        BackfillTopicPlan::new(
+            BTreeMap::from([(
+                "basenames_base_registry".to_owned(),
+                vec![
+                    "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_owned(),
+                ],
+            )]),
+            BTreeMap::from([(
+                "basenames_base_registry".to_owned(),
+                vec!["NewOwner(bytes32,bytes32,address)".to_owned()],
+            )]),
+            BTreeSet::new(),
+        )
+    }
+
+    fn backfill_config(adapter_sync_mode: BackfillAdapterSyncMode) -> BackfillJobRunConfig {
+        BackfillJobRunConfig {
+            deployment_profile: "test".to_owned(),
+            idempotency_key: "test".to_owned(),
+            range: super::super::BackfillBlockRange {
+                from_block: 1,
+                to_block: 8_192,
+            },
+            lease_owner: "test".to_owned(),
+            lease_token: "test".to_owned(),
+            lease_expires_at: OffsetDateTime::UNIX_EPOCH,
+            hash_pinned_chunk_blocks: 1_024,
+            adapter_sync_mode,
+            header_audit_mode: HeaderAuditMode::Minimal,
+        }
+    }
+
+    #[test]
+    fn concurrent_coinbase_sql_forces_basenames_registry_raw_only_adapter_sync() {
+        let mut source_plan = source_plan_for_family("basenames_base_registry");
+        source_plan.selector_kind = WatchedSourceSelectorKind::SourceFamily;
+
+        assert_eq!(
+            effective_concurrent_coinbase_sql_adapter_sync_mode(
+                &source_plan,
+                &registry_topic_plan(),
+                &backfill_config(BackfillAdapterSyncMode::Inline),
+            ),
+            BackfillAdapterSyncMode::RawOnly
+        );
+    }
 }

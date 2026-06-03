@@ -32,6 +32,7 @@ use super::{
 };
 
 pub(crate) use coinbase_sql_execution::{
+    effective_coinbase_sql_adapter_sync_mode,
     ensure_coinbase_sql_registry_range_start_is_replay_safe,
     run_reserved_coinbase_sql_backfill_range, run_resumable_coinbase_sql_backfill_job,
 };

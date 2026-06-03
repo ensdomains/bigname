@@ -227,6 +227,24 @@ exact logs from those block bundles, and then uses the same validation provider
 for canonicality evidence, selected transaction/receipt fills, and
 selected-log-emitter code observations.
 
+Coinbase SQL backfills can split a finite range into concurrent range workers
+with `BIGNAME_INDEXER_COINBASE_SQL_WORKERS`; the default `1` keeps one worker.
+`BIGNAME_INDEXER_COINBASE_SQL_RANGE_BLOCKS` chooses the fixed range size used by
+that concurrent mode. The default `0` keeps the normal adaptive resumable range
+planner. Basenames authority Coinbase SQL backfills remain raw-only in both the
+single-worker and concurrent paths so ordered normalized-event replay owns
+authority closure materialization.
+
+JSON-RPC validation providers can tune batch shape with
+`BIGNAME_INDEXER_JSON_RPC_BATCH_ITEM_LIMIT` and
+`BIGNAME_INDEXER_JSON_RPC_BATCH_CONCURRENCY`. The defaults favor conservative
+provider compatibility; higher values reduce round trips but can trip provider
+payload or rate limits. Receipt-heavy backfills can configure
+`BIGNAME_INDEXER_CHAIN_RPC_RECEIPT_FALLBACK_URLS` as comma-separated
+`<chain>=<url>` entries. The provider uses those URLs only for transaction
+receipt fallback work; block hashes, headers, canonicality, and primary payload
+validation still come from the chain's configured primary validation provider.
+
 Automatic normalized-event replay catch-up keeps its block cursor, but also caps
 each replay chunk with `BIGNAME_INDEXER_NORMALIZED_REPLAY_CATCHUP_MAX_LOGS_PER_CHUNK`
 so sparse eras can move in large block jumps while dense spans are bounded by
