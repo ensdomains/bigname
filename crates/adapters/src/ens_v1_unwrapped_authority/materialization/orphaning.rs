@@ -102,11 +102,15 @@ pub(super) async fn orphan_weaker_same_start_surface_bindings(
     let mut surface_binding_ids = Vec::with_capacity(candidates.len());
     let mut logical_name_ids = Vec::with_capacity(candidates.len());
     let mut resource_ids = Vec::with_capacity(candidates.len());
+    let mut authority_keys = Vec::with_capacity(candidates.len());
+    let mut active_from_epochs = Vec::with_capacity(candidates.len());
     let mut active_froms = Vec::with_capacity(candidates.len());
     for candidate in candidates.values() {
         surface_binding_ids.push(candidate.surface_binding_id);
         logical_name_ids.push(candidate.logical_name_id.clone());
         resource_ids.push(candidate.resource_id);
+        authority_keys.push(candidate.authority_key.clone());
+        active_from_epochs.push(candidate.active_from_epoch);
         active_froms.push(candidate.active_from);
     }
 
@@ -116,6 +120,8 @@ pub(super) async fn orphan_weaker_same_start_surface_bindings(
             surface_binding_id,
             logical_name_id,
             resource_id,
+            authority_key,
+            active_from_epoch,
             active_from
         ) AS (
             SELECT *
@@ -123,7 +129,9 @@ pub(super) async fn orphan_weaker_same_start_surface_bindings(
                 $1::UUID[],
                 $2::TEXT[],
                 $3::UUID[],
-                $4::TIMESTAMPTZ[]
+                $4::TEXT[],
+                $5::BIGINT[],
+                $6::TIMESTAMPTZ[]
             )
         )
         UPDATE surface_bindings
@@ -136,12 +144,25 @@ pub(super) async fn orphan_weaker_same_start_surface_bindings(
           AND surface_bindings.resource_id = candidate.resource_id
           AND surface_bindings.active_from = candidate.active_from
           AND surface_bindings.canonicality_state IN ('canonical', 'safe', 'finalized')
+          AND NOT EXISTS (
+              SELECT 1
+              FROM normalized_events
+              WHERE normalized_events.logical_name_id = candidate.logical_name_id
+                AND normalized_events.resource_id = candidate.resource_id
+                AND normalized_events.event_kind = 'SurfaceBound'
+                AND normalized_events.after_state->>'authority_key'
+                    IS NOT DISTINCT FROM candidate.authority_key
+                AND normalized_events.after_state->>'active_from' = candidate.active_from_epoch::TEXT
+                AND normalized_events.canonicality_state IN ('canonical', 'safe', 'finalized')
+          )
         RETURNING surface_bindings.surface_binding_id
         "#,
     )
     .bind(&surface_binding_ids)
     .bind(&logical_name_ids)
     .bind(&resource_ids)
+    .bind(&authority_keys)
+    .bind(&active_from_epochs)
     .bind(&active_froms)
     .fetch_all(pool)
     .await
@@ -228,6 +249,8 @@ pub(super) struct WeakerSameStartSurfaceBindingCandidate {
     pub(super) surface_binding_id: Uuid,
     pub(super) resource_id: Uuid,
     pub(super) logical_name_id: String,
+    pub(super) authority_key: Option<String>,
+    pub(super) active_from_epoch: i64,
     pub(super) active_from: OffsetDateTime,
 }
 
@@ -269,6 +292,12 @@ pub(super) fn weaker_same_start_surface_binding_candidates(
                     surface_binding_id: existing.surface_binding_id,
                     resource_id: existing.resource_id,
                     logical_name_id: existing.logical_name_id.clone(),
+                    authority_key: existing
+                        .provenance
+                        .get("authority_key")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned),
+                    active_from_epoch: existing.active_from.unix_timestamp(),
                     active_from: existing.active_from,
                 },
             );

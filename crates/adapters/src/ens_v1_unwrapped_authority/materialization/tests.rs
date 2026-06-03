@@ -1,4 +1,85 @@
 use super::*;
+use std::{
+    str::FromStr,
+    sync::atomic::{AtomicU64, Ordering},
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+use anyhow::Context;
+use bigname_storage::{
+    NormalizedEvent, default_database_url, upsert_normalized_events,
+    upsert_resources_without_snapshots, upsert_surface_bindings_without_snapshots,
+};
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+
+static NEXT_MATERIALIZATION_TEST_ID: AtomicU64 = AtomicU64::new(0);
+
+struct MaterializationTestDatabase {
+    admin_pool: PgPool,
+    pool: PgPool,
+    database_name: String,
+}
+
+impl MaterializationTestDatabase {
+    async fn new() -> Result<Self> {
+        let database_url = std::env::var("BIGNAME_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| default_database_url().to_owned());
+        let base_options = PgConnectOptions::from_str(&database_url)
+            .context("failed to parse database URL for materialization tests")?;
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .context("system clock is before unix epoch")?
+            .as_nanos();
+        let sequence = NEXT_MATERIALIZATION_TEST_ID.fetch_add(1, Ordering::Relaxed);
+        let database_name = format!("bn_ad_mat_{}_{}_{}", std::process::id(), sequence, unique);
+
+        let admin_pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with(base_options.clone().database("postgres"))
+            .await
+            .context("failed to connect admin pool for materialization tests")?;
+
+        sqlx::query(&format!(r#"CREATE DATABASE "{}""#, database_name))
+            .execute(&admin_pool)
+            .await
+            .with_context(|| format!("failed to create test database {database_name}"))?;
+
+        let pool = PgPoolOptions::new()
+            .max_connections(5)
+            .connect_with(base_options.database(&database_name))
+            .await
+            .context("failed to connect test pool for materialization tests")?;
+
+        bigname_storage::MIGRATOR
+            .run(&pool)
+            .await
+            .context("failed to apply migrations for materialization tests")?;
+
+        Ok(Self {
+            admin_pool,
+            pool,
+            database_name,
+        })
+    }
+
+    fn pool(&self) -> &PgPool {
+        &self.pool
+    }
+
+    async fn cleanup(self) -> Result<()> {
+        self.pool.close().await;
+        sqlx::query(&format!(
+            r#"DROP DATABASE IF EXISTS "{}" WITH (FORCE)"#,
+            self.database_name
+        ))
+        .execute(&self.admin_pool)
+        .await
+        .with_context(|| format!("failed to drop test database {}", self.database_name))?;
+        self.admin_pool.close().await;
+        Ok(())
+    }
+}
 
 #[test]
 fn coalesce_name_surfaces_for_upsert_keeps_first_identity() {
@@ -348,6 +429,117 @@ fn weaker_same_start_candidates_include_lower_precedence_existing_binding() {
     );
 }
 
+#[tokio::test]
+async fn weaker_same_start_orphaning_preserves_event_backed_binding() -> Result<()> {
+    let _permit = crate::acquire_test_db_permit().await;
+    let database = MaterializationTestDatabase::new().await?;
+
+    let incoming_backed = adapter_binding_with_authority(
+        Uuid::from_u128(0x1000),
+        "ens:backed.eth",
+        1_695_230_399,
+        "registrar",
+        "registrar:ethereum-mainnet:backed",
+        "0x1000100010001000100010001000100010001000100010001000100010001000",
+    );
+    let incoming_unbacked = adapter_binding_with_authority(
+        Uuid::from_u128(0x1001),
+        "ens:unbacked.eth",
+        1_695_230_399,
+        "registrar",
+        "registrar:ethereum-mainnet:unbacked",
+        "0x1001100110011001100110011001100110011001100110011001100110011001",
+    );
+    let event_backed = adapter_binding_with_authority(
+        Uuid::from_u128(0x2000),
+        "ens:backed.eth",
+        1_695_230_399,
+        "registry_only",
+        "registry-only:ethereum-mainnet:backed",
+        "0x2000200020002000200020002000200020002000200020002000200020002000",
+    );
+    let unbacked = adapter_binding_with_authority(
+        Uuid::from_u128(0x2001),
+        "ens:unbacked.eth",
+        1_695_230_399,
+        "registry_only",
+        "registry-only:ethereum-mainnet:unbacked",
+        "0x2001200120012001200120012001200120012001200120012001200120012001",
+    );
+
+    upsert_name_surfaces_without_snapshots(
+        database.pool(),
+        &[
+            test_surface(
+                "ens:backed.eth",
+                "backed.eth",
+                "0x3000300030003000300030003000300030003000300030003000300030003000",
+            ),
+            test_surface(
+                "ens:unbacked.eth",
+                "unbacked.eth",
+                "0x3001300130013001300130013001300130013001300130013001300130013001",
+            ),
+        ],
+    )
+    .await?;
+    upsert_resources_without_snapshots(
+        database.pool(),
+        &[
+            test_resource(
+                event_backed.resource_id,
+                "0x4000400040004000400040004000400040004000400040004000400040004000",
+            ),
+            test_resource(
+                unbacked.resource_id,
+                "0x4001400140014001400140014001400140014001400140014001400140014001",
+            ),
+        ],
+    )
+    .await?;
+    upsert_surface_bindings_without_snapshots(
+        database.pool(),
+        &[event_backed.clone(), unbacked.clone()],
+    )
+    .await?;
+    upsert_normalized_events(
+        database.pool(),
+        &[surface_bound_event(
+            "event-backed-surface-bound",
+            &event_backed,
+            "registry-only:ethereum-mainnet:backed",
+        )],
+    )
+    .await?;
+
+    let mut existing = vec![event_backed.clone(), unbacked.clone()];
+    let orphaned_count = orphan_weaker_same_start_surface_bindings(
+        database.pool(),
+        &[incoming_backed, incoming_unbacked],
+        &mut existing,
+    )
+    .await?;
+
+    assert_eq!(orphaned_count, 1);
+    assert_eq!(
+        existing
+            .iter()
+            .map(|binding| binding.surface_binding_id)
+            .collect::<Vec<_>>(),
+        vec![event_backed.surface_binding_id]
+    );
+    assert_eq!(
+        surface_binding_canonicality(database.pool(), event_backed.surface_binding_id).await?,
+        "canonical"
+    );
+    assert_eq!(
+        surface_binding_canonicality(database.pool(), unbacked.surface_binding_id).await?,
+        "orphaned"
+    );
+
+    database.cleanup().await
+}
+
 #[test]
 fn normalize_surface_bindings_tightens_duplicate_active_to() -> Result<()> {
     let earlier_close =
@@ -424,6 +616,18 @@ fn test_binding(
     }
 }
 
+fn test_resource(resource_id: Uuid, block_hash: &str) -> Resource {
+    Resource {
+        resource_id,
+        token_lineage_id: None,
+        chain_id: "ethereum-mainnet".to_owned(),
+        block_hash: block_hash.to_owned(),
+        block_number: 1,
+        provenance: json!({ "source": "materialization-test" }),
+        canonicality_state: CanonicalityState::Canonical,
+    }
+}
+
 fn test_binding_with_authority_kind(
     surface_binding_id: Uuid,
     logical_name_id: &str,
@@ -434,4 +638,70 @@ fn test_binding_with_authority_kind(
     let mut binding = test_binding(surface_binding_id, logical_name_id, active_from, active_to);
     binding.provenance = json!({ "authority_kind": authority_kind });
     binding
+}
+
+fn adapter_binding_with_authority(
+    surface_binding_id: Uuid,
+    logical_name_id: &str,
+    active_from: i64,
+    authority_kind: &str,
+    authority_key: &str,
+    block_hash: &str,
+) -> SurfaceBinding {
+    let mut binding = test_binding_with_authority_kind(
+        surface_binding_id,
+        logical_name_id,
+        active_from,
+        None,
+        authority_kind,
+    );
+    binding.block_hash = block_hash.to_owned();
+    binding.provenance = json!({
+        "adapter": DERIVATION_KIND_ENS_V1_UNWRAPPED_AUTHORITY,
+        "authority_kind": authority_kind,
+        "authority_key": authority_key
+    });
+    binding
+}
+
+fn surface_bound_event(
+    event_identity: &str,
+    binding: &SurfaceBinding,
+    authority_key: &str,
+) -> NormalizedEvent {
+    NormalizedEvent {
+        event_identity: event_identity.to_owned(),
+        namespace: "ens".to_owned(),
+        logical_name_id: Some(binding.logical_name_id.clone()),
+        resource_id: Some(binding.resource_id),
+        event_kind: EVENT_KIND_SURFACE_BOUND.to_owned(),
+        source_family: SOURCE_FAMILY_ENS_V1_REGISTRY_L1.to_owned(),
+        manifest_version: 1,
+        source_manifest_id: None,
+        chain_id: Some(binding.chain_id.clone()),
+        block_number: Some(binding.block_number),
+        block_hash: Some(binding.block_hash.clone()),
+        transaction_hash: Some(
+            "0xtxsurfacebound000000000000000000000000000000000000000000000000".to_owned(),
+        ),
+        log_index: Some(0),
+        raw_fact_ref: json!({}),
+        derivation_kind: DERIVATION_KIND_ENS_V1_UNWRAPPED_AUTHORITY.to_owned(),
+        canonicality_state: CanonicalityState::Canonical,
+        before_state: json!({}),
+        after_state: json!({
+            "authority_key": authority_key,
+            "active_from": binding.active_from.unix_timestamp()
+        }),
+    }
+}
+
+async fn surface_binding_canonicality(pool: &PgPool, surface_binding_id: Uuid) -> Result<String> {
+    sqlx::query_scalar::<_, String>(
+        "SELECT canonicality_state::TEXT FROM surface_bindings WHERE surface_binding_id = $1",
+    )
+    .bind(surface_binding_id)
+    .fetch_one(pool)
+    .await
+    .context("failed to load surface binding canonicality")
 }
