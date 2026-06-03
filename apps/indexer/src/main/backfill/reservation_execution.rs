@@ -231,21 +231,19 @@ pub(crate) fn coinbase_sql_backfill_job_source_identity_payload(
         "coinbase_sql_topic_plan".to_owned(),
         topic_plan.source_identity_payload()?,
     );
-    if coinbase_sql_uses_basenames_registry_scan_all(source_plan, topic_plan) {
-        payload
-            .as_object_mut()
-            .context("backfill source identity payload must be an object")?
-            .remove("source_identity_hash");
-        let source_identity_hash = keccak256_json_digest(&payload)
-            .context("failed to digest Coinbase SQL registry scan-all source identity")?;
-        payload
-            .as_object_mut()
-            .context("backfill source identity payload must be an object")?
-            .insert(
-                "source_identity_hash".to_owned(),
-                Value::String(source_identity_hash),
-            );
-    }
+    payload
+        .as_object_mut()
+        .context("backfill source identity payload must be an object")?
+        .remove("source_identity_hash");
+    let source_identity_hash =
+        keccak256_json_digest(&payload).context("failed to digest Coinbase SQL source identity")?;
+    payload
+        .as_object_mut()
+        .context("backfill source identity payload must be an object")?
+        .insert(
+            "source_identity_hash".to_owned(),
+            Value::String(source_identity_hash),
+        );
 
     Ok(payload)
 }

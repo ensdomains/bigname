@@ -390,8 +390,7 @@ pub(super) async fn count_current_binding_candidate_pairs(
 ) -> Result<i64> {
     sqlx::query_scalar(&format!(
         r#"
-        SELECT COUNT(*)::BIGINT
-        FROM (
+        WITH candidate_pairs AS (
             SELECT DISTINCT
                 ne.logical_name_id,
                 ne.resource_id
@@ -404,8 +403,56 @@ pub(super) async fn count_current_binding_candidate_pairs(
               AND ne.after_state->>'resolver' <> ''
               AND LOWER(ne.after_state->>'resolver') = $3
               AND ne.canonicality_state {CANONICAL_STATE_FILTER}
+        ),
+        current_bindings AS (
+            SELECT
+                sb.logical_name_id,
+                sb.resource_id
+            FROM surface_bindings sb
+            INNER JOIN candidate_pairs candidate
+              ON candidate.logical_name_id = sb.logical_name_id
+             AND candidate.resource_id = sb.resource_id
+            INNER JOIN name_surfaces ns
+              ON ns.logical_name_id = sb.logical_name_id
+             AND ns.canonicality_state {CANONICAL_STATE_FILTER}
+            WHERE sb.active_to IS NULL
+              AND sb.canonicality_state {CANONICAL_STATE_FILTER}
+        ),
+        latest_resolver_events AS (
+            SELECT
+                latest.logical_name_id,
+                latest.resource_id,
+                latest.resolver_address
+            FROM candidate_pairs candidate
+            CROSS JOIN LATERAL (
+                SELECT
+                    ne.logical_name_id,
+                    ne.resource_id,
+                    LOWER(ne.after_state->>'resolver') AS resolver_address
+                FROM normalized_events ne
+                WHERE ne.event_kind = $1
+                  AND ne.logical_name_id = candidate.logical_name_id
+                  AND ne.resource_id = candidate.resource_id
+                  AND ne.chain_id = $2
+                  AND ne.canonicality_state {CANONICAL_STATE_FILTER}
+                ORDER BY
+                    ne.block_number DESC NULLS LAST,
+                    ne.log_index DESC NULLS LAST,
+                    ne.normalized_event_id DESC
+                LIMIT 1
+            ) latest
+            WHERE latest.resolver_address = $3
+        )
+        SELECT COUNT(*)::BIGINT
+        FROM (
+            SELECT 1
+            FROM current_bindings cb
+            INNER JOIN latest_resolver_events lre
+              ON lre.logical_name_id = cb.logical_name_id
+             AND lre.resource_id = cb.resource_id
+            WHERE lre.resolver_address = $3
             LIMIT $4
-        ) candidate_pairs
+        ) current_pairs
         "#
     ))
     .bind(EVENT_KIND_RESOLVER_CHANGED)

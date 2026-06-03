@@ -15,8 +15,12 @@ use super::{
 };
 use crate::{
     backfill::{
-        BackfillBlockRange, BackfillTopicPlan, CoinbaseSqlValidationMode,
-        DEFAULT_COINBASE_SQL_QUERY_CHAR_LIMIT, HistoricalLogPayloadRequest,
+        BackfillBlockRange, BackfillTopicPlan, CoinbaseSqlBackfillConfig,
+        CoinbaseSqlValidationMode, DEFAULT_COINBASE_SQL_QUERY_CHAR_LIMIT,
+        HistoricalLogPayloadRequest,
+        reservation_execution::{
+            backfill_job_source_identity_payload, coinbase_sql_backfill_job_source_identity_payload,
+        },
         selection::SelectedTargetIntervalIndex,
     },
     provider::{ProviderLog, ProviderResolvedBlock},
@@ -37,6 +41,99 @@ fn pack(
         scan_all_emitters: false,
         source_families: vec!["basenames_base_registry".to_owned()],
     }
+}
+
+fn source_plan_for_family(source_family: &str) -> WatchedSourceSelectorPlan {
+    let address = "0x1111111111111111111111111111111111111111";
+    WatchedSourceSelectorPlan {
+        chain: "base-mainnet".to_owned(),
+        selector_kind: WatchedSourceSelectorKind::WholeActiveWatchedChain,
+        source_family: Some(source_family.to_owned()),
+        requested_watched_targets: Vec::new(),
+        selected_targets: vec![WatchedBackfillTarget {
+            source_family: source_family.to_owned(),
+            contract_instance_id: Uuid::from_u128(1),
+            address: address.to_owned(),
+            effective_from_block: 1,
+            effective_to_block: 8_192,
+        }],
+        watched_chain_plan: WatchedChainPlan {
+            chain: "base-mainnet".to_owned(),
+            addresses: vec![address.to_owned()],
+            manifest_root_entry_count: 0,
+            manifest_contract_entry_count: 1,
+            discovery_edge_entry_count: 0,
+        },
+    }
+}
+
+fn coinbase_sql_test_config(
+    validation_mode: CoinbaseSqlValidationMode,
+) -> CoinbaseSqlBackfillConfig {
+    CoinbaseSqlBackfillConfig {
+        initial_window_blocks: 8_192,
+        max_window_blocks: 8_192,
+        page_limit: 50_000,
+        sql_char_limit: 10_000,
+        query_timeout_secs: 30,
+        rate_limit_qps: 5,
+        validation_mode,
+    }
+}
+
+#[test]
+fn non_scan_all_coinbase_sql_source_identity_hash_includes_coinbase_fields() -> Result<()> {
+    let source_plan = source_plan_for_family("basenames_base_resolver");
+    let topic_plan = BackfillTopicPlan::new(
+        BTreeMap::from([(
+            "basenames_base_resolver".to_owned(),
+            vec!["0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd".to_owned()],
+        )]),
+        BTreeMap::new(),
+        BTreeSet::new(),
+    );
+    let changed_topic_plan = BackfillTopicPlan::new(
+        BTreeMap::from([(
+            "basenames_base_resolver".to_owned(),
+            vec!["0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_owned()],
+        )]),
+        BTreeMap::new(),
+        BTreeSet::new(),
+    );
+
+    let sample_payload = coinbase_sql_backfill_job_source_identity_payload(
+        &source_plan,
+        &coinbase_sql_test_config(CoinbaseSqlValidationMode::Sample),
+        &topic_plan,
+    )?;
+    let full_payload = coinbase_sql_backfill_job_source_identity_payload(
+        &source_plan,
+        &coinbase_sql_test_config(CoinbaseSqlValidationMode::Full),
+        &topic_plan,
+    )?;
+    let changed_topic_payload = coinbase_sql_backfill_job_source_identity_payload(
+        &source_plan,
+        &coinbase_sql_test_config(CoinbaseSqlValidationMode::Sample),
+        &changed_topic_plan,
+    )?;
+    let base_payload = backfill_job_source_identity_payload(&source_plan)?;
+
+    assert_eq!(sample_payload["coinbase_sql_validation_mode"], "sample");
+    assert_eq!(full_payload["coinbase_sql_validation_mode"], "full");
+    assert_ne!(
+        sample_payload["source_identity_hash"],
+        full_payload["source_identity_hash"]
+    );
+    assert_ne!(
+        sample_payload["source_identity_hash"],
+        changed_topic_payload["source_identity_hash"]
+    );
+    assert_ne!(
+        sample_payload["source_identity_hash"],
+        base_payload["source_identity_hash"]
+    );
+
+    Ok(())
 }
 
 #[test]

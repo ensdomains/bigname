@@ -1100,6 +1100,108 @@ async fn resolver_current_basenames_dynamic_resolver_gates_supported_pending_and
     database.cleanup().await
 }
 
+#[tokio::test]
+async fn resolver_current_targeted_candidate_limit_counts_current_bindings_not_history()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let current_resource_id = Uuid::from_u128(0x8700);
+    let current_surface_binding_id = Uuid::from_u128(0x8710);
+    let seed_resolver_contract_instance_id = Uuid::from_u128(0x8720);
+    let supported_resolver_contract_instance_id = Uuid::from_u128(0x8721);
+    let seed_resolver_address = "0x0000000000000000000000000000000000008720";
+    let supported_resolver_address = "0x0000000000000000000000000000000000008721";
+
+    insert_basenames_dynamic_resolver_profile_fixture(
+        database.pool(),
+        seed_resolver_contract_instance_id,
+        seed_resolver_address,
+        &[(
+            supported_resolver_contract_instance_id,
+            supported_resolver_address,
+        )],
+        &[(supported_resolver_address, Some(BASENAMES_L2_CODE_HASH))],
+    )
+    .await?;
+    seed_basenames_identity(
+        database.pool(),
+        "basenames:current-limit.base.eth",
+        current_resource_id,
+        current_surface_binding_id,
+        "current-limit.base.eth",
+        SurfaceBindingKind::DeclaredRegistryPath,
+    )
+    .await?;
+    seed_raw_blocks(
+        database.pool(),
+        &[
+            raw_block("base-mainnet", "0xbase-res0600", 600, 1_776_200_600),
+            raw_block("base-mainnet", "0xbase-res0601", 601, 1_776_200_601),
+            raw_block("base-mainnet", "0xbase-res0602", 602, 1_776_200_602),
+        ],
+    )
+    .await?;
+    seed_resolver_events(
+        database.pool(),
+        &[
+            basenames_resolver_event(
+                "base-history-limit-1",
+                "basenames:history-limit-1.base.eth",
+                Uuid::from_u128(0x8701),
+                supported_resolver_address,
+                600,
+                0,
+            ),
+            basenames_resolver_event(
+                "base-history-limit-2",
+                "basenames:history-limit-2.base.eth",
+                Uuid::from_u128(0x8702),
+                supported_resolver_address,
+                601,
+                0,
+            ),
+            basenames_resolver_event(
+                "base-current-limit",
+                "basenames:current-limit.base.eth",
+                current_resource_id,
+                supported_resolver_address,
+                602,
+                0,
+            ),
+        ],
+    )
+    .await?;
+
+    let target = ResolverTarget {
+        chain_id: "base-mainnet".to_owned(),
+        resolver_address: supported_resolver_address.to_owned(),
+        profile_source_family: Some(SOURCE_FAMILY_BASENAMES_BASE_RESOLVER.to_owned()),
+        enumerate_bindings: true,
+    };
+    assert_eq!(
+        count_current_binding_candidate_pairs(database.pool(), &target, 2).await?,
+        1
+    );
+
+    let summary = rebuild_resolver_current(
+        database.pool(),
+        Some("base-mainnet"),
+        Some(supported_resolver_address),
+    )
+    .await?;
+    assert_eq!(summary.upserted_row_count, 1);
+    let row = load_resolver_current(database.pool(), "base-mainnet", supported_resolver_address)
+        .await?
+        .context("supported Basenames resolver_current row should exist")?;
+    assert_eq!(
+        row.declared_summary["bindings"]["status"],
+        json!("supported")
+    );
+    assert_eq!(row.declared_summary["bindings"]["count"], json!(1));
+    assert_eq!(row.coverage["unsupported_reason"], Value::Null);
+
+    database.cleanup().await
+}
+
 async fn seed_identity(
     pool: &PgPool,
     logical_name_id: &str,
