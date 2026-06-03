@@ -362,7 +362,6 @@ pub(crate) async fn run_poll_loop(
                 } else {
                     false
                 };
-                let mut skip_post_replay_canonical_gap_refresh = false;
                 if effective_adapter_sync_on_live_poll
                     && !adapter_sync_on_live_poll
                     && !live_poll_adapter_sync_restored_after_replay
@@ -389,7 +388,6 @@ pub(crate) async fn run_poll_loop(
                         "live raw payload adapter sync enabled after normalized replay catch-up completed"
                     );
                     live_poll_adapter_sync_restored_after_replay = true;
-                    skip_post_replay_canonical_gap_refresh = true;
                 }
 
                 poll_provider_heads_with_adapter_sync(
@@ -397,7 +395,6 @@ pub(crate) async fn run_poll_loop(
                     &mut intake_chain_tasks,
                     provider_registry,
                     effective_adapter_sync_on_live_poll,
-                    skip_post_replay_canonical_gap_refresh,
                     header_audit_mode,
                     &event_silent_reverse_resolver_addresses,
                 )

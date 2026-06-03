@@ -204,7 +204,11 @@ sends generated bearer JWTs. Configure `COINBASE_CDP_SQL_API_KEY_ID` and
 `BIGNAME_INDEXER_COINBASE_SQL_API_KEY_SECRET_ENV`. The runner keeps the Secret
 API Key material in env and generates a fresh CDP REST bearer JWT for each SQL
 request, so operators should not paste a short-lived JWT into the server
-configuration. This source is backfill-only and finite-range-only: it is
+configuration. The generated JWT is passed to the HTTPS client through a
+0600-permission temporary config file and removed after the request; operators
+should still treat process temp directories as sensitive because a crash can
+leave a short-lived JWT behind until normal temp cleanup. This source is
+backfill-only and finite-range-only: it is
 unavailable to `run` live following, `ops-catchup`, repair, chain-head
 promotion, and checkpoint promotion. Operators must still configure
 `BIGNAME_INDEXER_CHAIN_RPC_URLS` or `BIGNAME_INDEXER_CHAIN_RETH_DB_SOURCES` for
@@ -270,7 +274,10 @@ stateful/contextual adapters that do not have a documented closure/dependency
 replay session, rather than advancing the cursor over possibly divergent
 transition rows. Source-scoped replay is reserved for explicit repair/backfill
 runs and is not deterministic stateful/contextual regeneration unless the
-selection is closure-complete.
+selection is closure-complete. After automatic replay catch-up completes, the
+post-replay live-adapter backlog cursor pages already-persisted raw-log blocks
+with `BIGNAME_INDEXER_LIVE_ADAPTER_BACKLOG_BLOCK_BATCH_SIZE`. The default `1`
+keeps the handoff conservative; values above the internal cap are clamped.
 Use `RUST_LOG=info,sqlx::query=error` for these runs; otherwise SQLx slow-query
 warnings can print huge generated INSERT statements for dense chunks and waste
 time on logging instead of ingest.

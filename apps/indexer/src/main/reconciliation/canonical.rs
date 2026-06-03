@@ -48,7 +48,6 @@ pub(crate) async fn poll_provider_heads(
         tasks,
         provider_registry,
         true,
-        false,
         HeaderAuditMode::Minimal,
         &[],
     )
@@ -60,7 +59,6 @@ pub(crate) async fn poll_provider_heads_with_adapter_sync(
     tasks: &mut Vec<IntakeChainTask>,
     provider_registry: &ProviderRegistry,
     adapter_sync_enabled: bool,
-    skip_post_replay_canonical_gap_refresh: bool,
     header_audit_mode: HeaderAuditMode,
     event_silent_reverse_resolver_addresses: &[String],
 ) -> Result<()> {
@@ -77,7 +75,6 @@ pub(crate) async fn poll_provider_heads_with_adapter_sync(
             task,
             provider,
             adapter_sync_enabled,
-            skip_post_replay_canonical_gap_refresh,
             header_audit_mode,
             event_silent_reverse_resolver_addresses,
         )
@@ -119,7 +116,6 @@ pub(crate) async fn reconcile_intake_chain_task(
         task,
         provider,
         true,
-        false,
         HeaderAuditMode::Minimal,
         &[],
     )
@@ -131,7 +127,6 @@ pub(crate) async fn reconcile_intake_chain_task_with_adapter_sync(
     task: &IntakeChainTask,
     provider: &(impl ChainProviderOps + ?Sized),
     adapter_sync_enabled: bool,
-    skip_post_replay_canonical_gap_refresh: bool,
     header_audit_mode: HeaderAuditMode,
     event_silent_reverse_resolver_addresses: &[String],
 ) -> Result<Option<(IntakeChainTask, ChainReconciliationOutcome)>> {
@@ -142,7 +137,6 @@ pub(crate) async fn reconcile_intake_chain_task_with_adapter_sync(
         provider,
         &heads,
         adapter_sync_enabled,
-        skip_post_replay_canonical_gap_refresh,
         header_audit_mode,
         event_silent_reverse_resolver_addresses,
     )
@@ -162,7 +156,6 @@ pub(crate) async fn reconcile_fetched_heads(
         provider,
         heads,
         true,
-        false,
         HeaderAuditMode::Minimal,
         &[],
     )
@@ -184,7 +177,6 @@ pub(crate) async fn reconcile_fetched_heads_with_adapter_sync(
         provider,
         heads,
         adapter_sync_enabled,
-        false,
         header_audit_mode,
         event_silent_reverse_resolver_addresses,
     )
@@ -197,7 +189,6 @@ async fn reconcile_fetched_heads_with_gap_policy(
     provider: &(impl ChainProviderOps + ?Sized),
     heads: &ProviderHeadSnapshot,
     adapter_sync_enabled: bool,
-    skip_post_replay_canonical_gap_refresh: bool,
     header_audit_mode: HeaderAuditMode,
     event_silent_reverse_resolver_addresses: &[String],
 ) -> Result<Option<(IntakeChainTask, ChainReconciliationOutcome)>> {
@@ -233,21 +224,12 @@ async fn reconcile_fetched_heads_with_gap_policy(
             &canonical,
             head_change_set,
             adapter_sync_enabled,
-            skip_post_replay_canonical_gap_refresh,
             event_silent_reverse_resolver_addresses,
         )
         .await?;
     }
-    persist_reconciled_raw_code_hashes(
-        pool,
-        task,
-        provider,
-        heads,
-        &canonical,
-        head_change_set,
-        skip_post_replay_canonical_gap_refresh,
-    )
-    .await?;
+    persist_reconciled_raw_code_hashes(pool, task, provider, heads, &canonical, head_change_set)
+        .await?;
 
     if let Some(safe_head) = &heads.safe {
         upsert_chain_lineage_blocks(
