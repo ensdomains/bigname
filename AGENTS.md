@@ -63,6 +63,7 @@ Citation rules:
 - `$consumer-slice`: scope one end-to-end consumer capability with docs, behavior, tests, and explicit deferrals.
 - `$manifest-authority`: plan or review manifests, discovery, admission, capability flags, and watch-plan authority.
 - `$replay-safety`: review raw facts, normalized events, canonicality, projection rebuilds, invalidation, execution artifacts, and migrations.
+- `$verify-loop`: user-invoked reviewer/fix loop that spawns a fresh `verification_reviewer`, confirms real findings with failing tests or checks, fixes them, and repeats until clean.
 
 ## Core Agents
 
