@@ -778,6 +778,130 @@ async fn name_current_excludes_rows_with_closed_surface_bindings() -> Result<()>
             .await?,
         loaded
     );
+    let list_page = load_name_current_list_page(
+        database.pool(),
+        &NameCurrentListFilter::default(),
+        NameCurrentListSort::Name,
+        NameCurrentListOrder::Asc,
+        None,
+        10,
+    )
+    .await?;
+    assert!(list_page.rows.is_empty());
+    assert_eq!(list_page.total_count, 0);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn name_current_list_address_filter_excludes_closed_membership_bindings() -> Result<()> {
+    let database = test_database().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    let logical_name_id = "ens:alice.eth";
+    let stale_token_lineage_id = Uuid::from_u128(0xb700);
+    let stale_resource_id = Uuid::from_u128(0xb800);
+    let stale_surface_binding_id = Uuid::from_u128(0xb900);
+    let current_token_lineage_id = Uuid::from_u128(0xba00);
+    let current_resource_id = Uuid::from_u128(0xbb00);
+    let current_surface_binding_id = Uuid::from_u128(0xbc00);
+
+    seed_binding_references(
+        &database,
+        logical_name_id,
+        "alice.eth",
+        stale_resource_id,
+        stale_token_lineage_id,
+        stale_surface_binding_id,
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE surface_bindings
+        SET active_to = $2
+        WHERE surface_binding_id = $1
+        "#,
+    )
+    .bind(stale_surface_binding_id)
+    .bind(timestamp(1_717_171_800))
+    .execute(database.pool())
+    .await?;
+    upsert_token_lineages(database.pool(), &[token_lineage(current_token_lineage_id)]).await?;
+    upsert_resources(
+        database.pool(),
+        &[resource(
+            current_resource_id,
+            Some(current_token_lineage_id),
+        )],
+    )
+    .await?;
+    upsert_surface_bindings(
+        database.pool(),
+        &[surface_binding(
+            current_surface_binding_id,
+            logical_name_id,
+            current_resource_id,
+            timestamp(1_717_171_900),
+            None,
+            "0xbinding-current",
+            21_000_004,
+        )],
+    )
+    .await?;
+
+    let current_row = name_current_row(
+        logical_name_id,
+        current_surface_binding_id,
+        current_resource_id,
+        current_token_lineage_id,
+    );
+    let stale_relation_row = address_name_current_row(
+        address,
+        &name_current_row(
+            logical_name_id,
+            stale_surface_binding_id,
+            stale_resource_id,
+            stale_token_lineage_id,
+        ),
+        AddressNameRelation::Registrant,
+    );
+    upsert_name_current_rows(database.pool(), std::slice::from_ref(&current_row)).await?;
+    upsert_address_names_current_rows(database.pool(), &[stale_relation_row]).await?;
+
+    let all_page = load_name_current_list_page(
+        database.pool(),
+        &NameCurrentListFilter::default(),
+        NameCurrentListSort::Name,
+        NameCurrentListOrder::Asc,
+        None,
+        10,
+    )
+    .await?;
+    assert_eq!(
+        all_page
+            .rows
+            .iter()
+            .map(|row| row.row.logical_name_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![logical_name_id]
+    );
+
+    let address_page = load_name_current_list_page(
+        database.pool(),
+        &NameCurrentListFilter {
+            address: Some(NameCurrentAddressFilter {
+                address: address.to_owned(),
+                relation: NameCurrentAddressRelationFilter::Any,
+            }),
+            ..NameCurrentListFilter::default()
+        },
+        NameCurrentListSort::Name,
+        NameCurrentListOrder::Asc,
+        None,
+        10,
+    )
+    .await?;
+    assert!(address_page.rows.is_empty());
+    assert_eq!(address_page.total_count, 0);
 
     database.cleanup().await
 }
