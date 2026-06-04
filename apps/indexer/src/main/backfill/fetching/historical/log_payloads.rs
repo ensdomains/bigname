@@ -10,9 +10,10 @@ pub(crate) async fn fill_log_payloads_from_validation_provider(
     resolved_blocks: &[ProviderResolvedBlock],
     logs_by_block: BTreeMap<i64, Vec<ProviderLog>>,
     validation_filters: &[HistoricalLogValidationFilter],
-    _validation_mode: CoinbaseSqlValidationMode,
+    validation_mode: CoinbaseSqlValidationMode,
 ) -> Result<BTreeMap<i64, Vec<ProviderLog>>> {
-    let validation_filters = effective_validation_filters(validation_filters, &logs_by_block);
+    let validation_filters =
+        effective_validation_filters(validation_filters, &logs_by_block, validation_mode);
     if validation_filters.is_empty() {
         return Ok(logs_by_block);
     }
@@ -75,9 +76,10 @@ pub(crate) async fn fill_log_payloads_from_validation_provider(
 fn effective_validation_filters(
     validation_filters: &[HistoricalLogValidationFilter],
     logs_by_block: &BTreeMap<i64, Vec<ProviderLog>>,
+    validation_mode: CoinbaseSqlValidationMode,
 ) -> Vec<HistoricalLogValidationFilter> {
-    if !validation_filters.is_empty() {
-        return validation_filters
+    let filters = if !validation_filters.is_empty() {
+        validation_filters
             .iter()
             .map(|filter| HistoricalLogValidationFilter {
                 from_block: filter.from_block,
@@ -97,9 +99,22 @@ fn effective_validation_filters(
                     .into_iter()
                     .collect(),
             })
-            .collect();
-    }
+            .collect()
+    } else {
+        validation_filters_from_logs(logs_by_block)
+    };
 
+    match validation_mode {
+        CoinbaseSqlValidationMode::Full => filters,
+        CoinbaseSqlValidationMode::Sample => {
+            restrict_validation_filters_to_returned_log_blocks(filters, logs_by_block)
+        }
+    }
+}
+
+fn validation_filters_from_logs(
+    logs_by_block: &BTreeMap<i64, Vec<ProviderLog>>,
+) -> Vec<HistoricalLogValidationFilter> {
     let addresses = logs_by_block
         .values()
         .flat_map(|logs| logs.iter().map(|log| log.address.to_ascii_lowercase()))
@@ -120,6 +135,52 @@ fn effective_validation_filters(
         addresses: addresses.into_iter().collect(),
         topic0s: Vec::new(),
     }]
+}
+
+fn restrict_validation_filters_to_returned_log_blocks(
+    filters: Vec<HistoricalLogValidationFilter>,
+    logs_by_block: &BTreeMap<i64, Vec<ProviderLog>>,
+) -> Vec<HistoricalLogValidationFilter> {
+    if logs_by_block.is_empty() {
+        return Vec::new();
+    }
+
+    let returned_blocks = logs_by_block.keys().copied().collect::<Vec<_>>();
+    let mut restricted = Vec::new();
+    for filter in filters {
+        let mut run_start = None;
+        let mut previous_block = None;
+        for block_number in returned_blocks.iter().copied().filter(|block_number| {
+            *block_number >= filter.from_block && *block_number <= filter.to_block
+        }) {
+            if previous_block.is_some_and(|previous| previous + 1 == block_number) {
+                previous_block = Some(block_number);
+                continue;
+            }
+            if let (Some(from_block), Some(to_block)) = (run_start, previous_block) {
+                restricted.push(validation_filter_for_range(&filter, from_block, to_block));
+            }
+            run_start = Some(block_number);
+            previous_block = Some(block_number);
+        }
+        if let (Some(from_block), Some(to_block)) = (run_start, previous_block) {
+            restricted.push(validation_filter_for_range(&filter, from_block, to_block));
+        }
+    }
+    restricted
+}
+
+fn validation_filter_for_range(
+    filter: &HistoricalLogValidationFilter,
+    from_block: i64,
+    to_block: i64,
+) -> HistoricalLogValidationFilter {
+    HistoricalLogValidationFilter {
+        from_block,
+        to_block,
+        addresses: filter.addresses.clone(),
+        topic0s: filter.topic0s.clone(),
+    }
 }
 
 fn resolved_blocks_for_filter(
@@ -215,9 +276,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sample_validation_rejects_provider_log_missing_from_coinbase_in_first_slice() {
+    async fn sample_validation_skips_empty_coinbase_windows() {
         let provider = LogProvider::new(vec![provider_log("0x1234")]);
-        let error = fill_log_payloads_from_validation_provider(
+        let filled = fill_log_payloads_from_validation_provider(
             &provider,
             &resolved_blocks(),
             BTreeMap::new(),
@@ -225,9 +286,9 @@ mod tests {
             CoinbaseSqlValidationMode::Sample,
         )
         .await
-        .expect_err("sample validation is conservative/full in the first Coinbase SQL slice");
+        .expect("sample validation should not provider-scan an empty Coinbase SQL window");
 
-        assert!(format!("{error:#}").contains("Coinbase SQL omitted validation-provider log"));
+        assert!(filled.is_empty());
     }
 
     #[tokio::test]
@@ -245,6 +306,96 @@ mod tests {
         )
         .await
         .expect("matching Coinbase identity should be filled by validation provider payload");
+
+        assert_eq!(filled[&10][0].data, "0x1234");
+    }
+
+    #[tokio::test]
+    async fn sample_validation_replaces_decoded_sql_payload_with_provider_payload() {
+        let provider = LogProvider::new(vec![provider_log("0x1234")]);
+        let mut coinbase_logs = BTreeMap::new();
+        coinbase_logs.insert(10, vec![provider_log("0xabcd")]);
+
+        let filled = fill_log_payloads_from_validation_provider(
+            &provider,
+            &resolved_blocks(),
+            coinbase_logs,
+            &[validation_filter()],
+            CoinbaseSqlValidationMode::Sample,
+        )
+        .await
+        .expect("sample validation should fill returned SQL identities with provider payloads");
+
+        assert_eq!(filled[&10][0].data, "0x1234");
+    }
+
+    #[tokio::test]
+    async fn sample_validation_rejects_provider_log_missing_from_coinbase_on_returned_block() {
+        let provider = LogProvider::new(vec![provider_log("0x1234"), provider_log_at_index(1)]);
+        let mut coinbase_logs = BTreeMap::new();
+        coinbase_logs.insert(10, vec![provider_log("0xabcd")]);
+
+        let error = fill_log_payloads_from_validation_provider(
+            &provider,
+            &resolved_blocks(),
+            coinbase_logs,
+            &[validation_filter()],
+            CoinbaseSqlValidationMode::Sample,
+        )
+        .await
+        .expect_err("sample validation should reject omitted logs on returned SQL blocks");
+
+        assert!(format!("{error:#}").contains("Coinbase SQL omitted validation-provider log"));
+    }
+
+    #[tokio::test]
+    async fn sample_validation_ignores_provider_logs_on_unreturned_blocks() {
+        let later_log = ProviderLog {
+            block_hash: "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+                .to_owned(),
+            block_number: 11,
+            transaction_hash: "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+                .to_owned(),
+            transaction_index: 1,
+            log_index: 2,
+            address: ADDRESS.to_owned(),
+            topics: vec![TOPIC0.to_owned()],
+            data: "0x5678".to_owned(),
+        };
+        let provider = LogProvider {
+            logs_by_block: BTreeMap::from([
+                (10, vec![provider_log("0x1234")]),
+                (11, vec![later_log]),
+            ]),
+        };
+        let mut coinbase_logs = BTreeMap::new();
+        coinbase_logs.insert(10, vec![provider_log("0xabcd")]);
+
+        let filled = fill_log_payloads_from_validation_provider(
+            &provider,
+            &vec![
+                ProviderResolvedBlock {
+                    block_number: 10,
+                    block_hash: BLOCK_HASH.to_owned(),
+                },
+                ProviderResolvedBlock {
+                    block_number: 11,
+                    block_hash:
+                        "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+                            .to_owned(),
+                },
+            ],
+            coinbase_logs,
+            &[HistoricalLogValidationFilter {
+                from_block: 10,
+                to_block: 11,
+                addresses: vec![ADDRESS.to_owned()],
+                topic0s: vec![TOPIC0.to_owned()],
+            }],
+            CoinbaseSqlValidationMode::Sample,
+        )
+        .await
+        .expect("sample validation should only fill returned Coinbase SQL log blocks");
 
         assert_eq!(filled[&10][0].data, "0x1234");
     }
@@ -350,6 +501,14 @@ mod tests {
             address: ADDRESS.to_owned(),
             topics: vec![TOPIC0.to_owned()],
             data: data.to_owned(),
+        }
+    }
+
+    fn provider_log_at_index(log_index: i64) -> ProviderLog {
+        ProviderLog {
+            log_index,
+            data: "0x5678".to_owned(),
+            ..provider_log("0x5678")
         }
     }
 

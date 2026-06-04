@@ -159,8 +159,7 @@ impl HistoricalBackfillSourceOps for CoinbaseSqlBackfillSource {
             let mut validation_filters = Vec::new();
             let mut seen_log_identities = BTreeSet::new();
             let mut logs_filtered_by_selected_target_index = true;
-            let mut logs_need_validation_provider_payload =
-                request.validation_mode == CoinbaseSqlValidationMode::Full;
+            let mut retained_rows_need_validation_provider_payload = false;
             let resolved_by_number = if request.validation_mode == CoinbaseSqlValidationMode::Sample
                 || request.resolved_blocks.is_empty()
             {
@@ -202,7 +201,7 @@ impl HistoricalBackfillSourceOps for CoinbaseSqlBackfillSource {
                     stats.merge(pages.stats);
                     for row in pages.rows {
                         row.validate_against_filter_pack(&split_pack, resolved_by_number.as_ref())?;
-                        logs_need_validation_provider_payload |=
+                        let requires_validation_provider_data =
                             row.requires_validation_provider_data;
                         let log = row.to_provider_log()?;
                         if split_pack.scan_all_emitters
@@ -213,6 +212,8 @@ impl HistoricalBackfillSourceOps for CoinbaseSqlBackfillSource {
                         {
                             continue;
                         }
+                        retained_rows_need_validation_provider_payload |=
+                            requires_validation_provider_data;
                         push_deduped_log(&mut logs_by_block, &mut seen_log_identities, log);
                     }
                 }
@@ -225,6 +226,12 @@ impl HistoricalBackfillSourceOps for CoinbaseSqlBackfillSource {
                         .then_with(|| left.log_index.cmp(&right.log_index))
                 });
             }
+            let logs_need_validation_provider_payload =
+                coinbase_sql_logs_need_validation_provider_payload(
+                    request.validation_mode,
+                    !logs_by_block.is_empty(),
+                    retained_rows_need_validation_provider_payload,
+                );
 
             Ok(HistoricalLogPayload {
                 logs_by_block,
@@ -237,6 +244,19 @@ impl HistoricalBackfillSourceOps for CoinbaseSqlBackfillSource {
                 validation_mode: request.validation_mode,
                 source_stats: stats,
             })
+        }
+    }
+}
+
+fn coinbase_sql_logs_need_validation_provider_payload(
+    validation_mode: CoinbaseSqlValidationMode,
+    has_retained_logs: bool,
+    retained_rows_need_validation_provider_payload: bool,
+) -> bool {
+    match validation_mode {
+        CoinbaseSqlValidationMode::Full => true,
+        CoinbaseSqlValidationMode::Sample => {
+            has_retained_logs || retained_rows_need_validation_provider_payload
         }
     }
 }

@@ -16,6 +16,11 @@ loc = 805
 justification = "Phase 7 allowlist for an oversized production file; future changes should split or shrink it."
 
 [[files]]
+path = "apps/indexer/src/main/backfill/fetching/historical/log_payloads.rs"
+loc = 653
+justification = "Coinbase SQL validation helper carries focused replay-safety tests for sample/full provider payload fill; future changes should split tests or shrink it."
+
+[[files]]
 path = "apps/indexer/src/main/backfill/reservation_execution.rs"
 loc = 622
 justification = "Phase 7 allowlist for an oversized production file; future changes should split or shrink it."

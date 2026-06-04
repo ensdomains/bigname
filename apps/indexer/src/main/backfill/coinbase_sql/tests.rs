@@ -8,6 +8,7 @@ use serde_json::json;
 use sqlx::types::Uuid;
 
 use super::{
+    coinbase_sql_logs_need_validation_provider_payload,
     planner::build_filter_packs,
     push_deduped_log,
     query::{CoinbaseSqlFilterPack, build_or_split_filter_pack, build_query},
@@ -134,6 +135,25 @@ fn non_scan_all_coinbase_sql_source_identity_hash_includes_coinbase_fields() -> 
     );
 
     Ok(())
+}
+
+#[test]
+fn sample_validation_requires_provider_payload_for_returned_decoded_logs() {
+    assert!(coinbase_sql_logs_need_validation_provider_payload(
+        CoinbaseSqlValidationMode::Sample,
+        true,
+        false,
+    ));
+    assert!(!coinbase_sql_logs_need_validation_provider_payload(
+        CoinbaseSqlValidationMode::Sample,
+        false,
+        false,
+    ));
+    assert!(coinbase_sql_logs_need_validation_provider_payload(
+        CoinbaseSqlValidationMode::Full,
+        false,
+        false,
+    ));
 }
 
 #[test]
