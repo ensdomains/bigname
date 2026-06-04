@@ -19,6 +19,7 @@ use sqlx::{
 use super::*;
 
 static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
+const BASE_NATIVE_COIN_TYPE: &str = "2147492101";
 
 struct TestDatabase {
     admin_pool: PgPool,
@@ -1009,9 +1010,9 @@ fn basenames_reverse_claim_event(
         canonicality_state: CanonicalityState::Canonical,
         before_state: json!({}),
         after_state: json!({
-            "source_event": "BaseReverseClaimed",
+            "source_event": "NameForAddrChanged",
             "address": claimed_address,
-            "coin_type": ENS_NATIVE_COIN_TYPE,
+            "coin_type": BASE_NATIVE_COIN_TYPE,
             "namespace": "basenames",
             "reverse_namespace": "basenames",
             "reverse_label": claimed_address.trim_start_matches("0x").to_ascii_lowercase(),

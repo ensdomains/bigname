@@ -46,7 +46,7 @@ profile. Do not point one runtime at both manifest roots.
 
 If `BIGNAME_INDEXER_CHAIN_RPC_URLS` is unset, the indexer still syncs
 manifest/watch state, but provider-backed live ingestion remains idle. Current
-bootstrap RPC support accepts `http://` endpoints.
+bootstrap RPC support accepts `http://` and `https://` endpoints.
 
 The API service also needs its own Ethereum JSON-RPC provider for live ENS
 verified resolution and the ENS/60 primary-name on-demand reverse/forward RPC fallback, configured as

@@ -127,12 +127,14 @@ For ENSv2, `resource_id` keys by `(chain_id, registry_contract_instance_id, upst
 | `address_names_current_identity_counts`, `address_names_current_identity_feed` | storage triggers on `address_names_current`, `primary_names_current`, and supporting identity-anchor and `name_current` readability changes | exact reverse identity total counts and compact feed display rows by address, role filter, and primary-name coin type for the partner-compatible identity façade, using the same canonical/read-safe and reachable-`name_current` row eligibility as reverse identity pages; this is the bounded exception in [`adrs/0005-identity-count-sidecar.md`](adrs/0005-identity-count-sidecar.md) |
 | `current_projection_replay_status` | projection workers | durable operational completion markers for bootstrap/full all-current projection replay |
 | `projection_normalized_event_changes` | normalized-event storage trigger; projection workers consume | append-only downstream change log for normalized-event inserts and canonicality-state updates |
-| `projection_apply_cursors`, `projection_invalidations` | projection workers | durable projection apply watermarks and key-scoped projection invalidation queue |
+| `projection_apply_cursors`, `projection_invalidations` | projection workers; storage trigger for projection-relevant `surface_bindings` repairs | durable projection apply watermarks and key-scoped projection invalidation queue |
 | `execution_*` | execution workers; synchronous indexer/reorg repair for orphan-block cache outcome deletes only | durable traces and steps, normal `execution_cache_outcomes` writes, invalidation records |
 
 The API process is read-only against storage.
 
 Within `execution_*`, the only non-execution-worker write owner is synchronous indexer/reorg repair during chain reconciliation. That path may delete or invalidate reusable `execution_cache_outcomes` rows whose dependency set includes an orphaned block identity. It does not write traces, steps, normal outcomes, projections, API state, or manifest state.
+
+For identity-row repair, the storage-owned `surface_bindings` update trigger is the bounded non-projection-worker writer for `projection_invalidations`. It enqueues `name_current` and `address_names_current` keys when repair updates change `active_to` or `canonicality_state` for an identity row. Adapters still write identity rows and normalized events only; they do not write projection rows directly.
 
 For interval identity and normalized authority/permission events, adapters mint and reuse `resource_id`, `token_lineage_id`, and `surface_binding_id` per the architecture identity rules. Projection workers consume those rows; they do not infer alternate continuity or synthesize cross-resource permission carry.
 
@@ -255,7 +257,7 @@ Current raw-fact normalized replay allows restricted block-hash/source-scoped re
 | Adapter / producer | Model | Raw-fact restricted replay | Reason and proof |
 | --- | --- | --- | --- |
 | `block_derived_normalized_events` | `stateless_raw_fact` | Allowed | Preimage rows are decoded from selected canonical raw logs, manifest/source metadata, and decoder constants. Covered by idempotent normalized replay and block-derived adapter tests. |
-| `ens_v1_reverse_claim` | `stateless_raw_fact` | Allowed | `ReverseChanged` rows are derived from the selected `ReverseClaimed` raw log and immutable manifest/source metadata. Covered by block-range, source-scoped, and block-hash replay tests. |
+| `ens_v1_reverse_claim` | `stateless_raw_fact` | Allowed | `ReverseChanged` rows are derived from selected reverse raw logs and immutable manifest/source metadata. ENSv1 Mainnet uses `ReverseClaimed`; Basenames primary-name value intake uses the ENSv1 Base `L2ReverseRegistrar` `NameForAddrChanged` log and emits the companion `RecordChanged(name)` claim observation from the same raw fact. Covered by block-range, source-scoped, and block-hash replay tests. |
 | `ens_v1_subregistry_discovery` | `contextual_dependency_required` | Restricted replay denied; full retained closure replay allowed | Normalized rows include discovery-edge contract-instance context; raw-log selection alone is not stable dependency closure. |
 | `ens_v1_unwrapped_authority` | `stateful_closure_required` | Restricted replay denied; full retained closure replay allowed | Authority transitions, `before_state`, resource continuity, resolver state, wrapper state, registrar expiry, and permission provenance require one ordered in-memory history across registry, registrar, wrapper, resolver, and related Basenames families. |
 | `ens_v2_registry_resource_surface` | `stateful_closure_required` | Restricted replay denied; full retained closure replay allowed | Token/resource identity, suffix state, bindings, discovery observations, and regeneration intervals depend on canonical ordered registry history through the replay target. |

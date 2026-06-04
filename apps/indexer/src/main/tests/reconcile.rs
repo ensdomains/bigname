@@ -1064,7 +1064,7 @@ async fn reconcile_fetched_heads_backfills_basenames_reverse_claim_normalized_ev
 {
     let database = TestDatabase::new().await?;
     let reverse_contract_instance_id = Uuid::from_u128(0x346);
-    let reverse_address = "0x79ea96012eea67a83431f1701b3dff7e37f9e282";
+    let reverse_address = "0x0000000000d8e504002cc26e3ec46d81971c1664";
     let claimed_address = "0x1234567890abcdef1234567890abcdef12345678";
 
     sqlx::query(
@@ -1133,10 +1133,11 @@ async fn reconcile_fetched_heads_backfills_basenames_reverse_claim_normalized_ev
         63,
     );
     let (provider, server) = bundle_provider_with_fixtures(vec![ProviderBlockFixture {
-        logs: vec![rpc_base_reverse_claimed_log_payload(
+        logs: vec![rpc_l2_reverse_name_log_payload(
             &canonical_head,
             reverse_address,
             claimed_address,
+            "alice.base.eth",
             0,
         )],
         block: canonical_head.clone(),
@@ -1165,7 +1166,15 @@ async fn reconcile_fetched_heads_backfills_basenames_reverse_claim_normalized_ev
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM normalized_events")
             .fetch_one(database.pool())
             .await?,
-        1
+        2
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT after_state->>'raw_name' FROM normalized_events WHERE event_kind = 'RecordChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "alice.base.eth".to_owned()
     );
     assert_eq!(
         sqlx::query_scalar::<_, String>(
@@ -1467,7 +1476,7 @@ async fn reconcile_fetched_heads_backfills_basenames_primary_claim_source_observ
     let reverse_contract_instance_id = Uuid::from_u128(0x347);
     let registry_contract_instance_id = Uuid::from_u128(0x348);
     let resolver_contract_instance_id = Uuid::from_u128(0x349);
-    let reverse_address = "0x79ea96012eea67a83431f1701b3dff7e37f9e282";
+    let reverse_address = "0x0000000000d8e504002cc26e3ec46d81971c1664";
     let registry_address = "0xb94704422c2a1e396835a571837aa5ae53285a95";
     let resolver_address = "0xc6d566a56a1aff6508b41f6c90ff131615583bcd";
     let claimed_address = "0x1234567890abcdef1234567890abcdef12345678";
@@ -1619,10 +1628,11 @@ async fn reconcile_fetched_heads_backfills_basenames_primary_claim_source_observ
     );
     let (provider, server) = bundle_provider_with_fixtures(vec![ProviderBlockFixture {
         logs: vec![
-            rpc_base_reverse_claimed_log_payload(
+            rpc_l2_reverse_name_log_payload(
                 &canonical_head,
                 reverse_address,
                 claimed_address,
+                "alice.base.eth",
                 0,
             ),
             rpc_registry_new_resolver_log_payload_for_namehash(

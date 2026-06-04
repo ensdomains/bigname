@@ -783,10 +783,10 @@ fn all_indexed_coinbase_sql_events_do_not_need_payload_validation() -> Result<()
         "transaction_index": 1,
         "log_index": 2,
         "emitting_address": "0x1111111111111111111111111111111111111111",
-        "event_signature": "BaseReverseClaimed(address,bytes32)",
+        "event_signature": "Transfer(address,address,uint256)",
         "parameters": {},
         "topics": [
-            "0x0c0d7b609ba3eb6298df54414482f650f3ab50fd6ebd740b24c6fc0e04454a6e",
+            "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
             "0x0000000000000000000000002222222222222222222222222222222222222222",
             "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
         ]
@@ -794,6 +794,38 @@ fn all_indexed_coinbase_sql_events_do_not_need_payload_validation() -> Result<()
 
     assert_eq!(row.data, "0x");
     assert!(!row.requires_validation_provider_data);
+    Ok(())
+}
+
+#[test]
+fn l2_reverse_name_for_addr_changed_parameters_synthesize_raw_log_data() -> Result<()> {
+    let row = CoinbaseSqlLogRow::from_value(json!({
+        "block_number": 10,
+        "block_hash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "transaction_hash": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "transaction_index": 1,
+        "log_index": 2,
+        "emitting_address": "0x0000000000d8e504002cc26e3ec46d81971c1664",
+        "event_signature": "NameForAddrChanged(address,string)",
+        "parameters": {
+            "name": "alice.base.eth"
+        },
+        "topics": [
+            "0x8af7a4c7007a33f680904f3b64733396b730fef22d79555dee29801ca2e479a9",
+            "0x0000000000000000000000002222222222222222222222222222222222222222"
+        ]
+    }))?;
+
+    assert!(!row.requires_validation_provider_data);
+    assert_eq!(
+        row.data,
+        concat!(
+            "0x",
+            "0000000000000000000000000000000000000000000000000000000000000020",
+            "000000000000000000000000000000000000000000000000000000000000000e",
+            "616c6963652e626173652e657468000000000000000000000000000000000000"
+        )
+    );
     Ok(())
 }
 

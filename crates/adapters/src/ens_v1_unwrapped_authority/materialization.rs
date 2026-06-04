@@ -4,7 +4,6 @@ use bigname_storage::sql_row;
 mod lineage;
 mod orphaning;
 mod overlap_repair;
-mod projection_invalidation;
 
 pub(super) use lineage::{build_resource, build_token_lineage, build_token_lineage_from_boundary};
 use orphaning::orphan_stale_overlapping_surface_bindings;
@@ -14,7 +13,6 @@ use orphaning::stale_overlapping_surface_binding_candidates;
 #[cfg(test)]
 use orphaning::weaker_same_start_surface_binding_candidates;
 pub(super) use overlap_repair::close_weaker_overlapping_existing_surface_bindings;
-use projection_invalidation::queue_surface_binding_projection_invalidations;
 
 const EXISTING_SURFACE_BINDING_LOOKUP_NAME_CHUNK_SIZE: usize = 5_000;
 

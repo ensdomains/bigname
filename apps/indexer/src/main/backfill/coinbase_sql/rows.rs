@@ -11,7 +11,7 @@ use super::query::CoinbaseSqlFilterPack;
 const ABI_WORD_BYTES: usize = 32;
 const BASENAMES_NAME_REGISTERED_SIGNATURE: &str = "NameRegistered(string,bytes32,address,uint256)";
 const BASENAMES_NAME_RENEWED_SIGNATURE: &str = "NameRenewed(string,bytes32,uint256)";
-const BASE_REVERSE_CLAIMED_SIGNATURE: &str = "BaseReverseClaimed(address,bytes32)";
+const NAME_FOR_ADDR_CHANGED_SIGNATURE: &str = "NameForAddrChanged(address,string)";
 const TRANSFER_SIGNATURE: &str = "Transfer(address,address,uint256)";
 const REGISTRY_NEW_OWNER_SIGNATURE: &str = "NewOwner(bytes32,bytes32,address)";
 const REGISTRY_TRANSFER_SIGNATURE: &str = "Transfer(bytes32,address)";
@@ -288,7 +288,7 @@ fn coinbase_sql_log_data(
                 Err(_) => Ok(validation_provider_log_data()),
             }
         }
-        Some(RESOLVER_NAME_CHANGED_SIGNATURE) => {
+        Some(RESOLVER_NAME_CHANGED_SIGNATURE) | Some(NAME_FOR_ADDR_CHANGED_SIGNATURE) => {
             let signature = event_signature.expect("matched event signature must be present");
             let parameters = parameters
                 .with_context(|| format!("Coinbase SQL {signature} row is missing parameters"))?;
@@ -309,7 +309,7 @@ fn coinbase_sql_log_data(
                 requires_validation_provider_data: false,
             })
         }
-        Some(BASE_REVERSE_CLAIMED_SIGNATURE) | Some(TRANSFER_SIGNATURE) => Ok(CoinbaseSqlLogData {
+        Some(TRANSFER_SIGNATURE) => Ok(CoinbaseSqlLogData {
             data: "0x".to_owned(),
             requires_validation_provider_data: false,
         }),

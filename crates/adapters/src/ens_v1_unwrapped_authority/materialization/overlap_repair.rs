@@ -94,17 +94,6 @@ pub(crate) async fn close_weaker_overlapping_existing_surface_bindings(
     .context("failed to close weaker overlapping surface bindings before authority replay")?;
 
     if !rows.is_empty() {
-        let invalidated_logical_name_ids = rows
-            .iter()
-            .map(|(_, logical_name_id)| logical_name_id.clone())
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>();
-        queue_surface_binding_projection_invalidations(
-            transaction.as_mut(),
-            &invalidated_logical_name_ids,
-        )
-        .await?;
         transaction
             .commit()
             .await

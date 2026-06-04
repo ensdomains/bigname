@@ -24,7 +24,7 @@ use crate::backfill::{
         BackfillCanonicalityEvidence, fill_log_payloads_from_validation_provider,
         load_backfill_canonicality_evidence, materialize_historical_payload_range,
     },
-    range_resolution::resolve_backfill_range,
+    range_resolution::{resolve_backfill_block_numbers, resolve_backfill_range},
     selection::{SelectedTargetIntervalIndex, SelectedTargetRangeCursor},
 };
 
@@ -33,7 +33,6 @@ const MAX_COINBASE_SQL_SAMPLE_PROVIDER_PAYLOAD_LOGS: usize = 2_000;
 const MAX_COINBASE_SQL_SAMPLE_DECODED_PAYLOAD_LOGS: usize = 5_000;
 const MAX_COINBASE_SQL_BASENAMES_REGISTRY_SAMPLE_DECODED_PAYLOAD_LOGS: usize = 50_000;
 const MAX_COINBASE_SQL_BASENAMES_REGISTRAR_SAMPLE_DECODED_PAYLOAD_LOGS: usize = 15_000;
-const MAX_COINBASE_SQL_SAMPLE_VALIDATION_RANGE_BLOCKS: i64 = 8_192;
 const MAX_COINBASE_SQL_PRACTICAL_WINDOW_BLOCKS: i64 = 65_536;
 const BASENAMES_BASE_REGISTRY_SOURCE_FAMILY: &str = "basenames_base_registry";
 const BASENAMES_BASE_REGISTRAR_SOURCE_FAMILY: &str = "basenames_base_registrar";
@@ -397,11 +396,10 @@ async fn run_coinbase_sql_backfill_window(
                 coinbase_config.validation_mode,
                 &historical_payload,
             );
-            let sample_block_numbers = historical_payload
-                .logs_by_block
-                .keys()
-                .copied()
-                .collect::<Vec<_>>();
+            let sample_block_numbers = coinbase_sql_sample_validation_block_numbers(
+                range,
+                &historical_payload.logs_by_block,
+            );
             let logs_need_validation_provider_payload =
                 historical_payload.logs_need_validation_provider_payload;
             let decoded_payload_log_limit = coinbase_sql_sample_decoded_payload_log_limit(
@@ -425,11 +423,12 @@ async fn run_coinbase_sql_backfill_window(
                 sample_block_count = sample_block_numbers.len(),
                 "Coinbase SQL sample validation range resolution started"
             );
-            let resolved_blocks = resolve_backfill_range(validation_provider, range)
+            let resolved_blocks =
+                resolve_backfill_block_numbers(validation_provider, &sample_block_numbers, range)
                 .await
                 .with_context(|| {
                     format!(
-                        "failed to resolve validation-provider block range for sampled Coinbase SQL range {}..={}",
+                        "failed to resolve validation-provider returned log blocks for sampled Coinbase SQL range {}..={}",
                         range.from_block, range.to_block
                     )
                 })?;
@@ -438,7 +437,6 @@ async fn run_coinbase_sql_backfill_window(
                 &resolved_blocks,
             )?;
             if logs_need_validation_provider_payload {
-                ensure_coinbase_sql_sample_validation_range_size(range)?;
                 info!(
                     service = "indexer",
                     command = "backfill",
@@ -715,24 +713,6 @@ pub(crate) fn ensure_coinbase_sql_registry_range_start_is_replay_safe(
     Ok(())
 }
 
-fn ensure_coinbase_sql_sample_validation_range_size(range: BackfillBlockRange) -> Result<()> {
-    let block_count = range
-        .to_block
-        .saturating_sub(range.from_block)
-        .saturating_add(1);
-    if block_count > MAX_COINBASE_SQL_SAMPLE_VALIDATION_RANGE_BLOCKS {
-        bail!(
-            "Coinbase SQL sample window {}..={} spans {} blocks; refusing range-log validation above {} blocks so the range can retry smaller",
-            range.from_block,
-            range.to_block,
-            block_count,
-            MAX_COINBASE_SQL_SAMPLE_VALIDATION_RANGE_BLOCKS
-        );
-    }
-
-    Ok(())
-}
-
 fn historical_payload_log_count(payload: &HistoricalLogPayload) -> usize {
     payload.logs_by_block.values().map(Vec::len).sum()
 }
@@ -743,6 +723,17 @@ fn coinbase_sql_planning_blocks(range: BackfillBlockRange) -> Vec<ProviderResolv
             block_number,
             block_hash: String::new(),
         })
+        .collect()
+}
+
+fn coinbase_sql_sample_validation_block_numbers(
+    range: BackfillBlockRange,
+    logs_by_block: &BTreeMap<i64, Vec<ProviderLog>>,
+) -> Vec<i64> {
+    logs_by_block
+        .keys()
+        .copied()
+        .filter(|block_number| *block_number >= range.from_block && *block_number <= range.to_block)
         .collect()
 }
 
@@ -795,6 +786,10 @@ fn ensure_coinbase_sql_logs_match_resolved_blocks(
 
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "coinbase_sql/sample_tests.rs"]
+mod sample_tests;
 
 #[cfg(test)]
 mod tests {

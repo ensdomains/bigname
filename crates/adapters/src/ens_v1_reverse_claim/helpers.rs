@@ -17,7 +17,7 @@ sol! {
     event ReverseClaimed(address indexed addr, bytes32 indexed node);
 
     #[derive(Debug)]
-    event BaseReverseClaimed(address indexed addr, bytes32 indexed node);
+    event NameForAddrChanged(address indexed addr, string name);
 }
 
 pub(super) fn supports_reverse_claim_source_family(source_family: &str) -> bool {
@@ -87,14 +87,13 @@ pub(super) fn reverse_claimed_topic0() -> String {
     evm_abi::hex_string(ReverseClaimed::SIGNATURE_HASH.as_slice())
 }
 
-pub(super) fn base_reverse_claimed_topic0() -> String {
-    evm_abi::hex_string(BaseReverseClaimed::SIGNATURE_HASH.as_slice())
+pub(super) fn name_for_addr_changed_topic0() -> String {
+    evm_abi::hex_string(NameForAddrChanged::SIGNATURE_HASH.as_slice())
 }
 
 pub(super) fn reverse_claimed_topic0_for_source_family(source_family: &str) -> Option<String> {
     match source_family {
         SOURCE_FAMILY_ENS_V1_REVERSE_L1 => Some(reverse_claimed_topic0()),
-        SOURCE_FAMILY_BASENAMES_BASE_PRIMARY => Some(base_reverse_claimed_topic0()),
         _ => None,
     }
 }

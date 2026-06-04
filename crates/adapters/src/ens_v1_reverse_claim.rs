@@ -11,7 +11,7 @@ mod helpers;
 mod raw_logs;
 
 use active_emitters::load_active_emitters;
-use events::build_reverse_changed_event;
+use events::build_reverse_changed_events;
 use raw_logs::load_reverse_raw_logs;
 
 #[cfg(test)]
@@ -20,17 +20,19 @@ use anyhow::Context;
 use bigname_storage::CanonicalityState;
 #[cfg(test)]
 use helpers::{
-    hex_string, reverse_claimed_topic0_for_source_family, reverse_name_for_source_family,
-    reverse_node_for_source_family,
+    hex_string, name_for_addr_changed_topic0, reverse_claimed_topic0_for_source_family,
+    reverse_name_for_source_family, reverse_node_for_source_family,
 };
 
 const SOURCE_FAMILY_ENS_V1_REVERSE_L1: &str = "ens_v1_reverse_l1";
 const SOURCE_FAMILY_BASENAMES_BASE_PRIMARY: &str = "basenames_base_primary";
 const SOURCE_EVENT_REVERSE_CLAIMED: &str = "ReverseClaimed";
-const SOURCE_EVENT_BASE_REVERSE_CLAIMED: &str = "BaseReverseClaimed";
+const SOURCE_EVENT_NAME_FOR_ADDR_CHANGED: &str = "NameForAddrChanged";
 const DERIVATION_KIND_ENS_V1_REVERSE_CLAIM: &str = "ens_v1_reverse_claim";
 const EVENT_KIND_REVERSE_CHANGED: &str = "ReverseChanged";
+const EVENT_KIND_RECORD_CHANGED: &str = "RecordChanged";
 const ENS_NATIVE_COIN_TYPE: &str = "60";
+const BASE_NATIVE_COIN_TYPE: &str = "2147492101";
 const CONTRACT_ROLE_REVERSE_REGISTRAR: &str = "reverse_registrar";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -119,16 +121,17 @@ async fn sync_ens_v1_reverse_claim_with_scope(
     let mut matched_log_refs = HashSet::new();
     let mut events = Vec::new();
     for raw_log in &raw_logs {
-        let Some(event) = build_reverse_changed_event(raw_log)? else {
+        let built_events = build_reverse_changed_events(raw_log)?;
+        if built_events.is_empty() {
             continue;
-        };
+        }
         matched_log_refs.insert((
             raw_log.chain_id.clone(),
             raw_log.block_hash.clone(),
             raw_log.transaction_hash.clone(),
             raw_log.log_index,
         ));
-        events.push(event);
+        events.extend(built_events);
     }
 
     if events.is_empty() {

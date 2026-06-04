@@ -66,9 +66,9 @@ async fn build_manifest_runtime_state_loads_checked_in_repository_seed() -> Resu
             WatchedChainPlan {
                 chain: "base-mainnet".to_owned(),
                 addresses: vec![
+                    "0x0000000000d8e504002cc26e3ec46d81971c1664".to_owned(),
                     "0x03c4738ee98ae44591e1a4a4f3cab6641d95dd9a".to_owned(),
                     "0x4ccb0bb02fcaba27e82a56646e81d8c5bc4119a5".to_owned(),
-                    "0x79ea96012eea67a83431f1701b3dff7e37f9e282".to_owned(),
                     "0x9ad14968093c5e8c2a8cc86f6868cfee8c659717".to_owned(),
                     "0xa7d2607c6bd39ae9521e514026cbb078405ab322".to_owned(),
                     "0xb94704422c2a1e396835a571837aa5ae53285a95".to_owned(),

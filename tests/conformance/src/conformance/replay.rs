@@ -278,7 +278,11 @@
             rebuild_resolver_current(database, None, None).await?;
             rebuild_address_names_current(database, None).await?;
             database
-                .rebuild_primary_names_current(corpus.primary_name_address, "basenames", "60")
+                .rebuild_primary_names_current(
+                    corpus.primary_name_address,
+                    "basenames",
+                    BASENAMES_PRIMARY_COIN_TYPE,
+                )
                 .await?;
             seed_replay_primary_name_execution(database, &corpus).await?;
             mark_replay_losing_branch_source_rows_orphaned(database).await?;
@@ -887,7 +891,7 @@
                     execution_trace_id,
                     "basenames",
                     corpus.primary_name_address,
-                    "60",
+                    BASENAMES_PRIMARY_COIN_TYPE,
                     verified_primary_name.clone(),
                     finished_at,
                 ),
@@ -900,7 +904,7 @@
                     execution_trace_id,
                     "basenames",
                     corpus.primary_name_address,
-                    "60",
+                    BASENAMES_PRIMARY_COIN_TYPE,
                     verified_primary_name,
                     finished_at,
                     primary_name_shared_topology_boundary(),
@@ -1791,13 +1795,13 @@
                         canonicality_state,
                         before_state: json!({}),
                         after_state: json!({
-                            "source_event": "ReverseClaimed",
+                            "source_event": "NameForAddrChanged",
                             "address": normalized_address.clone(),
-                            "coin_type": "60",
+                            "coin_type": BASENAMES_PRIMARY_COIN_TYPE,
                             "namespace": "basenames",
                             "reverse_namespace": "basenames",
                             "reverse_label": reverse_label.clone(),
-                            "reverse_name": format!("{reverse_label}.addr.reverse"),
+                            "reverse_name": format!("{reverse_label}.80002105.reverse"),
                             "reverse_node": format!("0xreplay{branch}reverse"),
                             "claim_provenance": {
                                 "source_family": "basenames_base_primary",
@@ -1813,7 +1817,7 @@
                         logical_name_id: None,
                         resource_id: None,
                         event_kind: "RecordChanged".to_owned(),
-                        source_family: "basenames_base_resolver".to_owned(),
+                        source_family: "basenames_base_primary".to_owned(),
                         manifest_version: 1,
                         source_manifest_id: None,
                         chain_id: Some("base-mainnet".to_owned()),
@@ -1826,19 +1830,20 @@
                             "branch": branch,
                             "event_identity": claim_event_identity,
                         }),
-                        derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+                        derivation_kind: "ens_v1_reverse_claim".to_owned(),
                         canonicality_state,
                         before_state: json!({}),
                         after_state: json!({
                             "record_key": "name",
                             "record_family": "name",
                             "selector_key": null,
+                            "source_event": "NameForAddrChanged",
                             "raw_name": raw_name,
                             "primary_claim_source": {
                                 "address": normalized_address,
                                 "namespace": "basenames",
-                                "coin_type": "60",
-                                "reverse_name": format!("{reverse_label}.addr.reverse"),
+                                "coin_type": BASENAMES_PRIMARY_COIN_TYPE,
+                                "reverse_name": format!("{reverse_label}.80002105.reverse"),
                                 "reverse_node": format!("0xreplay{branch}claim"),
                                 "claim_provenance": {
                                     "source_family": "basenames_base_primary",
@@ -2470,7 +2475,7 @@
                 ReplayRoute {
                     label: "primary-name",
                     uri: format!(
-                        "/v1/primary-names/{}?namespace=basenames&coin_type=60&mode=both",
+                        "/v1/primary-names/{}?namespace=basenames&coin_type={BASENAMES_PRIMARY_COIN_TYPE}&mode=both",
                         corpus.primary_name_address
                     ),
                 },
@@ -2561,7 +2566,7 @@
                 ReplayRoute {
                     label: "primary-name",
                     uri: format!(
-                        "/v1/primary-names/{}?namespace=basenames&coin_type=60&mode=both",
+                        "/v1/primary-names/{}?namespace=basenames&coin_type={BASENAMES_PRIMARY_COIN_TYPE}&mode=both",
                         corpus.primary_name_address
                     ),
                 },

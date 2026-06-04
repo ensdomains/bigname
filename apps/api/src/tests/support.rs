@@ -2271,13 +2271,13 @@ fn basenames_primary_name_reverse_changed_event(
         canonicality_state,
         before_state: json!({}),
         after_state: json!({
-            "source_event": "ReverseClaimed",
+            "source_event": "NameForAddrChanged",
             "address": normalized_address,
             "coin_type": coin_type,
             "namespace": "basenames",
             "reverse_namespace": "basenames",
             "reverse_label": reverse_label,
-            "reverse_name": format!("{reverse_label}.addr.reverse"),
+            "reverse_name": format!("{reverse_label}.80002105.reverse"),
             "reverse_node": format!("0x{block_number:064x}"),
             "claim_provenance": {
                 "source_family": "basenames_base_primary",
@@ -2310,7 +2310,7 @@ fn basenames_primary_name_reverse_linked_name_event(
                 "address": normalized_address,
                 "namespace": "basenames",
                 "coin_type": coin_type,
-                "reverse_name": format!("{reverse_label}.addr.reverse"),
+                "reverse_name": format!("{reverse_label}.80002105.reverse"),
                 "reverse_node": format!("0x{block_number:064x}"),
                 "claim_provenance": {
                     "source_family": "basenames_base_primary",

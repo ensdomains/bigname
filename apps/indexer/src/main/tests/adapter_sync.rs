@@ -963,7 +963,7 @@ async fn sync_adapter_owned_raw_log_state_backfills_basenames_reverse_claims_and
     let registrar_contract_instance_id = Uuid::from_u128(0x362);
     let registry_contract_instance_id = Uuid::from_u128(0x363);
     let resolver_contract_instance_id = Uuid::from_u128(0x364);
-    let reverse_address = "0x79ea96012eea67a83431f1701b3dff7e37f9e282";
+    let reverse_address = "0x0000000000d8e504002cc26e3ec46d81971c1664";
     let registrar_address = "0x03c4738ee98ae44591e1a4a4f3cab6641d95dd9a";
     let registry_address = "0xb94704422c2a1e396835a571837aa5ae53285a95";
     let resolver_address = "0xc6d566a56a1aff6508b41f6c90ff131615583bcd";
@@ -1185,11 +1185,10 @@ async fn sync_adapter_owned_raw_log_state_backfills_basenames_reverse_claims_and
                 log_index: 0,
                 emitting_address: reverse_address.to_owned(),
                 topics: vec![
-                    base_reverse_claimed_topic0(),
+                    name_for_addr_changed_topic0(),
                     hex_string(&abi_word_address(claimed_address)),
-                    base_reverse_node_for_address(claimed_address),
                 ],
-                data: Vec::new(),
+                data: decode_hex_string(&encode_dynamic_string_log_data("alice.base.eth")),
                 canonicality_state: CanonicalityState::Canonical,
             },
             RawLog {
@@ -1326,7 +1325,7 @@ async fn sync_adapter_owned_raw_log_state_backfills_basenames_reverse_claims_and
         )
         .fetch_one(database.pool())
         .await?,
-        1
+        2
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>(

@@ -87,17 +87,6 @@ pub(super) async fn orphan_stale_overlapping_surface_bindings(
         .iter()
         .map(|(surface_binding_id, _)| *surface_binding_id)
         .collect::<HashSet<_>>();
-    let invalidated_logical_name_ids = rows
-        .iter()
-        .map(|(_, logical_name_id)| logical_name_id.clone())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-    queue_surface_binding_projection_invalidations(
-        transaction.as_mut(),
-        &invalidated_logical_name_ids,
-    )
-    .await?;
     transaction
         .commit()
         .await
@@ -208,17 +197,6 @@ pub(super) async fn orphan_weaker_same_start_surface_bindings(
         .iter()
         .map(|(surface_binding_id, _)| *surface_binding_id)
         .collect::<HashSet<_>>();
-    let invalidated_logical_name_ids = rows
-        .iter()
-        .map(|(_, logical_name_id)| logical_name_id.clone())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-    queue_surface_binding_projection_invalidations(
-        transaction.as_mut(),
-        &invalidated_logical_name_ids,
-    )
-    .await?;
     transaction
         .commit()
         .await

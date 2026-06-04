@@ -1346,12 +1346,23 @@ async fn insert_raw_reverse_claimed_log_at_index(
             transaction_index: 0,
             log_index,
             emitting_address: emitting_address.to_ascii_lowercase(),
-            topics: vec![
-                reverse_claimed_topic0_for_chain(chain),
-                hex_string(&abi_word_address(claimed_address)),
-                reverse_node_for_chain(chain, claimed_address),
-            ],
-            data: Vec::new(),
+            topics: if chain == "base-mainnet" {
+                vec![
+                    name_for_addr_changed_topic0(),
+                    hex_string(&abi_word_address(claimed_address)),
+                ]
+            } else {
+                vec![
+                    reverse_claimed_topic0(),
+                    hex_string(&abi_word_address(claimed_address)),
+                    reverse_node_for_chain(chain, claimed_address),
+                ]
+            },
+            data: if chain == "base-mainnet" {
+                decode_hex_string(&encode_dynamic_string_log_data("alice.base.eth"))
+            } else {
+                Vec::new()
+            },
             canonicality_state,
         }],
     )
@@ -2204,16 +2215,8 @@ fn reverse_claimed_topic0() -> String {
     keccak256_hex(b"ReverseClaimed(address,bytes32)")
 }
 
-fn base_reverse_claimed_topic0() -> String {
-    keccak256_hex(b"BaseReverseClaimed(address,bytes32)")
-}
-
-fn reverse_claimed_topic0_for_chain(chain: &str) -> String {
-    if chain == "base-mainnet" {
-        base_reverse_claimed_topic0()
-    } else {
-        reverse_claimed_topic0()
-    }
+fn name_for_addr_changed_topic0() -> String {
+    keccak256_hex(b"NameForAddrChanged(address,string)")
 }
 
 const REVERSE_REGISTRAR_ROLE: &str = "reverse_registrar";
@@ -2498,10 +2501,11 @@ fn rpc_reverse_claimed_log_payload(
     })
 }
 
-fn rpc_base_reverse_claimed_log_payload(
+fn rpc_l2_reverse_name_log_payload(
     block: &ProviderBlock,
     address: &str,
     claimed_address: &str,
+    name: &str,
     log_index: u64,
 ) -> Value {
     json!({
@@ -2512,11 +2516,10 @@ fn rpc_base_reverse_claimed_log_payload(
         "logIndex": format!("0x{log_index:x}"),
         "address": address,
         "topics": [
-            base_reverse_claimed_topic0(),
-            hex_string(&abi_word_address(claimed_address)),
-            base_reverse_node_for_address(claimed_address)
+            name_for_addr_changed_topic0(),
+            hex_string(&abi_word_address(claimed_address))
         ],
-        "data": "0x"
+        "data": encode_dynamic_string_log_data(name)
     })
 }
 

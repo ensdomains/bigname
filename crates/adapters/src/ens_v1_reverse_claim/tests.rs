@@ -237,6 +237,20 @@ async fn insert_raw_reverse_claim_log(
     claimed_address: &str,
     canonicality_state: CanonicalityState,
 ) -> Result<()> {
+    if source_family == SOURCE_FAMILY_BASENAMES_BASE_PRIMARY {
+        return insert_raw_l2_reverse_name_log(
+            pool,
+            chain,
+            block_hash,
+            block_number,
+            emitting_address,
+            claimed_address,
+            "alice.base.eth",
+            canonicality_state,
+        )
+        .await;
+    }
+
     upsert_raw_blocks(
         pool,
         &[RawBlock {
@@ -270,6 +284,85 @@ async fn insert_raw_reverse_claim_log(
                 reverse_node_for_source_family(source_family, claimed_address)?,
             ],
             data: Vec::new(),
+            canonicality_state,
+        }],
+    )
+    .await?;
+    Ok(())
+}
+
+fn expected_events_per_reverse_log(source_family: &str) -> usize {
+    if source_family == SOURCE_FAMILY_BASENAMES_BASE_PRIMARY {
+        2
+    } else {
+        1
+    }
+}
+
+fn expected_reverse_claim_kind_counts(
+    source_family: &str,
+    inserted_count: usize,
+) -> BTreeMap<String, EnsV1ReverseClaimKindSyncSummary> {
+    let mut counts = BTreeMap::from([(
+        EVENT_KIND_REVERSE_CHANGED.to_owned(),
+        EnsV1ReverseClaimKindSyncSummary {
+            synced_count: 1,
+            inserted_count,
+        },
+    )]);
+    if source_family == SOURCE_FAMILY_BASENAMES_BASE_PRIMARY {
+        counts.insert(
+            EVENT_KIND_RECORD_CHANGED.to_owned(),
+            EnsV1ReverseClaimKindSyncSummary {
+                synced_count: 1,
+                inserted_count,
+            },
+        );
+    }
+    counts
+}
+
+async fn insert_raw_l2_reverse_name_log(
+    pool: &PgPool,
+    chain: &str,
+    block_hash: &str,
+    block_number: i64,
+    emitting_address: &str,
+    claimed_address: &str,
+    name: &str,
+    canonicality_state: CanonicalityState,
+) -> Result<()> {
+    upsert_raw_blocks(
+        pool,
+        &[RawBlock {
+            chain_id: chain.to_owned(),
+            block_hash: block_hash.to_owned(),
+            parent_hash: None,
+            block_number,
+            block_timestamp: OffsetDateTime::UNIX_EPOCH,
+            logs_bloom: None,
+            transactions_root: None,
+            receipts_root: None,
+            state_root: None,
+            canonicality_state,
+        }],
+    )
+    .await?;
+    upsert_raw_logs(
+        pool,
+        &[RawLog {
+            chain_id: chain.to_owned(),
+            block_hash: block_hash.to_owned(),
+            block_number,
+            transaction_hash: format!("0xtx{block_number:02x}"),
+            transaction_index: 0,
+            log_index: 0,
+            emitting_address: emitting_address.to_owned(),
+            topics: vec![
+                name_for_addr_changed_topic0(),
+                hex_string(&abi_word_address(claimed_address)),
+            ],
+            data: abi_encode_string(name),
             canonicality_state,
         }],
     )
@@ -370,82 +463,108 @@ async fn run_idempotence_case(config: TestReverseClaimConfig<'_>) -> Result<()> 
     .await?;
 
     let first = sync_ens_v1_reverse_claim(database.pool(), config.chain).await?;
+    let expected_event_count = expected_events_per_reverse_log(config.source_family);
     assert_eq!(first.scanned_log_count, 1);
     assert_eq!(first.matched_log_count, 1);
-    assert_eq!(first.total_synced_count, 1);
-    assert_eq!(first.total_inserted_count, 1);
+    assert_eq!(first.total_synced_count, expected_event_count);
+    assert_eq!(first.total_inserted_count, expected_event_count);
     assert_eq!(
         first.by_kind,
-        BTreeMap::from([(
-            EVENT_KIND_REVERSE_CHANGED.to_owned(),
-            EnsV1ReverseClaimKindSyncSummary {
-                synced_count: 1,
-                inserted_count: 1,
-            }
-        )])
+        expected_reverse_claim_kind_counts(config.source_family, 1)
     );
 
     let events = load_normalized_events_by_namespace(database.pool(), config.namespace).await?;
-    assert_eq!(events.len(), 1);
-    assert_eq!(events[0].event_kind, EVENT_KIND_REVERSE_CHANGED);
+    assert_eq!(events.len(), expected_event_count);
+    let reverse_event = events
+        .iter()
+        .find(|event| event.event_kind == EVENT_KIND_REVERSE_CHANGED)
+        .context("missing reverse claim event")?;
+    assert_eq!(reverse_event.event_kind, EVENT_KIND_REVERSE_CHANGED);
     assert_eq!(
-        events[0].derivation_kind,
+        reverse_event.derivation_kind,
         DERIVATION_KIND_ENS_V1_REVERSE_CLAIM
     );
-    assert_eq!(events[0].source_family, config.source_family);
-    assert_eq!(events[0].source_manifest_id, Some(active_manifest_id));
-    assert_eq!(events[0].chain_id.as_deref(), Some(config.chain));
+    assert_eq!(reverse_event.source_family, config.source_family);
+    assert_eq!(reverse_event.source_manifest_id, Some(active_manifest_id));
+    assert_eq!(reverse_event.chain_id.as_deref(), Some(config.chain));
     assert_eq!(
-        events[0].after_state["address"],
+        reverse_event.after_state["address"],
         claimed_address.to_ascii_lowercase()
     );
-    assert_eq!(events[0].after_state["coin_type"], ENS_NATIVE_COIN_TYPE);
-    assert_eq!(events[0].after_state["namespace"], config.namespace);
     assert_eq!(
-        events[0].after_state["source_event"],
+        reverse_event.after_state["coin_type"],
         if config.source_family == SOURCE_FAMILY_BASENAMES_BASE_PRIMARY {
-            SOURCE_EVENT_BASE_REVERSE_CLAIMED
+            BASE_NATIVE_COIN_TYPE
+        } else {
+            ENS_NATIVE_COIN_TYPE
+        }
+    );
+    assert_eq!(reverse_event.after_state["namespace"], config.namespace);
+    assert_eq!(
+        reverse_event.after_state["source_event"],
+        if config.source_family == SOURCE_FAMILY_BASENAMES_BASE_PRIMARY {
+            SOURCE_EVENT_NAME_FOR_ADDR_CHANGED
         } else {
             SOURCE_EVENT_REVERSE_CLAIMED
         }
     );
-    assert_eq!(events[0].after_state["reverse_namespace"], config.namespace);
     assert_eq!(
-        events[0].after_state["reverse_node"],
+        reverse_event.after_state["reverse_namespace"],
+        config.namespace
+    );
+    assert_eq!(
+        reverse_event.after_state["reverse_node"],
         reverse_node_for_source_family(config.source_family, claimed_address)?
     );
     assert_eq!(
-        events[0].after_state["reverse_name"],
+        reverse_event.after_state["reverse_name"],
         reverse_name_for_source_family(config.source_family, claimed_address)?
     );
     assert_eq!(
-        events[0].after_state["claim_provenance"]["source_family"],
+        reverse_event.after_state["claim_provenance"]["source_family"],
         config.source_family
     );
     assert_eq!(
-        events[0].after_state["claim_provenance"]["contract_role"],
+        reverse_event.after_state["claim_provenance"]["contract_role"],
         CONTRACT_ROLE_REVERSE_REGISTRAR
     );
     assert_eq!(
-        events[0].after_state["claim_provenance"]["contract_instance_id"],
+        reverse_event.after_state["claim_provenance"]["contract_instance_id"],
         active_contract_instance_id.to_string()
     );
     assert_eq!(
-        events[0].after_state["claim_provenance"]["emitting_address"],
+        reverse_event.after_state["claim_provenance"]["emitting_address"],
         active_emitter
     );
+    if config.source_family == SOURCE_FAMILY_BASENAMES_BASE_PRIMARY {
+        let record_event = events
+            .iter()
+            .find(|event| event.event_kind == EVENT_KIND_RECORD_CHANGED)
+            .context("missing Basenames primary-name value event")?;
+        assert_eq!(
+            record_event.after_state["source_event"],
+            SOURCE_EVENT_NAME_FOR_ADDR_CHANGED
+        );
+        assert_eq!(record_event.after_state["record_key"], "name");
+        assert_eq!(record_event.after_state["raw_name"], "alice.base.eth");
+        assert_eq!(
+            record_event.after_state["primary_claim_source"]["coin_type"],
+            BASE_NATIVE_COIN_TYPE
+        );
+    }
 
     let second = sync_ens_v1_reverse_claim(database.pool(), config.chain).await?;
     assert_eq!(second.scanned_log_count, 1);
     assert_eq!(second.matched_log_count, 1);
-    assert_eq!(second.total_synced_count, 1);
+    assert_eq!(second.total_synced_count, expected_event_count);
     assert_eq!(second.total_inserted_count, 0);
 
     let counts = load_normalized_event_counts_by_kind(database.pool(), config.namespace).await?;
-    assert_eq!(
-        counts,
-        BTreeMap::from([(EVENT_KIND_REVERSE_CHANGED.to_owned(), 1_usize)])
-    );
+    let mut expected_counts = BTreeMap::from([(EVENT_KIND_REVERSE_CHANGED.to_owned(), 1_usize)]);
+    if config.source_family == SOURCE_FAMILY_BASENAMES_BASE_PRIMARY {
+        expected_counts.insert(EVENT_KIND_RECORD_CHANGED.to_owned(), 1);
+    }
+    assert_eq!(counts, expected_counts);
 
     database.cleanup().await
 }
@@ -496,10 +615,15 @@ async fn run_canonicality_case(config: TestReverseClaimConfig<'_>) -> Result<()>
     .await?;
 
     let first = sync_ens_v1_reverse_claim(database.pool(), config.chain).await?;
-    assert_eq!(first.total_inserted_count, 1);
+    let expected_event_count = expected_events_per_reverse_log(config.source_family);
+    assert_eq!(first.total_inserted_count, expected_event_count);
     let mut events = load_normalized_events_by_namespace(database.pool(), config.namespace).await?;
-    assert_eq!(events.len(), 1);
-    assert_eq!(events[0].canonicality_state, CanonicalityState::Safe);
+    assert_eq!(events.len(), expected_event_count);
+    assert!(
+        events
+            .iter()
+            .all(|event| event.canonicality_state == CanonicalityState::Safe)
+    );
 
     insert_raw_reverse_claim_log(
         database.pool(),
@@ -516,22 +640,33 @@ async fn run_canonicality_case(config: TestReverseClaimConfig<'_>) -> Result<()>
     let second = sync_ens_v1_reverse_claim(database.pool(), config.chain).await?;
     assert_eq!(second.total_inserted_count, 0);
     events = load_normalized_events_by_namespace(database.pool(), config.namespace).await?;
-    assert_eq!(events.len(), 1);
-    assert_eq!(events[0].canonicality_state, CanonicalityState::Finalized);
-    assert_eq!(events[0].source_family, config.source_family);
-    assert_eq!(events[0].chain_id.as_deref(), Some(config.chain));
-    assert_eq!(events[0].after_state["namespace"], config.namespace);
-    assert_eq!(events[0].after_state["reverse_namespace"], config.namespace);
+    assert_eq!(events.len(), expected_event_count);
+    assert!(
+        events
+            .iter()
+            .all(|event| event.canonicality_state == CanonicalityState::Finalized)
+    );
+    let reverse_event = events
+        .iter()
+        .find(|event| event.event_kind == EVENT_KIND_REVERSE_CHANGED)
+        .context("missing canonical reverse claim event")?;
+    assert_eq!(reverse_event.source_family, config.source_family);
+    assert_eq!(reverse_event.chain_id.as_deref(), Some(config.chain));
+    assert_eq!(reverse_event.after_state["namespace"], config.namespace);
     assert_eq!(
-        events[0].after_state["claim_provenance"]["contract_role"],
+        reverse_event.after_state["reverse_namespace"],
+        config.namespace
+    );
+    assert_eq!(
+        reverse_event.after_state["claim_provenance"]["contract_role"],
         CONTRACT_ROLE_REVERSE_REGISTRAR
     );
     assert_eq!(
-        events[0].after_state["claim_provenance"]["contract_instance_id"],
+        reverse_event.after_state["claim_provenance"]["contract_instance_id"],
         contract_instance_id.to_string()
     );
     assert_eq!(
-        events[0].after_state["claim_provenance"]["emitting_address"],
+        reverse_event.after_state["claim_provenance"]["emitting_address"],
         emitter
     );
 
@@ -548,6 +683,22 @@ fn abi_word_address(value: &str) -> [u8; 32] {
             u8::from_str_radix(hex, 16).expect("test address chunk must be valid hex");
     }
     word
+}
+
+fn abi_word_u64(value: u64) -> [u8; 32] {
+    let mut word = [0u8; 32];
+    word[24..].copy_from_slice(&value.to_be_bytes());
+    word
+}
+
+fn abi_encode_string(value: &str) -> Vec<u8> {
+    let mut data = Vec::new();
+    data.extend_from_slice(&abi_word_u64(32));
+    data.extend_from_slice(&abi_word_u64(value.len() as u64));
+    data.extend_from_slice(value.as_bytes());
+    let padding = (32 - value.len() % 32) % 32;
+    data.extend(std::iter::repeat_n(0, padding));
+    data
 }
 
 #[tokio::test]
@@ -572,6 +723,123 @@ async fn sync_ens_v1_reverse_claim_is_idempotent_for_basenames_base_primary() ->
         file_path: "manifests/basenames/basenames_base_primary/v1.toml",
     })
     .await
+}
+
+#[tokio::test]
+async fn sync_basenames_base_primary_from_l2_reverse_registrar_name_value() -> Result<()> {
+    let _permit = crate::acquire_test_db_permit().await;
+    let database = TestDatabase::new().await?;
+    let active_manifest_id = insert_manifest_version(
+        database.pool(),
+        ManifestVersionSeed {
+            manifest_version: 1,
+            namespace: "basenames",
+            source_family: SOURCE_FAMILY_BASENAMES_BASE_PRIMARY,
+            chain: "base-mainnet",
+            deployment_epoch: "basenames_v1",
+            rollout_status: "active",
+            file_path: "manifests/basenames/basenames_base_primary/v1.toml",
+        },
+    )
+    .await?;
+    let contract_instance_id = Uuid::new_v4();
+    let l2_reverse_registrar = "0x0000000000d8e504002cc26e3ec46d81971c1664";
+    let claimed_address = "0x1111111111111111111111111111111111111111";
+
+    insert_contract_instance(database.pool(), "base-mainnet", contract_instance_id).await?;
+    insert_manifest_contract_instance(
+        database.pool(),
+        active_manifest_id,
+        contract_instance_id,
+        l2_reverse_registrar,
+    )
+    .await?;
+    insert_contract_instance_address(
+        database.pool(),
+        "base-mainnet",
+        contract_instance_id,
+        l2_reverse_registrar,
+        active_manifest_id,
+    )
+    .await?;
+    insert_raw_l2_reverse_name_log(
+        database.pool(),
+        "base-mainnet",
+        "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        42,
+        l2_reverse_registrar,
+        claimed_address,
+        "alice.base.eth",
+        CanonicalityState::Canonical,
+    )
+    .await?;
+
+    let summary = sync_ens_v1_reverse_claim(database.pool(), "base-mainnet").await?;
+    assert_eq!(summary.scanned_log_count, 1);
+    assert_eq!(summary.matched_log_count, 1);
+    assert_eq!(summary.total_synced_count, 2);
+    assert_eq!(
+        summary.by_kind,
+        BTreeMap::from([
+            (
+                EVENT_KIND_REVERSE_CHANGED.to_owned(),
+                EnsV1ReverseClaimKindSyncSummary {
+                    synced_count: 1,
+                    inserted_count: 1,
+                }
+            ),
+            (
+                "RecordChanged".to_owned(),
+                EnsV1ReverseClaimKindSyncSummary {
+                    synced_count: 1,
+                    inserted_count: 1,
+                }
+            )
+        ])
+    );
+
+    let events = load_normalized_events_by_namespace(database.pool(), "basenames").await?;
+    let reverse_event = events
+        .iter()
+        .find(|event| event.event_kind == EVENT_KIND_REVERSE_CHANGED)
+        .context("missing Basenames L2 ReverseChanged event")?;
+    assert_eq!(
+        reverse_event.source_family,
+        SOURCE_FAMILY_BASENAMES_BASE_PRIMARY
+    );
+    assert_eq!(reverse_event.chain_id.as_deref(), Some("base-mainnet"));
+    assert_eq!(
+        reverse_event.after_state["source_event"],
+        "NameForAddrChanged"
+    );
+    assert_eq!(reverse_event.after_state["address"], claimed_address);
+    assert_eq!(reverse_event.after_state["coin_type"], "2147492101");
+    assert_eq!(reverse_event.after_state["namespace"], "basenames");
+    assert_eq!(
+        reverse_event.after_state["claim_provenance"]["source_family"],
+        SOURCE_FAMILY_BASENAMES_BASE_PRIMARY
+    );
+    assert_eq!(
+        reverse_event.after_state["claim_provenance"]["contract_instance_id"],
+        contract_instance_id.to_string()
+    );
+
+    let record_event = events
+        .iter()
+        .find(|event| event.event_kind == "RecordChanged")
+        .context("missing Basenames L2 primary-name value event")?;
+    assert_eq!(record_event.after_state["record_key"], "name");
+    assert_eq!(record_event.after_state["raw_name"], "alice.base.eth");
+    assert_eq!(
+        record_event.after_state["primary_claim_source"]["coin_type"],
+        "2147492101"
+    );
+    assert_eq!(
+        record_event.after_state["primary_claim_source"]["claim_provenance"]["emitting_address"],
+        l2_reverse_registrar
+    );
+
+    database.cleanup().await
 }
 
 #[tokio::test]

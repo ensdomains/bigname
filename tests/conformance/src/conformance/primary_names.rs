@@ -1,3 +1,5 @@
+        const BASENAMES_PRIMARY_COIN_TYPE: &str = "2147492101";
+
         #[tokio::test]
         async fn primary_names_contract_reads_status_shaped_declared_results_by_mode_for_tuple_present()
         -> Result<()> {
@@ -103,21 +105,25 @@
             let expected_data = json!({
                 "address": address,
                 "namespace": "basenames",
-                "coin_type": "60",
+                "coin_type": BASENAMES_PRIMARY_COIN_TYPE,
             });
 
             database
-                .seed_basenames_primary_name_claim_observation(address, "60", "Alice.base.eth")
+                .seed_basenames_primary_name_claim_observation(
+                    address,
+                    BASENAMES_PRIMARY_COIN_TYPE,
+                    "Alice.base.eth",
+                )
                 .await?;
             database
-                .rebuild_primary_names_current(address, "basenames", "60")
+                .rebuild_primary_names_current(address, "basenames", BASENAMES_PRIMARY_COIN_TYPE)
                 .await?;
 
             let declared_response = app_router(database.app_state())
                 .oneshot(
                     Request::builder()
                         .uri(format!(
-                            "/v1/primary-names/{address}?namespace=basenames&coin_type=60&mode=declared"
+                            "/v1/primary-names/{address}?namespace=basenames&coin_type={BASENAMES_PRIMARY_COIN_TYPE}&mode=declared"
                         ))
                         .body(Body::empty())
                         .expect("request must build"),
@@ -128,7 +134,7 @@
                 .oneshot(
                     Request::builder()
                         .uri(format!(
-                            "/v1/primary-names/{address}?namespace=basenames&coin_type=60&mode=both"
+                            "/v1/primary-names/{address}?namespace=basenames&coin_type={BASENAMES_PRIMARY_COIN_TYPE}&mode=both"
                         ))
                         .body(Body::empty())
                         .expect("request must build"),
@@ -172,7 +178,7 @@
             );
 
             for payload in [&declared_payload, &both_payload] {
-                assert_primary_name_unsupported_bootstrap_invariants(payload);
+                assert_primary_name_unsupported_declared_readback_invariants(payload);
             }
 
             database.cleanup().await?;
@@ -809,7 +815,7 @@
             let expected_data = json!({
                 "address": address,
                 "namespace": "basenames",
-                "coin_type": "60",
+                "coin_type": BASENAMES_PRIMARY_COIN_TYPE,
             });
             let execution_trace_id = Uuid::from_u128(0x0e7ec7ace0000000000000000000004a);
             let finished_at = timestamp(1_717_172_410);
@@ -827,10 +833,14 @@
             });
 
             database
-                .seed_basenames_primary_name_claim_observation(address, "60", "Alice.base.eth")
+                .seed_basenames_primary_name_claim_observation(
+                    address,
+                    BASENAMES_PRIMARY_COIN_TYPE,
+                    "Alice.base.eth",
+                )
                 .await?;
             database
-                .rebuild_primary_names_current(address, "basenames", "60")
+                .rebuild_primary_names_current(address, "basenames", BASENAMES_PRIMARY_COIN_TYPE)
                 .await?;
 
             upsert_execution_trace(
@@ -839,7 +849,7 @@
                     execution_trace_id,
                     "basenames",
                     address,
-                    "60",
+                    BASENAMES_PRIMARY_COIN_TYPE,
                     verified_primary_name.clone(),
                     finished_at,
                 ),
@@ -851,7 +861,7 @@
                     execution_trace_id,
                     "basenames",
                     address,
-                    "60",
+                    BASENAMES_PRIMARY_COIN_TYPE,
                     verified_primary_name.clone(),
                     finished_at,
                     primary_name_shared_topology_boundary(),
@@ -864,7 +874,7 @@
                 .oneshot(
                     Request::builder()
                         .uri(format!(
-                            "/v1/primary-names/{address}?namespace=basenames&coin_type=60&mode=verified"
+                            "/v1/primary-names/{address}?namespace=basenames&coin_type={BASENAMES_PRIMARY_COIN_TYPE}&mode=verified"
                         ))
                         .body(Body::empty())
                         .expect("request must build"),
@@ -875,7 +885,7 @@
                 .oneshot(
                     Request::builder()
                         .uri(format!(
-                            "/v1/primary-names/{address}?namespace=basenames&coin_type=60&mode=both"
+                            "/v1/primary-names/{address}?namespace=basenames&coin_type={BASENAMES_PRIMARY_COIN_TYPE}&mode=both"
                         ))
                         .body(Body::empty())
                         .expect("request must build"),
@@ -927,16 +937,14 @@
             );
             assert_eq!(both_payload.verified_state, verified_payload.verified_state);
 
-            assert_primary_name_supported_persisted_readback_invariants_for_namespace(
+            assert_primary_name_supported_persisted_section_readback_invariants(
                 &verified_payload,
                 "basenames",
-                execution_trace_id,
                 finished_at,
             );
-            assert_primary_name_supported_persisted_readback_invariants_for_namespace(
+            assert_primary_name_supported_persisted_section_readback_invariants(
                 &both_payload,
                 "basenames",
-                execution_trace_id,
                 finished_at,
             );
 
@@ -952,7 +960,7 @@
             let expected_data = json!({
                 "address": address,
                 "namespace": "basenames",
-                "coin_type": "60",
+                "coin_type": BASENAMES_PRIMARY_COIN_TYPE,
             });
             let execution_trace_id = Uuid::from_u128(0x0e7ec7ace0000000000000000000004b);
             let finished_at = timestamp(1_717_172_411);
@@ -964,7 +972,7 @@
                 .insert_primary_name_current_row(PrimaryNameCurrentRow {
                     address: address.to_owned(),
                     namespace: "basenames".to_owned(),
-                    coin_type: "60".to_owned(),
+                    coin_type: BASENAMES_PRIMARY_COIN_TYPE.to_owned(),
                     claim_status: PrimaryNameClaimStatus::NotFound,
                     raw_claim_name: None,
                     claim_provenance: json!({}),
@@ -977,7 +985,7 @@
                     execution_trace_id,
                     "basenames",
                     address,
-                    "60",
+                    BASENAMES_PRIMARY_COIN_TYPE,
                     verified_primary_name.clone(),
                     finished_at,
                 ),
@@ -989,7 +997,7 @@
                     execution_trace_id,
                     "basenames",
                     address,
-                    "60",
+                    BASENAMES_PRIMARY_COIN_TYPE,
                     verified_primary_name.clone(),
                     finished_at,
                     primary_name_shared_topology_boundary(),
@@ -1002,7 +1010,7 @@
                 .oneshot(
                     Request::builder()
                         .uri(format!(
-                            "/v1/primary-names/{address}?namespace=basenames&coin_type=60&mode=verified"
+                            "/v1/primary-names/{address}?namespace=basenames&coin_type={BASENAMES_PRIMARY_COIN_TYPE}&mode=verified"
                         ))
                         .body(Body::empty())
                         .expect("request must build"),
@@ -1013,7 +1021,7 @@
                 .oneshot(
                     Request::builder()
                         .uri(format!(
-                            "/v1/primary-names/{address}?namespace=basenames&coin_type=60&mode=both"
+                            "/v1/primary-names/{address}?namespace=basenames&coin_type={BASENAMES_PRIMARY_COIN_TYPE}&mode=both"
                         ))
                         .body(Body::empty())
                         .expect("request must build"),
@@ -1059,16 +1067,14 @@
             );
             assert_eq!(both_payload.verified_state, verified_payload.verified_state);
 
-            assert_primary_name_supported_persisted_readback_invariants_for_namespace(
+            assert_primary_name_supported_persisted_section_readback_invariants(
                 &verified_payload,
                 "basenames",
-                execution_trace_id,
                 finished_at,
             );
-            assert_primary_name_supported_persisted_readback_invariants_for_namespace(
+            assert_primary_name_supported_persisted_section_readback_invariants(
                 &both_payload,
                 "basenames",
-                execution_trace_id,
                 finished_at,
             );
 
@@ -1084,7 +1090,7 @@
             let expected_data = json!({
                 "address": address,
                 "namespace": "basenames",
-                "coin_type": "60",
+                "coin_type": BASENAMES_PRIMARY_COIN_TYPE,
             });
             let execution_trace_id = Uuid::from_u128(0x0e7ec7ace0000000000000000000004c);
             let finished_at = timestamp(1_717_172_412);
@@ -1097,7 +1103,7 @@
                 .insert_primary_name_current_row(PrimaryNameCurrentRow {
                     address: address.to_owned(),
                     namespace: "basenames".to_owned(),
-                    coin_type: "60".to_owned(),
+                    coin_type: BASENAMES_PRIMARY_COIN_TYPE.to_owned(),
                     claim_status: PrimaryNameClaimStatus::InvalidName,
                     raw_claim_name: Some("alice..base.eth".to_owned()),
                     claim_provenance: json!({}),
@@ -1110,7 +1116,7 @@
                     execution_trace_id,
                     "basenames",
                     address,
-                    "60",
+                    BASENAMES_PRIMARY_COIN_TYPE,
                     verified_primary_name.clone(),
                     finished_at,
                 ),
@@ -1122,7 +1128,7 @@
                     execution_trace_id,
                     "basenames",
                     address,
-                    "60",
+                    BASENAMES_PRIMARY_COIN_TYPE,
                     verified_primary_name.clone(),
                     finished_at,
                     primary_name_shared_topology_boundary(),
@@ -1135,7 +1141,7 @@
                 .oneshot(
                     Request::builder()
                         .uri(format!(
-                            "/v1/primary-names/{address}?namespace=basenames&coin_type=60&mode=verified"
+                            "/v1/primary-names/{address}?namespace=basenames&coin_type={BASENAMES_PRIMARY_COIN_TYPE}&mode=verified"
                         ))
                         .body(Body::empty())
                         .expect("request must build"),
@@ -1146,7 +1152,7 @@
                 .oneshot(
                     Request::builder()
                         .uri(format!(
-                            "/v1/primary-names/{address}?namespace=basenames&coin_type=60&mode=both"
+                            "/v1/primary-names/{address}?namespace=basenames&coin_type={BASENAMES_PRIMARY_COIN_TYPE}&mode=both"
                         ))
                         .body(Body::empty())
                         .expect("request must build"),
@@ -1203,16 +1209,14 @@
                 "invalid_name readback must not backfill claimed_primary_name.name"
             );
 
-            assert_primary_name_supported_persisted_readback_invariants_for_namespace(
+            assert_primary_name_supported_persisted_section_readback_invariants(
                 &verified_payload,
                 "basenames",
-                execution_trace_id,
                 finished_at,
             );
-            assert_primary_name_supported_persisted_readback_invariants_for_namespace(
+            assert_primary_name_supported_persisted_section_readback_invariants(
                 &both_payload,
                 "basenames",
-                execution_trace_id,
                 finished_at,
             );
 
@@ -1370,16 +1374,7 @@
             payload: &PrimaryNameResponse,
             expected_coverage: Value,
         ) {
-            assert_eq!(
-                payload.provenance,
-                json!({
-                    "normalized_event_ids": [],
-                    "raw_fact_refs": [],
-                    "manifest_versions": [],
-                    "execution_trace_id": null,
-                    "derivation_kind": "primary_name_route_bootstrap",
-                })
-            );
+            assert!(payload.provenance.is_null());
             assert_primary_name_route_common_invariants_with_coverage(
                 payload,
                 expected_coverage,
@@ -1396,22 +1391,37 @@
             );
         }
 
+        fn assert_primary_name_unsupported_declared_readback_invariants(
+            payload: &PrimaryNameResponse,
+        ) {
+            assert!(payload.provenance.is_null());
+            assert_primary_name_route_common_invariants_with_coverage(
+                payload,
+                primary_name_unsupported_exact_tuple_coverage(),
+            );
+            assert!(payload.last_updated.ends_with('Z'));
+        }
+
         fn assert_primary_name_supported_persisted_readback_invariants_for_namespace(
             payload: &PrimaryNameResponse,
             namespace: &str,
-            execution_trace_id: Uuid,
+            _execution_trace_id: Uuid,
             finished_at: OffsetDateTime,
         ) {
-            assert_eq!(
-                payload.provenance,
-                json!({
-                    "normalized_event_ids": [],
-                    "raw_fact_refs": [],
-                    "manifest_versions": primary_name_execution_manifest_versions_for_namespace(namespace),
-                    "execution_trace_id": execution_trace_id.to_string(),
-                    "derivation_kind": "primary_name_route_bootstrap",
-                })
+            assert!(payload.provenance.is_null());
+            assert_primary_name_route_common_invariants_with_coverage(
+                payload,
+                primary_name_supported_exact_tuple_coverage(namespace),
             );
+            assert_eq!(payload.last_updated, format_timestamp(finished_at));
+        }
+
+        fn assert_primary_name_supported_persisted_section_readback_invariants(
+            payload: &PrimaryNameResponse,
+            namespace: &str,
+            finished_at: OffsetDateTime,
+        ) {
+            assert!(payload.provenance.is_null());
             assert_primary_name_route_common_invariants_with_coverage(
                 payload,
                 primary_name_supported_exact_tuple_coverage(namespace),
@@ -1699,25 +1709,21 @@
                 .await
                 .context("primary-name missing-coin-type request failed")?;
 
-            assert_eq!(missing_namespace.status(), StatusCode::BAD_REQUEST);
-            assert_eq!(missing_coin_type.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(missing_namespace.status(), StatusCode::OK);
+            assert_eq!(missing_coin_type.status(), StatusCode::OK);
 
-            let missing_namespace_payload: ErrorResponse = read_json(missing_namespace).await?;
-            let missing_coin_type_payload: ErrorResponse = read_json(missing_coin_type).await?;
+            let missing_namespace_payload: PrimaryNameResponse = read_json(missing_namespace).await?;
+            let missing_coin_type_payload: PrimaryNameResponse = read_json(missing_coin_type).await?;
 
-            assert_eq!(missing_namespace_payload.error.code, "invalid_input");
             assert_eq!(
-                missing_namespace_payload.error.message,
-                "namespace is required"
+                missing_namespace_payload.data,
+                json!({
+                    "address": address,
+                    "namespace": "ens",
+                    "coin_type": "60",
+                })
             );
-            assert!(missing_namespace_payload.error.details.is_empty());
-
-            assert_eq!(missing_coin_type_payload.error.code, "invalid_input");
-            assert_eq!(
-                missing_coin_type_payload.error.message,
-                "coin_type is required"
-            );
-            assert!(missing_coin_type_payload.error.details.is_empty());
+            assert_eq!(missing_coin_type_payload.data, missing_namespace_payload.data);
 
             database.cleanup().await?;
             Ok(())
