@@ -24,6 +24,7 @@ Method:
 
 Output:
 - findings first, ordered by severity, with precise file/line references
+- for each finding, include both the exact technical issue and a brief plain-language explanation of why it matters
 - missing tests/docs/citations separately when no bug is proven
 - recommended explicit staging set
 - residual risks and checks not run
