@@ -426,6 +426,33 @@ candidate_keys AS (
       )
       AND fallback.address IS NOT NULL
       AND fallback.address <> ''
+
+    UNION ALL
+
+    SELECT
+        'address_names_current'::TEXT AS projection,
+        lower(fallback.address) || ':' || changed.logical_name_id AS projection_key,
+        jsonb_build_object(
+            'address', lower(fallback.address),
+            'logical_name_id', changed.logical_name_id
+        ) AS key_payload,
+        changed.normalized_event_id,
+        changed.change_id,
+        changed.changed_at
+    FROM resource_permission_changed_names changed
+    JOIN normalized_events ne
+      ON ne.logical_name_id = changed.logical_name_id
+    CROSS JOIN LATERAL (
+        VALUES (ne.after_state ->> 'owner')
+    ) AS fallback(address)
+    WHERE ne.event_kind = 'AuthorityTransferred'
+      AND ne.canonicality_state IN (
+          'canonical'::canonicality_state,
+          'safe'::canonicality_state,
+          'finalized'::canonicality_state
+      )
+      AND fallback.address IS NOT NULL
+      AND fallback.address <> ''
 )
 "#;
 
