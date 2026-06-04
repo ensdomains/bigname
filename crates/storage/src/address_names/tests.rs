@@ -16,9 +16,11 @@ use uuid::Uuid;
 
 use super::*;
 use crate::{
-    CanonicalityState, NameCurrentRow, NameSurface, Resource, SurfaceBinding, SurfaceBindingKind,
-    TokenLineage, default_database_url, upsert_name_current_rows, upsert_name_surfaces,
-    upsert_resources, upsert_surface_bindings, upsert_token_lineages,
+    CanonicalityState, NameCurrentRow, NameSurface, Resource, ReverseIdentityFeedInput,
+    ReverseIdentityRoles, ReverseIdentityStorageInput, SurfaceBinding, SurfaceBindingKind,
+    TokenLineage, default_database_url, load_identity_records_by_names,
+    load_reverse_identity_feed_records, load_reverse_identity_records, upsert_name_current_rows,
+    upsert_name_surfaces, upsert_resources, upsert_surface_bindings, upsert_token_lineages,
 };
 
 static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
@@ -599,6 +601,30 @@ async fn address_names_current_filters_closed_surface_bindings() -> Result<()> {
     });
     upsert_name_current_rows(database.pool(), &[name_current_row(&row)]).await?;
     upsert_address_names_current_rows(database.pool(), std::slice::from_ref(&row)).await?;
+    rebuild_address_names_current_identity_sidecars(database.pool()).await?;
+
+    let reverse_input = ReverseIdentityStorageInput {
+        address: address.to_owned(),
+        coin_type: "60".to_owned(),
+        roles: ReverseIdentityRoles::Owned,
+        page_size: 10,
+        cursor: None,
+    };
+    let feed_input = ReverseIdentityFeedInput {
+        address: address.to_owned(),
+        coin_type: "60".to_owned(),
+        roles: ReverseIdentityRoles::Owned,
+    };
+    let reverse_before =
+        load_reverse_identity_records(database.pool(), std::slice::from_ref(&reverse_input))
+            .await?;
+    assert_eq!(reverse_before[0].entries.len(), 1);
+    assert_eq!(reverse_before[0].total_count, Some(1));
+    let feed_before =
+        load_reverse_identity_feed_records(database.pool(), std::slice::from_ref(&feed_input))
+            .await?;
+    assert_eq!(feed_before[0].total_count, 1);
+    assert!(feed_before[0].record.is_some());
 
     sqlx::query(
         r#"
@@ -617,6 +643,131 @@ async fn address_names_current_filters_closed_surface_bindings() -> Result<()> {
             .await?
             .is_empty()
     );
+    assert_eq!(identity_count(database.pool(), address, "owned").await?, 0);
+    assert_eq!(
+        identity_feed_count(database.pool(), address, "owned").await?,
+        0
+    );
+
+    let reverse_after =
+        load_reverse_identity_records(database.pool(), std::slice::from_ref(&reverse_input))
+            .await?;
+    assert!(reverse_after[0].entries.is_empty());
+    assert_eq!(reverse_after[0].total_count, Some(0));
+    let feed_after =
+        load_reverse_identity_feed_records(database.pool(), std::slice::from_ref(&feed_input))
+            .await?;
+    assert_eq!(feed_after[0].total_count, 0);
+    assert!(feed_after[0].record.is_none());
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn identity_name_records_filter_closed_address_relation_bindings() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    let logical_name_id = "ens:detail-closed.eth";
+    let stale_token_lineage_id = Uuid::from_u128(0x4101);
+    let stale_resource_id = Uuid::from_u128(0x4201);
+    let stale_surface_binding_id = Uuid::from_u128(0x4301);
+    let current_token_lineage_id = Uuid::from_u128(0x4102);
+    let current_resource_id = Uuid::from_u128(0x4202);
+    let current_surface_binding_id = Uuid::from_u128(0x4302);
+
+    seed_relation_references(
+        &database,
+        logical_name_id,
+        "detail-closed.eth",
+        stale_resource_id,
+        Some(stale_token_lineage_id),
+        stale_surface_binding_id,
+        CanonicalityState::Finalized,
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE surface_bindings
+        SET active_to = $2
+        WHERE surface_binding_id = $1
+        "#,
+    )
+    .bind(stale_surface_binding_id)
+    .bind(timestamp(1_717_171_800))
+    .execute(database.pool())
+    .await?;
+
+    upsert_token_lineages(
+        database.pool(),
+        &[token_lineage(
+            current_token_lineage_id,
+            CanonicalityState::Finalized,
+        )],
+    )
+    .await?;
+    upsert_resources(
+        database.pool(),
+        &[resource(
+            current_resource_id,
+            Some(current_token_lineage_id),
+            CanonicalityState::Finalized,
+        )],
+    )
+    .await?;
+    let mut current_binding = surface_binding(
+        current_surface_binding_id,
+        logical_name_id,
+        current_resource_id,
+        CanonicalityState::Finalized,
+    );
+    current_binding.active_from = timestamp(1_717_171_900);
+    current_binding.block_hash = format!("0xbinding{}", current_surface_binding_id.simple());
+    current_binding.block_number = 21_100_004;
+    upsert_surface_bindings(database.pool(), std::slice::from_ref(&current_binding)).await?;
+
+    let stale_relation = address_name_current_row(AddressNameCurrentRowSeed {
+        address,
+        logical_name_id,
+        display_name: "detail-closed.eth",
+        relation: AddressNameRelation::Registrant,
+        surface_binding_id: stale_surface_binding_id,
+        resource_id: stale_resource_id,
+        token_lineage_id: Some(stale_token_lineage_id),
+        manifest_version: 1,
+    });
+    let current_name = address_name_current_row(AddressNameCurrentRowSeed {
+        address,
+        logical_name_id,
+        display_name: "detail-closed.eth",
+        relation: AddressNameRelation::Registrant,
+        surface_binding_id: current_surface_binding_id,
+        resource_id: current_resource_id,
+        token_lineage_id: Some(current_token_lineage_id),
+        manifest_version: 2,
+    });
+    upsert_name_current_rows(database.pool(), &[name_current_row(&current_name)]).await?;
+    upsert_address_names_current_rows(database.pool(), std::slice::from_ref(&stale_relation))
+        .await?;
+    rebuild_address_names_current_identity_sidecars(database.pool()).await?;
+
+    let records =
+        load_identity_records_by_names(database.pool(), &[logical_name_id.to_owned()]).await?;
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].row.resource_id, Some(current_resource_id));
+    assert!(records[0].relations.is_empty());
+
+    let reverse_input = ReverseIdentityStorageInput {
+        address: address.to_owned(),
+        coin_type: "60".to_owned(),
+        roles: ReverseIdentityRoles::Owned,
+        page_size: 10,
+        cursor: None,
+    };
+    let reverse_records =
+        load_reverse_identity_records(database.pool(), std::slice::from_ref(&reverse_input))
+            .await?;
+    assert!(reverse_records[0].entries.is_empty());
+    assert_eq!(reverse_records[0].total_count, Some(0));
 
     database.cleanup().await
 }

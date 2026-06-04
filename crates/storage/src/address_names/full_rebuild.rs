@@ -251,81 +251,12 @@ async fn rebuild_address_names_current_identity_sidecars_in_transaction(
         r#"
         WITH relation_groups AS (
             SELECT
-                anc.address,
-                anc.logical_name_id,
-                BOOL_OR(anc.relation IN ('registrant', 'token_holder')) AS owned,
-                BOOL_OR(anc.relation = 'effective_controller') AS managed
-            FROM address_names_current anc
-            JOIN name_surfaces surface
-              ON surface.logical_name_id = anc.logical_name_id
-            JOIN resources resource
-              ON resource.resource_id = anc.resource_id
-            JOIN surface_bindings binding
-              ON binding.surface_binding_id = anc.surface_binding_id
-            LEFT JOIN token_lineages token_lineage
-              ON token_lineage.token_lineage_id = anc.token_lineage_id
-            JOIN name_current identity_nc
-              ON identity_nc.logical_name_id = anc.logical_name_id
-            JOIN name_surfaces identity_nc_surface
-              ON identity_nc_surface.logical_name_id = identity_nc.logical_name_id
-            LEFT JOIN resources identity_nc_resource
-              ON identity_nc_resource.resource_id = identity_nc.resource_id
-            LEFT JOIN surface_bindings identity_nc_binding
-              ON identity_nc_binding.surface_binding_id = identity_nc.surface_binding_id
-            LEFT JOIN token_lineages identity_nc_token_lineage
-              ON identity_nc_token_lineage.token_lineage_id = identity_nc.token_lineage_id
-            WHERE surface.canonicality_state IN (
-                  'canonical'::canonicality_state,
-                  'safe'::canonicality_state,
-                  'finalized'::canonicality_state
-              )
-              AND resource.canonicality_state IN (
-                  'canonical'::canonicality_state,
-                  'safe'::canonicality_state,
-                  'finalized'::canonicality_state
-              )
-              AND binding.canonicality_state IN (
-                  'canonical'::canonicality_state,
-                  'safe'::canonicality_state,
-                  'finalized'::canonicality_state
-              )
-              AND (
-                  anc.token_lineage_id IS NULL
-                  OR token_lineage.canonicality_state IN (
-                      'canonical'::canonicality_state,
-                      'safe'::canonicality_state,
-                      'finalized'::canonicality_state
-                  )
-              )
-              AND identity_nc_surface.canonicality_state IN (
-                  'canonical'::canonicality_state,
-                  'safe'::canonicality_state,
-                  'finalized'::canonicality_state
-              )
-              AND (
-                  identity_nc.surface_binding_id IS NULL
-                  OR (
-                      identity_nc_resource.canonicality_state IN (
-                          'canonical'::canonicality_state,
-                          'safe'::canonicality_state,
-                          'finalized'::canonicality_state
-                      )
-                      AND identity_nc_binding.canonicality_state IN (
-                          'canonical'::canonicality_state,
-                          'safe'::canonicality_state,
-                          'finalized'::canonicality_state
-                      )
-                      AND (
-                          identity_nc.token_lineage_id IS NULL
-                          OR identity_nc_token_lineage.canonicality_state IN (
-                              'canonical'::canonicality_state,
-                              'safe'::canonicality_state,
-                              'finalized'::canonicality_state
-                          )
-                      )
-                  )
-              )
-            GROUP BY anc.address, anc.logical_name_id
+                readable.address,
+                readable.logical_name_id,
+                BOOL_OR(readable.relation IN ('registrant', 'token_holder')) AS owned,
+                BOOL_OR(readable.relation = 'effective_controller') AS managed
+            FROM address_names_current_identity_readable_relation_rows(NULL::text) readable
+            GROUP BY readable.address, readable.logical_name_id
         ),
         counts AS (
             SELECT address, 'owned'::text AS roles, COUNT(*)::bigint AS total_count
