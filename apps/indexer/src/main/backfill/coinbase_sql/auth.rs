@@ -10,6 +10,7 @@ use serde::Serialize;
 use uuid::Uuid;
 
 const CDP_JWT_EXPIRY_SECS: i64 = 120;
+const CDP_REST_AUDIENCE: &str = "cdp_service";
 const ED25519_PKCS8_SEED_PREFIX: &[u8] = &[
     0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20,
 ];
@@ -67,6 +68,7 @@ impl CoinbaseSqlAuth {
         let claims = CoinbaseSqlJwtClaims {
             sub: &self.api_key_id,
             iss: "cdp",
+            aud: [CDP_REST_AUDIENCE],
             uris: vec![format!("POST {}{}", self.request_host, self.request_path)],
             iat: now,
             nbf: now,
@@ -156,6 +158,7 @@ fn ed25519_key_from_base64_secret(secret: &str) -> Result<Option<EncodingKey>> {
 struct CoinbaseSqlJwtClaims<'a> {
     sub: &'a str,
     iss: &'static str,
+    aud: [&'static str; 1],
     uris: Vec<String>,
     iat: i64,
     nbf: i64,
@@ -195,7 +198,7 @@ mod tests {
             "POST api.cdp.coinbase.com/platform/v2/data/query/run"
         );
         assert!(claims["exp"].as_i64().unwrap() > claims["iat"].as_i64().unwrap());
-        assert_eq!(claims.get("aud"), None);
+        assert_eq!(claims["aud"][0], "cdp_service");
     }
 
     #[test]
