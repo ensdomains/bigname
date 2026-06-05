@@ -295,6 +295,7 @@ impl TestDatabase {
                         logical_name_id TEXT NOT NULL REFERENCES name_surfaces (logical_name_id),
                         resource_id UUID NOT NULL REFERENCES resources (resource_id),
                         binding_kind TEXT NOT NULL,
+                        active_to TIMESTAMPTZ,
                         canonicality_state canonicality_state NOT NULL DEFAULT 'finalized',
                         CHECK (
                             binding_kind IN (
@@ -2270,13 +2271,13 @@ fn basenames_primary_name_reverse_changed_event(
         canonicality_state,
         before_state: json!({}),
         after_state: json!({
-            "source_event": "ReverseClaimed",
+            "source_event": "NameForAddrChanged",
             "address": normalized_address,
             "coin_type": coin_type,
             "namespace": "basenames",
             "reverse_namespace": "basenames",
             "reverse_label": reverse_label,
-            "reverse_name": format!("{reverse_label}.addr.reverse"),
+            "reverse_name": format!("{reverse_label}.80002105.reverse"),
             "reverse_node": format!("0x{block_number:064x}"),
             "claim_provenance": {
                 "source_family": "basenames_base_primary",
@@ -2309,7 +2310,7 @@ fn basenames_primary_name_reverse_linked_name_event(
                 "address": normalized_address,
                 "namespace": "basenames",
                 "coin_type": coin_type,
-                "reverse_name": format!("{reverse_label}.addr.reverse"),
+                "reverse_name": format!("{reverse_label}.80002105.reverse"),
                 "reverse_node": format!("0x{block_number:064x}"),
                 "claim_provenance": {
                     "source_family": "basenames_base_primary",

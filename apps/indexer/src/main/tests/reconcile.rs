@@ -39,18 +39,28 @@ async fn reconcile_fetched_heads_initializes_chain_from_provider_heads() -> Resu
     let tasks = sync_intake_chain_tasks(database.pool(), &watched_plan).await?;
     let canonical_head = provider_block(
         "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        Some("0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"),
+        Some("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
         42,
+    );
+    let canonical_parent = provider_block(
+        "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        Some("0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"),
+        41,
     );
     let safe_head = provider_block(
         "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        Some("0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"),
+        40,
+    );
+    let safe_parent = provider_block(
+        "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
         Some("0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"),
-        41,
+        39,
     );
     let finalized_head = provider_block(
         "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
         Some("0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"),
-        40,
+        38,
     );
     let (provider, server) = bundle_provider_with_fixtures(vec![
         ProviderBlockFixture {
@@ -58,8 +68,16 @@ async fn reconcile_fetched_heads_initializes_chain_from_provider_heads() -> Resu
             block: canonical_head.clone(),
         },
         ProviderBlockFixture {
+            logs: vec![],
+            block: canonical_parent,
+        },
+        ProviderBlockFixture {
             logs: vec![rpc_current_name_wrapped_log_payload(&safe_head)],
             block: safe_head.clone(),
+        },
+        ProviderBlockFixture {
+            logs: vec![],
+            block: safe_parent,
         },
         ProviderBlockFixture {
             logs: vec![rpc_current_name_wrapped_log_payload(&finalized_head)],
@@ -89,19 +107,19 @@ async fn reconcile_fetched_heads_initializes_chain_from_provider_heads() -> Resu
     assert!(outcome.safe_head_changed);
     assert!(outcome.finalized_head_changed);
     assert_eq!(next_task.checkpoint.canonical_block_number, Some(42));
-    assert_eq!(next_task.checkpoint.safe_block_number, Some(41));
-    assert_eq!(next_task.checkpoint.finalized_block_number, Some(40));
+    assert_eq!(next_task.checkpoint.safe_block_number, Some(40));
+    assert_eq!(next_task.checkpoint.finalized_block_number, Some(38));
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM chain_lineage")
             .fetch_one(database.pool())
             .await?,
-        3
+        5
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM chain_lineage")
             .fetch_one(database.pool())
             .await?,
-        3
+        5
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM raw_transactions")
@@ -155,11 +173,19 @@ async fn reconcile_fetched_heads_initializes_chain_from_provider_heads() -> Resu
         )
         .fetch_one(database.pool())
         .await?,
-        "safe".to_owned()
+        "canonical".to_owned()
     );
     assert_eq!(
         sqlx::query_scalar::<_, String>(
             "SELECT canonicality_state::TEXT FROM chain_lineage WHERE block_number = 40"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "safe".to_owned()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT canonicality_state::TEXT FROM chain_lineage WHERE block_number = 38"
         )
         .fetch_one(database.pool())
         .await?,
@@ -179,11 +205,19 @@ async fn reconcile_fetched_heads_initializes_chain_from_provider_heads() -> Resu
         )
         .fetch_one(database.pool())
         .await?,
-        "safe".to_owned()
+        "canonical".to_owned()
     );
     assert_eq!(
         sqlx::query_scalar::<_, String>(
             "SELECT canonicality_state::TEXT FROM chain_lineage WHERE block_number = 40"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "safe".to_owned()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT canonicality_state::TEXT FROM chain_lineage WHERE block_number = 38"
         )
         .fetch_one(database.pool())
         .await?,
@@ -199,7 +233,7 @@ async fn reconcile_fetched_heads_initializes_chain_from_provider_heads() -> Resu
     );
     assert_eq!(
         sqlx::query_scalar::<_, String>(
-            "SELECT canonicality_state::TEXT FROM raw_code_hashes WHERE block_number = 41"
+            "SELECT canonicality_state::TEXT FROM raw_code_hashes WHERE block_number = 40"
         )
         .fetch_one(database.pool())
         .await?,
@@ -207,7 +241,7 @@ async fn reconcile_fetched_heads_initializes_chain_from_provider_heads() -> Resu
     );
     assert_eq!(
         sqlx::query_scalar::<_, String>(
-            "SELECT canonicality_state::TEXT FROM raw_code_hashes WHERE block_number = 40"
+            "SELECT canonicality_state::TEXT FROM raw_code_hashes WHERE block_number = 38"
         )
         .fetch_one(database.pool())
         .await?,
@@ -223,7 +257,7 @@ async fn reconcile_fetched_heads_initializes_chain_from_provider_heads() -> Resu
     );
     assert_eq!(
         sqlx::query_scalar::<_, String>(
-            "SELECT canonicality_state::TEXT FROM raw_receipts WHERE block_number = 41"
+            "SELECT canonicality_state::TEXT FROM raw_receipts WHERE block_number = 40"
         )
         .fetch_one(database.pool())
         .await?,
@@ -231,7 +265,7 @@ async fn reconcile_fetched_heads_initializes_chain_from_provider_heads() -> Resu
     );
     assert_eq!(
         sqlx::query_scalar::<_, String>(
-            "SELECT canonicality_state::TEXT FROM raw_logs WHERE block_number = 40"
+            "SELECT canonicality_state::TEXT FROM raw_logs WHERE block_number = 38"
         )
         .fetch_one(database.pool())
         .await?,
@@ -247,7 +281,7 @@ async fn reconcile_fetched_heads_initializes_chain_from_provider_heads() -> Resu
     );
     assert_eq!(
         sqlx::query_scalar::<_, String>(
-            "SELECT canonicality_state::TEXT FROM normalized_events WHERE block_number = 41"
+            "SELECT canonicality_state::TEXT FROM normalized_events WHERE block_number = 40"
         )
         .fetch_one(database.pool())
         .await?,
@@ -255,7 +289,7 @@ async fn reconcile_fetched_heads_initializes_chain_from_provider_heads() -> Resu
     );
     assert_eq!(
         sqlx::query_scalar::<_, String>(
-            "SELECT canonicality_state::TEXT FROM normalized_events WHERE block_number = 40"
+            "SELECT canonicality_state::TEXT FROM normalized_events WHERE block_number = 38"
         )
         .fetch_one(database.pool())
         .await?,
@@ -268,6 +302,111 @@ async fn reconcile_fetched_heads_initializes_chain_from_provider_heads() -> Resu
         .fetch_one(database.pool())
         .await?,
         "wrapped.eth".to_owned()
+    );
+
+    server.abort();
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn reconcile_fetched_heads_skips_stale_finalized_checkpoint_tag() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let chain = "base-mainnet";
+    let block_102 = provider_block(
+        "0x1020000000000000000000000000000000000000000000000000000000000000",
+        Some("0x1010000000000000000000000000000000000000000000000000000000000000"),
+        102,
+    );
+    let block_103 = provider_block(
+        "0x1030000000000000000000000000000000000000000000000000000000000000",
+        Some(&block_102.block_hash),
+        103,
+    );
+    let block_104 = provider_block(
+        "0x1040000000000000000000000000000000000000000000000000000000000000",
+        Some(&block_103.block_hash),
+        104,
+    );
+    let block_105 = provider_block(
+        "0x1050000000000000000000000000000000000000000000000000000000000000",
+        Some(&block_104.block_hash),
+        105,
+    );
+    let block_106 = provider_block(
+        "0x1060000000000000000000000000000000000000000000000000000000000000",
+        Some(&block_105.block_hash),
+        106,
+    );
+    let block_107 = provider_block(
+        "0x1070000000000000000000000000000000000000000000000000000000000000",
+        Some(&block_106.block_hash),
+        107,
+    );
+    let (provider, server) = bundle_provider(vec![
+        block_102.clone(),
+        block_103.clone(),
+        block_104.clone(),
+        block_105.clone(),
+        block_106.clone(),
+        block_107.clone(),
+    ])
+    .await?;
+
+    let task = IntakeChainTask {
+        chain: chain.to_owned(),
+        addresses: Vec::new(),
+        manifest_root_entry_count: 0,
+        manifest_contract_entry_count: 0,
+        discovery_edge_entry_count: 0,
+        checkpoint: ChainCheckpoint {
+            chain_id: chain.to_owned(),
+            canonical_block_hash: None,
+            canonical_block_number: None,
+            safe_block_hash: None,
+            safe_block_number: None,
+            finalized_block_hash: None,
+            finalized_block_number: None,
+        },
+    };
+    let (task, _) = reconcile_fetched_heads_with_adapter_sync(
+        database.pool(),
+        &task,
+        &provider,
+        &ProviderHeadSnapshot {
+            canonical: block_105.clone(),
+            safe: Some(block_104.clone()),
+            finalized: Some(block_103.clone()),
+        },
+        false,
+        HeaderAuditMode::Minimal,
+        &[],
+    )
+    .await?
+    .expect("initial reconciliation must seed checkpoints");
+
+    let (task, _) = reconcile_fetched_heads_with_adapter_sync(
+        database.pool(),
+        &task,
+        &provider,
+        &ProviderHeadSnapshot {
+            canonical: block_107,
+            safe: Some(block_106),
+            finalized: Some(block_102),
+        },
+        false,
+        HeaderAuditMode::Minimal,
+        &[],
+    )
+    .await?
+    .expect("stale finalized provider tag must not fail canonical advancement");
+
+    assert_eq!(task.checkpoint.canonical_block_number, Some(107));
+    assert_eq!(task.checkpoint.safe_block_number, Some(106));
+    assert_eq!(task.checkpoint.finalized_block_number, Some(103));
+    assert_eq!(
+        task.checkpoint.finalized_block_hash.as_deref(),
+        Some(block_103.block_hash.as_str())
     );
 
     server.abort();
@@ -925,7 +1064,7 @@ async fn reconcile_fetched_heads_backfills_basenames_reverse_claim_normalized_ev
 {
     let database = TestDatabase::new().await?;
     let reverse_contract_instance_id = Uuid::from_u128(0x346);
-    let reverse_address = "0x79ea96012eea67a83431f1701b3dff7e37f9e282";
+    let reverse_address = "0x0000000000d8e504002cc26e3ec46d81971c1664";
     let claimed_address = "0x1234567890abcdef1234567890abcdef12345678";
 
     sqlx::query(
@@ -994,10 +1133,11 @@ async fn reconcile_fetched_heads_backfills_basenames_reverse_claim_normalized_ev
         63,
     );
     let (provider, server) = bundle_provider_with_fixtures(vec![ProviderBlockFixture {
-        logs: vec![rpc_reverse_claimed_log_payload(
+        logs: vec![rpc_l2_reverse_name_log_payload(
             &canonical_head,
             reverse_address,
             claimed_address,
+            "alice.base.eth",
             0,
         )],
         block: canonical_head.clone(),
@@ -1026,7 +1166,15 @@ async fn reconcile_fetched_heads_backfills_basenames_reverse_claim_normalized_ev
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM normalized_events")
             .fetch_one(database.pool())
             .await?,
-        1
+        2
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT after_state->>'raw_name' FROM normalized_events WHERE event_kind = 'RecordChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "alice.base.eth".to_owned()
     );
     assert_eq!(
         sqlx::query_scalar::<_, String>(
@@ -1230,7 +1378,12 @@ async fn reconcile_fetched_heads_backfills_ensv1_primary_claim_source_observatio
     );
     let (provider, server) = bundle_provider_with_fixtures(vec![ProviderBlockFixture {
         logs: vec![
-            rpc_reverse_claimed_log_payload(&canonical_head, reverse_address, claimed_address, 0),
+            rpc_reverse_claimed_log_payload(
+                &canonical_head,
+                reverse_address,
+                claimed_address,
+                0,
+            ),
             rpc_registry_new_resolver_log_payload_for_namehash(
                 &canonical_head,
                 registry_address,
@@ -1323,11 +1476,11 @@ async fn reconcile_fetched_heads_backfills_basenames_primary_claim_source_observ
     let reverse_contract_instance_id = Uuid::from_u128(0x347);
     let registry_contract_instance_id = Uuid::from_u128(0x348);
     let resolver_contract_instance_id = Uuid::from_u128(0x349);
-    let reverse_address = "0x79ea96012eea67a83431f1701b3dff7e37f9e282";
+    let reverse_address = "0x0000000000d8e504002cc26e3ec46d81971c1664";
     let registry_address = "0xb94704422c2a1e396835a571837aa5ae53285a95";
     let resolver_address = "0xc6d566a56a1aff6508b41f6c90ff131615583bcd";
     let claimed_address = "0x1234567890abcdef1234567890abcdef12345678";
-    let reverse_node = reverse_node_for_address(claimed_address);
+    let reverse_node = base_reverse_node_for_address(claimed_address);
 
     sqlx::query(
         r#"
@@ -1475,7 +1628,13 @@ async fn reconcile_fetched_heads_backfills_basenames_primary_claim_source_observ
     );
     let (provider, server) = bundle_provider_with_fixtures(vec![ProviderBlockFixture {
         logs: vec![
-            rpc_reverse_claimed_log_payload(&canonical_head, reverse_address, claimed_address, 0),
+            rpc_l2_reverse_name_log_payload(
+                &canonical_head,
+                reverse_address,
+                claimed_address,
+                "alice.base.eth",
+                0,
+            ),
             rpc_registry_new_resolver_log_payload_for_namehash(
                 &canonical_head,
                 registry_address,

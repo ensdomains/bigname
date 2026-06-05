@@ -135,7 +135,11 @@
             rebuild_resolver_current(database, None, None).await?;
             rebuild_address_names_current(database, None).await?;
             database
-                .rebuild_primary_names_current(corpus.primary_name_address, "basenames", "60")
+                .rebuild_primary_names_current(
+                    corpus.primary_name_address,
+                    "basenames",
+                    BASENAMES_PRIMARY_COIN_TYPE,
+                )
                 .await?;
             seed_replay_primary_name_execution(database, &corpus).await?;
 

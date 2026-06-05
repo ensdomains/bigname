@@ -233,18 +233,30 @@ async fn derives_key_scoped_invalidations_from_normalized_event_changes() -> Res
     assert!(has_key(
         &invalidations,
         "address_names_current",
-        "0x0000000000000000000000000000000000000ddd"
+        "0x0000000000000000000000000000000000000ddd:ens:alice.eth"
     ));
     assert!(has_key(
         &invalidations,
         "address_names_current",
-        "0x0000000000000000000000000000000000000aa1"
+        "0x0000000000000000000000000000000000000aa1:ens:alice.eth"
     ));
     assert!(has_key(
         &invalidations,
         "address_names_current",
-        "0x0000000000000000000000000000000000000aa2"
+        "0x0000000000000000000000000000000000000aa2:ens:alice.eth"
     ));
+    assert_eq!(
+        load_invalidation_payload(
+            &database,
+            "address_names_current",
+            "0x0000000000000000000000000000000000000ddd:ens:alice.eth"
+        )
+        .await?,
+        json!({
+            "address": "0x0000000000000000000000000000000000000ddd",
+            "logical_name_id": "ens:alice.eth"
+        })
+    );
     assert!(has_key(
         &invalidations,
         "primary_names_current",
@@ -317,12 +329,94 @@ async fn derives_key_scoped_invalidations_from_normalized_event_changes() -> Res
     assert!(has_key(
         &invalidations,
         "address_names_current",
-        "0x0000000000000000000000000000000000000aa2"
+        "0x0000000000000000000000000000000000000aa2:ens:alice.eth"
     ));
     assert!(has_key(
         &invalidations,
         "address_names_current",
-        "0x0000000000000000000000000000000000000ddd"
+        "0x0000000000000000000000000000000000000ddd:ens:alice.eth"
+    ));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn address_names_permission_changes_invalidate_existing_authority_owner() -> Result<()> {
+    let database = test_database().await?;
+    let resource_id = Uuid::new_v4();
+    let observed_at = timestamp(1_800_000_000);
+
+    insert_event(
+        &database,
+        EventSeed {
+            event_identity: "projection-apply:authority-owner-before-permission",
+            namespace: "ens",
+            logical_name_id: Some("ens:controller.eth"),
+            resource_id: Some(resource_id),
+            event_kind: "AuthorityTransferred",
+            source_family: "ens_v1_registry_l1",
+            derivation_kind: "ens_v1_unwrapped_authority",
+            chain_id: Some("ethereum-mainnet"),
+            block_number: Some(20),
+            block_hash: Some("0xblock20"),
+            before_state: json!({}),
+            after_state: json!({
+                "owner": "0x0000000000000000000000000000000000000a00"
+            }),
+            observed_at,
+        },
+    )
+    .await?;
+    derive_normalized_event_invalidations(database.pool(), 100).await?;
+    sqlx::query("DELETE FROM projection_invalidations")
+        .execute(database.pool())
+        .await
+        .context("failed to clear authority-owner invalidations")?;
+
+    insert_event(
+        &database,
+        EventSeed {
+            event_identity: "projection-apply:permission-overrides-authority-owner",
+            namespace: "ens",
+            logical_name_id: Some("ens:controller.eth"),
+            resource_id: Some(resource_id),
+            event_kind: "PermissionChanged",
+            source_family: "ens_v1_registry_l1",
+            derivation_kind: "ens_v1_unwrapped_authority",
+            chain_id: Some("ethereum-mainnet"),
+            block_number: Some(21),
+            block_hash: Some("0xblock21"),
+            before_state: json!({
+                "scope": {
+                    "kind": "resource"
+                },
+                "subject": "0x0000000000000000000000000000000000000b00",
+                "effective_powers": []
+            }),
+            after_state: json!({
+                "scope": {
+                    "kind": "resource"
+                },
+                "subject": "0x0000000000000000000000000000000000000b00",
+                "effective_powers": ["resource_control"]
+            }),
+            observed_at,
+        },
+    )
+    .await?;
+
+    let summary = derive_normalized_event_invalidations(database.pool(), 100).await?;
+    assert_eq!(summary.scanned_event_count, 1);
+    let invalidations = load_invalidations(&database).await?;
+    assert!(has_key(
+        &invalidations,
+        "address_names_current",
+        "0x0000000000000000000000000000000000000a00:ens:controller.eth"
+    ));
+    assert!(has_key(
+        &invalidations,
+        "address_names_current",
+        "0x0000000000000000000000000000000000000b00:ens:controller.eth"
     ));
 
     database.cleanup().await
@@ -658,6 +752,26 @@ async fn invalidation_generation(
     .fetch_one(database.pool())
     .await
     .context("failed to load projection invalidation generation")
+}
+
+async fn load_invalidation_payload(
+    database: &TestDatabase,
+    projection: &str,
+    projection_key: &str,
+) -> Result<Value> {
+    sqlx::query_scalar::<_, Value>(
+        r#"
+        SELECT key_payload
+        FROM projection_invalidations
+        WHERE projection = $1
+          AND projection_key = $2
+        "#,
+    )
+    .bind(projection)
+    .bind(projection_key)
+    .fetch_one(database.pool())
+    .await
+    .context("failed to load projection invalidation payload")
 }
 
 async fn insert_resource(database: &TestDatabase, resource_id: Uuid) -> Result<()> {

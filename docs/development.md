@@ -84,8 +84,7 @@ BIGNAME_INDEXER_CHAIN_RPC_URLS=ethereum-mainnet=http://127.0.0.1:8545,base-mainn
 If both provider source settings are unset, `./scripts/dev-up` still boots the
 processes and the indexer still syncs manifest/watch state, but provider-backed
 head fetch and live ingestion stay idle. Current bootstrap RPC support accepts
-`http://` endpoints only; use a local node or local HTTP proxy for hosted RPC
-providers that expose only HTTPS.
+`http://` and `https://` endpoints.
 
 ## Live API Execution Configuration
 

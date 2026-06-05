@@ -17,6 +17,7 @@ use sqlx::{
 
 pub(super) const ENS_NAMESPACE: &str = "ens";
 pub(super) const BASENAMES_NAMESPACE: &str = "basenames";
+pub(super) const BASE_COIN_TYPE: &str = "2147492101";
 const EVENT_KIND_REVERSE_CHANGED: &str = "ReverseChanged";
 
 static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
@@ -239,13 +240,13 @@ pub(super) fn basenames_reverse_changed_event(
         canonicality_state,
         before_state: json!({}),
         after_state: json!({
-            "source_event": "ReverseClaimed",
+            "source_event": "NameForAddrChanged",
             "address": normalized_address,
             "coin_type": coin_type,
             "namespace": BASENAMES_NAMESPACE,
             "reverse_namespace": BASENAMES_NAMESPACE,
             "reverse_label": reverse_label,
-            "reverse_name": format!("{reverse_label}.addr.reverse"),
+            "reverse_name": format!("{reverse_label}.80002105.reverse"),
             "reverse_node": format!("0x{block_number:064x}"),
             "claim_provenance": {
                 "source_family": "basenames_base_primary",
@@ -278,7 +279,7 @@ pub(super) fn basenames_reverse_linked_name_event(
                 "address": normalized_address,
                 "namespace": BASENAMES_NAMESPACE,
                 "coin_type": coin_type,
-                "reverse_name": format!("{reverse_label}.addr.reverse"),
+                "reverse_name": format!("{reverse_label}.80002105.reverse"),
                 "reverse_node": format!("0x{block_number:064x}"),
                 "claim_provenance": {
                     "source_family": "basenames_base_primary",
@@ -392,13 +393,18 @@ fn expected_claim_provenance_for_namespace(
     let mut invalidation =
         Map::from_iter([("claim_status".to_owned(), json!(claim_status.as_str()))]);
     if let Some(primary_claim_block_number) = primary_claim_block_number {
+        let reverse_name = if namespace == BASENAMES_NAMESPACE {
+            format!("{reverse_label}.80002105.reverse")
+        } else {
+            format!("{reverse_label}.addr.reverse")
+        };
         invalidation.insert(
             "primary_claim_source".to_owned(),
             json!({
                 "address": normalized_address.clone(),
                 "namespace": namespace,
                 "coin_type": coin_type,
-                "reverse_name": format!("{reverse_label}.addr.reverse"),
+                "reverse_name": reverse_name,
                 "reverse_node": format!("0x{primary_claim_block_number:064x}"),
                 "claim_provenance": {
                     "source_family": source_family,

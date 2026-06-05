@@ -232,6 +232,37 @@ fn binding(seed: BindingSeed<'_>) -> SurfaceBinding {
     }
 }
 
+async fn identity_count(pool: &PgPool, address: &str, roles: &str) -> Result<i64> {
+    sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT total_count
+        FROM address_names_current_identity_counts
+        WHERE address = $1 AND roles = $2
+        "#,
+    )
+    .bind(address)
+    .bind(roles)
+    .fetch_optional(pool)
+    .await
+    .map(|count| count.unwrap_or_default())
+    .context("failed to load address_names_current identity count")
+}
+
+async fn identity_feed_count(pool: &PgPool, address: &str, roles: &str) -> Result<i64> {
+    sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)::BIGINT
+        FROM address_names_current_identity_feed
+        WHERE address = $1 AND roles = $2
+        "#,
+    )
+    .bind(address)
+    .bind(roles)
+    .fetch_one(pool)
+    .await
+    .context("failed to count address_names_current identity feed rows")
+}
+
 #[tokio::test]
 async fn persists_canonical_surface_round_trip_with_resource_and_token_lineage() -> Result<()> {
     let database = TestDatabase::new().await?;
@@ -555,6 +586,91 @@ async fn no_snapshot_resource_upsert_accepts_compatible_existing_resource() -> R
 }
 
 #[tokio::test]
+async fn no_snapshot_token_lineage_upsert_skips_idempotent_rewrite() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let token_lineage_id = Uuid::from_u128(0xf103);
+    let anchored_observed_at = timestamp(946_684_800);
+    let lineage = token_lineage(
+        token_lineage_id,
+        "ens",
+        "token_no_snapshot_idempotent",
+        111,
+        CanonicalityState::Canonical,
+    );
+    upsert_token_lineages_without_snapshots(database.pool(), std::slice::from_ref(&lineage))
+        .await?;
+
+    sqlx::query("UPDATE token_lineages SET observed_at = $1 WHERE token_lineage_id = $2")
+        .bind(anchored_observed_at)
+        .bind(token_lineage_id)
+        .execute(database.pool())
+        .await
+        .context("failed to anchor token lineage observed_at")?;
+
+    upsert_token_lineages_without_snapshots(database.pool(), std::slice::from_ref(&lineage))
+        .await?;
+    assert_eq!(
+        load_token_lineage(database.pool(), token_lineage_id).await?,
+        Some(lineage)
+    );
+    assert_eq!(
+        load_token_lineage_observed_at(database.pool(), token_lineage_id).await?,
+        anchored_observed_at
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn no_snapshot_resource_upsert_skips_idempotent_rewrite() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let token_lineage_id = Uuid::from_u128(0xf104);
+    let resource_id = Uuid::from_u128(0xf105);
+    let anchored_observed_at = timestamp(946_684_800);
+
+    upsert_token_lineages(
+        database.pool(),
+        &[token_lineage(
+            token_lineage_id,
+            "ens",
+            "token_resource_no_snapshot_idempotent",
+            111,
+            CanonicalityState::Canonical,
+        )],
+    )
+    .await?;
+
+    let resource = resource(
+        resource_id,
+        Some(token_lineage_id),
+        "ens",
+        "resource_no_snapshot_idempotent",
+        112,
+        CanonicalityState::Canonical,
+    );
+    upsert_resources_without_snapshots(database.pool(), std::slice::from_ref(&resource)).await?;
+
+    sqlx::query("UPDATE resources SET observed_at = $1 WHERE resource_id = $2")
+        .bind(anchored_observed_at)
+        .bind(resource_id)
+        .execute(database.pool())
+        .await
+        .context("failed to anchor resource observed_at")?;
+
+    upsert_resources_without_snapshots(database.pool(), std::slice::from_ref(&resource)).await?;
+    assert_eq!(
+        load_resource(database.pool(), resource_id).await?,
+        Some(resource)
+    );
+    assert_eq!(
+        load_resource_observed_at(database.pool(), resource_id).await?,
+        anchored_observed_at
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn no_snapshot_name_surface_upsert_accepts_compatible_existing_surface() -> Result<()> {
     let database = TestDatabase::new().await?;
     let logical_name_id = "ens:no-snapshot-surface.eth";
@@ -600,6 +716,41 @@ async fn no_snapshot_name_surface_upsert_accepts_compatible_existing_surface() -
     assert_eq!(
         load_name_surface(database.pool(), logical_name_id).await?,
         Some(expected_surface)
+    );
+    assert_eq!(
+        load_name_surface_observed_at(database.pool(), logical_name_id).await?,
+        anchored_observed_at
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn no_snapshot_name_surface_upsert_skips_idempotent_rewrite() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let logical_name_id = "ens:no-snapshot-surface-idempotent.eth";
+    let anchored_observed_at = timestamp(946_684_800);
+    let surface = name_surface(
+        logical_name_id,
+        "no-snapshot-surface-idempotent.eth",
+        "no-snapshot-surface-idempotent.eth",
+        "surface_no_snapshot_idempotent",
+        113,
+        CanonicalityState::Canonical,
+    );
+    upsert_name_surfaces_without_snapshots(database.pool(), std::slice::from_ref(&surface)).await?;
+
+    sqlx::query("UPDATE name_surfaces SET observed_at = $1 WHERE logical_name_id = $2")
+        .bind(anchored_observed_at)
+        .bind(logical_name_id)
+        .execute(database.pool())
+        .await
+        .context("failed to anchor name surface observed_at")?;
+
+    upsert_name_surfaces_without_snapshots(database.pool(), std::slice::from_ref(&surface)).await?;
+    assert_eq!(
+        load_name_surface(database.pool(), logical_name_id).await?,
+        Some(surface)
     );
     assert_eq!(
         load_name_surface_observed_at(database.pool(), logical_name_id).await?,
@@ -1741,6 +1892,391 @@ async fn explicit_noncanonical_opt_in_reads_include_observed_and_orphaned_histor
         load_surface_bindings_by_resource_id_including_noncanonical(database.pool(), resource_id,)
             .await?,
         vec![orphaned_binding]
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn identity_facade_statement_triggers_replace_row_level_feed_triggers() -> Result<()> {
+    let database = TestDatabase::new().await?;
+
+    let trigger_names = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT tgname
+        FROM pg_trigger
+        WHERE NOT tgisinternal
+          AND tgrelid IN (
+              'public.name_surfaces'::regclass,
+              'public.resources'::regclass,
+              'public.surface_bindings'::regclass,
+              'public.token_lineages'::regclass
+          )
+          AND tgname IN (
+              'address_names_current_identity_counts_binding_readability_updat',
+              'address_names_current_identity_counts_binding_readability_update',
+              'name_surfaces_identity_feed_after_change',
+              'resources_identity_feed_after_change',
+              'surface_bindings_identity_feed_after_change',
+              'token_lineages_identity_feed_after_change'
+          )
+        ORDER BY tgname
+        "#,
+    )
+    .fetch_all(database.pool())
+    .await
+    .context("failed to inspect identity facade feed triggers")?;
+    assert!(
+        trigger_names.is_empty(),
+        "row-level identity feed triggers should be replaced by statement triggers, found {trigger_names:?}"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn identity_count_statement_triggers_recompute_name_current_resource_eligibility()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    let logical_name_id = "ens:count-trigger.eth";
+    let relation_resource_id = Uuid::from_u128(0xf001);
+    let name_current_resource_id = Uuid::from_u128(0xf002);
+    let surface_binding_id = Uuid::from_u128(0xf003);
+
+    upsert_name_surfaces(
+        database.pool(),
+        &[name_surface(
+            logical_name_id,
+            "count-trigger.eth",
+            "count-trigger.eth",
+            "count_trigger_surface",
+            700,
+            CanonicalityState::Finalized,
+        )],
+    )
+    .await?;
+    upsert_resources(
+        database.pool(),
+        &[
+            resource(
+                relation_resource_id,
+                None,
+                "ens",
+                "count_trigger_relation_resource",
+                701,
+                CanonicalityState::Finalized,
+            ),
+            resource(
+                name_current_resource_id,
+                None,
+                "ens",
+                "count_trigger_name_resource",
+                702,
+                CanonicalityState::Finalized,
+            ),
+        ],
+    )
+    .await?;
+    upsert_surface_bindings(
+        database.pool(),
+        &[binding(BindingSeed {
+            surface_binding_id,
+            logical_name_id,
+            resource_id: relation_resource_id,
+            binding_kind: SurfaceBindingKind::DeclaredRegistryPath,
+            active_from: timestamp(1_717_172_900),
+            active_to: None,
+            source: "count_trigger_relation",
+            chain_label: "count_trigger_binding",
+            block_number: 703,
+            canonicality_state: CanonicalityState::Finalized,
+        })],
+    )
+    .await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO name_current (
+            logical_name_id,
+            namespace,
+            canonical_display_name,
+            normalized_name,
+            namehash,
+            surface_binding_id,
+            resource_id,
+            token_lineage_id,
+            binding_kind,
+            declared_summary,
+            provenance,
+            coverage,
+            chain_positions,
+            canonicality_summary,
+            manifest_version
+        )
+        VALUES (
+            $1,
+            'ens',
+            'count-trigger.eth',
+            'count-trigger.eth',
+            'namehash:count-trigger.eth',
+            $2,
+            $3,
+            NULL,
+            'declared_registry_path',
+            '{}'::jsonb,
+            '{}'::jsonb,
+            '{}'::jsonb,
+            '{}'::jsonb,
+            '{}'::jsonb,
+            1
+        )
+        "#,
+    )
+    .bind(logical_name_id)
+    .bind(surface_binding_id)
+    .bind(name_current_resource_id)
+    .execute(database.pool())
+    .await
+    .context("failed to seed name_current for identity count trigger test")?;
+    sqlx::query(
+        r#"
+        INSERT INTO address_names_current (
+            address,
+            logical_name_id,
+            relation,
+            namespace,
+            canonical_display_name,
+            normalized_name,
+            namehash,
+            surface_binding_id,
+            resource_id,
+            token_lineage_id,
+            binding_kind,
+            provenance,
+            coverage,
+            chain_positions,
+            canonicality_summary,
+            manifest_version
+        )
+        VALUES (
+            $1,
+            $2,
+            'registrant',
+            'ens',
+            'count-trigger.eth',
+            'count-trigger.eth',
+            'namehash:count-trigger.eth',
+            $3,
+            $4,
+            NULL,
+            'declared_registry_path',
+            '{}'::jsonb,
+            '{}'::jsonb,
+            '{}'::jsonb,
+            '{}'::jsonb,
+            1
+        )
+        "#,
+    )
+    .bind(address)
+    .bind(logical_name_id)
+    .bind(surface_binding_id)
+    .bind(relation_resource_id)
+    .execute(database.pool())
+    .await
+    .context("failed to seed address_names_current for identity count trigger test")?;
+
+    sqlx::query("SELECT public.address_names_current_identity_counts_recompute_address($1)")
+        .bind(address)
+        .execute(database.pool())
+        .await
+        .context("failed to seed identity counts")?;
+    assert_eq!(identity_count(database.pool(), address, "owned").await?, 1);
+
+    sqlx::query("UPDATE resources SET canonicality_state = 'orphaned' WHERE resource_id = $1")
+        .bind(name_current_resource_id)
+        .execute(database.pool())
+        .await
+        .context("failed to orphan name_current resource")?;
+
+    assert_eq!(identity_count(database.pool(), address, "owned").await?, 0);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn identity_feed_statement_triggers_recompute_name_current_resource_eligibility() -> Result<()>
+{
+    let database = TestDatabase::new().await?;
+    let address = "0x0000000000000000000000000000000000000fed";
+    let logical_name_id = "ens:feed-trigger.eth";
+    let relation_resource_id = Uuid::from_u128(0xf101);
+    let name_current_resource_id = Uuid::from_u128(0xf102);
+    let surface_binding_id = Uuid::from_u128(0xf103);
+
+    upsert_name_surfaces(
+        database.pool(),
+        &[name_surface(
+            logical_name_id,
+            "feed-trigger.eth",
+            "feed-trigger.eth",
+            "feed_trigger_surface",
+            800,
+            CanonicalityState::Finalized,
+        )],
+    )
+    .await?;
+    upsert_resources(
+        database.pool(),
+        &[
+            resource(
+                relation_resource_id,
+                None,
+                "ens",
+                "feed_trigger_relation_resource",
+                801,
+                CanonicalityState::Finalized,
+            ),
+            resource(
+                name_current_resource_id,
+                None,
+                "ens",
+                "feed_trigger_name_resource",
+                802,
+                CanonicalityState::Finalized,
+            ),
+        ],
+    )
+    .await?;
+    upsert_surface_bindings(
+        database.pool(),
+        &[binding(BindingSeed {
+            surface_binding_id,
+            logical_name_id,
+            resource_id: relation_resource_id,
+            binding_kind: SurfaceBindingKind::DeclaredRegistryPath,
+            active_from: timestamp(1_717_173_100),
+            active_to: None,
+            source: "feed_trigger_relation",
+            chain_label: "feed_trigger_binding",
+            block_number: 803,
+            canonicality_state: CanonicalityState::Finalized,
+        })],
+    )
+    .await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO name_current (
+            logical_name_id,
+            namespace,
+            canonical_display_name,
+            normalized_name,
+            namehash,
+            surface_binding_id,
+            resource_id,
+            token_lineage_id,
+            binding_kind,
+            declared_summary,
+            provenance,
+            coverage,
+            chain_positions,
+            canonicality_summary,
+            manifest_version
+        )
+        VALUES (
+            $1,
+            'ens',
+            'feed-trigger.eth',
+            'feed-trigger.eth',
+            'namehash:feed-trigger.eth',
+            $2,
+            $3,
+            NULL,
+            'declared_registry_path',
+            '{}'::jsonb,
+            '{}'::jsonb,
+            '{}'::jsonb,
+            '{}'::jsonb,
+            '{}'::jsonb,
+            1
+        )
+        "#,
+    )
+    .bind(logical_name_id)
+    .bind(surface_binding_id)
+    .bind(name_current_resource_id)
+    .execute(database.pool())
+    .await
+    .context("failed to seed name_current for identity feed trigger test")?;
+    sqlx::query(
+        r#"
+        INSERT INTO address_names_current (
+            address,
+            logical_name_id,
+            relation,
+            namespace,
+            canonical_display_name,
+            normalized_name,
+            namehash,
+            surface_binding_id,
+            resource_id,
+            token_lineage_id,
+            binding_kind,
+            provenance,
+            coverage,
+            chain_positions,
+            canonicality_summary,
+            manifest_version
+        )
+        VALUES (
+            $1,
+            $2,
+            'registrant',
+            'ens',
+            'feed-trigger.eth',
+            'feed-trigger.eth',
+            'namehash:feed-trigger.eth',
+            $3,
+            $4,
+            NULL,
+            'declared_registry_path',
+            '{}'::jsonb,
+            '{}'::jsonb,
+            '{}'::jsonb,
+            '{}'::jsonb,
+            1
+        )
+        "#,
+    )
+    .bind(address)
+    .bind(logical_name_id)
+    .bind(surface_binding_id)
+    .bind(relation_resource_id)
+    .execute(database.pool())
+    .await
+    .context("failed to seed address_names_current for identity feed trigger test")?;
+
+    sqlx::query("SELECT public.address_names_current_identity_feed_recompute_address($1)")
+        .bind(address)
+        .execute(database.pool())
+        .await
+        .context("failed to seed identity feed")?;
+    assert_eq!(
+        identity_feed_count(database.pool(), address, "owned").await?,
+        1
+    );
+
+    sqlx::query("UPDATE resources SET canonicality_state = 'orphaned' WHERE resource_id = $1")
+        .bind(name_current_resource_id)
+        .execute(database.pool())
+        .await
+        .context("failed to orphan name_current resource")?;
+
+    assert_eq!(
+        identity_feed_count(database.pool(), address, "owned").await?,
+        0
     );
 
     database.cleanup().await

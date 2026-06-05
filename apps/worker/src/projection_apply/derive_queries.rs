@@ -339,8 +339,15 @@ resource_permission_changed_names AS (
 candidate_keys AS (
     SELECT
         'address_names_current'::TEXT AS projection,
-        lower(address.address) AS projection_key,
-        jsonb_build_object('address', lower(address.address)) AS key_payload,
+        CASE
+            WHEN ne.logical_name_id IS NOT NULL
+            THEN lower(address.address) || ':' || ne.logical_name_id
+            ELSE lower(address.address)
+        END AS projection_key,
+        jsonb_strip_nulls(jsonb_build_object(
+            'address', lower(address.address),
+            'logical_name_id', ne.logical_name_id
+        )) AS key_payload,
         ne.normalized_event_id,
         ne.change_id,
         ne.changed_at
@@ -368,8 +375,15 @@ candidate_keys AS (
 
     SELECT
         'address_names_current'::TEXT AS projection,
-        lower(address.address) AS projection_key,
-        jsonb_build_object('address', lower(address.address)) AS key_payload,
+        CASE
+            WHEN ne.logical_name_id IS NOT NULL
+            THEN lower(address.address) || ':' || ne.logical_name_id
+            ELSE lower(address.address)
+        END AS projection_key,
+        jsonb_strip_nulls(jsonb_build_object(
+            'address', lower(address.address),
+            'logical_name_id', ne.logical_name_id
+        )) AS key_payload,
         ne.normalized_event_id,
         ne.change_id,
         ne.changed_at
@@ -388,8 +402,11 @@ candidate_keys AS (
 
     SELECT
         'address_names_current'::TEXT AS projection,
-        lower(fallback.address) AS projection_key,
-        jsonb_build_object('address', lower(fallback.address)) AS key_payload,
+        lower(fallback.address) || ':' || changed.logical_name_id AS projection_key,
+        jsonb_build_object(
+            'address', lower(fallback.address),
+            'logical_name_id', changed.logical_name_id
+        ) AS key_payload,
         changed.normalized_event_id,
         changed.change_id,
         changed.changed_at
@@ -402,6 +419,33 @@ candidate_keys AS (
             (ne.after_state ->> 'to')
     ) AS fallback(address)
     WHERE ne.event_kind IN ('RegistrationGranted', 'TokenControlTransferred')
+      AND ne.canonicality_state IN (
+          'canonical'::canonicality_state,
+          'safe'::canonicality_state,
+          'finalized'::canonicality_state
+      )
+      AND fallback.address IS NOT NULL
+      AND fallback.address <> ''
+
+    UNION ALL
+
+    SELECT
+        'address_names_current'::TEXT AS projection,
+        lower(fallback.address) || ':' || changed.logical_name_id AS projection_key,
+        jsonb_build_object(
+            'address', lower(fallback.address),
+            'logical_name_id', changed.logical_name_id
+        ) AS key_payload,
+        changed.normalized_event_id,
+        changed.change_id,
+        changed.changed_at
+    FROM resource_permission_changed_names changed
+    JOIN normalized_events ne
+      ON ne.logical_name_id = changed.logical_name_id
+    CROSS JOIN LATERAL (
+        VALUES (ne.after_state ->> 'owner')
+    ) AS fallback(address)
+    WHERE ne.event_kind = 'AuthorityTransferred'
       AND ne.canonicality_state IN (
           'canonical'::canonicality_state,
           'safe'::canonicality_state,

@@ -37,6 +37,7 @@ const DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER: &str = r#"
       'safe'::canonicality_state,
       'finalized'::canonicality_state
   )
+  AND binding.active_to IS NULL
   AND (
       anc.token_lineage_id IS NULL
       OR token_lineage.canonicality_state IN (
@@ -66,6 +67,7 @@ const DEFAULT_IDENTITY_NAME_CURRENT_READ_FILTER: &str = r#"
               'safe'::canonicality_state,
               'finalized'::canonicality_state
           )
+          AND identity_nc_binding.active_to IS NULL
           AND (
               identity_nc.token_lineage_id IS NULL
               OR identity_nc_token_lineage.canonicality_state IN (

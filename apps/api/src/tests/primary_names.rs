@@ -1,3 +1,5 @@
+const BASE_PRIMARY_COIN_TYPE: &str = "2147492101";
+
 fn primary_name_supported_coverage(namespace: &str) -> Value {
     let source_classes_considered = match namespace {
         "ens" => json!(["ens_v1_reverse_l1", "ens_execution"]),
@@ -799,7 +801,7 @@ async fn get_primary_names_reads_basenames_declared_claim_status_for_exact_tuple
             basenames_primary_name_reverse_changed_event(
                 "basenames-reverse-a-60",
                 address,
-                "60",
+                BASE_PRIMARY_COIN_TYPE,
                 260,
                 0,
                 CanonicalityState::Canonical,
@@ -807,7 +809,7 @@ async fn get_primary_names_reads_basenames_declared_claim_status_for_exact_tuple
             basenames_primary_name_reverse_linked_name_event(
                 "basenames-record-a-60-success",
                 address,
-                "60",
+                BASE_PRIMARY_COIN_TYPE,
                 Some("Alice.base.eth"),
                 261,
                 0,
@@ -820,7 +822,7 @@ async fn get_primary_names_reads_basenames_declared_claim_status_for_exact_tuple
         &database.pool,
         Some(address),
         Some("basenames"),
-        Some("60"),
+        Some(BASE_PRIMARY_COIN_TYPE),
     )
     .await?;
 
@@ -828,7 +830,7 @@ async fn get_primary_names_reads_basenames_declared_claim_status_for_exact_tuple
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v1/primary-names/{address}?namespace=basenames&coin_type=60&mode=declared"
+                    "/v1/primary-names/{address}?namespace=basenames&coin_type={BASE_PRIMARY_COIN_TYPE}&mode=declared"
                 ))
                 .body(Body::empty())
                 .expect("request must build"),
@@ -839,7 +841,7 @@ async fn get_primary_names_reads_basenames_declared_claim_status_for_exact_tuple
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v1/primary-names/{address}?namespace=basenames&coin_type=60&mode=both"
+                    "/v1/primary-names/{address}?namespace=basenames&coin_type={BASE_PRIMARY_COIN_TYPE}&mode=both"
                 ))
                 .body(Body::empty())
                 .expect("request must build"),
@@ -1465,7 +1467,7 @@ async fn get_primary_names_reads_persisted_basenames_verified_primary_name_for_e
             basenames_primary_name_reverse_changed_event(
                 "basenames-reverse-b-60",
                 address,
-                "60",
+                BASE_PRIMARY_COIN_TYPE,
                 360,
                 0,
                 CanonicalityState::Canonical,
@@ -1473,7 +1475,7 @@ async fn get_primary_names_reads_persisted_basenames_verified_primary_name_for_e
             basenames_primary_name_reverse_linked_name_event(
                 "basenames-record-b-60-success",
                 address,
-                "60",
+                BASE_PRIMARY_COIN_TYPE,
                 Some("Alice.base.eth"),
                 361,
                 0,
@@ -1486,7 +1488,7 @@ async fn get_primary_names_reads_persisted_basenames_verified_primary_name_for_e
         &database.pool,
         Some(address),
         Some("basenames"),
-        Some("60"),
+        Some(BASE_PRIMARY_COIN_TYPE),
     )
     .await?;
 
@@ -1494,7 +1496,7 @@ async fn get_primary_names_reads_persisted_basenames_verified_primary_name_for_e
         execution_trace_id,
         "basenames",
         address,
-        "60",
+        BASE_PRIMARY_COIN_TYPE,
         verified_primary_name.clone(),
         finished_at,
     );
@@ -1502,7 +1504,7 @@ async fn get_primary_names_reads_persisted_basenames_verified_primary_name_for_e
         execution_trace_id,
         "basenames",
         address,
-        "60",
+        BASE_PRIMARY_COIN_TYPE,
         verified_primary_name.clone(),
         finished_at,
     );
@@ -1513,7 +1515,7 @@ async fn get_primary_names_reads_persisted_basenames_verified_primary_name_for_e
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v1/primary-names/{address}?namespace=basenames&coin_type=60&mode=verified"
+                    "/v1/primary-names/{address}?namespace=basenames&coin_type={BASE_PRIMARY_COIN_TYPE}&mode=verified"
                 ))
                 .body(Body::empty())
                 .expect("request must build"),
@@ -1524,7 +1526,7 @@ async fn get_primary_names_reads_persisted_basenames_verified_primary_name_for_e
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v1/primary-names/{address}?namespace=basenames&coin_type=60&mode=both"
+                    "/v1/primary-names/{address}?namespace=basenames&coin_type={BASE_PRIMARY_COIN_TYPE}&mode=both"
                 ))
                 .body(Body::empty())
                 .expect("request must build"),
@@ -1606,7 +1608,7 @@ async fn get_primary_names_reads_persisted_basenames_verified_primary_name_not_f
         .insert_primary_name_current_claim_row(
             address,
             "basenames",
-            "60",
+            BASE_PRIMARY_COIN_TYPE,
             PrimaryNameClaimStatus::NotFound,
             None,
         )
@@ -1616,7 +1618,7 @@ async fn get_primary_names_reads_persisted_basenames_verified_primary_name_not_f
         execution_trace_id,
         "basenames",
         address,
-        "60",
+        BASE_PRIMARY_COIN_TYPE,
         verified_primary_name.clone(),
         finished_at,
     );
@@ -1624,7 +1626,7 @@ async fn get_primary_names_reads_persisted_basenames_verified_primary_name_not_f
         execution_trace_id,
         "basenames",
         address,
-        "60",
+        BASE_PRIMARY_COIN_TYPE,
         verified_primary_name,
         finished_at,
     );
@@ -1635,7 +1637,7 @@ async fn get_primary_names_reads_persisted_basenames_verified_primary_name_not_f
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v1/primary-names/{address}?namespace=basenames&coin_type=60&mode=verified"
+                    "/v1/primary-names/{address}?namespace=basenames&coin_type={BASE_PRIMARY_COIN_TYPE}&mode=verified"
                 ))
                 .body(Body::empty())
                 .expect("request must build"),
@@ -1646,7 +1648,7 @@ async fn get_primary_names_reads_persisted_basenames_verified_primary_name_not_f
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v1/primary-names/{address}?namespace=basenames&coin_type=60&mode=both"
+                    "/v1/primary-names/{address}?namespace=basenames&coin_type={BASE_PRIMARY_COIN_TYPE}&mode=both"
                 ))
                 .body(Body::empty())
                 .expect("request must build"),
@@ -1669,7 +1671,7 @@ async fn get_primary_names_reads_persisted_basenames_verified_primary_name_not_f
         json!({
             "address": address,
             "namespace": "basenames",
-            "coin_type": "60",
+            "coin_type": BASE_PRIMARY_COIN_TYPE,
         })
     );
     assert_eq!(both_payload.data, verified_payload.data);
@@ -1723,7 +1725,7 @@ async fn get_primary_names_reads_persisted_basenames_verified_primary_name_inval
         .insert_primary_name_current_claim_row(
             address,
             "basenames",
-            "60",
+            BASE_PRIMARY_COIN_TYPE,
             PrimaryNameClaimStatus::InvalidName,
             Some("alice..base.eth"),
         )
@@ -1733,7 +1735,7 @@ async fn get_primary_names_reads_persisted_basenames_verified_primary_name_inval
         execution_trace_id,
         "basenames",
         address,
-        "60",
+        BASE_PRIMARY_COIN_TYPE,
         verified_primary_name.clone(),
         finished_at,
     );
@@ -1741,7 +1743,7 @@ async fn get_primary_names_reads_persisted_basenames_verified_primary_name_inval
         execution_trace_id,
         "basenames",
         address,
-        "60",
+        BASE_PRIMARY_COIN_TYPE,
         verified_primary_name,
         finished_at,
     );
@@ -1752,7 +1754,7 @@ async fn get_primary_names_reads_persisted_basenames_verified_primary_name_inval
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v1/primary-names/{address}?namespace=basenames&coin_type=60&mode=verified"
+                    "/v1/primary-names/{address}?namespace=basenames&coin_type={BASE_PRIMARY_COIN_TYPE}&mode=verified"
                 ))
                 .body(Body::empty())
                 .expect("request must build"),
@@ -1763,7 +1765,7 @@ async fn get_primary_names_reads_persisted_basenames_verified_primary_name_inval
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v1/primary-names/{address}?namespace=basenames&coin_type=60&mode=both"
+                    "/v1/primary-names/{address}?namespace=basenames&coin_type={BASE_PRIMARY_COIN_TYPE}&mode=both"
                 ))
                 .body(Body::empty())
                 .expect("request must build"),
@@ -1786,7 +1788,7 @@ async fn get_primary_names_reads_persisted_basenames_verified_primary_name_inval
         json!({
             "address": address,
             "namespace": "basenames",
-            "coin_type": "60",
+            "coin_type": BASE_PRIMARY_COIN_TYPE,
         })
     );
     assert_eq!(both_payload.data, verified_payload.data);
@@ -2137,14 +2139,14 @@ async fn get_primary_names_rejects_persisted_basenames_verified_primary_name_wit
     });
 
     database
-        .insert_primary_name_current_row(address, "basenames", "60")
+        .insert_primary_name_current_row(address, "basenames", BASE_PRIMARY_COIN_TYPE)
         .await?;
 
     let mut trace = primary_name_execution_trace(
         execution_trace_id,
         "basenames",
         address,
-        "60",
+        BASE_PRIMARY_COIN_TYPE,
         verified_primary_name.clone(),
         finished_at,
     );
@@ -2158,7 +2160,7 @@ async fn get_primary_names_rejects_persisted_basenames_verified_primary_name_wit
         execution_trace_id,
         "basenames",
         address,
-        "60",
+        BASE_PRIMARY_COIN_TYPE,
         verified_primary_name,
         finished_at,
     );
@@ -2174,7 +2176,7 @@ async fn get_primary_names_rejects_persisted_basenames_verified_primary_name_wit
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v1/primary-names/{address}?namespace=basenames&coin_type=60&mode=verified"
+                    "/v1/primary-names/{address}?namespace=basenames&coin_type={BASE_PRIMARY_COIN_TYPE}&mode=verified"
                 ))
                 .body(Body::empty())
                 .expect("request must build"),

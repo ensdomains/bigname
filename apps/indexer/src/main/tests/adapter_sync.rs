@@ -448,14 +448,14 @@ async fn post_replay_live_adapter_backlog_latches_tail_before_live_sync_resumes(
         &[chain.to_owned()],
     )
     .await?;
-    assert_eq!(second_summary.selected_block_count, 0);
+    assert_eq!(second_summary.selected_block_count, 1);
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM normalized_events WHERE event_kind = 'ReverseChanged'"
         )
         .fetch_one(database.pool())
         .await?,
-        1
+        2
     );
     assert_eq!(
         sqlx::query_as::<_, (i64, i64)>(
@@ -470,9 +470,248 @@ async fn post_replay_live_adapter_backlog_latches_tail_before_live_sync_resumes(
         .bind(chain)
         .fetch_one(database.pool())
         .await?,
-        (12, 11)
+        (13, 12)
     );
 
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn post_replay_handoff_fetches_provider_gap_after_backlog() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_normalized_replay_cursor_table(database.pool()).await?;
+    let chain = "ethereum-mainnet";
+    let reverse_contract_instance_id = Uuid::from_u128(0x345);
+    let reverse_address = "0x00000000000000000000000000000000000000b2";
+    let backlog_claimed_address = "0x5555555555555555555555555555555555555555";
+    let live_claimed_address = "0x6666666666666666666666666666666666666666";
+    let replay_target_block = provider_block(
+        "0x1313131313131313131313131313131313131313131313131313131313131313",
+        Some("0x0909090909090909090909090909090909090909090909090909090909090909"),
+        10,
+    );
+    let backlog_block = provider_block(
+        "0x1414141414141414141414141414141414141414141414141414141414141414",
+        Some(&replay_target_block.block_hash),
+        11,
+    );
+    let live_gap_block = provider_block(
+        "0x1515151515151515151515151515151515151515151515151515151515151515",
+        Some(&backlog_block.block_hash),
+        12,
+    );
+    let live_head_block = provider_block(
+        "0x1616161616161616161616161616161616161616161616161616161616161616",
+        Some(&live_gap_block.block_hash),
+        13,
+    );
+
+    sqlx::query(
+        r#"
+            INSERT INTO manifest_versions (
+                manifest_id,
+                manifest_version,
+                namespace,
+                source_family,
+                chain,
+                deployment_epoch,
+                rollout_status,
+                normalizer_version,
+                file_path,
+                manifest_payload
+            )
+            VALUES (
+                13,
+                1,
+                'ens',
+                'ens_v1_reverse_l1',
+                'ethereum-mainnet',
+                'ens_v1',
+                'active',
+                'ensip15@ens-normalize-0.1.1',
+                'manifests/ens/ens_v1_reverse_l1/v1.toml',
+                DEFAULT
+            )
+            "#,
+    )
+    .execute(database.pool())
+    .await
+    .context("failed to insert manifest_versions for post-replay handoff test")?;
+    insert_contract_instance(
+        database.pool(),
+        reverse_contract_instance_id,
+        chain,
+        "contract",
+    )
+    .await?;
+    insert_active_contract_instance_address(
+        database.pool(),
+        reverse_contract_instance_id,
+        chain,
+        reverse_address,
+        Some(13),
+    )
+    .await?;
+    insert_manifest_contract_instance(
+        database.pool(),
+        13,
+        "reverse_registrar",
+        reverse_contract_instance_id,
+        reverse_address,
+        "none",
+        None,
+        None,
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO normalized_replay_cursors (
+            deployment_profile,
+            chain_id,
+            cursor_kind,
+            range_start_block_number,
+            next_block_number,
+            target_block_number,
+            last_completed_block_number
+        )
+        VALUES ('mainnet', $1, 'raw_fact_normalized_events', 1, 11, 10, 10)
+        "#,
+    )
+    .bind(chain)
+    .execute(database.pool())
+    .await
+    .context("failed to seed completed normalized replay cursor")?;
+    insert_chain_lineage_for_block(
+        database.pool(),
+        chain,
+        &replay_target_block,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    insert_chain_lineage_for_block(
+        database.pool(),
+        chain,
+        &backlog_block,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    insert_raw_reverse_claimed_log(
+        database.pool(),
+        chain,
+        &backlog_block,
+        reverse_address,
+        backlog_claimed_address,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+
+    let summary = sync_live_adapter_backlog_after_normalized_replay(
+        database.pool(),
+        "mainnet",
+        &[chain.to_owned()],
+    )
+    .await?;
+    assert_eq!(summary.selected_block_count, 1);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM normalized_events WHERE event_kind = 'ReverseChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        1
+    );
+
+    let (provider, server) = bundle_provider_with_fixtures(vec![
+        ProviderBlockFixture {
+            block: live_gap_block.clone(),
+            logs: vec![],
+        },
+        ProviderBlockFixture {
+            block: live_head_block.clone(),
+            logs: vec![rpc_reverse_claimed_log_payload(
+                &live_head_block,
+                reverse_address,
+                live_claimed_address,
+                0,
+            )],
+        },
+    ])
+    .await?;
+    let task = IntakeChainTask {
+        chain: chain.to_owned(),
+        addresses: vec![reverse_address.to_owned()],
+        manifest_root_entry_count: 0,
+        manifest_contract_entry_count: 1,
+        discovery_edge_entry_count: 0,
+        checkpoint: ChainCheckpoint {
+            chain_id: chain.to_owned(),
+            canonical_block_hash: Some(backlog_block.block_hash.clone()),
+            canonical_block_number: Some(backlog_block.block_number),
+            safe_block_hash: None,
+            safe_block_number: None,
+            finalized_block_hash: None,
+            finalized_block_number: None,
+        },
+    };
+    let (next_task, outcome) = reconcile_fetched_heads_with_adapter_sync(
+        database.pool(),
+        &task,
+        &provider,
+        &ProviderHeadSnapshot {
+            canonical: live_head_block.clone(),
+            safe: None,
+            finalized: None,
+        },
+        true,
+        HeaderAuditMode::Minimal,
+        &[],
+    )
+    .await?
+    .expect("provider gap reconciliation must update the live checkpoint");
+
+    assert_eq!(
+        outcome.canonical_status,
+        CanonicalReconciliationStatus::GapBackfilled
+    );
+    assert_eq!(
+        next_task.checkpoint.canonical_block_number,
+        Some(live_head_block.block_number)
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM raw_logs WHERE chain_id = $1 AND block_hash = $2"
+        )
+        .bind(chain)
+        .bind(&live_head_block.block_hash)
+        .fetch_one(database.pool())
+        .await?,
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM normalized_events WHERE event_kind = 'ReverseChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        2
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            r#"
+            SELECT raw_fact_ref->>'block_hash'
+            FROM normalized_events
+            WHERE event_kind = 'ReverseChanged'
+              AND raw_fact_ref->>'block_hash' = $1
+            "#
+        )
+        .bind(&live_head_block.block_hash)
+        .fetch_one(database.pool())
+        .await?,
+        live_head_block.block_hash
+    );
+
+    server.abort();
     database.cleanup().await?;
     Ok(())
 }
@@ -724,7 +963,7 @@ async fn sync_adapter_owned_raw_log_state_backfills_basenames_reverse_claims_and
     let registrar_contract_instance_id = Uuid::from_u128(0x362);
     let registry_contract_instance_id = Uuid::from_u128(0x363);
     let resolver_contract_instance_id = Uuid::from_u128(0x364);
-    let reverse_address = "0x79ea96012eea67a83431f1701b3dff7e37f9e282";
+    let reverse_address = "0x0000000000d8e504002cc26e3ec46d81971c1664";
     let registrar_address = "0x03c4738ee98ae44591e1a4a4f3cab6641d95dd9a";
     let registry_address = "0xb94704422c2a1e396835a571837aa5ae53285a95";
     let resolver_address = "0xc6d566a56a1aff6508b41f6c90ff131615583bcd";
@@ -946,11 +1185,10 @@ async fn sync_adapter_owned_raw_log_state_backfills_basenames_reverse_claims_and
                 log_index: 0,
                 emitting_address: reverse_address.to_owned(),
                 topics: vec![
-                    reverse_claimed_topic0(),
+                    name_for_addr_changed_topic0(),
                     hex_string(&abi_word_address(claimed_address)),
-                    reverse_node_for_address(claimed_address),
                 ],
-                data: Vec::new(),
+                data: decode_hex_string(&encode_dynamic_string_log_data("alice.base.eth")),
                 canonicality_state: CanonicalityState::Canonical,
             },
             RawLog {
@@ -1087,7 +1325,7 @@ async fn sync_adapter_owned_raw_log_state_backfills_basenames_reverse_claims_and
         )
         .fetch_one(database.pool())
         .await?,
-        1
+        2
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>(

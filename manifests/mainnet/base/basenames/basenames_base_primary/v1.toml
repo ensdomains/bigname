@@ -1,5 +1,7 @@
 # Bootstrap seed for the canonical Basenames declared-primary surface on Base mainnet.
-# Address confirmed from the upstream base/basenames deployment metadata.
+# Address and Base coin-type constructor argument confirmed from the upstream ENSv1 Base L2ReverseRegistrar deployment.
+# (upstream: .refs/ens_v1/deployments/base/L2ReverseRegistrar.json:L2 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/deployments/base/L2ReverseRegistrar.json:L391 @ ens_v1@91c966f)
 manifest_version = 1
 namespace = "basenames"
 source_family = "basenames_base_primary"
@@ -14,5 +16,15 @@ discovery_rules = []
 
 [[contracts]]
 role = "reverse_registrar"
-address = "0x79ea96012eea67a83431f1701b3dff7e37f9e282"
+address = "0x0000000000d8e504002cc26e3ec46d81971c1664"
 proxy_kind = "none"
+
+[[abi.events]]
+# ENSv1's Base L2ReverseRegistrar emits the declared primary-name value for Base coin type 2147492101.
+# (upstream: .refs/ens_v1/deployments/base/L2ReverseRegistrar.json:L88 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/deployments/base/L2ReverseRegistrar.json:L98 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/deployments/base/L2ReverseRegistrar.json:L391 @ ens_v1@91c966f)
+name = "NameForAddrChanged"
+fragment = "event NameForAddrChanged(address indexed addr, string name)"
+emitter_roles = ["reverse_registrar"]
+normalized_events = ["ReverseChanged", "RecordChanged"]

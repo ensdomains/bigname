@@ -4,11 +4,12 @@ use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
 use super::{
-    JsonRpcProvider, PROVIDER_BATCH_ITEM_LIMIT, ProviderBlock, ProviderBlockBundle,
-    ProviderBlockSelection, ProviderHeadHashSnapshot, ProviderHeadSnapshot, ProviderResolvedBlock,
+    JsonRpcProvider, ProviderBlock, ProviderBlockBundle, ProviderBlockSelection,
+    ProviderHeadHashSnapshot, ProviderHeadSnapshot, ProviderResolvedBlock,
     RAW_PAYLOAD_KIND_FULL_BLOCK,
     decode::{block_hash_from_value, normalize_hash},
     logs_receipts::ProviderBlockLogFetch,
+    provider_batch_item_limit,
     request::JsonRpcBatchCall,
 };
 
@@ -97,12 +98,35 @@ impl JsonRpcProvider {
     }
 
     async fn fetch_chain_head_hashes(&self) -> Result<ProviderHeadHashSnapshot> {
-        let canonical = self
-            .fetch_head_hash_by_tag("latest")
-            .await?
-            .context("provider did not return a latest block")?;
-        let safe = self.fetch_head_hash_by_tag("safe").await?;
-        let finalized = self.fetch_head_hash_by_tag("finalized").await?;
+        let tags = ["latest", "safe", "finalized"];
+        let calls = tags
+            .iter()
+            .map(|tag| JsonRpcBatchCall {
+                method: "eth_getBlockByNumber",
+                params: vec![Value::String((*tag).to_owned()), Value::Bool(false)],
+            })
+            .collect::<Vec<_>>();
+        let mut results = self.fetch_json_rpc_batch_results(calls).await?.into_iter();
+
+        let canonical = head_hash_from_tag_result(
+            "latest",
+            results
+                .next()
+                .context("provider omitted latest head hash result")?,
+        )?
+        .context("provider did not return a latest block")?;
+        let safe = head_hash_from_tag_result(
+            "safe",
+            results
+                .next()
+                .context("provider omitted safe head hash result")?,
+        )?;
+        let finalized = head_hash_from_tag_result(
+            "finalized",
+            results
+                .next()
+                .context("provider omitted finalized head hash result")?,
+        )?;
 
         Ok(ProviderHeadHashSnapshot {
             canonical,
@@ -140,7 +164,7 @@ impl JsonRpcProvider {
     ) -> Result<Vec<ProviderResolvedBlock>> {
         let mut resolved = Vec::with_capacity(block_numbers.len());
 
-        for chunk in block_numbers.chunks(PROVIDER_BATCH_ITEM_LIMIT) {
+        for chunk in block_numbers.chunks(provider_batch_item_limit()) {
             let calls = chunk
                 .iter()
                 .map(|block_number| {
@@ -204,7 +228,7 @@ impl JsonRpcProvider {
     ) -> Result<Vec<ProviderBlock>> {
         let mut blocks = Vec::with_capacity(resolved_blocks.len());
 
-        for chunk in resolved_blocks.chunks(PROVIDER_BATCH_ITEM_LIMIT) {
+        for chunk in resolved_blocks.chunks(provider_batch_item_limit()) {
             let calls = chunk
                 .iter()
                 .map(|resolved_block| JsonRpcBatchCall {
@@ -256,7 +280,7 @@ impl JsonRpcProvider {
 
         // Keep retained payload fetches single-response scoped: cache-fill verifies the stored
         // digest against the same full block/log/receipt JSON-RPC response body.
-        for chunk in resolved_blocks.chunks(PROVIDER_BATCH_ITEM_LIMIT) {
+        for chunk in resolved_blocks.chunks(provider_batch_item_limit()) {
             for resolved_block in chunk {
                 let bundle = self
                     .fetch_block_bundle_by_hash(&resolved_block.block_hash)
@@ -282,7 +306,7 @@ impl JsonRpcProvider {
     ) -> Result<Vec<ProviderBlockBundle>> {
         let mut bundles = Vec::with_capacity(resolved_blocks.len());
 
-        for chunk in resolved_blocks.chunks(PROVIDER_BATCH_ITEM_LIMIT) {
+        for chunk in resolved_blocks.chunks(provider_batch_item_limit()) {
             let calls = chunk
                 .iter()
                 .map(|resolved_block| JsonRpcBatchCall {
@@ -451,16 +475,6 @@ impl JsonRpcProvider {
         Ok(())
     }
 
-    async fn fetch_head_hash_by_tag(&self, tag: &str) -> Result<Option<String>> {
-        self.fetch_json_rpc_result(
-            "eth_getBlockByNumber",
-            vec![Value::String(tag.to_owned()), Value::Bool(false)],
-        )
-        .await?
-        .map(|value| block_hash_from_value(&value))
-        .transpose()
-    }
-
     async fn fetch_blocks_by_hashes<I>(&self, hashes: I) -> Result<BTreeMap<String, ProviderBlock>>
     where
         I: IntoIterator<Item = Option<String>>,
@@ -487,4 +501,13 @@ impl JsonRpcProvider {
             .map(ProviderBlock::from_value)
             .transpose()
     }
+}
+
+fn head_hash_from_tag_result(tag: &str, result: Option<Value>) -> Result<Option<String>> {
+    result
+        .map(|value| {
+            block_hash_from_value(&value)
+                .with_context(|| format!("failed to decode {tag} block hash from provider result"))
+        })
+        .transpose()
 }

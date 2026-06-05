@@ -126,6 +126,7 @@ const DEFAULT_NAME_CURRENT_LIST_READ_FILTER: &str = r#"
               'safe'::canonicality_state,
               'finalized'::canonicality_state
           )
+          AND binding.active_to IS NULL
           AND (
               nc.token_lineage_id IS NULL
               OR token_lineage.canonicality_state IN (
@@ -154,6 +155,7 @@ const DEFAULT_ADDRESS_NAMES_MEMBERSHIP_READ_FILTER: &str = r#"
       'safe'::canonicality_state,
       'finalized'::canonicality_state
   )
+  AND membership_binding.active_to IS NULL
   AND (
       anc.token_lineage_id IS NULL
       OR membership_token_lineage.canonicality_state IN (
