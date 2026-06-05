@@ -41,19 +41,28 @@ pub async fn rebuild_address_names_current_logical_name(
     address: &str,
     logical_name_id: &str,
 ) -> Result<AddressNamesCurrentRebuildSummary> {
+    rebuild_address_names_current_logical_names(pool, address, &[logical_name_id.to_owned()]).await
+}
+
+pub async fn rebuild_address_names_current_logical_names(
+    pool: &PgPool,
+    address: &str,
+    logical_name_ids: &[String],
+) -> Result<AddressNamesCurrentRebuildSummary> {
     let normalized_address = normalize_address(address);
-    let bindings = load_current_bindings_for_logical_name(pool, logical_name_id).await?;
     let mut rows = Vec::new();
 
-    for binding in &bindings {
-        rows.extend(build_rows_for_binding(pool, binding, Some(&normalized_address)).await?);
+    for logical_name_id in logical_name_ids {
+        let bindings = load_current_bindings_for_logical_name(pool, logical_name_id).await?;
+        for binding in &bindings {
+            rows.extend(build_rows_for_binding(pool, binding, Some(&normalized_address)).await?);
+        }
     }
 
-    let logical_name_ids = vec![logical_name_id.to_owned()];
     let (deleted_row_count, inserted_row_count) = replace_address_names_current_logical_names(
         pool,
         &normalized_address,
-        &logical_name_ids,
+        logical_name_ids,
         &rows,
     )
     .await?;
@@ -61,10 +70,10 @@ pub async fn rebuild_address_names_current_logical_name(
     tracing::info!(
         projection = "address_names_current",
         address = %normalized_address,
-        logical_name_id,
+        logical_name_count = logical_name_ids.len(),
         upserted_row_count = inserted_row_count,
         deleted_row_count,
-        "address_names_current logical-name replacement published projection and refreshed identity sidecars"
+        "address_names_current logical-name batch replacement published projection and refreshed identity sidecars"
     );
 
     Ok(AddressNamesCurrentRebuildSummary {

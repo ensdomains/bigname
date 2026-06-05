@@ -248,98 +248,64 @@ pub(super) async fn load_current_bindings(
               AND ne.after_state->>'resolver' <> ''
               AND LOWER(ne.after_state->>'resolver') = $3
               AND ne.canonicality_state {CANONICAL_STATE_FILTER}
-        ),
-        current_bindings AS (
-            SELECT
-                sb.logical_name_id,
-                sb.resource_id,
-                sb.surface_binding_id,
-                sb.binding_kind,
-                ns.canonical_display_name,
-                ns.normalized_name,
-                ns.namehash
-            FROM surface_bindings sb
-            INNER JOIN candidate_pairs candidate
-              ON candidate.logical_name_id = sb.logical_name_id
-             AND candidate.resource_id = sb.resource_id
-            INNER JOIN name_surfaces ns
-              ON ns.logical_name_id = sb.logical_name_id
-             AND ns.canonicality_state {CANONICAL_STATE_FILTER}
-            WHERE sb.active_to IS NULL
-              AND sb.canonicality_state {CANONICAL_STATE_FILTER}
-        ),
-        latest_resolver_events AS (
-            SELECT
-                latest.logical_name_id,
-                latest.resource_id,
-                latest.normalized_event_id,
-                latest.source_family,
-                latest.manifest_version,
-                latest.source_manifest_id,
-                latest.chain_id,
-                latest.block_number,
-                latest.block_hash,
-                latest.block_timestamp,
-                latest.raw_fact_ref,
-                latest.canonicality_state,
-                latest.resolver_address
-            FROM candidate_pairs candidate
-            CROSS JOIN LATERAL (
-                SELECT
-                    ne.logical_name_id,
-                    ne.resource_id,
-                    ne.normalized_event_id,
-                    ne.source_family,
-                    ne.manifest_version,
-                    ne.source_manifest_id,
-                    ne.chain_id,
-                    ne.block_number,
-                    ne.block_hash,
-                    rb.block_timestamp,
-                    ne.raw_fact_ref,
-                    ne.canonicality_state::TEXT AS canonicality_state,
-                    LOWER(ne.after_state->>'resolver') AS resolver_address
-                FROM normalized_events ne
-                LEFT JOIN chain_lineage rb
-                  ON rb.chain_id = ne.chain_id
-                 AND rb.block_hash = ne.block_hash
-                WHERE ne.event_kind = $1
-                  AND ne.logical_name_id = candidate.logical_name_id
-                  AND ne.resource_id = candidate.resource_id
-                  AND ne.chain_id = $2
-                  AND ne.canonicality_state {CANONICAL_STATE_FILTER}
-                ORDER BY
-                    ne.block_number DESC NULLS LAST,
-                    ne.log_index DESC NULLS LAST,
-                    ne.normalized_event_id DESC
-                LIMIT 1
-            ) latest
-            WHERE latest.resolver_address = $3
         )
         SELECT
-            cb.logical_name_id,
-            cb.canonical_display_name,
-            cb.normalized_name,
-            cb.namehash,
-            cb.resource_id,
-            cb.surface_binding_id,
-            cb.binding_kind,
-            lre.normalized_event_id,
-            lre.source_family,
-            lre.manifest_version,
-            lre.source_manifest_id,
-            lre.chain_id,
-            lre.block_number,
-            lre.block_hash,
-            lre.block_timestamp,
-            lre.raw_fact_ref,
-            lre.canonicality_state
-        FROM current_bindings cb
-        INNER JOIN latest_resolver_events lre
-          ON lre.logical_name_id = cb.logical_name_id
-         AND lre.resource_id = cb.resource_id
-        WHERE lre.resolver_address = $3
-        ORDER BY cb.canonical_display_name, cb.logical_name_id, cb.surface_binding_id
+            candidate.logical_name_id,
+            ns.canonical_display_name,
+            ns.normalized_name,
+            ns.namehash,
+            candidate.resource_id,
+            sb.surface_binding_id,
+            sb.binding_kind,
+            latest.normalized_event_id,
+            latest.source_family,
+            latest.manifest_version,
+            latest.source_manifest_id,
+            latest.chain_id,
+            latest.block_number,
+            latest.block_hash,
+            latest.block_timestamp,
+            latest.raw_fact_ref,
+            latest.canonicality_state
+        FROM candidate_pairs candidate
+        INNER JOIN surface_bindings sb
+          ON sb.logical_name_id = candidate.logical_name_id
+         AND sb.resource_id = candidate.resource_id
+         AND sb.active_to IS NULL
+         AND sb.canonicality_state {CANONICAL_STATE_FILTER}
+        INNER JOIN name_surfaces ns
+          ON ns.logical_name_id = candidate.logical_name_id
+         AND ns.canonicality_state {CANONICAL_STATE_FILTER}
+        CROSS JOIN LATERAL (
+            SELECT
+                ne.normalized_event_id,
+                ne.source_family,
+                ne.manifest_version,
+                ne.source_manifest_id,
+                ne.chain_id,
+                ne.block_number,
+                ne.block_hash,
+                rb.block_timestamp,
+                ne.raw_fact_ref,
+                ne.canonicality_state::TEXT AS canonicality_state,
+                LOWER(ne.after_state->>'resolver') AS resolver_address
+            FROM normalized_events ne
+            LEFT JOIN chain_lineage rb
+              ON rb.chain_id = ne.chain_id
+             AND rb.block_hash = ne.block_hash
+            WHERE ne.event_kind = $1
+              AND ne.logical_name_id = candidate.logical_name_id
+              AND ne.resource_id = candidate.resource_id
+              AND ne.chain_id = $2
+              AND ne.canonicality_state {CANONICAL_STATE_FILTER}
+            ORDER BY
+                ne.block_number DESC NULLS LAST,
+                ne.log_index DESC NULLS LAST,
+                ne.normalized_event_id DESC
+            LIMIT 1
+        ) latest
+        WHERE latest.resolver_address = $3
+        ORDER BY ns.canonical_display_name, candidate.logical_name_id, sb.surface_binding_id
         "#
     ))
     .bind(EVENT_KIND_RESOLVER_CHANGED)
@@ -403,31 +369,21 @@ pub(super) async fn count_current_binding_candidate_pairs(
               AND ne.after_state->>'resolver' <> ''
               AND LOWER(ne.after_state->>'resolver') = $3
               AND ne.canonicality_state {CANONICAL_STATE_FILTER}
-        ),
-        current_bindings AS (
-            SELECT
-                sb.logical_name_id,
-                sb.resource_id
-            FROM surface_bindings sb
-            INNER JOIN candidate_pairs candidate
-              ON candidate.logical_name_id = sb.logical_name_id
-             AND candidate.resource_id = sb.resource_id
-            INNER JOIN name_surfaces ns
-              ON ns.logical_name_id = sb.logical_name_id
-             AND ns.canonicality_state {CANONICAL_STATE_FILTER}
-            WHERE sb.active_to IS NULL
-              AND sb.canonicality_state {CANONICAL_STATE_FILTER}
-        ),
-        latest_resolver_events AS (
-            SELECT
-                latest.logical_name_id,
-                latest.resource_id,
-                latest.resolver_address
+        )
+        SELECT COUNT(*)::BIGINT
+        FROM (
+            SELECT 1
             FROM candidate_pairs candidate
+            INNER JOIN surface_bindings sb
+              ON sb.logical_name_id = candidate.logical_name_id
+             AND sb.resource_id = candidate.resource_id
+             AND sb.active_to IS NULL
+             AND sb.canonicality_state {CANONICAL_STATE_FILTER}
+            INNER JOIN name_surfaces ns
+              ON ns.logical_name_id = candidate.logical_name_id
+             AND ns.canonicality_state {CANONICAL_STATE_FILTER}
             CROSS JOIN LATERAL (
                 SELECT
-                    ne.logical_name_id,
-                    ne.resource_id,
                     LOWER(ne.after_state->>'resolver') AS resolver_address
                 FROM normalized_events ne
                 WHERE ne.event_kind = $1
@@ -442,15 +398,6 @@ pub(super) async fn count_current_binding_candidate_pairs(
                 LIMIT 1
             ) latest
             WHERE latest.resolver_address = $3
-        )
-        SELECT COUNT(*)::BIGINT
-        FROM (
-            SELECT 1
-            FROM current_bindings cb
-            INNER JOIN latest_resolver_events lre
-              ON lre.logical_name_id = cb.logical_name_id
-             AND lre.resource_id = cb.resource_id
-            WHERE lre.resolver_address = $3
             LIMIT $4
         ) current_pairs
         "#

@@ -11,12 +11,20 @@ use super::{types::NormalizedEvent, validation::validate_normalized_event};
 
 #[path = "upsert/batch.rs"]
 mod batch;
+#[path = "upsert/repair.rs"]
+mod repair;
 #[path = "upsert/sanitize.rs"]
 mod sanitize;
 
 use batch::{
     insert_normalized_events_do_nothing, load_normalized_events_by_identities,
     upsert_normalized_event_batch,
+};
+use repair::{
+    basenames_primary_claim_source_after_state_repair_allowed,
+    ens_v1_unwrapped_authority_renewal_resource_id_repair_allowed,
+    repair_basenames_primary_claim_source_after_states,
+    repair_ens_v1_unwrapped_authority_renewal_resource_ids,
 };
 use sanitize::jsonb_safe_normalized_event;
 pub use sanitize::serialize_jsonb_value;
@@ -75,6 +83,10 @@ pub async fn upsert_normalized_events_with_summary(
     let mut conflict_load_ms = 0u128;
     let mut conflict_snapshot_ms = 0u128;
     let mut conflict_update_ms = 0u128;
+    let mut after_state_repair_ms = 0u128;
+    let mut after_state_repaired_count = 0usize;
+    let mut resource_id_repair_ms = 0u128;
+    let mut resource_id_repaired_count = 0usize;
     let mut output_snapshot_ms = 0u128;
     for chunk in jsonb_safe_events.chunks(NORMALIZED_EVENT_FAST_INSERT_BATCH_SIZE) {
         chunk_count += 1;
@@ -115,6 +127,27 @@ pub async fn upsert_normalized_events_with_summary(
             existing_events.extend(raced_existing);
             conflicted_events.extend(raced_conflicted_events);
         }
+
+        let after_state_repair_started = Instant::now();
+        let after_state_repaired_identities = repair_basenames_primary_claim_source_after_states(
+            &mut transaction,
+            &conflicted_events,
+            &existing_events,
+        )
+        .await?;
+        after_state_repaired_count += after_state_repaired_identities.len();
+        after_state_repair_ms += after_state_repair_started.elapsed().as_millis();
+
+        let resource_id_repair_started = Instant::now();
+        let resource_id_repaired_identities =
+            repair_ens_v1_unwrapped_authority_renewal_resource_ids(
+                &mut transaction,
+                &conflicted_events,
+                &existing_events,
+            )
+            .await?;
+        resource_id_repaired_count += resource_id_repaired_identities.len();
+        resource_id_repair_ms += resource_id_repair_started.elapsed().as_millis();
 
         let events_requiring_canonicality_refresh = conflicted_events
             .iter()
@@ -185,6 +218,10 @@ pub async fn upsert_normalized_events_with_summary(
         conflict_load_ms,
         conflict_snapshot_ms,
         conflict_update_ms,
+        after_state_repair_ms,
+        after_state_repaired_count,
+        resource_id_repair_ms,
+        resource_id_repaired_count,
         output_snapshot_ms,
         commit_ms,
         elapsed_ms = total_started.elapsed().as_millis(),
@@ -217,6 +254,10 @@ pub async fn upsert_normalized_events_count_only(
     let mut conflict_partition_ms = 0u128;
     let mut conflict_load_ms = 0u128;
     let mut conflict_update_ms = 0u128;
+    let mut after_state_repair_ms = 0u128;
+    let mut after_state_repaired_count = 0usize;
+    let mut resource_id_repair_ms = 0u128;
+    let mut resource_id_repaired_count = 0usize;
     let mut commit_ms = 0u128;
 
     for raw_chunk in events.chunks(NORMALIZED_EVENT_FAST_INSERT_BATCH_SIZE) {
@@ -274,6 +315,27 @@ pub async fn upsert_normalized_events_count_only(
             conflicted_events.extend(raced_conflicted_events);
         }
 
+        let after_state_repair_started = Instant::now();
+        let after_state_repaired_identities = repair_basenames_primary_claim_source_after_states(
+            &mut transaction,
+            &conflicted_events,
+            &existing_events,
+        )
+        .await?;
+        after_state_repaired_count += after_state_repaired_identities.len();
+        after_state_repair_ms += after_state_repair_started.elapsed().as_millis();
+
+        let resource_id_repair_started = Instant::now();
+        let resource_id_repaired_identities =
+            repair_ens_v1_unwrapped_authority_renewal_resource_ids(
+                &mut transaction,
+                &conflicted_events,
+                &existing_events,
+            )
+            .await?;
+        resource_id_repaired_count += resource_id_repaired_identities.len();
+        resource_id_repair_ms += resource_id_repair_started.elapsed().as_millis();
+
         let events_requiring_canonicality_refresh = conflicted_events
             .iter()
             .filter(|event| {
@@ -319,6 +381,10 @@ pub async fn upsert_normalized_events_count_only(
         conflict_partition_ms,
         conflict_load_ms,
         conflict_update_ms,
+        after_state_repair_ms,
+        after_state_repaired_count,
+        resource_id_repair_ms,
+        resource_id_repaired_count,
         commit_ms,
         elapsed_ms = total_started.elapsed().as_millis(),
         "normalized-event count-only upsert timing completed"
@@ -390,6 +456,18 @@ fn ensure_normalized_event_identity_matches(
 ) -> Result<()> {
     let differing_fields = normalized_event_identity_differences(existing, incoming);
     if !differing_fields.is_empty() {
+        if basenames_primary_claim_source_after_state_repair_allowed(
+            existing,
+            incoming,
+            &differing_fields,
+        ) || ens_v1_unwrapped_authority_renewal_resource_id_repair_allowed(
+            existing,
+            incoming,
+            &differing_fields,
+        ) {
+            return Ok(());
+        }
+
         bail!(
             "normalized event identity mismatch for event {} (differing_fields={}, existing={}, incoming={})",
             existing.event_identity,
@@ -402,7 +480,7 @@ fn ensure_normalized_event_identity_matches(
     Ok(())
 }
 
-fn normalized_event_identity_differences(
+pub(super) fn normalized_event_identity_differences(
     existing: &NormalizedEvent,
     incoming: &NormalizedEvent,
 ) -> Vec<&'static str> {
