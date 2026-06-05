@@ -27,9 +27,8 @@ justification = "Phase 7 allowlist for an oversized production file; future chan
 
 [[files]]
 path = "apps/indexer/src/main/backfill/reservation_execution/coinbase_sql.rs"
-loc = 1160
+loc = 796
 justification = "Phase 7 allowlist for an oversized production file; future changes should split or shrink it."
-review_justification = "Explicit review accepted this file above 900 LOC; future changes should split or shrink it."
 
 [[files]]
 path = "apps/indexer/src/main/reconciliation/adapter_sync.rs"

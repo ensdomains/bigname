@@ -34,20 +34,27 @@ pub(super) fn build_query(
         bail!("Coinbase SQL filter pack must include addresses unless scan_all_emitters is true");
     }
 
-    let mut event_row_predicates = vec![format!(
+    let mut event_log_predicates = vec![format!(
         "l.block_number BETWEEN {} AND {}",
         pack.from_block, pack.to_block
     )];
+    let mut encoded_log_predicates = event_log_predicates.clone();
     if !pack.scan_all_emitters {
         let address_predicate = format!("l.address IN ({})", sql_string_literals(&pack.addresses));
-        event_row_predicates.push(address_predicate);
+        event_log_predicates.push(address_predicate.clone());
+        encoded_log_predicates.push(address_predicate);
     }
     if !pack.event_signatures.is_empty() {
         let event_signature_predicate = format!(
             "l.event_signature IN ({})",
             sql_string_literals(&pack.event_signatures)
         );
-        event_row_predicates.push(event_signature_predicate);
+        event_log_predicates.push(event_signature_predicate);
+    } else if !pack.topic0s.is_empty() {
+        event_log_predicates.push(topic0_predicate(&pack.topic0s));
+    }
+    if !pack.topic0s.is_empty() {
+        encoded_log_predicates.push(topic0_predicate(&pack.topic0s));
     }
     let mut output_predicates = vec![format!(
         "l.block_number BETWEEN {} AND {}",
@@ -91,7 +98,7 @@ pub(super) fn build_query(
   ) t
   WHERE t.action_sum > 0
 ),
-event_log_rows AS (
+decoded_log_rows AS (
   SELECT
     l.block_number AS block_number,
     l.block_hash AS block_hash,
@@ -108,9 +115,9 @@ event_log_rows AS (
     ON t.block_number = l.block_number
    AND t.block_hash = l.block_hash
    AND t.transaction_hash = l.transaction_hash
-  WHERE {event_row_predicates}
+  WHERE {event_log_predicates}
 ),
-event_log_sums AS (
+decoded_log_sums AS (
   SELECT
     l.block_number AS block_number,
     l.block_hash AS block_hash,
@@ -122,7 +129,7 @@ event_log_sums AS (
     any(l.parameters) AS parameters,
     l.topics AS topics,
     sum(l.action) AS action_sum
-  FROM event_log_rows l
+  FROM decoded_log_rows l
   GROUP BY
     l.block_number,
     l.block_hash,
@@ -132,7 +139,7 @@ event_log_sums AS (
     l.emitting_address,
     l.topics
 ),
-active_logs AS (
+active_decoded_logs AS (
   SELECT
     e.block_number AS block_number,
     e.block_hash AS block_hash,
@@ -143,7 +150,62 @@ active_logs AS (
     e.event_signature AS event_signature,
     e.parameters AS parameters,
     e.topics AS topics
-  FROM event_log_sums e
+  FROM decoded_log_sums e
+  WHERE e.action_sum > 0
+),
+encoded_log_rows AS (
+  SELECT
+    l.block_number AS block_number,
+    l.block_hash AS block_hash,
+    l.transaction_hash AS transaction_hash,
+    t.transaction_index AS transaction_index,
+    l.log_index AS log_index,
+    l.address AS emitting_address,
+    NULL AS event_signature,
+    NULL AS parameters,
+    l.topics AS topics,
+    {log_action_expr} AS action
+  FROM {network}.encoded_logs l
+  JOIN active_transactions t
+    ON t.block_number = l.block_number
+   AND t.block_hash = l.block_hash
+   AND t.transaction_hash = l.transaction_hash
+  WHERE {encoded_log_predicates}
+),
+encoded_log_sums AS (
+  SELECT
+    l.block_number AS block_number,
+    l.block_hash AS block_hash,
+    l.transaction_hash AS transaction_hash,
+    l.transaction_index AS transaction_index,
+    l.log_index AS log_index,
+    l.emitting_address AS emitting_address,
+    NULL AS event_signature,
+    NULL AS parameters,
+    l.topics AS topics,
+    sum(l.action) AS action_sum
+  FROM encoded_log_rows l
+  GROUP BY
+    l.block_number,
+    l.block_hash,
+    l.transaction_hash,
+    l.transaction_index,
+    l.log_index,
+    l.emitting_address,
+    l.topics
+),
+active_encoded_logs AS (
+  SELECT
+    e.block_number AS block_number,
+    e.block_hash AS block_hash,
+    e.transaction_hash AS transaction_hash,
+    e.transaction_index AS transaction_index,
+    e.log_index AS log_index,
+    e.emitting_address AS emitting_address,
+    e.event_signature AS event_signature,
+    e.parameters AS parameters,
+    e.topics AS topics
+  FROM encoded_log_sums e
   WHERE e.action_sum > 0
 )
 SELECT
@@ -156,7 +218,20 @@ SELECT
   l.event_signature AS event_signature,
   l.parameters AS parameters,
   l.topics AS topics
-FROM active_logs l
+FROM active_decoded_logs l
+WHERE {output_predicates}
+UNION ALL
+SELECT
+  l.block_number AS block_number,
+  l.block_hash AS block_hash,
+  l.transaction_hash AS transaction_hash,
+  l.transaction_index AS transaction_index,
+  l.log_index AS log_index,
+  l.emitting_address AS emitting_address,
+  l.event_signature AS event_signature,
+  l.parameters AS parameters,
+  l.topics AS topics
+FROM active_encoded_logs l
 WHERE {output_predicates}
 ORDER BY block_number, transaction_index, log_index
 LIMIT {limit}"#,
@@ -164,7 +239,8 @@ LIMIT {limit}"#,
         to_block = pack.to_block,
         tx_action_expr = tx_action_expr,
         log_action_expr = log_action_expr,
-        event_row_predicates = event_row_predicates.join("\n    AND "),
+        event_log_predicates = event_log_predicates.join("\n    AND "),
+        encoded_log_predicates = encoded_log_predicates.join("\n    AND "),
         output_predicates = output_predicates.join("\n  AND "),
     ))
 }
@@ -216,6 +292,10 @@ fn active_action_expression(column: &str) -> String {
     format!(
         "CASE WHEN toString({column}) IN ('1', 'added') THEN 1 WHEN toString({column}) IN ('-1', 'removed') THEN -1 ELSE 0 END"
     )
+}
+
+fn topic0_predicate(topic0s: &[String]) -> String {
+    format!("l.topics[1] IN ({})", sql_string_literals(topic0s))
 }
 
 fn sql_string_literals(values: &[String]) -> String {

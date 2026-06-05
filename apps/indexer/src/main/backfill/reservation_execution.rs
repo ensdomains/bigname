@@ -216,7 +216,7 @@ pub(crate) fn coinbase_sql_backfill_job_source_identity_payload(
     );
     object.insert(
         "coinbase_sql_plan_version".to_owned(),
-        Value::String("base_logs_v1".to_owned()),
+        Value::String("base_logs_v2".to_owned()),
     );
     object.insert("validation_provider_required".to_owned(), Value::Bool(true));
     object.insert(

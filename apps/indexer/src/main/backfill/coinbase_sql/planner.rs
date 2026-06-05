@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result};
 use bigname_manifests::{
-    WatchedBackfillTarget, WatchedSourceSelectorPlan,
+    WatchedBackfillTarget, WatchedSourceSelectorKind, WatchedSourceSelectorPlan,
     load_active_manifest_abi_events_by_chain_and_source_families,
 };
 use tracing::warn;
@@ -105,7 +105,12 @@ pub(super) fn build_filter_packs(
             )
             .into_iter()
             .flat_map(|segment| {
-                packs_for_source_family_segment(request.chain, request.topic_plan, segment)
+                packs_for_source_family_segment(
+                    request.chain,
+                    request.source_plan,
+                    request.topic_plan,
+                    segment,
+                )
             })
         })
         .collect()
@@ -117,6 +122,8 @@ fn scan_all_source_family_filter_packs(
 ) -> Option<Vec<CoinbaseSqlFilterPack>> {
     if request.resolved_blocks.is_empty()
         || request.selected_target_addresses_for_chunk.is_empty()
+        || request.source_plan.selector_kind != WatchedSourceSelectorKind::SourceFamily
+        || request.source_plan.source_family.as_deref() != Some(source_family)
         || !request
             .source_plan
             .selected_targets
@@ -156,6 +163,7 @@ fn scan_all_source_family_filter_packs(
 
 fn packs_for_source_family_segment(
     chain: &str,
+    source_plan: &WatchedSourceSelectorPlan,
     topic_plan: &BackfillTopicPlan,
     segment: CoinbaseSqlSourceFamilySegment,
 ) -> Vec<CoinbaseSqlFilterPack> {
@@ -172,6 +180,7 @@ fn packs_for_source_family_segment(
             .then(|| event_signatures.to_vec())
             .filter(|signatures| !signatures.is_empty());
         let scan_all_emitters = should_scan_all_emitters(
+            source_plan,
             &source_family,
             addresses.len(),
             topic_key.as_ref(),
@@ -212,12 +221,15 @@ fn packs_for_source_family_segment(
 }
 
 fn should_scan_all_emitters(
+    source_plan: &WatchedSourceSelectorPlan,
     source_family: &str,
     address_count: usize,
     topic0s: Option<&Vec<String>>,
     event_signatures: Option<&Vec<String>>,
 ) -> bool {
-    source_family == BASENAMES_BASE_REGISTRY_SOURCE_FAMILY
+    source_plan.selector_kind == WatchedSourceSelectorKind::SourceFamily
+        && source_plan.source_family.as_deref() == Some(source_family)
+        && source_family == BASENAMES_BASE_REGISTRY_SOURCE_FAMILY
         && address_count > SCAN_ALL_EMITTERS_ADDRESS_THRESHOLD
         && topic0s.is_some_and(|topic0s| !topic0s.is_empty())
         && event_signatures.is_some_and(|event_signatures| !event_signatures.is_empty())

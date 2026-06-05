@@ -108,7 +108,8 @@ impl CoinbaseSqlValidationMode {
 
 pub(crate) const DEFAULT_COINBASE_SQL_INITIAL_WINDOW_BLOCKS: i64 = 1_024;
 pub(crate) const DEFAULT_COINBASE_SQL_MAX_WINDOW_BLOCKS: i64 = 8_192;
-pub(crate) const DEFAULT_COINBASE_SQL_PAGE_LIMIT: usize = 50_000;
+pub(crate) const COINBASE_SQL_RESULT_SET_CAP: usize = 10_000;
+pub(crate) const DEFAULT_COINBASE_SQL_PAGE_LIMIT: usize = COINBASE_SQL_RESULT_SET_CAP;
 pub(crate) const DEFAULT_COINBASE_SQL_QUERY_CHAR_LIMIT: usize = 10_000;
 pub(crate) const DEFAULT_COINBASE_SQL_QUERY_TIMEOUT_SECS: u64 = 30;
 pub(crate) const DEFAULT_COINBASE_SQL_RATE_LIMIT_QPS: u32 = 5;
@@ -159,6 +160,10 @@ impl CoinbaseSqlBackfillConfig {
         }
 
         Ok(())
+    }
+
+    pub(crate) fn effective_page_limit(&self) -> usize {
+        self.page_limit.min(COINBASE_SQL_RESULT_SET_CAP)
     }
 }
 

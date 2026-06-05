@@ -174,13 +174,12 @@ impl HistoricalBackfillSourceOps for CoinbaseSqlBackfillSource {
                 )
             };
             let packs = planner::build_filter_packs(&request);
+            let page_limit = self.config.effective_page_limit();
 
             for pack in packs {
-                for split_pack in query::build_or_split_filter_pack(
-                    pack,
-                    self.config.sql_char_limit,
-                    self.config.page_limit,
-                )? {
+                for split_pack in
+                    query::build_or_split_filter_pack(pack, self.config.sql_char_limit, page_limit)?
+                {
                     let materializes_all_scan_emitters =
                         materializes_all_scan_all_emitters(&split_pack);
                     logs_filtered_by_selected_target_index &=
@@ -194,7 +193,7 @@ impl HistoricalBackfillSourceOps for CoinbaseSqlBackfillSource {
                     let pages = pagination::fetch_all_pages(
                         &self.client,
                         &split_pack,
-                        self.config.page_limit,
+                        page_limit,
                         self.config.sql_char_limit,
                     )
                     .await?;

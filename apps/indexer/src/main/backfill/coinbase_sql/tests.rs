@@ -16,9 +16,9 @@ use super::{
 };
 use crate::{
     backfill::{
-        BackfillBlockRange, BackfillTopicPlan, CoinbaseSqlBackfillConfig,
-        CoinbaseSqlValidationMode, DEFAULT_COINBASE_SQL_QUERY_CHAR_LIMIT,
-        HistoricalLogPayloadRequest,
+        BackfillBlockRange, BackfillTopicPlan, COINBASE_SQL_RESULT_SET_CAP,
+        CoinbaseSqlBackfillConfig, CoinbaseSqlValidationMode,
+        DEFAULT_COINBASE_SQL_QUERY_CHAR_LIMIT, HistoricalLogPayloadRequest,
         reservation_execution::{
             backfill_job_source_identity_payload, coinbase_sql_backfill_job_source_identity_payload,
         },
@@ -157,6 +157,14 @@ fn sample_validation_requires_provider_payload_for_returned_decoded_logs() {
 }
 
 #[test]
+fn configured_coinbase_sql_page_limit_is_capped_at_effective_result_limit() {
+    let config = coinbase_sql_test_config(CoinbaseSqlValidationMode::Full);
+
+    assert_eq!(config.page_limit, 50_000);
+    assert_eq!(config.effective_page_limit(), COINBASE_SQL_RESULT_SET_CAP);
+}
+
+#[test]
 fn query_builder_batches_addresses_and_topics() -> Result<()> {
     let pack = pack(
         vec![
@@ -176,10 +184,14 @@ fn query_builder_batches_addresses_and_topics() -> Result<()> {
     let sql = build_query(&pack, None, 50_000)?;
 
     assert!(sql.contains("WITH active_transactions AS"));
-    assert!(sql.contains("event_log_rows AS"));
-    assert!(sql.contains("event_log_sums AS"));
-    assert!(sql.contains("active_logs AS"));
+    assert!(sql.contains("decoded_log_rows AS"));
+    assert!(sql.contains("decoded_log_sums AS"));
+    assert!(sql.contains("active_decoded_logs AS"));
+    assert!(sql.contains("encoded_log_rows AS"));
+    assert!(sql.contains("encoded_log_sums AS"));
+    assert!(sql.contains("active_encoded_logs AS"));
     assert!(sql.contains("FROM base.events l"));
+    assert!(sql.contains("FROM base.encoded_logs l"));
     assert!(sql.contains("JOIN active_transactions t"));
     assert!(sql.contains("t.transaction_index AS transaction_index"));
     assert!(sql.contains("l.log_index AS log_index"));
@@ -196,13 +208,14 @@ fn query_builder_batches_addresses_and_topics() -> Result<()> {
     assert!(!sql.contains("HAVING"));
     assert!(!sql.contains("row_number()"));
     assert!(!sql.contains(" OVER "));
-    assert!(!sql.contains("base.encoded_logs"));
-    assert!(!sql.contains("topics[1] IN"));
-    assert!(sql.contains("FROM active_logs l"));
+    assert!(sql.contains("l.topics[1] IN ('0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb')"));
+    assert!(sql.contains("FROM active_decoded_logs l"));
+    assert!(sql.contains("FROM active_encoded_logs l"));
+    assert!(sql.contains("UNION ALL"));
     assert!(sql.contains("ORDER BY block_number, transaction_index, log_index"));
 
     let final_event_select_pos = sql
-        .find("FROM active_logs l")
+        .find("FROM active_decoded_logs l")
         .expect("query should read active event logs in final selection");
     let cte_section = &sql[..final_event_select_pos];
     assert!(!cte_section.contains("UNION"));
@@ -232,7 +245,11 @@ fn query_builder_allows_scan_all_emitter_topic_queries() -> Result<()> {
 
     assert!(!sql.contains("l.address IN"));
     assert!(sql.contains("l.event_signature IN ('Transfer(address,address,uint256)')"));
+    assert!(sql.contains(
+        "l.topics[1] IN ('0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')"
+    ));
     assert!(sql.contains("FROM base.events l"));
+    assert!(sql.contains("FROM base.encoded_logs l"));
     Ok(())
 }
 
@@ -311,14 +328,14 @@ fn query_splitter_splits_scan_all_event_signature_query_over_character_budget() 
 }
 
 #[test]
-fn planner_scans_all_emitters_for_large_basenames_registry_sets() -> Result<()> {
+fn planner_scans_all_emitters_for_large_basenames_registry_source_family_sets() -> Result<()> {
     let addresses = (0..513)
         .map(|index| format!("0x{index:040x}"))
         .collect::<Vec<_>>();
     let source_plan = WatchedSourceSelectorPlan {
         chain: "base-mainnet".to_owned(),
-        selector_kind: WatchedSourceSelectorKind::WholeActiveWatchedChain,
-        source_family: None,
+        selector_kind: WatchedSourceSelectorKind::SourceFamily,
+        source_family: Some("basenames_base_registry".to_owned()),
         requested_watched_targets: Vec::new(),
         selected_targets: addresses
             .iter()
@@ -381,12 +398,83 @@ fn planner_scans_all_emitters_for_large_basenames_registry_sets() -> Result<()> 
 }
 
 #[test]
+fn planner_keeps_large_whole_chain_basenames_registry_address_filtered() -> Result<()> {
+    let addresses = (0..513)
+        .map(|index| format!("0x{index:040x}"))
+        .collect::<Vec<_>>();
+    let source_plan = WatchedSourceSelectorPlan {
+        chain: "base-mainnet".to_owned(),
+        selector_kind: WatchedSourceSelectorKind::WholeActiveWatchedChain,
+        source_family: None,
+        requested_watched_targets: Vec::new(),
+        selected_targets: addresses
+            .iter()
+            .enumerate()
+            .map(|(index, address)| WatchedBackfillTarget {
+                source_family: "basenames_base_registry".to_owned(),
+                contract_instance_id: Uuid::from_u128(index as u128 + 1),
+                address: address.clone(),
+                effective_from_block: 10,
+                effective_to_block: 10,
+            })
+            .collect(),
+        watched_chain_plan: WatchedChainPlan {
+            chain: "base-mainnet".to_owned(),
+            addresses: addresses.clone(),
+            manifest_root_entry_count: 0,
+            manifest_contract_entry_count: 513,
+            discovery_edge_entry_count: 0,
+        },
+    };
+    let selected_target_index = SelectedTargetIntervalIndex::from_source_plan(&source_plan);
+    let resolved_blocks = vec![ProviderResolvedBlock {
+        block_number: 10,
+        block_hash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+    }];
+    let topic0 = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned();
+    let topic_plan = BackfillTopicPlan::new(
+        BTreeMap::from([("basenames_base_registry".to_owned(), vec![topic0.clone()])]),
+        BTreeMap::from([(
+            "basenames_base_registry".to_owned(),
+            vec!["Transfer(address,address,uint256)".to_owned()],
+        )]),
+        BTreeSet::new(),
+    );
+
+    let packs = build_filter_packs(&HistoricalLogPayloadRequest {
+        chain: "base-mainnet",
+        source_plan: &source_plan,
+        selected_target_index: &selected_target_index,
+        resolved_blocks: &resolved_blocks,
+        selected_target_addresses_for_chunk: &addresses,
+        topic_plan: &topic_plan,
+        range: BackfillBlockRange::new(10, 10)?,
+        validation_mode: CoinbaseSqlValidationMode::Sample,
+    });
+
+    assert_eq!(packs.len(), 1);
+    assert!(!packs[0].scan_all_emitters);
+    assert_eq!(packs[0].addresses.len(), addresses.len());
+    assert_eq!(packs[0].addresses, addresses);
+    assert_eq!(packs[0].topic0s, vec![topic0]);
+    assert_eq!(
+        packs[0].event_signatures,
+        vec!["Transfer(address,address,uint256)".to_owned()]
+    );
+    assert_eq!(
+        packs[0].source_families,
+        vec!["basenames_base_registry".to_owned()]
+    );
+    Ok(())
+}
+
+#[test]
 fn planner_coalesces_basenames_registry_scan_all_windows() -> Result<()> {
     let address_a = "0x1111111111111111111111111111111111111111";
     let address_b = "0x2222222222222222222222222222222222222222";
     let source_plan = WatchedSourceSelectorPlan {
         chain: "base-mainnet".to_owned(),
-        selector_kind: WatchedSourceSelectorKind::WholeActiveWatchedChain,
+        selector_kind: WatchedSourceSelectorKind::SourceFamily,
         source_family: Some("basenames_base_registry".to_owned()),
         requested_watched_targets: Vec::new(),
         selected_targets: vec![
@@ -453,6 +541,80 @@ fn planner_coalesces_basenames_registry_scan_all_windows() -> Result<()> {
     assert!(packs[0].addresses.is_empty());
     assert_eq!(packs[0].from_block, 10);
     assert_eq!(packs[0].to_block, 11);
+    assert_eq!(packs[0].topic0s, vec![topic0]);
+    assert_eq!(
+        packs[0].event_signatures,
+        vec!["NewResolver(bytes32,address)".to_owned()]
+    );
+    Ok(())
+}
+
+#[test]
+fn planner_keeps_targeted_basenames_registry_address_filtered_under_threshold() -> Result<()> {
+    let address_a = "0x1111111111111111111111111111111111111111";
+    let address_b = "0x2222222222222222222222222222222222222222";
+    let source_plan = WatchedSourceSelectorPlan {
+        chain: "base-mainnet".to_owned(),
+        selector_kind: WatchedSourceSelectorKind::WholeActiveWatchedChain,
+        source_family: None,
+        requested_watched_targets: Vec::new(),
+        selected_targets: vec![
+            WatchedBackfillTarget {
+                source_family: "basenames_base_registry".to_owned(),
+                contract_instance_id: Uuid::from_u128(1),
+                address: address_a.to_owned(),
+                effective_from_block: 10,
+                effective_to_block: 10,
+            },
+            WatchedBackfillTarget {
+                source_family: "basenames_base_registry".to_owned(),
+                contract_instance_id: Uuid::from_u128(2),
+                address: address_b.to_owned(),
+                effective_from_block: 10,
+                effective_to_block: 10,
+            },
+        ],
+        watched_chain_plan: WatchedChainPlan {
+            chain: "base-mainnet".to_owned(),
+            addresses: vec![address_a.to_owned(), address_b.to_owned()],
+            manifest_root_entry_count: 0,
+            manifest_contract_entry_count: 2,
+            discovery_edge_entry_count: 0,
+        },
+    };
+    let selected_target_index = SelectedTargetIntervalIndex::from_source_plan(&source_plan);
+    let resolved_blocks = vec![ProviderResolvedBlock {
+        block_number: 10,
+        block_hash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+    }];
+    let topic0 = "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_owned();
+    let topic_plan = BackfillTopicPlan::new(
+        BTreeMap::from([("basenames_base_registry".to_owned(), vec![topic0.clone()])]),
+        BTreeMap::from([(
+            "basenames_base_registry".to_owned(),
+            vec!["NewResolver(bytes32,address)".to_owned()],
+        )]),
+        BTreeSet::new(),
+    );
+    let selected_addresses = vec![address_a.to_owned(), address_b.to_owned()];
+
+    let packs = build_filter_packs(&HistoricalLogPayloadRequest {
+        chain: "base-mainnet",
+        source_plan: &source_plan,
+        selected_target_index: &selected_target_index,
+        resolved_blocks: &resolved_blocks,
+        selected_target_addresses_for_chunk: &selected_addresses,
+        topic_plan: &topic_plan,
+        range: BackfillBlockRange::new(10, 10)?,
+        validation_mode: CoinbaseSqlValidationMode::Sample,
+    });
+
+    assert_eq!(packs.len(), 1);
+    assert!(!packs[0].scan_all_emitters);
+    assert_eq!(
+        packs[0].addresses,
+        vec![address_a.to_owned(), address_b.to_owned()]
+    );
     assert_eq!(packs[0].topic0s, vec![topic0]);
     assert_eq!(
         packs[0].event_signatures,
@@ -794,6 +956,27 @@ fn all_indexed_coinbase_sql_events_do_not_need_payload_validation() -> Result<()
 
     assert_eq!(row.data, "0x");
     assert!(!row.requires_validation_provider_data);
+    Ok(())
+}
+
+#[test]
+fn encoded_log_rows_require_validation_provider_payload() -> Result<()> {
+    let row = CoinbaseSqlLogRow::from_value(json!({
+        "block_number": 10,
+        "block_hash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "transaction_hash": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "transaction_index": 1,
+        "log_index": 2,
+        "address": "0x1111111111111111111111111111111111111111",
+        "event_signature": null,
+        "parameters": null,
+        "topics": [
+            "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        ]
+    }))?;
+
+    assert_eq!(row.data, "0x");
+    assert!(row.requires_validation_provider_data);
     Ok(())
 }
 

@@ -218,18 +218,25 @@ transaction/receipt fills. The Coinbase SQL runner respects
 `BIGNAME_INDEXER_COINBASE_SQL_PAGE_LIMIT`,
 `BIGNAME_INDEXER_COINBASE_SQL_QUERY_CHAR_LIMIT`,
 `BIGNAME_INDEXER_COINBASE_SQL_QUERY_TIMEOUT_SECS`, and
-`BIGNAME_INDEXER_COINBASE_SQL_RATE_LIMIT_QPS`; row, query length, and timeout
-defaults match the [CDP SQL REST API reference](https://docs.cdp.coinbase.com/api-reference/v2/rest-api/onchain-data/run-sql-query),
-while the QPS default is a conservative per-process guardrail and remains
+`BIGNAME_INDEXER_COINBASE_SQL_RATE_LIMIT_QPS`; query length and timeout defaults
+track the stricter currently published CDP SQL limits, while the row default
+uses bigname's conservative 10,000-row effective cap because Coinbase's
+[SQL FAQ](https://docs.cdp.coinbase.com/data/sql-api/faq) and
+[REST reference](https://docs.cdp.coinbase.com/api-reference/v2/rest-api/onchain-data/run-sql-query)
+currently publish different row/query-length ceilings. If the configured page
+limit is above the effective result cap, pagination and window tuning use the
+cap. The QPS default is a conservative per-process guardrail and remains
 operator-configurable if product limits change. The default validation mode is
 `full`, so the validation provider fetches the same address/topic log span and
-fails the range if Coinbase SQL omitted or added a selected log identity. Empty
-Coinbase SQL windows do not force code observations for every selected address.
-`sample` uses Coinbase SQL identities for selected logs, resolves and
-hash-checks only the returned log blocks with the validation provider, fills
-exact logs from those block bundles, and then uses the same validation provider
-for canonicality evidence, selected transaction/receipt fills, and
-selected-log-emitter code observations.
+fails the range if Coinbase SQL omitted or added a selected log identity.
+Coinbase SQL reads decoded event rows and undecoded encoded-log rows; undecoded
+rows require validation-provider payload fill because Coinbase SQL supplies only
+the log identity and topics for them. Empty Coinbase SQL windows do not force
+code observations for every selected address. `sample` uses Coinbase SQL
+identities for selected logs, resolves and hash-checks only the returned log
+blocks with the validation provider, fills exact logs from those block bundles,
+and then uses the same validation provider for canonicality evidence, selected
+transaction/receipt fills, and selected-log-emitter code observations.
 
 Coinbase SQL backfills can split a finite range into concurrent range workers
 with `BIGNAME_INDEXER_COINBASE_SQL_WORKERS`; the default `1` keeps one worker.

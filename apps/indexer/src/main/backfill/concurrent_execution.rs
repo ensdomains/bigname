@@ -218,6 +218,7 @@ pub(crate) async fn run_resumable_coinbase_sql_backfill_job_concurrently<
         coinbase_sql_initial_window_blocks = coinbase_config.initial_window_blocks,
         coinbase_sql_max_window_blocks = coinbase_config.max_window_blocks,
         coinbase_sql_page_limit = coinbase_config.page_limit,
+        coinbase_sql_effective_page_limit = coinbase_config.effective_page_limit(),
         coinbase_sql_query_char_limit = coinbase_config.sql_char_limit,
         coinbase_sql_validation_mode = coinbase_config.validation_mode.as_str(),
         adapter_sync_mode = config.adapter_sync_mode.as_str(),
