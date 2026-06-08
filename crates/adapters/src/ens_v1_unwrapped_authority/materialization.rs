@@ -323,11 +323,6 @@ pub(super) async fn prepend_existing_open_binding_closures(
         return Ok(0);
     }
 
-    drop_incoming_bindings_shadowed_by_existing(pool, bindings).await?;
-    if bindings.is_empty() {
-        return Ok(0);
-    }
-
     let mut closures = Vec::new();
     let mut group_start = 0usize;
     while group_start < bindings.len() {
@@ -370,76 +365,6 @@ pub(super) async fn prepend_existing_open_binding_closures(
     *bindings = next_bindings;
 
     Ok(closure_count)
-}
-
-async fn drop_incoming_bindings_shadowed_by_existing(
-    pool: &PgPool,
-    bindings: &mut Vec<SurfaceBinding>,
-) -> Result<usize> {
-    let mut shadowed_ids = HashSet::new();
-    let mut group_start = 0usize;
-    while group_start < bindings.len() {
-        let group_end = next_surface_binding_name_chunk_end(bindings, group_start);
-        let incoming = &bindings[group_start..group_end];
-        let logical_name_ids = incoming
-            .iter()
-            .filter(|binding| surface_binding_exclusion_applies(binding.canonicality_state))
-            .map(|binding| binding.logical_name_id.clone())
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>();
-        if logical_name_ids.is_empty() {
-            group_start = group_end;
-            continue;
-        }
-
-        let existing_bindings =
-            load_existing_surface_bindings_for_logical_names(pool, &logical_name_ids).await?;
-        for binding in incoming {
-            if incoming_binding_shadowed_by_existing(binding, &existing_bindings) {
-                shadowed_ids.insert(binding.surface_binding_id);
-            }
-        }
-
-        group_start = group_end;
-    }
-
-    if shadowed_ids.is_empty() {
-        return Ok(0);
-    }
-
-    bindings.retain(|binding| !shadowed_ids.contains(&binding.surface_binding_id));
-    tracing::warn!(
-        adapter = DERIVATION_KIND_ENS_V1_UNWRAPPED_AUTHORITY,
-        shadowed_surface_binding_count = shadowed_ids.len(),
-        "dropped restricted authority surface bindings shadowed by existing stronger bindings"
-    );
-    Ok(shadowed_ids.len())
-}
-
-fn incoming_binding_shadowed_by_existing(
-    incoming: &SurfaceBinding,
-    existing_bindings: &[SurfaceBinding],
-) -> bool {
-    if !surface_binding_exclusion_applies(incoming.canonicality_state) {
-        return false;
-    }
-    let incoming_rank = surface_binding_authority_rank(incoming);
-    existing_bindings.iter().any(|existing| {
-        existing.logical_name_id == incoming.logical_name_id
-            && existing.surface_binding_id != incoming.surface_binding_id
-            && surface_binding_exclusion_applies(existing.canonicality_state)
-            && existing.active_from <= incoming.active_from
-            && existing
-                .active_to
-                .is_none_or(|active_to| incoming.active_from < active_to)
-            && {
-                let existing_rank = surface_binding_authority_rank(existing);
-                existing_rank > incoming_rank
-                    || (existing_rank == incoming_rank
-                        && existing.active_from == incoming.active_from)
-            }
-    })
 }
 
 fn surface_binding_authority_rank(binding: &SurfaceBinding) -> u8 {

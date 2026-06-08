@@ -132,7 +132,9 @@ pub(super) fn apply_registration_renewed(
 
     restore_superseded_registration_for_renewal(history, &event)?;
 
-    if history.current_registration.is_none() {
+    if history.current_registration.is_none()
+        && !has_superseded_registration_for_renewal(history, &event)
+    {
         let name = history
             .name
             .clone()
@@ -215,21 +217,20 @@ pub(super) fn apply_registration_renewed(
         .clone()
         .context("failed to build registrar name metadata")?;
 
-    if let Some(current_registration) = history.current_registration.as_mut() {
+    if let Some(current_registration) = registration_for_renewal_mut(history, &event) {
         let before_expiry = current_registration.expiry;
         current_registration.expiry = event.expiry;
         current_registration.release_ref = block_index.first_block_at_or_after(
             release_after_grace(event.expiry)?,
             &event.reference.namespace,
         );
+        let registration_resource_id =
+            deterministic_uuid(&format!("resource:{}", current_registration.authority_key));
 
         history.events.push(build_normalized_event(
             &event.reference,
             Some(name.logical_name_id.clone()),
-            Some(deterministic_uuid(&format!(
-                "resource:{}",
-                current_registration.authority_key
-            ))),
+            Some(registration_resource_id),
             EVENT_KIND_REGISTRATION_RENEWED,
             json!({
                 "expiry": before_expiry.unix_timestamp(),
@@ -252,10 +253,7 @@ pub(super) fn apply_registration_renewed(
         history.events.push(build_normalized_event(
             &event.reference,
             Some(name.logical_name_id.clone()),
-            Some(deterministic_uuid(&format!(
-                "resource:{}",
-                current_registration.authority_key
-            ))),
+            Some(registration_resource_id),
             EVENT_KIND_EXPIRY_CHANGED,
             json!({
                 "expiry": before_expiry.unix_timestamp(),
@@ -340,10 +338,13 @@ pub(super) fn apply_token_transferred(
         return Ok(());
     };
     let current_resolver = history.current_resolver.clone();
+    let registry_owner_before_transfer = nonzero_address(history.current_registry_owner.as_deref());
     let mut transfer_applied_to_superseded_registration = false;
+    let mut transfer_applied_to_current_registration = false;
     let anchor = {
         let current_registration =
             if let Some(current_registration) = history.current_registration.as_mut() {
+                transfer_applied_to_current_registration = true;
                 current_registration
             } else if let Some(superseded_registration) = history.superseded_registration.as_mut() {
                 if registration_released_at_or_before(
@@ -387,24 +388,70 @@ pub(super) fn apply_token_transferred(
             event.reference.log_index.unwrap_or_default()
         ),
     ));
+    let revoke_previous_registrant = !registry_owner_before_transfer.is_some_and(|owner| {
+        owner.eq_ignore_ascii_case(&previous_registrant)
+            && !owner.eq_ignore_ascii_case(&event.to_address)
+    });
     emit_observation_permission_subject_change(
         &mut history.events,
         &event.reference,
         &name.logical_name_id,
         &anchor,
         PermissionSubjectChange {
-            before_subject: Some(previous_registrant.as_str()),
+            before_subject: revoke_previous_registrant.then_some(previous_registrant.as_str()),
             after_subject: Some(event.to_address.as_str()),
             resolver: current_resolver.as_deref(),
             source_event_kind: EVENT_KIND_TOKEN_CONTROL_TRANSFERRED,
         },
     );
+    if transfer_applied_to_current_registration
+        && history.current_wrapper_key.is_none()
+        && history
+            .current_registration
+            .as_ref()
+            .is_some_and(|lease| registry_owner_still_supersedes_registrar(history, lease))
+    {
+        let before_anchor = Some(anchor);
+        let lease = history
+            .current_registration
+            .take()
+            .context("current registration should exist for registry-owner divergence")?;
+        history.superseded_registration = Some(lease);
+        let after_anchor = active_anchor_for_observation(history, &event.reference);
+        transition_authority(
+            history,
+            before_anchor,
+            after_anchor.clone(),
+            &event.reference.as_boundary_ref(),
+            event.reference.block_timestamp,
+        )?;
+        if let (Some(after_anchor), Some(subject)) = (
+            after_anchor.as_ref(),
+            nonzero_address(history.current_registry_owner.as_deref()),
+        ) {
+            emit_observation_permission_grants(
+                &mut history.events,
+                &event.reference,
+                &name.logical_name_id,
+                after_anchor,
+                &subject,
+                current_resolver.as_deref(),
+                EVENT_KIND_TOKEN_CONTROL_TRANSFERRED,
+            );
+        }
+    }
     if transfer_applied_to_superseded_registration
         && history.current_wrapper_key.is_none()
         && nonzero_address(history.current_registry_owner.as_deref())
             .is_some_and(|owner| owner.eq_ignore_ascii_case(&event.to_address))
     {
         let before_anchor = active_anchor_for_observation(history, &event.reference);
+        emit_registry_owner_revokes_before_registrar_restore(
+            history,
+            before_anchor.as_ref(),
+            &event.reference,
+            EVENT_KIND_TOKEN_CONTROL_TRANSFERRED,
+        );
         if let Some(lease) = history.superseded_registration.take() {
             history.current_registration = Some(lease);
             let after_anchor = active_anchor_for_observation(history, &event.reference);
@@ -436,8 +483,18 @@ fn restore_superseded_registration_for_renewal(
         history.superseded_registration = Some(lease);
         return Ok(());
     }
+    if registry_owner_still_supersedes_registrar(history, &lease) {
+        history.superseded_registration = Some(lease);
+        return Ok(());
+    }
 
     let before_anchor = active_anchor_for_observation(history, &event.reference);
+    emit_registry_owner_revokes_before_registrar_restore(
+        history,
+        before_anchor.as_ref(),
+        &event.reference,
+        EVENT_KIND_REGISTRATION_RENEWED,
+    );
     history.current_registration = Some(lease);
     let after_anchor = active_anchor_for_observation(history, &event.reference);
     transition_authority(
@@ -447,6 +504,74 @@ fn restore_superseded_registration_for_renewal(
         &event.reference.as_boundary_ref(),
         event.reference.block_timestamp,
     )
+}
+
+fn emit_registry_owner_revokes_before_registrar_restore(
+    history: &mut NameHistory,
+    before_anchor: Option<&AuthorityAnchor>,
+    reference: &ObservationRef,
+    source_event_kind: &str,
+) {
+    let Some(before_anchor) =
+        before_anchor.filter(|anchor| anchor.kind == AuthorityKind::RegistryOnly)
+    else {
+        return;
+    };
+    let Some(name) = history.name.as_ref() else {
+        return;
+    };
+    emit_observation_permission_subject_change(
+        &mut history.events,
+        reference,
+        &name.logical_name_id,
+        before_anchor,
+        PermissionSubjectChange {
+            before_subject: history.current_registry_owner.as_deref(),
+            after_subject: None,
+            resolver: history.current_resolver.as_deref(),
+            source_event_kind,
+        },
+    );
+}
+
+fn has_superseded_registration_for_renewal(
+    history: &NameHistory,
+    event: &NameRenewalObservation,
+) -> bool {
+    history
+        .superseded_registration
+        .as_ref()
+        .is_some_and(|lease| superseded_registration_matches_renewal(lease, event))
+}
+
+fn registration_for_renewal_mut<'a>(
+    history: &'a mut NameHistory,
+    event: &NameRenewalObservation,
+) -> Option<&'a mut RegistrationLease> {
+    if history.current_registration.is_some() {
+        return history.current_registration.as_mut();
+    }
+    if has_superseded_registration_for_renewal(history, event) {
+        return history.superseded_registration.as_mut();
+    }
+    None
+}
+
+fn superseded_registration_matches_renewal(
+    lease: &RegistrationLease,
+    event: &NameRenewalObservation,
+) -> bool {
+    lease.labelhash.eq_ignore_ascii_case(&event.labelhash)
+        && !registration_released_at_or_before(lease, event.reference.block_timestamp)
+}
+
+fn registry_owner_still_supersedes_registrar(
+    history: &NameHistory,
+    lease: &RegistrationLease,
+) -> bool {
+    history.current_wrapper_key.is_none()
+        && nonzero_address(history.current_registry_owner.as_deref())
+            .is_some_and(|owner| !owner.eq_ignore_ascii_case(&lease.registrant))
 }
 
 fn registration_released_at_or_before(

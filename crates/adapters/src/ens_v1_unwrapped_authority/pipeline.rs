@@ -6,7 +6,6 @@ mod flush;
 mod identity;
 mod materialize;
 mod summary;
-
 use apply::*;
 use flush::*;
 use identity::*;
@@ -20,7 +19,8 @@ pub async fn sync_ens_v1_unwrapped_authority(
     pool: &PgPool,
     chain: &str,
 ) -> Result<EnsV1UnwrappedAuthoritySyncSummary> {
-    sync_ens_v1_unwrapped_authority_with_scope(pool, chain, false, &[], None, None, None).await
+    sync_ens_v1_unwrapped_authority_with_scope(pool, chain, false, &[], None, None, None, None)
+        .await
 }
 
 pub async fn sync_ens_v1_unwrapped_authority_with_replay_checkpoint_and_log_limit(
@@ -34,6 +34,7 @@ pub async fn sync_ens_v1_unwrapped_authority_with_replay_checkpoint_and_log_limi
         chain,
         false,
         &[],
+        None,
         None,
         Some(checkpoint),
         Some(max_raw_logs_per_page),
@@ -55,6 +56,7 @@ impl EnsV1UnwrappedAuthoritySyncSummary {
             None,
             None,
             None,
+            None,
         )
         .await
     }
@@ -70,6 +72,27 @@ impl EnsV1UnwrappedAuthoritySyncSummary {
             chain,
             true,
             block_hashes,
+            None,
+            Some(source_scope),
+            None,
+            None,
+        )
+        .await
+    }
+
+    pub async fn sync_for_block_hashes_with_source_scope_and_transactions(
+        pool: &PgPool,
+        chain: &str,
+        block_hashes: &[String],
+        source_scope: &[(String, String, i64, i64)],
+        transaction_hashes: &[String],
+    ) -> Result<Self> {
+        sync_ens_v1_unwrapped_authority_with_scope(
+            pool,
+            chain,
+            true,
+            block_hashes,
+            Some(transaction_hashes),
             Some(source_scope),
             None,
             None,
@@ -83,6 +106,7 @@ async fn sync_ens_v1_unwrapped_authority_with_scope(
     chain: &str,
     restrict_to_block_hashes: bool,
     block_hashes: &[String],
+    transaction_hashes: Option<&[String]>,
     source_scope: Option<&[(String, String, i64, i64)]>,
     replay_checkpoint: Option<&ReplayAdapterCheckpointContext>,
     replay_max_raw_logs_per_page: Option<usize>,
@@ -126,7 +150,6 @@ async fn sync_ens_v1_unwrapped_authority_with_scope(
     let mut known_name_refs_by_namehash = HashMap::<String, ObservationRef>::new();
     let mut namehash_to_labelhash = HashMap::<String, String>::new();
     let mut pending_namehash_observations = HashMap::<String, Vec<AuthorityObservation>>::new();
-    let mut same_tx_name_intro_positions = HashMap::<String, Vec<RawLogPosition>>::new();
     let mut migrated_registry_nodes = MigratedRegistryNodes::empty();
     let mut active_replay_checkpoint = None::<UnwrappedAuthorityReplayCheckpoint>;
     let mut flushed_events = UnwrappedAuthorityReplayFlushedEvents::default();
@@ -136,11 +159,11 @@ async fn sync_ens_v1_unwrapped_authority_with_scope(
     let mut raw_log_load_ms = 0;
     let canonical_blocks_ms;
     let reverse_claim_sources_ms;
-    let resolver_profile_gate_ms;
     let mut same_tx_name_intro_ms = 0;
     let mut preload_name_metadata_ms = 0;
     let mut preload_restricted_histories_ms = 0;
     let mut migrated_registry_nodes_ms = 0;
+    let mut resolver_profile_gate_ms = 0;
     let apply_ms;
     if !restrict_to_block_hashes && source_scope.is_none() {
         if let Some(context) = replay_checkpoint {
@@ -180,21 +203,8 @@ async fn sync_ens_v1_unwrapped_authority_with_scope(
         let reverse_claim_sources_started = Instant::now();
         let reverse_claim_sources = load_reverse_claim_sources(pool, chain).await?;
         reverse_claim_sources_ms = reverse_claim_sources_started.elapsed().as_millis();
-        let resolver_profile_gate_started = Instant::now();
-        let resolver_profile_gate = ResolverProfileGate::load(pool).await?;
-        resolver_profile_gate_ms = resolver_profile_gate_started.elapsed().as_millis();
-
         if let Some(checkpoint) = active_replay_checkpoint.as_ref() {
             let include_replay_auxiliary_state = checkpoint.needs_replay_auxiliary_state();
-            tracing::info!(
-                service = "adapters",
-                adapter = DERIVATION_KIND_ENS_V1_UNWRAPPED_AUTHORITY,
-                chain,
-                include_replay_auxiliary_state,
-                checkpoint_last_block_number = checkpoint.last_block_number(),
-                checkpoint_target_block_number = checkpoint.target_block_number(),
-                "loading ENSv1 unwrapped-authority replay checkpoint state"
-            );
             if let Some(state) = checkpoint
                 .load_state(pool, include_replay_auxiliary_state)
                 .await?
@@ -264,6 +274,7 @@ async fn sync_ens_v1_unwrapped_authority_with_scope(
                 max_raw_logs_per_page,
             )
             .await?;
+            let mut page_raw_logs = Vec::new();
             total_scanned_log_count += stream_authority_raw_logs(
                 &mut *conn,
                 chain,
@@ -272,30 +283,39 @@ async fn sync_ens_v1_unwrapped_authority_with_scope(
                 page_from_block,
                 page_to_block,
                 |raw_log| {
-                    if apply_authority_raw_log(
-                        &raw_log,
-                        &mut histories,
-                        &mut reverse_histories,
-                        &mut known_names_by_namehash,
-                        &mut known_name_refs_by_namehash,
-                        &mut namehash_to_labelhash,
-                        &mut pending_namehash_observations,
-                        &same_tx_name_intro_positions,
-                        &mut migrated_registry_nodes,
-                        &reverse_claim_sources,
-                        &resolver_profile_gate,
-                        &block_index,
-                        &event_topics,
-                        active_replay_checkpoint
-                            .as_ref()
-                            .map(|_| &mut checkpoint_delta),
-                    )? {
-                        matched_log_count += 1;
-                    }
+                    page_raw_logs.push(raw_log);
                     Ok(())
                 },
             )
             .await?;
+            let page_intro_positions =
+                name_intro_positions_for_raw_logs(&page_raw_logs, &event_topics)?;
+            let resolver_profile_gate_started = Instant::now();
+            let page_resolver_profile_gate =
+                ResolverProfileGate::load_for_raw_logs(pool, &page_raw_logs, &event_topics).await?;
+            resolver_profile_gate_ms += resolver_profile_gate_started.elapsed().as_millis();
+            for raw_log in &page_raw_logs {
+                if apply_authority_raw_log(
+                    raw_log,
+                    &mut histories,
+                    &mut reverse_histories,
+                    &mut known_names_by_namehash,
+                    &mut known_name_refs_by_namehash,
+                    &mut namehash_to_labelhash,
+                    &mut pending_namehash_observations,
+                    &page_intro_positions,
+                    &mut migrated_registry_nodes,
+                    &reverse_claim_sources,
+                    &page_resolver_profile_gate,
+                    &block_index,
+                    &event_topics,
+                    active_replay_checkpoint
+                        .as_ref()
+                        .map(|_| &mut checkpoint_delta),
+                )? {
+                    matched_log_count += 1;
+                }
+            }
             stream_page_count += 1;
             if active_replay_checkpoint.is_some() {
                 drop(stream_conn.take());
@@ -387,6 +407,7 @@ async fn sync_ens_v1_unwrapped_authority_with_scope(
             &event_topics,
             restrict_to_block_hashes,
             block_hashes,
+            transaction_hashes,
             source_scope.as_deref(),
         )
         .await?;
@@ -426,9 +447,10 @@ async fn sync_ens_v1_unwrapped_authority_with_scope(
         } else {
             ResolverProfileGate::default()
         };
-        resolver_profile_gate_ms = resolver_profile_gate_started.elapsed().as_millis();
+        resolver_profile_gate_ms += resolver_profile_gate_started.elapsed().as_millis();
         let same_tx_name_intro_started = Instant::now();
-        same_tx_name_intro_positions = name_intro_positions_for_raw_logs(&raw_logs, &event_topics)?;
+        let same_tx_name_intro_positions =
+            name_intro_positions_for_raw_logs(&raw_logs, &event_topics)?;
         same_tx_name_intro_ms = same_tx_name_intro_started.elapsed().as_millis();
         let preload_name_metadata_started = Instant::now();
         preload_name_metadata_for_raw_logs(

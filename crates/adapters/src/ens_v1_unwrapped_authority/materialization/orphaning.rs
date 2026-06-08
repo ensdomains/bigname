@@ -15,12 +15,16 @@ pub(super) async fn orphan_stale_overlapping_surface_bindings(
     let mut logical_name_ids = Vec::with_capacity(candidates.len());
     let mut authority_keys = Vec::with_capacity(candidates.len());
     let mut active_from_epochs = Vec::with_capacity(candidates.len());
+    let mut block_hashes = Vec::with_capacity(candidates.len());
+    let mut block_numbers = Vec::with_capacity(candidates.len());
     for candidate in candidates.values() {
         surface_binding_ids.push(candidate.surface_binding_id);
         resource_ids.push(candidate.resource_id);
         logical_name_ids.push(candidate.logical_name_id.clone());
         authority_keys.push(candidate.authority_key.clone());
         active_from_epochs.push(candidate.active_from_epoch);
+        block_hashes.push(candidate.block_hash.clone());
+        block_numbers.push(candidate.block_number);
     }
 
     let mut transaction = pool
@@ -34,7 +38,9 @@ pub(super) async fn orphan_stale_overlapping_surface_bindings(
             resource_id,
             logical_name_id,
             authority_key,
-            active_from_epoch
+            active_from_epoch,
+            block_hash,
+            block_number
         ) AS (
             SELECT *
             FROM unnest(
@@ -42,8 +48,52 @@ pub(super) async fn orphan_stale_overlapping_surface_bindings(
                 $2::UUID[],
                 $3::TEXT[],
                 $4::TEXT[],
-                $5::BIGINT[]
+                $5::BIGINT[],
+                $6::TEXT[],
+                $7::BIGINT[]
             )
+        ),
+        orphaned_backing_events AS (
+            UPDATE normalized_events event
+            SET
+                canonicality_state = 'orphaned'::canonicality_state,
+                observed_at = now()
+            FROM candidate
+            WHERE event.logical_name_id = candidate.logical_name_id
+              AND event.resource_id = candidate.resource_id
+              AND event.derivation_kind = 'ens_v1_unwrapped_authority'
+              AND event.transaction_hash IS NULL
+              AND event.log_index IS NULL
+              AND event.block_number >= candidate.block_number
+              AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+              AND (
+                  (
+                      event.event_kind = 'SurfaceBound'
+                      AND event.after_state->>'authority_key'
+                          IS NOT DISTINCT FROM candidate.authority_key
+                      AND event.after_state->>'active_from' = candidate.active_from_epoch::TEXT
+                  )
+                  OR (
+                      event.event_kind = 'SurfaceUnbound'
+                      AND event.after_state->>'authority_key'
+                          IS NOT DISTINCT FROM candidate.authority_key
+                  )
+                  OR (
+                      event.event_kind = 'AuthorityEpochChanged'
+                      AND (
+                          event.before_state->>'authority_key'
+                              IS NOT DISTINCT FROM candidate.authority_key
+                          OR event.after_state->>'authority_key'
+                              IS NOT DISTINCT FROM candidate.authority_key
+                      )
+                  )
+                  OR (
+                      event.event_kind = 'ResolverChanged'
+                      AND event.after_state->>'source_event' = 'AuthorityEpochChanged'
+                      AND event.after_state->>'resolver' IS NOT NULL
+                  )
+              )
+            RETURNING event.normalized_event_id
         )
         UPDATE surface_bindings
         SET
@@ -57,11 +107,17 @@ pub(super) async fn orphan_stale_overlapping_surface_bindings(
               FROM normalized_events
               WHERE normalized_events.logical_name_id = candidate.logical_name_id
                 AND normalized_events.resource_id = candidate.resource_id
-                AND normalized_events.event_kind = 'SurfaceBound'
-                AND normalized_events.after_state->>'authority_key'
-                    IS NOT DISTINCT FROM candidate.authority_key
-                AND normalized_events.after_state->>'active_from' = candidate.active_from_epoch::TEXT
-                AND normalized_events.canonicality_state IN ('canonical', 'safe', 'finalized')
+                    AND normalized_events.event_kind = 'SurfaceBound'
+                    AND normalized_events.after_state->>'authority_key'
+                        IS NOT DISTINCT FROM candidate.authority_key
+                    AND normalized_events.after_state->>'active_from' = candidate.active_from_epoch::TEXT
+                    AND normalized_events.canonicality_state IN ('canonical', 'safe', 'finalized')
+                    AND NOT EXISTS (
+                        SELECT 1
+                        FROM orphaned_backing_events orphaned
+                        WHERE orphaned.normalized_event_id =
+                            normalized_events.normalized_event_id
+                    )
           )
         RETURNING
             surface_bindings.surface_binding_id,
@@ -73,6 +129,8 @@ pub(super) async fn orphan_stale_overlapping_surface_bindings(
     .bind(&logical_name_ids)
     .bind(&authority_keys)
     .bind(&active_from_epochs)
+    .bind(&block_hashes)
+    .bind(&block_numbers)
     .fetch_all(transaction.as_mut())
     .await
     .context(
@@ -219,6 +277,8 @@ pub(super) struct StaleSurfaceBindingCandidate {
     pub(super) logical_name_id: String,
     pub(super) authority_key: Option<String>,
     pub(super) active_from_epoch: i64,
+    pub(super) block_hash: String,
+    pub(super) block_number: i64,
 }
 
 pub(super) fn stale_overlapping_surface_binding_candidates(
@@ -262,6 +322,8 @@ pub(super) fn stale_overlapping_surface_binding_candidates(
                         .and_then(Value::as_str)
                         .map(ToOwned::to_owned),
                     active_from_epoch: existing.active_from.unix_timestamp(),
+                    block_hash: existing.block_hash.clone(),
+                    block_number: existing.block_number,
                 },
             );
         }

@@ -349,6 +349,8 @@ pub(super) fn project_facts(
             "AuthorityEpochChanged" => {
                 facts.authority_kind = json_str(&event.after_state, &["authority_kind"]);
                 facts.authority_key = json_str(&event.after_state, &["authority_key"]);
+                facts.registry_owner =
+                    json_str(&event.after_state, &["registry_owner"]).or(facts.registry_owner);
                 facts.latest_control_event_kind = Some(event.event_kind.clone());
             }
             EVENT_KIND_RESOLVER_CHANGED

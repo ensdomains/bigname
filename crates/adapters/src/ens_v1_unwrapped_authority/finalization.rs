@@ -141,6 +141,13 @@ pub(super) fn finalize_history(
         .wrapper_authorities
         .into_values()
         .collect::<Vec<_>>();
+    let registry_resource_anchor = history.registry_resource_anchor.clone().or_else(|| {
+        history
+            .latest_registry_owner_ref
+            .as_ref()
+            .or(history.latest_registry_owner_before_registration.as_ref())
+            .map(ObservationRef::as_boundary_ref)
+    });
 
     Ok(FinalizedHistory {
         labelhash: history.labelhash,
@@ -149,7 +156,7 @@ pub(super) fn finalize_history(
         events: history.events,
         registrar_leases,
         wrapper_authorities,
-        registry_resource_anchor: history.registry_resource_anchor,
+        registry_resource_anchor,
         current_registry_owner: history.current_registry_owner,
     })
 }
@@ -201,13 +208,21 @@ pub(super) fn registry_anchor_for_history(
         .latest_registry_owner_ref
         .as_ref()
         .or(history.latest_registry_owner_before_registration.as_ref())?;
+    let node = registry_authority_node(history).unwrap_or(labelhash);
     Some(AuthorityAnchor {
         kind: AuthorityKind::RegistryOnly,
-        authority_key: format!("registry-only:{chain}:{labelhash}"),
-        resource_id: deterministic_uuid(&format!("resource:registry-only:{chain}:{labelhash}")),
+        authority_key: format!("registry-only:{chain}:{node}"),
+        resource_id: deterministic_uuid(&format!("resource:registry-only:{chain}:{node}")),
         token_lineage_id: None,
         binding_source_family: reference.source_family.clone(),
         binding_manifest_version: reference.manifest_version,
         binding_manifest_id: reference.source_manifest_id,
     })
+}
+
+fn registry_authority_node(history: &NameHistory) -> Option<&str> {
+    if !history.namehash.is_empty() {
+        return Some(history.namehash.as_str());
+    }
+    history.name.as_ref().map(|name| name.namehash.as_str())
 }

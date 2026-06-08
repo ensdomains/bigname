@@ -22,8 +22,15 @@ use batch::{
 };
 use repair::{
     basenames_primary_claim_source_after_state_repair_allowed,
+    ens_v1_registry_resolver_observation_key_after_state_repair_allowed,
+    ens_v1_same_tx_registration_setup_before_state_repair_allowed,
+    ens_v1_unwrapped_authority_boundary_manifest_metadata_mismatch_allowed,
+    ens_v1_unwrapped_authority_registry_event_time_resource_id_repair_allowed,
     ens_v1_unwrapped_authority_renewal_resource_id_repair_allowed,
     repair_basenames_primary_claim_source_after_states,
+    repair_ens_v1_registry_resolver_observation_key_after_states,
+    repair_ens_v1_same_tx_registration_setup_before_states,
+    repair_ens_v1_unwrapped_authority_registry_event_time_resource_ids,
     repair_ens_v1_unwrapped_authority_renewal_resource_ids,
 };
 use sanitize::jsonb_safe_normalized_event;
@@ -135,18 +142,42 @@ pub async fn upsert_normalized_events_with_summary(
             &existing_events,
         )
         .await?;
-        after_state_repaired_count += after_state_repaired_identities.len();
+        let resolver_key_after_state_repaired_identities =
+            repair_ens_v1_registry_resolver_observation_key_after_states(
+                &mut transaction,
+                &conflicted_events,
+                &existing_events,
+            )
+            .await?;
+        let same_tx_registration_before_state_repaired_identities =
+            repair_ens_v1_same_tx_registration_setup_before_states(
+                &mut transaction,
+                &conflicted_events,
+                &existing_events,
+            )
+            .await?;
+        after_state_repaired_count += after_state_repaired_identities.len()
+            + resolver_key_after_state_repaired_identities.len()
+            + same_tx_registration_before_state_repaired_identities.len();
         after_state_repair_ms += after_state_repair_started.elapsed().as_millis();
 
         let resource_id_repair_started = Instant::now();
-        let resource_id_repaired_identities =
+        let renewal_resource_id_repaired_identities =
             repair_ens_v1_unwrapped_authority_renewal_resource_ids(
                 &mut transaction,
                 &conflicted_events,
                 &existing_events,
             )
             .await?;
-        resource_id_repaired_count += resource_id_repaired_identities.len();
+        let registry_event_time_resource_id_repaired_identities =
+            repair_ens_v1_unwrapped_authority_registry_event_time_resource_ids(
+                &mut transaction,
+                &conflicted_events,
+                &existing_events,
+            )
+            .await?;
+        resource_id_repaired_count += renewal_resource_id_repaired_identities.len()
+            + registry_event_time_resource_id_repaired_identities.len();
         resource_id_repair_ms += resource_id_repair_started.elapsed().as_millis();
 
         let events_requiring_canonicality_refresh = conflicted_events
@@ -322,18 +353,42 @@ pub async fn upsert_normalized_events_count_only(
             &existing_events,
         )
         .await?;
-        after_state_repaired_count += after_state_repaired_identities.len();
+        let resolver_key_after_state_repaired_identities =
+            repair_ens_v1_registry_resolver_observation_key_after_states(
+                &mut transaction,
+                &conflicted_events,
+                &existing_events,
+            )
+            .await?;
+        let same_tx_registration_before_state_repaired_identities =
+            repair_ens_v1_same_tx_registration_setup_before_states(
+                &mut transaction,
+                &conflicted_events,
+                &existing_events,
+            )
+            .await?;
+        after_state_repaired_count += after_state_repaired_identities.len()
+            + resolver_key_after_state_repaired_identities.len()
+            + same_tx_registration_before_state_repaired_identities.len();
         after_state_repair_ms += after_state_repair_started.elapsed().as_millis();
 
         let resource_id_repair_started = Instant::now();
-        let resource_id_repaired_identities =
+        let renewal_resource_id_repaired_identities =
             repair_ens_v1_unwrapped_authority_renewal_resource_ids(
                 &mut transaction,
                 &conflicted_events,
                 &existing_events,
             )
             .await?;
-        resource_id_repaired_count += resource_id_repaired_identities.len();
+        let registry_event_time_resource_id_repaired_identities =
+            repair_ens_v1_unwrapped_authority_registry_event_time_resource_ids(
+                &mut transaction,
+                &conflicted_events,
+                &existing_events,
+            )
+            .await?;
+        resource_id_repaired_count += renewal_resource_id_repaired_identities.len()
+            + registry_event_time_resource_id_repaired_identities.len();
         resource_id_repair_ms += resource_id_repair_started.elapsed().as_millis();
 
         let events_requiring_canonicality_refresh = conflicted_events
@@ -460,7 +515,23 @@ fn ensure_normalized_event_identity_matches(
             existing,
             incoming,
             &differing_fields,
+        ) || ens_v1_registry_resolver_observation_key_after_state_repair_allowed(
+            existing,
+            incoming,
+            &differing_fields,
+        ) || ens_v1_same_tx_registration_setup_before_state_repair_allowed(
+            existing,
+            incoming,
+            &differing_fields,
         ) || ens_v1_unwrapped_authority_renewal_resource_id_repair_allowed(
+            existing,
+            incoming,
+            &differing_fields,
+        ) || ens_v1_unwrapped_authority_registry_event_time_resource_id_repair_allowed(
+            existing,
+            incoming,
+            &differing_fields,
+        ) || ens_v1_unwrapped_authority_boundary_manifest_metadata_mismatch_allowed(
             existing,
             incoming,
             &differing_fields,

@@ -5,8 +5,13 @@ pub(in crate::ens_v1_unwrapped_authority) fn empty_preloaded_history(
     labelhash: String,
     name: Option<NameMetadata>,
 ) -> NameHistory {
+    let namehash = name
+        .as_ref()
+        .map(|name| name.namehash.clone())
+        .unwrap_or_default();
     NameHistory {
         name,
+        namehash,
         labelhash,
         first_name_ref: None,
         current_registration: None,

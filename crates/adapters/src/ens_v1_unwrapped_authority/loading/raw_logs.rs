@@ -27,6 +27,7 @@ pub(in crate::ens_v1_unwrapped_authority) async fn load_authority_raw_logs(
     event_topics: &AuthorityEventTopics,
     restrict_to_block_hashes: bool,
     block_hashes: &[String],
+    transaction_hashes: Option<&[String]>,
     source_scope: Option<&[AuthorityRawLogSourceScopeTarget]>,
 ) -> Result<Vec<AuthorityRawLogRow>> {
     let block_range = source_scope.and_then(authority_source_scope_block_range);
@@ -38,6 +39,7 @@ pub(in crate::ens_v1_unwrapped_authority) async fn load_authority_raw_logs(
         event_topics,
         restrict_to_block_hashes,
         block_hashes,
+        transaction_hashes,
         source_scope,
         block_range,
     )
@@ -157,9 +159,12 @@ async fn load_authority_raw_logs_internal(
     event_topics: &AuthorityEventTopics,
     restrict_to_block_hashes: bool,
     block_hashes: &[String],
+    transaction_hashes: Option<&[String]>,
     source_scope: Option<&[AuthorityRawLogSourceScopeTarget]>,
     block_range: Option<(i64, i64)>,
 ) -> Result<Vec<AuthorityRawLogRow>> {
+    let restrict_to_transaction_hashes = transaction_hashes.is_some();
+    let transaction_hashes = transaction_hashes.unwrap_or(&[]);
     let mut emitters_by_address = HashMap::<String, Vec<ActiveEmitter>>::new();
     for emitter in active_emitters.iter().cloned() {
         emitters_by_address
@@ -229,6 +234,7 @@ async fn load_authority_raw_logs_internal(
                   AND lower(rl.emitting_address) = ANY($2::TEXT[])
                   AND ($3::BOOLEAN = FALSE OR rl.block_hash = ANY($4::TEXT[]))
                   AND ($8::BOOLEAN = FALSE OR rl.block_number BETWEEN $9::BIGINT AND $10::BIGINT)
+                  AND ($14::BOOLEAN = FALSE OR rl.transaction_hash = ANY($15::TEXT[]))
                   AND EXISTS (
                       SELECT 1
                       FROM unnest($5::TEXT[], $6::BIGINT[], $7::BIGINT[]) AS watched(
@@ -272,6 +278,8 @@ async fn load_authority_raw_logs_internal(
                 .bind(&scoped_addresses)
                 .bind(&scoped_from_blocks)
                 .bind(&scoped_to_blocks)
+                .bind(restrict_to_transaction_hashes)
+                .bind(transaction_hashes)
                 .fetch_all(pool)
                 .await
                 .with_context(|| {
@@ -326,6 +334,7 @@ async fn load_authority_raw_logs_internal(
                       AND lower(rl.emitting_address) = watched.address
                       AND ($3::BOOLEAN = FALSE OR rl.block_hash = ANY($4::TEXT[]))
                       AND ($8::BOOLEAN = FALSE OR rl.block_number BETWEEN $9::BIGINT AND $10::BIGINT)
+                      AND ($11::BOOLEAN = FALSE OR rl.transaction_hash = ANY($12::TEXT[]))
                       AND rl.block_number BETWEEN watched.effective_from_block
                           AND watched.effective_to_block
                       AND rl.canonicality_state IN (
@@ -348,6 +357,8 @@ async fn load_authority_raw_logs_internal(
             .bind(has_block_range)
             .bind(from_block)
             .bind(to_block)
+            .bind(restrict_to_transaction_hashes)
+            .bind(transaction_hashes)
             .fetch_all(pool)
             .await
             .with_context(|| {
@@ -383,6 +394,11 @@ async fn load_authority_raw_logs_internal(
             event_topics,
             restrict_to_block_hashes,
             block_hashes,
+            if restrict_to_transaction_hashes {
+                Some(transaction_hashes)
+            } else {
+                None
+            },
             block_range,
         )
         .await?,

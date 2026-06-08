@@ -355,6 +355,300 @@ async fn seed_ens_v1_renewal_resource_repair_identity_rows(
     Ok(())
 }
 
+async fn seed_ens_v1_registry_event_time_repair_resources(
+    pool: &PgPool,
+    old_resource_id: Uuid,
+    repaired_resource_id: Uuid,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO resources (
+            resource_id,
+            token_lineage_id,
+            chain_id,
+            block_hash,
+            block_number,
+            provenance,
+            canonicality_state
+        )
+        VALUES
+        (
+            $1,
+            NULL,
+            'ethereum-mainnet',
+            '0xlaterregistrarresource',
+            200,
+            jsonb_build_object(
+                'authority_kind', 'registrar',
+                'authority_key', 'registrar:ethereum-mainnet:alice',
+                'logical_name_id', 'ens:alice.eth',
+                'labelhash', '0xcbf005454c11bc7e583aa4a100988b4a893acb2233dbb77afef8d9f931df3735'
+            ),
+            'canonical'::canonicality_state
+        ),
+        (
+            $2,
+            NULL,
+            'ethereum-mainnet',
+            '0xeventtimeregistryresource',
+            90,
+            jsonb_build_object(
+                'authority_kind', 'registry_only',
+                'authority_key', 'registry-only:ethereum-mainnet:0xalice_namehash',
+                'logical_name_id', 'ens:alice.eth',
+                'namehash', '0xalice_namehash',
+                'labelhash', '0xcbf005454c11bc7e583aa4a100988b4a893acb2233dbb77afef8d9f931df3735',
+                'current_registry_owner', '0x0000000000000000000000000000000000000123'
+            ),
+            'canonical'::canonicality_state
+        )
+        "#,
+    )
+    .bind(old_resource_id)
+    .bind(repaired_resource_id)
+    .execute(pool)
+    .await
+    .context("failed to seed ENSv1 registry event-time repair resources")?;
+
+    Ok(())
+}
+
+async fn seed_ens_v1_registry_event_time_wrapper_repair_resources(
+    pool: &PgPool,
+    old_resource_id: Uuid,
+    repaired_resource_id: Uuid,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO resources (
+            resource_id,
+            token_lineage_id,
+            chain_id,
+            block_hash,
+            block_number,
+            provenance,
+            canonicality_state
+        )
+        VALUES
+        (
+            $1,
+            NULL,
+            'ethereum-mainnet',
+            '0xlaterwrapperresource',
+            200,
+            jsonb_build_object(
+                'authority_kind', 'wrapper',
+                'authority_key', 'wrapper:ethereum-mainnet:alice',
+                'logical_name_id', 'ens:alice.eth'
+            ),
+            'canonical'::canonicality_state
+        ),
+        (
+            $2,
+            NULL,
+            'ethereum-mainnet',
+            '0xeventtimeregistryresource',
+            90,
+            jsonb_build_object(
+                'authority_kind', 'registry_only',
+                'authority_key', 'registry-only:ethereum-mainnet:0xalice_namehash',
+                'logical_name_id', 'ens:alice.eth',
+                'namehash', '0xalice_namehash',
+                'labelhash', '0xcbf005454c11bc7e583aa4a100988b4a893acb2233dbb77afef8d9f931df3735',
+                'current_registry_owner', '0x0000000000000000000000000000000000000123'
+            ),
+            'canonical'::canonicality_state
+        )
+        "#,
+    )
+    .bind(old_resource_id)
+    .bind(repaired_resource_id)
+    .execute(pool)
+    .await
+    .context("failed to seed ENSv1 registry event-time wrapper repair resources")?;
+
+    Ok(())
+}
+
+async fn seed_ens_v1_registry_event_time_registry_collision_repair_resources(
+    pool: &PgPool,
+    old_resource_id: Uuid,
+    repaired_resource_id: Uuid,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO resources (
+            resource_id,
+            token_lineage_id,
+            chain_id,
+            block_hash,
+            block_number,
+            provenance,
+            canonicality_state
+        )
+        VALUES
+        (
+            $1,
+            NULL,
+            'ethereum-mainnet',
+            '0xlegacyregistrycollisionresource',
+            200,
+            jsonb_build_object(
+                'authority_kind', 'registry_only',
+                'authority_key', 'registry-only:ethereum-mainnet:0xshared_cold_labelhash',
+                'logical_name_id', 'ens:cold.eth',
+                'namehash', '0xcold_eth_namehash',
+                'labelhash', '0xshared_cold_labelhash',
+                'current_registry_owner', '0x0000000000000000000000000000000000000abc'
+            ),
+            'canonical'::canonicality_state
+        ),
+        (
+            $2,
+            NULL,
+            'ethereum-mainnet',
+            '0xeventtimeregistrysubnameresource',
+            90,
+            jsonb_build_object(
+                'authority_kind', 'registry_only',
+                'authority_key', 'registry-only:ethereum-mainnet:0xcold_highwind_namehash',
+                'logical_name_id', 'ens:cold.highwind.eth',
+                'namehash', '0xcold_highwind_namehash',
+                'labelhash', '0xshared_cold_labelhash',
+                'current_registry_owner', '0x0000000000000000000000000000000000000123'
+            ),
+            'canonical'::canonicality_state
+        )
+        "#,
+    )
+    .bind(old_resource_id)
+    .bind(repaired_resource_id)
+    .execute(pool)
+    .await
+    .context("failed to seed ENSv1 registry event-time registry collision repair resources")?;
+
+    Ok(())
+}
+
+async fn seed_ens_v1_registry_event_time_registry_key_repair_resources(
+    pool: &PgPool,
+    old_resource_id: Uuid,
+    repaired_resource_id: Uuid,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO resources (
+            resource_id,
+            token_lineage_id,
+            chain_id,
+            block_hash,
+            block_number,
+            provenance,
+            canonicality_state
+        )
+        VALUES
+        (
+            $1,
+            NULL,
+            'ethereum-mainnet',
+            '0xlegacyregistrykeyresource',
+            90,
+            jsonb_build_object(
+                'authority_kind', 'registry_only',
+                'authority_key', 'registry-only:ethereum-mainnet:0xcubebucks_labelhash',
+                'logical_name_id', 'ens:cubebucks.eth',
+                'labelhash', '0xcubebucks_labelhash',
+                'current_registry_owner', '0x0000000000000000000000000000000000000abc'
+            ),
+            'canonical'::canonicality_state
+        ),
+        (
+            $2,
+            NULL,
+            'ethereum-mainnet',
+            '0xregistrykeyresource',
+            90,
+            jsonb_build_object(
+                'authority_kind', 'registry_only',
+                'authority_key', 'registry-only:ethereum-mainnet:0xcubebucks_namehash',
+                'logical_name_id', 'ens:cubebucks.eth',
+                'namehash', '0xcubebucks_namehash',
+                'labelhash', '0xcubebucks_labelhash',
+                'current_registry_owner', '0x0000000000000000000000000000000000000abc'
+            ),
+            'canonical'::canonicality_state
+        )
+        "#,
+    )
+    .bind(old_resource_id)
+    .bind(repaired_resource_id)
+    .execute(pool)
+    .await
+    .context("failed to seed ENSv1 registry event-time registry key repair resources")?;
+
+    Ok(())
+}
+
+async fn seed_ens_v1_same_transaction_registration_setup_repair_resources(
+    pool: &PgPool,
+    registry_resource_id: Uuid,
+    registrar_resource_id: Uuid,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO resources (
+            resource_id,
+            token_lineage_id,
+            chain_id,
+            block_hash,
+            block_number,
+            provenance,
+            canonicality_state
+        )
+        VALUES
+        (
+            $1,
+            NULL,
+            'ethereum-mainnet',
+            '0xsametxregistryresource',
+            90,
+            jsonb_build_object(
+                'authority_kind', 'registry_only',
+                'authority_key', 'registry-only:ethereum-mainnet:0xalice_namehash',
+                'logical_name_id', 'ens:alice.eth',
+                'namehash', '0xalice_namehash',
+                'labelhash', '0xcbf005454c11bc7e583aa4a100988b4a893acb2233dbb77afef8d9f931df3735',
+                'current_registry_owner', '0x0000000000000000000000000000000000000123'
+            ),
+            'canonical'::canonicality_state
+        ),
+        (
+            $2,
+            NULL,
+            'ethereum-mainnet',
+            '0xsametxregistrationblock',
+            100,
+            jsonb_build_object(
+                'authority_kind', 'registrar',
+                'authority_key', 'registrar:ethereum-mainnet:10:0xcbf005454c11bc7e583aa4a100988b4a893acb2233dbb77afef8d9f931df3735:0xsametxregistrationblock:5',
+                'logical_name_id', 'ens:alice.eth',
+                'labelhash', '0xcbf005454c11bc7e583aa4a100988b4a893acb2233dbb77afef8d9f931df3735',
+                'registrant', '0x0000000000000000000000000000000000000123',
+                'expiry', 1800000000
+            ),
+            'canonical'::canonicality_state
+        )
+        "#,
+    )
+    .bind(registry_resource_id)
+    .bind(registrar_resource_id)
+    .execute(pool)
+    .await
+    .context("failed to seed ENSv1 same-transaction registration setup repair resources")?;
+
+    Ok(())
+}
+
 fn ens_v1_renewal_related_event(
     event_identity: &str,
     event_kind: &str,
@@ -384,6 +678,409 @@ fn ens_v1_renewal_related_event(
     });
     event.before_state = json!({});
     event.after_state = after_state;
+    event
+}
+
+fn ens_v1_registry_event_time_repair_event(
+    event_identity: &str,
+    resource_id: Uuid,
+) -> NormalizedEvent {
+    let mut event = normalized_event(
+        event_identity,
+        "ResolverChanged",
+        CanonicalityState::Canonical,
+    );
+    event.logical_name_id = Some("ens:alice.eth".to_owned());
+    event.resource_id = Some(resource_id);
+    event.source_family = "ens_v1_registry_l1".to_owned();
+    event.derivation_kind = "ens_v1_unwrapped_authority".to_owned();
+    event.chain_id = Some("ethereum-mainnet".to_owned());
+    event.block_number = Some(100);
+    event.block_hash = Some("0xregistryeventblock".to_owned());
+    event.transaction_hash = Some("0xregistryeventtx".to_owned());
+    event.log_index = Some(2);
+    event.raw_fact_ref = json!({
+        "kind": "raw_log",
+        "chain_id": "ethereum-mainnet",
+        "block_number": 100,
+        "block_hash": "0xregistryeventblock",
+        "transaction_hash": "0xregistryeventtx",
+        "transaction_index": 5,
+        "log_index": 2,
+    });
+    event.before_state = json!({"resolver": null});
+    event.after_state = json!({
+        "namehash": "0xalice_namehash",
+        "resolver": "0x0000000000000000000000000000000000000456"
+    });
+    event
+}
+
+fn ens_v1_registry_event_time_subname_collision_repair_event(
+    event_identity: &str,
+    resource_id: Uuid,
+) -> NormalizedEvent {
+    let mut event = ens_v1_registry_event_time_repair_event(event_identity, resource_id);
+    event.logical_name_id = Some("ens:cold.highwind.eth".to_owned());
+    event.block_hash = Some("0xregistryeventsubnameblock".to_owned());
+    event.transaction_hash = Some("0xregistryeventsubnametx".to_owned());
+    event.raw_fact_ref = json!({
+        "kind": "raw_log",
+        "chain_id": "ethereum-mainnet",
+        "block_number": 100,
+        "block_hash": "0xregistryeventsubnameblock",
+        "transaction_hash": "0xregistryeventsubnametx",
+        "transaction_index": 5,
+        "log_index": 2,
+    });
+    event.after_state["namehash"] = json!("0xcold_highwind_namehash");
+    event
+}
+
+fn ens_v1_registry_event_time_authority_transfer_repair_event(
+    event_identity: &str,
+    resource_id: Uuid,
+) -> NormalizedEvent {
+    let mut event = normalized_event(
+        event_identity,
+        "AuthorityTransferred",
+        CanonicalityState::Canonical,
+    );
+    event.logical_name_id = Some("ens:cubebucks.eth".to_owned());
+    event.resource_id = Some(resource_id);
+    event.source_family = "ens_v1_registry_l1".to_owned();
+    event.derivation_kind = "ens_v1_unwrapped_authority".to_owned();
+    event.chain_id = Some("ethereum-mainnet".to_owned());
+    event.block_number = Some(100);
+    event.block_hash = Some("0xregistrytransferblock".to_owned());
+    event.transaction_hash = Some("0xregistrytransfertx".to_owned());
+    event.log_index = Some(7);
+    event.raw_fact_ref = json!({
+        "kind": "raw_log",
+        "chain_id": "ethereum-mainnet",
+        "block_number": 100,
+        "block_hash": "0xregistrytransferblock",
+        "transaction_hash": "0xregistrytransfertx",
+        "transaction_index": 17,
+        "log_index": 7,
+    });
+    event.before_state = json!({
+        "owner": "0x0000000000000000000000000000000000000abc"
+    });
+    event.after_state = json!({
+        "labelhash": "0xcubebucks_labelhash",
+        "owner": "0x0000000000000000000000000000000000000123"
+    });
+    event
+}
+
+fn ens_v1_registry_event_time_permission_repair_event(
+    resource_id: Uuid,
+    authority_kind: &str,
+    authority_key: &str,
+) -> NormalizedEvent {
+    let mut event = normalized_event(
+        "ens-v1-unwrapped-authority:registry-event-time:permission",
+        "PermissionChanged",
+        CanonicalityState::Canonical,
+    );
+    event.logical_name_id = Some("ens:alice.eth".to_owned());
+    event.resource_id = Some(resource_id);
+    event.source_family = "ens_v1_registry_l1".to_owned();
+    event.derivation_kind = "ens_v1_unwrapped_authority".to_owned();
+    event.chain_id = Some("ethereum-mainnet".to_owned());
+    event.block_number = Some(100);
+    event.block_hash = Some("0xregistryeventpermissionblock".to_owned());
+    event.transaction_hash = Some("0xregistryeventpermissiontx".to_owned());
+    event.log_index = Some(14);
+    event.raw_fact_ref = json!({
+        "kind": "raw_log",
+        "chain_id": "ethereum-mainnet",
+        "block_number": 100,
+        "block_hash": "0xregistryeventpermissionblock",
+        "transaction_hash": "0xregistryeventpermissiontx",
+        "transaction_index": 23,
+        "log_index": 14,
+    });
+    event.before_state = json!({
+        "effective_powers": [],
+        "grant_source": null,
+        "inheritance_path": [],
+        "revocation_source": null,
+        "scope": {
+            "chain_id": "ethereum-mainnet",
+            "kind": "resolver",
+            "resolver_address": "0x0000000000000000000000000000000000000456"
+        },
+        "subject": "0x0000000000000000000000000000000000000123",
+        "transfer_behavior": "replace_on_authority_change"
+    });
+    event.after_state = json!({
+        "effective_powers": ["resolver_control"],
+        "grant_source": {
+            "authority_key": authority_key,
+            "authority_kind": authority_kind,
+            "kind": "ens_v1_authority",
+            "source_event_kind": "ResolverChanged"
+        },
+        "inheritance_path": [],
+        "revocation_source": null,
+        "scope": {
+            "chain_id": "ethereum-mainnet",
+            "kind": "resolver",
+            "resolver_address": "0x0000000000000000000000000000000000000456"
+        },
+        "subject": "0x0000000000000000000000000000000000000123",
+        "transfer_behavior": "replace_on_authority_change"
+    });
+    event
+}
+
+fn ens_v1_registry_event_time_permission_revoke_repair_event(
+    resource_id: Uuid,
+    authority_kind: &str,
+    authority_key: &str,
+) -> NormalizedEvent {
+    let mut event = normalized_event(
+        "ens-v1-unwrapped-authority:registry-event-time:permission-revoke",
+        "PermissionChanged",
+        CanonicalityState::Canonical,
+    );
+    event.logical_name_id = Some("ens:alice.eth".to_owned());
+    event.resource_id = Some(resource_id);
+    event.source_family = "ens_v1_registry_l1".to_owned();
+    event.derivation_kind = "ens_v1_unwrapped_authority".to_owned();
+    event.chain_id = Some("ethereum-mainnet".to_owned());
+    event.block_number = Some(100);
+    event.block_hash = Some("0xregistryeventpermissionrevokeblock".to_owned());
+    event.transaction_hash = Some("0xregistryeventpermissionrevoketx".to_owned());
+    event.log_index = Some(15);
+    event.raw_fact_ref = json!({
+        "kind": "raw_log",
+        "chain_id": "ethereum-mainnet",
+        "block_number": 100,
+        "block_hash": "0xregistryeventpermissionrevokeblock",
+        "transaction_hash": "0xregistryeventpermissionrevoketx",
+        "transaction_index": 23,
+        "log_index": 15,
+    });
+    event.before_state = json!({
+        "effective_powers": ["resolver_control"],
+        "grant_source": {
+            "authority_key": authority_key,
+            "authority_kind": authority_kind,
+            "kind": "ens_v1_authority",
+            "source_event_kind": "ResolverChanged"
+        },
+        "inheritance_path": [],
+        "revocation_source": null,
+        "scope": {
+            "chain_id": "ethereum-mainnet",
+            "kind": "resolver",
+            "resolver_address": "0x0000000000000000000000000000000000000456"
+        },
+        "subject": "0x0000000000000000000000000000000000000123",
+        "transfer_behavior": "replace_on_authority_change"
+    });
+    event.after_state = json!({
+        "effective_powers": [],
+        "grant_source": null,
+        "inheritance_path": [],
+        "revocation_source": {
+            "authority_key": authority_key,
+            "authority_kind": authority_kind,
+            "kind": "ens_v1_authority",
+            "source_event_kind": "ResolverChanged"
+        },
+        "scope": {
+            "chain_id": "ethereum-mainnet",
+            "kind": "resolver",
+            "resolver_address": "0x0000000000000000000000000000000000000456"
+        },
+        "subject": "0x0000000000000000000000000000000000000123",
+        "transfer_behavior": "replace_on_authority_change"
+    });
+    event
+}
+
+fn ens_v1_same_transaction_registration_setup_permission_event(
+    resource_id: Uuid,
+    authority_kind: &str,
+    authority_key: &str,
+) -> NormalizedEvent {
+    let mut event = normalized_event(
+        "ens-v1-unwrapped-authority:same-tx-registration:permission",
+        "PermissionChanged",
+        CanonicalityState::Canonical,
+    );
+    event.logical_name_id = Some("ens:alice.eth".to_owned());
+    event.resource_id = Some(resource_id);
+    event.source_family = "ens_v1_registry_l1".to_owned();
+    event.derivation_kind = "ens_v1_unwrapped_authority".to_owned();
+    event.chain_id = Some("ethereum-mainnet".to_owned());
+    event.block_number = Some(100);
+    event.block_hash = Some("0xsametxregistrationblock".to_owned());
+    event.transaction_hash = Some("0xsametxregistrationtx".to_owned());
+    event.log_index = Some(2);
+    event.raw_fact_ref = json!({
+        "kind": "raw_log",
+        "chain_id": "ethereum-mainnet",
+        "block_number": 100,
+        "block_hash": "0xsametxregistrationblock",
+        "transaction_hash": "0xsametxregistrationtx",
+        "transaction_index": 3,
+        "log_index": 2,
+    });
+    event.before_state = json!({
+        "effective_powers": [],
+        "grant_source": null,
+        "inheritance_path": [],
+        "revocation_source": null,
+        "scope": {
+            "chain_id": "ethereum-mainnet",
+            "kind": "resolver",
+            "resolver_address": "0x0000000000000000000000000000000000000456"
+        },
+        "subject": "0x0000000000000000000000000000000000000123",
+        "transfer_behavior": "replace_on_authority_change"
+    });
+    event.after_state = json!({
+        "effective_powers": ["resolver_control"],
+        "grant_source": {
+            "authority_key": authority_key,
+            "authority_kind": authority_kind,
+            "kind": "ens_v1_authority",
+            "source_event_kind": "ResolverChanged"
+        },
+        "inheritance_path": [],
+        "revocation_source": null,
+        "scope": {
+            "chain_id": "ethereum-mainnet",
+            "kind": "resolver",
+            "resolver_address": "0x0000000000000000000000000000000000000456"
+        },
+        "subject": "0x0000000000000000000000000000000000000123",
+        "transfer_behavior": "replace_on_authority_change"
+    });
+    event
+}
+
+fn ens_v1_same_transaction_registration_grant_event(resource_id: Uuid) -> NormalizedEvent {
+    let mut event = normalized_event(
+        "ens-v1-unwrapped-authority:same-tx-registration:grant",
+        "RegistrationGranted",
+        CanonicalityState::Canonical,
+    );
+    event.logical_name_id = Some("ens:alice.eth".to_owned());
+    event.resource_id = Some(resource_id);
+    event.source_family = "ens_v1_registrar_l1".to_owned();
+    event.derivation_kind = "ens_v1_unwrapped_authority".to_owned();
+    event.chain_id = Some("ethereum-mainnet".to_owned());
+    event.block_number = Some(100);
+    event.block_hash = Some("0xsametxregistrationblock".to_owned());
+    event.transaction_hash = Some("0xsametxregistrationtx".to_owned());
+    event.log_index = Some(5);
+    event.raw_fact_ref = json!({
+        "kind": "raw_log",
+        "chain_id": "ethereum-mainnet",
+        "block_number": 100,
+        "block_hash": "0xsametxregistrationblock",
+        "transaction_hash": "0xsametxregistrationtx",
+        "transaction_index": 3,
+        "log_index": 5,
+    });
+    event.before_state = json!({"authority_kind": "registry_only", "registrant": null});
+    event.after_state = json!({
+        "authority_kind": "registrar",
+        "authority_key": "registrar:ethereum-mainnet:10:0xcbf005454c11bc7e583aa4a100988b4a893acb2233dbb77afef8d9f931df3735:0xsametxregistrationblock:5",
+        "registrant": "0x0000000000000000000000000000000000000123",
+        "expiry": 1800000000,
+        "labelhash": "0xcbf005454c11bc7e583aa4a100988b4a893acb2233dbb77afef8d9f931df3735"
+    });
+    event
+}
+
+fn ens_v1_same_transaction_registration_setup_authority_transfer_event(
+    resource_id: Uuid,
+) -> NormalizedEvent {
+    let mut event = normalized_event(
+        "ens-v1-unwrapped-authority:same-tx-registration:authority-transfer",
+        "AuthorityTransferred",
+        CanonicalityState::Canonical,
+    );
+    event.logical_name_id = Some("ens:alice.eth".to_owned());
+    event.resource_id = Some(resource_id);
+    event.source_family = "ens_v1_registry_l1".to_owned();
+    event.derivation_kind = "ens_v1_unwrapped_authority".to_owned();
+    event.chain_id = Some("ethereum-mainnet".to_owned());
+    event.block_number = Some(100);
+    event.block_hash = Some("0xsametxregistrationblock".to_owned());
+    event.transaction_hash = Some("0xsametxregistrationtx".to_owned());
+    event.log_index = Some(2);
+    event.raw_fact_ref = json!({
+        "kind": "raw_log",
+        "chain_id": "ethereum-mainnet",
+        "block_number": 100,
+        "block_hash": "0xsametxregistrationblock",
+        "transaction_hash": "0xsametxregistrationtx",
+        "transaction_index": 3,
+        "log_index": 2,
+    });
+    event.before_state = json!({"owner": null});
+    event.after_state = json!({
+        "owner": "0x0000000000000000000000000000000000000123",
+        "labelhash": "0xcbf005454c11bc7e583aa4a100988b4a893acb2233dbb77afef8d9f931df3735"
+    });
+    event
+}
+
+fn ens_v1_registry_resolver_observation_key_repair_event(observation_key: &str) -> NormalizedEvent {
+    let mut event = normalized_event(
+        "ens_v1_registry_resolver_changed:13:0xresolverblock:0xresolvertx:2:0x314159265dd8dbb310642f98f50c066173c1259b",
+        "ResolverChanged",
+        CanonicalityState::Canonical,
+    );
+    event.source_family = "ens_v1_registry_l1".to_owned();
+    event.manifest_version = 3;
+    event.source_manifest_id = None;
+    event.chain_id = Some("ethereum-mainnet".to_owned());
+    event.block_number = Some(3_745_840);
+    event.block_hash = Some("0xresolverblock".to_owned());
+    event.transaction_hash = Some("0xresolvertx".to_owned());
+    event.log_index = Some(2);
+    event.raw_fact_ref = json!({
+        "kind": "raw_log",
+        "chain_id": "ethereum-mainnet",
+        "block_number": 3745840,
+        "block_hash": "0xresolverblock",
+        "transaction_hash": "0xresolvertx",
+        "transaction_index": 9,
+        "log_index": 2,
+        "emitting_address": "0x314159265dd8dbb310642f98f50c066173c1259b",
+        "topic0": "0x335721b01866dc23fbee8b6b2c7b1e14d6f05c28cd35a2c934239f94095602a0",
+        "topic1": "0xdea316f9d0b5800de3e6b0d31743113b679d9d30d004a2d4f8e4f257a21173ea",
+        "topic2": null,
+        "data_hex": "0000000000000000000000000000000000000000000000000000000000000000",
+    });
+    event.derivation_kind = "ens_v1_registry_resolver_changed".to_owned();
+    event.before_state = json!({});
+    event.after_state = json!({
+        "source_event": "NewResolver",
+        "discovery_source": "ens_v1_registry_resolver:ethereum-mainnet",
+        "edge_kind": "resolver",
+        "observation_key": observation_key,
+        "node": "0xdea316f9d0b5800de3e6b0d31743113b679d9d30d004a2d4f8e4f257a21173ea",
+        "emitting_address": "0x314159265dd8dbb310642f98f50c066173c1259b",
+        "resolver": null,
+        "raw_resolver": "0x0000000000000000000000000000000000000000",
+        "tombstone": true,
+        "from_contract_instance_id": "bbbb47ac-de4f-41e9-b044-11458aa9ba77",
+        "to_contract_instance_id": null,
+        "active_edge": false,
+        "resolver_profile_supported": false,
+        "resolver_profile_status": "unsupported",
+        "resolver_profile_reason": "registry_resolver_discovery_does_not_admit_typed_resolver_profile",
+    });
     event
 }
 
@@ -515,6 +1212,92 @@ async fn normalized_event_upsert_rejects_resource_id_change() -> Result<()> {
             .contains("normalized event identity mismatch for event raw-log:resolver-changed"),
         "unexpected error: {error:#}"
     );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn normalized_event_count_only_accepts_ens_v1_boundary_manifest_metadata_downgrade()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let source_manifest_id = sqlx::query_scalar::<_, i64>(
+        r#"
+        INSERT INTO manifest_versions (
+            manifest_version,
+            namespace,
+            source_family,
+            chain,
+            deployment_epoch,
+            rollout_status,
+            normalizer_version,
+            file_path,
+            manifest_payload
+        )
+        VALUES (
+            3,
+            'ens',
+            'ens_v1_registry_l1',
+            'ethereum-mainnet',
+            'ens_v1',
+            'active',
+            'ensip15@ens-normalize-0.1.1',
+            'manifests/ens/ens_v1_registry_l1/v3.toml',
+            '{"rollout_status":"active"}'::JSONB
+        )
+        RETURNING manifest_id
+        "#,
+    )
+    .fetch_one(database.pool())
+    .await?;
+    let mut event = normalized_event(
+        "ens_v1_unwrapped_authority:SurfaceUnbound:surface-unbound:0xblock:ens:alice.eth:binding",
+        "SurfaceUnbound",
+        CanonicalityState::Finalized,
+    );
+    event.logical_name_id = Some("ens:alice.eth".to_owned());
+    event.resource_id = Some(Uuid::from_u128(0xace));
+    event.source_family = "ens_v1_registry_l1".to_owned();
+    event.derivation_kind = "ens_v1_unwrapped_authority".to_owned();
+    event.manifest_version = 3;
+    event.source_manifest_id = Some(source_manifest_id);
+    event.chain_id = Some("ethereum-mainnet".to_owned());
+    event.block_number = Some(100);
+    event.block_hash = Some("0xblock".to_owned());
+    event.transaction_hash = None;
+    event.log_index = None;
+    event.raw_fact_ref = json!({
+        "kind": "raw_block",
+        "chain_id": "ethereum-mainnet",
+        "block_number": 100,
+        "block_hash": "0xblock",
+        "block_timestamp": 1700000000,
+    });
+    event.before_state = json!({
+        "authority_kind": "registry_only",
+        "authority_key": "registry-only:ethereum-mainnet:0xalice_namehash",
+    });
+    event.after_state = json!({
+        "authority_kind": "registry_only",
+        "authority_key": "registry-only:ethereum-mainnet:0xalice_namehash",
+        "active_to": 1700000000,
+    });
+    upsert_normalized_events(database.pool(), std::slice::from_ref(&event)).await?;
+
+    let mut replayed = event.clone();
+    replayed.manifest_version = 1;
+    replayed.source_manifest_id = None;
+    let inserted_count =
+        upsert_normalized_events_count_only(database.pool(), std::slice::from_ref(&replayed))
+            .await?;
+    assert_eq!(inserted_count, 0);
+
+    let stored = sqlx::query_as::<_, (i64, Option<i64>)>(
+        "SELECT manifest_version, source_manifest_id FROM normalized_events WHERE event_identity = $1",
+    )
+    .bind(&event.event_identity)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(stored, (3, Some(source_manifest_id)));
 
     database.cleanup().await
 }
@@ -697,6 +1480,686 @@ async fn normalized_event_upsert_repairs_ens_v1_renewal_resource_id_transition()
                 repaired_resource_id.to_string()
             ),
         ]
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn normalized_event_count_only_upsert_repairs_ens_v1_registry_event_time_resource_id_transition()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let stale_later_registrar_resource_id = Uuid::from_u128(0x1400);
+    let event_time_registry_resource_id = Uuid::from_u128(0x1500);
+    seed_ens_v1_registry_event_time_repair_resources(
+        database.pool(),
+        stale_later_registrar_resource_id,
+        event_time_registry_resource_id,
+    )
+    .await?;
+
+    let event = ens_v1_registry_event_time_repair_event(
+        "ens-v1-unwrapped-authority:registry-event-time:resolver",
+        stale_later_registrar_resource_id,
+    );
+    upsert_normalized_events(database.pool(), std::slice::from_ref(&event)).await?;
+
+    let repaired = ens_v1_registry_event_time_repair_event(
+        "ens-v1-unwrapped-authority:registry-event-time:resolver",
+        event_time_registry_resource_id,
+    );
+    let inserted_count =
+        upsert_normalized_events_count_only(database.pool(), std::slice::from_ref(&repaired))
+            .await?;
+    assert_eq!(inserted_count, 0);
+
+    let stored_resource_id: Uuid =
+        sqlx::query_scalar("SELECT resource_id FROM normalized_events WHERE event_identity = $1")
+            .bind(&event.event_identity)
+            .fetch_one(database.pool())
+            .await?;
+    assert_eq!(stored_resource_id, event_time_registry_resource_id);
+
+    let queued_change_count = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)
+        FROM projection_normalized_event_changes change
+        JOIN normalized_events event
+          ON event.normalized_event_id = change.normalized_event_id
+        WHERE event.event_identity = $1
+          AND change.change_kind = 'canonicality_update'
+        "#,
+    )
+    .bind(&event.event_identity)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(queued_change_count, 1);
+
+    let invalidation_keys = sqlx::query_as::<_, (String, String)>(
+        r#"
+        SELECT projection, projection_key
+        FROM projection_invalidations
+        WHERE projection = 'record_inventory_current'
+        ORDER BY projection_key
+        "#,
+    )
+    .fetch_all(database.pool())
+    .await?;
+    assert_eq!(
+        invalidation_keys,
+        vec![
+            (
+                "record_inventory_current".to_owned(),
+                stale_later_registrar_resource_id.to_string()
+            ),
+            (
+                "record_inventory_current".to_owned(),
+                event_time_registry_resource_id.to_string()
+            ),
+        ]
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn normalized_event_count_only_upsert_repairs_ens_v1_registry_event_time_registry_collision()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let legacy_labelhash_registry_resource_id = Uuid::from_u128(0x1550);
+    let namehash_registry_resource_id = Uuid::from_u128(0x1560);
+    seed_ens_v1_registry_event_time_registry_collision_repair_resources(
+        database.pool(),
+        legacy_labelhash_registry_resource_id,
+        namehash_registry_resource_id,
+    )
+    .await?;
+
+    let event = ens_v1_registry_event_time_subname_collision_repair_event(
+        "ens-v1-unwrapped-authority:registry-event-time:subname-collision",
+        legacy_labelhash_registry_resource_id,
+    );
+    upsert_normalized_events(database.pool(), std::slice::from_ref(&event)).await?;
+
+    let repaired = ens_v1_registry_event_time_subname_collision_repair_event(
+        "ens-v1-unwrapped-authority:registry-event-time:subname-collision",
+        namehash_registry_resource_id,
+    );
+    let inserted_count =
+        upsert_normalized_events_count_only(database.pool(), std::slice::from_ref(&repaired))
+            .await?;
+    assert_eq!(inserted_count, 0);
+
+    let stored_resource_id: Uuid =
+        sqlx::query_scalar("SELECT resource_id FROM normalized_events WHERE event_identity = $1")
+            .bind(&event.event_identity)
+            .fetch_one(database.pool())
+            .await?;
+    assert_eq!(stored_resource_id, namehash_registry_resource_id);
+
+    let invalidation_keys = sqlx::query_as::<_, (String, String)>(
+        r#"
+        SELECT projection, projection_key
+        FROM projection_invalidations
+        WHERE projection = 'record_inventory_current'
+        ORDER BY projection_key
+        "#,
+    )
+    .fetch_all(database.pool())
+    .await?;
+    assert_eq!(
+        invalidation_keys,
+        vec![
+            (
+                "record_inventory_current".to_owned(),
+                legacy_labelhash_registry_resource_id.to_string()
+            ),
+            (
+                "record_inventory_current".to_owned(),
+                namehash_registry_resource_id.to_string()
+            ),
+        ]
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn normalized_event_count_only_upsert_repairs_ens_v1_registry_event_time_authority_transfer_key()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let legacy_labelhash_registry_resource_id = Uuid::from_u128(0x1570);
+    let namehash_registry_resource_id = Uuid::from_u128(0x1580);
+    seed_ens_v1_registry_event_time_registry_key_repair_resources(
+        database.pool(),
+        legacy_labelhash_registry_resource_id,
+        namehash_registry_resource_id,
+    )
+    .await?;
+
+    let event = ens_v1_registry_event_time_authority_transfer_repair_event(
+        "ens-v1-unwrapped-authority:registry-event-time:authority-transfer",
+        legacy_labelhash_registry_resource_id,
+    );
+    upsert_normalized_events(database.pool(), std::slice::from_ref(&event)).await?;
+
+    let repaired = ens_v1_registry_event_time_authority_transfer_repair_event(
+        "ens-v1-unwrapped-authority:registry-event-time:authority-transfer",
+        namehash_registry_resource_id,
+    );
+    let inserted_count =
+        upsert_normalized_events_count_only(database.pool(), std::slice::from_ref(&repaired))
+            .await?;
+    assert_eq!(inserted_count, 0);
+
+    let stored_resource_id: Uuid =
+        sqlx::query_scalar("SELECT resource_id FROM normalized_events WHERE event_identity = $1")
+            .bind(&event.event_identity)
+            .fetch_one(database.pool())
+            .await?;
+    assert_eq!(stored_resource_id, namehash_registry_resource_id);
+
+    let invalidation_keys = sqlx::query_as::<_, (String, String)>(
+        r#"
+        SELECT projection, projection_key
+        FROM projection_invalidations
+        WHERE projection = 'permissions_current'
+        ORDER BY projection_key
+        "#,
+    )
+    .fetch_all(database.pool())
+    .await?;
+    assert_eq!(
+        invalidation_keys,
+        vec![
+            (
+                "permissions_current".to_owned(),
+                legacy_labelhash_registry_resource_id.to_string()
+            ),
+            (
+                "permissions_current".to_owned(),
+                namehash_registry_resource_id.to_string()
+            ),
+        ]
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn normalized_event_count_only_upsert_repairs_ens_v1_registry_event_time_authority_transfer_before_owner()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let legacy_labelhash_registry_resource_id = Uuid::from_u128(0x1590);
+    let namehash_registry_resource_id = Uuid::from_u128(0x15a0);
+    seed_ens_v1_registry_event_time_registry_key_repair_resources(
+        database.pool(),
+        legacy_labelhash_registry_resource_id,
+        namehash_registry_resource_id,
+    )
+    .await?;
+
+    let mut event = ens_v1_registry_event_time_authority_transfer_repair_event(
+        "ens-v1-unwrapped-authority:registry-event-time:authority-transfer-before-owner",
+        legacy_labelhash_registry_resource_id,
+    );
+    event.before_state = json!({
+        "owner": "0x0000000000000000000000000000000000000def"
+    });
+    upsert_normalized_events(database.pool(), std::slice::from_ref(&event)).await?;
+
+    let mut repaired = ens_v1_registry_event_time_authority_transfer_repair_event(
+        "ens-v1-unwrapped-authority:registry-event-time:authority-transfer-before-owner",
+        namehash_registry_resource_id,
+    );
+    repaired.before_state = json!({
+        "owner": "0x0000000000000000000000000000000000000abc"
+    });
+    let inserted_count =
+        upsert_normalized_events_count_only(database.pool(), std::slice::from_ref(&repaired))
+            .await?;
+    assert_eq!(inserted_count, 0);
+
+    let stored = sqlx::query_as::<_, (Uuid, serde_json::Value)>(
+        "SELECT resource_id, before_state FROM normalized_events WHERE event_identity = $1",
+    )
+    .bind(&event.event_identity)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(stored.0, namehash_registry_resource_id);
+    assert_eq!(stored.1, repaired.before_state);
+
+    let invalidation_keys = sqlx::query_as::<_, (String, String)>(
+        r#"
+        SELECT projection, projection_key
+        FROM projection_invalidations
+        WHERE projection = 'permissions_current'
+        ORDER BY projection_key
+        "#,
+    )
+    .fetch_all(database.pool())
+    .await?;
+    assert_eq!(
+        invalidation_keys,
+        vec![
+            (
+                "permissions_current".to_owned(),
+                legacy_labelhash_registry_resource_id.to_string()
+            ),
+            (
+                "permissions_current".to_owned(),
+                namehash_registry_resource_id.to_string()
+            ),
+        ]
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn normalized_event_count_only_upsert_repairs_ens_v1_registry_resolver_observation_key_transition()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let stale_key = "resolver:0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e:0xdea316f9d0b5800de3e6b0d31743113b679d9d30d004a2d4f8e4f257a21173ea";
+    let repaired_key = "resolver:0x314159265dd8dbb310642f98f50c066173c1259b:0xdea316f9d0b5800de3e6b0d31743113b679d9d30d004a2d4f8e4f257a21173ea";
+
+    let event = ens_v1_registry_resolver_observation_key_repair_event(stale_key);
+    upsert_normalized_events(database.pool(), std::slice::from_ref(&event)).await?;
+
+    let repaired = ens_v1_registry_resolver_observation_key_repair_event(repaired_key);
+    let inserted_count =
+        upsert_normalized_events_count_only(database.pool(), std::slice::from_ref(&repaired))
+            .await?;
+    assert_eq!(inserted_count, 0);
+
+    let stored_observation_key = sqlx::query_scalar::<_, String>(
+        "SELECT after_state->>'observation_key' FROM normalized_events WHERE event_identity = $1",
+    )
+    .bind(&event.event_identity)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(stored_observation_key, repaired_key);
+
+    let queued_change_count = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)
+        FROM projection_normalized_event_changes change
+        JOIN normalized_events event
+          ON event.normalized_event_id = change.normalized_event_id
+        WHERE event.event_identity = $1
+          AND change.change_kind = 'canonicality_update'
+        "#,
+    )
+    .bind(&event.event_identity)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(queued_change_count, 1);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn normalized_event_count_only_upsert_repairs_ens_v1_registry_event_time_permission_grant_source()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let stale_later_registrar_resource_id = Uuid::from_u128(0x1600);
+    let event_time_registry_resource_id = Uuid::from_u128(0x1700);
+    seed_ens_v1_registry_event_time_repair_resources(
+        database.pool(),
+        stale_later_registrar_resource_id,
+        event_time_registry_resource_id,
+    )
+    .await?;
+
+    let stale = ens_v1_registry_event_time_permission_repair_event(
+        stale_later_registrar_resource_id,
+        "registrar",
+        "registrar:ethereum-mainnet:alice",
+    );
+    upsert_normalized_events(database.pool(), std::slice::from_ref(&stale)).await?;
+
+    let repaired = ens_v1_registry_event_time_permission_repair_event(
+        event_time_registry_resource_id,
+        "registry_only",
+        "registry-only:ethereum-mainnet:0xalice_namehash",
+    );
+    let inserted_count =
+        upsert_normalized_events_count_only(database.pool(), std::slice::from_ref(&repaired))
+            .await?;
+    assert_eq!(inserted_count, 0);
+
+    let stored = sqlx::query_as::<_, (Uuid, serde_json::Value)>(
+        "SELECT resource_id, after_state FROM normalized_events WHERE event_identity = $1",
+    )
+    .bind(&stale.event_identity)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(stored.0, event_time_registry_resource_id);
+    assert_eq!(
+        stored.1["grant_source"]["authority_kind"].as_str(),
+        Some("registry_only")
+    );
+    assert_eq!(
+        stored.1["grant_source"]["authority_key"].as_str(),
+        Some("registry-only:ethereum-mainnet:0xalice_namehash")
+    );
+
+    let invalidation_keys = sqlx::query_as::<_, (String, String)>(
+        r#"
+        SELECT projection, projection_key
+        FROM projection_invalidations
+        WHERE projection = 'permissions_current'
+        ORDER BY projection_key
+        "#,
+    )
+    .fetch_all(database.pool())
+    .await?;
+    assert_eq!(
+        invalidation_keys,
+        vec![
+            (
+                "permissions_current".to_owned(),
+                stale_later_registrar_resource_id.to_string()
+            ),
+            (
+                "permissions_current".to_owned(),
+                event_time_registry_resource_id.to_string()
+            ),
+        ]
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn normalized_event_count_only_upsert_repairs_ens_v1_same_tx_registration_setup_permission_to_registrar()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let stale_registry_resource_id = Uuid::from_u128(0x1710);
+    let registrar_resource_id = Uuid::from_u128(0x1720);
+    seed_ens_v1_same_transaction_registration_setup_repair_resources(
+        database.pool(),
+        stale_registry_resource_id,
+        registrar_resource_id,
+    )
+    .await?;
+
+    let stale = ens_v1_same_transaction_registration_setup_permission_event(
+        stale_registry_resource_id,
+        "registry_only",
+        "registry-only:ethereum-mainnet:0xalice_namehash",
+    );
+    let registration = ens_v1_same_transaction_registration_grant_event(registrar_resource_id);
+    upsert_normalized_events(database.pool(), &[stale.clone(), registration]).await?;
+
+    let repaired = ens_v1_same_transaction_registration_setup_permission_event(
+        registrar_resource_id,
+        "registrar",
+        "registrar:ethereum-mainnet:10:0xcbf005454c11bc7e583aa4a100988b4a893acb2233dbb77afef8d9f931df3735:0xsametxregistrationblock:5",
+    );
+    let inserted_count =
+        upsert_normalized_events_count_only(database.pool(), std::slice::from_ref(&repaired))
+            .await?;
+    assert_eq!(inserted_count, 0);
+
+    let stored = sqlx::query_as::<_, (Uuid, serde_json::Value)>(
+        "SELECT resource_id, after_state FROM normalized_events WHERE event_identity = $1",
+    )
+    .bind(&stale.event_identity)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(stored.0, registrar_resource_id);
+    assert_eq!(
+        stored.1["grant_source"]["authority_kind"].as_str(),
+        Some("registrar")
+    );
+    assert_eq!(
+        stored.1["grant_source"]["authority_key"].as_str(),
+        Some(
+            "registrar:ethereum-mainnet:10:0xcbf005454c11bc7e583aa4a100988b4a893acb2233dbb77afef8d9f931df3735:0xsametxregistrationblock:5"
+        )
+    );
+
+    let invalidation_keys = sqlx::query_as::<_, (String, String)>(
+        r#"
+        SELECT projection, projection_key
+        FROM projection_invalidations
+        WHERE projection = 'permissions_current'
+        ORDER BY projection_key
+        "#,
+    )
+    .fetch_all(database.pool())
+    .await?;
+    assert_eq!(
+        invalidation_keys,
+        vec![
+            (
+                "permissions_current".to_owned(),
+                stale_registry_resource_id.to_string()
+            ),
+            (
+                "permissions_current".to_owned(),
+                registrar_resource_id.to_string()
+            ),
+        ]
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn normalized_event_count_only_upsert_repairs_ens_v1_same_tx_registration_before_state_and_orphans_setup_registry_events()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let stale_registry_resource_id = Uuid::from_u128(0x1730);
+    let registrar_resource_id = Uuid::from_u128(0x1740);
+    seed_ens_v1_same_transaction_registration_setup_repair_resources(
+        database.pool(),
+        stale_registry_resource_id,
+        registrar_resource_id,
+    )
+    .await?;
+
+    let stale_transfer = ens_v1_same_transaction_registration_setup_authority_transfer_event(
+        stale_registry_resource_id,
+    );
+    let stale_permission = ens_v1_same_transaction_registration_setup_permission_event(
+        stale_registry_resource_id,
+        "registry_only",
+        "registry-only:ethereum-mainnet:0xalice_namehash",
+    );
+    let stale_registration =
+        ens_v1_same_transaction_registration_grant_event(registrar_resource_id);
+    upsert_normalized_events(
+        database.pool(),
+        &[
+            stale_transfer.clone(),
+            stale_permission.clone(),
+            stale_registration.clone(),
+        ],
+    )
+    .await?;
+
+    let mut repaired_registration =
+        ens_v1_same_transaction_registration_grant_event(registrar_resource_id);
+    repaired_registration.before_state = json!({"authority_kind": null, "registrant": null});
+    let inserted_count = upsert_normalized_events_count_only(
+        database.pool(),
+        std::slice::from_ref(&repaired_registration),
+    )
+    .await?;
+    assert_eq!(inserted_count, 0);
+
+    let stored_registration_before_state = sqlx::query_scalar::<_, serde_json::Value>(
+        "SELECT before_state FROM normalized_events WHERE event_identity = $1",
+    )
+    .bind(&stale_registration.event_identity)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(
+        stored_registration_before_state,
+        repaired_registration.before_state
+    );
+
+    let stale_states = sqlx::query_as::<_, (String, CanonicalityState)>(
+        "SELECT event_kind, canonicality_state::TEXT AS canonicality_state
+         FROM normalized_events
+         WHERE event_identity = ANY($1::TEXT[])
+         ORDER BY event_kind",
+    )
+    .bind(&[
+        stale_transfer.event_identity.clone(),
+        stale_permission.event_identity.clone(),
+    ])
+    .fetch_all(database.pool())
+    .await?;
+    assert_eq!(
+        stale_states,
+        vec![
+            (
+                "AuthorityTransferred".to_owned(),
+                CanonicalityState::Orphaned
+            ),
+            ("PermissionChanged".to_owned(), CanonicalityState::Orphaned),
+        ]
+    );
+
+    let invalidation_keys = sqlx::query_as::<_, (String, String)>(
+        r#"
+        SELECT projection, projection_key
+        FROM projection_invalidations
+        WHERE projection IN ('name_current', 'permissions_current')
+        ORDER BY projection, projection_key
+        "#,
+    )
+    .fetch_all(database.pool())
+    .await?;
+    assert!(invalidation_keys.contains(&("name_current".to_owned(), "ens:alice.eth".to_owned())));
+    assert!(invalidation_keys.contains(&(
+        "permissions_current".to_owned(),
+        stale_registry_resource_id.to_string()
+    )));
+    assert!(invalidation_keys.contains(&(
+        "permissions_current".to_owned(),
+        registrar_resource_id.to_string()
+    )));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn normalized_event_count_only_upsert_repairs_ens_v1_registry_event_time_permission_revoke_sources()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let stale_later_registrar_resource_id = Uuid::from_u128(0x1750);
+    let event_time_registry_resource_id = Uuid::from_u128(0x1760);
+    seed_ens_v1_registry_event_time_repair_resources(
+        database.pool(),
+        stale_later_registrar_resource_id,
+        event_time_registry_resource_id,
+    )
+    .await?;
+
+    let stale = ens_v1_registry_event_time_permission_revoke_repair_event(
+        stale_later_registrar_resource_id,
+        "registrar",
+        "registrar:ethereum-mainnet:alice",
+    );
+    upsert_normalized_events(database.pool(), std::slice::from_ref(&stale)).await?;
+
+    let repaired = ens_v1_registry_event_time_permission_revoke_repair_event(
+        event_time_registry_resource_id,
+        "registry_only",
+        "registry-only:ethereum-mainnet:0xalice_namehash",
+    );
+    let inserted_count =
+        upsert_normalized_events_count_only(database.pool(), std::slice::from_ref(&repaired))
+            .await?;
+    assert_eq!(inserted_count, 0);
+
+    let stored = sqlx::query_as::<_, (Uuid, serde_json::Value, serde_json::Value)>(
+        "SELECT resource_id, before_state, after_state FROM normalized_events WHERE event_identity = $1",
+    )
+    .bind(&stale.event_identity)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(stored.0, event_time_registry_resource_id);
+    assert_eq!(
+        stored.1["grant_source"]["authority_kind"].as_str(),
+        Some("registry_only")
+    );
+    assert_eq!(
+        stored.2["revocation_source"]["authority_kind"].as_str(),
+        Some("registry_only")
+    );
+
+    let invalidation_keys = sqlx::query_as::<_, (String, String)>(
+        r#"
+        SELECT projection, projection_key
+        FROM projection_invalidations
+        WHERE projection = 'permissions_current'
+        ORDER BY projection_key
+        "#,
+    )
+    .fetch_all(database.pool())
+    .await?;
+    assert_eq!(
+        invalidation_keys,
+        vec![
+            (
+                "permissions_current".to_owned(),
+                stale_later_registrar_resource_id.to_string()
+            ),
+            (
+                "permissions_current".to_owned(),
+                event_time_registry_resource_id.to_string()
+            ),
+        ]
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn normalized_event_count_only_upsert_repairs_ens_v1_registry_event_time_wrapper_permission_grant_source()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let stale_later_wrapper_resource_id = Uuid::from_u128(0x1800);
+    let event_time_registry_resource_id = Uuid::from_u128(0x1900);
+    seed_ens_v1_registry_event_time_wrapper_repair_resources(
+        database.pool(),
+        stale_later_wrapper_resource_id,
+        event_time_registry_resource_id,
+    )
+    .await?;
+
+    let stale = ens_v1_registry_event_time_permission_repair_event(
+        stale_later_wrapper_resource_id,
+        "wrapper",
+        "wrapper:ethereum-mainnet:alice",
+    );
+    upsert_normalized_events(database.pool(), std::slice::from_ref(&stale)).await?;
+
+    let repaired = ens_v1_registry_event_time_permission_repair_event(
+        event_time_registry_resource_id,
+        "registry_only",
+        "registry-only:ethereum-mainnet:0xalice_namehash",
+    );
+    let inserted_count =
+        upsert_normalized_events_count_only(database.pool(), std::slice::from_ref(&repaired))
+            .await?;
+    assert_eq!(inserted_count, 0);
+
+    let stored = sqlx::query_as::<_, (Uuid, serde_json::Value)>(
+        "SELECT resource_id, after_state FROM normalized_events WHERE event_identity = $1",
+    )
+    .bind(&stale.event_identity)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(stored.0, event_time_registry_resource_id);
+    assert_eq!(
+        stored.1["grant_source"]["authority_kind"].as_str(),
+        Some("registry_only")
     );
 
     database.cleanup().await

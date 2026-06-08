@@ -14,7 +14,11 @@ pub(super) use registrar_history::{
 use registrar_state::*;
 use resolver::*;
 use support::*;
-use wrapper_registry::*;
+pub(in crate::ens_v1_unwrapped_authority) use wrapper_registry::preload_registry_history;
+use wrapper_registry::{
+    load_latest_registry_owner_before_block, load_latest_wrapper_state_before_block,
+    load_selected_wrapper_state_before_replay, preload_wrapper_history,
+};
 
 #[derive(Clone, Debug, Default)]
 pub(super) struct PreloadedRegistrarState {
@@ -33,7 +37,7 @@ struct PreloadedWrapperState {
 }
 
 #[derive(Clone, Debug, Default)]
-struct PreloadedRegistryOwnerState {
+pub(in crate::ens_v1_unwrapped_authority) struct PreloadedRegistryOwnerState {
     owner: Option<String>,
     reference: Option<ObservationRef>,
 }

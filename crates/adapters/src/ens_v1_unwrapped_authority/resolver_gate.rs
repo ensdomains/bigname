@@ -6,39 +6,6 @@ pub(super) struct ResolverProfileGate {
 }
 
 impl ResolverProfileGate {
-    pub(super) async fn load(pool: &PgPool) -> Result<Self> {
-        let mut admissions =
-            bigname_manifests::load_ens_v1_public_resolver_profile_admissions(pool)
-                .await
-                .context("failed to load ENSv1 PublicResolver profile admissions")?;
-        admissions.extend(
-            bigname_manifests::load_basenames_l2_resolver_profile_admissions(pool)
-                .await
-                .context("failed to load Basenames L2Resolver profile admissions")?,
-        );
-        let supported_fact_families = admissions
-            .into_iter()
-            .filter(|admission| {
-                resolver_profile_admitted(&admission.source_family, &admission.profile)
-                    && admission.status == "supported"
-            })
-            .filter_map(|admission| {
-                resolver_fact_family_key(&admission.fact_family).map(|fact_family| {
-                    (
-                        admission.chain,
-                        admission.source_family,
-                        admission.address.to_ascii_lowercase(),
-                        fact_family,
-                    )
-                })
-            })
-            .collect();
-
-        Ok(Self {
-            supported_fact_families,
-        })
-    }
-
     pub(super) async fn load_for_raw_logs(
         pool: &PgPool,
         raw_logs: &[AuthorityRawLogRow],

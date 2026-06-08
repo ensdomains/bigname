@@ -158,7 +158,9 @@ struct TokenTransferObservation {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct RegistryOwnerObservation {
+    parent_node: Option<String>,
     labelhash: String,
+    namehash: Option<String>,
     owner: String,
     reference: ObservationRef,
 }
@@ -414,6 +416,8 @@ struct BindingSegment {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct NameHistory {
     name: Option<NameMetadata>,
+    #[serde(default)]
+    namehash: String,
     labelhash: String,
     first_name_ref: Option<ObservationRef>,
     current_registration: Option<RegistrationLease>,

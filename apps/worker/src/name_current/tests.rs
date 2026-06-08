@@ -2380,6 +2380,83 @@ async fn rebuild_keeps_same_binding_for_renewal_and_transfer() -> Result<()> {
 }
 
 #[tokio::test]
+async fn rebuild_projects_registry_owner_from_authority_epoch_change() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let binding = IdentityBinding::new(
+        "ens:controller.eth",
+        "controller.eth",
+        0x7100,
+        0x7200,
+        0x7300,
+    );
+    let registry_owner = "0x0000000000000000000000000000000000000aaa";
+
+    seed_raw_blocks(
+        database.pool(),
+        &[
+            raw_block("ethereum-mainnet", "0xgrant", 301, 1_717_171_901),
+            raw_block("ethereum-mainnet", "0xregistry-owner", 302, 1_717_171_902),
+        ],
+    )
+    .await?;
+    seed_identity(database.pool(), &binding, "0xgrant", 301, 1_717_171_901).await?;
+    seed_events(
+        database.pool(),
+        &[
+            authority_event(
+                &binding,
+                "grant-controller",
+                "RegistrationGranted",
+                "0xgrant",
+                301,
+                Some(0),
+                json!({}),
+                json!({
+                    "authority_kind": "registrar",
+                    "authority_key": "registrar:ethereum-mainnet:7:controller",
+                    "registrant": "0x0000000000000000000000000000000000000bbb",
+                    "expiry": 1_800_000_000_i64,
+                }),
+            ),
+            authority_event(
+                &binding,
+                "registry-owner-epoch",
+                "AuthorityEpochChanged",
+                "0xregistry-owner",
+                302,
+                None,
+                json!({
+                    "authority_kind": "registrar",
+                    "authority_key": "registrar:ethereum-mainnet:7:controller",
+                }),
+                json!({
+                    "authority_kind": "registry_only",
+                    "authority_key": "registry-only:ethereum-mainnet:0xcontroller",
+                    "registry_owner": registry_owner,
+                }),
+            ),
+        ],
+    )
+    .await?;
+
+    rebuild_name_current(database.pool(), Some(&binding.logical_name_id)).await?;
+
+    let row = load_name_current(database.pool(), &binding.logical_name_id)
+        .await?
+        .context("rebuilt row must exist")?;
+    assert_eq!(
+        row.declared_summary["control"]["registry_owner"],
+        Value::String(registry_owner.to_owned())
+    );
+    assert_eq!(
+        row.declared_summary["control"]["latest_event_kind"],
+        Value::String("AuthorityEpochChanged".to_owned())
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn rebuild_keeps_resource_permission_manager_out_of_registry_owner() -> Result<()> {
     let database = TestDatabase::new().await?;
     let binding = IdentityBinding::new("ens:manager.eth", "manager.eth", 0x9100, 0x9200, 0x9300);
