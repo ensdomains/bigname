@@ -361,13 +361,13 @@ Each compact item: `name`, `normalized_name`, `label_name`, `labelhash`, `nameha
 Rules:
 
 - `view=compact` is the default. `view=full` returns the existing full-envelope declared child collection.
-- `name` is the child identity name; `label_name` is the single child label relative to the requested parent.
+- `name` is the child identity name when known, or the unknown-label placeholder when only the child node and labelhash are known. `label_name` is the single child label relative to the requested parent; for unknown ENSv1 and Basenames registry labels it is `[<labelhash-without-0x>]`.
 - `labelhash` is `null` when the projection doesn't carry a stable label hash.
 - `owner` and `registrant` are `null` when not projected for that child; this doesn't imply route-level unsupported.
 - `include=counts` adds `subname_count` per child where projected. When unprojected, the field is `null` and `meta.unsupported_fields` includes `subname_count` unless `meta=none`.
 - `surface_classes=linked|alias|wildcard` is reserved and returns `unsupported`.
-- For ENSv1 registry-derived children, the registry `NewOwner` event proves `parent_node`, labelhash, owner, and child node, but not the plaintext child label. The route returns only child nodes that also have a canonical child `name_surfaces` row; labelhash-only registry observations do not synthesize displayable child names.[^v1-registry-l45][^v1-registry-l82]
-- For `namespace=basenames`, child surfaces come from the admitted Base authority split only.[^bn-readme-l69][^bn-readme-l70]
+- For ENSv1 registry-derived children, the registry `NewOwner` event proves `parent_node`, labelhash, owner, and child node, but not the plaintext child label.[^v1-registry-l45][^v1-registry-l82] Basenames Base registry subnode updates use the same parent-node plus labelhash shape.[^bn-registry-l81][^bn-registry-l120][^bn-registry-l122] The route still returns the declared child node. If no canonical child surface or retained, proof-checked label preimage identifies the label, `name`, `normalized_name`, and `label_name` use the explicit unknown-label bracket placeholder. Unknown-label rows count toward collection totals but do not make the placeholder a valid exact-name lookup target.
+- For `namespace=basenames`, child rows come from the admitted Base authority split only; primary-claim and L1 compatibility transport do not add children.[^bn-readme-l69][^bn-readme-l70]
 - `cursor` and `page_size` page over `display_name_asc`.
 
 ## `GET /v1/names/{namespace}/{name}/records`
@@ -715,6 +715,9 @@ GET /v1/resolvers/ethereum-mainnet/0x0000.../overview?include=nodes,aliases,role
 [^bn-l1resolver-l173]: (upstream: .refs/basenames/src/L1/L1Resolver.sol:L173 @ basenames@1809bbc)
 [^bn-l1resolver-l191]: (upstream: .refs/basenames/src/L1/L1Resolver.sol:L191 @ basenames@1809bbc)
 
+[^bn-registry-l81]: (upstream: .refs/basenames/src/L2/Registry.sol:L81 @ basenames@1809bbc)
+[^bn-registry-l120]: (upstream: .refs/basenames/src/L2/Registry.sol:L120 @ basenames@1809bbc)
+[^bn-registry-l122]: (upstream: .refs/basenames/src/L2/Registry.sol:L122 @ basenames@1809bbc)
 [^bn-registry-l132]: (upstream: .refs/basenames/src/L2/Registry.sol:L132 @ basenames@1809bbc)
 [^bn-l2resolver-l4]: (upstream: .refs/basenames/src/L2/L2Resolver.sol:L4 @ basenames@1809bbc)
 [^bn-l2resolver-l16]: (upstream: .refs/basenames/src/L2/L2Resolver.sol:L16 @ basenames@1809bbc)

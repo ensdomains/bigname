@@ -45,7 +45,10 @@ fn canonical_declared_child_sources_query<'a>(
     sqlx::query(
         r#"
         WITH target_v1_child_nodes AS (
-            SELECT DISTINCT candidate_ne.after_state ->> 'child_node' AS child_node
+            SELECT DISTINCT
+                candidate_ne.namespace,
+                candidate_ne.chain_id,
+                candidate_ne.after_state ->> 'child_node' AS child_node
             FROM normalized_events candidate_ne
             JOIN name_surfaces candidate_parent
               ON candidate_parent.namehash = candidate_ne.after_state ->> 'parent_node'
@@ -71,11 +74,37 @@ fn canonical_declared_child_sources_query<'a>(
         ranked_v1_sources AS (
             SELECT
                 parent.logical_name_id AS parent_logical_name_id,
-                child.logical_name_id AS child_logical_name_id,
-                child.namespace,
-                child.canonical_display_name,
-                child.normalized_name,
-                child.namehash,
+                COALESCE(
+                    child.logical_name_id,
+                    ne.namespace || ':' || COALESCE(
+                        label_preimage.normalized_label,
+                        '[' || substring(lower(ne.after_state ->> 'labelhash') FROM 3) || ']'
+                    ) || '.' || parent.normalized_name
+                ) AS child_logical_name_id,
+                ne.namespace,
+                COALESCE(
+                    child.canonical_display_name,
+                    COALESCE(
+                        label_preimage.canonical_display_label,
+                        '[' || substring(lower(ne.after_state ->> 'labelhash') FROM 3) || ']'
+                    ) || '.' || parent.normalized_name
+                ) AS canonical_display_name,
+                COALESCE(
+                    child.normalized_name,
+                    COALESCE(
+                        label_preimage.normalized_label,
+                        '[' || substring(lower(ne.after_state ->> 'labelhash') FROM 3) || ']'
+                    ) || '.' || parent.normalized_name
+                ) AS normalized_name,
+                ne.after_state ->> 'child_node' AS namehash,
+                lower(ne.after_state ->> 'labelhash') AS labelhash,
+                CASE
+                    WHEN child.logical_name_id IS NOT NULL THEN 'name_surface'
+                    WHEN label_preimage.labelhash IS NOT NULL THEN 'label_preimage'
+                    ELSE 'unknown'
+                END AS label_source,
+                lower(ne.after_state ->> 'owner') AS owner,
+                NULL::TEXT AS registrant,
                 ne.normalized_event_id,
                 ne.event_identity,
                 ne.source_family,
@@ -97,7 +126,10 @@ fn canonical_declared_child_sources_query<'a>(
                 COALESCE((ne.after_state ->> 'tombstone')::BOOLEAN, FALSE) AS tombstone,
                 COALESCE((ne.after_state ->> 'active_edge')::BOOLEAN, FALSE) AS active_edge,
                 ROW_NUMBER() OVER (
-                    PARTITION BY child.logical_name_id
+                    PARTITION BY
+                        ne.namespace,
+                        ne.chain_id,
+                        ne.after_state ->> 'child_node'
                     ORDER BY
                         ne.block_number DESC,
                         ne.log_index DESC,
@@ -106,35 +138,40 @@ fn canonical_declared_child_sources_query<'a>(
             FROM normalized_events ne
             JOIN name_surfaces parent
               ON parent.namehash = ne.after_state ->> 'parent_node'
-            JOIN name_surfaces child
+            LEFT JOIN name_surfaces child
               ON child.namehash = ne.after_state ->> 'child_node'
+             AND child.namespace = ne.namespace
+             AND child.chain_id = ne.chain_id
+             AND child.canonicality_state IN (
+                    'canonical'::canonicality_state,
+                    'safe'::canonicality_state,
+                    'finalized'::canonicality_state
+              )
+            LEFT JOIN label_preimages label_preimage
+              ON label_preimage.labelhash = lower(ne.after_state ->> 'labelhash')
             WHERE ne.event_kind = $1
               AND ne.derivation_kind = $2
               AND ne.source_family IN ($3, $4)
-              AND parent.namespace = child.namespace
               AND parent.namespace = ne.namespace
-              AND child.namespace = ne.namespace
-              AND parent.chain_id = child.chain_id
               AND parent.chain_id = ne.chain_id
-              AND child.chain_id = ne.chain_id
               AND ne.canonicality_state IN (
                     'canonical'::canonicality_state,
                     'safe'::canonicality_state,
                     'finalized'::canonicality_state
               )
+              AND ne.after_state ->> 'labelhash' IS NOT NULL
+              AND ne.after_state ->> 'child_node' IS NOT NULL
               AND (
                     $5::TEXT IS NULL
-                    OR ne.after_state ->> 'child_node' IN (
-                        SELECT child_node
-                        FROM target_v1_child_nodes
+                    OR EXISTS (
+                        SELECT 1
+                        FROM target_v1_child_nodes target
+                        WHERE target.namespace = ne.namespace
+                          AND target.chain_id = ne.chain_id
+                          AND target.child_node = ne.after_state ->> 'child_node'
                     )
               )
               AND parent.canonicality_state IN (
-                    'canonical'::canonicality_state,
-                    'safe'::canonicality_state,
-                    'finalized'::canonicality_state
-              )
-              AND child.canonicality_state IN (
                     'canonical'::canonicality_state,
                     'safe'::canonicality_state,
                     'finalized'::canonicality_state
@@ -148,6 +185,10 @@ fn canonical_declared_child_sources_query<'a>(
                 canonical_display_name,
                 normalized_name,
                 namehash,
+                labelhash,
+                label_source,
+                owner,
+                registrant,
                 normalized_event_id,
                 event_identity,
                 source_family,
@@ -299,6 +340,10 @@ fn canonical_declared_child_sources_query<'a>(
                 child.canonical_display_name,
                 child.normalized_name,
                 child.namehash,
+                lower(child.labelhashes[1]) AS labelhash,
+                'name_surface'::TEXT AS label_source,
+                NULL::TEXT AS owner,
+                NULL::TEXT AS registrant,
                 latest.normalized_event_id,
                 latest.event_identity,
                 latest.source_family,
@@ -464,6 +509,10 @@ fn canonical_declared_child_sources_query<'a>(
             canonical_display_name,
             normalized_name,
             namehash,
+            labelhash,
+            label_source,
+            owner,
+            registrant,
             normalized_event_id,
             event_identity,
             source_family,

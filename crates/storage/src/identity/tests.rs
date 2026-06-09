@@ -726,6 +726,149 @@ async fn no_snapshot_name_surface_upsert_accepts_compatible_existing_surface() -
 }
 
 #[tokio::test]
+async fn no_snapshot_name_surface_upsert_repairs_stale_normalized_hash_path() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let logical_name_id = "ens:missioncontrol.2718.eth";
+    let dns_encoded_name = vec![
+        14, b'm', b'i', b's', b's', b'i', b'o', b'n', b'c', b'o', b'n', b't', b'r', b'o', b'l', 4,
+        b'2', b'7', b'1', b'8', 3, b'e', b't', b'h', 0,
+    ];
+    let stale_namehash = "0x0bead95ae242ed57428f81738348205d9a8210ad066c01c3ea223626a2f99061";
+    let repaired_namehash = "0x582f93f5b5d7aedd8945d00e042fcc92078dca21d5c1deb34f956b3672440b6e";
+    let stale_labelhash = "0xf16eb6748d7b00704e9b7e5faa8f33e1036467f83e5d718aab952a9f82acc74f";
+    let repaired_labelhash = "0xe141a2d34371b17fa7034fa2acf312fbb9cf042435cb81a0b9f962e959aae280";
+    let parent_labelhash = "0xb73b6a51b3e5f8c36d7b7757496ee3eb11f6300d981e965cb578604ff8de772c";
+    let tld_labelhash = "0x4f5b812789fc606be1b3b16908db13fc7a9adf7ca72641f84d75b47069d3d7f0";
+    let provenance = json!({
+        "adapter": "ens_v1_unwrapped_authority",
+        "logical_name_id": logical_name_id,
+        "source_event": "registrar_name_observation",
+    });
+
+    let mut stale_surface = name_surface(
+        logical_name_id,
+        "MissionControl.2718.eth",
+        "missioncontrol.2718.eth",
+        "surface_stale_hash_path",
+        18178513,
+        CanonicalityState::Finalized,
+    );
+    stale_surface.canonical_display_name = "missioncontrol.2718.eth".to_owned();
+    stale_surface.dns_encoded_name = dns_encoded_name.clone();
+    stale_surface.namehash = stale_namehash.to_owned();
+    stale_surface.labelhashes = vec![
+        stale_labelhash.to_owned(),
+        parent_labelhash.to_owned(),
+        tld_labelhash.to_owned(),
+    ];
+    stale_surface.provenance = provenance.clone();
+    upsert_name_surfaces_without_snapshots(database.pool(), std::slice::from_ref(&stale_surface))
+        .await?;
+
+    let mut repaired_surface = stale_surface.clone();
+    repaired_surface.input_name = "missioncontrol.2718.eth".to_owned();
+    repaired_surface.namehash = repaired_namehash.to_owned();
+    repaired_surface.labelhashes = vec![
+        repaired_labelhash.to_owned(),
+        parent_labelhash.to_owned(),
+        tld_labelhash.to_owned(),
+    ];
+    repaired_surface.chain_id = "chain:surface_repaired_hash_path".to_owned();
+    repaired_surface.block_hash = "0xsurface_repaired_hash_path_011585bf".to_owned();
+    repaired_surface.block_number = 18182975;
+    upsert_name_surfaces_without_snapshots(
+        database.pool(),
+        std::slice::from_ref(&repaired_surface),
+    )
+    .await?;
+
+    let mut expected_surface = stale_surface;
+    expected_surface.namehash = repaired_namehash.to_owned();
+    expected_surface.labelhashes = vec![
+        repaired_labelhash.to_owned(),
+        parent_labelhash.to_owned(),
+        tld_labelhash.to_owned(),
+    ];
+    assert_eq!(
+        load_name_surface(database.pool(), logical_name_id).await?,
+        Some(expected_surface)
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn no_snapshot_name_surface_upsert_repairs_stale_dotted_registrar_surface() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let logical_name_id = "ens:3.1415.eth";
+    let stale_dns_encoded_name = vec![
+        6, b'3', b'.', b'1', b'4', b'1', b'5', 3, b'e', b't', b'h', 0,
+    ];
+    let repaired_dns_encoded_name =
+        vec![1, b'3', 4, b'1', b'4', b'1', b'5', 3, b'e', b't', b'h', 0];
+    let stale_namehash = "0x5f17755d1125039bb4039a841dba980dfc8096cb2a65a14655a10b8e123e5a75";
+    let repaired_namehash = "0xa76a2d53db8c3cf609227f6d8dfe35ef54d9582e83a3f7ef63171705ba2cdfba";
+    let stale_labelhash = "0x6b09de763b2c9b88e890b228c7f52ea055de1f0414272b7e4ed068113e2e7f76";
+    let repaired_left_labelhash =
+        "0x2a80e1ef1d7842f27f2e6be0972bb708b9a135c38860dbe73c27c3486c34f4de";
+    let repaired_parent_labelhash =
+        "0xde9c9651fee49e4c6fdbfdbe4bbabdb101af3264b63962d1b7e6fddd4168ac3c";
+    let eth_labelhash = "0x4f5b812789fc606be1b3b16908db13fc7a9adf7ca72641f84d75b47069d3d7f0";
+    let provenance = json!({
+        "adapter": "ens_v1_unwrapped_authority",
+        "logical_name_id": logical_name_id,
+        "source_event": "registrar_name_observation",
+    });
+
+    let mut stale_surface = name_surface(
+        logical_name_id,
+        "3.1415.eth",
+        "3.1415.eth",
+        "surface_stale_dotted_registrar",
+        15524287,
+        CanonicalityState::Finalized,
+    );
+    stale_surface.dns_encoded_name = stale_dns_encoded_name;
+    stale_surface.namehash = stale_namehash.to_owned();
+    stale_surface.labelhashes = vec![stale_labelhash.to_owned(), eth_labelhash.to_owned()];
+    stale_surface.provenance = provenance.clone();
+    upsert_name_surfaces_without_snapshots(database.pool(), std::slice::from_ref(&stale_surface))
+        .await?;
+
+    let mut repaired_surface = stale_surface.clone();
+    repaired_surface.dns_encoded_name = repaired_dns_encoded_name.clone();
+    repaired_surface.namehash = repaired_namehash.to_owned();
+    repaired_surface.labelhashes = vec![
+        repaired_left_labelhash.to_owned(),
+        repaired_parent_labelhash.to_owned(),
+        eth_labelhash.to_owned(),
+    ];
+    repaired_surface.chain_id = "chain:surface_repaired_dotted_registrar".to_owned();
+    repaired_surface.block_hash = "0xsurface_repaired_dotted_registrar_013bdc25".to_owned();
+    repaired_surface.block_number = 20696837;
+    upsert_name_surfaces_without_snapshots(
+        database.pool(),
+        std::slice::from_ref(&repaired_surface),
+    )
+    .await?;
+
+    let mut expected_surface = stale_surface;
+    expected_surface.dns_encoded_name = repaired_dns_encoded_name;
+    expected_surface.namehash = repaired_namehash.to_owned();
+    expected_surface.labelhashes = vec![
+        repaired_left_labelhash.to_owned(),
+        repaired_parent_labelhash.to_owned(),
+        eth_labelhash.to_owned(),
+    ];
+    assert_eq!(
+        load_name_surface(database.pool(), logical_name_id).await?,
+        Some(expected_surface)
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn no_snapshot_name_surface_upsert_skips_idempotent_rewrite() -> Result<()> {
     let database = TestDatabase::new().await?;
     let logical_name_id = "ens:no-snapshot-surface-idempotent.eth";

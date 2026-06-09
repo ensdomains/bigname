@@ -10,6 +10,7 @@ bigname anchors every ENSv1, ENSv2, Basenames, admitted upstream app-metadata, r
 | `ens_v2` | `ensdomains/contracts-v2` | `554c309b` | ENSv2 contracts |
 | `basenames` | `base-org/basenames` | `1809bbc9` | Canonical Basenames Solidity |
 | `ens_subgraph` | `ensdomains/ens-subgraph` | `723f1b6a` | Reference ENSv1 indexer |
+| `ens_rainbow` | `graphprotocol/ens-rainbow` | `bc44492` | Graph Protocol ENS rainbow-table tooling |
 | `ensnode` | `namehash/ensnode` | `2017ae62` | Alternative ENS indexer |
 | `ens_app_v3` | `ensdomains/ens-app-v3` | `71758582` | ENS app known resolver metadata |
 | `ponder` | `ponder-sh/ponder` | `c8f6935f` | Reference EVM indexer framework |

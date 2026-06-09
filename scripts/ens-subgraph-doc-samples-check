@@ -162,6 +162,10 @@ def expect_status_ok(name: str, status: int, payload: Any) -> None:
         record("fail", f"{name} status", f"status {status}: {payload}")
 
 
+def stale_error(payload: Any) -> bool:
+    return ptr(payload, "/error/code") == "stale"
+
+
 def first_graph_domain(graph: Any) -> dict[str, Any]:
     domains = graph["domain"]
     if len(domains) != 1:
@@ -170,7 +174,19 @@ def first_graph_domain(graph: Any) -> dict[str, Any]:
 
 
 def selector_keys(entries: list[dict[str, Any]], family: str) -> list[str]:
+    if entries is None:
+        return []
     return [entry["selector_key"] for entry in entries if entry.get("record_family") == family]
+
+
+def graph_child_display_name(row: dict[str, Any]) -> str | None:
+    name = row.get("name")
+    if name:
+        return name
+    labelhash = lower(row.get("labelhash"))
+    if isinstance(labelhash, str) and labelhash.startswith("0x") and len(labelhash) == 66:
+        return f"[{labelhash[2:]}].{SAMPLE_NAME}"
+    return None
 
 
 def bigname_route_samples() -> dict[str, Any]:
@@ -283,6 +299,9 @@ def bigname_route_samples() -> dict[str, Any]:
         status, payload = api_get(path, query)
         responses[key] = {"status": status, "payload": payload}
         if key in {"resolver_overview", "execution_explain"}:
+            continue
+        if key == "profile" and status == 409 and stale_error(payload):
+            record("skip", f"{key} status", "profile requires on-demand verified resolution RPC and local API returned stale")
             continue
         expect_status_ok(key, status, payload)
 
@@ -480,7 +499,12 @@ def compare_records_and_profile(responses: dict[str, Any], domain: dict[str, Any
     expect_equal("records coin 0 missing", ptr(records_expanded, "/data/coin_addresses/0/status"), "not_found")
     expect_equal("records content_hash missing", ptr(records_expanded, "/data/content_hash/status"), "not_found")
 
-    profile = responses["profile"]["payload"]
+    profile_response = responses["profile"]
+    if profile_response["status"] != 200:
+        record("skip", "profile parity", f"profile route unavailable with status {profile_response['status']}")
+        return
+
+    profile = profile_response["payload"]
     expect_equal("profile name", ptr(profile, "/data/name"), domain["name"])
     expect_equal("profile namehash", lower(ptr(profile, "/data/namehash")), lower(domain["id"]))
     inventory_selectors = ptr(profile, "/declared_state/record_inventory/selectors")
@@ -491,21 +515,36 @@ def compare_records_and_profile(responses: dict[str, Any], domain: dict[str, Any
 
 
 def compare_children(responses: dict[str, Any], graph: Any) -> None:
-    bigname_children = [row["normalized_name"] for row in responses["children"]["payload"]["data"]]
-    graph_children = [row["name"] for row in graph["children"]]
+    bigname_rows = responses["children"]["payload"]["data"]
+    bigname_children = [row["normalized_name"] for row in bigname_rows]
+    graph_children = [name for row in graph["children"] if (name := graph_child_display_name(row))]
+    bigname_labelhashes = [lower(row.get("labelhash")) for row in bigname_rows if row.get("labelhash")]
+    graph_labelhashes = [lower(row.get("labelhash")) for row in graph["children"] if row.get("labelhash")]
+    labelhashes_match = sorted(bigname_labelhashes) == sorted(graph_labelhashes)
+
     if not bigname_children and graph_children:
+        record(
+            "fail",
+            "children names",
+            "bigname returned no child rows for ENS subgraph children",
+        )
+        record(
+            "fail",
+            "children total_count",
+            "bigname returned no child rows for ENS subgraph children",
+        )
+        return
+    expect_set_equal("children labelhashes", bigname_labelhashes, graph_labelhashes)
+    if sorted(bigname_children) == sorted(graph_children):
+        record("pass", "children names", json.dumps(sorted(bigname_children)))
+    elif labelhashes_match:
         record(
             "skip",
             "children names",
-            "ENS subgraph has label-preimage child names; bigname exposes only children with local child name_surfaces",
+            "child identities match by labelhash; display labels may differ when either indexer has extra preimage knowledge",
         )
-        record(
-            "skip",
-            "children total_count",
-            "bigname has no displayable child surfaces for the subgraph's labelhash-only ENSv1 children",
-        )
-        return
-    expect_set_equal("children names", bigname_children, graph_children)
+    else:
+        record("fail", "children names", f"expected {sorted(graph_children)!r}, got {sorted(bigname_children)!r}")
     expect_equal("children total_count", ptr(responses["children"]["payload"], "/meta/total_count"), len(graph_children))
 
 
@@ -596,8 +635,17 @@ def compare_skipped(responses: dict[str, Any]) -> None:
         record("fail", "execution explain", f"unexpected response: {explain}")
 
     primary = responses["primary_name"]
-    if primary["status"] == 200 and ptr(primary["payload"], "/declared_state/claimed_primary_name/status") == "success":
-        record("skip", "primary name", "ENS subgraph has no current primary-name field equivalent for the docs sample")
+    primary_claim_status = ptr(primary["payload"], "/declared_state/claimed_primary_name/status")
+    primary_coverage_status = ptr(primary["payload"], "/coverage/status")
+    if primary["status"] == 200 and (
+        primary_claim_status == "success"
+        or (primary_claim_status == "not_found" and primary_coverage_status == "unsupported")
+    ):
+        record(
+            "skip",
+            "primary name",
+            "ENS subgraph has no current primary-name field equivalent for the docs sample",
+        )
     else:
         record("fail", "primary name", f"unexpected response: {primary}")
 

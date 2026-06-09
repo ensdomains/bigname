@@ -58,6 +58,9 @@ pub async fn load_children_current_page(
             cc.canonical_display_name,
             cc.normalized_name,
             cc.namehash,
+            cc.labelhash,
+            cc.owner,
+            cc.registrant,
             cc.provenance,
             cc.chain_positions,
             cc.canonicality_summary,
@@ -66,7 +69,7 @@ pub async fn load_children_current_page(
         FROM children_current cc
         JOIN name_surfaces parent
           ON parent.logical_name_id = cc.parent_logical_name_id
-        JOIN name_surfaces child
+        LEFT JOIN name_surfaces child
           ON child.logical_name_id = cc.child_logical_name_id
         WHERE cc.parent_logical_name_id =
         "#,
@@ -146,29 +149,84 @@ pub async fn load_children_current_summaries(
         )
         SELECT
             requested.parent_logical_name_id,
-            COUNT(child.logical_name_id)::BIGINT AS child_count,
+            COUNT(cc.child_logical_name_id) FILTER (
+                WHERE cc.child_logical_name_id IS NOT NULL
+                  AND (
+                      child.logical_name_id IS NULL
+                      OR cc.provenance #>> '{label,source}' = 'label_preimage'
+                      OR child.canonicality_state IN (
+                          'canonical'::canonicality_state,
+                          'safe'::canonicality_state,
+                          'finalized'::canonicality_state
+                      )
+                  )
+            )::BIGINT AS child_count,
             COALESCE(
                 jsonb_agg(
                     cc.provenance
                     ORDER BY cc.canonical_display_name ASC, cc.child_logical_name_id ASC
-                ) FILTER (WHERE child.logical_name_id IS NOT NULL),
+                ) FILTER (
+                    WHERE cc.child_logical_name_id IS NOT NULL
+                      AND (
+                          child.logical_name_id IS NULL
+                          OR cc.provenance #>> '{label,source}' = 'label_preimage'
+                          OR child.canonicality_state IN (
+                              'canonical'::canonicality_state,
+                              'safe'::canonicality_state,
+                              'finalized'::canonicality_state
+                          )
+                      )
+                ),
                 '[]'::jsonb
             ) AS provenance_inputs,
             COALESCE(
                 jsonb_agg(
                     cc.chain_positions
                     ORDER BY cc.canonical_display_name ASC, cc.child_logical_name_id ASC
-                ) FILTER (WHERE child.logical_name_id IS NOT NULL),
+                ) FILTER (
+                    WHERE cc.child_logical_name_id IS NOT NULL
+                      AND (
+                          child.logical_name_id IS NULL
+                          OR cc.provenance #>> '{label,source}' = 'label_preimage'
+                          OR child.canonicality_state IN (
+                              'canonical'::canonicality_state,
+                              'safe'::canonicality_state,
+                              'finalized'::canonicality_state
+                          )
+                      )
+                ),
                 '[]'::jsonb
             ) AS chain_positions,
             COALESCE(
                 jsonb_agg(
                     cc.canonicality_summary
                     ORDER BY cc.canonical_display_name ASC, cc.child_logical_name_id ASC
-                ) FILTER (WHERE child.logical_name_id IS NOT NULL),
+                ) FILTER (
+                    WHERE cc.child_logical_name_id IS NOT NULL
+                      AND (
+                          child.logical_name_id IS NULL
+                          OR cc.provenance #>> '{label,source}' = 'label_preimage'
+                          OR child.canonicality_state IN (
+                              'canonical'::canonicality_state,
+                              'safe'::canonicality_state,
+                              'finalized'::canonicality_state
+                          )
+                      )
+                ),
                 '[]'::jsonb
             ) AS canonicality_summaries,
-            MAX(cc.last_recomputed_at) FILTER (WHERE child.logical_name_id IS NOT NULL)
+            MAX(cc.last_recomputed_at) FILTER (
+                WHERE cc.child_logical_name_id IS NOT NULL
+                  AND (
+                      child.logical_name_id IS NULL
+                      OR cc.provenance #>> '{label,source}' = 'label_preimage'
+                      OR child.canonicality_state IN (
+                          'canonical'::canonicality_state,
+                          'safe'::canonicality_state,
+                          'finalized'::canonicality_state
+                      )
+                  )
+            )
                 AS last_recomputed_at
         FROM requested
         LEFT JOIN name_surfaces parent
@@ -184,11 +242,6 @@ pub async fn load_children_current_summaries(
          AND parent.logical_name_id IS NOT NULL
         LEFT JOIN name_surfaces child
           ON child.logical_name_id = cc.child_logical_name_id
-         AND child.canonicality_state IN (
-                'canonical'::canonicality_state,
-                'safe'::canonicality_state,
-                'finalized'::canonicality_state
-         )
         GROUP BY
             requested.ordinal,
             requested.parent_logical_name_id
@@ -227,6 +280,9 @@ async fn load_children_current_internal(
             cc.canonical_display_name,
             cc.normalized_name,
             cc.namehash,
+            cc.labelhash,
+            cc.owner,
+            cc.registrant,
             cc.provenance,
             cc.chain_positions,
             cc.canonicality_summary,
@@ -235,7 +291,7 @@ async fn load_children_current_internal(
         FROM children_current cc
         JOIN name_surfaces parent
           ON parent.logical_name_id = cc.parent_logical_name_id
-        JOIN name_surfaces child
+        LEFT JOIN name_surfaces child
           ON child.logical_name_id = cc.child_logical_name_id
         WHERE cc.parent_logical_name_id = $1
           AND cc.surface_class = $2
@@ -287,6 +343,9 @@ pub(super) fn decode_children_current_row(row: PgRow) -> Result<ChildrenCurrentR
         canonical_display_name: crate::sql_row::get(&row, "canonical_display_name")?,
         normalized_name: crate::sql_row::get(&row, "normalized_name")?,
         namehash: crate::sql_row::get(&row, "namehash")?,
+        labelhash: crate::sql_row::get(&row, "labelhash")?,
+        owner: crate::sql_row::get(&row, "owner")?,
+        registrant: crate::sql_row::get(&row, "registrant")?,
         provenance: crate::sql_row::get(&row, "provenance")?,
         chain_positions: crate::sql_row::get(&row, "chain_positions")?,
         canonicality_summary: crate::sql_row::get(&row, "canonicality_summary")?,

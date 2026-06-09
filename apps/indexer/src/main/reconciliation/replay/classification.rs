@@ -263,25 +263,19 @@ pub(crate) enum RawFactReplayContractMode {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct RawFactReplayContractPlan {
-    mode: RawFactReplayContractMode,
-}
+pub(crate) struct RawFactReplayContractPlan(RawFactReplayContractMode);
 
 impl RawFactReplayContractPlan {
     pub(crate) const fn stateless_restricted() -> Self {
-        Self {
-            mode: RawFactReplayContractMode::StatelessRestricted,
-        }
+        Self(RawFactReplayContractMode::StatelessRestricted)
     }
 
     pub(crate) const fn full_closure() -> Self {
-        Self {
-            mode: RawFactReplayContractMode::FullClosure,
-        }
+        Self(RawFactReplayContractMode::FullClosure)
     }
 
     pub(crate) fn permits_nonstateless_adapters(self) -> bool {
-        match self.mode {
+        match self.0 {
             RawFactReplayContractMode::StatelessRestricted => false,
             RawFactReplayContractMode::FullClosure => true,
         }
@@ -602,9 +596,7 @@ async fn earliest_required_raw_fact_block(
 }
 
 fn source_family_in(source_family: &str, candidates: &[&str]) -> bool {
-    candidates
-        .iter()
-        .any(|candidate| source_family == *candidate)
+    candidates.contains(&source_family)
 }
 
 #[cfg(test)]

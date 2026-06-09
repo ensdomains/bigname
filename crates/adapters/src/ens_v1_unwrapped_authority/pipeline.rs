@@ -2,15 +2,16 @@ use super::*;
 use crate::ens_v1_subregistry_discovery::ReplayAdapterCheckpointContext;
 
 mod apply;
+mod finalize;
 mod flush;
 mod identity;
 mod materialize;
 mod summary;
 use apply::*;
+use finalize::{FinalizeAuthoritySync, PreMaterializationTimings, finalize_authority_sync};
 use flush::*;
 use identity::*;
-use materialize::{AuthorityMaterialization, materialize_authority_histories};
-use summary::{build_summary, empty_summary};
+use summary::empty_summary;
 
 const FULL_REPLAY_RAW_LOG_STREAM_MAX_BLOCK_SCAN_SPAN: i64 = 262_144;
 const FULL_REPLAY_RAW_LOG_STREAM_DEFAULT_MAX_LOGS_PER_PAGE: usize = 100_000;
@@ -531,121 +532,35 @@ async fn sync_ens_v1_unwrapped_authority_with_scope(
         return Ok(empty_summary(scanned_log_count));
     }
 
-    let head_block = block_index
-        .blocks
-        .last()
-        .cloned()
-        .context("canonical block index must contain a head block")?;
-    let head_ref = BoundaryRef {
-        chain_id: head_block.chain_id.clone(),
-        block_hash: head_block.block_hash.clone(),
-        block_number: head_block.block_number,
-        block_timestamp: head_block.block_timestamp,
-        canonicality_state: head_block.canonicality_state,
-        namespace: active_emitters
-            .first()
-            .map(|emitter| emitter.namespace.clone())
-            .or_else(|| {
-                generic_resolver_event_sources
-                    .first()
-                    .map(|source| source.namespace.clone())
-            })
-            .unwrap_or_else(|| "ens".to_owned()),
-    };
-
-    let materialization_started = Instant::now();
-    let AuthorityMaterialization {
-        token_lineage_count,
-        resource_count,
-        surface_count,
-        mut bindings,
-        events,
-        token_lineages_upsert_ms,
-        resources_upsert_ms,
-        surfaces_upsert_ms,
-    } = materialize_authority_histories(pool, chain, &head_ref, histories, reverse_histories)
-        .await?;
-    let materialization_ms = materialization_started.elapsed().as_millis();
-
-    let normalize_started = Instant::now();
-    let mut by_kind = flushed_events.by_kind.clone();
-    merge_event_kind_counts(&mut by_kind, count_events_by_kind(&events));
-    normalize_surface_bindings_for_upsert(&mut bindings)?;
-    let normalize_ms = normalize_started.elapsed().as_millis();
-    let closure_started = Instant::now();
-    let closure_count = prepend_existing_open_binding_closures(pool, &mut bindings).await?;
-    let closure_ms = closure_started.elapsed().as_millis();
-    let binding_closures_started = Instant::now();
-    if closure_count > 0 {
-        upsert_surface_bindings_without_snapshots(pool, &bindings[..closure_count]).await?;
-    }
-    let binding_closures_upsert_ms = binding_closures_started.elapsed().as_millis();
-    let (binding_overlap_repair_count, binding_overlap_repair_ms) =
-        close_binding_overlaps(pool, &bindings[closure_count..]).await?;
-    let bindings_started = Instant::now();
-    upsert_surface_bindings_without_snapshots(pool, &bindings[closure_count..]).await?;
-    let bindings_upsert_ms = bindings_started.elapsed().as_millis();
-    let binding_count = bindings.len();
-    drop(bindings);
-    let normalized_events_started = Instant::now();
-    let normalized_event_count = events.len();
-    let event_inserted_count = upsert_normalized_events_count_only(pool, &events).await?;
-    let normalized_events_upsert_ms = normalized_events_started.elapsed().as_millis();
-    drop(events);
-
-    tracing::info!(
-        service = "adapters",
-        adapter = DERIVATION_KIND_ENS_V1_UNWRAPPED_AUTHORITY,
+    finalize_authority_sync(FinalizeAuthoritySync {
+        pool,
         chain,
         restrict_to_block_hashes,
-        block_hash_count = block_hashes.len(),
-        source_scope_target_count = source_scope.as_ref().map_or(0, Vec::len),
-        active_emitter_count = active_emitters.len(),
+        block_hash_count: block_hashes.len(),
+        source_scope_target_count: source_scope.as_ref().map_or(0, Vec::len),
+        active_emitter_count: active_emitters.len(),
         scanned_log_count,
         matched_log_count,
-        history_count = surface_count,
-        token_lineage_count,
-        resource_count,
-        binding_count,
-        normalized_event_count,
-        flushed_normalized_event_count = flushed_events.total_count,
-        normalized_event_inserted_count = event_inserted_count,
-        flushed_normalized_event_inserted_count = flushed_events.inserted_count,
-        active_emitters_ms,
-        raw_log_load_ms,
-        canonical_blocks_ms,
-        reverse_claim_sources_ms,
-        resolver_profile_gate_ms,
-        same_tx_name_intro_ms,
-        preload_name_metadata_ms,
-        preload_restricted_histories_ms,
-        migrated_registry_nodes_ms,
-        apply_ms,
-        materialization_ms,
-        normalize_ms,
-        closure_ms,
-        token_lineages_upsert_ms,
-        resources_upsert_ms,
-        surfaces_upsert_ms,
-        binding_closures_upsert_ms,
-        binding_overlap_repair_count,
-        binding_overlap_repair_ms,
-        bindings_upsert_ms,
-        normalized_events_upsert_ms,
-        total_ms = total_started.elapsed().as_millis(),
-        "ENSv1 unwrapped-authority replay timing"
-    );
-
-    let summary = build_summary(
-        scanned_log_count,
-        matched_log_count,
-        (surface_count, resource_count, binding_count),
-        (flushed_events.total_count, flushed_events.inserted_count),
-        (normalized_event_count, event_inserted_count),
-        by_kind,
-    );
-    if let Some(checkpoint) = active_replay_checkpoint.as_mut() {
-        checkpoint.mark_completed(pool, &summary).await?;
-    }
-    Ok(summary)
+        block_index: &block_index,
+        active_emitters: &active_emitters,
+        generic_resolver_event_sources: &generic_resolver_event_sources,
+        histories,
+        reverse_histories,
+        flushed_events,
+        active_replay_checkpoint: &mut active_replay_checkpoint,
+        pre_timings: PreMaterializationTimings {
+            active_emitters_ms,
+            raw_log_load_ms,
+            canonical_blocks_ms,
+            reverse_claim_sources_ms,
+            resolver_profile_gate_ms,
+            same_tx_name_intro_ms,
+            preload_name_metadata_ms,
+            preload_restricted_histories_ms,
+            migrated_registry_nodes_ms,
+            apply_ms,
+        },
+        total_started,
+    })
+    .await
 }

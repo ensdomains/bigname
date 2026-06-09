@@ -22,6 +22,7 @@ pub(crate) enum Command {
     ChildrenCurrent(ChildrenCurrentArgs),
     Execution(ExecutionArgs),
     Inspect(inspect::InspectArgs),
+    LabelPreimages(LabelPreimagesArgs),
     ManifestDrift(ManifestDriftArgs),
     NameCurrent(NameCurrentArgs),
     PermissionsCurrent(PermissionsCurrentArgs),
@@ -111,6 +112,12 @@ pub(crate) struct ExecutionArgs {
 }
 
 #[derive(Args, Debug)]
+pub(crate) struct LabelPreimagesArgs {
+    #[command(subcommand)]
+    pub(crate) command: LabelPreimagesCommand,
+}
+
+#[derive(Args, Debug)]
 pub(crate) struct ManifestDriftArgs {
     #[command(subcommand)]
     pub(crate) command: ManifestDriftCommand,
@@ -179,6 +186,11 @@ pub(crate) enum ExecutionCommand {
 }
 
 #[derive(Subcommand, Debug)]
+pub(crate) enum LabelPreimagesCommand {
+    ImportEnsRainbow(LabelPreimagesImportEnsRainbowArgs),
+}
+
+#[derive(Subcommand, Debug)]
 pub(crate) enum ManifestDriftCommand {
     Audit(ManifestDriftAuditArgs),
 }
@@ -237,6 +249,38 @@ pub(crate) struct ChildrenCurrentRebuildArgs {
     pub(crate) database: DatabaseConfig,
     #[arg(long)]
     pub(crate) logical_name_id: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct LabelPreimagesImportEnsRainbowArgs {
+    #[command(flatten)]
+    pub(crate) database: DatabaseConfig,
+    #[arg(long, value_parser = parse_positive_i64)]
+    pub(crate) batch_size: Option<i64>,
+    #[arg(long, value_parser = parse_non_negative_i64)]
+    pub(crate) limit: Option<i64>,
+}
+
+fn parse_positive_i64(value: &str) -> Result<i64, String> {
+    let parsed = value
+        .parse::<i64>()
+        .map_err(|error| format!("must be a positive integer: {error}"))?;
+    if parsed > 0 {
+        Ok(parsed)
+    } else {
+        Err("must be a positive integer".to_owned())
+    }
+}
+
+fn parse_non_negative_i64(value: &str) -> Result<i64, String> {
+    let parsed = value
+        .parse::<i64>()
+        .map_err(|error| format!("must be a non-negative integer: {error}"))?;
+    if parsed >= 0 {
+        Ok(parsed)
+    } else {
+        Err("must be non-negative".to_owned())
+    }
 }
 
 #[derive(Args, Debug)]

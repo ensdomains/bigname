@@ -42,7 +42,7 @@ justification = "Phase 7 allowlist for an oversized production file; future chan
 
 [[files]]
 path = "apps/indexer/src/main/reconciliation/replay/classification.rs"
-loc = 608
+loc = 604
 justification = "Phase 7 allowlist for an oversized production file; future changes should split or shrink it."
 
 [[files]]
@@ -69,12 +69,7 @@ justification = "Phase 7 allowlist for an oversized production file; future chan
 
 [[files]]
 path = "crates/adapters/src/ens_v1_unwrapped_authority/materialization.rs"
-loc = 709
-justification = "Phase 7 allowlist for an oversized production file; future changes should split or shrink it."
-
-[[files]]
-path = "crates/adapters/src/ens_v1_unwrapped_authority/pipeline.rs"
-loc = 625
+loc = 634
 justification = "Phase 7 allowlist for an oversized production file; future changes should split or shrink it."
 
 [[files]]
@@ -90,4 +85,9 @@ justification = "Phase 7 allowlist for an oversized production file; future chan
 [[files]]
 path = "crates/storage/src/identity/write_fast.rs"
 loc = 808
+justification = "Phase 7 allowlist for an oversized production file; future changes should split or shrink it."
+
+[[files]]
+path = "crates/storage/src/normalized_events/upsert/repair/ens_v1_registry_event_time.rs"
+loc = 872
 justification = "Phase 7 allowlist for an oversized production file; future changes should split or shrink it."

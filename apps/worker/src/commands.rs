@@ -18,6 +18,7 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
         Command::ChildrenCurrent(args) => children_current(args).await,
         Command::Execution(args) => execution_command(args).await,
         Command::Inspect(args) => inspect::inspect_command(args).await,
+        Command::LabelPreimages(args) => label_preimages_command(args).await,
         Command::ManifestDrift(args) => manifest_drift_command(args).await,
         Command::NameCurrent(args) => name_current(args).await,
         Command::PermissionsCurrent(args) => permissions_current(args).await,
@@ -51,6 +52,14 @@ async fn address_names_current(args: AddressNamesCurrentArgs) -> Result<()> {
 async fn children_current(args: ChildrenCurrentArgs) -> Result<()> {
     match args.command {
         ChildrenCurrentCommand::Rebuild(args) => rebuild_children_current(args).await,
+    }
+}
+
+async fn label_preimages_command(args: LabelPreimagesArgs) -> Result<()> {
+    match args.command {
+        LabelPreimagesCommand::ImportEnsRainbow(args) => {
+            import_ens_rainbow_label_preimages(args).await
+        }
     }
 }
 
@@ -153,6 +162,28 @@ async fn rebuild_children_current(args: ChildrenCurrentRebuildArgs) -> Result<()
         deleted_row_count = summary.deleted_row_count,
         logical_name_id = args.logical_name_id.as_deref().unwrap_or("all"),
         "children_current rebuild completed"
+    );
+
+    Ok(())
+}
+
+async fn import_ens_rainbow_label_preimages(
+    args: LabelPreimagesImportEnsRainbowArgs,
+) -> Result<()> {
+    let pool = bigname_storage::connect(&args.database).await?;
+    let summary = bigname_storage::import_label_preimages_from_ens_names_table(
+        &pool,
+        args.batch_size,
+        args.limit,
+    )
+    .await?;
+
+    info!(
+        service = "worker",
+        scanned_row_count = summary.scanned_row_count,
+        retained_row_count = summary.retained_row_count,
+        invalidated_parent_count = summary.invalidated_parent_count,
+        "ENS rainbow label preimage import completed"
     );
 
     Ok(())

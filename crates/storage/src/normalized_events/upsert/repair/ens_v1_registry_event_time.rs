@@ -59,11 +59,10 @@ pub(crate) async fn repair_ens_v1_unwrapped_authority_registry_event_time_resour
         ) {
             continue;
         }
-        let (Some(old_resource_id), Some(new_resource_id)) =
-            (existing.resource_id, event.resource_id)
-        else {
+        let Some(old_resource_id) = existing.resource_id else {
             continue;
         };
+        let new_resource_id = event.resource_id;
         let (Some(logical_name_id), Some(block_number)) =
             (existing.logical_name_id.as_ref(), existing.block_number)
         else {
@@ -162,7 +161,28 @@ pub(crate) async fn repair_ens_v1_unwrapped_authority_registry_event_time_resour
             )
         ),
         repair_map AS (
-            SELECT input.*
+            SELECT
+                input.*,
+                CASE
+                    WHEN input.event_kind = 'RecordChanged'
+                     AND input.old_before_state::JSONB IS NOT DISTINCT FROM
+                         input.new_before_state::JSONB
+                     AND input.old_after_state::JSONB - 'value' =
+                         input.new_after_state::JSONB - 'value'
+                     AND input.old_after_state::JSONB ->> 'record_family' = 'text'
+                     AND input.new_after_state::JSONB ->> 'record_family' = 'text'
+                     AND COALESCE(input.old_after_state::JSONB ->> 'record_key', '') LIKE
+                         'text:%'
+                     AND input.old_after_state::JSONB ->> 'record_key' =
+                         input.new_after_state::JSONB ->> 'record_key'
+                     AND COALESCE(input.old_after_state::JSONB ->> 'selector_key', '') <> ''
+                     AND input.old_after_state::JSONB ->> 'selector_key' =
+                         input.new_after_state::JSONB ->> 'selector_key'
+                     AND (input.old_after_state::JSONB ? 'value')
+                     AND NOT (input.new_after_state::JSONB ? 'value')
+                    THEN input.old_after_state::JSONB
+                    ELSE input.new_after_state::JSONB
+                END AS repaired_after_state
             FROM input
             JOIN resources old_resource
               ON old_resource.resource_id = input.old_resource_id
@@ -274,7 +294,10 @@ pub(crate) async fn repair_ens_v1_unwrapped_authority_registry_event_time_resour
                  )
                  OR (
                      new_resource.resource_id IS NULL
-                     AND input.new_resource_id <> old_resource.resource_id
+                     AND (
+                         input.new_resource_id IS NULL
+                         OR input.new_resource_id <> old_resource.resource_id
+                     )
                      AND old_resource.provenance->>'authority_kind' IN ('registrar', 'wrapper')
                      AND old_resource.block_number > input.block_number
                  )
@@ -306,6 +329,75 @@ pub(crate) async fn repair_ens_v1_unwrapped_authority_registry_event_time_resour
                          input.new_before_state::JSONB - 'owner'
                      AND COALESCE(input.old_before_state::JSONB ->> 'owner', '') <> ''
                      AND COALESCE(input.new_before_state::JSONB ->> 'owner', '') <> ''
+                 )
+                 OR (
+                     input.event_kind = 'RecordVersionChanged'
+                     AND input.old_after_state::JSONB IS NOT DISTINCT FROM
+                         input.new_after_state::JSONB
+                     AND input.old_before_state::JSONB - 'record_version' =
+                         input.new_before_state::JSONB - 'record_version'
+                     AND COALESCE(input.new_after_state::JSONB ->> 'record_version', '') ~
+                         '^[0-9]+$'
+                     AND (
+                         (
+                             input.old_before_state::JSONB -> 'record_version' =
+                                 'null'::JSONB
+                             AND COALESCE(
+                                 input.new_before_state::JSONB ->> 'record_version',
+                                 ''
+                             ) ~ '^[0-9]+$'
+                             AND (
+                                 input.new_before_state::JSONB ->> 'record_version'
+                             )::BIGINT + 1 =
+                                 (
+                                     input.new_after_state::JSONB ->> 'record_version'
+                                 )::BIGINT
+                         )
+                         OR (
+                             input.new_before_state::JSONB -> 'record_version' =
+                                 'null'::JSONB
+                             AND COALESCE(
+                                 input.old_before_state::JSONB ->> 'record_version',
+                                 ''
+                             ) ~ '^[0-9]+$'
+                             AND (
+                                 input.old_before_state::JSONB ->> 'record_version'
+                             )::BIGINT + 1 =
+                                 (
+                                     input.new_after_state::JSONB ->> 'record_version'
+                                 )::BIGINT
+                         )
+                     )
+                 )
+                 OR (
+                     input.event_kind = 'RecordChanged'
+                     AND input.old_before_state::JSONB IS NOT DISTINCT FROM
+                         input.new_before_state::JSONB
+                     AND input.old_after_state::JSONB - 'value' =
+                         input.new_after_state::JSONB - 'value'
+                     AND input.old_after_state::JSONB ->> 'record_family' = 'text'
+                     AND input.new_after_state::JSONB ->> 'record_family' = 'text'
+                     AND COALESCE(input.old_after_state::JSONB ->> 'record_key', '') LIKE
+                         'text:%'
+                     AND input.old_after_state::JSONB ->> 'record_key' =
+                         input.new_after_state::JSONB ->> 'record_key'
+                     AND COALESCE(input.old_after_state::JSONB ->> 'selector_key', '') <> ''
+                     AND input.old_after_state::JSONB ->> 'selector_key' =
+                         input.new_after_state::JSONB ->> 'selector_key'
+                     AND (
+                         (
+                             (input.old_after_state::JSONB ? 'value')
+                             AND NOT (input.new_after_state::JSONB ? 'value')
+                             AND jsonb_typeof(input.old_after_state::JSONB -> 'value') =
+                                 'string'
+                         )
+                         OR (
+                             NOT (input.old_after_state::JSONB ? 'value')
+                             AND (input.new_after_state::JSONB ? 'value')
+                             AND jsonb_typeof(input.new_after_state::JSONB -> 'value') =
+                                 'string'
+                         )
+                     )
                  )
                  OR (
                      input.event_kind = 'PermissionChanged'
@@ -545,7 +637,7 @@ pub(crate) async fn repair_ens_v1_unwrapped_authority_registry_event_time_resour
             SET
                 resource_id = repair.new_resource_id,
                 before_state = repair.new_before_state::JSONB,
-                after_state = repair.new_after_state::JSONB,
+                after_state = repair.repaired_after_state,
                 observed_at = now()
             FROM repair_map repair
             WHERE event.event_identity = repair.event_identity
@@ -559,6 +651,37 @@ pub(crate) async fn repair_ens_v1_unwrapped_authority_registry_event_time_resour
                 event.event_kind,
                 repair.old_resource_id,
                 repair.new_resource_id
+        ),
+        already_repaired AS (
+            SELECT event.event_identity
+            FROM input
+            JOIN normalized_events event
+              ON event.event_identity = input.event_identity
+            WHERE event.event_kind = input.event_kind
+              AND event.resource_id IS NOT DISTINCT FROM input.new_resource_id
+              AND event.before_state IS NOT DISTINCT FROM input.new_before_state::JSONB
+              AND event.after_state IS NOT DISTINCT FROM (
+                  CASE
+                      WHEN input.event_kind = 'RecordChanged'
+                       AND input.old_before_state::JSONB IS NOT DISTINCT FROM
+                           input.new_before_state::JSONB
+                       AND input.old_after_state::JSONB - 'value' =
+                           input.new_after_state::JSONB - 'value'
+                       AND input.old_after_state::JSONB ->> 'record_family' = 'text'
+                       AND input.new_after_state::JSONB ->> 'record_family' = 'text'
+                       AND COALESCE(input.old_after_state::JSONB ->> 'record_key', '') LIKE
+                           'text:%'
+                       AND input.old_after_state::JSONB ->> 'record_key' =
+                           input.new_after_state::JSONB ->> 'record_key'
+                       AND COALESCE(input.old_after_state::JSONB ->> 'selector_key', '') <> ''
+                       AND input.old_after_state::JSONB ->> 'selector_key' =
+                           input.new_after_state::JSONB ->> 'selector_key'
+                       AND (input.old_after_state::JSONB ? 'value')
+                       AND NOT (input.new_after_state::JSONB ? 'value')
+                      THEN input.old_after_state::JSONB
+                      ELSE input.new_after_state::JSONB
+                  END
+              )
         ),
         queued_changes AS (
             INSERT INTO projection_normalized_event_changes (
@@ -640,8 +763,16 @@ pub(crate) async fn repair_ens_v1_unwrapped_authority_registry_event_time_resour
         )
         SELECT input.event_identity
         FROM input
-        JOIN updated
-          ON updated.event_identity = input.event_identity
+        WHERE EXISTS (
+            SELECT 1
+            FROM updated
+            WHERE updated.event_identity = input.event_identity
+        )
+        OR EXISTS (
+            SELECT 1
+            FROM already_repaired
+            WHERE already_repaired.event_identity = input.event_identity
+        )
         "#,
     )
     .bind(&event_identities)
@@ -668,20 +799,285 @@ pub(crate) async fn repair_ens_v1_unwrapped_authority_registry_event_time_resour
     )?;
 
     let repaired = repaired.into_iter().collect::<HashSet<_>>();
-    let rejected = event_identities
-        .iter()
-        .zip(old_resource_ids.iter())
-        .zip(new_resource_ids.iter())
-        .filter(|((event_identity, _), _)| !repaired.contains(event_identity.as_str()))
-        .map(|((event_identity, old_resource_id), new_resource_id)| {
+    let rejected = (0..event_identities.len())
+        .filter(|index| !repaired.contains(event_identities[*index].as_str()))
+        .map(|index| {
+            let event_identity = &event_identities[index];
+            let old_resource_id = old_resource_ids[index];
+            let new_resource_id = new_resource_ids[index];
+            let new_resource_id = new_resource_id
+                .map(|resource_id| resource_id.to_string())
+                .unwrap_or_else(|| "NULL".to_owned());
             format!(
-                "{event_identity} (old_resource_id={old_resource_id}, new_resource_id={new_resource_id})"
+                "{event_identity} (old_resource_id={old_resource_id}, new_resource_id={new_resource_id}, logical_name_id={}, event_kind={}, old_before_state={}, new_before_state={}, old_after_state={}, new_after_state={})",
+                logical_name_ids[index],
+                event_kinds[index],
+                old_before_states[index],
+                new_before_states[index],
+                old_after_states[index],
+                new_after_states[index]
             )
         })
         .collect::<Vec<_>>();
     if !rejected.is_empty() {
         bail!(
             "ENSv1 registry event-time resource_id repair rejected invalid resource anchors for events: {}",
+            rejected.join(", ")
+        );
+    }
+
+    Ok(repaired)
+}
+
+pub(crate) async fn repair_ens_v1_unwrapped_authority_registry_event_time_before_states(
+    executor: &mut sqlx::Transaction<'_, Postgres>,
+    events: &[NormalizedEvent],
+    existing_by_identity: &HashMap<String, NormalizedEvent>,
+) -> Result<HashSet<String>> {
+    let mut event_identities = Vec::new();
+    let mut resource_ids = Vec::new();
+    let mut logical_name_ids = Vec::new();
+    let mut event_kinds = Vec::new();
+    let mut old_before_states = Vec::new();
+    let mut new_before_states = Vec::new();
+    let mut after_states = Vec::new();
+
+    for event in events {
+        let Some(existing) = existing_by_identity.get(&event.event_identity) else {
+            continue;
+        };
+        if !ens_v1_unwrapped_authority_registry_event_time_before_state_repair_allowed(
+            existing,
+            event,
+            &normalized_event_identity_differences(existing, event),
+        ) {
+            continue;
+        }
+        let (Some(resource_id), Some(logical_name_id)) =
+            (existing.resource_id, existing.logical_name_id.as_ref())
+        else {
+            continue;
+        };
+
+        event_identities.push(event.event_identity.clone());
+        resource_ids.push(resource_id);
+        logical_name_ids.push(logical_name_id.clone());
+        event_kinds.push(event.event_kind.clone());
+        old_before_states.push(serialize_jsonb_value(
+            &existing.before_state,
+            "failed to serialize existing ENSv1 registry event-time before_state",
+        )?);
+        new_before_states.push(serialize_jsonb_value(
+            &event.before_state,
+            "failed to serialize repaired ENSv1 registry event-time before_state",
+        )?);
+        after_states.push(serialize_jsonb_value(
+            &event.after_state,
+            "failed to serialize ENSv1 registry event-time after_state",
+        )?);
+    }
+
+    if event_identities.is_empty() {
+        return Ok(HashSet::new());
+    }
+
+    let repaired = sqlx::query_scalar::<_, String>(
+        r#"
+        WITH input AS (
+            SELECT *
+            FROM unnest(
+                $1::TEXT[],
+                $2::UUID[],
+                $3::TEXT[],
+                $4::TEXT[],
+                $5::TEXT[],
+                $6::TEXT[],
+                $7::TEXT[]
+            ) AS input(
+                event_identity,
+                resource_id,
+                logical_name_id,
+                event_kind,
+                old_before_state,
+                new_before_state,
+                after_state
+            )
+        ),
+        repair_map AS (
+            SELECT input.*
+            FROM input
+            JOIN resources resource
+              ON resource.resource_id = input.resource_id
+             AND resource.chain_id = 'ethereum-mainnet'
+             AND resource.canonicality_state IN (
+                 'canonical'::canonicality_state,
+                 'safe'::canonicality_state,
+                 'finalized'::canonicality_state
+             )
+             AND resource.provenance->>'logical_name_id' = input.logical_name_id
+             AND resource.provenance->>'authority_kind' IN (
+                 'registrar',
+                 'wrapper',
+                 'registry_only'
+             )
+            WHERE (
+                input.event_kind = 'AuthorityTransferred'
+                AND input.old_before_state::JSONB - 'owner' =
+                    input.new_before_state::JSONB - 'owner'
+                AND COALESCE(input.old_before_state::JSONB ->> 'owner', '') <> ''
+                AND COALESCE(input.new_before_state::JSONB ->> 'owner', '') <> ''
+            )
+            OR (
+                input.event_kind = 'RecordVersionChanged'
+                AND input.old_before_state::JSONB - 'record_version' =
+                    input.new_before_state::JSONB - 'record_version'
+                AND COALESCE(input.after_state::JSONB ->> 'record_version', '') ~
+                    '^[0-9]+$'
+                AND (
+                    (
+                        input.old_before_state::JSONB -> 'record_version' =
+                            'null'::JSONB
+                        AND COALESCE(
+                            input.new_before_state::JSONB ->> 'record_version',
+                            ''
+                        ) ~ '^[0-9]+$'
+                        AND (
+                            input.new_before_state::JSONB ->> 'record_version'
+                        )::BIGINT + 1 =
+                            (input.after_state::JSONB ->> 'record_version')::BIGINT
+                    )
+                    OR (
+                        input.new_before_state::JSONB -> 'record_version' =
+                            'null'::JSONB
+                        AND COALESCE(
+                            input.old_before_state::JSONB ->> 'record_version',
+                            ''
+                        ) ~ '^[0-9]+$'
+                        AND (
+                            input.old_before_state::JSONB ->> 'record_version'
+                        )::BIGINT + 1 =
+                            (input.after_state::JSONB ->> 'record_version')::BIGINT
+                    )
+                )
+            )
+        ),
+        updated AS (
+            UPDATE normalized_events event
+            SET
+                before_state = repair.new_before_state::JSONB,
+                observed_at = now()
+            FROM repair_map repair
+            WHERE event.event_identity = repair.event_identity
+              AND event.resource_id = repair.resource_id
+              AND event.event_kind = repair.event_kind
+              AND event.before_state IS NOT DISTINCT FROM repair.old_before_state::JSONB
+              AND event.after_state IS NOT DISTINCT FROM repair.after_state::JSONB
+            RETURNING
+                event.event_identity,
+                event.normalized_event_id,
+                event.canonicality_state,
+                event.event_kind,
+                event.resource_id
+        ),
+        queued_changes AS (
+            INSERT INTO projection_normalized_event_changes (
+                normalized_event_id,
+                changed_at,
+                change_kind,
+                canonicality_state
+            )
+            SELECT
+                normalized_event_id,
+                now(),
+                'canonicality_update',
+                canonicality_state
+            FROM updated
+            RETURNING
+                change_id,
+                normalized_event_id,
+                changed_at
+        ),
+        affected_resource_keys AS (
+            SELECT
+                'permissions_current'::TEXT AS projection,
+                resource_id::TEXT AS projection_key,
+                jsonb_build_object('resource_id', resource_id::TEXT) AS key_payload
+            FROM updated
+            WHERE event_kind = 'AuthorityTransferred'
+
+            UNION ALL
+
+            SELECT
+                'record_inventory_current'::TEXT AS projection,
+                resource_id::TEXT AS projection_key,
+                jsonb_build_object('resource_id', resource_id::TEXT) AS key_payload
+            FROM updated
+            WHERE event_kind = 'RecordVersionChanged'
+        ),
+        queued_resource_invalidations AS (
+            INSERT INTO projection_invalidations (
+                projection,
+                projection_key,
+                key_payload,
+                last_changed_at,
+                invalidated_at
+            )
+            SELECT
+                projection,
+                projection_key,
+                key_payload,
+                now(),
+                now()
+            FROM affected_resource_keys
+            WHERE projection_key IS NOT NULL
+              AND btrim(projection_key) <> ''
+            GROUP BY projection, projection_key, key_payload
+            ON CONFLICT (projection, projection_key)
+            DO UPDATE SET
+                key_payload = EXCLUDED.key_payload,
+                generation = projection_invalidations.generation + 1,
+                last_changed_at = GREATEST(
+                    projection_invalidations.last_changed_at,
+                    EXCLUDED.last_changed_at
+                ),
+                invalidated_at = EXCLUDED.invalidated_at,
+                claim_token = NULL,
+                claimed_at = NULL,
+                last_failure_reason = NULL,
+                last_failure_at = NULL
+            RETURNING projection_key
+        )
+        SELECT input.event_identity
+        FROM input
+        JOIN updated
+          ON updated.event_identity = input.event_identity
+        "#,
+    )
+    .bind(&event_identities)
+    .bind(&resource_ids)
+    .bind(&logical_name_ids)
+    .bind(&event_kinds)
+    .bind(&old_before_states)
+    .bind(&new_before_states)
+    .bind(&after_states)
+    .fetch_all(&mut **executor)
+    .await
+    .context(
+        "failed to repair ENSv1 unwrapped-authority event-time registry normalized-event before_state",
+    )?;
+
+    let repaired = repaired.into_iter().collect::<HashSet<_>>();
+    let rejected = event_identities
+        .iter()
+        .zip(resource_ids.iter())
+        .filter(|(event_identity, _)| !repaired.contains(event_identity.as_str()))
+        .map(|(event_identity, resource_id)| {
+            format!("{event_identity} (resource_id={resource_id})")
+        })
+        .collect::<Vec<_>>();
+    if !rejected.is_empty() {
+        bail!(
+            "ENSv1 registry event-time before_state repair rejected invalid resource anchors for events: {}",
             rejected.join(", ")
         );
     }
@@ -698,7 +1094,6 @@ pub(crate) fn ens_v1_unwrapped_authority_registry_event_time_resource_id_repair_
         return false;
     }
     if existing.resource_id.is_none()
-        || incoming.resource_id.is_none()
         || existing.logical_name_id.is_none()
         || incoming.logical_name_id.is_none()
         || existing.logical_name_id != incoming.logical_name_id
@@ -708,7 +1103,7 @@ pub(crate) fn ens_v1_unwrapped_authority_registry_event_time_resource_id_repair_
         || existing.derivation_kind != "ens_v1_unwrapped_authority"
         || !matches!(
             existing.source_family.as_str(),
-            "ens_v1_registry_l1" | "ens_v1_resolver_l1"
+            "ens_v1_registry_l1" | "ens_v1_registrar_l1" | "ens_v1_resolver_l1"
         )
         || !matches!(
             existing.event_kind.as_str(),
@@ -735,9 +1130,67 @@ pub(crate) fn ens_v1_unwrapped_authority_registry_event_time_resource_id_repair_
         );
     }
 
+    if existing.event_kind == "RecordVersionChanged" {
+        return record_version_state_repair_allowed(
+            &existing.before_state,
+            &incoming.before_state,
+            &existing.after_state,
+            &incoming.after_state,
+        );
+    }
+
+    if existing.event_kind == "RecordChanged" {
+        return record_changed_text_value_state_repair_allowed(
+            &existing.before_state,
+            &incoming.before_state,
+            &existing.after_state,
+            &incoming.after_state,
+        );
+    }
+
     existing.event_kind == "PermissionChanged"
         && permission_state_authority_repair_allowed(&existing.before_state, &incoming.before_state)
         && permission_state_authority_repair_allowed(&existing.after_state, &incoming.after_state)
+}
+
+pub(crate) fn ens_v1_unwrapped_authority_registry_event_time_before_state_repair_allowed(
+    existing: &NormalizedEvent,
+    incoming: &NormalizedEvent,
+    differing_fields: &[&'static str],
+) -> bool {
+    if !matches!(differing_fields, ["before_state"]) {
+        return false;
+    }
+    if existing.resource_id.is_none()
+        || existing.resource_id != incoming.resource_id
+        || existing.logical_name_id.is_none()
+        || incoming.logical_name_id.is_none()
+        || existing.logical_name_id != incoming.logical_name_id
+        || existing.namespace != "ens"
+        || existing.chain_id.as_deref() != Some("ethereum-mainnet")
+        || existing.derivation_kind != "ens_v1_unwrapped_authority"
+    {
+        return false;
+    }
+
+    if existing.event_kind == "AuthorityTransferred" {
+        return existing.source_family == "ens_v1_registry_l1"
+            && authority_transfer_state_repair_allowed(
+                &existing.before_state,
+                &incoming.before_state,
+                &existing.after_state,
+                &incoming.after_state,
+            );
+    }
+
+    existing.event_kind == "RecordVersionChanged"
+        && existing.source_family == "ens_v1_resolver_l1"
+        && record_version_state_repair_allowed(
+            &existing.before_state,
+            &incoming.before_state,
+            &existing.after_state,
+            &incoming.after_state,
+        )
 }
 
 fn registry_event_time_repair_differences_allowed(differing_fields: &[&'static str]) -> bool {
@@ -780,6 +1233,92 @@ fn authority_transfer_state_repair_allowed(
     }
 
     existing_without_owner == incoming_without_owner
+}
+
+fn record_version_state_repair_allowed(
+    existing_before_state: &Value,
+    incoming_before_state: &Value,
+    existing_after_state: &Value,
+    incoming_after_state: &Value,
+) -> bool {
+    if existing_after_state != incoming_after_state {
+        return false;
+    }
+
+    let Some(after_version) = incoming_after_state
+        .get("record_version")
+        .and_then(Value::as_i64)
+    else {
+        return false;
+    };
+
+    let mut existing_without_version = existing_before_state.clone();
+    if let Some(object) = existing_without_version.as_object_mut() {
+        object.remove("record_version");
+    }
+    let mut incoming_without_version = incoming_before_state.clone();
+    if let Some(object) = incoming_without_version.as_object_mut() {
+        object.remove("record_version");
+    }
+
+    if existing_without_version != incoming_without_version {
+        return false;
+    }
+
+    let existing_version = existing_before_state.get("record_version");
+    let incoming_version = incoming_before_state.get("record_version");
+    let previous_version = match (existing_version, incoming_version) {
+        (Some(Value::Null), Some(value)) => value.as_i64(),
+        (Some(value), Some(Value::Null)) => value.as_i64(),
+        _ => None,
+    };
+
+    previous_version.and_then(|version| version.checked_add(1)) == Some(after_version)
+}
+
+fn record_changed_text_value_state_repair_allowed(
+    existing_before_state: &Value,
+    incoming_before_state: &Value,
+    existing_after_state: &Value,
+    incoming_after_state: &Value,
+) -> bool {
+    if existing_before_state != incoming_before_state
+        || !selector_text_record_state(existing_after_state)
+        || !selector_text_record_state(incoming_after_state)
+    {
+        return false;
+    }
+
+    let existing_value = existing_after_state.get("value").and_then(Value::as_str);
+    let incoming_value = incoming_after_state.get("value").and_then(Value::as_str);
+    if existing_value.is_some() == incoming_value.is_some() {
+        return false;
+    }
+
+    let mut existing_without_value = existing_after_state.clone();
+    if let Some(object) = existing_without_value.as_object_mut() {
+        object.remove("value");
+    }
+    let mut incoming_without_value = incoming_after_state.clone();
+    if let Some(object) = incoming_without_value.as_object_mut() {
+        object.remove("value");
+    }
+
+    existing_without_value == incoming_without_value
+}
+
+fn selector_text_record_state(state: &Value) -> bool {
+    let Some(record_family) = state.get("record_family").and_then(Value::as_str) else {
+        return false;
+    };
+    let Some(record_key) = state.get("record_key").and_then(Value::as_str) else {
+        return false;
+    };
+    let Some(selector_key) = state.get("selector_key").and_then(Value::as_str) else {
+        return false;
+    };
+
+    record_family == "text" && record_key.starts_with("text:") && !selector_key.is_empty()
 }
 
 fn permission_state_authority_repair_allowed(

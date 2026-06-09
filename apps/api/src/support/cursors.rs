@@ -191,7 +191,7 @@ pub(super) async fn ensure_children_cursor_exists(
             FROM children_current cc
             JOIN name_surfaces parent
               ON parent.logical_name_id = cc.parent_logical_name_id
-            JOIN name_surfaces child
+            LEFT JOIN name_surfaces child
               ON child.logical_name_id = cc.child_logical_name_id
             WHERE cc.parent_logical_name_id = $1
               AND cc.surface_class = 'declared'
@@ -202,10 +202,14 @@ pub(super) async fn ensure_children_cursor_exists(
                     'safe'::canonicality_state,
                     'finalized'::canonicality_state
               )
-              AND child.canonicality_state IN (
-                    'canonical'::canonicality_state,
-                    'safe'::canonicality_state,
-                    'finalized'::canonicality_state
+              AND (
+                    child.logical_name_id IS NULL
+                    OR cc.provenance #>> '{label,source}' = 'label_preimage'
+                    OR child.canonicality_state IN (
+                        'canonical'::canonicality_state,
+                        'safe'::canonicality_state,
+                        'finalized'::canonicality_state
+                    )
               )
         )
         "#,

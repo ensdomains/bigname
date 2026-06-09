@@ -224,6 +224,8 @@ pub(in crate::identity) async fn bulk_upsert_name_surfaces_without_snapshots(
             "name_surfaces",
             "input_rows.canonicality_state::canonicality_state",
         );
+        let normalized_path_repair =
+            name_surface_normalized_path_repair_allowed_sql("name_surfaces", "EXCLUDED");
         let sql = format!(
             r#"
             WITH input_rows AS (
@@ -321,22 +323,34 @@ pub(in crate::identity) async fn bulk_upsert_name_surfaces_without_snapshots(
             FROM input_rows
             ON CONFLICT (logical_name_id) DO UPDATE
             SET
+                dns_encoded_name = CASE WHEN {normalized_path_repair} THEN EXCLUDED.dns_encoded_name ELSE name_surfaces.dns_encoded_name END,
+                namehash = CASE WHEN {normalized_path_repair} THEN EXCLUDED.namehash ELSE name_surfaces.namehash END,
+                labelhashes = CASE WHEN {normalized_path_repair} THEN EXCLUDED.labelhashes ELSE name_surfaces.labelhashes END,
                 chain_id = CASE WHEN {anchor_refresh} THEN EXCLUDED.chain_id ELSE name_surfaces.chain_id END,
                 block_hash = CASE WHEN {anchor_refresh} THEN EXCLUDED.block_hash ELSE name_surfaces.block_hash END,
                 block_number = CASE WHEN {anchor_refresh} THEN EXCLUDED.block_number ELSE name_surfaces.block_number END,
                 provenance = CASE WHEN {anchor_refresh} THEN {provenance_merge} ELSE name_surfaces.provenance END,
                 canonicality_state = {canonicality_merge},
-                observed_at = CASE WHEN {anchor_refresh} THEN now() ELSE name_surfaces.observed_at END
+                observed_at = CASE WHEN ({anchor_refresh} OR {normalized_path_repair}) THEN now() ELSE name_surfaces.observed_at END
             WHERE
                 name_surfaces.namespace = EXCLUDED.namespace
                 AND name_surfaces.normalized_name = EXCLUDED.normalized_name
-                AND name_surfaces.dns_encoded_name = EXCLUDED.dns_encoded_name
-                AND name_surfaces.namehash = EXCLUDED.namehash
-                AND name_surfaces.labelhashes = EXCLUDED.labelhashes
+                AND (
+                    name_surfaces.dns_encoded_name = EXCLUDED.dns_encoded_name
+                    OR {normalized_path_repair}
+                )
+                AND (
+                    (
+                        name_surfaces.namehash = EXCLUDED.namehash
+                        AND name_surfaces.labelhashes = EXCLUDED.labelhashes
+                    )
+                    OR {normalized_path_repair}
+                )
                 AND name_surfaces.normalization_errors = EXCLUDED.normalization_errors
                 AND (
                     {anchor_refresh}
                     OR {later_anchor_canonicality_refresh}
+                    OR {normalized_path_repair}
                 )
             RETURNING logical_name_id
             ),
@@ -369,6 +383,7 @@ pub(in crate::identity) async fn bulk_upsert_name_surfaces_without_snapshots(
             later_anchor_canonicality_refresh =
                 stable_later_anchor_canonicality_refresh_allowed_sql("name_surfaces"),
             accepted_canonicality_merge = accepted_canonicality_merge,
+            normalized_path_repair = normalized_path_repair,
         );
 
         let upserted_ids = sqlx::query_scalar::<_, String>(&sql)
@@ -423,6 +438,27 @@ pub(in crate::identity) async fn bulk_upsert_name_surfaces_without_snapshots(
     }
 
     Ok(())
+}
+
+fn name_surface_normalized_path_repair_allowed_sql(existing: &str, incoming: &str) -> String {
+    format!(
+        r#"
+        (
+            {existing}.namespace = {incoming}.namespace
+            AND {existing}.normalized_name = {incoming}.normalized_name
+            AND {existing}.normalization_errors = {incoming}.normalization_errors
+            AND {existing}.normalization_errors = '[]'::jsonb
+            AND {incoming}.normalization_errors = '[]'::jsonb
+            AND {existing}.provenance->>'adapter' = 'ens_v1_unwrapped_authority'
+            AND {incoming}.provenance->>'adapter' = 'ens_v1_unwrapped_authority'
+            AND (
+                {existing}.dns_encoded_name IS DISTINCT FROM {incoming}.dns_encoded_name
+                OR {existing}.namehash IS DISTINCT FROM {incoming}.namehash
+                OR {existing}.labelhashes IS DISTINCT FROM {incoming}.labelhashes
+            )
+        )
+        "#
+    )
 }
 
 #[allow(clippy::too_many_arguments)]

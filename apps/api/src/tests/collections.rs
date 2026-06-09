@@ -4,6 +4,10 @@ async fn get_name_children_compact_default_returns_rows_with_summary_meta() -> R
     let parent_logical_name_id = "ens:parent.eth";
     let owner = "0x0000000000000000000000000000000000000ABC";
     let registrant = "0x0000000000000000000000000000000000000DEF";
+    let alice_labelhash = labelhash_for_display_name("alice.parent.eth")
+        .expect("alice child labelhash must be available");
+    let bob_labelhash =
+        labelhash_for_display_name("bob.parent.eth").expect("bob child labelhash must be available");
 
     bigname_storage::upsert_name_surfaces(
         &database.pool,
@@ -97,7 +101,7 @@ async fn get_name_children_compact_default_returns_rows_with_summary_meta() -> R
                 "name": "alice.parent.eth",
                 "normalized_name": "alice.parent.eth",
                 "label_name": "alice",
-                "labelhash": "labelhash:alice.parent.eth",
+                "labelhash": alice_labelhash,
                 "namehash": "node:alice.parent.eth",
                 "owner": owner.to_ascii_lowercase(),
                 "registrant": registrant.to_ascii_lowercase(),
@@ -106,7 +110,7 @@ async fn get_name_children_compact_default_returns_rows_with_summary_meta() -> R
                 "name": "bob.parent.eth",
                 "normalized_name": "bob.parent.eth",
                 "label_name": "bob",
-                "labelhash": "labelhash:bob.parent.eth",
+                "labelhash": bob_labelhash,
                 "namehash": "node:bob.parent.eth",
                 "owner": "0x0000000000000000000000000000000000000b0b",
                 "registrant": "0x0000000000000000000000000000000000000b0c",
@@ -120,6 +124,284 @@ async fn get_name_children_compact_default_returns_rows_with_summary_meta() -> R
     assert!(payload["meta"].get("provenance").is_none());
     assert_eq!(payload["page"]["sort"], json!("display_name_asc"));
     assert_eq!(payload["page"]["page_size"], json!(50));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_name_children_compact_returns_unknown_label_rows_without_child_surface() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let parent_logical_name_id = "ens:parent.eth";
+    let labelhash = labelhash_for_display_name("mystery.parent.eth")
+        .expect("mystery child labelhash must be available");
+    let placeholder = format!(
+        "[{}].parent.eth",
+        labelhash.trim_start_matches("0x")
+    );
+    let owner = "0x0000000000000000000000000000000000000abc";
+    let mut child_row = declared_child_row(
+        parent_logical_name_id,
+        "ens:mystery.parent.eth",
+        "mystery.parent.eth",
+        "node:mystery.parent.eth",
+        211,
+        11,
+    );
+    child_row.child_logical_name_id = format!("ens:{placeholder}");
+    child_row.canonical_display_name = placeholder.clone();
+    child_row.normalized_name = placeholder.clone();
+    child_row.provenance["label"] = json!({
+        "labelhash": labelhash,
+        "source": "unknown",
+        "status": "unknown",
+    });
+    child_row.owner = Some(owner.to_owned());
+
+    bigname_storage::upsert_name_surfaces(
+        &database.pool,
+        &[collection_name_surface(
+            parent_logical_name_id,
+            "parent.eth",
+            "node:parent.eth",
+            10,
+        )],
+    )
+    .await?;
+    bigname_storage::upsert_children_current_rows(&database.pool, &[child_row]).await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/names/ens/parent.eth/children")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("compact unknown-label children request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let payload: Value = read_json(response).await?;
+    assert_eq!(
+        payload["data"],
+        json!([
+            {
+                "name": placeholder,
+                "normalized_name": placeholder,
+                "label_name": format!("[{}]", labelhash.trim_start_matches("0x")),
+                "labelhash": labelhash,
+                "namehash": "node:mystery.parent.eth",
+                "owner": owner,
+                "registrant": null,
+            }
+        ])
+    );
+    assert_eq!(payload["meta"]["total_count"], json!(1));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_name_children_compact_paginates_unknown_label_rows_without_child_surface() -> Result<()>
+{
+    let database = TestDatabase::new_migrated().await?;
+    let parent_logical_name_id = "ens:parent.eth";
+    let mystery_labelhash = labelhash_for_display_name("mystery.parent.eth")
+        .expect("mystery child labelhash must be available");
+    let mystery_placeholder = format!(
+        "[{}].parent.eth",
+        mystery_labelhash.trim_start_matches("0x")
+    );
+    let mut mystery_row = declared_child_row(
+        parent_logical_name_id,
+        "ens:mystery.parent.eth",
+        "mystery.parent.eth",
+        "node:mystery.parent.eth",
+        212,
+        11,
+    );
+    mystery_row.child_logical_name_id = format!("ens:{mystery_placeholder}");
+    mystery_row.canonical_display_name = mystery_placeholder;
+    mystery_row.normalized_name = mystery_row.canonical_display_name.clone();
+    mystery_row.provenance["label"] = json!({
+        "labelhash": mystery_labelhash,
+        "source": "unknown",
+        "status": "unknown",
+    });
+
+    bigname_storage::upsert_name_surfaces(
+        &database.pool,
+        &[
+            collection_name_surface(parent_logical_name_id, "parent.eth", "node:parent.eth", 10),
+            collection_name_surface(
+                "ens:zeta.parent.eth",
+                "zeta.parent.eth",
+                "node:zeta.parent.eth",
+                12,
+            ),
+        ],
+    )
+    .await?;
+    bigname_storage::upsert_children_current_rows(
+        &database.pool,
+        &[
+            mystery_row,
+            declared_child_row(
+                parent_logical_name_id,
+                "ens:zeta.parent.eth",
+                "zeta.parent.eth",
+                "node:zeta.parent.eth",
+                213,
+                12,
+            ),
+        ],
+    )
+    .await?;
+
+    let first_page_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/names/ens/parent.eth/children?page_size=1")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("compact unknown-label children first page request failed")?;
+    assert_eq!(first_page_response.status(), StatusCode::OK);
+    let first_page_payload: Value = read_json(first_page_response).await?;
+    let cursor = first_page_payload["page"]["next_cursor"]
+        .as_str()
+        .context("first unknown-label page must include next_cursor")?;
+
+    let second_page_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/names/ens/parent.eth/children?page_size=1&cursor={cursor}"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("compact unknown-label children second page request failed")?;
+    assert_eq!(second_page_response.status(), StatusCode::OK);
+    let second_page_payload: Value = read_json(second_page_response).await?;
+    assert_eq!(
+        second_page_payload["data"][0]["name"],
+        json!("zeta.parent.eth")
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_name_children_compact_counts_marks_unknown_label_child_count_unsupported()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let parent_logical_name_id = "ens:parent.eth";
+    let labelhash = labelhash_for_display_name("mystery.parent.eth")
+        .expect("mystery child labelhash must be available");
+    let placeholder = format!(
+        "[{}].parent.eth",
+        labelhash.trim_start_matches("0x")
+    );
+    let mut child_row = declared_child_row(
+        parent_logical_name_id,
+        "ens:mystery.parent.eth",
+        "mystery.parent.eth",
+        "node:mystery.parent.eth",
+        214,
+        11,
+    );
+    child_row.child_logical_name_id = format!("ens:{placeholder}");
+    child_row.canonical_display_name = placeholder;
+    child_row.normalized_name = child_row.canonical_display_name.clone();
+    child_row.provenance["label"] = json!({
+        "labelhash": labelhash,
+        "source": "unknown",
+        "status": "unknown",
+    });
+
+    bigname_storage::upsert_name_surfaces(
+        &database.pool,
+        &[collection_name_surface(
+            parent_logical_name_id,
+            "parent.eth",
+            "node:parent.eth",
+            10,
+        )],
+    )
+    .await?;
+    bigname_storage::upsert_children_current_rows(&database.pool, &[child_row]).await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/names/ens/parent.eth/children?include=counts")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("compact unknown-label children counts request failed")?;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["data"][0]["subname_count"], Value::Null);
+    assert_eq!(payload["meta"]["unsupported_fields"], json!(["subname_count"]));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_name_children_compact_falls_back_to_surface_labelhash_for_legacy_rows() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let parent_logical_name_id = "ens:parent.eth";
+    let child_logical_name_id = "ens:alice.parent.eth";
+    let expected_labelhash = labelhash_for_display_name("alice.parent.eth")
+        .expect("alice child labelhash must be available");
+    let mut child_row = declared_child_row(
+        parent_logical_name_id,
+        child_logical_name_id,
+        "alice.parent.eth",
+        "node:alice.parent.eth",
+        221,
+        11,
+    );
+    child_row.labelhash = None;
+
+    bigname_storage::upsert_name_surfaces(
+        &database.pool,
+        &[
+            collection_name_surface(parent_logical_name_id, "parent.eth", "node:parent.eth", 10),
+            collection_name_surface(
+                child_logical_name_id,
+                "alice.parent.eth",
+                "node:alice.parent.eth",
+                11,
+            ),
+        ],
+    )
+    .await?;
+    bigname_storage::upsert_children_current_rows(&database.pool, &[child_row]).await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/names/ens/parent.eth/children")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("compact legacy-labelhash children request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["data"][0]["labelhash"], json!(expected_labelhash));
 
     database.cleanup().await?;
     Ok(())
@@ -672,6 +954,21 @@ async fn get_name_children_rejects_malformed_wrong_route_filter_and_stale_cursor
     assert_invalid_cursor_request(
         database.app_state(),
         format!("/v1/names/ens/cursor-parent.eth/children?page_size=1&cursor={stale_cursor}"),
+    )
+    .await?;
+
+    sqlx::query(
+        r#"
+        UPDATE name_surfaces
+        SET canonicality_state = 'observed'::canonicality_state
+        WHERE logical_name_id = 'ens:alpha.cursor-parent.eth'
+        "#,
+    )
+    .execute(&database.pool)
+    .await?;
+    assert_invalid_cursor_request(
+        database.app_state(),
+        format!("/v1/names/ens/cursor-parent.eth/children?page_size=1&cursor={cursor}"),
     )
     .await?;
 
