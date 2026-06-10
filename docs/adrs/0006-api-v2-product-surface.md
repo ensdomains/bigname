@@ -114,7 +114,7 @@ One name per concept, applied on every `v2` route:
 | `network` | display slug (`ethereum`, `base`) | `network` (unchanged, display-only) |
 | `registration_id` | the one opaque stable handle for a registration lifecycle | `resource_id`, `resource_hex`, `resource`, `token_lineage_id`, `surface_binding_id` |
 | `finality` | `latest`, `safe`, `finalized` (JSON-RPC block-tag vocabulary) | `consistency` = `head`/`safe`/`finalized` |
-| `source` | `indexed`, `verified` | `mode` = `declared`/`verified`/`both`/`auto`; `declared_state`/`verified_state` |
+| `source` | `indexed`, `verified` (the records route adds `auto`) | `mode` = `declared`/`verified`/`both`/`auto`; `declared_state`/`verified_state` |
 | `as_of` | per-chain `{block_number, block_hash, timestamp}`, keyed by `chain_id` | `chain_positions` (and the `execution_checkpoint` pseudo-slot is diagnostics-only) |
 | `scope` (history) | `name`, `registration`, `both` | `surface`, `resource`, `both` |
 | `grant_scope` | the protocol scope of a permission row (root/registry/resolver-scoped grants) | permission-row `scope` (renamed so history `scope` and permission scope are two names for two concepts) |
@@ -144,10 +144,14 @@ surfaces to coexist in one binary for parity validation — several new paths
 (`GET /v1/names/{namespace}/{name}`) at the same prefix.
 
 Name-shaped routes infer the namespace from the name itself (the existing
-`profiles/` and `identity:lookup` inference: exact `base.eth` is `ens`,
-`*.base.eth` is `basenames`, other supported names are `ens`), accept an
-optional `?namespace=` override, and always echo the resolved `namespace` in the
-response. This collapses the `v1` dual grammar of `/v1/names/{ns}/{name}` vs
+`profiles/` and `identity:lookup` inference: exact `base.eth` is `ens` because
+upstream treats it as the L1 root domain handled by the Mainnet
+L1Resolver (upstream: .refs/basenames/src/L1/L1Resolver.sol:L13 @ basenames@1809bbc)
+(upstream: .refs/basenames/src/L1/L1Resolver.sol:L154 @ basenames@1809bbc);
+`*.base.eth` is `basenames`, the Base-issued subdomain
+space (upstream: .refs/basenames/README.md:L70 @ basenames@1809bbc); other
+supported names are `ens`), accept an optional `?namespace=` override, and
+always echo the resolved `namespace` in the response. This collapses the `v1` dual grammar of `/v1/names/{ns}/{name}` vs
 `/v1/profiles/names/{name}`.
 
 Tier 1 — lookup primitives:
@@ -162,7 +166,7 @@ Tier 2 — product reads:
 | Route | Purpose |
 | --- | --- |
 | `GET /v2/names/{name}` | Name profile: the flat record shape plus registration summary. Replaces `/v1/names/{ns}/{name}` + `/v1/profiles/names/{name}`. |
-| `GET /v2/names/{name}/records` | Resolver records. `?source=indexed\|verified`, `?keys=` selector filter. `?include=inventory` adds the known selector space and unset keys (the record-editing capability) in product vocabulary; deep inventory internals stay on diagnostics. |
+| `GET /v2/names/{name}/records` | Resolver records. `?source=indexed\|verified\|auto` (`auto` keeps `v1`'s replay-safe-cache-with-verified-fallback policy), `?keys=` selector filter. `?include=inventory` adds the known selector space and unset keys (the record-editing capability) in product vocabulary; deep inventory internals stay on diagnostics. |
 | `GET /v2/names/{name}/subnames` | Direct subnames. `?include=counts`. Replaces `children`. |
 | `GET /v2/names/{name}/history` | Name history. `?scope=name\|registration\|both`. |
 | `GET /v2/permissions` | Permission rows by `?name=`, `?registration_id=`, or `?address=` (at least one required; combinable), including registrations that are no longer a name's current one. `?include=lineage` adds per-row grant/revocation lineage and inheritance/transfer behavior. A flat filterable collection in the same style as `/v2/events`. Replaces `/v1/resources/{id}/permissions`, `/v1/roles`, `/v1/names/.../roles`, `/v1/resources/lookup`. |
@@ -255,7 +259,12 @@ Rules:
 - There are no `declared_state`/`verified_state` parallel trees and no
   `both` mode. `source=indexed` returns indexed values; `source=verified`
   returns the same shape from verified execution, with `meta.source`
-  identifying the answer's origin. Indexed-vs-verified side-by-side
+  identifying the answer's origin. The records route also accepts
+  `source=auto` — `v1`'s `mode=auto` value-source policy, kept for record
+  panels: indexed values where replay-safe, verified execution fills explicit
+  gaps and unretained values for supported selectors. Same response shape;
+  `meta.source` reports `auto`, and per-key origin lives on the diagnostics
+  records route. Indexed-vs-verified side-by-side
   comparison is a diagnostics read
   (`GET /v2/diagnostics/names/{name}/records`), not a product-route mode —
   a third top-level member only in one mode would break the one-envelope
@@ -304,7 +313,7 @@ behavior per row.
 | --- | --- | --- |
 | `at` | Tier-2 projection reads (not the lookup primitive — see below) | RFC 3339 timestamp (selects the snapshot at or before it), or a URL-safe opaque snapshot token round-tripped from a previous response's `meta.as_of` (pins exact per-chain positions) |
 | `finality` | projection-read routes | `latest` (default), `safe`, `finalized` |
-| `source` | names, records, primary-name | `indexed` (default), `verified` |
+| `source` | names, records, primary-name | `indexed` (default), `verified`; the records route also accepts `auto` |
 | `namespace` | name-inferred, address-anchored, and collection routes | explicit override / filter |
 | `include` | route-documented expansions | per-route allowlist |
 | `sort`, `order` | every paginated route | route-documented field set + `asc`/`desc`; one style |
@@ -431,8 +440,15 @@ all upstream-anchored semantics in `docs/api-v1.md` and
 citations. The `finality` vocabulary adopts the Ethereum JSON-RPC block-tag
 terms already used by `consistency`'s `safe`/`finalized` values.
 
-One existing claim is restated in § "What this ADR deliberately keeps" and
-cited in place: Basenames verified reads use the L1 transport path from
+Two existing claims are restated and cited in place. The namespace-inference
+rule (§ Route catalog): exact `base.eth` resolves under `ens` because
+upstream handles it through the Mainnet L1Resolver
+(upstream: .refs/basenames/src/L1/L1Resolver.sol:L13 @ basenames@1809bbc)
+(upstream: .refs/basenames/src/L1/L1Resolver.sol:L154 @ basenames@1809bbc),
+while `*.base.eth` is the Base-issued `basenames` space
+(upstream: .refs/basenames/README.md:L70 @ basenames@1809bbc) — the same
+anchors carried by `docs/architecture.md` § Namespaces. And in § "What this
+ADR deliberately keeps": Basenames verified reads use the L1 transport path from
 `base-mainnet` to `ethereum-mainnet` through the L1 Resolver
 (upstream: .refs/basenames/README.md:L69 @ basenames@1809bbc)
 (upstream: .refs/basenames/README.md:L22 @ basenames@1809bbc) — L69 states
