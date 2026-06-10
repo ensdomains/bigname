@@ -15,7 +15,7 @@ never made. Measured against the implementation, the `v1` contract today has:
   single, full collection, compact collection, compact single, the profile-route
   hybrid whose arity changes with `meta`, the identity batch shape, the status
   wrapper, and `/healthz`).
-- 54 OpenAPI component schemas, roughly 30 used exactly once, 2 orphaned, and
+- 54 OpenAPI component schemas, 37 used exactly once, 2 orphaned, and
   about 10 documented shapes that exist only as untyped `JsonObject`.
 - The same concept spelled differently per route: the name string as `name` /
   `normalized_name` / `canonical_display_name` (with `name` itself meaning
@@ -43,8 +43,11 @@ The two driving consumers need the opposite of this:
   batched — with a flat record shape in common vocabulary, `has_more` /
   `total_count` / cursor pagination, per-response staleness metadata, defined
   empty-vs-not-found semantics, no caller-side namespace fan-out, and p95 under
-  10 ms. `POST /v1/identity:lookup` already satisfies this and meets the latency
-  target (`docs/partners/partner-1-identity-facade-benchmarks.md`).
+  10 ms. `POST /v1/identity:lookup` already satisfies this and meets a local
+  server-side proxy for the latency target through 250 inputs
+  (`docs/partners/partner-1-identity-facade-benchmarks.md`); the final AWS
+  `us-east` vantage measurement is outstanding and is rerun at the parity
+  gate.
 - The first-party app (capability scan in ADR 0003) needs profile, records,
   owned-names-with-role-summary, subnames, search, and history reads — and does
   not call the `v1` API yet.
@@ -56,8 +59,9 @@ expensive at partner cutover.
 
 The review also confirmed what is worth keeping: snapshot-pinned reads, the
 indexed-vs-onchain-verified distinction, and explicit unsupported semantics are
-real differentiators — partner-1's shadow-comparison migration depends on
-exactly those properties. The defect is that they leak on every route by
+real differentiators — partner-1's shadow-comparison migration leans on
+exactly these properties, the explicit semantics and per-response staleness
+attribution in particular. The defect is that they leak on every route by
 default, under invented names, in overlapping vocabularies. And one route —
 `identity:lookup` — already demonstrates the target ergonomics: flat DTOs,
 common vocabulary, sane batch semantics, fastest path in the system. This ADR
@@ -72,7 +76,9 @@ re-baselined `v1` — designed around three rules:
    from common ENS/blockchain usage, defined in the naming dictionary below, and
    used identically on every route.
 2. **One envelope.** Every route returns `data`, plus `page` on collections,
-   plus `meta`. No full/compact dual shapes, no query-time shape switching.
+   plus `meta`. No full/compact dual shapes and no query-time envelope or
+   arity switching; documented field budgets (`include=`, the lookup feed
+   profile) may subset fields but never rename, retype, or restructure them.
 3. **Three tiers.** Lookup primitives (the partner path), product reads (the app
    path), and diagnostics (the only home of pipeline vocabulary). Product
    responses carry zero indexer internals; the route path — not a query knob —
@@ -96,7 +102,7 @@ One name per concept, applied on every `v2` route:
 | `owner` | token/registry owner | `token_holder`, `owner`, `owner_address`, `registry_owner` |
 | `manager` | controller/manager | `effective_controller`, `manager_address` |
 | `registrant` | registrant | `registrant` (unchanged) |
-| `relation` | address-to-name relation enum: `owner`, `manager`, `registrant`, `any` | four divergent relation/role enums incl. `owned`/`managed`/`both` |
+| `relation` | address-to-name relation filter: one or more of `owner`, `manager`, `registrant` (comma-separated set); `any` = all three | four divergent relation/role enums incl. `owned`/`managed`/`both` (partner `BOTH` = `owner,manager`) |
 | `expires_at` | expiry, RFC 3339 | `expiry_date`, `expiration` (unix), `expiry` |
 | `registered_at` | current registration start, RFC 3339 | `registration_date` |
 | `created_at` | first observation of the name, RFC 3339 | `created_at` (now defined and distinguished from `registered_at`) |
@@ -111,7 +117,8 @@ One name per concept, applied on every `v2` route:
 | `source` | `indexed`, `verified` | `mode` = `declared`/`verified`/`both`/`auto`; `declared_state`/`verified_state` |
 | `as_of` | per-chain `{block_number, block_hash, timestamp}`, keyed by `chain_id` | `chain_positions` (and the `execution_checkpoint` pseudo-slot is diagnostics-only) |
 | `scope` (history) | `name`, `registration`, `both` | `surface`, `resource`, `both` |
-| `status` | one result vocabulary: `ok`, `not_found`, `invalid_name`, `unsupported`, `stale`, `failed` | `ResultStatus`, `IdentityStatus`, `NameRecordStatus`, `unnormalizable_input` (folds into `invalid_name`) |
+| `grant_scope` | the protocol scope of a permission row (root/registry/resolver-scoped grants) | permission-row `scope` (renamed so history `scope` and permission scope are two names for two concepts) |
+| `status` | one result vocabulary: `ok`, `not_found`, `invalid_name`, `mismatch`, `unsupported`, `stale`, `failed` | `ResultStatus`, `IdentityStatus`, `NameRecordStatus`, `unnormalizable_input` (folds into `invalid_name`); `mismatch` kept for verification results |
 | `completeness` | `full`, `partial`, `unsupported` | `coverage.status` on product routes (full taxonomy moves to diagnostics) |
 | `powers` | effective permission powers | `effective_powers` |
 
@@ -148,23 +155,23 @@ Tier 1 — lookup primitives:
 | Route | Purpose |
 | --- | --- |
 | `POST /v2/lookup` | Batched forward (name) and reverse (address + coin type) resolution. `profile=feed` is the latency path; `profile=detail` returns full records. Replaces `POST /v1/identity:lookup`. |
-| `GET /v2/status` | Per-chain indexing readiness: `chains: {<chain_id>: {latest_block, indexed_block, lag_blocks, lag_seconds, status}}`. |
+| `GET /v2/status` | Per-chain indexing readiness: `chains: {<chain_id>: {latest_block, indexed_block, safe_block, finalized_block, lag_blocks, lag_seconds, status}}`. `status` here is the ops vocabulary `ready\|degraded\|stale` — the one non-result status enum, scoped to this route. |
 
 Tier 2 — product reads:
 
 | Route | Purpose |
 | --- | --- |
 | `GET /v2/names/{name}` | Name profile: the flat record shape plus registration summary. Replaces `/v1/names/{ns}/{name}` + `/v1/profiles/names/{name}`. |
-| `GET /v2/names/{name}/records` | Resolver records. `?source=indexed\|verified`, `?keys=` selector filter. |
+| `GET /v2/names/{name}/records` | Resolver records. `?source=indexed\|verified`, `?keys=` selector filter. `?include=inventory` adds the known selector space and unset keys (the record-editing capability) in product vocabulary; deep inventory internals stay on diagnostics. |
 | `GET /v2/names/{name}/subnames` | Direct subnames. `?include=counts`. Replaces `children`. |
 | `GET /v2/names/{name}/history` | Name history. `?scope=name\|registration\|both`. |
-| `GET /v2/permissions` | Permission rows by `?name=`, `?registration_id=`, or `?address=` (at least one required; combinable), including registrations that are no longer a name's current one. A flat filterable collection in the same style as `/v2/events`. Replaces `/v1/resources/{id}/permissions`, `/v1/roles`, `/v1/names/.../roles`, `/v1/resources/lookup`. |
-| `GET /v2/addresses/{address}/names` | Names related to an address. `?relation=owner\|manager\|registrant\|any`, `?include=role_summary`. |
-| `GET /v2/addresses/{address}/primary-name` | Primary name. `?coin_type=` (default `60`), `?namespace=` (default `ens`), `?source=`. Replaces `/v1/primary-names/{address}` with the same `{address, coin_type, namespace}` tuple selection. |
-| `GET /v2/addresses/{address}/history` | Address activity history. |
-| `GET /v2/search` | Name search and suggestions: `?q=`, `?namespace=`, `?limit=`. Split out of `/v1/names`; no availability or pricing semantics. |
+| `GET /v2/permissions` | Permission rows by `?name=`, `?registration_id=`, or `?address=` (at least one required; combinable), including registrations that are no longer a name's current one. `?include=lineage` adds per-row grant/revocation lineage and inheritance/transfer behavior. A flat filterable collection in the same style as `/v2/events`. Replaces `/v1/resources/{id}/permissions`, `/v1/roles`, `/v1/names/.../roles`, `/v1/resources/lookup`. |
+| `GET /v2/addresses/{address}/names` | Names related to an address. `?relation=` set filter, `?q=` text filter, `?sort=name\|expires_at\|registered_at`, `?dedupe=name\|registration`, `?include=role_summary` — keeps the `v1` dashboard combination of address relation + text filter + sort. |
+| `GET /v2/addresses/{address}/primary-name` | Primary name. `?coin_type=` (default `60`), `?namespace=` (default `ens`), `?source=`. Replaces `/v1/primary-names/{address}` with the same `{address, coin_type, namespace}` tuple selection. Returns one answer per `source` plus a typed `verification` summary (`{status, name}`, `status` incl. `mismatch`) whenever a persisted or on-demand verified outcome exists — claimed-vs-verified stays one call without parallel state trees. |
+| `GET /v2/addresses/{address}/history` | Address activity history. `?relation=` set filter. |
+| `GET /v2/search` | Name search and suggestions: `?q=` with `?match=prefix\|contains` (default `prefix`), `?namespace=`, `?limit=`. Split out of `/v1/names`; no availability or pricing semantics. |
 | `GET /v2/events` | Compact event search across name, address, registration, type, and block filters. |
-| `GET /v2/resolvers/{chain_id}/{address}` | Resolver overview (numeric `chain_id`). Replaces `/v1/resolvers/.../overview`. |
+| `GET /v2/resolvers/{chain_id}/{address}` | Resolver overview (numeric `chain_id`). Replaces `/v1/resolvers/.../overview` and, through its paginated bound-names section, the `/v1/names?resolver=` filter. |
 | `GET /v2/namespaces/{namespace}` | Namespace metadata: supported-capability summary in product vocabulary. |
 
 Tier 3 — diagnostics (the only routes carrying pipeline vocabulary):
@@ -177,6 +184,7 @@ Tier 3 — diagnostics (the only routes carrying pipeline vocabulary):
 | `GET /v2/diagnostics/names/{name}/records` | Record inventory and cache internals: selectors, explicit gaps, unsupported families, version boundaries, value sources, and indexed-vs-verified side-by-side comparison (the former `mode=both`). |
 | `GET /v2/diagnostics/names/{name}/execution` | Persisted verified-execution explain: trace id, steps, digests, CCIP participation. |
 | `GET /v2/diagnostics/namespaces/{namespace}/manifests` | Active manifest versions, source families, deployment epochs, capability flags. Replaces `/v1/manifests/{namespace}`. |
+| `GET /v2/diagnostics/events` | Raw normalized-event rows: upstream event kinds, event identity, full provenance. Same filters as `/v2/events`. This is the home of `v1` history `view=full`, resolving ADR 0003's open history full-view decision: the full row shape survives as a diagnostics contract, not a product one. |
 
 `GET /healthz`, `GET /`, `GET /docs`, and `GET /openapi.json` remain non-contract
 helpers.
@@ -199,7 +207,7 @@ One success shape for every route:
   "data": {},
   "page": {
     "cursor": null,
-    "next_cursor": null,
+    "next_cursor": "opaque-token",
     "page_size": 50,
     "total_count": 123,
     "has_more": true
@@ -213,8 +221,8 @@ One success shape for every route:
       }
     },
     "completeness": "partial",
-    "unsupported_fields": ["manager"],
-    "unsupported_reason": "resolver_family_pending",
+    "unsupported_fields": ["role_summary"],
+    "unsupported_reason": "not_supported_for_namespace",
     "source": "indexed"
   }
 }
@@ -230,13 +238,20 @@ Rules:
   makes it cheap (the reverse-lookup count path) or where the caller opts in
   via `include=total_count`; routes must not run unconditional full counts on
   the request path to fill it.
-- `meta` is always present: `as_of` always; `completeness`,
-  `unsupported_fields`, and `unsupported_reason` only when the read is not
-  clean; `source` when the route supports `?source=`. There is no `meta`
-  query parameter — no `meta=full` (deeper detail is a diagnostics route, not
-  a query knob) and no stripped variant, so the envelope never changes shape
-  per request. `meta` is one small response-level object (not per-record);
-  the feed latency path tolerates it.
+- `meta` is always present: `as_of` on every route that reads chain-derived
+  state (control-plane routes — `/v2/status`, `/v2/namespaces/{namespace}` —
+  omit it); `completeness`, `unsupported_fields`, and `unsupported_reason`
+  only when the read is not clean; `source` when the route supports
+  `?source=`. There is no `meta` query parameter — no `meta=full` (deeper
+  detail is a diagnostics route, not a query knob) and no stripped variant,
+  so the envelope never changes shape per request. `meta` is one small
+  response-level object (not per-record); the feed latency path tolerates it.
+- `unsupported_fields` appears at two levels with disjoint meanings and no
+  duplication: `meta.unsupported_fields` names response-level sections or
+  expansions the route could not serve (e.g. an `include=` section);
+  record-level `unsupported_fields` names data fields the index could not
+  prove for that record. An entry never appears at both levels for one
+  response.
 - There are no `declared_state`/`verified_state` parallel trees and no
   `both` mode. `source=indexed` returns indexed values; `source=verified`
   returns the same shape from verified execution, with `meta.source`
@@ -248,15 +263,18 @@ Rules:
 - `view` does not exist in `v2`.
 
 The flat record shape (used by `/v2/lookup` detail results, `/v2/names/{name}`,
-and as the row shape on address-name collections):
+and as the row shape on subname and address-name collections):
 
 ```
 name, display_name, namespace, namehash, chain_id, network,
 owner, manager, registrant, expires_at, registered_at, created_at,
-resolver: {chain_id, address}, primary_name,
+resolver: {chain_id, address}, primary_name, primary_address,
 addresses: {"60": "0x..."}, text_records: {...}, content_hash,
 token_id, registration_id, status, unsupported_fields
 ```
+
+`primary_address` is the reverse-record target for the relevant name — a
+partner-1 required field carried by `v1`'s `IdentityRecord` and kept here.
 
 Reverse results add `is_primary` and `relations` (the subset of
 `owner`/`manager`/`registrant` that matched). Optional fields are omitted when
@@ -276,13 +294,15 @@ Event rows (history and events routes) use one shape:
 transaction_hash, log_index, data}` with the friendly `type` vocabulary
 (`registration`, `renewal`, `transfer`, `authority`, `resolver`, `record`,
 `primary_name`, `permission`). Raw upstream event kinds are diagnostics-only.
-Permission rows use `{address, scope, powers, registration_id, name}`.
+Permission rows use `{address, grant_scope, powers, registration_id, name}`;
+`?include=lineage` adds grant/revocation lineage and inheritance/transfer
+behavior per row.
 
 ### Parameters
 
 | Parameter | Applies to | Values |
 | --- | --- | --- |
-| `at` | projection-read routes | RFC 3339 timestamp (selects the snapshot at or before it), or a snapshot token round-tripped from a previous response's `meta.as_of` (pins exact per-chain positions) |
+| `at` | Tier-2 projection reads (not the lookup primitive — see below) | RFC 3339 timestamp (selects the snapshot at or before it), or a URL-safe opaque snapshot token round-tripped from a previous response's `meta.as_of` (pins exact per-chain positions) |
 | `finality` | projection-read routes | `latest` (default), `safe`, `finalized` |
 | `source` | names, records, primary-name | `indexed` (default), `verified` |
 | `namespace` | name-inferred, address-anchored, and collection routes | explicit override / filter |
@@ -308,7 +328,13 @@ Rules:
   `docs/consumer-capabilities.md`, not reserved in the schema.
 - `POST /v2/lookup` body: `{inputs: [...], profile, namespace?}`, where each
   input is `{name}` or `{address, coin_type?, relation?, page_size?, cursor?}`.
-  Input order is preserved, one result per input, batch limit 1000
+  Reverse inputs default to `coin_type=60` when omitted. Input order is
+  preserved, one result per input; each result echoes its `input` and, for
+  name inputs, carries `normalization` metadata (`changed`, `input_name`,
+  `reason`) — preserved from `v1`'s result-level contract. The lookup
+  primitive is a current-state read: it does not accept `at`/`finality`, and
+  `meta.as_of` records the served positions for staleness attribution and
+  shadow-diff correlation. Batch limit 1000
   (configurable via `BIGNAME_API_LOOKUP_BATCH_LIMIT`, which renames
   `BIGNAME_API_IDENTITY_BATCH_LIMIT`). `profile=shadow` is
   removed from the public contract; it survives as an undocumented
@@ -339,8 +365,12 @@ Rules:
   200 with empty `data`; batch lookup results carry in-band `status` per input
   (a batch never 404s). Empty arrays mean known-empty, never unknown.
 - One result-status vocabulary everywhere: `ok`, `not_found`, `invalid_name`,
-  `unsupported`, `stale`, `failed`, with `unsupported_reason` required when
-  `unsupported` and `failure_reason` permitted on `failed`/`not_found`.
+  `mismatch`, `unsupported`, `stale`, `failed`, with `unsupported_reason`
+  required when `unsupported` and `failure_reason` permitted on
+  `failed`/`not_found`/`mismatch`. `mismatch` is the verification state where
+  a claimed answer verifies to a different value (claimed-vs-verified primary
+  names) — kept from `v1`, where dropping it would misreport as `not_found`
+  or `failed`.
 - Error messages must not name internal tables, projections, or sidecars.
 
 ### Deleted wire surface
@@ -360,8 +390,8 @@ filters, the reserved `/v1/events` parameter block, the `resource` vs
   semantics — renamed (`finality`, `as_of`), not removed.
 - Verified execution, CCIP-Read support, Basenames L1-transport-assisted
   verified reads (`base-mainnet` → `ethereum-mainnet` through the L1
-  Resolver (upstream: .refs/basenames/README.md:L22 @ basenames@1809bbc)
-  (upstream: .refs/basenames/README.md:L70 @ basenames@1809bbc)), and
+  Resolver (upstream: .refs/basenames/README.md:L69 @ basenames@1809bbc)
+  (upstream: .refs/basenames/README.md:L22 @ basenames@1809bbc)), and
   on-demand execution on the records/profile/primary-name paths — behind
   `source=`.
 - Explicit unsupported semantics — as `meta.completeness`,
@@ -404,9 +434,11 @@ terms already used by `consistency`'s `safe`/`finalized` values.
 One existing claim is restated in § "What this ADR deliberately keeps" and
 cited in place: Basenames verified reads use the L1 transport path from
 `base-mainnet` to `ethereum-mainnet` through the L1 Resolver
-(upstream: .refs/basenames/README.md:L22 @ basenames@1809bbc)
-(upstream: .refs/basenames/README.md:L70 @ basenames@1809bbc) — the same
-claim and citations carried by `docs/api-v1.md`. No divergence is created.
+(upstream: .refs/basenames/README.md:L69 @ basenames@1809bbc)
+(upstream: .refs/basenames/README.md:L22 @ basenames@1809bbc) — L69 states
+the L1 resolver's cross-chain role for the `base.eth` 2LD and L22 pins the
+deployed L1Resolver. The same claim is anchored more broadly in
+`docs/api-v1.md`. No divergence is created.
 
 ## Consequences
 
@@ -493,7 +525,11 @@ tests.
    `docs/consumer-capabilities.md` is served by a mapped new route; a diff
    harness reads both surfaces at the same snapshot and proves value
    equivalence under the dictionary mapping; the partner latency benchmarks
-   are rerun against the new lookup route. Results are recorded once — this
+   are rerun against the new lookup route. The gate checks against the
+   capability matrix as frozen before this ADR (not the remapped one),
+   includes error-path parity (status codes, not-found philosophy) alongside
+   value equivalence, and the harness's dictionary mapping is itself
+   review-gated before its results count. Results are recorded once — this
    gate is not a standing dual-serving arrangement, and it is the only
    safety check before the old contract disappears.
 6. The switch, in one release: delete the old `v1` routes, rename the `/v2`
@@ -576,7 +612,9 @@ auditability. Rejected in favor of confining, not deleting.
 ## References
 
 - `docs/adrs/0003-api-surface-flattening-plan.md` (target model this ADR
-  completes)
+  completes; its compatibility-preservation policy is superseded by the
+  replacement model here, while its implementation slices 3–6 remain valid
+  enablers)
 - `docs/adrs/0004-conceptual-deduplication-gate.md`
 - `docs/internal/api-surface-flattening-scope-decisions.md`
 - `docs/partners/partner-1-indexing-requirements.md`

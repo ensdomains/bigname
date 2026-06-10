@@ -614,7 +614,8 @@ Can delete:
   parallel trees), `meta=full` on product routes, dead wire fields
   (`resource_hex`, `role_bitmap`, `authority_epoch`, `verification_failed`),
   reserved/rejected parameters, `/v1/resources/*` + roles routes (merged into
-  permissions), `/v1/manifests/*` (merged into namespaces), `profiles/` prefix.
+  the flat permissions route), `/v1/manifests/*` (moved to a diagnostics
+  route), `profiles/` prefix.
 
 Needs docs-first change:
 
