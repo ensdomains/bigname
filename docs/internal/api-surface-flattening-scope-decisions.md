@@ -583,16 +583,39 @@ Notes:
 
 ## Final Direction
 
+Decided in [ADR 0006](../adrs/0006-api-v2-product-surface.md) (proposed
+2026-06-10; pending acceptance). Summary:
+
 Chosen product shape:
 
+- API `v2` with three tiers: lookup primitives (`POST /v2/lookup`, `/v2/status`),
+  product reads in one envelope (`data`/`page`/`meta`) and one naming
+  dictionary, and `/v2/diagnostics/*` as the only home of pipeline vocabulary.
+- The remaining `Unsure` items above are resolved in ADR 0006 § "What this ADR
+  deliberately keeps" (Q3, Q4, Q5, Q8, Q9, Q12, Q20, Q31, Q33, Q34, Q39, Q40).
 
 Must keep:
 
+- Snapshot-pinned reads (`at` + `finality`), `stale`/`conflict` canonicality
+  semantics, verified execution behind `source=`, explicit unsupported
+  semantics (`meta.completeness`, `unsupported_fields`, per-item `status`).
 
 Can delete:
 
+- `view`, `mode`/`declared_state`/`verified_state` (renamed `source`, no
+  parallel trees), `meta=full` on product routes, dead wire fields
+  (`resource_hex`, `role_bitmap`, `authority_epoch`, `verification_failed`),
+  reserved/rejected parameters, `/v1/resources/*` + roles routes (merged into
+  permissions), `/v1/manifests/*` (merged into namespaces), `profiles/` prefix.
 
 Needs docs-first change:
 
+- `docs/api-v2.md`, `docs/api-v2-routes.md`, generated
+  `docs/api-v2.openapi.json`; `docs/api-v1.md` frozen except corrections;
+  `docs/consumer-capabilities.md` remapped to `v2`.
 
 Implementation order:
+
+- Per ADR 0006 § Rollout: accept ADR → write v2 docs → implement v2 over the
+  existing read layer (ADR 0003 slices 3–6 as enablers) → conformance tests →
+  point partner-1 shim and app at v2 → sunset v1 before partner cutover.
