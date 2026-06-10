@@ -165,7 +165,7 @@ Tier 2 — product reads:
 | `GET /v2/search` | Name search and suggestions: `?q=`, `?namespace=`, `?limit=`. Split out of `/v1/names`; no availability or pricing semantics. |
 | `GET /v2/events` | Compact event search across name, address, registration, type, and block filters. |
 | `GET /v2/resolvers/{chain_id}/{address}` | Resolver overview (numeric `chain_id`). Replaces `/v1/resolvers/.../overview`. |
-| `GET /v2/namespaces/{namespace}` | Namespace metadata. `?include=manifests` absorbs `/v1/manifests/{namespace}`. |
+| `GET /v2/namespaces/{namespace}` | Namespace metadata: supported-capability summary in product vocabulary. |
 
 Tier 3 — diagnostics (the only routes carrying pipeline vocabulary):
 
@@ -176,6 +176,7 @@ Tier 3 — diagnostics (the only routes carrying pipeline vocabulary):
 | `GET /v2/diagnostics/names/{name}/authority` | Authority/control explain (token lineage, control vectors, permission lineage). |
 | `GET /v2/diagnostics/names/{name}/records` | Record inventory and cache internals: selectors, explicit gaps, unsupported families, version boundaries, value sources. |
 | `GET /v2/diagnostics/names/{name}/execution` | Persisted verified-execution explain: trace id, steps, digests, CCIP participation. |
+| `GET /v2/diagnostics/namespaces/{namespace}/manifests` | Active manifest versions, source families, deployment epochs, capability flags. Replaces `/v1/manifests/{namespace}`. |
 
 `GET /healthz`, `GET /`, `GET /docs`, and `GET /openapi.json` remain non-contract
 helpers.
@@ -183,7 +184,8 @@ helpers.
 Deleted from the public catalog (capability absorbed as noted): the `profiles/`
 prefix, `/v1/coverage/*` and `/v1/explain/*` (moved under diagnostics),
 `/v1/resources/*` and the roles routes (merged into permissions),
-`/v1/manifests/*` (merged into namespaces), and exact-name filtering via
+`/v1/manifests/*` (moved to diagnostics — manifest vocabulary is pipeline
+internals and stays off product routes), and exact-name filtering via
 `/v1/names?name=` (owned by `GET /v2/names/{name}`).
 
 ### Envelope
@@ -226,11 +228,13 @@ Rules:
   makes it cheap (the reverse-lookup count path) or where the caller opts in
   via `include=total_count`; routes must not run unconditional full counts on
   the request path to fill it.
-- `meta` defaults to the summary above: `as_of` always; `completeness`,
+- `meta` is always present: `as_of` always; `completeness`,
   `unsupported_fields`, and `unsupported_reason` only when the read is not
-  clean; `source` when the route supports `?source=`. `?meta=none` strips
-  `meta` for byte-sensitive feed reads. There is no `meta=full` on product
-  routes — deeper detail is a diagnostics route, not a query knob.
+  clean; `source` when the route supports `?source=`. There is no `meta`
+  query parameter — no `meta=full` (deeper detail is a diagnostics route, not
+  a query knob) and no stripped variant, so the envelope never changes shape
+  per request. `meta` is one small response-level object (not per-record);
+  the feed latency path tolerates it.
 - There are no `declared_state`/`verified_state` parallel trees.
   `source=indexed` returns indexed values; `source=verified` returns the same
   shape from verified execution; `source=both` returns `data` (indexed) plus a
@@ -271,7 +275,6 @@ Permission rows use `{address, scope, powers, registration_id, name}`.
 | `source` | names, records, primary-name | `indexed` (default), `verified`, `both` |
 | `namespace` | name-inferred and collection routes | explicit override / filter |
 | `include` | route-documented expansions | per-route allowlist |
-| `meta` | all | `summary` (default), `none` |
 | `sort`, `order` | every paginated route | route-documented field set + `asc`/`desc`; one style |
 | `cursor`, `page_size` | every paginated route | opaque cursor; default 50, max 200 |
 
@@ -339,8 +342,12 @@ filters, the reserved `/v1/events` parameter block, the `resource` vs
 
 - Snapshot-pinned reads, multi-chain coherence, and `stale`/`conflict`
   semantics — renamed (`finality`, `as_of`), not removed.
-- Verified execution, CCIP-Read support, Basenames transport, and on-demand
-  execution on the records/profile/primary-name paths — behind `source=`.
+- Verified execution, CCIP-Read support, Basenames L1-transport-assisted
+  verified reads (`base-mainnet` → `ethereum-mainnet` through the L1
+  Resolver (upstream: .refs/basenames/README.md:L22 @ basenames@1809bbc)
+  (upstream: .refs/basenames/README.md:L70 @ basenames@1809bbc)), and
+  on-demand execution on the records/profile/primary-name paths — behind
+  `source=`.
 - Explicit unsupported semantics — as `meta.completeness`,
   `unsupported_fields`, and per-item `status`, with the full taxonomy intact on
   diagnostics routes. "Never silent omission" is unchanged.
@@ -360,7 +367,12 @@ per-item `status` (Q31); `view=full` — deleted (Q33); `mode` public — rename
 `source`, only on routes where verified execution is first-class (Q34);
 canonicality explicit in public behavior — yes, via `stale`/`conflict` (Q39);
 coherent multi-chain snapshots — yes, with exact pinning diagnostics-only
-(Q40).
+(Q40); normalized events as public semantics — no: history and events are
+route-owned compact DTOs, and raw normalized-event rows and kinds stay
+diagnostics-only (Q37). It also supersedes Q32's earlier `Yes`: `meta=full`
+does not survive on product routes; deep metadata is a diagnostics route.
+Q36 (raw-fact retention) is storage policy, not API surface — this ADR
+deliberately leaves it open.
 
 ## Upstream anchors
 
@@ -371,6 +383,13 @@ all upstream-anchored semantics in `docs/api-v1.md` and
 `docs/consumer-capabilities.md` carry forward unchanged with their existing
 citations. The `finality` vocabulary adopts the Ethereum JSON-RPC block-tag
 terms already used by `consistency`'s `safe`/`finalized` values.
+
+One existing claim is restated in § "What this ADR deliberately keeps" and
+cited in place: Basenames verified reads use the L1 transport path from
+`base-mainnet` to `ethereum-mainnet` through the L1 Resolver
+(upstream: .refs/basenames/README.md:L22 @ basenames@1809bbc)
+(upstream: .refs/basenames/README.md:L70 @ basenames@1809bbc) — the same
+claim and citations carried by `docs/api-v1.md`. No divergence is created.
 
 ## Consequences
 

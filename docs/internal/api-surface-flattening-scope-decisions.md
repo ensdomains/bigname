@@ -583,8 +583,11 @@ Notes:
 
 ## Final Direction
 
-Decided in [ADR 0006](../adrs/0006-api-v2-product-surface.md) (proposed
-2026-06-10; pending acceptance). Summary:
+Proposed in [ADR 0006](../adrs/0006-api-v2-product-surface.md) (2026-06-10).
+The ADR is `Status: Proposed`: nothing below is decided until it is accepted,
+and implementation does not start before acceptance (ADR 0006 § Rollout
+step 1). The checkbox states above are the original survey; the ADR
+supersedes them on acceptance. Summary of the proposed direction:
 
 Chosen product shape:
 
@@ -593,8 +596,11 @@ Chosen product shape:
   `/status`), product reads in one envelope (`data`/`page`/`meta`) and one
   naming dictionary, and `/diagnostics/*` as the only home of pipeline
   vocabulary.
-- The remaining `Unsure` items above are resolved in ADR 0006 § "What this ADR
-  deliberately keeps" (Q3, Q4, Q5, Q8, Q9, Q12, Q20, Q31, Q33, Q34, Q39, Q40).
+- The API-scope `Unsure` items above are resolved in ADR 0006 § "What this ADR
+  deliberately keeps" (Q3, Q4, Q5, Q8, Q9, Q12, Q20, Q31, Q33, Q34, Q37, Q39,
+  Q40); Q32's earlier `Yes` is superseded (`meta=full` does not survive on
+  product routes). Q36 (raw-fact retention) is storage policy, not API
+  surface — it stays open and is not decided by ADR 0006.
 
 Must keep:
 
