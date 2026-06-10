@@ -108,7 +108,7 @@ One name per concept, applied on every `v2` route:
 | `network` | display slug (`ethereum`, `base`) | `network` (unchanged, display-only) |
 | `registration_id` | the one opaque stable handle for a registration lifecycle | `resource_id`, `resource_hex`, `resource`, `token_lineage_id`, `surface_binding_id` |
 | `finality` | `latest`, `safe`, `finalized` (JSON-RPC block-tag vocabulary) | `consistency` = `head`/`safe`/`finalized` |
-| `source` | `indexed`, `verified`, `both` | `mode` = `declared`/`verified`/`both`/`auto`; `declared_state`/`verified_state` |
+| `source` | `indexed`, `verified` | `mode` = `declared`/`verified`/`both`/`auto`; `declared_state`/`verified_state` |
 | `as_of` | per-chain `{block_number, block_hash, timestamp}`, keyed by `chain_id` | `chain_positions` (and the `execution_checkpoint` pseudo-slot is diagnostics-only) |
 | `scope` (history) | `name`, `registration`, `both` | `surface`, `resource`, `both` |
 | `status` | one result vocabulary: `ok`, `not_found`, `invalid_name`, `unsupported`, `stale`, `failed` | `ResultStatus`, `IdentityStatus`, `NameRecordStatus`, `unnormalizable_input` (folds into `invalid_name`) |
@@ -155,12 +155,12 @@ Tier 2 — product reads:
 | Route | Purpose |
 | --- | --- |
 | `GET /v2/names/{name}` | Name profile: the flat record shape plus registration summary. Replaces `/v1/names/{ns}/{name}` + `/v1/profiles/names/{name}`. |
-| `GET /v2/names/{name}/records` | Resolver records. `?source=indexed\|verified\|both`, `?keys=` selector filter. |
+| `GET /v2/names/{name}/records` | Resolver records. `?source=indexed\|verified`, `?keys=` selector filter. |
 | `GET /v2/names/{name}/subnames` | Direct subnames. `?include=counts`. Replaces `children`. |
 | `GET /v2/names/{name}/history` | Name history. `?scope=name\|registration\|both`. |
-| `GET /v2/names/{name}/permissions` | Permission rows for the name's current registration. Replaces `/v1/resources/{id}/permissions`, `/v1/roles`, `/v1/names/.../roles`, `/v1/resources/lookup`. `registration_id` stays available as a response field and filter. |
+| `GET /v2/permissions` | Permission rows by `?name=`, `?registration_id=`, or `?address=` (at least one required; combinable), including registrations that are no longer a name's current one. A flat filterable collection in the same style as `/v2/events`. Replaces `/v1/resources/{id}/permissions`, `/v1/roles`, `/v1/names/.../roles`, `/v1/resources/lookup`. |
 | `GET /v2/addresses/{address}/names` | Names related to an address. `?relation=owner\|manager\|registrant\|any`, `?include=role_summary`. |
-| `GET /v2/addresses/{address}/primary-name` | Primary name. `?coin_type=` (default `60`), `?source=`. Replaces `/v1/primary-names/{address}`. |
+| `GET /v2/addresses/{address}/primary-name` | Primary name. `?coin_type=` (default `60`), `?namespace=` (default `ens`), `?source=`. Replaces `/v1/primary-names/{address}` with the same `{address, coin_type, namespace}` tuple selection. |
 | `GET /v2/addresses/{address}/history` | Address activity history. |
 | `GET /v2/search` | Name search and suggestions: `?q=`, `?namespace=`, `?limit=`. Split out of `/v1/names`; no availability or pricing semantics. |
 | `GET /v2/events` | Compact event search across name, address, registration, type, and block filters. |
@@ -174,7 +174,7 @@ Tier 3 — diagnostics (the only routes carrying pipeline vocabulary):
 | `GET /v2/diagnostics/names/{name}/coverage` | Full coverage taxonomy: `exhaustiveness`, `enumeration_basis`, `source_classes_considered`, `unsupported_reason` detail. |
 | `GET /v2/diagnostics/names/{name}/binding` | Surface-binding explain (binding ids, binding kind, anchors). |
 | `GET /v2/diagnostics/names/{name}/authority` | Authority/control explain (token lineage, control vectors, permission lineage). |
-| `GET /v2/diagnostics/names/{name}/records` | Record inventory and cache internals: selectors, explicit gaps, unsupported families, version boundaries, value sources. |
+| `GET /v2/diagnostics/names/{name}/records` | Record inventory and cache internals: selectors, explicit gaps, unsupported families, version boundaries, value sources, and indexed-vs-verified side-by-side comparison (the former `mode=both`). |
 | `GET /v2/diagnostics/names/{name}/execution` | Persisted verified-execution explain: trace id, steps, digests, CCIP participation. |
 | `GET /v2/diagnostics/namespaces/{namespace}/manifests` | Active manifest versions, source families, deployment epochs, capability flags. Replaces `/v1/manifests/{namespace}`. |
 
@@ -183,7 +183,9 @@ helpers.
 
 Deleted from the public catalog (capability absorbed as noted): the `profiles/`
 prefix, `/v1/coverage/*` and `/v1/explain/*` (moved under diagnostics),
-`/v1/resources/*` and the roles routes (merged into permissions),
+`/v1/resources/*` and the roles routes (merged into the flat
+`GET /v2/permissions`, where `registration_id` remains a first-class filter
+and response field),
 `/v1/manifests/*` (moved to diagnostics — manifest vocabulary is pipeline
 internals and stays off product routes), and exact-name filtering via
 `/v1/names?name=` (owned by `GET /v2/names/{name}`).
@@ -235,11 +237,14 @@ Rules:
   a query knob) and no stripped variant, so the envelope never changes shape
   per request. `meta` is one small response-level object (not per-record);
   the feed latency path tolerates it.
-- There are no `declared_state`/`verified_state` parallel trees.
-  `source=indexed` returns indexed values; `source=verified` returns the same
-  shape from verified execution; `source=both` returns `data` (indexed) plus a
-  `verified` sibling section in the same shape, present only in that mode.
-  No permanently-null required fields.
+- There are no `declared_state`/`verified_state` parallel trees and no
+  `both` mode. `source=indexed` returns indexed values; `source=verified`
+  returns the same shape from verified execution, with `meta.source`
+  identifying the answer's origin. Indexed-vs-verified side-by-side
+  comparison is a diagnostics read
+  (`GET /v2/diagnostics/names/{name}/records`), not a product-route mode —
+  a third top-level member only in one mode would break the one-envelope
+  guarantee. No permanently-null required fields.
 - `view` does not exist in `v2`.
 
 The flat record shape (used by `/v2/lookup` detail results, `/v2/names/{name}`,
@@ -259,6 +264,13 @@ no backed value exists; `unsupported_fields` lists fields the index could not
 prove without inventing a value — the explicit-unsupported guarantee is
 unchanged, only its spelling.
 
+`profile=feed` on the lookup route is a field budget over this same record
+shape, not a second DTO: it returns the record object restricted to a
+documented core-field subset (identity fields, `is_primary`/`relations`,
+`status`), and every feed field is identical in name and type to its detail
+counterpart. The latency contract is preserved by returning fewer fields, not
+different ones.
+
 Event rows (history and events routes) use one shape:
 `{type, name, namespace, registration_id, chain_id, block_number, timestamp,
 transaction_hash, log_index, data}` with the friendly `type` vocabulary
@@ -270,10 +282,10 @@ Permission rows use `{address, scope, powers, registration_id, name}`.
 
 | Parameter | Applies to | Values |
 | --- | --- | --- |
-| `at` | projection-read routes | RFC 3339 timestamp; selects the snapshot at or before it |
+| `at` | projection-read routes | RFC 3339 timestamp (selects the snapshot at or before it), or a snapshot token round-tripped from a previous response's `meta.as_of` (pins exact per-chain positions) |
 | `finality` | projection-read routes | `latest` (default), `safe`, `finalized` |
-| `source` | names, records, primary-name | `indexed` (default), `verified`, `both` |
-| `namespace` | name-inferred and collection routes | explicit override / filter |
+| `source` | names, records, primary-name | `indexed` (default), `verified` |
+| `namespace` | name-inferred, address-anchored, and collection routes | explicit override / filter |
 | `include` | route-documented expansions | per-route allowlist |
 | `sort`, `order` | every paginated route | route-documented field set + `asc`/`desc`; one style |
 | `cursor`, `page_size` | every paginated route | opaque cursor; default 50, max 200 |
@@ -282,8 +294,12 @@ Rules:
 
 - Snapshot selection (`at` + `finality`) is uniform across projection-read
   routes — including history and events, which could not pin a snapshot in
-  `v1`. Exact multi-chain block pinning (the `chain_positions` JSON selector)
-  is diagnostics-only.
+  `v1`. Exact multi-chain block pinning stays on product routes: every
+  response's `meta.as_of` round-trips as an `at` snapshot token, so any read
+  can be replayed at exactly the positions it was served from (the
+  determinism tool for the parity diff harness and shadow comparison). What
+  dies is `v1`'s separate `chain_positions` query parameter — one selector
+  parameter, not two.
 - Cursors are opaque and versioned but not bound to the route path string, so
   route evolution does not invalidate outstanding cursors. Cursors remain
   stable under replay for the same snapshot.
@@ -366,7 +382,8 @@ split — yes (Q20); typed unsupported inside 200s — yes, as `meta` +
 per-item `status` (Q31); `view=full` — deleted (Q33); `mode` public — renamed
 `source`, only on routes where verified execution is first-class (Q34);
 canonicality explicit in public behavior — yes, via `stale`/`conflict` (Q39);
-coherent multi-chain snapshots — yes, with exact pinning diagnostics-only
+coherent multi-chain snapshots — yes, with exact pinning preserved on product
+routes via the `at` snapshot token
 (Q40); normalized events as public semantics — no: history and events are
 route-owned compact DTOs, and raw normalized-event rows and kinds stay
 diagnostics-only (Q37). It also supersedes Q32's earlier `Yes`: `meta=full`
@@ -429,11 +446,11 @@ Negative / trade-offs:
 - Diagnostics routes become load-bearing for operators and shadow comparison;
   they need the same contract discipline as product routes, just a different
   audience.
-- Folding roles/permissions into one route narrows specialist query shapes;
-  account-anchored role search moves to `?address=` filters on
-  `/v2/names/{name}/permissions` and `/v2/addresses/{address}/names?include=role_summary`,
-  which must be validated against the roles-page capability before `/v1/roles`
-  is removed.
+- Folding four roles/permissions routes into one flat `GET /v2/permissions`
+  narrows specialist query shapes; name-, registration-, and account-anchored
+  reads become filters on that route (plus
+  `/v2/addresses/{address}/names?include=role_summary`), which must be
+  validated against the roles-page capability before `/v1/roles` is removed.
 
 New failure modes:
 
