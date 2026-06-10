@@ -172,8 +172,8 @@ Tier 2 — product reads:
 | `GET /v2/permissions` | Permission rows by `?name=`, `?registration_id=`, or `?address=` (at least one required; combinable), including registrations that are no longer a name's current one. `?include=lineage` adds per-row grant/revocation lineage and inheritance/transfer behavior. A flat filterable collection in the same style as `/v2/events`. Replaces `/v1/resources/{id}/permissions`, `/v1/roles`, `/v1/names/.../roles`, `/v1/resources/lookup`. |
 | `GET /v2/addresses/{address}/names` | Names related to an address. `?relation=` set filter, `?q=` text filter, `?sort=name\|expires_at\|registered_at`, `?dedupe=name\|registration`, `?include=role_summary` — keeps the `v1` dashboard combination of address relation + text filter + sort. |
 | `GET /v2/addresses/{address}/primary-name` | Primary name. `?coin_type=` (default `60`), `?namespace=` (default `ens`), `?source=`. Replaces `/v1/primary-names/{address}` with the same `{address, coin_type, namespace}` tuple selection. Returns one answer per `source` plus a typed `verification` summary (`{status, name}`, `status` incl. `mismatch`) whenever a persisted or on-demand verified outcome exists — claimed-vs-verified stays one call without parallel state trees. |
-| `GET /v2/addresses/{address}/history` | Address activity history. `?relation=` set filter. |
-| `GET /v2/search` | Name search and suggestions: `?q=` with `?match=prefix\|contains` (default `prefix`), `?namespace=`, `?limit=`. Split out of `/v1/names`; no availability or pricing semantics. |
+| `GET /v2/addresses/{address}/history` | Address activity history. `?relation=` set filter, `?scope=name\|registration\|both` — keeps `v1`'s anchor selection for separating name-surface events from registration-lifecycle events. |
+| `GET /v2/search` | Name search and suggestions: `?q=` with `?match=prefix\|contains` (default `prefix`), `?namespace=`; paginates with the standard `cursor`/`page_size` like every collection. Split out of `/v1/names`; no availability or pricing semantics. |
 | `GET /v2/events` | Compact event search across name, address, registration, type, and block filters. |
 | `GET /v2/resolvers/{chain_id}/{address}` | Resolver overview (numeric `chain_id`). Replaces `/v1/resolvers/.../overview` and, through its paginated bound-names section, the `/v1/names?resolver=` filter. |
 | `GET /v2/namespaces/{namespace}` | Namespace metadata: supported-capability summary in product vocabulary. |
@@ -336,11 +336,13 @@ Rules:
   absent from the contract and listed under deferred capabilities in
   `docs/consumer-capabilities.md`, not reserved in the schema.
 - `POST /v2/lookup` body: `{inputs: [...], profile, namespace?}`, where each
-  input is `{name}` or `{address, coin_type?, relation?, page_size?, cursor?}`.
+  input is `{id?, name}` or
+  `{id?, address, coin_type?, relation?, page_size?, cursor?}`.
   Reverse inputs default to `coin_type=60` when omitted. Input order is
-  preserved, one result per input; each result echoes its `input` and, for
-  name inputs, carries `normalization` metadata (`changed`, `input_name`,
-  `reason`) — preserved from `v1`'s result-level contract. The lookup
+  preserved, one result per input; each result echoes its `input` including
+  the caller-supplied correlation `id`, and, for name inputs, carries
+  `normalization` metadata (`changed`, `input_name`, `reason`) — both
+  preserved from `v1`'s result-level contract. The lookup
   primitive is a current-state read: it does not accept `at`/`finality`, and
   `meta.as_of` records the served positions for staleness attribution and
   shadow-diff correlation. Batch limit 1000
@@ -372,7 +374,13 @@ Rules:
   block.
 - One not-found philosophy: single-resource GETs return 404; collections return
   200 with empty `data`; batch lookup results carry in-band `status` per input
-  (a batch never 404s). Empty arrays mean known-empty, never unknown.
+  (a batch never 404s). Empty arrays mean known-empty, never unknown. The
+  primary-name route is the documented exception to the 404 rule: a valid
+  `{address, coin_type, namespace}` tuple with no claim, or an
+  unsupported/mismatched verification, is an answer about that tuple rather
+  than a missing resource — it returns 200 with in-band `status`
+  (`not_found`, `unsupported`, `mismatch`) on the answer and verification
+  sections, matching `v1`'s conformance-tested behavior.
 - One result-status vocabulary everywhere: `ok`, `not_found`, `invalid_name`,
   `mismatch`, `unsupported`, `stale`, `failed`, with `unsupported_reason`
   required when `unsupported` and `failure_reason` permitted on
