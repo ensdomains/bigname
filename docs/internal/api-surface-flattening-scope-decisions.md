@@ -583,16 +583,51 @@ Notes:
 
 ## Final Direction
 
+Proposed in [ADR 0006](../adrs/0006-api-v2-product-surface.md) (2026-06-10).
+The ADR is `Status: Proposed`: nothing below is decided until it is accepted,
+and implementation does not start before acceptance (ADR 0006 § Rollout
+step 1). The checkbox states above are the original survey; the ADR
+supersedes them on acceptance. Summary of the proposed direction:
+
 Chosen product shape:
 
+- A new product surface (developed under the `/v2` prefix, shipped as the
+  re-baselined `v1`) with three tiers: lookup primitives (`POST /lookup`,
+  `/status`), product reads in one envelope (`data`/`page`/`meta`) and one
+  naming dictionary, and `/diagnostics/*` as the only home of pipeline
+  vocabulary.
+- The API-scope `Unsure` items above are resolved in ADR 0006 § "What this ADR
+  deliberately keeps" (Q3, Q4, Q5, Q8, Q9, Q12, Q20, Q31, Q33, Q34, Q37, Q39,
+  Q40); Q32's earlier `Yes` is superseded (`meta=full` does not survive on
+  product routes). Q36 (raw-fact retention) is storage policy, not API
+  surface — it stays open and is not decided by ADR 0006.
 
 Must keep:
 
+- Snapshot-pinned reads (`at` + `finality`), `stale`/`conflict` canonicality
+  semantics, verified execution behind `source=`, explicit unsupported
+  semantics (`meta.completeness`, `unsupported_fields`, per-item `status`).
 
 Can delete:
 
+- `view`, `mode`/`declared_state`/`verified_state` (renamed `source`, no
+  parallel trees), `meta=full` on product routes, dead wire fields
+  (`resource_hex`, `role_bitmap`, `authority_epoch`, `verification_failed`),
+  reserved/rejected parameters, `/v1/resources/*` + roles routes (merged into
+  the flat permissions route), `/v1/manifests/*` (moved to a diagnostics
+  route), `profiles/` prefix.
 
 Needs docs-first change:
 
+- `docs/api-v2.md`, `docs/api-v2-routes.md`, generated
+  `docs/api-v2.openapi.json`; `docs/api-v1.md` frozen except corrections;
+  `docs/consumer-capabilities.md` remapped to `v2`.
 
 Implementation order:
+
+- Per ADR 0006 § Rollout: accept ADR → write new contract docs → implement
+  under the `/v2` development prefix over the existing read layer (ADR 0003
+  slices 3–6 as enablers) → conformance tests → one-time parity validation
+  (capability mapping, same-snapshot value equivalence, partner latency) →
+  switch: delete old v1 and rename `/v2` to `/v1` (public API stays at v1; no
+  permanent v2 prefix) → point partner-1 shim and app at the re-baselined v1.
