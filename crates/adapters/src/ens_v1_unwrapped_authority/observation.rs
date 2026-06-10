@@ -154,6 +154,25 @@ pub(super) fn build_authority_observation(
     }
 
     if matches!(profile, Some(profile) if raw_log.source_family == profile.registry_source_family())
+        && event_topics.matches(REGISTRY_TRANSFER_SIGNATURE, topic0)?
+    {
+        return Ok(Some(AuthorityObservation::RegistryOwnerChanged(
+            RegistryOwnerObservation {
+                parent_node: None,
+                labelhash: String::new(),
+                namehash: Some(normalize_hex_32(
+                    raw_log
+                        .topics
+                        .get(1)
+                        .context("Transfer log is missing indexed node")?,
+                )?),
+                owner: decode_owner_address(&raw_log.data)?,
+                reference: raw_log.reference(),
+            },
+        )));
+    }
+
+    if matches!(profile, Some(profile) if raw_log.source_family == profile.registry_source_family())
         && event_topics.matches(NEW_RESOLVER_SIGNATURE, topic0)?
     {
         return Ok(Some(AuthorityObservation::ResolverChanged(
@@ -467,7 +486,11 @@ pub(super) fn observation_namehash(observation: &AuthorityObservation) -> Option
         AuthorityObservation::WrapperFusesSet(value) => Some(&value.namehash),
         AuthorityObservation::WrapperExpiryExtended(value) => Some(&value.namehash),
         AuthorityObservation::WrapperTokenTransferred(value) => Some(&value.namehash),
-        AuthorityObservation::RegistryOwnerChanged(value) => value.namehash.as_deref(),
+        AuthorityObservation::RegistryOwnerChanged(value)
+            if value.labelhash.is_empty() && value.namehash.is_some() =>
+        {
+            value.namehash.as_deref()
+        }
         _ => None,
     }
 }

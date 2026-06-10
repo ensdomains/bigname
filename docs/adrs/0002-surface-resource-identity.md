@@ -44,8 +44,8 @@ ENSv1 authority-anchor rules:
 
 - `resource_id` is anchored to the current ENSv1 authority object, not to the surface text and not to the current holder address
 - for this slice, the relevant ENSv1 authority anchors are direct registry-only control, registrar-backed registration, and wrapper-backed control
-- keep the active `resource_id` while the same ENSv1 authority anchor stays authoritative across transfer, renewal, expiry, grace, fuse, controller, or resolver changes
-- rotate the active `resource_id` when authority moves to a different ENSv1 anchor; wrap, unwrap, and re-registration are the important cases
+- keep the active `resource_id` while the same ENSv1 authority anchor stays authoritative across transfer, renewal, expiry, grace, fuse, resolver changes, or controller changes that do not diverge from the current tokenized holder
+- rotate the active `resource_id` when authority moves to a different ENSv1 anchor; wrap, unwrap, re-registration, and live registrar registry-owner divergence are the important cases
 - if the exact prior ENSv1 authority anchor becomes authoritative again, reuse its prior `resource_id`
 - effective permissions and permission history are keyed to the authoritative `resource_id`, not to the surface text
 - when the same ENSv1 anchor remains authoritative, resource-centric permission continuity stays on that `resource_id`; when authority moves to a different anchor, resource-centric permission reads do not merge predecessor and successor resources
@@ -82,6 +82,8 @@ Resource-centric convenience rule:
 | --- | --- |
 | Registry-only control for `ens:sub.alice.eth` | mint one registry-anchored `resource_id`; keep it across registry-owner or controller changes; no active `token_lineage_id`; `binding_kind` is `declared_registry_path` |
 | Registrar registration for `ens:alice.eth` | mint one registrar-anchored `resource_id` and one registrar `token_lineage_id`; keep both while that same lease remains authoritative; `binding_kind` is `declared_registry_path` |
+| Registry owner diverges from the live registrar holder for `ens:alice.eth` | close the registrar binding; mint one registry-anchored `resource_id` with no active `token_lineage_id`; the successor binding is still `declared_registry_path` |
+| Diverged registry owner returns to the same live registrar holder before release | keep `logical_name_id`; close the registry-only binding; reactivate the prior registrar `resource_id` and prior registrar `token_lineage_id`; the successor binding is still `declared_registry_path` |
 | Wrap `ens:alice.eth` | keep `logical_name_id`; close the registrar binding; mint a wrapper-anchored `resource_id` and wrapper `token_lineage_id`; the successor binding is still `declared_registry_path` |
 | Unwrap `ens:alice.eth` before the lease ends | keep `logical_name_id`; close the wrapper binding; reactivate the prior registrar `resource_id` and prior registrar `token_lineage_id`; the successor binding is still `declared_registry_path` |
 | `ens:alice.eth` enters expiry or grace while the same authority anchor remains in force | keep the current `resource_id` and current `token_lineage_id`; only status and expiry facts change; `binding_kind` stays `declared_registry_path` |

@@ -62,8 +62,8 @@ For each workstream:
 
 | Stream | Status | Branch | PR | Notes |
 | --- | --- | --- | --- | --- |
-| WS-H Safety net & docs | PR open | `fix/ws-h-safety-net-docs` | [#13](https://github.com/TateB/bigname/pull/13) | WS-H P0 checkboxes are closed on the branch; approved cross-scope healthcheck command patch touches indexer/worker; Docker publishes only from successful CI on main, with release-tag publishing deferred rather than left as an ungated path; no other stream merges to main before WS-H P0s land |
-| WS-A ENSv1 authority | not started | `fix/ens-v1-registry-owner-authority` | — | Items 1–3 gate the existing fix branch; may be prepared there but must not merge to main before WS-H |
+| WS-H Safety net & docs | merged | `fix/ws-h-safety-net-docs` | [#13](https://github.com/TateB/bigname/pull/13) | Merged to `main` in `2891acd`; WS-H P0 gate is closed |
+| WS-A ENSv1 authority | in progress | `codex/ws-a-ens-v1-authority-gates` → `fix/ens-v1-registry-owner-authority` | — | Items 1–3 are WIP; focused storage/decode/reactivation checks and full `ens_v1_unwrapped_authority` filter pass; storage reviewer blockers addressed locally; full gate, reviewer rerun, and PR remain pending |
 | WS-B ENSv2 + preimage | not started | — | — | |
 | WS-C Projection pipeline | not started | — | — | Will need a migration (dead-letter) — WS-F review |
 | WS-D Intake resilience | not started | — | — | Owns storage `backfill_jobs/`, `lineage/` |
