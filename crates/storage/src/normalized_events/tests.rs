@@ -3983,6 +3983,148 @@ async fn normalized_event_count_only_upsert_repairs_ens_v1_registry_event_time_a
 }
 
 #[tokio::test]
+async fn normalized_event_count_only_upsert_preserves_ens_v1_registry_event_time_authority_transfer_before_owner_when_incoming_null()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let registry_resource_id = Uuid::from_u128(0x15b2);
+    seed_ens_v1_registry_event_time_registry_key_repair_resources(
+        database.pool(),
+        registry_resource_id,
+        Uuid::from_u128(0x15b3),
+    )
+    .await?;
+
+    let mut event = ens_v1_registry_event_time_authority_transfer_repair_event(
+        "ens-v1-unwrapped-authority:registry-event-time:authority-transfer-before-owner-incoming-null",
+        registry_resource_id,
+    );
+    event.canonicality_state = CanonicalityState::Observed;
+    event.before_state = json!({
+        "owner": "0x0000000000000000000000000000000000000def"
+    });
+    upsert_normalized_events(database.pool(), std::slice::from_ref(&event)).await?;
+
+    let mut replayed = ens_v1_registry_event_time_authority_transfer_repair_event(
+        "ens-v1-unwrapped-authority:registry-event-time:authority-transfer-before-owner-incoming-null",
+        registry_resource_id,
+    );
+    replayed.before_state = json!({
+        "owner": null
+    });
+    let inserted_count =
+        upsert_normalized_events_count_only(database.pool(), std::slice::from_ref(&replayed))
+            .await?;
+    assert_eq!(inserted_count, 0);
+
+    let stored = sqlx::query_as::<_, (Uuid, serde_json::Value, String)>(
+        "SELECT resource_id, before_state, canonicality_state::TEXT FROM normalized_events WHERE event_identity = $1",
+    )
+    .bind(&event.event_identity)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(stored.0, registry_resource_id);
+    assert_eq!(stored.1, event.before_state);
+    assert_eq!(stored.2, "canonical");
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn normalized_event_count_only_upsert_repairs_ens_v1_registry_event_time_authority_transfer_before_owner_from_null()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let registry_resource_id = Uuid::from_u128(0x15b4);
+    seed_ens_v1_registry_event_time_registry_key_repair_resources(
+        database.pool(),
+        registry_resource_id,
+        Uuid::from_u128(0x15b5),
+    )
+    .await?;
+
+    let mut event = ens_v1_registry_event_time_authority_transfer_repair_event(
+        "ens-v1-unwrapped-authority:registry-event-time:authority-transfer-before-owner-from-null",
+        registry_resource_id,
+    );
+    event.canonicality_state = CanonicalityState::Observed;
+    event.before_state = json!({
+        "owner": null
+    });
+    upsert_normalized_events(database.pool(), std::slice::from_ref(&event)).await?;
+
+    let mut repaired = ens_v1_registry_event_time_authority_transfer_repair_event(
+        "ens-v1-unwrapped-authority:registry-event-time:authority-transfer-before-owner-from-null",
+        registry_resource_id,
+    );
+    repaired.before_state = json!({
+        "owner": "0x0000000000000000000000000000000000000abc"
+    });
+    let inserted_count =
+        upsert_normalized_events_count_only(database.pool(), std::slice::from_ref(&repaired))
+            .await?;
+    assert_eq!(inserted_count, 0);
+
+    let stored = sqlx::query_as::<_, (Uuid, serde_json::Value, String)>(
+        "SELECT resource_id, before_state, canonicality_state::TEXT FROM normalized_events WHERE event_identity = $1",
+    )
+    .bind(&event.event_identity)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(stored.0, registry_resource_id);
+    assert_eq!(stored.1, repaired.before_state);
+    assert_eq!(stored.2, "canonical");
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn normalized_event_count_only_upsert_repairs_ens_v1_registry_event_time_authority_transfer_resource_id_preserving_before_owner_when_incoming_null()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let legacy_labelhash_registry_resource_id = Uuid::from_u128(0x15b6);
+    let namehash_registry_resource_id = Uuid::from_u128(0x15b7);
+    seed_ens_v1_registry_event_time_registry_key_repair_resources(
+        database.pool(),
+        legacy_labelhash_registry_resource_id,
+        namehash_registry_resource_id,
+    )
+    .await?;
+
+    let mut event = ens_v1_registry_event_time_authority_transfer_repair_event(
+        "ens-v1-unwrapped-authority:registry-event-time:authority-transfer-resource-before-owner-incoming-null",
+        legacy_labelhash_registry_resource_id,
+    );
+    event.canonicality_state = CanonicalityState::Observed;
+    event.before_state = json!({
+        "owner": "0x0000000000000000000000000000000000000def"
+    });
+    upsert_normalized_events(database.pool(), std::slice::from_ref(&event)).await?;
+
+    let mut replayed = ens_v1_registry_event_time_authority_transfer_repair_event(
+        "ens-v1-unwrapped-authority:registry-event-time:authority-transfer-resource-before-owner-incoming-null",
+        namehash_registry_resource_id,
+    );
+    replayed.before_state = json!({
+        "owner": null
+    });
+    let inserted_count =
+        upsert_normalized_events_count_only(database.pool(), std::slice::from_ref(&replayed))
+            .await?;
+    assert_eq!(inserted_count, 0);
+
+    let stored = sqlx::query_as::<_, (Uuid, serde_json::Value, String)>(
+        "SELECT resource_id, before_state, canonicality_state::TEXT FROM normalized_events WHERE event_identity = $1",
+    )
+    .bind(&event.event_identity)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(stored.0, namehash_registry_resource_id);
+    assert_eq!(stored.1, event.before_state);
+    assert_eq!(stored.2, "canonical");
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn normalized_event_count_only_upsert_repairs_ens_v1_registry_event_time_record_version_before_state_same_resource()
 -> Result<()> {
     let database = TestDatabase::new().await?;

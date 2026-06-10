@@ -109,7 +109,7 @@ pub(crate) async fn run_automatic_current_projection_replay(
                     info!(
                         service = "worker",
                         replay = "all_current_projections",
-                        "automatic all-current projection replay skipped because durable apply cursor and replay markers exist"
+                        "automatic all-current projection replay skipped because durable apply cursor and target-covering replay markers exist"
                     );
                 }
                 Ok(false) => {}
@@ -387,7 +387,19 @@ async fn projection_bootstrap_already_handed_off_to_apply(pool: &PgPool) -> Resu
         return Ok(false);
     }
 
-    let complete_marker_count = load_current_projection_replay_marker_count(pool).await?;
+    let readiness = load_projection_replay_readiness(pool).await?;
+    if !readiness.is_ready() {
+        return Ok(false);
+    }
+
+    let chain_checkpoint_max_block =
+        projection_apply::load_chain_checkpoint_max_block(pool).await?;
+    let replay_target_block = projection_bootstrap_replay_target_block(
+        readiness.normalized_replay_max_target_block,
+        chain_checkpoint_max_block,
+    );
+    let complete_marker_count =
+        load_current_projection_replay_marker_count(pool, replay_target_block).await?;
     Ok(should_skip_bootstrap_for_existing_apply_cursor(
         cursor_exists,
         complete_marker_count,
@@ -494,7 +506,10 @@ async fn missing_projection_index_count(pool: &PgPool) -> Result<i64> {
         .context("failed to inspect deferred normalized-event projection indexes")
 }
 
-async fn load_current_projection_replay_marker_count(pool: &PgPool) -> Result<i64> {
+async fn load_current_projection_replay_marker_count(
+    pool: &PgPool,
+    replay_target_block: Option<i64>,
+) -> Result<i64> {
     let projections = replay::ALL_CURRENT_PROJECTION_ORDER
         .iter()
         .copied()
@@ -506,10 +521,15 @@ async fn load_current_projection_replay_marker_count(pool: &PgPool) -> Result<i6
         FROM current_projection_replay_status
         WHERE replay_version = $1
           AND projection = ANY($2::TEXT[])
+          AND (
+              $3::BIGINT IS NULL
+              OR completed_normalized_target_block >= $3
+          )
         "#,
     )
     .bind(replay::CURRENT_PROJECTION_REPLAY_VERSION)
     .bind(&projections)
+    .bind(replay_target_block)
     .fetch_one(pool)
     .await
     .context("failed to inspect current projection replay markers")

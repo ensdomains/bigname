@@ -164,6 +164,15 @@ pub(crate) async fn repair_ens_v1_unwrapped_authority_registry_event_time_resour
             SELECT
                 input.*,
                 CASE
+                    WHEN input.event_kind = 'AuthorityTransferred'
+                     AND jsonb_typeof(input.old_before_state::JSONB -> 'owner') =
+                         'string'
+                     AND btrim(input.old_before_state::JSONB ->> 'owner') <> ''
+                     AND input.new_before_state::JSONB -> 'owner' = 'null'::JSONB
+                    THEN input.old_before_state::JSONB
+                    ELSE input.new_before_state::JSONB
+                END AS repaired_before_state,
+                CASE
                     WHEN input.event_kind = 'RecordChanged'
                      AND input.old_before_state::JSONB IS NOT DISTINCT FROM
                          input.new_before_state::JSONB
@@ -327,8 +336,28 @@ pub(crate) async fn repair_ens_v1_unwrapped_authority_registry_event_time_resour
                          input.new_after_state::JSONB
                      AND input.old_before_state::JSONB - 'owner' =
                          input.new_before_state::JSONB - 'owner'
-                     AND COALESCE(input.old_before_state::JSONB ->> 'owner', '') <> ''
-                     AND COALESCE(input.new_before_state::JSONB ->> 'owner', '') <> ''
+                     AND (
+                         (
+                             jsonb_typeof(input.old_before_state::JSONB -> 'owner') =
+                                 'string'
+                             AND btrim(input.old_before_state::JSONB ->> 'owner') <> ''
+                             AND jsonb_typeof(input.new_before_state::JSONB -> 'owner') =
+                                 'string'
+                             AND btrim(input.new_before_state::JSONB ->> 'owner') <> ''
+                         )
+                         OR (
+                             jsonb_typeof(input.old_before_state::JSONB -> 'owner') =
+                                 'string'
+                             AND btrim(input.old_before_state::JSONB ->> 'owner') <> ''
+                             AND input.new_before_state::JSONB -> 'owner' = 'null'::JSONB
+                         )
+                         OR (
+                             input.old_before_state::JSONB -> 'owner' = 'null'::JSONB
+                             AND jsonb_typeof(input.new_before_state::JSONB -> 'owner') =
+                                 'string'
+                             AND btrim(input.new_before_state::JSONB ->> 'owner') <> ''
+                         )
+                     )
                  )
                  OR (
                      input.event_kind = 'RecordVersionChanged'
@@ -636,7 +665,7 @@ pub(crate) async fn repair_ens_v1_unwrapped_authority_registry_event_time_resour
             UPDATE normalized_events event
             SET
                 resource_id = repair.new_resource_id,
-                before_state = repair.new_before_state::JSONB,
+                before_state = repair.repaired_before_state,
                 after_state = repair.repaired_after_state,
                 observed_at = now()
             FROM repair_map repair
@@ -659,7 +688,17 @@ pub(crate) async fn repair_ens_v1_unwrapped_authority_registry_event_time_resour
               ON event.event_identity = input.event_identity
             WHERE event.event_kind = input.event_kind
               AND event.resource_id IS NOT DISTINCT FROM input.new_resource_id
-              AND event.before_state IS NOT DISTINCT FROM input.new_before_state::JSONB
+              AND event.before_state IS NOT DISTINCT FROM (
+                  CASE
+                      WHEN input.event_kind = 'AuthorityTransferred'
+                       AND jsonb_typeof(input.old_before_state::JSONB -> 'owner') =
+                           'string'
+                       AND btrim(input.old_before_state::JSONB ->> 'owner') <> ''
+                       AND input.new_before_state::JSONB -> 'owner' = 'null'::JSONB
+                      THEN input.old_before_state::JSONB
+                      ELSE input.new_before_state::JSONB
+                  END
+              )
               AND event.after_state IS NOT DISTINCT FROM (
                   CASE
                       WHEN input.event_kind = 'RecordChanged'
@@ -924,8 +963,28 @@ pub(crate) async fn repair_ens_v1_unwrapped_authority_registry_event_time_before
                 input.event_kind = 'AuthorityTransferred'
                 AND input.old_before_state::JSONB - 'owner' =
                     input.new_before_state::JSONB - 'owner'
-                AND COALESCE(input.old_before_state::JSONB ->> 'owner', '') <> ''
-                AND COALESCE(input.new_before_state::JSONB ->> 'owner', '') <> ''
+                AND (
+                    (
+                        jsonb_typeof(input.old_before_state::JSONB -> 'owner') =
+                            'string'
+                        AND btrim(input.old_before_state::JSONB ->> 'owner') <> ''
+                        AND jsonb_typeof(input.new_before_state::JSONB -> 'owner') =
+                            'string'
+                        AND btrim(input.new_before_state::JSONB ->> 'owner') <> ''
+                    )
+                    OR (
+                        jsonb_typeof(input.old_before_state::JSONB -> 'owner') =
+                            'string'
+                        AND btrim(input.old_before_state::JSONB ->> 'owner') <> ''
+                        AND input.new_before_state::JSONB -> 'owner' = 'null'::JSONB
+                    )
+                    OR (
+                        input.old_before_state::JSONB -> 'owner' = 'null'::JSONB
+                        AND jsonb_typeof(input.new_before_state::JSONB -> 'owner') =
+                            'string'
+                        AND btrim(input.new_before_state::JSONB ->> 'owner') <> ''
+                    )
+                )
             )
             OR (
                 input.event_kind = 'RecordVersionChanged'
@@ -964,7 +1023,15 @@ pub(crate) async fn repair_ens_v1_unwrapped_authority_registry_event_time_before
         updated AS (
             UPDATE normalized_events event
             SET
-                before_state = repair.new_before_state::JSONB,
+                before_state = CASE
+                    WHEN repair.event_kind = 'AuthorityTransferred'
+                     AND jsonb_typeof(repair.old_before_state::JSONB -> 'owner') =
+                         'string'
+                     AND btrim(repair.old_before_state::JSONB ->> 'owner') <> ''
+                     AND repair.new_before_state::JSONB -> 'owner' = 'null'::JSONB
+                    THEN repair.old_before_state::JSONB
+                    ELSE repair.new_before_state::JSONB
+                END,
                 observed_at = now()
             FROM repair_map repair
             WHERE event.event_identity = repair.event_identity
@@ -1213,13 +1280,7 @@ fn authority_transfer_state_repair_allowed(
         return false;
     }
 
-    let Some(existing_owner) = existing_before_state.get("owner").and_then(Value::as_str) else {
-        return false;
-    };
-    let Some(incoming_owner) = incoming_before_state.get("owner").and_then(Value::as_str) else {
-        return false;
-    };
-    if existing_owner.is_empty() || incoming_owner.is_empty() {
+    if !authority_transfer_owner_transition_allowed(existing_before_state, incoming_before_state) {
         return false;
     }
 
@@ -1233,6 +1294,34 @@ fn authority_transfer_state_repair_allowed(
     }
 
     existing_without_owner == incoming_without_owner
+}
+
+fn authority_transfer_owner_transition_allowed(
+    existing_before_state: &Value,
+    incoming_before_state: &Value,
+) -> bool {
+    matches!(
+        (
+            owner_state(existing_before_state),
+            owner_state(incoming_before_state)
+        ),
+        (Some(OwnerState::Known), Some(OwnerState::Known))
+            | (Some(OwnerState::Known), Some(OwnerState::Null))
+            | (Some(OwnerState::Null), Some(OwnerState::Known))
+    )
+}
+
+enum OwnerState {
+    Known,
+    Null,
+}
+
+fn owner_state(value: &Value) -> Option<OwnerState> {
+    match value.get("owner")? {
+        Value::Null => Some(OwnerState::Null),
+        Value::String(owner) if !owner.trim().is_empty() => Some(OwnerState::Known),
+        _ => None,
+    }
 }
 
 fn record_version_state_repair_allowed(

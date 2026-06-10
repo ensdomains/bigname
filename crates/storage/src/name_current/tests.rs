@@ -285,6 +285,32 @@ fn address_name_current_row(
     }
 }
 
+async fn identity_sidecar_row_counts(database: &TestDatabase, address: &str) -> Result<(i64, i64)> {
+    let count_rows = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)::bigint
+        FROM address_names_current_identity_counts
+        WHERE address = $1
+        "#,
+    )
+    .bind(address)
+    .fetch_one(database.pool())
+    .await?;
+
+    let feed_rows = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)::bigint
+        FROM address_names_current_identity_feed
+        WHERE address = $1
+        "#,
+    )
+    .bind(address)
+    .fetch_one(database.pool())
+    .await?;
+
+    Ok((count_rows, feed_rows))
+}
+
 #[tokio::test]
 async fn name_current_upserts_and_loads_exact_name_projection() -> Result<()> {
     let database = test_database().await?;
@@ -1115,6 +1141,121 @@ async fn name_current_replacement_updates_last_recomputed_at_only() -> Result<()
     assert_eq!(
         load_name_current(database.pool(), logical_name_id).await?,
         Some(replacement)
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn name_current_replacement_bulk_rebuilds_identity_sidecars_without_row_triggers()
+-> Result<()> {
+    let database = test_database().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    let logical_name_id = "ens:alice.eth";
+    let old_token_lineage_id = Uuid::from_u128(0x1210);
+    let old_resource_id = Uuid::from_u128(0x2210);
+    let old_surface_binding_id = Uuid::from_u128(0x3210);
+    let replacement_logical_name_id = "ens:bob.eth";
+    let replacement_token_lineage_id = Uuid::from_u128(0x1211);
+    let replacement_resource_id = Uuid::from_u128(0x2211);
+    let replacement_surface_binding_id = Uuid::from_u128(0x3211);
+
+    seed_binding_references(
+        &database,
+        logical_name_id,
+        "alice.eth",
+        old_resource_id,
+        old_token_lineage_id,
+        old_surface_binding_id,
+    )
+    .await?;
+    let existing = name_current_row(
+        logical_name_id,
+        old_surface_binding_id,
+        old_resource_id,
+        old_token_lineage_id,
+    );
+    upsert_name_current_rows(database.pool(), std::slice::from_ref(&existing)).await?;
+    upsert_address_names_current_rows(
+        database.pool(),
+        &[address_name_current_row(
+            address,
+            &existing,
+            AddressNameRelation::TokenHolder,
+        )],
+    )
+    .await?;
+    assert_eq!(
+        identity_sidecar_row_counts(&database, address).await?,
+        (2, 2)
+    );
+
+    seed_binding_references(
+        &database,
+        replacement_logical_name_id,
+        "bob.eth",
+        replacement_resource_id,
+        replacement_token_lineage_id,
+        replacement_surface_binding_id,
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        CREATE OR REPLACE FUNCTION public.address_names_current_identity_counts_recompute_for_name_current()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+            RAISE EXCEPTION 'name_current counts trigger fired during replacement';
+        END;
+        $$;
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        CREATE OR REPLACE FUNCTION public.address_names_current_identity_feed_name_current_trigger()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+            RAISE EXCEPTION 'name_current feed trigger fired during replacement';
+        END;
+        $$;
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+
+    let mut replacement_row = name_current_row(
+        replacement_logical_name_id,
+        replacement_surface_binding_id,
+        replacement_resource_id,
+        replacement_token_lineage_id,
+    );
+    replacement_row.canonical_display_name = "bob.eth".to_owned();
+    replacement_row.normalized_name = "bob.eth".to_owned();
+    replacement_row.namehash = "namehash:bob.eth".to_owned();
+    let mut replacement = NameCurrentReplacement::begin(database.pool()).await?;
+    replacement
+        .stage_rows(std::slice::from_ref(&replacement_row))
+        .await?;
+    let (upserted_row_count, deleted_row_count) = replacement.publish().await?;
+
+    assert_eq!(upserted_row_count, 1);
+    assert_eq!(deleted_row_count, 1);
+    assert_eq!(
+        load_name_current(database.pool(), replacement_logical_name_id).await?,
+        Some(replacement_row)
+    );
+    assert_eq!(
+        load_name_current(database.pool(), logical_name_id).await?,
+        None
+    );
+    assert_eq!(
+        identity_sidecar_row_counts(&database, address).await?,
+        (0, 0)
     );
 
     database.cleanup().await

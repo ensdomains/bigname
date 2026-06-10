@@ -235,7 +235,7 @@ pub async fn rebuild_address_names_current_identity_sidecars(pool: &PgPool) -> R
     Ok(())
 }
 
-async fn rebuild_address_names_current_identity_sidecars_in_transaction(
+pub(crate) async fn rebuild_address_names_current_identity_sidecars_in_transaction(
     transaction: &mut Transaction<'_, Postgres>,
 ) -> Result<()> {
     sqlx::query(

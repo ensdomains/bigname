@@ -17,6 +17,7 @@ pub use address_replacement::{
 };
 pub use collapse::collapse_address_name_current_rows;
 pub use count::{AddressNamesCurrentCountFilter, count_address_names_current_for_app_filter};
+pub(crate) use full_rebuild::rebuild_address_names_current_identity_sidecars_in_transaction;
 pub use full_rebuild::{
     AddressNamesCurrentFullRebuild, begin_address_names_current_full_rebuild,
     drop_address_names_current_full_rebuild, insert_address_names_current_full_rebuild_rows,
