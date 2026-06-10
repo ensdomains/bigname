@@ -65,7 +65,8 @@ makes the exception the rule.
 
 ## Decision
 
-Publish API `v2` as the product contract, designed around three rules:
+Publish a new product contract — developed as `v2`, shipped as the
+re-baselined `v1` — designed around three rules:
 
 1. **One vocabulary.** Every domain concept has exactly one wire name, drawn
    from common ENS/blockchain usage, defined in the naming dictionary below, and
@@ -77,9 +78,12 @@ Publish API `v2` as the product contract, designed around three rules:
    responses carry zero indexer internals; the route path — not a query knob —
    decides which tier a response belongs to.
 
-`v2` replaces `v1` outright. `v1` is frozen at the current contract while `v2`
-is built, and the release that ships `v2` deletes the `v1` routes — there is no
-coexistence or deprecation window (see Rollout).
+`v2` is a development designation only. The new surface is built under the
+`/v2` prefix alongside the frozen `v1`, passes a one-time parity validation,
+and then ships as the new `v1`: the old `v1` routes are deleted and the `/v2`
+prefix is renamed to `/v1` in the same release. The public API stays at `v1`;
+no permanent `/v2` prefix exists and there is no coexistence or deprecation
+window (see Rollout).
 
 ### Naming dictionary (normative)
 
@@ -125,6 +129,12 @@ Rules:
   values, or error messages.
 
 ### Route catalog
+
+Routes below carry the `/v2` development prefix; at the switch the prefix
+becomes `/v1` (see Rollout). The development prefix is what allows old and new
+surfaces to coexist in one binary for parity validation — several new paths
+(e.g. `GET /v2/names/{name}`) would be ambiguous against old-`v1` grammar
+(`GET /v1/names/{namespace}/{name}`) at the same prefix.
 
 Name-shaped routes infer the namespace from the name itself (the existing
 `profiles/` and `identity:lookup` inference: exact `base.eth` is `ens`,
@@ -377,16 +387,23 @@ Positive:
 - Contract rot is eliminated structurally: no reserved parameters, no
   documented-but-never-emitted fields or codes, and generated OpenAPI continues
   to derive from the route table.
-- `docs/api-v1.md` ceases to grow; `v2` docs start from the dictionary and one
-  envelope instead of per-route exceptions.
+- `docs/api-v1.md` ceases to grow; the new contract docs start from the
+  dictionary and one envelope instead of per-route exceptions, and take over
+  the `api-v1` names at the switch.
+- The public API stays at `v1` permanently — no `/v2` prefix encoding the
+  migration history of zero clients into every future URL.
 
 Negative / trade-offs:
 
-- `v1` keeps serving unchanged until `v2` reaches capability parity, then is
-  deleted in the `v2` release — one replacement, not a migration window.
-  Anyone who integrates against `v1` in the interim breaks at the switch;
-  accepted because the consumer count is ~zero and `v1` docs stop being
-  advertised at ADR acceptance.
+- The old `v1` keeps serving unchanged until the new surface passes the
+  parity gate, then the switch replaces it in one release — not a migration
+  window. Anyone who integrates against the old `v1` in the interim breaks at
+  the switch; accepted because the consumer count is ~zero and the old `v1`
+  docs stop being advertised at ADR acceptance.
+- The one-time parity gate is the only safety check before the old contract
+  disappears; there is no fallback window to catch a missed capability after
+  the switch. The gate's three checks (capability mapping, same-snapshot value
+  equivalence, partner latency) are therefore hard requirements, not advisory.
 - Some field names originate in projection rows in `crates/storage`
   (`declared_summary` passthroughs); `v2` requires a mapping layer at the API
   boundary or projection-side renames, coordinated with Storage and Domain.
@@ -406,6 +423,10 @@ New failure modes:
 - Namespace inference on all name routes makes the inference table
   correctness-critical; it needs exhaustive tests including the `base.eth`
   exact-match exception.
+- Re-using the `v1` label means two different `v1` contracts exist across the
+  repo's history; any cached or forked copy of the old docs silently describes
+  a dead contract. Mitigated by archiving the old docs with a pointer to this
+  ADR and the switch date.
 
 ## Rollout
 
@@ -418,9 +439,11 @@ tests.
 
 1. Accept or revise this ADR; record the outcome as the Final Direction in
    `docs/internal/api-surface-flattening-scope-decisions.md`.
-2. Write `docs/api-v2.md` and `docs/api-v2-routes.md` from the dictionary and
-   route catalog above; generate `docs/api-v2.openapi.json` from the route
-   table. `docs/api-v1.md` is frozen except for corrections.
+2. Write the new contract docs from the dictionary and route catalog above —
+   maintained as `docs/api-v2.md` / `docs/api-v2-routes.md` during development
+   and renamed to the `api-v1` names at the switch; generate the OpenAPI from
+   the route table. The existing `docs/api-v1.md` is frozen except for
+   corrections until then.
 3. Implement `v2` routes over the existing read layer (the shared exact-name
    funnel in `apps/api/src/support/snapshots.rs` and the route-definition
    table). ADR 0003 slices 3–6 (snapshot service, record read model,
@@ -429,12 +452,21 @@ tests.
 4. Add envelope-conformance, dictionary-conformance (no banned `v1` spellings
    on `v2` routes), and product-route denylist tests (no pipeline vocabulary)
    alongside the existing OpenAPI assertions.
-5. Point the partner-1 shim and the first app integration at `v2` only. Rerun
-   the partner latency benchmarks against `POST /v2/lookup` before the switch.
-6. Replace `v1`: the release that publishes `v2` deletes the `v1` routes, and
-   `docs/api-v1*.md` are retired to an archived record. No deprecation window
-   is owed to a contract nobody integrated against; anything still pointing at
-   `v1` breaks at the switch by design.
+5. One-time parity validation, with old and new surfaces registered in the
+   same binary (old `/v1`, new `/v2`): every capability row in
+   `docs/consumer-capabilities.md` is served by a mapped new route; a diff
+   harness reads both surfaces at the same snapshot and proves value
+   equivalence under the dictionary mapping; the partner latency benchmarks
+   are rerun against the new lookup route. Results are recorded once — this
+   gate is not a standing dual-serving arrangement, and it is the only
+   safety check before the old contract disappears.
+6. The switch, in one release: delete the old `v1` routes, rename the `/v2`
+   prefix to `/v1` (route table, docs, and generated OpenAPI follow), and
+   retire the old `v1` docs to an archived record pointing at this ADR. The
+   `/v2` prefix never ships as a public contract; anything still reading
+   old-`v1` semantics breaks at the switch by design.
+7. Point the partner-1 shim and the first app integration at the re-baselined
+   `v1`.
 
 Sequencing with the 2026-06 remediation
 (`docs/internal/remediation-2026-06.md`, a temporary tracking doc): the
@@ -464,11 +496,22 @@ block them.
 
 ## Alternatives considered
 
-**Reshape `v1` in place instead of publishing `v2`.** Cheaper on path strings,
-but `docs/api-v1.md` § Versioning explicitly requires a major version for
-changed enum meanings, defaults, and required fields, and an in-place rewrite
-would make the frozen docs retroactively false. The prefix costs nothing;
-honoring the repo's own versioning policy keeps the contract docs trustworthy.
+**Keep a permanent `/v2` prefix.** The conventional reading of
+`docs/api-v1.md` § Versioning is that this change requires a `v2`. Rejected as
+the end state: version prefixes exist for consumers, and the old `v1` has
+none — shipping the new contract under `/v2` forever would encode the
+migration history of zero clients into every future URL. The policy's intent
+(no silent breaking changes for integrators) is honored by the parity gate and
+by the fact that nobody integrated; this re-baseline is a one-time exception
+recorded here, and the versioning policy applies unchanged to the re-baselined
+`v1` from the switch onward.
+
+**Reshape `v1` incrementally in place.** Cheapest on prefixes but worst on
+truth: the frozen `v1` docs would be wrong for the whole transition, there is
+no single parity gate, partial states would be observable, and several new
+paths are grammatically ambiguous against old routes at the same prefix.
+Rejected in favor of the wholesale switch, which keeps the docs accurate at
+every moment — the old contract until the switch, the new one after.
 
 **Keep the dual full/compact envelope model and only rename fields.** Renaming
 alone fixes vocabulary but preserves eight envelope shapes, the `meta`-dependent

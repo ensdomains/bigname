@@ -588,9 +588,11 @@ Decided in [ADR 0006](../adrs/0006-api-v2-product-surface.md) (proposed
 
 Chosen product shape:
 
-- API `v2` with three tiers: lookup primitives (`POST /v2/lookup`, `/v2/status`),
-  product reads in one envelope (`data`/`page`/`meta`) and one naming
-  dictionary, and `/v2/diagnostics/*` as the only home of pipeline vocabulary.
+- A new product surface (developed under the `/v2` prefix, shipped as the
+  re-baselined `v1`) with three tiers: lookup primitives (`POST /lookup`,
+  `/status`), product reads in one envelope (`data`/`page`/`meta`) and one
+  naming dictionary, and `/diagnostics/*` as the only home of pipeline
+  vocabulary.
 - The remaining `Unsure` items above are resolved in ADR 0006 § "What this ADR
   deliberately keeps" (Q3, Q4, Q5, Q8, Q9, Q12, Q20, Q31, Q33, Q34, Q39, Q40).
 
@@ -616,7 +618,9 @@ Needs docs-first change:
 
 Implementation order:
 
-- Per ADR 0006 § Rollout: accept ADR → write v2 docs → implement v2 over the
-  existing read layer (ADR 0003 slices 3–6 as enablers) → conformance tests →
-  point partner-1 shim and app at v2 → the v2 release deletes the v1 routes
-  (v2 replaces v1 outright; no coexistence window).
+- Per ADR 0006 § Rollout: accept ADR → write new contract docs → implement
+  under the `/v2` development prefix over the existing read layer (ADR 0003
+  slices 3–6 as enablers) → conformance tests → one-time parity validation
+  (capability mapping, same-snapshot value equivalence, partner latency) →
+  switch: delete old v1 and rename `/v2` to `/v1` (public API stays at v1; no
+  permanent v2 prefix) → point partner-1 shim and app at the re-baselined v1.
