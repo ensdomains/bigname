@@ -77,8 +77,9 @@ Publish API `v2` as the product contract, designed around three rules:
    responses carry zero indexer internals; the route path — not a query knob —
    decides which tier a response belongs to.
 
-`v1` is frozen at the current contract and sunset before partner-1 cutover (see
-Rollout).
+`v2` replaces `v1` outright. `v1` is frozen at the current contract while `v2`
+is built, and the release that ships `v2` deletes the `v1` routes — there is no
+coexistence or deprecation window (see Rollout).
 
 ### Naming dictionary (normative)
 
@@ -279,9 +280,8 @@ Rules:
 - `POST /v2/lookup` body: `{inputs: [...], profile, namespace?}`, where each
   input is `{name}` or `{address, coin_type?, relation?, page_size?, cursor?}`.
   Input order is preserved, one result per input, batch limit 1000
-  (configurable via `BIGNAME_API_LOOKUP_BATCH_LIMIT`, with the existing
-  `BIGNAME_API_IDENTITY_BATCH_LIMIT` honored as an alias during the bridge
-  window). `profile=shadow` is
+  (configurable via `BIGNAME_API_LOOKUP_BATCH_LIMIT`, which renames
+  `BIGNAME_API_IDENTITY_BATCH_LIMIT`). `profile=shadow` is
   removed from the public contract; it survives as an undocumented
   compatibility alias of `detail` until partner-1 shadow comparison completes.
 
@@ -382,8 +382,11 @@ Positive:
 
 Negative / trade-offs:
 
-- Two contracts exist during the bridge window; the route table and handlers
-  serve both until `v1` is removed.
+- `v1` keeps serving unchanged until `v2` reaches capability parity, then is
+  deleted in the `v2` release — one replacement, not a migration window.
+  Anyone who integrates against `v1` in the interim breaks at the switch;
+  accepted because the consumer count is ~zero and `v1` docs stop being
+  advertised at ADR acceptance.
 - Some field names originate in projection rows in `crates/storage`
   (`declared_summary` passthroughs); `v2` requires a mapping layer at the API
   boundary or projection-side renames, coordinated with Storage and Domain.
@@ -427,10 +430,11 @@ tests.
    on `v2` routes), and product-route denylist tests (no pipeline vocabulary)
    alongside the existing OpenAPI assertions.
 5. Point the partner-1 shim and the first app integration at `v2` only. Rerun
-   the partner latency benchmarks against `POST /v2/lookup` before cutover.
-6. Sunset `v1`: docs stop advertising it at `v2` availability; routes are
-   removed before partner-1 cutover, while the consumer count is still ~zero.
-   No long deprecation window is owed to a contract nobody integrated against.
+   the partner latency benchmarks against `POST /v2/lookup` before the switch.
+6. Replace `v1`: the release that publishes `v2` deletes the `v1` routes, and
+   `docs/api-v1*.md` are retired to an archived record. No deprecation window
+   is owed to a contract nobody integrated against; anything still pointing at
+   `v1` breaks at the switch by design.
 
 Sequencing with the 2026-06 remediation
 (`docs/internal/remediation-2026-06.md`, a temporary tracking doc): the

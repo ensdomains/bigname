@@ -618,4 +618,5 @@ Implementation order:
 
 - Per ADR 0006 § Rollout: accept ADR → write v2 docs → implement v2 over the
   existing read layer (ADR 0003 slices 3–6 as enablers) → conformance tests →
-  point partner-1 shim and app at v2 → sunset v1 before partner cutover.
+  point partner-1 shim and app at v2 → the v2 release deletes the v1 routes
+  (v2 replaces v1 outright; no coexistence window).
