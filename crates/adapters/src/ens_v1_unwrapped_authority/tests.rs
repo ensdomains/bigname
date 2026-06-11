@@ -2323,6 +2323,290 @@ fn registrar_renewal_keeps_registry_owner_authority_after_divergence() -> Result
 }
 
 #[test]
+fn registry_transfer_restores_superseded_registrar_matching_owner_before_release() -> Result<()> {
+    let alice = observe_registrar_eth_name_with_version("alice", ENS_NORMALIZER_VERSION)?;
+    let labelhash = alice.labelhashes[0].clone();
+    let registrant = "0x0000000000000000000000000000000000000001";
+    let registry_owner = "0x0000000000000000000000000000000000000002";
+    let resolver = "0x0000000000000000000000000000000000000003";
+    let registration_ref = AuthorityRawLogRow {
+        block_number: 42,
+        block_timestamp: OffsetDateTime::from_unix_timestamp(1_700_000_042)?,
+        block_hash: "0x1000000000000000000000000000000000000000000000000000000000000042".to_owned(),
+        source_family: SOURCE_FAMILY_ENS_V1_REGISTRAR_L1.to_owned(),
+        source_manifest_id: 1,
+        contract_role: Some("registrar_controller".to_owned()),
+        ..registrar_raw_log(Vec::new(), Vec::new(), 0)
+    }
+    .reference();
+    let resolver_ref = AuthorityRawLogRow {
+        block_number: 43,
+        block_timestamp: OffsetDateTime::from_unix_timestamp(1_700_000_043)?,
+        block_hash: "0x1000000000000000000000000000000000000000000000000000000000000043".to_owned(),
+        source_family: SOURCE_FAMILY_ENS_V1_REGISTRY_L1.to_owned(),
+        source_manifest_id: 2,
+        contract_role: Some("registry".to_owned()),
+        ..registrar_raw_log(Vec::new(), Vec::new(), 1)
+    }
+    .reference();
+    let registry_ref = AuthorityRawLogRow {
+        block_number: 44,
+        block_timestamp: OffsetDateTime::from_unix_timestamp(1_700_000_044)?,
+        block_hash: "0x1000000000000000000000000000000000000000000000000000000000000044".to_owned(),
+        source_family: SOURCE_FAMILY_ENS_V1_REGISTRY_L1.to_owned(),
+        source_manifest_id: 2,
+        contract_role: Some("registry".to_owned()),
+        ..registrar_raw_log(Vec::new(), Vec::new(), 2)
+    }
+    .reference();
+    let transfer_ref = AuthorityRawLogRow {
+        block_number: 45,
+        block_timestamp: OffsetDateTime::from_unix_timestamp(1_700_000_045)?,
+        block_hash: "0x1000000000000000000000000000000000000000000000000000000000000045".to_owned(),
+        source_family: SOURCE_FAMILY_ENS_V1_REGISTRY_L1.to_owned(),
+        source_manifest_id: 2,
+        contract_role: Some("registry".to_owned()),
+        ..registrar_raw_log(Vec::new(), Vec::new(), 3)
+    }
+    .reference();
+    let record_ref = AuthorityRawLogRow {
+        block_number: 46,
+        block_timestamp: OffsetDateTime::from_unix_timestamp(1_700_000_046)?,
+        block_hash: "0x1000000000000000000000000000000000000000000000000000000000000046".to_owned(),
+        source_family: SOURCE_FAMILY_ENS_V1_RESOLVER_L1.to_owned(),
+        source_manifest_id: 3,
+        contract_role: Some("public_resolver".to_owned()),
+        ..resolver_raw_log(
+            "0x00000000000000000000000000000000000000bb",
+            Vec::new(),
+            Vec::new(),
+            4,
+        )
+    }
+    .reference();
+    let mut history = empty_preloaded_history(labelhash.clone(), Some(alice.clone()));
+
+    apply_registration_granted(
+        &mut history,
+        NameRegistrationObservation {
+            label: "alice".to_owned(),
+            labelhash: labelhash.clone(),
+            registrant: registrant.to_owned(),
+            expiry: OffsetDateTime::from_unix_timestamp(1_800_000_000)?,
+            reference: registration_ref,
+        },
+        &CanonicalBlockIndex { blocks: Vec::new() },
+    )?;
+    let registrar_anchor = build_registrar_anchor(history.current_registration.as_ref().unwrap());
+    apply_resolver_changed(
+        &mut history,
+        ResolverObservation {
+            namehash: alice.namehash.clone(),
+            resolver: resolver.to_owned(),
+            reference: resolver_ref,
+        },
+    )?;
+    apply_registry_owner_changed(
+        &mut history,
+        RegistryOwnerObservation {
+            parent_node: None,
+            labelhash: labelhash.clone(),
+            namehash: None,
+            owner: registry_owner.to_owned(),
+            reference: registry_ref,
+        },
+    )?;
+    assert!(history.current_registration.is_none());
+    assert!(history.superseded_registration.is_some());
+    let registry_anchor = active_anchor_for_history(&history, "ethereum-mainnet")
+        .context("registry-only authority should be active")?;
+    assert_eq!(registry_anchor.kind, AuthorityKind::RegistryOnly);
+
+    apply_registry_owner_changed(
+        &mut history,
+        RegistryOwnerObservation {
+            parent_node: None,
+            labelhash: String::new(),
+            namehash: Some(alice.namehash.clone()),
+            owner: registrant.to_owned(),
+            reference: transfer_ref,
+        },
+    )?;
+
+    assert!(history.current_registration.is_some());
+    assert!(history.superseded_registration.is_none());
+    let active_anchor = active_anchor_for_history(&history, "ethereum-mainnet")
+        .context("registrar authority should be restored")?;
+    assert_eq!(active_anchor.kind, AuthorityKind::Registrar);
+    assert_eq!(active_anchor.resource_id, registrar_anchor.resource_id);
+    assert_eq!(
+        active_anchor.token_lineage_id,
+        registrar_anchor.token_lineage_id
+    );
+    let restore_epoch = history
+        .events
+        .iter()
+        .rev()
+        .find(|event| {
+            event.event_kind == EVENT_KIND_AUTHORITY_EPOCH_CHANGED && event.block_number == Some(45)
+        })
+        .context("registry transfer should restore the registrar authority epoch")?;
+    assert_eq!(
+        restore_epoch.before_state.get("authority_kind"),
+        Some(&json!("registry_only"))
+    );
+    assert_eq!(
+        restore_epoch.after_state.get("authority_kind"),
+        Some(&json!("registrar"))
+    );
+    let registry_revokes = history
+        .events
+        .iter()
+        .filter(|event| {
+            event.event_kind == EVENT_KIND_PERMISSION_CHANGED
+                && event.block_number == Some(45)
+                && event.resource_id == Some(registry_anchor.resource_id)
+                && event.after_state.get("subject").and_then(Value::as_str) == Some(registry_owner)
+                && event
+                    .after_state
+                    .get("effective_powers")
+                    .and_then(Value::as_array)
+                    .is_some_and(Vec::is_empty)
+        })
+        .count();
+    assert_eq!(registry_revokes, 2);
+
+    apply_record_changed(
+        &mut history,
+        RecordChangeObservation {
+            namehash: alice.namehash,
+            resolver: resolver.to_owned(),
+            selector: RecordSelector {
+                record_key: "addr:60".to_owned(),
+                record_family: "addr".to_owned(),
+                selector_key: Some("60".to_owned()),
+            },
+            value: Some(json!(registrant)),
+            raw_name: None,
+            reference: record_ref,
+        },
+    )?;
+    let record = history
+        .events
+        .iter()
+        .rev()
+        .find(|event| event.event_kind == EVENT_KIND_RECORD_CHANGED)
+        .context("record event should be emitted")?;
+    assert_eq!(record.resource_id, Some(registrar_anchor.resource_id));
+
+    Ok(())
+}
+
+#[test]
+fn registry_new_owner_reclaim_restores_registrar_before_release() -> Result<()> {
+    let alice = observe_registrar_eth_name_with_version("alice", ENS_NORMALIZER_VERSION)?;
+    let labelhash = alice.labelhashes[0].clone();
+    let registrant = "0x0000000000000000000000000000000000000001";
+    let registry_owner = "0x0000000000000000000000000000000000000002";
+    let registration_ref = AuthorityRawLogRow {
+        block_number: 42,
+        block_timestamp: OffsetDateTime::from_unix_timestamp(1_700_000_042)?,
+        block_hash: "0x2000000000000000000000000000000000000000000000000000000000000042".to_owned(),
+        source_family: SOURCE_FAMILY_ENS_V1_REGISTRAR_L1.to_owned(),
+        source_manifest_id: 1,
+        contract_role: Some("registrar_controller".to_owned()),
+        ..registrar_raw_log(Vec::new(), Vec::new(), 0)
+    }
+    .reference();
+    let registry_ref = AuthorityRawLogRow {
+        block_number: 43,
+        block_timestamp: OffsetDateTime::from_unix_timestamp(1_700_000_043)?,
+        block_hash: "0x2000000000000000000000000000000000000000000000000000000000000043".to_owned(),
+        source_family: SOURCE_FAMILY_ENS_V1_REGISTRY_L1.to_owned(),
+        source_manifest_id: 2,
+        contract_role: Some("registry".to_owned()),
+        ..registrar_raw_log(Vec::new(), Vec::new(), 1)
+    }
+    .reference();
+    let reclaim_ref = AuthorityRawLogRow {
+        block_number: 44,
+        block_timestamp: OffsetDateTime::from_unix_timestamp(1_700_000_044)?,
+        block_hash: "0x2000000000000000000000000000000000000000000000000000000000000044".to_owned(),
+        source_family: SOURCE_FAMILY_ENS_V1_REGISTRY_L1.to_owned(),
+        source_manifest_id: 2,
+        contract_role: Some("registry".to_owned()),
+        ..registrar_raw_log(Vec::new(), Vec::new(), 2)
+    }
+    .reference();
+    let mut history = empty_preloaded_history(labelhash.clone(), Some(alice.clone()));
+
+    apply_registration_granted(
+        &mut history,
+        NameRegistrationObservation {
+            label: "alice".to_owned(),
+            labelhash: labelhash.clone(),
+            registrant: registrant.to_owned(),
+            expiry: OffsetDateTime::from_unix_timestamp(1_800_000_000)?,
+            reference: registration_ref,
+        },
+        &CanonicalBlockIndex { blocks: Vec::new() },
+    )?;
+    let registrar_anchor = build_registrar_anchor(history.current_registration.as_ref().unwrap());
+    apply_registry_owner_changed(
+        &mut history,
+        RegistryOwnerObservation {
+            parent_node: None,
+            labelhash: labelhash.clone(),
+            namehash: None,
+            owner: registry_owner.to_owned(),
+            reference: registry_ref,
+        },
+    )?;
+    assert!(history.current_registration.is_none());
+    assert!(history.superseded_registration.is_some());
+
+    apply_registry_owner_changed(
+        &mut history,
+        RegistryOwnerObservation {
+            parent_node: Some(eth_node()),
+            labelhash,
+            namehash: Some(alice.namehash),
+            owner: registrant.to_owned(),
+            reference: reclaim_ref,
+        },
+    )?;
+
+    assert!(history.current_registration.is_some());
+    assert!(history.superseded_registration.is_none());
+    let active_anchor = active_anchor_for_history(&history, "ethereum-mainnet")
+        .context("registrar authority should be restored")?;
+    assert_eq!(active_anchor.kind, AuthorityKind::Registrar);
+    assert_eq!(active_anchor.resource_id, registrar_anchor.resource_id);
+    assert_eq!(
+        active_anchor.token_lineage_id,
+        registrar_anchor.token_lineage_id
+    );
+    let restore_epoch = history
+        .events
+        .iter()
+        .rev()
+        .find(|event| {
+            event.event_kind == EVENT_KIND_AUTHORITY_EPOCH_CHANGED && event.block_number == Some(44)
+        })
+        .context("registry NewOwner reclaim should restore the registrar authority epoch")?;
+    assert_eq!(
+        restore_epoch.before_state.get("authority_kind"),
+        Some(&json!("registry_only"))
+    );
+    assert_eq!(
+        restore_epoch.after_state.get("authority_kind"),
+        Some(&json!("registrar"))
+    );
+
+    Ok(())
+}
+
+#[test]
 fn token_transfer_restores_superseded_registrar_matching_registry_owner() -> Result<()> {
     let alice = observe_registrar_eth_name_with_version("alice", ENS_NORMALIZER_VERSION)?;
     let labelhash = alice.labelhashes[0].clone();
@@ -3956,10 +4240,9 @@ async fn full_replay_defers_same_transaction_logs_before_last_registry_owner_unt
     )
     .fetch_one(database.pool())
     .await?;
-    assert_eq!(
-        registration_before_state["authority_kind"],
-        json!("registry_only"),
-        "same-transaction registry setup should be visible as the registration before-authority"
+    assert!(
+        registration_before_state["authority_kind"].is_null(),
+        "same-transaction registry setup should be deferred until after the registration"
     );
     assert_eq!(resolver_resource_id, registration_resource_id);
     assert_eq!(
@@ -5389,11 +5672,14 @@ async fn block_hash_replay_defers_preloaded_same_transaction_namehash_logs_until
     )
     .fetch_one(database.pool())
     .await?;
-    assert_eq!(
-        registration_before_state["authority_kind"].as_str(),
-        Some("registry_only")
-    );
-    assert_eq!(resolver_resource_id, registration_resource_id);
+    let registry_resource_id = sqlx::query_scalar::<_, Uuid>(
+        "SELECT resource_id FROM resources WHERE provenance->>'authority_kind' = 'registry_only'",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert!(registration_before_state["authority_kind"].is_null());
+    assert_ne!(resolver_resource_id, registration_resource_id);
+    assert_eq!(resolver_resource_id, registry_resource_id);
 
     let second = EnsV1UnwrappedAuthoritySyncSummary::sync_for_block_hashes(
         database.pool(),
@@ -10040,7 +10326,7 @@ async fn sync_ens_v1_unwrapped_authority_partitions_permission_events_by_authori
     assert_eq!(summary.total_resource_count, 2);
     assert_eq!(
         summary.by_kind.get(EVENT_KIND_PERMISSION_CHANGED),
-        Some(&5_usize)
+        Some(&6_usize)
     );
 
     let registrar_resource_id = sqlx::query_scalar::<_, Uuid>(
@@ -10070,7 +10356,7 @@ async fn sync_ens_v1_unwrapped_authority_partitions_permission_events_by_authori
             .bind(registry_resource_id)
             .fetch_one(database.pool())
             .await?,
-            2
+            3
         );
     assert_eq!(
             sqlx::query_scalar::<_, i64>(

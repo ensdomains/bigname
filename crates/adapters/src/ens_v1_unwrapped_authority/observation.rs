@@ -486,11 +486,7 @@ pub(super) fn observation_namehash(observation: &AuthorityObservation) -> Option
         AuthorityObservation::WrapperFusesSet(value) => Some(&value.namehash),
         AuthorityObservation::WrapperExpiryExtended(value) => Some(&value.namehash),
         AuthorityObservation::WrapperTokenTransferred(value) => Some(&value.namehash),
-        AuthorityObservation::RegistryOwnerChanged(value)
-            if value.labelhash.is_empty() && value.namehash.is_some() =>
-        {
-            value.namehash.as_deref()
-        }
+        AuthorityObservation::RegistryOwnerChanged(value) => value.namehash.as_deref(),
         _ => None,
     }
 }

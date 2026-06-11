@@ -37,7 +37,7 @@ For each workstream:
 1. Create branch `fix/ws-<letter>-<slug>` off `main` (e.g. `fix/ws-c-projection-integrity`). One workstream = one branch = one PR (or a small stacked chain if the stream's P0s should merge before its P3s).
 2. Work items top-to-bottom (they are priority-ordered). For each: re-verify → failing test → fix → acceptance criteria met.
 3. Respect the stream's **file scope** as listed in the plan. If an item genuinely requires editing another stream's files, see Coordination below — do not just edit them.
-4. Run the full local gate before PR: `cargo fmt --check`, `cargo clippy --workspace --all-targets`, `cargo test` for touched packages, `scripts/check-rust-file-size`, plus the conformance suite (`cargo test --manifest-path tests/conformance/Cargo.toml --locked`) for anything touching public contracts, projections, or replay.
+4. Run the full local gate before PR: `cargo fmt --check`, `cargo clippy --workspace --all-targets`, `cargo test` for touched packages, `scripts/check-rust-file-size`, plus the conformance suite (`cargo test --manifest-path tests/conformance/Cargo.toml --locked`) for anything touching public contracts, projections, or replay. If the workstream base branch has never passed CI, local readiness must include full workspace/test shard coverage, not only touched packages.
 5. Run `$verify-loop` on the result.
 6. PR description: list the checkbox items closed (copy their text), evidence of each acceptance criterion, and any rejected items with rebuttals.
 7. On merge: tick the checkboxes in `remediation-2026-06.md` and update the status table below — in the same PR or an immediate follow-up commit, so the tracking doc never lags.
@@ -63,7 +63,7 @@ For each workstream:
 | Stream | Status | Branch | PR | Notes |
 | --- | --- | --- | --- | --- |
 | WS-H Safety net & docs | merged | `fix/ws-h-safety-net-docs` | [#13](https://github.com/TateB/bigname/pull/13) | Merged to `main` in `2891acd`; WS-H P0 gate is closed |
-| WS-A ENSv1 authority | in progress | `codex/ws-a-ens-v1-authority-gates` → `fix/ens-v1-registry-owner-authority` | — | Items 1–3 are WIP; focused storage/decode/reactivation checks and full `ens_v1_unwrapped_authority` filter pass; storage reviewer blockers addressed locally; full gate, reviewer rerun, and PR remain pending |
+| WS-A ENSv1 authority | PR open | `codex/ws-a-ens-v1-authority-gates` → `fix/ens-v1-registry-owner-authority` | [#15](https://github.com/TateB/bigname/pull/15) | Items 1–3 are under PR review; semantic blockers and CI fixture blockers have been addressed locally; final verification/PR update pending |
 | WS-B ENSv2 + preimage | not started | — | — | |
 | WS-C Projection pipeline | not started | — | — | Will need a migration (dead-letter) — WS-F review |
 | WS-D Intake resilience | not started | — | — | Owns storage `backfill_jobs/`, `lineage/` |
