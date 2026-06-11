@@ -952,6 +952,7 @@ fn record_inventory_entry(query: &VerifiedQuerySummary) -> Value {
         "status": match query.status {
             VerifiedQueryStatus::Success => "success",
             VerifiedQueryStatus::NotFound => "not_found",
+            VerifiedQueryStatus::Unsupported => "unsupported",
             VerifiedQueryStatus::ExecutionFailed => "unsupported",
         }
     });
@@ -974,6 +975,17 @@ fn record_inventory_entry(query: &VerifiedQuerySummary) -> Value {
                 .as_object_mut()
                 .expect("entry must be object")
                 .insert("value".to_owned(), value);
+        }
+        VerifiedQueryStatus::Unsupported => {
+            entry.as_object_mut().expect("entry must be object").insert(
+                "unsupported_reason".to_owned(),
+                json!(
+                    query
+                        .failure_reason
+                        .as_deref()
+                        .unwrap_or("value_not_retained_in_normalized_events")
+                ),
+            );
         }
         VerifiedQueryStatus::NotFound => {}
         VerifiedQueryStatus::ExecutionFailed => {

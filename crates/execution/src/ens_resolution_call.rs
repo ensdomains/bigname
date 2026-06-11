@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Result, bail};
 use bigname_storage::{
     CanonicalityState, NameCurrentRow, RawCallSnapshot, SupportedVerifiedResolutionRecordKey,
     parse_supported_verified_resolution_record_key,
@@ -30,6 +30,7 @@ pub(super) struct SelectorCall {
 enum SelectorStatus {
     Success { value: Value },
     NotFound { failure_reason: &'static str },
+    Unsupported { unsupported_reason: &'static str },
     ExecutionFailed { failure_reason: &'static str },
 }
 
@@ -46,6 +47,10 @@ impl SelectorCall {
             SelectorStatus::NotFound { failure_reason } => json!({
                 "status": "not_found",
                 "failure_reason": failure_reason,
+            }),
+            SelectorStatus::Unsupported { unsupported_reason } => json!({
+                "status": "unsupported",
+                "unsupported_reason": unsupported_reason,
             }),
             SelectorStatus::ExecutionFailed { failure_reason } => json!({
                 "status": "execution_failed",
@@ -102,14 +107,18 @@ pub(super) async fn execute_record_call(
         .await?;
     let result = if use_latest_block_tag {
         match &result.result {
-            Err(error) => match follow_ccip_read(rpc, error, &block_selector).await {
-                Ok(Some(outcome)) => {
-                    ccip_summary = Some(outcome.summary);
-                    outcome.result
+            Err(error) => {
+                match follow_ccip_read(rpc, error, &block_selector, ENS_UNIVERSAL_RESOLVER_ADDRESS)
+                    .await
+                {
+                    Ok(Some(outcome)) => {
+                        ccip_summary = Some(outcome.summary);
+                        outcome.result
+                    }
+                    Ok(None) => result,
+                    Err(_) => result,
                 }
-                Ok(None) => result,
-                Err(_) => result,
-            },
+            }
             Ok(_) => result,
         }
     } else {
@@ -177,7 +186,7 @@ fn selector_call_from_rpc_result(context: SelectorCallRpcContext<'_>) -> Result<
     });
     let status = match result {
         Ok(value) => decode_rpc_success(row, record, selector, value),
-        Err(error) => Ok(decode_rpc_error(&error)),
+        Err(error) => decode_rpc_error(&error),
     }?;
 
     Ok(SelectorCall {
@@ -239,13 +248,43 @@ fn decode_rpc_success(
     })
 }
 
-fn decode_rpc_error(error: &JsonRpcCallError) -> SelectorStatus {
-    let _ = error.code;
-    let _ = &error.message;
-    let _ = &error.data;
-    SelectorStatus::ExecutionFailed {
-        failure_reason: "resolver_call_failed",
+fn decode_rpc_error(error: &JsonRpcCallError) -> Result<SelectorStatus> {
+    if crate::ens_resolution_ccip::rpc_error_contains_offchain_lookup(error)? {
+        return Ok(SelectorStatus::Unsupported {
+            unsupported_reason: "offchain_lookup_required",
+        });
     }
+    if rpc_error_provider_unavailable_for_selected_block(error) {
+        bail!(
+            "verified resolution RPC provider could not serve selected block: {}",
+            error.message
+        );
+    }
+
+    Ok(SelectorStatus::ExecutionFailed {
+        failure_reason: "resolver_call_failed",
+    })
+}
+
+fn rpc_error_provider_unavailable_for_selected_block(error: &JsonRpcCallError) -> bool {
+    let mut text = error.message.to_ascii_lowercase();
+    if let Some(data) = &error.data {
+        text.push(' ');
+        text.push_str(&data.to_string().to_ascii_lowercase());
+    }
+
+    [
+        "header not found",
+        "block not found",
+        "unknown block",
+        "missing trie node",
+        "state not available",
+        "missing state",
+        "historical state unavailable",
+        "pruned",
+    ]
+    .iter()
+    .any(|needle| text.contains(needle))
 }
 
 fn selector_value(
@@ -351,6 +390,106 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn offchain_lookup_revert_is_selector_local_unsupported() -> Result<()> {
+        let row = test_name_current_row();
+        let record = EnsResolutionRecord::new("avatar", "text", Some("avatar".to_owned()));
+        let selector = parse_supported_verified_resolution_record_key(&record.record_key)?;
+        let block = ExecutionBlock {
+            chain_id: ETHEREUM_MAINNET_CHAIN_ID.to_owned(),
+            block_number: 21_000_000,
+            block_hash: "0xabc123".to_owned(),
+        };
+        let selector_call = selector_call_from_rpc_result(SelectorCallRpcContext {
+            row: &row,
+            record: &record,
+            selector: &selector,
+            result: JsonRpcCallResult {
+                request_payload: json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "eth_call",
+                    "params": [
+                        {
+                            "to": ENS_UNIVERSAL_RESOLVER_ADDRESS,
+                            "data": "0x9061b923"
+                        },
+                        {
+                            "blockHash": "0xabc123",
+                            "requireCanonical": true
+                        }
+                    ]
+                }),
+                response_payload: json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "error": {
+                        "code": 3,
+                        "message": "execution reverted",
+                        "data": encoded_offchain_lookup_error(),
+                    }
+                }),
+                result: Err(JsonRpcCallError {
+                    code: Some(3),
+                    message: "execution reverted".to_owned(),
+                    data: Some(json!(encoded_offchain_lookup_error())),
+                }),
+            },
+            block: &block,
+            contract_call: json!({
+                "chain_id": ETHEREUM_MAINNET_CHAIN_ID,
+                "contract_address": ENS_UNIVERSAL_RESOLVER_ADDRESS,
+                "selector": "0x9061b923",
+                "record_key": "avatar",
+                "resolver_selector": "0x59d1d43c"
+            }),
+            resolver_selector: "0x59d1d43c".to_owned(),
+            universal_calldata: "0x9061b923".to_owned(),
+            block_selector: json!({
+                "blockHash": "0xabc123",
+                "requireCanonical": true
+            }),
+            persist_raw_call_snapshot: true,
+            ccip_summary: None,
+        })?;
+
+        let verified_query = selector_call.verified_query(Uuid::from_u128(1));
+        assert_eq!(
+            verified_query.get("status").and_then(Value::as_str),
+            Some("unsupported")
+        );
+        assert_eq!(
+            verified_query
+                .get("unsupported_reason")
+                .and_then(Value::as_str),
+            Some("offchain_lookup_required")
+        );
+        assert_eq!(
+            verified_query.get("record_key").and_then(Value::as_str),
+            Some("avatar")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn selected_block_unavailable_rpc_error_is_not_cacheable_selector_failure() {
+        let error = JsonRpcCallError {
+            code: Some(-32001),
+            message: "header not found".to_owned(),
+            data: None,
+        };
+
+        let Err(error) = decode_rpc_error(&error) else {
+            panic!("selected-block provider unavailability must fail before persistence");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("verified resolution RPC provider could not serve selected block"),
+            "unexpected error: {error:?}"
+        );
+    }
+
     fn test_name_current_row() -> NameCurrentRow {
         NameCurrentRow {
             logical_name_id: "ens:alice.eth".to_owned(),
@@ -371,5 +510,32 @@ mod tests {
             last_recomputed_at: OffsetDateTime::from_unix_timestamp(1)
                 .expect("test timestamp must be valid"),
         }
+    }
+
+    fn encoded_offchain_lookup_error() -> String {
+        use alloy_primitives::{Address, Bytes};
+        use alloy_sol_types::{SolError, sol};
+
+        sol! {
+            #[derive(Debug, PartialEq, Eq)]
+            error OffchainLookup(
+                address sender,
+                string[] urls,
+                bytes callData,
+                bytes4 callbackFunction,
+                bytes extraData
+            );
+        }
+
+        crate::ens_resolution_abi::hex_string(
+            &OffchainLookup {
+                sender: Address::repeat_byte(0x11),
+                urls: vec!["https://gateway.example/{data}".to_owned()],
+                callData: Bytes::copy_from_slice(&[0xab, 0xcd]),
+                callbackFunction: alloy_primitives::FixedBytes::from(&[0x12, 0x34, 0x56, 0x78]),
+                extraData: Bytes::copy_from_slice(&[0xef]),
+            }
+            .abi_encode(),
+        )
     }
 }

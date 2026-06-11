@@ -1839,6 +1839,31 @@ fn assert_primary_name_bootstrap_invariants(payload: &PrimaryNameResponse) {
     assert!(payload.last_updated.ends_with('Z'));
 }
 
+fn assert_primary_name_supported_bootstrap_invariants(payload: &PrimaryNameResponse) {
+    assert_eq!(
+        payload.provenance,
+        json!({
+            "normalized_event_ids": [],
+            "raw_fact_refs": [],
+            "manifest_versions": [],
+            "derivation_kind": "primary_name_route_bootstrap",
+        })
+    );
+    assert_eq!(
+        payload.coverage,
+        json!({
+            "status": "partial",
+            "exhaustiveness": "non_enumerable",
+            "source_classes_considered": ["ens_v1_reverse_l1", "ens_execution"],
+            "enumeration_basis": "primary_name_lookup",
+            "unsupported_reason": null,
+        })
+    );
+    assert_eq!(payload.chain_positions, json!({}));
+    assert_eq!(payload.consistency, "head");
+    assert!(payload.last_updated.ends_with('Z'));
+}
+
 fn assert_primary_name_persisted_readback_invariants_for_namespace(
     payload: &PrimaryNameResponse,
     namespace: &str,
@@ -7006,8 +7031,7 @@ async fn run_primary_name_execution_invalidation_case(
         verified_after_payload.verified_state,
         Some(json!({
             "verified_primary_name": {
-                "status": "unsupported",
-                "unsupported_reason": "verified primary-name entrypoint is not yet supported",
+                "status": "not_found",
             }
         }))
     );
@@ -7024,8 +7048,8 @@ async fn run_primary_name_execution_invalidation_case(
         both_after_payload.verified_state,
         verified_after_payload.verified_state
     );
-    assert_primary_name_bootstrap_invariants(&verified_after_payload);
-    assert_primary_name_bootstrap_invariants(&both_after_payload);
+    assert_primary_name_supported_bootstrap_invariants(&verified_after_payload);
+    assert_primary_name_supported_bootstrap_invariants(&both_after_payload);
     let mut expected_sibling_verified_primary_name = fixture.sibling_verified_primary_name.clone();
     expected_sibling_verified_primary_name
         .as_object_mut()

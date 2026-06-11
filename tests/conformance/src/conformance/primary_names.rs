@@ -80,8 +80,7 @@
                 verified_payload.verified_state,
                 Some(json!({
                     "verified_primary_name": {
-                        "status": "unsupported",
-                        "unsupported_reason": "verified primary-name entrypoint is not yet supported",
+                        "status": "not_found",
                     }
                 }))
             );
@@ -90,7 +89,7 @@
             assert_eq!(both_payload.verified_state, verified_payload.verified_state);
 
             for payload in [&declared_payload, &verified_payload, &both_payload] {
-                assert_primary_name_unsupported_bootstrap_invariants(payload);
+                assert_primary_name_supported_bootstrap_invariants_for_namespace(payload, "ens");
             }
 
             database.cleanup().await?;
@@ -171,15 +170,79 @@
                 both_payload.verified_state,
                 Some(json!({
                     "verified_primary_name": {
-                        "status": "unsupported",
-                        "unsupported_reason": "verified primary-name entrypoint is not yet supported",
+                        "status": "not_found",
                     }
                 }))
             );
 
             for payload in [&declared_payload, &both_payload] {
-                assert_primary_name_unsupported_declared_readback_invariants(payload);
+                assert_primary_name_supported_bootstrap_invariants_for_namespace(payload, "basenames");
             }
+
+            database.cleanup().await?;
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn primary_names_contract_reports_basenames_primary_unset_as_not_found()
+        -> Result<()> {
+            let database = HarnessDatabase::new().await?;
+            let address = "0x0000000000000000000000000000000000000bce";
+            let expected_data = json!({
+                "address": address,
+                "namespace": "basenames",
+                "coin_type": BASENAMES_PRIMARY_COIN_TYPE,
+            });
+
+            database
+                .seed_basenames_primary_name_claim_observation(
+                    address,
+                    BASENAMES_PRIMARY_COIN_TYPE,
+                    "   ",
+                )
+                .await?;
+            database
+                .rebuild_primary_names_current(address, "basenames", BASENAMES_PRIMARY_COIN_TYPE)
+                .await?;
+
+            let response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/v1/primary-names/{address}?namespace=basenames&coin_type={BASENAMES_PRIMARY_COIN_TYPE}&mode=both"
+                        ))
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .context("mixed basenames unset primary-name request failed")?;
+
+            assert_eq!(response.status(), StatusCode::OK);
+            let payload: PrimaryNameResponse = read_json(response).await?;
+            assert_eq!(payload.data, expected_data);
+            assert_eq!(
+                payload.declared_state,
+                Some(json!({
+                    "claimed_primary_name": {
+                        "status": "not_found",
+                        "provenance": {
+                            "source_family": "basenames_base_primary",
+                            "contract_role": "reverse_registrar",
+                            "contract_instance_id": "00000000-0000-0000-0000-000000000104",
+                            "emitting_address": "0x00000000000000000000000000000000000000ad",
+                        },
+                    }
+                }))
+            );
+            assert_eq!(
+                payload.verified_state,
+                Some(json!({
+                    "verified_primary_name": {
+                        "status": "not_found",
+                    }
+                }))
+            );
+            assert_primary_name_supported_bootstrap_invariants_for_namespace(&payload, "basenames");
 
             database.cleanup().await?;
             Ok(())
@@ -342,8 +405,7 @@
                 target_both_payload.verified_state,
                 Some(json!({
                     "verified_primary_name": {
-                        "status": "unsupported",
-                        "unsupported_reason": "verified primary-name entrypoint is not yet supported",
+                        "status": "not_found",
                     }
                 }))
             );
@@ -362,8 +424,7 @@
                 sibling_both_payload.verified_state,
                 Some(json!({
                     "verified_primary_name": {
-                        "status": "unsupported",
-                        "unsupported_reason": "verified primary-name entrypoint is not yet supported",
+                        "status": "not_found",
                     }
                 }))
             );
@@ -407,7 +468,7 @@
                 &sibling_declared_payload,
                 &sibling_both_payload,
             ] {
-                assert_primary_name_unsupported_bootstrap_invariants(payload);
+                assert_primary_name_supported_bootstrap_invariants_for_namespace(payload, "ens");
             }
 
             database.cleanup().await?;
@@ -601,8 +662,7 @@
                 verified_payload.verified_state,
                 Some(json!({
                     "verified_primary_name": {
-                        "status": "unsupported",
-                        "unsupported_reason": "verified primary-name entrypoint is not yet supported",
+                        "status": "not_found",
                     }
                 }))
             );
@@ -621,7 +681,7 @@
             );
 
             for payload in [&declared_payload, &verified_payload, &both_payload] {
-                assert_primary_name_unsupported_bootstrap_invariants(payload);
+                assert_primary_name_supported_bootstrap_invariants_for_namespace(payload, "ens");
             }
 
             database.cleanup().await?;
@@ -791,7 +851,7 @@
             assert_eq!(both_payload.declared_state, declared_payload.declared_state);
             assert_eq!(both_payload.verified_state, verified_payload.verified_state);
 
-            assert_primary_name_unsupported_bootstrap_invariants(&declared_payload);
+            assert_primary_name_supported_bootstrap_invariants_for_namespace(&declared_payload, "ens");
             assert_primary_name_supported_persisted_readback_invariants(
                 &verified_payload,
                 execution_trace_id,
@@ -1318,8 +1378,7 @@
                 verified_payload.verified_state,
                 Some(json!({
                     "verified_primary_name": {
-                        "status": "unsupported",
-                        "unsupported_reason": "verified primary-name entrypoint is not yet supported",
+                        "status": "not_found",
                     }
                 }))
             );
@@ -1328,7 +1387,7 @@
             assert_eq!(both_payload.verified_state, verified_payload.verified_state);
 
             for payload in [&declared_payload, &verified_payload, &both_payload] {
-                assert_primary_name_unsupported_bootstrap_invariants(payload);
+                assert_primary_name_supported_bootstrap_invariants_for_namespace(payload, "ens");
             }
 
             database.cleanup().await?;
@@ -1388,6 +1447,16 @@
             assert_primary_name_bootstrap_invariants_with_coverage(
                 payload,
                 primary_name_unsupported_exact_tuple_coverage(),
+            );
+        }
+
+        fn assert_primary_name_supported_bootstrap_invariants_for_namespace(
+            payload: &PrimaryNameResponse,
+            namespace: &str,
+        ) {
+            assert_primary_name_bootstrap_invariants_with_coverage(
+                payload,
+                primary_name_supported_exact_tuple_coverage(namespace),
             );
         }
 
@@ -1633,8 +1702,7 @@
                 verified_after_payload.verified_state,
                 Some(json!({
                     "verified_primary_name": {
-                        "status": "unsupported",
-                        "unsupported_reason": "verified primary-name entrypoint is not yet supported",
+                        "status": "not_found",
                     }
                 }))
             );
@@ -1651,8 +1719,14 @@
                 both_after_payload.verified_state,
                 verified_after_payload.verified_state
             );
-            assert_primary_name_unsupported_bootstrap_invariants(&verified_after_payload);
-            assert_primary_name_unsupported_bootstrap_invariants(&both_after_payload);
+            assert_primary_name_supported_bootstrap_invariants_for_namespace(
+                &verified_after_payload,
+                "ens",
+            );
+            assert_primary_name_supported_bootstrap_invariants_for_namespace(
+                &both_after_payload,
+                "ens",
+            );
 
             let mut expected_sibling_verified_primary_name =
                 fixture.sibling_verified_primary_name.clone();

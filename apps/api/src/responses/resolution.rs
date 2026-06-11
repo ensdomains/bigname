@@ -275,6 +275,8 @@ fn build_primary_name_response(
     mode: ResolutionMode,
     lookup_state: &PrimaryNameLookupState,
 ) -> PrimaryNameResponse {
+    let coin_type =
+        canonical_primary_name_coin_type(&coin_type).unwrap_or_else(|_| coin_type.clone());
     let data = json!({
         "address": address,
         "namespace": namespace,
@@ -285,7 +287,7 @@ fn build_primary_name_response(
         .then(|| json!({ "claimed_primary_name": primary_name_claim_result(lookup_state) }));
     let verified_state = mode
         .includes_verified()
-        .then(|| json!({ "verified_primary_name": primary_name_verified_result(lookup_state) }));
+        .then(|| json!({ "verified_primary_name": primary_name_verified_result(&namespace, lookup_state) }));
 
     PrimaryNameResponse {
         data,
@@ -305,19 +307,25 @@ fn primary_name_claim_result(lookup_state: &PrimaryNameLookupState) -> JsonValue
             "declared primary-name claim surface is not yet supported",
         ),
         PrimaryNameTupleState::TupleMissing => {
-            if let OnDemandPrimaryNameClaimState::Found(on_demand_claim) =
-                &lookup_state.on_demand_claim
-            {
-                return json!({
+            match &lookup_state.on_demand_claim {
+                OnDemandPrimaryNameClaimState::Found(on_demand_claim) => json!({
                     "status": "success",
                     "name": on_demand_claim.normalized_name.clone(),
                     "provenance": {
                         "source_family": "ens_reverse_rpc",
                         "resolver_address": on_demand_claim.resolver_address.clone(),
                     },
-                });
+                }),
+                OnDemandPrimaryNameClaimState::InvalidName(invalid_claim) => json!({
+                    "status": "invalid_name",
+                    "raw_claim_name": invalid_claim.raw_name.clone(),
+                    "provenance": {
+                        "source_family": "ens_reverse_rpc",
+                        "resolver_address": invalid_claim.resolver_address.clone(),
+                    },
+                }),
+                _ => primary_name_not_found_result(),
             }
-            primary_name_not_found_result()
         }
         PrimaryNameTupleState::TuplePresent(row) => {
             let mut result = json!({
@@ -355,7 +363,7 @@ fn primary_name_claim_provenance(row: &PrimaryNameCurrentRow) -> JsonValue {
     JsonValue::Object(provenance)
 }
 
-fn primary_name_verified_result(lookup_state: &PrimaryNameLookupState) -> JsonValue {
+fn primary_name_verified_result(namespace: &str, lookup_state: &PrimaryNameLookupState) -> JsonValue {
     if let Some(persisted_verified) = lookup_state.persisted_verified.as_ref() {
         let mut verified_primary_name = persisted_verified.verified_primary_name.clone();
         insert_value_field(
@@ -373,6 +381,9 @@ fn primary_name_verified_result(lookup_state: &PrimaryNameLookupState) -> JsonVa
             {
                 return on_demand_verified.clone();
             }
+            primary_name_not_found_result()
+        }
+        PrimaryNameTupleState::TuplePresent(_) if primary_name_supported_tuple_namespace(namespace) => {
             primary_name_not_found_result()
         }
         PrimaryNameTupleState::ProjectionUnavailable | PrimaryNameTupleState::TuplePresent(_) => {
@@ -471,7 +482,7 @@ fn primary_name_route_coverage(
     if matches!(
         lookup_state.tuple_state,
         PrimaryNameTupleState::TuplePresent(_)
-    ) && lookup_state.persisted_verified.is_some()
+    ) && primary_name_supported_tuple_namespace(namespace)
     {
         match namespace {
             "ens" => {
@@ -497,13 +508,19 @@ fn primary_name_route_coverage(
 
     if matches!(
         lookup_state.on_demand_claim,
-        OnDemandPrimaryNameClaimState::Found(_) | OnDemandPrimaryNameClaimState::NotFound
+        OnDemandPrimaryNameClaimState::Found(_)
+            | OnDemandPrimaryNameClaimState::InvalidName(_)
+            | OnDemandPrimaryNameClaimState::NotFound
     ) && namespace == "ens"
     {
         return primary_name_exact_tuple_coverage(&["ens_reverse_rpc"]);
     }
 
     primary_name_unsupported_exact_tuple_coverage()
+}
+
+fn primary_name_supported_tuple_namespace(namespace: &str) -> bool {
+    matches!(namespace, "ens" | "basenames")
 }
 
 fn primary_name_exact_tuple_coverage(source_classes: &[&str]) -> JsonValue {

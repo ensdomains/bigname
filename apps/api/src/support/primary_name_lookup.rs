@@ -7,7 +7,8 @@ pub(super) async fn load_primary_name_lookup_state(
     coin_type: &str,
     mode: ResolutionMode,
 ) -> ApiResult<PrimaryNameLookupState> {
-    match load_primary_name_current_snapshot(pool, address, namespace, coin_type).await {
+    let coin_type = canonical_primary_name_coin_type(coin_type)?;
+    match load_primary_name_current_snapshot(pool, address, namespace, &coin_type).await {
         Ok(Some(snapshot)) => Ok(PrimaryNameLookupState {
             tuple_state: PrimaryNameTupleState::TuplePresent(snapshot.row),
             normalized_claim_name: mode
@@ -17,7 +18,7 @@ pub(super) async fn load_primary_name_lookup_state(
             on_demand_claim: OnDemandPrimaryNameClaimState::NotAttempted,
             on_demand_verified: OnDemandPrimaryNameVerificationState::NotAttempted,
             persisted_verified: if mode.includes_verified() {
-                load_persisted_primary_name_verified_readback(pool, address, namespace, coin_type)
+                load_persisted_primary_name_verified_readback(pool, address, namespace, &coin_type)
                     .await?
             } else {
                 None
@@ -66,6 +67,17 @@ pub(super) fn primary_name_projection_unavailable(load_error: &anyhow::Error) ->
                 )
             })
     })
+}
+
+pub(super) fn canonical_primary_name_coin_type(coin_type: &str) -> ApiResult<String> {
+    coin_type
+        .parse::<u64>()
+        .map(|value| value.to_string())
+        .map_err(|_| ApiError {
+            status: StatusCode::BAD_REQUEST,
+            code: "invalid_input",
+            message: "coin_type must fit in an unsigned 64-bit integer".to_owned(),
+        })
 }
 
 pub(super) async fn load_persisted_primary_name_verified_readback(
@@ -354,6 +366,7 @@ pub(super) async fn load_on_demand_primary_name_claim(
     namespace: &str,
     coin_type: &str,
 ) -> ApiResult<OnDemandPrimaryNameClaimState> {
+    let coin_type = canonical_primary_name_coin_type(coin_type)?;
     if namespace != bigname_storage::ENS_NAMESPACE || coin_type != "60" {
         return Ok(OnDemandPrimaryNameClaimState::NotAttempted);
     }
@@ -395,7 +408,12 @@ pub(super) async fn load_on_demand_primary_name_claim(
                 error = %error.message,
                 "on-demand primary-name reverse lookup returned an unnormalizable name"
             );
-            return Ok(OnDemandPrimaryNameClaimState::NotFound);
+            return Ok(OnDemandPrimaryNameClaimState::InvalidName(
+                OnDemandPrimaryNameInvalidClaim {
+                    raw_name: on_demand.name,
+                    resolver_address: on_demand.resolver_address,
+                },
+            ));
         }
     };
     if parsed.namespace != namespace {
@@ -417,6 +435,7 @@ pub(super) async fn load_on_demand_primary_name_verification(
     coin_type: &str,
     claim: &OnDemandPrimaryNameClaim,
 ) -> ApiResult<OnDemandPrimaryNameVerificationState> {
+    let coin_type = canonical_primary_name_coin_type(coin_type)?;
     if namespace != bigname_storage::ENS_NAMESPACE || coin_type != "60" {
         return Ok(OnDemandPrimaryNameVerificationState::NotAttempted);
     }

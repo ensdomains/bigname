@@ -329,7 +329,14 @@ pub(crate) enum OnDemandPrimaryNameClaimState {
     NotAttempted,
     Unavailable,
     NotFound,
+    InvalidName(OnDemandPrimaryNameInvalidClaim),
     Found(OnDemandPrimaryNameClaim),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct OnDemandPrimaryNameInvalidClaim {
+    pub(crate) raw_name: String,
+    pub(crate) resolver_address: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
