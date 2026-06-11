@@ -98,7 +98,13 @@ fn canonical_decimal_coin_type(value: &str, context: &str, field_name: &str) -> 
     let coin_type = value
         .parse::<u64>()
         .with_context(|| format!("{context} field {field_name} must fit in u64"))?;
-    Ok(coin_type.to_string())
+    let canonical = coin_type.to_string();
+    if value != canonical {
+        bail!(
+            "{context} field {field_name} must be canonical decimal text; found {value}, expected {canonical}"
+        );
+    }
+    Ok(canonical)
 }
 
 pub(crate) fn ensure_absent(
@@ -119,15 +125,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn required_coin_type_field_canonicalizes_decimal_text() -> Result<()> {
+    fn required_coin_type_field_rejects_noncanonical_decimal_text() -> Result<()> {
         let object = json!({
             "coin_type": "060",
         });
         let object = object.as_object().expect("test payload must be an object");
 
-        assert_eq!(
-            required_coin_type_field(object, "coin_type", "test payload")?,
-            "60"
+        let error = required_coin_type_field(object, "coin_type", "test payload")
+            .expect_err("noncanonical coin_type text must be rejected");
+        assert!(
+            error.to_string().contains("must be canonical decimal text"),
+            "unexpected error: {error:#}"
         );
         Ok(())
     }

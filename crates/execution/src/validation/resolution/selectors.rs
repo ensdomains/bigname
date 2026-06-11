@@ -9,8 +9,8 @@ use bigname_storage::{
 use serde_json::Value;
 
 use crate::json_helpers::{
-    ensure_absent, optional_nonempty_string_field, required_array, required_nonempty_string_field,
-    required_object, required_string,
+    ensure_absent, optional_nonempty_string_field, required_array, required_coin_type_field,
+    required_nonempty_string_field, required_object, required_string,
 };
 use crate::validation::{RequestedSelectorSet, VerifiedQueryStatus, VerifiedQuerySummary};
 
@@ -164,9 +164,12 @@ pub(super) fn extract_verified_queries_from_payload(
                 let value = required_object(query.get("value"), &format!("{query_context}.value"))?;
                 ensure_absent(query, "unsupported_reason", &query_context)?;
                 if let SupportedVerifiedRecordKey::Addr { coin_type } = &selector {
-                    let value_coin_type =
-                        required_string(value, "coin_type", &format!("{query_context}.value"))?;
-                    if value_coin_type != coin_type {
+                    let value_coin_type = required_coin_type_field(
+                        value,
+                        "coin_type",
+                        &format!("{query_context}.value"),
+                    )?;
+                    if value_coin_type != *coin_type {
                         bail!(
                             "ENS direct-path verified resolution query value coin_type {} does not match record_key {}",
                             value_coin_type,

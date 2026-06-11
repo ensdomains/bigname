@@ -361,6 +361,56 @@ async fn get_primary_names_uses_configured_on_demand_rpc_for_default_tuple_miss(
 }
 
 #[tokio::test]
+async fn get_primary_names_canonical_coin_type_reaches_on_demand_fallback() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![
+        json!("0x000000000000000000000000a2c122be93b0074270ebee7f6b7292c7deb45047"),
+        primary_name_reverse_name_response("taytems.eth"),
+    ])
+    .await?;
+    let chain_rpc_urls =
+        bigname_execution::ChainRpcUrls::from_entries(&[format!("ethereum-mainnet={rpc_url}")])?;
+
+    let response = app_router(database.app_state_with_chain_rpc_urls(chain_rpc_urls))
+        .oneshot(
+            Request::builder()
+                .uri("/v1/primary-names/0x8e8db5ccef88cca9d624701db544989c996e3216?namespace=ens&coin_type=060")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("canonical coin_type on-demand primary-name request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: PrimaryNameResponse = read_json(response).await?;
+    assert_eq!(
+        payload.data,
+        json!({
+            "address": "0x8e8db5ccef88cca9d624701db544989c996e3216",
+            "namespace": "ens",
+            "coin_type": "60",
+        })
+    );
+    assert_eq!(
+        payload.declared_state,
+        Some(json!({
+            "claimed_primary_name": {
+                "status": "success",
+                "name": "taytems.eth",
+                "provenance": {
+                    "source_family": "ens_reverse_rpc",
+                    "resolver_address": "0xa2c122be93b0074270ebee7f6b7292c7deb45047",
+                },
+            }
+        }))
+    );
+
+    assert_eq!(join_primary_name_mock_rpc_requests(rpc_handle).await?.len(), 2);
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn get_primary_names_canonicalizes_coin_type_before_lookup_and_response() -> Result<()> {
     let database = TestDatabase::new(false).await?;
     database.create_primary_names_current_table().await?;
@@ -2544,12 +2594,23 @@ async fn get_primary_names_rejects_malformed_input() -> Result<()> {
         )
         .await
         .context("malformed-coin-type request failed")?;
+    let overflowing_coin_type = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/primary-names/0x0000000000000000000000000000000000000abc?namespace=ens&coin_type=18446744073709551616")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("overflowing-coin-type request failed")?;
 
     assert_eq!(malformed_address.status(), StatusCode::BAD_REQUEST);
     assert_eq!(malformed_coin_type.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(overflowing_coin_type.status(), StatusCode::BAD_REQUEST);
 
     let malformed_address_payload: ErrorResponse = read_json(malformed_address).await?;
     let malformed_coin_type_payload: ErrorResponse = read_json(malformed_coin_type).await?;
+    let overflowing_coin_type_payload: ErrorResponse = read_json(overflowing_coin_type).await?;
     assert_eq!(malformed_address_payload.error.code, "invalid_input");
     assert_eq!(
         malformed_address_payload.error.message,
@@ -2559,6 +2620,11 @@ async fn get_primary_names_rejects_malformed_input() -> Result<()> {
     assert_eq!(
         malformed_coin_type_payload.error.message,
         "coin_type must contain only decimal digits"
+    );
+    assert_eq!(overflowing_coin_type_payload.error.code, "invalid_input");
+    assert_eq!(
+        overflowing_coin_type_payload.error.message,
+        "coin_type must fit in an unsigned 64-bit integer"
     );
 
     database.cleanup().await?;
