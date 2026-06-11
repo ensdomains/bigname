@@ -1,6 +1,7 @@
 # ADR 0003: API Surface Flattening Plan
 
-Status: Proposed
+Status: Proposed — compatibility-preservation policy superseded by ADR 0006;
+implementation slices 3–6 remain valid enablers
 Date: 2026-05-06
 
 ## Context
