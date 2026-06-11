@@ -6297,6 +6297,276 @@ async fn block_hash_replay_preloads_registry_owner_at_boundary_not_resource_head
 }
 
 #[tokio::test]
+async fn block_hash_replay_preloads_diverged_registrar_as_superseded_before_registry_convergence()
+-> Result<()> {
+    let _permit = crate::acquire_test_db_permit().await;
+    let database = TestDatabase::new().await?;
+    let registrar_address = "0x00000000000000000000000000000000000000aa";
+    let registry_address = "0x00000000000000000000000000000000000000bb";
+    let registrant = "0x0000000000000000000000000000000000000001";
+    let diverged_registry_owner = "0x0000000000000000000000000000000000000002";
+    let resolver = "0x00000000000000000000000000000000000000cc";
+    let registration_block_hash =
+        "0xc100000000000000000000000000000000000000000000000000000000000001";
+    let divergence_block_hash =
+        "0xc100000000000000000000000000000000000000000000000000000000000002";
+    let resolver_block_hash = "0xc100000000000000000000000000000000000000000000000000000000000003";
+    let convergence_block_hash =
+        "0xc100000000000000000000000000000000000000000000000000000000000004";
+
+    insert_active_contract_fixture(
+        database.pool(),
+        SOURCE_FAMILY_ENS_V1_REGISTRAR_L1,
+        "registrar",
+        registrar_address,
+        Some("registrar"),
+        "manifests/ens/ens_v1_registrar_l1/v1.toml",
+    )
+    .await?;
+    insert_active_contract_fixture(
+        database.pool(),
+        SOURCE_FAMILY_ENS_V1_REGISTRY_L1,
+        "registry",
+        registry_address,
+        Some("registry"),
+        "manifests/ens/ens_v1_registry_l1/v3.toml",
+    )
+    .await?;
+
+    let alice = observe_registrar_eth_name_with_version("alice", ENS_NORMALIZER_VERSION)?;
+    let labelhash = alice.labelhashes[0].clone();
+    upsert_raw_blocks(
+        database.pool(),
+        &[
+            raw_block(registration_block_hash, None, 91, 1_700_000_091),
+            raw_block(
+                divergence_block_hash,
+                Some(registration_block_hash),
+                92,
+                1_700_000_092,
+            ),
+            raw_block(
+                resolver_block_hash,
+                Some(divergence_block_hash),
+                93,
+                1_700_000_093,
+            ),
+            raw_block(
+                convergence_block_hash,
+                Some(resolver_block_hash),
+                94,
+                1_700_000_094,
+            ),
+        ],
+    )
+    .await?;
+    upsert_raw_logs(
+        database.pool(),
+        &[
+            RawLog {
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: registration_block_hash.to_owned(),
+                block_number: 91,
+                transaction_hash:
+                    "0xtxc1000000000000000000000000000000000000000000000000000000000001".to_owned(),
+                transaction_index: 0,
+                log_index: 0,
+                emitting_address: registrar_address.to_owned(),
+                topics: vec![
+                    name_registered_topic0(),
+                    labelhash.clone(),
+                    hex_string(&abi_word_address(registrant)),
+                ],
+                data: encode_registrar_name_registered_log_data("alice", 1_800_000_000),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            RawLog {
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: divergence_block_hash.to_owned(),
+                block_number: 92,
+                transaction_hash:
+                    "0xtxc1000000000000000000000000000000000000000000000000000000000002".to_owned(),
+                transaction_index: 0,
+                log_index: 0,
+                emitting_address: registry_address.to_owned(),
+                topics: vec![new_owner_topic0(), eth_node(), labelhash.clone()],
+                data: abi_word_address(diverged_registry_owner).to_vec(),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            RawLog {
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: resolver_block_hash.to_owned(),
+                block_number: 93,
+                transaction_hash:
+                    "0xtxc1000000000000000000000000000000000000000000000000000000000003".to_owned(),
+                transaction_index: 0,
+                log_index: 0,
+                emitting_address: registry_address.to_owned(),
+                topics: vec![new_resolver_topic0(), alice.namehash.clone()],
+                data: encode_registry_new_resolver_log_data(resolver),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            RawLog {
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: convergence_block_hash.to_owned(),
+                block_number: 94,
+                transaction_hash:
+                    "0xtxc1000000000000000000000000000000000000000000000000000000000004".to_owned(),
+                transaction_index: 0,
+                log_index: 0,
+                emitting_address: registry_address.to_owned(),
+                topics: vec![new_owner_topic0(), eth_node(), labelhash],
+                data: abi_word_address(registrant).to_vec(),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+        ],
+    )
+    .await?;
+
+    let seeded = EnsV1UnwrappedAuthoritySyncSummary::sync_for_block_hashes(
+        database.pool(),
+        "ethereum-mainnet",
+        &[
+            registration_block_hash.to_owned(),
+            divergence_block_hash.to_owned(),
+        ],
+    )
+    .await?;
+    assert_eq!(seeded.matched_log_count, 2);
+
+    let (registrar_resource_id, registrar_lineage_id) = sqlx::query_as::<_, (Uuid, Option<Uuid>)>(
+        "SELECT resource_id, token_lineage_id
+         FROM resources
+         WHERE provenance->>'authority_kind' = 'registrar'",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    let registry_resource_id = sqlx::query_scalar::<_, Uuid>(
+        "SELECT resource_id
+         FROM resources
+         WHERE provenance->>'authority_kind' = 'registry_only'",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT resource_id
+             FROM surface_bindings
+             WHERE logical_name_id = 'ens:alice.eth'
+               AND active_to IS NULL",
+        )
+        .fetch_one(database.pool())
+        .await?,
+        registry_resource_id
+    );
+
+    let resolver_replayed = EnsV1UnwrappedAuthoritySyncSummary::sync_for_block_hashes(
+        database.pool(),
+        "ethereum-mainnet",
+        &[resolver_block_hash.to_owned()],
+    )
+    .await?;
+    assert_eq!(resolver_replayed.matched_log_count, 1);
+    let resolver_resource_id = sqlx::query_scalar::<_, Uuid>(
+        "SELECT resource_id
+         FROM normalized_events
+         WHERE logical_name_id = 'ens:alice.eth'
+           AND event_kind = 'ResolverChanged'
+           AND block_number = 93",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(resolver_resource_id, registry_resource_id);
+    assert_ne!(resolver_resource_id, registrar_resource_id);
+
+    let convergence_replayed = EnsV1UnwrappedAuthoritySyncSummary::sync_for_block_hashes(
+        database.pool(),
+        "ethereum-mainnet",
+        &[convergence_block_hash.to_owned()],
+    )
+    .await?;
+    assert_eq!(convergence_replayed.matched_log_count, 1);
+
+    let active_resource_id = sqlx::query_scalar::<_, Uuid>(
+        "SELECT resource_id
+         FROM surface_bindings
+         WHERE logical_name_id = 'ens:alice.eth'
+           AND active_to IS NULL",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(active_resource_id, registrar_resource_id);
+    assert_eq!(
+        sqlx::query_scalar::<_, Option<Uuid>>(
+            "SELECT token_lineage_id
+             FROM resources
+             WHERE resource_id = $1",
+        )
+        .bind(active_resource_id)
+        .fetch_one(database.pool())
+        .await?,
+        registrar_lineage_id
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT
+             FROM surface_bindings
+             WHERE logical_name_id = 'ens:alice.eth'
+               AND resource_id = $1
+               AND active_to IS NOT NULL",
+        )
+        .bind(registry_resource_id)
+        .fetch_one(database.pool())
+        .await?,
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT
+             FROM normalized_events
+             WHERE logical_name_id = 'ens:alice.eth'
+               AND event_kind = 'PermissionChanged'
+               AND block_number = 94
+               AND resource_id = $1
+               AND after_state->>'subject' = $2
+               AND jsonb_array_length(after_state->'effective_powers') = 0",
+        )
+        .bind(registry_resource_id)
+        .bind(diverged_registry_owner)
+        .fetch_one(database.pool())
+        .await?,
+        2
+    );
+    let (before_authority_kind, after_authority_kind) = sqlx::query_as::<_, (String, String)>(
+        "SELECT before_state->>'authority_kind', after_state->>'authority_kind'
+         FROM normalized_events
+         WHERE logical_name_id = 'ens:alice.eth'
+           AND event_kind = 'AuthorityEpochChanged'
+           AND block_number = 94",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(before_authority_kind, "registry_only");
+    assert_eq!(after_authority_kind, "registrar");
+    assert_eq!(
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT resource_id
+             FROM normalized_events
+             WHERE logical_name_id = 'ens:alice.eth'
+               AND event_kind = 'AuthorityTransferred'
+               AND block_number = 94
+               AND after_state->>'owner' = $1",
+        )
+        .bind(registrant)
+        .fetch_one(database.pool())
+        .await?,
+        registrar_resource_id
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn block_hash_replay_prefers_same_block_resolver_log_over_authority_boundary() -> Result<()> {
     let _permit = crate::acquire_test_db_permit().await;
     let database = TestDatabase::new().await?;
@@ -7218,6 +7488,394 @@ async fn sync_ens_v1_unwrapped_authority_translates_wrapper_events_idempotently_
             .fetch_one(database.pool())
             .await?,
         14
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn sync_ens_v1_unwrapped_authority_wrap_eth2ld_reclaim_restores_then_wraps_same_tx()
+-> Result<()> {
+    let _permit = crate::acquire_test_db_permit().await;
+    let database = TestDatabase::new().await?;
+
+    let registrar_address = "0x00000000000000000000000000000000000000aa";
+    let registry_address = "0x00000000000000000000000000000000000000bb";
+    let wrapper_address = "0x00000000000000000000000000000000000000dd";
+    let registrant = "0x0000000000000000000000000000000000000001";
+    let diverged_registry_owner = "0x0000000000000000000000000000000000000002";
+    let wrapped_owner = "0x0000000000000000000000000000000000000003";
+
+    insert_active_contract_fixture(
+        database.pool(),
+        SOURCE_FAMILY_ENS_V1_REGISTRAR_L1,
+        "registrar",
+        registrar_address,
+        Some("registrar"),
+        "manifests/ens/ens_v1_registrar_l1/v1.toml",
+    )
+    .await?;
+    insert_active_contract_fixture(
+        database.pool(),
+        SOURCE_FAMILY_ENS_V1_REGISTRY_L1,
+        "registry",
+        registry_address,
+        Some("registry"),
+        "manifests/ens/ens_v1_registry_l1/v1.toml",
+    )
+    .await?;
+    insert_active_contract_fixture(
+        database.pool(),
+        SOURCE_FAMILY_ENS_V1_WRAPPER_L1,
+        "name_wrapper",
+        wrapper_address,
+        Some("name_wrapper"),
+        "manifests/ens/ens_v1_wrapper_l1/v1.toml",
+    )
+    .await?;
+
+    let registration_block_hash =
+        "0xc200000000000000000000000000000000000000000000000000000000000001";
+    let divergence_block_hash =
+        "0xc200000000000000000000000000000000000000000000000000000000000002";
+    let wrap_block_hash = "0xc200000000000000000000000000000000000000000000000000000000000003";
+    let wrap_tx_hash = "0xtxc2000000000000000000000000000000000000000000000000000000000003";
+
+    upsert_raw_blocks(
+        database.pool(),
+        &[
+            raw_block(registration_block_hash, None, 101, 1_700_000_101),
+            raw_block(
+                divergence_block_hash,
+                Some(registration_block_hash),
+                102,
+                1_700_000_102,
+            ),
+            raw_block(
+                wrap_block_hash,
+                Some(divergence_block_hash),
+                103,
+                1_700_000_103,
+            ),
+        ],
+    )
+    .await?;
+
+    let alice = observe_registrar_eth_name_with_version("alice", ENS_NORMALIZER_VERSION)?;
+    let labelhash = alice.labelhashes[0].clone();
+    let dns_name = dns_encoded_name(&["alice", "eth"]);
+    upsert_raw_logs(
+        database.pool(),
+        &[
+            RawLog {
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: registration_block_hash.to_owned(),
+                block_number: 101,
+                transaction_hash:
+                    "0xtxc2000000000000000000000000000000000000000000000000000000000001".to_owned(),
+                transaction_index: 0,
+                log_index: 0,
+                emitting_address: registrar_address.to_owned(),
+                topics: vec![
+                    name_registered_topic0(),
+                    labelhash.clone(),
+                    hex_string(&abi_word_address(registrant)),
+                ],
+                data: encode_registrar_name_registered_log_data("alice", 1_800_000_000),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            RawLog {
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: divergence_block_hash.to_owned(),
+                block_number: 102,
+                transaction_hash:
+                    "0xtxc2000000000000000000000000000000000000000000000000000000000002".to_owned(),
+                transaction_index: 0,
+                log_index: 0,
+                emitting_address: registry_address.to_owned(),
+                topics: vec![new_owner_topic0(), eth_node(), labelhash.clone()],
+                data: abi_word_address(diverged_registry_owner).to_vec(),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            RawLog {
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: wrap_block_hash.to_owned(),
+                block_number: 103,
+                transaction_hash: wrap_tx_hash.to_owned(),
+                transaction_index: 0,
+                log_index: 0,
+                emitting_address: registrar_address.to_owned(),
+                topics: vec![
+                    transfer_topic0(),
+                    hex_string(&abi_word_address(registrant)),
+                    hex_string(&abi_word_address(wrapper_address)),
+                    labelhash.clone(),
+                ],
+                data: Vec::new(),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            RawLog {
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: wrap_block_hash.to_owned(),
+                block_number: 103,
+                transaction_hash: wrap_tx_hash.to_owned(),
+                transaction_index: 0,
+                log_index: 1,
+                emitting_address: registry_address.to_owned(),
+                topics: vec![new_owner_topic0(), eth_node(), labelhash],
+                data: abi_word_address(wrapper_address).to_vec(),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            RawLog {
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: wrap_block_hash.to_owned(),
+                block_number: 103,
+                transaction_hash: wrap_tx_hash.to_owned(),
+                transaction_index: 0,
+                log_index: 2,
+                emitting_address: wrapper_address.to_owned(),
+                topics: vec![name_wrapped_topic0(), alice.namehash.clone()],
+                data: encode_name_wrapped_log_data(&dns_name, wrapped_owner, 0, 1_800_777_600),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+        ],
+    )
+    .await?;
+
+    let summary = sync_ens_v1_unwrapped_authority(database.pool(), "ethereum-mainnet").await?;
+    assert_eq!(summary.scanned_log_count, 5);
+    assert_eq!(summary.matched_log_count, 5);
+    assert_eq!(summary.total_name_surface_count, 1);
+
+    let (registrar_resource_id, registrar_lineage_id) = sqlx::query_as::<_, (Uuid, Option<Uuid>)>(
+        "SELECT resource_id, token_lineage_id
+         FROM resources
+         WHERE provenance->>'authority_kind' = 'registrar'",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    let registry_resource_id = sqlx::query_scalar::<_, Uuid>(
+        "SELECT resource_id
+         FROM resources
+         WHERE provenance->>'authority_kind' = 'registry_only'",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    let (wrapper_resource_id, wrapper_lineage_id) = sqlx::query_as::<_, (Uuid, Option<Uuid>)>(
+        "SELECT resource_id, token_lineage_id
+         FROM resources
+         WHERE provenance->>'authority_kind' = 'wrapper'",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert!(registrar_lineage_id.is_some());
+    assert!(wrapper_lineage_id.is_some());
+    assert_ne!(registrar_lineage_id, wrapper_lineage_id);
+
+    assert_eq!(
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT resource_id
+             FROM surface_bindings
+             WHERE logical_name_id = 'ens:alice.eth'
+               AND active_to IS NULL",
+        )
+        .fetch_one(database.pool())
+        .await?,
+        wrapper_resource_id
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT
+             FROM surface_bindings
+             WHERE logical_name_id = 'ens:alice.eth'
+               AND resource_id = $1",
+        )
+        .bind(registrar_resource_id)
+        .fetch_one(database.pool())
+        .await?,
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT
+             FROM surface_bindings
+             WHERE logical_name_id = 'ens:alice.eth'
+               AND resource_id = $1
+               AND active_to IS NOT NULL",
+        )
+        .bind(registry_resource_id)
+        .fetch_one(database.pool())
+        .await?,
+        1
+    );
+
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT after_state->>'to'
+             FROM normalized_events
+             WHERE logical_name_id = 'ens:alice.eth'
+               AND event_kind = 'TokenControlTransferred'
+               AND block_number = 103
+               AND log_index = 0
+               AND resource_id = $1",
+        )
+        .bind(registrar_resource_id)
+        .fetch_one(database.pool())
+        .await?,
+        wrapper_address.to_owned()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT
+             FROM normalized_events
+             WHERE logical_name_id = 'ens:alice.eth'
+               AND event_kind = 'PermissionChanged'
+               AND block_number = 103
+               AND log_index = 0
+               AND resource_id = $1
+               AND after_state->>'subject' IN ($2, $3)",
+        )
+        .bind(registrar_resource_id)
+        .bind(registrant)
+        .bind(wrapper_address)
+        .fetch_one(database.pool())
+        .await?,
+        2
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT
+             FROM normalized_events
+             WHERE logical_name_id = 'ens:alice.eth'
+               AND event_kind = 'PermissionChanged'
+               AND block_number = 103
+               AND log_index = 1
+               AND resource_id = $1
+               AND after_state->>'subject' = $2
+               AND jsonb_array_length(after_state->'effective_powers') = 0",
+        )
+        .bind(registry_resource_id)
+        .bind(diverged_registry_owner)
+        .fetch_one(database.pool())
+        .await?,
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT resource_id
+             FROM normalized_events
+             WHERE logical_name_id = 'ens:alice.eth'
+               AND event_kind = 'AuthorityTransferred'
+               AND block_number = 103
+               AND log_index = 1
+               AND after_state->>'owner' = $1",
+        )
+        .bind(wrapper_address)
+        .fetch_one(database.pool())
+        .await?,
+        registrar_resource_id
+    );
+    let (restore_before_kind, restore_after_kind) = sqlx::query_as::<_, (String, String)>(
+        "SELECT before_state->>'authority_kind', after_state->>'authority_kind'
+         FROM normalized_events
+         WHERE logical_name_id = 'ens:alice.eth'
+           AND event_kind = 'AuthorityEpochChanged'
+           AND block_number = 103
+           AND before_state->>'authority_kind' = 'registry_only'
+           AND after_state->>'authority_kind' = 'registrar'",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(restore_before_kind, "registry_only");
+    assert_eq!(restore_after_kind, "registrar");
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT
+             FROM normalized_events
+             WHERE logical_name_id = 'ens:alice.eth'
+               AND event_kind = 'SurfaceBound'
+               AND block_number = 103
+               AND resource_id = $1
+               AND after_state->>'authority_kind' = 'registrar'",
+        )
+        .bind(registrar_resource_id)
+        .fetch_one(database.pool())
+        .await?,
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT
+             FROM normalized_events
+             WHERE logical_name_id = 'ens:alice.eth'
+               AND event_kind = 'SurfaceUnbound'
+               AND block_number = 103
+               AND resource_id = $1
+               AND after_state->>'authority_kind' = 'registry_only'",
+        )
+        .bind(registry_resource_id)
+        .fetch_one(database.pool())
+        .await?,
+        1
+    );
+
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT after_state->>'to'
+             FROM normalized_events
+             WHERE logical_name_id = 'ens:alice.eth'
+               AND event_kind = 'TokenControlTransferred'
+               AND block_number = 103
+               AND log_index = 2
+               AND resource_id = $1",
+        )
+        .bind(wrapper_resource_id)
+        .fetch_one(database.pool())
+        .await?,
+        wrapped_owner.to_owned()
+    );
+    let (wrap_before_kind, wrap_after_kind) = sqlx::query_as::<_, (String, String)>(
+        "SELECT before_state->>'authority_kind', after_state->>'authority_kind'
+         FROM normalized_events
+         WHERE logical_name_id = 'ens:alice.eth'
+           AND event_kind = 'AuthorityEpochChanged'
+           AND block_number = 103
+           AND before_state->>'authority_kind' = 'registrar'
+           AND after_state->>'authority_kind' = 'wrapper'",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(wrap_before_kind, "registrar");
+    assert_eq!(wrap_after_kind, "wrapper");
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT
+             FROM normalized_events
+             WHERE logical_name_id = 'ens:alice.eth'
+               AND event_kind = 'PermissionScopeChanged'
+               AND block_number = 103
+               AND log_index = 2
+               AND resource_id = $1
+               AND after_state->>'fuses' = '0'",
+        )
+        .bind(wrapper_resource_id)
+        .fetch_one(database.pool())
+        .await?,
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT
+             FROM normalized_events
+             WHERE logical_name_id = 'ens:alice.eth'
+               AND event_kind = 'SurfaceUnbound'
+               AND block_number = 103
+               AND resource_id = $1",
+        )
+        .bind(registrar_resource_id)
+        .fetch_one(database.pool())
+        .await?,
+        0
     );
 
     database.cleanup().await
