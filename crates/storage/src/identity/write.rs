@@ -158,6 +158,16 @@ pub async fn upsert_name_surfaces(
             snapshots.push(upsert_name_surface(&mut transaction, name_surface).await?);
         }
     }
+    crate::label_preimages::upsert_label_preimages_from_name_surfaces(
+        &mut transaction,
+        name_surfaces,
+    )
+    .await?;
+    crate::children::enqueue_children_current_invalidations_for_parent_surfaces(
+        &mut transaction,
+        name_surfaces,
+    )
+    .await?;
 
     transaction
         .commit()
@@ -181,6 +191,13 @@ pub async fn upsert_name_surfaces_without_snapshots(
             validate_name_surface(name_surface)?;
         }
         bulk_upsert_name_surfaces_without_snapshots(&mut transaction, chunk).await?;
+        crate::label_preimages::upsert_label_preimages_from_name_surfaces(&mut transaction, chunk)
+            .await?;
+        crate::children::enqueue_children_current_invalidations_for_parent_surfaces(
+            &mut transaction,
+            chunk,
+        )
+        .await?;
         transaction
             .commit()
             .await

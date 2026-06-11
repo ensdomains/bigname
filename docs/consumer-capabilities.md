@@ -78,6 +78,7 @@ The slim surface removes namespace-inferred `/v1/resolve*` aliases. Canonical na
 - ENSv1 dynamic resolver-profile admission is profile-exact, not latest-PublicResolver-only. A resolver with `pending` or `unsupported` profile state may expose only observed selector and cache facts. An admitted legacy generation satisfies only the record/interface families listed for that profile; unsupported sections remain explicit.[^v1-pres-l20][^v1-pres-l31][^v1-resbase-l17]
 - ENSv1 pubkey evidence is unadmitted. Known PublicResolver-generation profiles keep it explicit `unsupported`; unknown resolvers keep it `pending`. Generic resolver-record observation does not promote it.
 - ENSv1 reverse and primary resolver `NameChanged` text is preimage intake only. It can attach already-observed forward-node facts to a human-readable name; it does not create primary-name truth, exact-name authority, or record support without those forward-node facts.[^v1-namech-l10][^v1-namech-l18][^v1-revreg-l129][^v1-revreg-l130]
+- ENSv1 and Basenames child enumeration is node-complete for current registry-derived direct children whose parent surface is known. If the child label is not known, the children route returns the bracketed labelhash placeholder and counts the row; later proof-checked on-chain, retained-surface, or rainbow-table label preimages may repair the display label without changing exact-name support.[^v1-registry-l45][^v1-registry-l82][^bn-registry-l81][^bn-registry-l120][^bn-registry-l122]
 - `ENSRegistryOld` is admitted as migration-aware input under `ens_v1_registry_l1`. Current-registry `NewOwner` migration, suppression of later old-registry topology for migrated nodes, and the root-resolver exception are honored before any old-registry fact contributes to declared reads. The current-registry subgraph start `9380380` stays current-registry scope only; the old-registry start is `3327417`.[^subgraph-l15][^subgraph-l39][^subgraph-l44][^subgraph-ts-l238][^subgraph-ts-l246]
 - `PrimaryName` is one mixed route. `claimed_primary_name` is the declared claim candidate; `verified_primary_name` is the execution-derived verification result. Route-level coverage is `partial` for persisted exact-tuple classes and for the ENS/60 on-demand reverse RPC fallback, including `ens_execution_rpc` when verified mode performs live forward verification; unsupported tuples stay explicit.
 - Mixed profile and primary-name results reuse the same `ResultStatus` vocabulary: `success`, `not_found`, `mismatch`, `unsupported`, `invalid_name`, `execution_failed`.
@@ -102,6 +103,8 @@ The following are deferred until projection-backed equality indexes, stable proj
 [^v1-namech-l18]: (upstream: .refs/ens_v1/contracts/resolvers/profiles/NameResolver.sol:L18 @ ens_v1@91c966f)
 [^v1-revreg-l129]: (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L129 @ ens_v1@91c966f)
 [^v1-revreg-l130]: (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L130 @ ens_v1@91c966f)
+[^v1-registry-l45]: (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L45 @ ens_v1@91c966f)
+[^v1-registry-l82]: (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L82 @ ens_v1@91c966f)
 [^v1-ur-l44]: (upstream: .refs/ens_v1/contracts/universalResolver/IUniversalResolver.sol:L44 @ ens_v1@91c966f)
 [^v1-ur-l52]: (upstream: .refs/ens_v1/contracts/universalResolver/IUniversalResolver.sol:L52 @ ens_v1@91c966f)
 
@@ -110,6 +113,9 @@ The following are deferred until projection-backed equality indexes, stable proj
 [^bn-l2resolver-l193]: (upstream: .refs/basenames/src/L2/L2Resolver.sol:L193 @ basenames@1809bbc)
 [^bn-l2resolver-l209]: (upstream: .refs/basenames/src/L2/L2Resolver.sol:L209 @ basenames@1809bbc)
 [^bn-l2resolver-l225]: (upstream: .refs/basenames/src/L2/L2Resolver.sol:L225 @ basenames@1809bbc)
+[^bn-registry-l81]: (upstream: .refs/basenames/src/L2/Registry.sol:L81 @ basenames@1809bbc)
+[^bn-registry-l120]: (upstream: .refs/basenames/src/L2/Registry.sol:L120 @ basenames@1809bbc)
+[^bn-registry-l122]: (upstream: .refs/basenames/src/L2/Registry.sol:L122 @ basenames@1809bbc)
 
 [^v2-ethreg]: (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistry.json:L2 @ ens_v2@554c309)
 [^v2-ethrc]: (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistrar.json:L2 @ ens_v2@554c309)

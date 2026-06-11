@@ -119,6 +119,19 @@ pub(super) fn transition_authority(
             .map(|value| value.binding_manifest_id)
             .or_else(|| before.as_ref().map(|value| value.binding_manifest_id))
             .unwrap_or(0);
+        let mut after_state = json!({
+            "authority_kind": after.as_ref().map(|value| value.kind.as_str()),
+            "authority_key": after.as_ref().map(|value| value.authority_key.clone()),
+        });
+        if after
+            .as_ref()
+            .is_some_and(|value| value.kind == AuthorityKind::RegistryOnly)
+            && let Some(owner) = nonzero_address(history.current_registry_owner.as_deref())
+            && let Some(object) = after_state.as_object_mut()
+        {
+            object.insert("registry_owner".to_owned(), json!(owner));
+        }
+
         history.events.push(build_boundary_event(
             reference,
             BoundaryEventPayload {
@@ -132,10 +145,7 @@ pub(super) fn transition_authority(
                     "authority_kind": before.as_ref().map(|value| value.kind.as_str()),
                     "authority_key": before.as_ref().map(|value| value.authority_key.clone()),
                 }),
-                after_state: json!({
-                    "authority_kind": after.as_ref().map(|value| value.kind.as_str()),
-                    "authority_key": after.as_ref().map(|value| value.authority_key.clone()),
-                }),
+                after_state,
                 identity_suffix: format!(
                     "authority-epoch:{}:{}:{}:{}:{}",
                     reference.block_hash,

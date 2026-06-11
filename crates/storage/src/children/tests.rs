@@ -10,7 +10,8 @@ use sqlx::{
 
 use super::*;
 use crate::{
-    CanonicalityState, NameSurface, NormalizedEvent, default_database_url, upsert_name_surfaces,
+    CanonicalityState, NameSurface, NormalizedEvent, default_database_url,
+    label_preimage_from_label, upsert_label_preimages, upsert_name_surfaces,
     upsert_normalized_events,
 };
 
@@ -131,7 +132,7 @@ fn name_surface_on_chain(
         normalized_name: display_name.to_owned(),
         dns_encoded_name: display_name.as_bytes().to_vec(),
         namehash: namehash.to_owned(),
-        labelhashes: vec![format!("labelhash:{display_name}")],
+        labelhashes: labelhashes_for_name(display_name),
         normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
         normalization_warnings: json!([]),
         normalization_errors: json!([]),
@@ -158,6 +159,9 @@ fn children_current_row(
         canonical_display_name: display_name.to_owned(),
         normalized_name: display_name.to_owned(),
         namehash: namehash.to_owned(),
+        labelhash: labelhashes_for_name(display_name).into_iter().next(),
+        owner: None,
+        registrant: None,
         provenance: json!({
             "normalized_event_ids": [block_number],
             "derivation_kind": "children_current_rebuild"
@@ -224,12 +228,30 @@ fn subregistry_event(seed: SubregistryEventSeed<'_>) -> NormalizedEvent {
             "edge_kind": "subregistry",
             "parent_node": seed.parent_namehash,
             "child_node": seed.child_namehash,
-            "labelhash": format!("labelhash:{}", seed.child_namehash),
+            "labelhash": labelhash_for_child_namehash(seed.child_namehash),
             "owner": "0x0000000000000000000000000000000000000001",
             "tombstone": seed.tombstone,
             "active_edge": seed.active_edge
         }),
     }
+}
+
+fn labelhashes_for_name(name: &str) -> Vec<String> {
+    name.split('.').map(labelhash_for_label).collect()
+}
+
+fn labelhash_for_child_namehash(child_namehash: &str) -> String {
+    let child_name = child_namehash
+        .strip_prefix("node:")
+        .unwrap_or(child_namehash);
+    labelhash_for_label(child_name.split('.').next().unwrap_or(child_name))
+}
+
+fn labelhash_for_label(label: &str) -> String {
+    format!(
+        "0x{}",
+        alloy_primitives::hex::encode(alloy_primitives::keccak256(label.as_bytes()))
+    )
 }
 
 fn ensv2_subregistry_event(
@@ -423,6 +445,57 @@ async fn children_current_upserts_and_loads_declared_rows() -> Result<()> {
 }
 
 #[tokio::test]
+async fn children_current_load_keeps_label_preimage_rows_when_exact_surface_is_noncanonical()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let parent_logical_name_id = "ens:parent.eth";
+    let child_logical_name_id = "ens:mystery.parent.eth";
+
+    upsert_name_surfaces(
+        database.pool(),
+        &[
+            name_surface(
+                parent_logical_name_id,
+                "parent.eth",
+                "node:parent.eth",
+                12,
+                CanonicalityState::Finalized,
+            ),
+            name_surface(
+                child_logical_name_id,
+                "mystery.parent.eth",
+                "node:mystery.parent.eth",
+                13,
+                CanonicalityState::Observed,
+            ),
+        ],
+    )
+    .await?;
+
+    let mut expected = children_current_row(
+        parent_logical_name_id,
+        child_logical_name_id,
+        "mystery.parent.eth",
+        "node:mystery.parent.eth",
+        13,
+    );
+    expected.provenance["label"] = json!({
+        "labelhash": expected.labelhash,
+        "status": "known",
+        "source": "label_preimage",
+    });
+
+    upsert_children_current_rows(database.pool(), std::slice::from_ref(&expected)).await?;
+
+    assert_eq!(
+        load_children_current(database.pool(), parent_logical_name_id).await?,
+        vec![expected]
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn children_current_load_orders_by_display_name() -> Result<()> {
     let database = TestDatabase::new().await?;
     let parent_logical_name_id = "ens:parent.eth";
@@ -475,6 +548,127 @@ async fn children_current_load_orders_by_display_name() -> Result<()> {
         load_children_current(database.pool(), parent_logical_name_id).await?,
         vec![alice, bob]
     );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn children_current_rejects_malformed_owner_and_registrant_addresses() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let parent_logical_name_id = "ens:parent.eth";
+
+    upsert_name_surfaces(
+        database.pool(),
+        &[name_surface(
+            parent_logical_name_id,
+            "parent.eth",
+            "node:parent.eth",
+            22,
+            CanonicalityState::Finalized,
+        )],
+    )
+    .await?;
+
+    let mut malformed_owner = children_current_row(
+        parent_logical_name_id,
+        "ens:bad-owner.parent.eth",
+        "bad-owner.parent.eth",
+        "node:bad-owner.parent.eth",
+        23,
+    );
+    malformed_owner.owner = Some("not-an-address".to_owned());
+
+    let owner_error = upsert_children_current_rows(database.pool(), &[malformed_owner])
+        .await
+        .expect_err("malformed owner address must be rejected");
+    assert!(
+        format!("{owner_error:?}").contains("invalid owner"),
+        "unexpected owner validation error: {owner_error:?}"
+    );
+
+    let mut malformed_registrant = children_current_row(
+        parent_logical_name_id,
+        "ens:bad-registrant.parent.eth",
+        "bad-registrant.parent.eth",
+        "node:bad-registrant.parent.eth",
+        24,
+    );
+    malformed_registrant.registrant = Some("0x00000000000000000000000000000000000000GG".to_owned());
+
+    let registrant_error = upsert_children_current_rows(database.pool(), &[malformed_registrant])
+        .await
+        .expect_err("malformed registrant address must be rejected");
+    assert!(
+        format!("{registrant_error:?}").contains("invalid registrant"),
+        "unexpected registrant validation error: {registrant_error:?}"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn children_current_requires_no_surface_rows_to_use_declared_label_provenance() -> Result<()>
+{
+    let database = TestDatabase::new().await?;
+    let parent_logical_name_id = "ens:parent.eth";
+
+    upsert_name_surfaces(
+        database.pool(),
+        &[name_surface(
+            parent_logical_name_id,
+            "parent.eth",
+            "node:parent.eth",
+            25,
+            CanonicalityState::Finalized,
+        )],
+    )
+    .await?;
+
+    let malformed = children_current_row(
+        parent_logical_name_id,
+        "ens:missing.parent.eth",
+        "missing.parent.eth",
+        "node:missing.parent.eth",
+        26,
+    );
+    let error = upsert_children_current_rows(database.pool(), &[malformed])
+        .await
+        .expect_err("no-surface exact row without label provenance must be rejected");
+    assert!(
+        format!("{error:?}").contains("missing child surface"),
+        "unexpected no-surface validation error: {error:?}"
+    );
+
+    let mut preimage_row = children_current_row(
+        parent_logical_name_id,
+        "ens:preimage.parent.eth",
+        "preimage.parent.eth",
+        "node:preimage.parent.eth",
+        27,
+    );
+    preimage_row.provenance["label"] = json!({
+        "labelhash": preimage_row.labelhash,
+        "status": "known",
+        "source": "label_preimage",
+    });
+    upsert_children_current_rows(database.pool(), &[preimage_row]).await?;
+
+    let labelhash = labelhash_for_label("unknown");
+    let placeholder = format!("[{}].parent.eth", labelhash.trim_start_matches("0x"));
+    let mut unknown_row = children_current_row(
+        parent_logical_name_id,
+        &format!("ens:{placeholder}"),
+        &placeholder,
+        "node:unknown.parent.eth",
+        28,
+    );
+    unknown_row.labelhash = Some(labelhash);
+    unknown_row.provenance["label"] = json!({
+        "labelhash": unknown_row.labelhash,
+        "status": "unknown",
+        "source": "unknown",
+    });
+    upsert_children_current_rows(database.pool(), &[unknown_row]).await?;
 
     database.cleanup().await
 }
@@ -880,10 +1074,146 @@ async fn children_current_declared_child_sources_filter_noncanonical_events_and_
 
     let current =
         load_canonical_ens_v1_declared_child_sources(database.pool(), Some(parent_b)).await?;
-    assert_eq!(current.len(), 1);
-    assert_eq!(current[0].parent_logical_name_id, parent_b);
-    assert_eq!(current[0].child_logical_name_id, child_alice);
-    assert_eq!(current[0].event_identity, "alice-parent-b");
+    assert_eq!(current.len(), 2);
+    let alice = current
+        .iter()
+        .find(|source| source.child_logical_name_id == child_alice)
+        .expect("alice child should stay visible");
+    assert_eq!(alice.parent_logical_name_id, parent_b);
+    assert_eq!(alice.event_identity, "alice-parent-b");
+
+    let carla = current
+        .iter()
+        .find(|source| source.event_identity == "carla-finalized")
+        .expect("child edge with noncanonical child surface should stay visible");
+    let carla_labelhash = labelhash_for_child_namehash("node:carla.parent.eth");
+    assert_eq!(carla.child_logical_name_id, "ens:carla.other.eth");
+    assert_eq!(carla.labelhash, Some(carla_labelhash));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn children_current_parent_surface_upsert_invalidates_retained_registry_edges() -> Result<()>
+{
+    let database = TestDatabase::new().await?;
+    let parent = "ens:parent.eth";
+    let child_node = "node:mystery.parent.eth";
+
+    upsert_label_preimages(
+        database.pool(),
+        &[label_preimage_from_label(
+            "mystery",
+            "children_current_test",
+            100,
+            json!({"source": "children_current_test"}),
+        )?],
+    )
+    .await?;
+    upsert_normalized_events(
+        database.pool(),
+        &[subregistry_event(SubregistryEventSeed {
+            event_identity: "mystery-before-parent",
+            namespace: "ens",
+            source_family: ENSV1_SUBREGISTRY_SOURCE_FAMILY,
+            chain_id: "ethereum-mainnet",
+            parent_namehash: "node:parent.eth",
+            child_namehash: child_node,
+            block_number: 105,
+            log_index: 0,
+            canonicality_state: CanonicalityState::Finalized,
+            tombstone: false,
+            active_edge: true,
+        })],
+    )
+    .await?;
+
+    let invalidation_count: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*)
+        FROM projection_invalidations
+        WHERE projection = 'children_current'
+          AND projection_key = $1
+        "#,
+    )
+    .bind(parent)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(invalidation_count, 0);
+
+    upsert_name_surfaces(
+        database.pool(),
+        &[name_surface(
+            parent,
+            "parent.eth",
+            "node:parent.eth",
+            35,
+            CanonicalityState::Finalized,
+        )],
+    )
+    .await?;
+
+    let invalidation_count: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*)
+        FROM projection_invalidations
+        WHERE projection = 'children_current'
+          AND projection_key = $1
+        "#,
+    )
+    .bind(parent)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(invalidation_count, 1);
+
+    let sources =
+        load_canonical_ens_v1_declared_child_sources(database.pool(), Some(parent)).await?;
+    assert_eq!(sources.len(), 1);
+    assert_eq!(sources[0].child_logical_name_id, "ens:mystery.parent.eth");
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn children_current_declared_child_sources_ignore_events_without_child_node() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let parent = "ens:parent.eth";
+
+    upsert_name_surfaces(
+        database.pool(),
+        &[name_surface(
+            parent,
+            "parent.eth",
+            "node:parent.eth",
+            36,
+            CanonicalityState::Finalized,
+        )],
+    )
+    .await?;
+
+    let mut missing_child_node = subregistry_event(SubregistryEventSeed {
+        event_identity: "missing-child-node",
+        namespace: "ens",
+        source_family: ENSV1_SUBREGISTRY_SOURCE_FAMILY,
+        chain_id: "ethereum-mainnet",
+        parent_namehash: "node:parent.eth",
+        child_namehash: "node:mystery.parent.eth",
+        block_number: 106,
+        log_index: 0,
+        canonicality_state: CanonicalityState::Finalized,
+        tombstone: false,
+        active_edge: true,
+    });
+    missing_child_node
+        .after_state
+        .as_object_mut()
+        .expect("test event after_state must be an object")
+        .remove("child_node");
+
+    upsert_normalized_events(database.pool(), &[missing_child_node]).await?;
+
+    let sources = load_canonical_ens_v1_declared_child_sources(database.pool(), None).await?;
+    assert!(sources.is_empty());
 
     database.cleanup().await
 }
@@ -985,6 +1315,135 @@ async fn children_current_declared_child_sources_include_basenames_base_registry
     assert_eq!(current[0].namespace, "basenames");
     assert_eq!(current[0].chain_id, "base-mainnet");
     assert_eq!(current[0].event_identity, "alice-base-registry");
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn children_current_declared_child_sources_use_unknown_label_placeholders_for_basenames()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let parent = "basenames:base.eth";
+    let child_namehash = "node:mystery.base.eth";
+    let labelhash = labelhash_for_child_namehash(child_namehash);
+    let placeholder = format!("[{}].base.eth", labelhash.trim_start_matches("0x"));
+
+    upsert_name_surfaces(
+        database.pool(),
+        &[name_surface_on_chain(
+            parent,
+            "base.eth",
+            "node:base.eth",
+            "base-mainnet",
+            40,
+            CanonicalityState::Finalized,
+        )],
+    )
+    .await?;
+    upsert_normalized_events(
+        database.pool(),
+        &[subregistry_event(SubregistryEventSeed {
+            event_identity: "mystery-base-registry",
+            namespace: "basenames",
+            source_family: BASENAMES_BASE_SUBREGISTRY_SOURCE_FAMILY,
+            chain_id: "base-mainnet",
+            parent_namehash: "node:base.eth",
+            child_namehash,
+            block_number: 210,
+            log_index: 0,
+            canonicality_state: CanonicalityState::Finalized,
+            tombstone: false,
+            active_edge: true,
+        })],
+    )
+    .await?;
+
+    let current = load_canonical_declared_child_sources(database.pool(), Some(parent)).await?;
+    assert_eq!(current.len(), 1);
+    assert_eq!(current[0].parent_logical_name_id, parent);
+    assert_eq!(
+        current[0].child_logical_name_id,
+        format!("basenames:{placeholder}")
+    );
+    assert_eq!(current[0].normalized_name, placeholder);
+    assert_eq!(current[0].labelhash, Some(labelhash));
+    assert_eq!(
+        current[0].source_family,
+        BASENAMES_BASE_SUBREGISTRY_SOURCE_FAMILY
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn children_current_declared_child_sources_rank_child_nodes_per_namespace_and_chain()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let ens_parent = "ens:parent.eth";
+    let basenames_parent = "basenames:base.eth";
+    let shared_child_node = "node:shared-child";
+
+    upsert_name_surfaces(
+        database.pool(),
+        &[
+            name_surface_on_chain(
+                ens_parent,
+                "parent.eth",
+                "node:parent.eth",
+                "ethereum-mainnet",
+                70,
+                CanonicalityState::Finalized,
+            ),
+            name_surface_on_chain(
+                basenames_parent,
+                "base.eth",
+                "node:base.eth",
+                "base-mainnet",
+                71,
+                CanonicalityState::Finalized,
+            ),
+        ],
+    )
+    .await?;
+
+    upsert_normalized_events(
+        database.pool(),
+        &[
+            subregistry_event(SubregistryEventSeed {
+                event_identity: "ens-shared-child",
+                namespace: "ens",
+                source_family: ENSV1_SUBREGISTRY_SOURCE_FAMILY,
+                chain_id: "ethereum-mainnet",
+                parent_namehash: "node:parent.eth",
+                child_namehash: shared_child_node,
+                block_number: 200,
+                log_index: 0,
+                canonicality_state: CanonicalityState::Finalized,
+                tombstone: false,
+                active_edge: true,
+            }),
+            subregistry_event(SubregistryEventSeed {
+                event_identity: "basenames-shared-child",
+                namespace: "basenames",
+                source_family: BASENAMES_BASE_SUBREGISTRY_SOURCE_FAMILY,
+                chain_id: "base-mainnet",
+                parent_namehash: "node:base.eth",
+                child_namehash: shared_child_node,
+                block_number: 201,
+                log_index: 0,
+                canonicality_state: CanonicalityState::Finalized,
+                tombstone: false,
+                active_edge: true,
+            }),
+        ],
+    )
+    .await?;
+
+    let current = load_canonical_declared_child_sources(database.pool(), Some(ens_parent)).await?;
+
+    assert_eq!(current.len(), 1);
+    assert_eq!(current[0].event_identity, "ens-shared-child");
+    assert_eq!(current[0].namespace, "ens");
 
     database.cleanup().await
 }

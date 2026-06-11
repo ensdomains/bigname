@@ -135,21 +135,37 @@ pub(super) fn build_authority_observation(
                 .get(1)
                 .context("NewOwner log is missing parent node")?,
         )?;
-        if parent_node
-            != profile
-                .context("registry observation is missing an authority profile")?
-                .root_node()
-        {
-            return Ok(None);
-        }
+        let labelhash = normalize_hex_32(
+            raw_log
+                .topics
+                .get(2)
+                .context("NewOwner log is missing indexed labelhash")?,
+        )?;
+        let namehash = child_namehash_hex(&parent_node, &labelhash)?;
         return Ok(Some(AuthorityObservation::RegistryOwnerChanged(
             RegistryOwnerObservation {
-                labelhash: normalize_hex_32(
+                parent_node: Some(parent_node),
+                labelhash,
+                namehash: Some(namehash),
+                owner: decode_owner_address(&raw_log.data)?,
+                reference: raw_log.reference(),
+            },
+        )));
+    }
+
+    if matches!(profile, Some(profile) if raw_log.source_family == profile.registry_source_family())
+        && event_topics.matches(REGISTRY_TRANSFER_SIGNATURE, topic0)?
+    {
+        return Ok(Some(AuthorityObservation::RegistryOwnerChanged(
+            RegistryOwnerObservation {
+                parent_node: None,
+                labelhash: String::new(),
+                namehash: Some(normalize_hex_32(
                     raw_log
                         .topics
-                        .get(2)
-                        .context("NewOwner log is missing indexed labelhash")?,
-                )?,
+                        .get(1)
+                        .context("Transfer log is missing indexed node")?,
+                )?),
                 owner: decode_owner_address(&raw_log.data)?,
                 reference: raw_log.reference(),
             },
@@ -470,6 +486,7 @@ pub(super) fn observation_namehash(observation: &AuthorityObservation) -> Option
         AuthorityObservation::WrapperFusesSet(value) => Some(&value.namehash),
         AuthorityObservation::WrapperExpiryExtended(value) => Some(&value.namehash),
         AuthorityObservation::WrapperTokenTransferred(value) => Some(&value.namehash),
+        AuthorityObservation::RegistryOwnerChanged(value) => value.namehash.as_deref(),
         _ => None,
     }
 }

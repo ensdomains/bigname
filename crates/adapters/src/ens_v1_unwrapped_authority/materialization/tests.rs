@@ -263,75 +263,6 @@ fn existing_binding_closure_uses_next_later_incoming_segment() {
 }
 
 #[test]
-fn lower_precedence_incoming_binding_is_shadowed_by_existing_authority() {
-    let existing = test_binding_with_authority_kind(
-        Uuid::from_u128(0x100),
-        "ens:mustafa.eth",
-        1_695_230_399,
-        None,
-        "registrar",
-    );
-    let incoming = test_binding_with_authority_kind(
-        Uuid::from_u128(0x200),
-        "ens:mustafa.eth",
-        1_695_284_247,
-        None,
-        "registry_only",
-    );
-
-    assert!(incoming_binding_shadowed_by_existing(
-        &incoming,
-        std::slice::from_ref(&existing)
-    ));
-}
-
-#[test]
-fn same_precedence_later_incoming_binding_is_not_shadowed() {
-    let existing = test_binding_with_authority_kind(
-        Uuid::from_u128(0x100),
-        "ens:missioncontrol.eth",
-        1_695_230_399,
-        None,
-        "registrar",
-    );
-    let incoming = test_binding_with_authority_kind(
-        Uuid::from_u128(0x200),
-        "ens:missioncontrol.eth",
-        1_695_284_247,
-        None,
-        "registrar",
-    );
-
-    assert!(!incoming_binding_shadowed_by_existing(
-        &incoming,
-        std::slice::from_ref(&existing)
-    ));
-}
-
-#[test]
-fn same_precedence_same_start_incoming_binding_is_shadowed() {
-    let existing = test_binding_with_authority_kind(
-        Uuid::from_u128(0x100),
-        "ens:retry.eth",
-        1_695_230_399,
-        None,
-        "registrar",
-    );
-    let incoming = test_binding_with_authority_kind(
-        Uuid::from_u128(0x200),
-        "ens:retry.eth",
-        1_695_230_399,
-        None,
-        "registrar",
-    );
-
-    assert!(incoming_binding_shadowed_by_existing(
-        &incoming,
-        std::slice::from_ref(&existing)
-    ));
-}
-
-#[test]
 fn stale_overlap_candidates_only_include_adapter_rows_without_matching_binding_id() {
     let incoming = vec![test_binding(
         Uuid::from_u128(0x100),
@@ -686,6 +617,61 @@ async fn overlap_closure_tolerates_missing_projection_invalidation_queue() -> Re
         surface_binding_active_to(database.pool(), existing.surface_binding_id).await?,
         Some(incoming.active_from)
     );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn restricted_replay_keeps_later_registry_binding_after_open_registrar() -> Result<()> {
+    let _permit = crate::acquire_test_db_permit().await;
+    let database = MaterializationTestDatabase::new().await?;
+
+    let existing = adapter_binding_with_authority(
+        Uuid::from_u128(0x3200),
+        "ens:diverged.eth",
+        1_695_230_399,
+        "registrar",
+        "registrar:ethereum-mainnet:diverged",
+        "0x3200320032003200320032003200320032003200320032003200320032003200",
+    );
+    let incoming = adapter_binding_with_authority(
+        Uuid::from_u128(0x3201),
+        "ens:diverged.eth",
+        1_695_284_247,
+        "registry_only",
+        "registry-only:ethereum-mainnet:diverged",
+        "0x3201320132013201320132013201320132013201320132013201320132013201",
+    );
+
+    upsert_name_surfaces_without_snapshots(
+        database.pool(),
+        &[test_surface(
+            "ens:diverged.eth",
+            "diverged.eth",
+            "0x5200520052005200520052005200520052005200520052005200520052005200",
+        )],
+    )
+    .await?;
+    upsert_resources_without_snapshots(
+        database.pool(),
+        &[test_resource(
+            existing.resource_id,
+            "0x6200620062006200620062006200620062006200620062006200620062006200",
+        )],
+    )
+    .await?;
+    upsert_surface_bindings_without_snapshots(database.pool(), std::slice::from_ref(&existing))
+        .await?;
+
+    let mut bindings = vec![incoming.clone()];
+    let closure_count = prepend_existing_open_binding_closures(database.pool(), &mut bindings)
+        .await
+        .context("failed to prepend existing binding closure")?;
+
+    assert_eq!(closure_count, 0);
+    assert_eq!(bindings.len(), 1);
+    assert_eq!(bindings[0].surface_binding_id, incoming.surface_binding_id);
+    assert_eq!(bindings[0].active_to, None);
 
     database.cleanup().await
 }

@@ -11,7 +11,7 @@ use super::read::{
 use super::types::{NameSurface, Resource, TokenLineage};
 use super::validate::{
     ensure_name_surface_identity_matches, ensure_resource_identity_matches,
-    ensure_token_lineage_identity_matches,
+    ensure_token_lineage_identity_matches, name_surface_normalized_path_repair_allowed,
 };
 
 mod surface_binding;
@@ -365,6 +365,8 @@ pub(super) async fn upsert_name_surface(
         })?;
 
     ensure_name_surface_identity_matches(&existing, name_surface)?;
+    let repair_normalized_path =
+        name_surface_normalized_path_repair_allowed(&existing, name_surface);
     let next_observation = merge_stable_row_observation(
         existing.canonicality_state,
         StableObservationInput {
@@ -394,6 +396,9 @@ pub(super) async fn upsert_name_surface(
         r#"
         UPDATE name_surfaces
         SET
+            dns_encoded_name = CASE WHEN $7 THEN $8 ELSE dns_encoded_name END,
+            namehash = CASE WHEN $7 THEN $9 ELSE namehash END,
+            labelhashes = CASE WHEN $7 THEN $10 ELSE labelhashes END,
             chain_id = $2,
             block_hash = $3,
             block_number = $4,
@@ -426,6 +431,10 @@ pub(super) async fn upsert_name_surface(
     .bind(next_observation.block_number)
     .bind(next_observation.provenance)
     .bind(next_state.as_str())
+    .bind(repair_normalized_path)
+    .bind(&name_surface.dns_encoded_name)
+    .bind(&name_surface.namehash)
+    .bind(&name_surface.labelhashes)
     .fetch_one(&mut **executor)
     .await
     .with_context(|| {

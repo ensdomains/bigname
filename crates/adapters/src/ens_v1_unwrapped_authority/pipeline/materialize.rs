@@ -144,7 +144,7 @@ pub(super) async fn materialize_authority_histories(
                     pool,
                     deterministic_uuid(&format!(
                         "resource:registry-only:{}:{}",
-                        chain, finalized.labelhash
+                        chain, name.namehash
                     )),
                     None,
                     &registry_anchor.chain_id,
@@ -152,8 +152,9 @@ pub(super) async fn materialize_authority_histories(
                     json!({
                         "adapter": DERIVATION_KIND_ENS_V1_UNWRAPPED_AUTHORITY,
                         "authority_kind": "registry_only",
-                        "authority_key": format!("registry-only:{}:{}", chain, finalized.labelhash),
+                        "authority_key": format!("registry-only:{}:{}", chain, name.namehash),
                         "logical_name_id": name.logical_name_id,
+                        "namehash": name.namehash,
                         "labelhash": finalized.labelhash,
                         "current_registry_owner": finalized.current_registry_owner,
                     }),

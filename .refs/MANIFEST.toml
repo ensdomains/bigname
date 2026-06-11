@@ -54,6 +54,14 @@ authoritative_for = [
   "fixture inspiration for tests/conformance when upstream-derived cases are added",
 ]
 
+[refs.ens_rainbow]
+repo = "https://github.com/graphprotocol/ens-rainbow"
+commit = "bc444923fdced6b667304d9e98e9d39e2c6fde55"
+purpose = "Graph Protocol ENS rainbow table tooling. Not authoritative for ENS semantics; used to pin labelhash preimage import table shape."
+authoritative_for = [
+  "operator rainbow import table shape for label preimage imports",
+]
+
 [refs.ensnode]
 repo = "https://github.com/namehash/ensnode"
 commit = "2017ae6239ae4a338fb4122d5204f769030c9bc3"

@@ -200,7 +200,7 @@ where
         SELECT topics
         FROM raw_logs
         WHERE chain_id = $1
-          AND LOWER(emitting_address) = ANY($2::TEXT[])
+          AND emitting_address = ANY($2::TEXT[])
           AND block_number >= $7
           AND block_number < $3
           AND topics[1] = $4
@@ -211,7 +211,7 @@ where
                   effective_from_block,
                   effective_to_block
               )
-              WHERE watched.address = LOWER(emitting_address)
+              WHERE watched.address = emitting_address
                 AND block_number BETWEEN watched.effective_from_block
                     AND watched.effective_to_block
           )

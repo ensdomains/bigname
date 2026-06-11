@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use sqlx::{PgPool, Postgres, QueryBuilder, Transaction};
 
 use crate::SurfaceBindingKind;
+use crate::address_names::rebuild_address_names_current_identity_sidecars_in_transaction;
 
 use super::replacement_publish::publish_name_current_replacement_rows;
 use super::row::{NameCurrentRow, decode_name_current_row, validate_name_current_row};
@@ -46,10 +47,14 @@ impl NameCurrentReplacement {
 
     pub async fn publish(mut self) -> Result<(usize, u64)> {
         index_name_current_replacement_rows(&mut self.transaction).await?;
+        set_name_current_sidecar_triggers(&mut self.transaction, false).await?;
         let upserted_row_count =
             publish_name_current_replacement_rows(&mut self.transaction).await?;
         let deleted_row_count =
             delete_stale_name_current_rows_from_replacement(&mut self.transaction).await?;
+        set_name_current_sidecar_triggers(&mut self.transaction, true).await?;
+        rebuild_address_names_current_identity_sidecars_in_transaction(&mut self.transaction)
+            .await?;
         self.transaction
             .commit()
             .await
@@ -259,6 +264,34 @@ pub async fn clear_name_current(pool: &PgPool) -> Result<u64> {
         .await
         .context("failed to clear name_current rows")
         .map(|result| result.rows_affected())
+}
+
+const NAME_CURRENT_SIDECAR_TRIGGERS: &[&str] = &[
+    "address_names_current_identity_counts_name_current_insert_delete",
+    "address_names_current_identity_counts_name_current_update",
+    "name_current_identity_feed_after_insert_delete",
+    "name_current_identity_feed_after_anchor_update",
+];
+
+async fn set_name_current_sidecar_triggers(
+    transaction: &mut Transaction<'_, Postgres>,
+    enabled: bool,
+) -> Result<()> {
+    let action = if enabled { "ENABLE" } else { "DISABLE" };
+    for trigger in NAME_CURRENT_SIDECAR_TRIGGERS {
+        let sql = format!("ALTER TABLE name_current {action} TRIGGER {trigger}");
+        sqlx::query(&sql)
+            .execute(&mut **transaction)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to {} name_current sidecar trigger {}",
+                    action.to_ascii_lowercase(),
+                    trigger
+                )
+            })?;
+    }
+    Ok(())
 }
 
 async fn delete_stale_name_current_rows_from_replacement(

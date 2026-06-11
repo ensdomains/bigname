@@ -3,7 +3,8 @@ fn build_compact_children_response(
     summary: &bigname_storage::ChildrenCurrentSummary,
     page_rows: &[ChildrenCurrentRow],
     parent_normalized_name: &str,
-    child_labelhashes: &BTreeMap<String, Option<String>>,
+    child_surface_ids: &BTreeSet<String>,
+    child_surface_labelhashes: &BTreeMap<String, Option<String>>,
     child_name_rows: &BTreeMap<String, NameCurrentRow>,
     child_summaries: &BTreeMap<String, bigname_storage::ChildrenCurrentSummary>,
     include_counts: bool,
@@ -13,7 +14,10 @@ fn build_compact_children_response(
     let counts_supported = !include_counts
         || page_rows
             .iter()
-            .all(|row| child_summaries.contains_key(&row.child_logical_name_id));
+            .all(|row| {
+                child_surface_ids.contains(&row.child_logical_name_id)
+                    && child_summaries.contains_key(&row.child_logical_name_id)
+            });
     let mut response = empty_object();
     insert_value_field(
         &mut response,
@@ -25,7 +29,8 @@ fn build_compact_children_response(
                     build_compact_child_item(
                         row,
                         parent_normalized_name,
-                        child_labelhashes,
+                        child_surface_ids,
+                        child_surface_labelhashes,
                         child_name_rows.get(&row.child_logical_name_id),
                         child_summaries.get(&row.child_logical_name_id),
                         include_counts,
@@ -52,7 +57,8 @@ fn build_compact_children_response(
 fn build_compact_child_item(
     row: &ChildrenCurrentRow,
     parent_normalized_name: &str,
-    child_labelhashes: &BTreeMap<String, Option<String>>,
+    child_surface_ids: &BTreeSet<String>,
+    child_surface_labelhashes: &BTreeMap<String, Option<String>>,
     child_name_row: Option<&NameCurrentRow>,
     child_summary: Option<&bigname_storage::ChildrenCurrentSummary>,
     include_counts: bool,
@@ -68,27 +74,34 @@ fn build_compact_child_item(
     insert_optional_string_field(
         &mut value,
         "labelhash",
-        child_labelhashes
-            .get(&row.child_logical_name_id)
-            .cloned()
-            .flatten(),
+        row.labelhash.clone().or_else(|| {
+            child_surface_labelhashes
+                .get(&row.child_logical_name_id)
+                .cloned()
+                .flatten()
+        }),
     );
     insert_string_field(&mut value, "namehash", row.namehash.clone());
     insert_optional_string_field(
         &mut value,
         "owner",
-        child_name_row.and_then(compact_child_owner),
+        child_name_row
+            .and_then(compact_child_owner)
+            .or_else(|| row.owner.clone()),
     );
     insert_optional_string_field(
         &mut value,
         "registrant",
-        child_name_row.and_then(compact_child_registrant),
+        child_name_row
+            .and_then(compact_child_registrant)
+            .or_else(|| row.registrant.clone()),
     );
     if include_counts {
         insert_value_field(
             &mut value,
             "subname_count",
             child_summary
+                .filter(|_| child_surface_ids.contains(&row.child_logical_name_id))
                 .map(|summary| JsonValue::Number(summary.child_count.into()))
                 .unwrap_or(JsonValue::Null),
         );

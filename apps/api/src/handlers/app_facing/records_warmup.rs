@@ -33,6 +33,19 @@ pub(super) async fn warm_compact_records_route_sql_path(
             .await
             .context("compact records route SQL warm-up task failed to join")?;
         if let Err(error) = result {
+            if is_skippable_compact_records_warmup_error(&error) {
+                warn!(
+                    service = "api",
+                    namespace = %namespace,
+                    name = %name,
+                    status = %error.status,
+                    code = error.code,
+                    message = %error.message,
+                    "skipped compact records route SQL warm-up because the selected sample was not readable"
+                );
+                return Ok(());
+            }
+
             bail!(
                 "compact records route SQL warm-up failed for {namespace}/{name}: {} ({})",
                 error.message,
@@ -49,6 +62,10 @@ pub(super) async fn warm_compact_records_route_sql_path(
         "warmed compact records route SQL path"
     );
     Ok(())
+}
+
+fn is_skippable_compact_records_warmup_error(error: &ApiError) -> bool {
+    error.status == StatusCode::NOT_FOUND && error.code == "not_found"
 }
 
 async fn compact_records_warmup_sample(pool: &PgPool) -> Result<Option<(String, String)>> {
@@ -102,6 +119,29 @@ async fn compact_records_warmup_sample(pool: &PgPool) -> Result<Option<(String, 
         ))
     })
     .transpose()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compact_records_warmup_skips_not_found_samples() {
+        let error = ApiError {
+            status: StatusCode::NOT_FOUND,
+            code: "not_found",
+            message: "name missing".to_owned(),
+        };
+
+        assert!(is_skippable_compact_records_warmup_error(&error));
+    }
+
+    #[test]
+    fn compact_records_warmup_keeps_internal_errors_fatal() {
+        let error = ApiError::internal_error("projection read failed");
+
+        assert!(!is_skippable_compact_records_warmup_error(&error));
+    }
 }
 
 fn compact_records_warmup_query() -> NameRecordsQuery {

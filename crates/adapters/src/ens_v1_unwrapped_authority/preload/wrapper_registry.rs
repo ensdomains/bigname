@@ -370,7 +370,7 @@ pub(super) fn preload_wrapper_history(
     Ok(())
 }
 
-pub(super) fn preload_registry_history(
+pub(in crate::ens_v1_unwrapped_authority) fn preload_registry_history(
     history: &mut NameHistory,
     provenance: &Value,
     binding_ref: &BoundaryRef,
@@ -386,20 +386,29 @@ pub(super) fn preload_registry_history(
         .unwrap_or_else(|| format!("registry-only:{}:{}", binding_ref.chain_id, labelhash));
     let source_family = authority_profile_for_source_family(
         provenance
-            .get("source_family")
+            .get("binding_source_family")
+            .or_else(|| provenance.get("source_family"))
             .and_then(Value::as_str)
             .unwrap_or(SOURCE_FAMILY_ENS_V1_REGISTRY_L1),
     )
     .map(|profile| profile.registry_source_family().to_owned())
     .unwrap_or_else(|| SOURCE_FAMILY_ENS_V1_REGISTRY_L1.to_owned());
-    let source_manifest_id = manifest_id_from_authority_key(&authority_key).unwrap_or(0);
+    let source_manifest_id = provenance
+        .get("binding_manifest_id")
+        .and_then(Value::as_i64)
+        .or_else(|| manifest_id_from_authority_key(&authority_key))
+        .unwrap_or(0);
+    let manifest_version = provenance
+        .get("binding_manifest_version")
+        .and_then(Value::as_i64)
+        .unwrap_or(1);
     let authority = AuthorityAnchor {
         kind: AuthorityKind::RegistryOnly,
         authority_key,
         resource_id,
         token_lineage_id: None,
         binding_source_family: source_family,
-        binding_manifest_version: 1,
+        binding_manifest_version: manifest_version,
         binding_manifest_id: source_manifest_id,
     };
     history.current_registry_owner = registry_owner_state

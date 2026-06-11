@@ -206,6 +206,9 @@ pub(super) fn ensure_name_surface_identity_matches(
         || existing.labelhashes != incoming.labelhashes
         || existing.normalization_errors != incoming.normalization_errors
     {
+        if name_surface_normalized_path_repair_allowed(existing, incoming) {
+            return Ok(());
+        }
         bail!(
             "name surface identity mismatch for {}",
             existing.logical_name_id
@@ -213,6 +216,31 @@ pub(super) fn ensure_name_surface_identity_matches(
     }
 
     Ok(())
+}
+
+pub(super) fn name_surface_normalized_path_repair_allowed(
+    existing: &NameSurface,
+    incoming: &NameSurface,
+) -> bool {
+    existing.namespace == incoming.namespace
+        && existing.normalized_name == incoming.normalized_name
+        && existing.normalization_errors == incoming.normalization_errors
+        && existing
+            .normalization_errors
+            .as_array()
+            .is_some_and(Vec::is_empty)
+        && (existing.dns_encoded_name != incoming.dns_encoded_name
+            || existing.namehash != incoming.namehash
+            || existing.labelhashes != incoming.labelhashes)
+        && ens_v1_unwrapped_authority_surface_provenance(&existing.provenance)
+        && ens_v1_unwrapped_authority_surface_provenance(&incoming.provenance)
+}
+
+fn ens_v1_unwrapped_authority_surface_provenance(provenance: &serde_json::Value) -> bool {
+    provenance
+        .get("adapter")
+        .and_then(serde_json::Value::as_str)
+        == Some("ens_v1_unwrapped_authority")
 }
 
 pub(super) fn ensure_surface_binding_identity_matches(

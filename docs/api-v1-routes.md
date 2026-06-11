@@ -361,12 +361,13 @@ Each compact item: `name`, `normalized_name`, `label_name`, `labelhash`, `nameha
 Rules:
 
 - `view=compact` is the default. `view=full` returns the existing full-envelope declared child collection.
-- `name` is the child identity name; `label_name` is the single child label relative to the requested parent.
+- `name` is the child identity name when known, or the unknown-label placeholder when only the child node and labelhash are known. `label_name` is the single child label relative to the requested parent; for unknown ENSv1 and Basenames registry labels it is `[<labelhash-without-0x>]`.
 - `labelhash` is `null` when the projection doesn't carry a stable label hash.
 - `owner` and `registrant` are `null` when not projected for that child; this doesn't imply route-level unsupported.
 - `include=counts` adds `subname_count` per child where projected. When unprojected, the field is `null` and `meta.unsupported_fields` includes `subname_count` unless `meta=none`.
 - `surface_classes=linked|alias|wildcard` is reserved and returns `unsupported`.
-- For `namespace=basenames`, child surfaces come from the admitted Base authority split only.[^bn-readme-l69][^bn-readme-l70]
+- For ENSv1 registry-derived children, the registry `NewOwner` event proves `parent_node`, labelhash, owner, and child node, but not the plaintext child label.[^v1-registry-l45][^v1-registry-l82] Basenames Base registry subnode updates use the same parent-node plus labelhash shape.[^bn-registry-l81][^bn-registry-l120][^bn-registry-l122] The route still returns the declared child node. If no canonical child surface or retained, proof-checked label preimage identifies the label, `name`, `normalized_name`, and `label_name` use the explicit unknown-label bracket placeholder. Unknown-label rows count toward collection totals but do not make the placeholder a valid exact-name lookup target.
+- For `namespace=basenames`, child rows come from the admitted Base authority split only; primary-claim and L1 compatibility transport do not add children.[^bn-readme-l69][^bn-readme-l70]
 - `cursor` and `page_size` page over `display_name_asc`.
 
 ## `GET /v1/names/{namespace}/{name}/records`
@@ -454,6 +455,8 @@ Rules:
 - `resource_id` is the truth anchor. Surface names and resolver addresses appear only as explanatory context.
 - `effective_powers` is server-computed post-scope-modifier. Clients don't apply NameWrapper fuse masks themselves.
 - Resolver-scoped permissions are rows in this collection with resolver-scope detail, not a separate truth system.
+- For ENSv1 registry-only authority, `subject` is the current ENS Registry owner. That owner, or an operator approved by that owner, is authorized by ENS Registry to transfer node ownership, transfer or create subnodes, and set resolvers, so registry-only permission rows expose `resource_control` and resolver-scoped `resolver_control` when a resolver target is declared.[^v1-registry-l16][^v1-registry-l60][^v1-registry-l71][^v1-registry-l86]
+- ENSv1 registrar renewal events update registrar lease expiry and lineage, but they do not switch the current resource away from a divergent registry owner. Divergence can be introduced by an ENS Registry owner change or by a registrar token transfer away from the retained registry owner. The current resource only moves back to registrar authority when the registrar and registry subjects realign.
 - For ENSv1 wrapper-backed resources, current NameWrapper fuses are folded into `effective_powers`. A burned fuse removes any public power that depends on the prohibited operation, and a row whose powers are fully masked is omitted. Upstream emits fuses through `NameWrapped` and `FusesSet` and gates wrapper operations on those bits.[^v1-iname-l31][^v1-iname-l37][^v1-nw-l421][^v1-nw-l427][^v1-nw-l666][^v1-nw-l676][^v1-nw-l723][^v1-nw-l827][^v1-nw-l1023][^v1-nw-l132]
 - A wrapper-backed answer is `full` only when the current fuse modifier for the selected resource snapshot was applied. If the projection can't prove current fuse state, the route fails closed rather than returning unmasked powers.
 - `cursor` and `page_size` page over `subject_scope_asc`.
@@ -477,6 +480,7 @@ Rules:
 - `account` filters by effective permission subject. It doesn't search owner, registrant, or address-name relations unless those subjects also exist in `permissions_current`.
 - `role_bitmap` filters only when the projection exposes it; otherwise non-2xx `unsupported` for that filter.
 - `effective_powers` remains the API-owned post-scope result. Don't infer powers from `role_bitmap` alone.
+- Compact item unit is one `(resource_id, subject, scope)` row. `effective_powers` is an array within that one scope; the same account appears in separate items when it has both resource-scoped and resolver-scoped powers. Summary metadata may group rows by subject, but compact `items` do not.
 - Compact role rows do not expose provenance, raw facts, normalized-event IDs, or execution traces. Row-granular grant lineage stays on `GET /v1/resources/{resource_id}/permissions`.
 - `view=full` is reserved and still returns `400 invalid_input`; OpenAPI advertises only `view=compact`.
 
@@ -712,6 +716,9 @@ GET /v1/resolvers/ethereum-mainnet/0x0000.../overview?include=nodes,aliases,role
 [^bn-l1resolver-l173]: (upstream: .refs/basenames/src/L1/L1Resolver.sol:L173 @ basenames@1809bbc)
 [^bn-l1resolver-l191]: (upstream: .refs/basenames/src/L1/L1Resolver.sol:L191 @ basenames@1809bbc)
 
+[^bn-registry-l81]: (upstream: .refs/basenames/src/L2/Registry.sol:L81 @ basenames@1809bbc)
+[^bn-registry-l120]: (upstream: .refs/basenames/src/L2/Registry.sol:L120 @ basenames@1809bbc)
+[^bn-registry-l122]: (upstream: .refs/basenames/src/L2/Registry.sol:L122 @ basenames@1809bbc)
 [^bn-registry-l132]: (upstream: .refs/basenames/src/L2/Registry.sol:L132 @ basenames@1809bbc)
 [^bn-l2resolver-l4]: (upstream: .refs/basenames/src/L2/L2Resolver.sol:L4 @ basenames@1809bbc)
 [^bn-l2resolver-l16]: (upstream: .refs/basenames/src/L2/L2Resolver.sol:L16 @ basenames@1809bbc)
@@ -760,6 +767,12 @@ GET /v1/resolvers/ethereum-mainnet/0x0000.../overview?include=nodes,aliases,role
 [^v1-revreg-l83]: (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L83 @ ens_v1@91c966f)
 [^v1-revreg-l84]: (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L84 @ ens_v1@91c966f)
 [^v1-revreg-l137]: (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L137 @ ens_v1@91c966f)
+[^v1-registry-l16]: (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L16 @ ens_v1@91c966f)
+[^v1-registry-l45]: (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L45 @ ens_v1@91c966f)
+[^v1-registry-l60]: (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L60 @ ens_v1@91c966f)
+[^v1-registry-l71]: (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L71 @ ens_v1@91c966f)
+[^v1-registry-l82]: (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L82 @ ens_v1@91c966f)
+[^v1-registry-l86]: (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L86 @ ens_v1@91c966f)
 [^v1-registry-l137]: (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L137 @ ens_v1@91c966f)
 [^v1-nameresolver-l7]: (upstream: .refs/ens_v1/contracts/resolvers/profiles/INameResolver.sol:L7 @ ens_v1@91c966f)
 [^v1-nameresolverimpl-l25]: (upstream: .refs/ens_v1/contracts/resolvers/profiles/NameResolver.sol:L25 @ ens_v1@91c966f)

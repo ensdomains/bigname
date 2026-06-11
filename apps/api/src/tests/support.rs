@@ -3721,7 +3721,7 @@ fn collection_name_surface(
         normalized_name: display_name.to_owned(),
         dns_encoded_name: display_name.as_bytes().to_vec(),
         namehash: namehash.to_owned(),
-        labelhashes: vec![format!("labelhash:{display_name}")],
+        labelhashes: labelhash_for_display_name(display_name).into_iter().collect(),
         normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
         normalization_warnings: json!([]),
         normalization_errors: json!([]),
@@ -3756,6 +3756,9 @@ fn declared_child_row(
         canonical_display_name: display_name.to_owned(),
         normalized_name: display_name.to_owned(),
         namehash: namehash.to_owned(),
+        labelhash: labelhash_for_display_name(display_name),
+        owner: None,
+        registrant: None,
         provenance: json!({
             "normalized_event_ids": [normalized_event_id],
             "raw_fact_refs": [{
@@ -3787,6 +3790,18 @@ fn declared_child_row(
         manifest_version: 1,
         last_recomputed_at: timestamp(1_717_172_000 + block_number),
     }
+}
+
+fn labelhash_for_display_name(display_name: &str) -> Option<String> {
+    display_name
+        .split('.')
+        .next()
+        .filter(|label| !label.is_empty())
+        .map(|label| {
+            bigname_storage::label_preimage_from_label(label, "api_test", 1, json!({}))
+                .expect("test label must hash")
+                .labelhash
+        })
 }
 
 fn chain_id_for_namespace(namespace: &str) -> &'static str {

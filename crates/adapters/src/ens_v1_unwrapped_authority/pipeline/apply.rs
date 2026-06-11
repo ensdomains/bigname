@@ -1,7 +1,12 @@
 use super::super::*;
 
+mod pending;
 mod preload;
 
+use pending::{
+    PendingObservationFlush, drain_pending_namehash_observations, is_name_intro_observation,
+    observation_raw_log_position, remember_known_name,
+};
 pub(super) use preload::{name_intro_positions_for_raw_logs, preload_name_metadata_for_raw_logs};
 
 pub(super) fn resolver_profile_fact_nodes(
@@ -264,7 +269,11 @@ fn labelhash_observation_target(
             })
         }
         AuthorityObservation::RegistryOwnerChanged(value) => {
-            let history_key = registrar_child_namehash(&value.reference, &value.labelhash)?;
+            let history_key = if let Some(namehash) = value.namehash.clone() {
+                namehash
+            } else {
+                registrar_child_namehash(&value.reference, &value.labelhash)?
+            };
             Ok(LabelhashObservationTarget {
                 known_name: known_names_by_namehash.get(&history_key).cloned(),
                 known_name_ref: None,
@@ -327,70 +336,140 @@ fn apply_authority_observation_for_history_key(
     if let Some(delta) = checkpoint_delta.as_deref_mut() {
         delta.mark_history(history_key);
     }
-    let history = histories
-        .entry(history_key.to_owned())
-        .or_insert_with(|| NameHistory {
-            name: known_name.clone(),
-            labelhash: labelhash.to_owned(),
-            first_name_ref: known_name_ref.clone(),
-            current_registration: None,
-            superseded_registration: None,
-            current_wrapper_key: None,
-            wrapper_authorities: BTreeMap::new(),
-            current_registry_owner: None,
-            current_resolver: None,
-            current_record_version: None,
-            open_binding: None,
-            bindings: Vec::new(),
-            events: Vec::new(),
-            registry_resource_anchor: None,
-            latest_registry_owner_ref: None,
-            latest_registry_owner_before_registration: None,
-        });
-    if history.name.is_none() {
-        history.name = known_name;
-        if let Some(reference) = known_name_ref.clone() {
-            history.first_name_ref.get_or_insert(reference);
+    let introduces_name = is_name_intro_observation(&observation);
+    {
+        let history = histories
+            .entry(history_key.to_owned())
+            .or_insert_with(|| NameHistory {
+                name: known_name.clone(),
+                namehash: history_key.to_owned(),
+                labelhash: labelhash.to_owned(),
+                first_name_ref: known_name_ref.clone(),
+                current_registration: None,
+                superseded_registration: None,
+                current_wrapper_key: None,
+                wrapper_authorities: BTreeMap::new(),
+                current_registry_owner: None,
+                current_resolver: None,
+                current_record_version: None,
+                open_binding: None,
+                bindings: Vec::new(),
+                events: Vec::new(),
+                registry_resource_anchor: None,
+                latest_registry_owner_ref: None,
+                latest_registry_owner_before_registration: None,
+            });
+        if history.name.is_none() {
+            history.name = known_name;
+            if let Some(reference) = known_name_ref.clone() {
+                history.first_name_ref.get_or_insert(reference);
+            }
+        }
+        if history.namehash.is_empty() {
+            history.namehash = history_key.to_owned();
         }
     }
 
-    apply_observation(history, observation, block_index)?;
-    let learned_name = history.name.clone();
-    if let Some(name) = learned_name {
-        namehash_to_labelhash.insert(name.namehash.clone(), labelhash.to_owned());
-        if let Some(delta) = checkpoint_delta.as_deref_mut() {
-            delta.mark_namehash_labelhash(name.namehash.clone());
-            delta.mark_known_name(name.namehash.clone());
-            if known_name_ref.is_some() {
-                delta.mark_known_name_ref(name.namehash.clone());
-            }
-        }
-        known_names_by_namehash
-            .entry(name.namehash.clone())
-            .or_insert_with(|| name.clone());
-        if let Some(pending) = pending_namehash_observations.remove(&name.namehash) {
-            if let Some(delta) = checkpoint_delta.as_deref_mut() {
-                delta.mark_pending_observations(name.namehash.clone());
-            }
-            let name_ref = known_name_refs_by_namehash.get(&name.namehash).cloned();
-            for pending_observation in pending {
-                apply_authority_observation_for_history_key(
-                    pending_observation,
-                    &name.namehash,
-                    labelhash,
-                    Some(name.clone()),
-                    name_ref.clone(),
-                    histories,
-                    known_names_by_namehash,
-                    known_name_refs_by_namehash,
-                    namehash_to_labelhash,
-                    pending_namehash_observations,
-                    same_tx_name_intro_positions,
-                    block_index,
-                    checkpoint_delta.as_deref_mut(),
-                )?;
-            }
-        }
+    if introduces_name
+        && let Some(name) = histories
+            .get(history_key)
+            .and_then(|history| history.name.clone())
+    {
+        remember_known_name(
+            &name,
+            labelhash,
+            known_name_ref.as_ref(),
+            known_names_by_namehash,
+            known_name_refs_by_namehash,
+            namehash_to_labelhash,
+            checkpoint_delta.as_deref_mut(),
+        );
+        flush_pending_namehash_observations(
+            &name,
+            labelhash,
+            PendingObservationFlush::BeforeNameIntro(&observation),
+            histories,
+            known_names_by_namehash,
+            known_name_refs_by_namehash,
+            namehash_to_labelhash,
+            pending_namehash_observations,
+            same_tx_name_intro_positions,
+            block_index,
+            checkpoint_delta.as_deref_mut(),
+        )?;
+    }
+
+    let learned_name = {
+        let history = histories
+            .get_mut(history_key)
+            .with_context(|| format!("missing ENSv1 authority history {history_key}"))?;
+        apply_observation(history, observation, block_index)?;
+        history.name.clone()
+    };
+    if introduces_name && let Some(name) = learned_name {
+        remember_known_name(
+            &name,
+            labelhash,
+            known_name_ref.as_ref(),
+            known_names_by_namehash,
+            known_name_refs_by_namehash,
+            namehash_to_labelhash,
+            checkpoint_delta.as_deref_mut(),
+        );
+        flush_pending_namehash_observations(
+            &name,
+            labelhash,
+            PendingObservationFlush::AfterNameIntro,
+            histories,
+            known_names_by_namehash,
+            known_name_refs_by_namehash,
+            namehash_to_labelhash,
+            pending_namehash_observations,
+            same_tx_name_intro_positions,
+            block_index,
+            checkpoint_delta.as_deref_mut(),
+        )?;
+    }
+    Ok(())
+}
+
+fn flush_pending_namehash_observations(
+    name: &NameMetadata,
+    labelhash: &str,
+    mode: PendingObservationFlush<'_>,
+    histories: &mut BTreeMap<String, NameHistory>,
+    known_names_by_namehash: &mut HashMap<String, NameMetadata>,
+    known_name_refs_by_namehash: &mut HashMap<String, ObservationRef>,
+    namehash_to_labelhash: &mut HashMap<String, String>,
+    pending_namehash_observations: &mut HashMap<String, Vec<AuthorityObservation>>,
+    same_tx_name_intro_positions: &HashMap<String, Vec<RawLogPosition>>,
+    block_index: &CanonicalBlockIndex,
+    mut checkpoint_delta: Option<&mut UnwrappedAuthorityReplayCheckpointDelta>,
+) -> Result<()> {
+    let selected = drain_pending_namehash_observations(
+        &name.namehash,
+        mode,
+        pending_namehash_observations,
+        checkpoint_delta.as_deref_mut(),
+    );
+
+    let name_ref = known_name_refs_by_namehash.get(&name.namehash).cloned();
+    for pending_observation in selected {
+        apply_authority_observation_for_history_key(
+            pending_observation,
+            &name.namehash,
+            labelhash,
+            Some(name.clone()),
+            name_ref.clone(),
+            histories,
+            known_names_by_namehash,
+            known_name_refs_by_namehash,
+            namehash_to_labelhash,
+            pending_namehash_observations,
+            same_tx_name_intro_positions,
+            block_index,
+            checkpoint_delta.as_deref_mut(),
+        )?;
     }
     Ok(())
 }
@@ -465,32 +544,6 @@ fn should_defer_preloaded_namehash_observation(
         return false;
     }
     true
-}
-
-fn observation_raw_log_position(observation: &AuthorityObservation) -> Option<RawLogPosition> {
-    let reference = observation_reference(observation);
-    Some(RawLogPosition {
-        block_hash: reference.block_hash.clone(),
-        transaction_hash: reference.transaction_hash.clone()?,
-        log_index: reference.log_index?,
-    })
-}
-
-fn observation_reference(observation: &AuthorityObservation) -> &ObservationRef {
-    match observation {
-        AuthorityObservation::RegistrationGranted(value) => &value.reference,
-        AuthorityObservation::RegistrationRenewed(value) => &value.reference,
-        AuthorityObservation::TokenTransferred(value) => &value.reference,
-        AuthorityObservation::RegistryOwnerChanged(value) => &value.reference,
-        AuthorityObservation::ResolverChanged(value) => &value.reference,
-        AuthorityObservation::RecordChanged(value) => &value.reference,
-        AuthorityObservation::RecordVersionChanged(value) => &value.reference,
-        AuthorityObservation::WrapperNameWrapped(value) => &value.reference,
-        AuthorityObservation::WrapperNameUnwrapped(value) => &value.reference,
-        AuthorityObservation::WrapperFusesSet(value) => &value.reference,
-        AuthorityObservation::WrapperExpiryExtended(value) => &value.reference,
-        AuthorityObservation::WrapperTokenTransferred(value) => &value.reference,
-    }
 }
 
 fn history_has_authority_at_observation(

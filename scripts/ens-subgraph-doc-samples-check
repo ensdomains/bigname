@@ -1,0 +1,691 @@
+#!/usr/bin/env python3
+"""
+Compare the bigname docs-console ENS samples with effective ENS subgraph queries.
+
+This is intentionally a live conformance smoke: it needs a running bigname API and
+The Graph gateway access. Defaults match apps/api/src/openapi/docs.html.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import shlex
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+
+BIGNAME_API_BASE_URL = os.environ.get("BIGNAME_API_BASE_URL", "http://127.0.0.1:3000").rstrip("/")
+ENS_SUBGRAPH_URL = os.environ.get(
+    "ENS_SUBGRAPH_URL",
+    "https://gateway.thegraph.com/api/subgraphs/id/5XqPmWe6gjyrJtFn9cLy237i4cWw2j9HcUJEXsP5qGtH",
+)
+
+SAMPLE_NAME = "taytems.eth"
+SAMPLE_NAMESPACE = "ens"
+SAMPLE_ADDRESS = "0x8e8Db5CcEF88cca9d624701Db544989C996E3216"
+SAMPLE_ADDRESS_LOWER = SAMPLE_ADDRESS.lower()
+SAMPLE_RESOLVER_ADDRESS = "0x4976fb03c32e5b8cfe2b6ccb31c09ba78ebaba41"
+
+
+@dataclass
+class Check:
+    name: str
+    status: str
+    detail: str
+
+
+checks: list[Check] = []
+
+
+def load_graph_api_key() -> str:
+    key = os.environ.get("THE_GRAPH_API_KEY")
+    if key:
+        return key
+
+    bashrc = Path.home() / ".bashrc"
+    if bashrc.exists():
+        for line in bashrc.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line.startswith("export THE_GRAPH_API_KEY="):
+                continue
+            return shlex.split(line.removeprefix("export THE_GRAPH_API_KEY="))[0]
+
+    raise RuntimeError("THE_GRAPH_API_KEY is not set and was not found in ~/.bashrc")
+
+
+def request_json(
+    method: str,
+    url: str,
+    *,
+    headers: dict[str, str] | None = None,
+    body: Any = None,
+) -> tuple[int, Any]:
+    data = None
+    request_headers = dict(headers or {})
+    request_headers.setdefault("User-Agent", "bigname-ens-subgraph-doc-samples-check/1.0")
+    if body is not None:
+        data = json.dumps(body).encode("utf-8")
+        request_headers.setdefault("Content-Type", "application/json")
+
+    request = urllib.request.Request(url, data=data, headers=request_headers, method=method)
+    try:
+        with urllib.request.urlopen(request, timeout=45) as response:
+            payload = response.read().decode("utf-8")
+            return response.status, json.loads(payload)
+    except urllib.error.HTTPError as error:
+        payload = error.read().decode("utf-8")
+        try:
+            parsed = json.loads(payload)
+        except json.JSONDecodeError:
+            parsed = {"raw": payload}
+        return error.code, parsed
+
+
+def api_get(path: str, query: dict[str, str] | None = None) -> tuple[int, Any]:
+    query_text = urllib.parse.urlencode(query or {})
+    suffix = f"{path}?{query_text}" if query_text else path
+    return request_json("GET", f"{BIGNAME_API_BASE_URL}{suffix}")
+
+
+def api_post(path: str, body: Any) -> tuple[int, Any]:
+    return request_json("POST", f"{BIGNAME_API_BASE_URL}{path}", body=body)
+
+
+def graph_query(query: str, variables: dict[str, Any]) -> Any:
+    key = load_graph_api_key()
+    status, payload = request_json(
+        "POST",
+        ENS_SUBGRAPH_URL,
+        headers={"Authorization": f"Bearer {key}"},
+        body={"query": query, "variables": variables},
+    )
+    if status != 200 or payload.get("errors"):
+        raise RuntimeError(f"ENS subgraph query failed with status {status}: {payload.get('errors') or payload}")
+    return payload["data"]
+
+
+def lower(value: Any) -> Any:
+    return value.lower() if isinstance(value, str) else value
+
+
+def unix_to_rfc3339(seconds: str | int | None) -> str | None:
+    if seconds is None:
+        return None
+    return datetime.fromtimestamp(int(seconds), timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def ptr(value: Any, path: str) -> Any:
+    cursor = value
+    for part in path.strip("/").split("/"):
+        if not part:
+            continue
+        if isinstance(cursor, list):
+            cursor = cursor[int(part)]
+        else:
+            cursor = cursor.get(part)
+        if cursor is None:
+            return None
+    return cursor
+
+
+def record(status: str, name: str, detail: str) -> None:
+    checks.append(Check(name=name, status=status, detail=detail))
+
+
+def expect_equal(name: str, actual: Any, expected: Any) -> None:
+    if actual == expected:
+        record("pass", name, repr(actual))
+    else:
+        record("fail", name, f"expected {expected!r}, got {actual!r}")
+
+
+def expect_set_equal(name: str, actual: list[Any], expected: list[Any]) -> None:
+    actual_sorted = sorted(actual)
+    expected_sorted = sorted(expected)
+    if actual_sorted == expected_sorted:
+        record("pass", name, json.dumps(actual_sorted))
+    else:
+        record("fail", name, f"expected {expected_sorted!r}, got {actual_sorted!r}")
+
+
+def expect_status_ok(name: str, status: int, payload: Any) -> None:
+    if 200 <= status < 300:
+        record("pass", f"{name} status", str(status))
+    else:
+        record("fail", f"{name} status", f"status {status}: {payload}")
+
+
+def stale_error(payload: Any) -> bool:
+    return ptr(payload, "/error/code") == "stale"
+
+
+def first_graph_domain(graph: Any) -> dict[str, Any]:
+    domains = graph["domain"]
+    if len(domains) != 1:
+        raise RuntimeError(f"expected one graph domain for {SAMPLE_NAME}, got {len(domains)}")
+    return domains[0]
+
+
+def selector_keys(entries: list[dict[str, Any]], family: str) -> list[str]:
+    if entries is None:
+        return []
+    return [entry["selector_key"] for entry in entries if entry.get("record_family") == family]
+
+
+def graph_child_display_name(row: dict[str, Any]) -> str | None:
+    name = row.get("name")
+    if name:
+        return name
+    labelhash = lower(row.get("labelhash"))
+    if isinstance(labelhash, str) and labelhash.startswith("0x") and len(labelhash) == 66:
+        return f"[{labelhash[2:]}].{SAMPLE_NAME}"
+    return None
+
+
+def bigname_route_samples() -> dict[str, Any]:
+    responses: dict[str, Any] = {}
+
+    route_calls: list[tuple[str, str, dict[str, str]]] = [
+        (
+            "names_compact_exact",
+            "/v1/names",
+            {
+                "namespace": SAMPLE_NAMESPACE,
+                "name": SAMPLE_NAME,
+                "sort": "name",
+                "order": "asc",
+                "view": "compact",
+                "meta": "summary",
+                "page_size": "10",
+            },
+        ),
+        ("exact_name", f"/v1/names/{SAMPLE_NAMESPACE}/{SAMPLE_NAME}", {"consistency": "head"}),
+        ("coverage", f"/v1/coverage/{SAMPLE_NAMESPACE}/{SAMPLE_NAME}", {"consistency": "head"}),
+        (
+            "surface_binding",
+            f"/v1/explain/names/{SAMPLE_NAMESPACE}/{SAMPLE_NAME}/surface-binding",
+            {"consistency": "head"},
+        ),
+        (
+            "authority_control",
+            f"/v1/explain/names/{SAMPLE_NAMESPACE}/{SAMPLE_NAME}/authority-control",
+            {"consistency": "head"},
+        ),
+        (
+            "children",
+            f"/v1/names/{SAMPLE_NAMESPACE}/{SAMPLE_NAME}/children",
+            {
+                "surface_classes": "declared",
+                "include": "counts",
+                "view": "compact",
+                "meta": "summary",
+                "page_size": "10",
+            },
+        ),
+        ("records_default", f"/v1/names/{SAMPLE_NAMESPACE}/{SAMPLE_NAME}/records", {}),
+        (
+            "records_expanded",
+            f"/v1/names/{SAMPLE_NAMESPACE}/{SAMPLE_NAME}/records",
+            {
+                "include": "resolver_address,known_text_keys,avatar,content_hash,coins",
+                "texts": "avatar,com.twitter",
+                "coin_types": "60,0",
+                "view": "compact",
+                "meta": "summary",
+            },
+        ),
+        (
+            "profile",
+            f"/v1/profiles/names/{SAMPLE_NAME}",
+            {"consistency": "head", "mode": "both", "meta": "summary"},
+        ),
+        (
+            "events",
+            "/v1/events",
+            {
+                "namespace": SAMPLE_NAMESPACE,
+                "name": SAMPLE_NAME,
+                "view": "compact",
+                "meta": "summary",
+                "page_size": "10",
+            },
+        ),
+        (
+            "history_name",
+            f"/v1/history/names/{SAMPLE_NAMESPACE}/{SAMPLE_NAME}",
+            {"scope": "both", "view": "compact", "meta": "summary", "page_size": "10"},
+        ),
+        (
+            "address_names",
+            f"/v1/addresses/{SAMPLE_ADDRESS}/names",
+            {"dedupe_by": "surface", "page_size": "10"},
+        ),
+        (
+            "roles",
+            "/v1/roles",
+            {"namespace": SAMPLE_NAMESPACE, "name": SAMPLE_NAME, "view": "compact", "meta": "summary", "page_size": "10"},
+        ),
+        (
+            "name_roles",
+            f"/v1/names/{SAMPLE_NAMESPACE}/{SAMPLE_NAME}/roles",
+            {"view": "compact", "meta": "summary", "page_size": "10"},
+        ),
+        (
+            "resource_lookup",
+            "/v1/resources/lookup",
+            {"namespace": SAMPLE_NAMESPACE, "name": SAMPLE_NAME, "view": "compact", "meta": "summary"},
+        ),
+        (
+            "resolver_overview",
+            f"/v1/resolvers/ethereum-mainnet/{SAMPLE_RESOLVER_ADDRESS}/overview",
+            {"include": "nodes,aliases,roles,events", "view": "compact", "meta": "summary"},
+        ),
+        ("primary_name", f"/v1/primary-names/{SAMPLE_ADDRESS}", {"namespace": "ens", "coin_type": "60", "mode": "declared"}),
+        (
+            "execution_explain",
+            f"/v1/explain/resolutions/{SAMPLE_NAMESPACE}/{SAMPLE_NAME}/execution",
+            {"records": "addr:60"},
+        ),
+    ]
+
+    for key, path, query in route_calls:
+        status, payload = api_get(path, query)
+        responses[key] = {"status": status, "payload": payload}
+        if key in {"resolver_overview", "execution_explain"}:
+            continue
+        if key == "profile" and status == 409 and stale_error(payload):
+            record("skip", f"{key} status", "profile requires on-demand verified resolution RPC and local API returned stale")
+            continue
+        expect_status_ok(key, status, payload)
+
+    resource_id = ptr(responses["resource_lookup"]["payload"], "/data/resource_id")
+    if isinstance(resource_id, str) and resource_id:
+        for key, path, query in [
+            (
+                "history_resource",
+                f"/v1/history/resources/{resource_id}",
+                {"scope": "both", "view": "compact", "meta": "summary", "page_size": "10"},
+            ),
+            (
+                "resource_permissions",
+                f"/v1/resources/{resource_id}/permissions",
+                {"page_size": "10"},
+            ),
+        ]:
+            status, payload = api_get(path, query)
+            responses[key] = {"status": status, "payload": payload}
+            expect_status_ok(key, status, payload)
+    else:
+        record("fail", "resource lookup resource_id", f"unexpected resource lookup payload: {responses['resource_lookup']['payload']}")
+
+    status, payload = api_post(
+        "/v1/identity:lookup",
+        {
+            "profile": "feed",
+            "namespace": "ens",
+            "inputs": [{"id": "name-1", "kind": "name", "name": SAMPLE_NAME}],
+        },
+    )
+    responses["identity_lookup"] = {"status": status, "payload": payload}
+    expect_status_ok("identity_lookup", status, payload)
+
+    return responses
+
+
+def graph_sample() -> Any:
+    query = """
+    query DocSamples($name: String!, $namehash: String!, $address: String!) {
+      domain: domains(where: { name: $name }, first: 1) {
+        id
+        name
+        labelName
+        labelhash
+        createdAt
+        owner { id }
+        registrant { id }
+        wrappedOwner { id }
+        expiryDate
+        registration {
+          id
+          registrationDate
+          expiryDate
+          registrant { id }
+          domain { id name }
+          events(first: 10, orderBy: blockNumber, orderDirection: desc) {
+            id
+            blockNumber
+            transactionID
+            __typename
+            ... on NameRegistered { registrant { id } expiryDate }
+            ... on NameRenewed { expiryDate }
+            ... on NameTransferred { newOwner { id } }
+          }
+        }
+        resolver {
+          id
+          address
+          texts
+          coinTypes
+          contentHash
+          addr { id }
+          events(first: 20, orderBy: blockNumber, orderDirection: desc) {
+            id
+            blockNumber
+            transactionID
+            __typename
+            ... on AddrChanged { addr { id } }
+            ... on MulticoinAddrChanged { coinType addr }
+            ... on TextChanged { key value }
+            ... on ContenthashChanged { hash }
+            ... on NameChanged { name }
+          }
+        }
+        resolvedAddress { id }
+        subdomainCount
+        events(first: 10, orderBy: blockNumber, orderDirection: desc) {
+          id
+          blockNumber
+          transactionID
+          __typename
+          ... on NewResolver { resolver { id address } }
+          ... on Transfer { owner { id } }
+          ... on NameWrapped { name owner { id } expiryDate fuses }
+          ... on NameUnwrapped { owner { id } }
+        }
+      }
+      children: domains(where: { parent: $namehash }, first: 10, orderBy: name, orderDirection: asc) {
+        id
+        name
+        labelName
+        labelhash
+        owner { id }
+        registrant { id }
+        wrappedOwner { id }
+        subdomainCount
+      }
+      registered: domains(where: { registrant: $address }, first: 20, orderBy: name, orderDirection: asc) {
+        id
+        name
+      }
+      wrapped: domains(where: { wrappedOwner: $address }, first: 20, orderBy: name, orderDirection: asc) {
+        id
+        name
+      }
+      owned: domains(where: { owner: $address }, first: 20, orderBy: name, orderDirection: asc) {
+        id
+        name
+      }
+    }
+    """
+    return graph_query(
+        query,
+        {
+            "name": SAMPLE_NAME,
+            "namehash": "0xe7a98c5780681fe6e7aa4e0fc54180e2e93b4118ce40fee6deb728e5c09cd9f2",
+            "address": SAMPLE_ADDRESS_LOWER,
+        },
+    )
+
+
+def compare_identity_and_exact(responses: dict[str, Any], domain: dict[str, Any]) -> None:
+    graph_namehash = lower(domain["id"])
+    graph_name = domain["name"]
+    graph_labelhash = lower(domain["labelhash"])
+    graph_owner = lower(domain["owner"]["id"])
+    graph_registrant = lower(domain["registration"]["registrant"]["id"])
+    graph_expiry_rfc3339 = unix_to_rfc3339(domain["registration"]["expiryDate"])
+    graph_created_rfc3339 = unix_to_rfc3339(domain["createdAt"])
+    graph_resolver = lower(domain["resolver"]["address"])
+
+    identity_result = responses["identity_lookup"]["payload"]["results"][0]
+    expect_equal("identity name", identity_result["record"]["name"], graph_name)
+    expect_equal("identity namespace", identity_result["record"]["namespace"], SAMPLE_NAMESPACE)
+    expect_equal("identity namehash", lower(identity_result["record"]["namehash"]), graph_namehash)
+
+    compact_rows = responses["names_compact_exact"]["payload"]["data"]
+    expect_equal("compact exact row count", len(compact_rows), 1)
+    compact = compact_rows[0]
+    expect_equal("compact exact name", compact["name"], graph_name)
+    expect_equal("compact exact namehash", lower(compact["namehash"]), graph_namehash)
+    expect_equal("compact exact labelhash", lower(compact["labelhash"]), graph_labelhash)
+    expect_equal("compact exact created_at", compact.get("created_at"), graph_created_rfc3339)
+    expect_equal("compact exact expiry_date", compact.get("expiry_date"), graph_expiry_rfc3339)
+    expect_equal("compact exact registrant", lower(compact.get("registrant")), graph_registrant)
+    expect_equal("compact exact resolver", lower(compact.get("resolver_address")), graph_resolver)
+
+    for route in ["exact_name", "coverage", "surface_binding", "authority_control"]:
+        payload = responses[route]["payload"]
+        expect_equal(f"{route} name", payload["data"]["normalized_name"], graph_name)
+        expect_equal(f"{route} namehash", lower(payload["data"]["namehash"]), graph_namehash)
+        expect_equal(f"{route} namespace", payload["data"]["namespace"], SAMPLE_NAMESPACE)
+
+    exact = responses["exact_name"]["payload"]
+    expect_equal("exact registration registrant", lower(ptr(exact, "/declared_state/registration/registrant")), graph_registrant)
+    expect_equal("exact registration expiry", ptr(exact, "/declared_state/registration/expiry"), int(domain["registration"]["expiryDate"]))
+    expect_equal("exact resolver address", lower(ptr(exact, "/declared_state/resolver/address")), graph_resolver)
+    expect_equal("exact control registrant", lower(ptr(exact, "/declared_state/control/registrant")), graph_registrant)
+    expect_equal("exact control registry owner", lower(ptr(exact, "/declared_state/control/registry_owner")), graph_owner)
+
+    resource_lookup = responses["resource_lookup"]["payload"]
+    expect_equal("resource lookup name", ptr(resource_lookup, "/data/name"), graph_name)
+    expect_equal("resource lookup namespace", ptr(resource_lookup, "/data/namespace"), SAMPLE_NAMESPACE)
+    resource_id = ptr(resource_lookup, "/data/resource_id")
+    if isinstance(resource_id, str) and resource_id:
+        record("pass", "resource lookup resource_id", resource_id)
+    else:
+        record("fail", "resource lookup resource_id", repr(resource_id))
+
+
+def compare_records_and_profile(responses: dict[str, Any], domain: dict[str, Any]) -> None:
+    graph_resolver = domain["resolver"]
+    graph_texts = sorted(graph_resolver["texts"])
+    graph_coin_types = sorted(graph_resolver["coinTypes"], key=int)
+    graph_addr60 = lower(graph_resolver["addr"]["id"])
+
+    records_default = responses["records_default"]["payload"]
+    expect_equal("records default resolver", lower(ptr(records_default, "/data/resolver_address")), lower(graph_resolver["address"]))
+
+    records_expanded = responses["records_expanded"]["payload"]
+    expect_equal("records expanded resolver", lower(ptr(records_expanded, "/data/resolver_address")), lower(graph_resolver["address"]))
+    expect_set_equal("records known text keys", ptr(records_expanded, "/data/known_text_keys/keys"), graph_texts)
+    expect_equal("records coin 60", lower(ptr(records_expanded, "/data/coin_addresses/60/value")), graph_addr60)
+    expect_equal("records coin 0 missing", ptr(records_expanded, "/data/coin_addresses/0/status"), "not_found")
+    expect_equal("records content_hash missing", ptr(records_expanded, "/data/content_hash/status"), "not_found")
+
+    profile_response = responses["profile"]
+    if profile_response["status"] != 200:
+        record("skip", "profile parity", f"profile route unavailable with status {profile_response['status']}")
+        return
+
+    profile = profile_response["payload"]
+    expect_equal("profile name", ptr(profile, "/data/name"), domain["name"])
+    expect_equal("profile namehash", lower(ptr(profile, "/data/namehash")), lower(domain["id"]))
+    inventory_selectors = ptr(profile, "/declared_state/record_inventory/selectors")
+    expect_set_equal("profile text inventory", selector_keys(inventory_selectors, "text"), graph_texts)
+    expect_set_equal("profile coin inventory", selector_keys(inventory_selectors, "addr"), graph_coin_types)
+    verified = {entry["record_key"]: entry for entry in ptr(profile, "/verified_state/verified_queries")}
+    expect_equal("profile verified addr:60", lower(ptr(verified, "/addr:60/value/value")), graph_addr60)
+
+
+def compare_children(responses: dict[str, Any], graph: Any) -> None:
+    bigname_rows = responses["children"]["payload"]["data"]
+    bigname_children = [row["normalized_name"] for row in bigname_rows]
+    graph_children = [name for row in graph["children"] if (name := graph_child_display_name(row))]
+    bigname_labelhashes = [lower(row.get("labelhash")) for row in bigname_rows if row.get("labelhash")]
+    graph_labelhashes = [lower(row.get("labelhash")) for row in graph["children"] if row.get("labelhash")]
+    labelhashes_match = sorted(bigname_labelhashes) == sorted(graph_labelhashes)
+
+    if not bigname_children and graph_children:
+        record(
+            "fail",
+            "children names",
+            "bigname returned no child rows for ENS subgraph children",
+        )
+        record(
+            "fail",
+            "children total_count",
+            "bigname returned no child rows for ENS subgraph children",
+        )
+        return
+    expect_set_equal("children labelhashes", bigname_labelhashes, graph_labelhashes)
+    if sorted(bigname_children) == sorted(graph_children):
+        record("pass", "children names", json.dumps(sorted(bigname_children)))
+    elif labelhashes_match:
+        record(
+            "skip",
+            "children names",
+            "child identities match by labelhash; display labels may differ when either indexer has extra preimage knowledge",
+        )
+    else:
+        record("fail", "children names", f"expected {sorted(graph_children)!r}, got {sorted(bigname_children)!r}")
+    expect_equal("children total_count", ptr(responses["children"]["payload"], "/meta/total_count"), len(graph_children))
+
+
+def compare_address_names(responses: dict[str, Any], graph: Any) -> None:
+    bigname_names = [row["normalized_name"] for row in responses["address_names"]["payload"]["data"]]
+    graph_names = sorted(
+        {row["name"] for row in graph["registered"]}
+        | {row["name"] for row in graph["wrapped"]}
+        | {row["name"] for row in graph["owned"]}
+    )
+    expect_equal("address names", bigname_names, graph_names[:10])
+
+
+def compare_roles(responses: dict[str, Any], domain: dict[str, Any]) -> None:
+    graph_owner = lower(domain["owner"]["id"])
+    expected_subjects = [graph_owner]
+
+    for route in ["roles", "name_roles"]:
+        rows = responses[route]["payload"]["data"]
+        accounts = sorted({lower(row["account"]) for row in rows})
+        expect_equal(f"{route} account set", accounts, expected_subjects)
+
+        powers_by_account: dict[str, set[str]] = {}
+        for row in rows:
+            account = lower(row["account"])
+            powers_by_account.setdefault(account, set()).update(row["effective_powers"])
+        expect_set_equal(
+            f"{route} registry-owner powers",
+            sorted(powers_by_account.get(graph_owner, set())),
+            ["resolver_control", "resource_control"],
+        )
+    permission_rows = responses["resource_permissions"]["payload"]["data"]
+    permission_subjects = sorted({lower(row["subject"]) for row in permission_rows})
+    expect_equal("resource permissions subject set", permission_subjects, expected_subjects)
+    scoped_powers = {
+        (lower(row["subject"]), ptr(row, "/scope/kind")): tuple(row["effective_powers"])
+        for row in permission_rows
+    }
+    expect_equal(
+        "resource permissions registry-owner resource scope",
+        scoped_powers.get((graph_owner, "resource")),
+        ("resource_control",),
+    )
+    expect_equal(
+        "resource permissions registry-owner resolver scope",
+        scoped_powers.get((graph_owner, "resolver")),
+        ("resolver_control",),
+    )
+
+
+def compare_events(responses: dict[str, Any], domain: dict[str, Any]) -> None:
+    graph_text_events = [
+        event
+        for event in domain["resolver"]["events"]
+        if event["__typename"] == "TextChanged"
+    ][:2]
+    graph_renewed = next(
+        event
+        for event in domain["registration"]["events"]
+        if event["__typename"] == "NameRenewed"
+    )
+
+    for route in ["events", "history_name"]:
+        rows = responses[route]["payload"]["data"]
+        for index, event in enumerate(graph_text_events):
+            row = rows[index]
+            expect_equal(f"{route} text event {index} block", row["block_number"], event["blockNumber"])
+            expect_equal(f"{route} text event {index} tx", lower(row["transaction_hash"]), lower(event["transactionID"]))
+            expect_equal(f"{route} text event {index} key", ptr(row, "/data/selector_key"), event["key"])
+
+        renewed_row = next(row for row in rows if row["type"] == "RegistrationRenewed")
+        expect_equal(f"{route} renewal block", renewed_row["block_number"], graph_renewed["blockNumber"])
+        expect_equal(f"{route} renewal tx", lower(renewed_row["transaction_hash"]), lower(graph_renewed["transactionID"]))
+        expect_equal(f"{route} renewal expiry", ptr(renewed_row, "/data/after/expiry"), int(graph_renewed["expiryDate"]))
+
+
+def compare_skipped(responses: dict[str, Any]) -> None:
+    overview = responses["resolver_overview"]
+    if overview["status"] == 200 and ptr(overview["payload"], "/meta/support_status") == "unsupported":
+        record("skip", "resolver overview", "bigname docs sample reports unsupported resolver fan-in sections")
+    else:
+        record("fail", "resolver overview", f"unexpected response: {overview}")
+
+    explain = responses["execution_explain"]
+    if explain["status"] == 404:
+        record("skip", "execution explain", "sample records=addr:60 has no persisted execution explain row")
+    else:
+        record("fail", "execution explain", f"unexpected response: {explain}")
+
+    primary = responses["primary_name"]
+    primary_claim_status = ptr(primary["payload"], "/declared_state/claimed_primary_name/status")
+    primary_coverage_status = ptr(primary["payload"], "/coverage/status")
+    if primary["status"] == 200 and (
+        primary_claim_status == "success"
+        or (primary_claim_status == "not_found" and primary_coverage_status == "unsupported")
+    ):
+        record(
+            "skip",
+            "primary name",
+            "ENS subgraph has no current primary-name field equivalent for the docs sample",
+        )
+    else:
+        record("fail", "primary name", f"unexpected response: {primary}")
+
+    if responses.get("history_resource", {}).get("status") == 200:
+        record("skip", "history_resource event equivalence", "resource history is bigname resource-scoped; ENS subgraph history is name/registration-scoped")
+    else:
+        record("fail", "history_resource", f"unexpected response: {responses.get('history_resource')}")
+
+    for name in ["healthz", "status", "namespaces", "manifests"]:
+        record("skip", name, "process/manifest metadata has no ENS subgraph data equivalent")
+
+
+def print_results() -> int:
+    for check in checks:
+        print(f"{check.status.upper():4} {check.name}: {check.detail}")
+    failures = [check for check in checks if check.status == "fail"]
+    print()
+    print(f"{len(checks) - len(failures)} passed/skipped, {len(failures)} failed")
+    return 1 if failures else 0
+
+
+def main() -> int:
+    responses = bigname_route_samples()
+    graph = graph_sample()
+    domain = first_graph_domain(graph)
+
+    compare_identity_and_exact(responses, domain)
+    compare_records_and_profile(responses, domain)
+    compare_children(responses, graph)
+    compare_address_names(responses, graph)
+    compare_roles(responses, domain)
+    compare_events(responses, domain)
+    compare_skipped(responses)
+
+    return print_results()
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except Exception as error:
+        print(f"ERROR {error}", file=sys.stderr)
+        raise SystemExit(1)

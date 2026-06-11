@@ -24,6 +24,7 @@ pub async fn upsert_children_current_rows(
     let mut snapshots = Vec::with_capacity(rows.len());
     for row in rows {
         validate_children_current_row(row)?;
+        validate_children_current_child_surface_shape(&mut transaction, row).await?;
         snapshots.push(upsert_children_current_row(&mut transaction, row).await?);
     }
 
@@ -98,6 +99,9 @@ async fn upsert_children_current_row(
             canonical_display_name,
             normalized_name,
             namehash,
+            labelhash,
+            owner,
+            registrant,
             provenance,
             chain_positions,
             canonicality_summary,
@@ -112,11 +116,14 @@ async fn upsert_children_current_row(
             $5,
             $6,
             $7,
-            $8::jsonb,
-            $9::jsonb,
-            $10::jsonb,
-            $11,
-            $12
+            $8,
+            $9,
+            $10,
+            $11::jsonb,
+            $12::jsonb,
+            $13::jsonb,
+            $14,
+            $15
         )
         ON CONFLICT (parent_logical_name_id, child_logical_name_id, surface_class) DO UPDATE
         SET
@@ -124,6 +131,9 @@ async fn upsert_children_current_row(
             canonical_display_name = EXCLUDED.canonical_display_name,
             normalized_name = EXCLUDED.normalized_name,
             namehash = EXCLUDED.namehash,
+            labelhash = EXCLUDED.labelhash,
+            owner = EXCLUDED.owner,
+            registrant = EXCLUDED.registrant,
             provenance = EXCLUDED.provenance,
             chain_positions = EXCLUDED.chain_positions,
             canonicality_summary = EXCLUDED.canonicality_summary,
@@ -137,6 +147,9 @@ async fn upsert_children_current_row(
             canonical_display_name,
             normalized_name,
             namehash,
+            labelhash,
+            owner,
+            registrant,
             provenance,
             chain_positions,
             canonicality_summary,
@@ -151,6 +164,9 @@ async fn upsert_children_current_row(
     .bind(&row.canonical_display_name)
     .bind(&row.normalized_name)
     .bind(&row.namehash)
+    .bind(&row.labelhash)
+    .bind(&row.owner)
+    .bind(&row.registrant)
     .bind(provenance)
     .bind(chain_positions)
     .bind(canonicality_summary)
@@ -217,6 +233,18 @@ fn validate_children_current_row(row: &ChildrenCurrentRow) -> Result<()> {
             row.child_logical_name_id
         );
     }
+    if let Some(labelhash) = row.labelhash.as_ref()
+        && (labelhash.trim().is_empty() || labelhash != &labelhash.to_ascii_lowercase())
+    {
+        bail!(
+            "children_current row {} -> {} has invalid labelhash {}",
+            row.parent_logical_name_id,
+            row.child_logical_name_id,
+            labelhash
+        );
+    }
+    validate_optional_normalized_evm_address(row, "owner", row.owner.as_deref())?;
+    validate_optional_normalized_evm_address(row, "registrant", row.registrant.as_deref())?;
     if row.child_logical_name_id != format!("{}:{}", row.namespace, row.normalized_name) {
         bail!(
             "children_current row {} -> {} does not match namespace {} and normalized_name {}",
@@ -255,4 +283,98 @@ fn validate_children_current_row(row: &ChildrenCurrentRow) -> Result<()> {
     })?;
 
     Ok(())
+}
+
+async fn validate_children_current_child_surface_shape(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    row: &ChildrenCurrentRow,
+) -> Result<()> {
+    let child_surface_exists = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM name_surfaces
+            WHERE logical_name_id = $1
+        )
+        "#,
+    )
+    .bind(&row.child_logical_name_id)
+    .fetch_one(&mut **transaction)
+    .await
+    .with_context(|| {
+        format!(
+            "failed to validate children_current child surface for {} -> {}",
+            row.parent_logical_name_id, row.child_logical_name_id
+        )
+    })?;
+
+    if child_surface_exists || has_allowed_missing_child_surface_shape(row) {
+        Ok(())
+    } else {
+        bail!(
+            "children_current row {} -> {} is missing child surface without unknown-label or label-preimage provenance",
+            row.parent_logical_name_id,
+            row.child_logical_name_id
+        )
+    }
+}
+
+fn has_allowed_missing_child_surface_shape(row: &ChildrenCurrentRow) -> bool {
+    match label_provenance(row) {
+        Some(("label_preimage", "known")) => row.labelhash.is_some() && !is_unknown_label_row(row),
+        Some(("unknown", "unknown")) => row.labelhash.is_some() && is_unknown_label_row(row),
+        _ => false,
+    }
+}
+
+fn label_provenance(row: &ChildrenCurrentRow) -> Option<(&str, &str)> {
+    let label = row.provenance.get("label")?;
+    Some((
+        label.get("source")?.as_str()?,
+        label.get("status")?.as_str()?,
+    ))
+}
+
+fn is_unknown_label_row(row: &ChildrenCurrentRow) -> bool {
+    let Some(labelhash) = row.labelhash.as_deref() else {
+        return false;
+    };
+    let marker = format!("[{}]", labelhash.trim_start_matches("0x"));
+    first_label(&row.normalized_name) == Some(marker.as_str())
+        && first_label(&row.canonical_display_name) == Some(marker.as_str())
+}
+
+fn first_label(name: &str) -> Option<&str> {
+    name.split('.').next().filter(|label| !label.is_empty())
+}
+
+fn validate_optional_normalized_evm_address(
+    row: &ChildrenCurrentRow,
+    field_name: &str,
+    value: Option<&str>,
+) -> Result<()> {
+    let Some(address) = value else {
+        return Ok(());
+    };
+    if is_normalized_evm_address(address) {
+        Ok(())
+    } else {
+        bail!(
+            "children_current row {} -> {} has invalid {} address {}",
+            row.parent_logical_name_id,
+            row.child_logical_name_id,
+            field_name,
+            address
+        )
+    }
+}
+
+fn is_normalized_evm_address(value: &str) -> bool {
+    let Some(payload) = value.strip_prefix("0x") else {
+        return false;
+    };
+    payload.len() == 40
+        && payload
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }

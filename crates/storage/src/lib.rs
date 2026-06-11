@@ -10,6 +10,7 @@ mod execution;
 mod history;
 mod identity;
 mod identity_facade;
+mod label_preimages;
 mod lineage;
 mod name_current;
 mod normalized_events;
@@ -117,6 +118,11 @@ pub use identity_facade::{
     ReverseIdentityRoles, ReverseIdentityStorageInput, load_identity_name_feed_records_by_names,
     load_identity_records_by_names, load_indexing_status, load_reverse_identity_feed_records,
     load_reverse_identity_records,
+};
+pub use label_preimages::{
+    LabelPreimage, LabelPreimageImportSummary, backfill_label_preimages_from_existing_facts,
+    import_label_preimages_from_ens_names_table, label_preimage_from_label, upsert_label_preimages,
+    upsert_label_preimages_from_normalized_events, upsert_label_preimages_in_transaction,
 };
 pub use lineage::{
     CanonicalityState, ChainLineageBlock, chain_lineage_contains_ancestor,
@@ -268,5 +274,14 @@ pub async fn migrate(pool: &PgPool) -> Result<()> {
         .await
         .context("failed to apply checked-in migrations")?;
     info!("checked-in migrations applied");
+    let summary = backfill_label_preimages_from_existing_facts(pool, None)
+        .await
+        .context("failed to backfill label preimages from retained facts")?;
+    info!(
+        scanned_row_count = summary.scanned_row_count,
+        retained_row_count = summary.retained_row_count,
+        invalidated_parent_count = summary.invalidated_parent_count,
+        "retained label preimage backfill checked"
+    );
     Ok(())
 }

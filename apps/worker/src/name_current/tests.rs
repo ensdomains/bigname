@@ -7,9 +7,10 @@ use std::{
 use anyhow::{Context, Result};
 use bigname_storage::{
     ChainLineageBlock, NameSurface, NormalizedEvent, RawBlock, RawLog, Resource, SurfaceBinding,
-    TokenLineage, default_database_url, load_name_current, upsert_chain_lineage_blocks,
-    upsert_name_current_rows, upsert_name_surfaces, upsert_normalized_events, upsert_raw_blocks,
-    upsert_raw_logs, upsert_resources, upsert_surface_bindings, upsert_token_lineages,
+    TokenLineage, default_database_url, label_preimage_from_label, load_name_current,
+    upsert_chain_lineage_blocks, upsert_name_current_rows, upsert_name_surfaces,
+    upsert_normalized_events, upsert_raw_blocks, upsert_raw_logs, upsert_resources,
+    upsert_surface_bindings, upsert_token_lineages,
 };
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
@@ -454,7 +455,7 @@ async fn rebuild_preserves_ens_v2_resource_identity_across_token_regeneration() 
             normalized_name: binding.display_name.clone(),
             dns_encoded_name: binding.display_name.as_bytes().to_vec(),
             namehash: format!("namehash:{}", binding.display_name),
-            labelhashes: vec![format!("labelhash:{}", binding.display_name)],
+            labelhashes: labelhashes_for_name(&binding.display_name),
             normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
             normalization_warnings: json!([]),
             normalization_errors: json!([]),
@@ -718,7 +719,7 @@ async fn rebuild_ignores_deprecated_ens_v2_registrar_shadow_events_after_support
             normalized_name: binding.display_name.clone(),
             dns_encoded_name: binding.display_name.as_bytes().to_vec(),
             namehash: format!("namehash:{}", binding.display_name),
-            labelhashes: vec![format!("labelhash:{}", binding.display_name)],
+            labelhashes: labelhashes_for_name(&binding.display_name),
             normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
             normalization_warnings: json!([]),
             normalization_errors: json!([]),
@@ -910,7 +911,7 @@ async fn rebuild_keeps_ens_v2_registry_only_exact_name_coverage_shadow() -> Resu
             normalized_name: binding.display_name.clone(),
             dns_encoded_name: binding.display_name.as_bytes().to_vec(),
             namehash: format!("namehash:{}", binding.display_name),
-            labelhashes: vec![format!("labelhash:{}", binding.display_name)],
+            labelhashes: labelhashes_for_name(&binding.display_name),
             normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
             normalization_warnings: json!([]),
             normalization_errors: json!([]),
@@ -1882,7 +1883,7 @@ async fn rebuild_projects_supported_basenames_transport_topology_from_frozen_inp
             normalized_name: binding.display_name.clone(),
             dns_encoded_name: binding.display_name.as_bytes().to_vec(),
             namehash: format!("namehash:{}", binding.display_name),
-            labelhashes: vec![format!("labelhash:{}", binding.display_name)],
+            labelhashes: labelhashes_for_name(&binding.display_name),
             normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
             normalization_warnings: json!([]),
             normalization_errors: json!([]),
@@ -2374,6 +2375,83 @@ async fn rebuild_keeps_same_binding_for_renewal_and_transfer() -> Result<()> {
     assert_eq!(
         row.declared_summary["control"]["registrant"],
         Value::String("0x0000000000000000000000000000000000000bbb".to_owned())
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn rebuild_projects_registry_owner_from_authority_epoch_change() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let binding = IdentityBinding::new(
+        "ens:controller.eth",
+        "controller.eth",
+        0x7100,
+        0x7200,
+        0x7300,
+    );
+    let registry_owner = "0x0000000000000000000000000000000000000aaa";
+
+    seed_raw_blocks(
+        database.pool(),
+        &[
+            raw_block("ethereum-mainnet", "0xgrant", 301, 1_717_171_901),
+            raw_block("ethereum-mainnet", "0xregistry-owner", 302, 1_717_171_902),
+        ],
+    )
+    .await?;
+    seed_identity(database.pool(), &binding, "0xgrant", 301, 1_717_171_901).await?;
+    seed_events(
+        database.pool(),
+        &[
+            authority_event(
+                &binding,
+                "grant-controller",
+                "RegistrationGranted",
+                "0xgrant",
+                301,
+                Some(0),
+                json!({}),
+                json!({
+                    "authority_kind": "registrar",
+                    "authority_key": "registrar:ethereum-mainnet:7:controller",
+                    "registrant": "0x0000000000000000000000000000000000000bbb",
+                    "expiry": 1_800_000_000_i64,
+                }),
+            ),
+            authority_event(
+                &binding,
+                "registry-owner-epoch",
+                "AuthorityEpochChanged",
+                "0xregistry-owner",
+                302,
+                None,
+                json!({
+                    "authority_kind": "registrar",
+                    "authority_key": "registrar:ethereum-mainnet:7:controller",
+                }),
+                json!({
+                    "authority_kind": "registry_only",
+                    "authority_key": "registry-only:ethereum-mainnet:0xcontroller",
+                    "registry_owner": registry_owner,
+                }),
+            ),
+        ],
+    )
+    .await?;
+
+    rebuild_name_current(database.pool(), Some(&binding.logical_name_id)).await?;
+
+    let row = load_name_current(database.pool(), &binding.logical_name_id)
+        .await?
+        .context("rebuilt row must exist")?;
+    assert_eq!(
+        row.declared_summary["control"]["registry_owner"],
+        Value::String(registry_owner.to_owned())
+    );
+    assert_eq!(
+        row.declared_summary["control"]["latest_event_kind"],
+        Value::String("AuthorityEpochChanged".to_owned())
     );
 
     database.cleanup().await
@@ -3280,7 +3358,7 @@ async fn seed_basenames_identity(
             normalized_name: binding.display_name.clone(),
             dns_encoded_name: binding.display_name.as_bytes().to_vec(),
             namehash: format!("namehash:{}", binding.display_name),
-            labelhashes: vec![format!("labelhash:{}", binding.display_name)],
+            labelhashes: labelhashes_for_name(&binding.display_name),
             normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
             normalization_warnings: json!([]),
             normalization_errors: json!([]),
@@ -3655,7 +3733,7 @@ fn name_surface(
         normalized_name: display_name.to_owned(),
         dns_encoded_name: display_name.as_bytes().to_vec(),
         namehash: format!("namehash:{display_name}"),
-        labelhashes: vec![format!("labelhash:{display_name}")],
+        labelhashes: labelhashes_for_name(display_name),
         normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
         normalization_warnings: json!([]),
         normalization_errors: json!([]),
@@ -3665,6 +3743,16 @@ fn name_surface(
         provenance: json!({"source": "worker_name_current_test", "kind": "name_surface"}),
         canonicality_state: CanonicalityState::Finalized,
     }
+}
+
+fn labelhashes_for_name(name: &str) -> Vec<String> {
+    name.split('.').map(labelhash_for_label).collect()
+}
+
+fn labelhash_for_label(label: &str) -> String {
+    label_preimage_from_label(label, "worker_name_current_test", 1, json!({}))
+        .expect("test label must hash")
+        .labelhash
 }
 
 fn surface_binding(

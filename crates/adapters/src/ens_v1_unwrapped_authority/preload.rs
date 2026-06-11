@@ -9,12 +9,16 @@ mod wrapper_registry;
 
 pub(super) use registrar_history::{
     empty_preloaded_history, preload_registrar_history, preload_selected_registrar_lease,
-    registrar_labelhash_from_authority_key,
+    preload_superseded_registrar_lease, registrar_labelhash_from_authority_key,
 };
 use registrar_state::*;
 use resolver::*;
 use support::*;
-use wrapper_registry::*;
+pub(in crate::ens_v1_unwrapped_authority) use wrapper_registry::preload_registry_history;
+use wrapper_registry::{
+    load_latest_registry_owner_before_block, load_latest_wrapper_state_before_block,
+    load_selected_wrapper_state_before_replay, preload_wrapper_history,
+};
 
 #[derive(Clone, Debug, Default)]
 pub(super) struct PreloadedRegistrarState {
@@ -33,7 +37,7 @@ struct PreloadedWrapperState {
 }
 
 #[derive(Clone, Debug, Default)]
-struct PreloadedRegistryOwnerState {
+pub(in crate::ens_v1_unwrapped_authority) struct PreloadedRegistryOwnerState {
     owner: Option<String>,
     reference: Option<ObservationRef>,
 }
@@ -142,13 +146,23 @@ pub(super) async fn preload_restricted_name_histories(
         )
     })?;
 
-    let registrar_scopes = rows
-        .iter()
-        .map(|row| RegistrarStateScope {
+    let mut registrar_scopes = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let resource_provenance: Value = sql_row::get(row, "resource_provenance")?;
+        let lower_block_number = if resource_provenance
+            .get("authority_kind")
+            .and_then(Value::as_str)
+            == Some("registry_only")
+        {
+            0
+        } else {
+            row.get("binding_block_number")
+        };
+        registrar_scopes.push(RegistrarStateScope {
             logical_name_id: row.get("logical_name_id"),
-            lower_block_number: row.get("binding_block_number"),
-        })
-        .collect::<Vec<_>>();
+            lower_block_number,
+        });
+    }
     let logical_name_ids = registrar_scopes
         .iter()
         .map(|scope| scope.logical_name_id.clone())
@@ -315,7 +329,7 @@ pub(super) async fn preload_restricted_name_histories(
                     resource_id,
                     registry_owner_state.get(&logical_name_id),
                 );
-                preload_selected_registrar_lease(
+                preload_superseded_registrar_lease(
                     history,
                     registrar_state.get(&logical_name_id),
                     &preload_block_index,

@@ -241,9 +241,14 @@ pub(super) async fn name_children(
             } else {
                 BTreeMap::new()
             };
-            let mut child_labelhashes = BTreeMap::new();
-            for child_logical_name_id in &child_logical_name_ids {
-                let child_surface = load_name_surface(&state.pool, child_logical_name_id)
+            let mut child_surface_labelhashes = BTreeMap::new();
+            let mut child_surface_ids = BTreeSet::new();
+            for row in storage_page
+                .rows
+                .iter()
+                .filter(|row| include_counts || row.labelhash.is_none())
+            {
+                let child_surface = load_name_surface(&state.pool, &row.child_logical_name_id)
                     .await
                     .map_err(|load_error| {
                         error!(
@@ -251,25 +256,32 @@ pub(super) async fn name_children(
                             namespace = %namespace,
                             name = %name,
                             logical_name_id = %logical_name_id,
-                            child_logical_name_id = %child_logical_name_id,
+                            child_logical_name_id = %row.child_logical_name_id,
                             error = ?load_error,
-                            "failed to load name surface for compact child row"
+                            "failed to load child name surface for compact children labelhash fallback"
                         );
                         ApiError::internal_error(format!(
                             "failed to load compact child collection for name {namespace}/{name}"
                         ))
                     })?;
-                child_labelhashes.insert(
-                    child_logical_name_id.clone(),
-                    child_surface.and_then(|surface| surface.labelhashes.into_iter().next()),
-                );
+                if let Some(surface) = child_surface {
+                    child_surface_ids.insert(row.child_logical_name_id.clone());
+                    if row.labelhash.is_none() {
+                        child_surface_labelhashes.insert(
+                            row.child_logical_name_id.clone(),
+                            surface.labelhashes.into_iter().next(),
+                        );
+                    }
+                } else if row.labelhash.is_none() {
+                    child_surface_labelhashes.insert(row.child_logical_name_id.clone(), None);
+                }
             }
-
             Ok(Json(build_compact_children_response(
                 &storage_page.summary,
                 &storage_page.rows,
                 &surface.normalized_name,
-                &child_labelhashes,
+                &child_surface_ids,
+                &child_surface_labelhashes,
                 &child_name_rows,
                 &child_summaries,
                 include_counts,

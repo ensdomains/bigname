@@ -192,6 +192,9 @@ async fn build_children_row(
         canonical_display_name: source.canonical_display_name.clone(),
         normalized_name: source.normalized_name.clone(),
         namehash: source.namehash.clone(),
+        labelhash: source.labelhash.clone(),
+        owner: source.owner.clone(),
+        registrant: source.registrant.clone(),
         provenance: build_provenance(source),
         chain_positions: build_chain_positions(source, &block),
         canonicality_summary: build_canonicality_summary(source, block.canonicality_state),
@@ -254,9 +257,26 @@ fn build_provenance(source: &bigname_storage::DeclaredChildEventSource) -> Value
         "normalized_event_ids": source.normalized_event_ids.clone(),
         "raw_fact_refs": source.raw_fact_refs.clone(),
         "manifest_versions": source.manifest_versions.clone(),
+        "label": {
+            "labelhash": source.labelhash,
+            "status": child_label_status(source),
+            "source": source.label_source.clone(),
+        },
         "execution_trace_id": Value::Null,
         "derivation_kind": CHILDREN_CURRENT_DERIVATION_KIND,
     })
+}
+
+fn child_label_status(source: &bigname_storage::DeclaredChildEventSource) -> &'static str {
+    if source.labelhash.is_none() {
+        return "not_applicable";
+    }
+
+    if source.normalized_name.starts_with('[') {
+        "unknown"
+    } else {
+        "known"
+    }
 }
 
 fn build_chain_positions(
