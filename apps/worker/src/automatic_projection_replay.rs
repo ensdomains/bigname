@@ -387,11 +387,6 @@ async fn projection_bootstrap_already_handed_off_to_apply(pool: &PgPool) -> Resu
         return Ok(false);
     }
 
-    let readiness = load_projection_replay_readiness(pool).await?;
-    if !readiness.is_ready() {
-        return Ok(false);
-    }
-
     let complete_marker_count = load_current_projection_replay_marker_count(pool, None).await?;
     Ok(should_skip_bootstrap_for_existing_apply_cursor(
         cursor_exists,
