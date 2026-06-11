@@ -285,6 +285,37 @@ pub async fn load_name_current_list_row_by_namehash(
     row.map(decode_name_current_list_row).transpose()
 }
 
+/// Load a single derived list row by normalized ENS name within a namespace, or `None` if no current
+/// name matches. Backs the Manager's `domain(id: "alice.eth")`, which passes the ENS *name* string
+/// rather than the namehash. Mirrors [`load_name_current_list_row_by_namehash`] but keys on
+/// `normalized_name` (covered by the `(namespace, normalized_name)` index); the name and namespace
+/// are bound through the shared filter predicates, so the lookup stays injection-safe and produces
+/// the same derived columns as the paged reads.
+pub async fn load_name_current_list_row_by_name(
+    pool: &PgPool,
+    namespace: &str,
+    name: &str,
+) -> Result<Option<NameCurrentListRow>> {
+    let filter = NameCurrentListFilter {
+        namespace: Some(namespace.to_owned()),
+        name: Some(name.to_owned()),
+        ..Default::default()
+    };
+    let mut builder = QueryBuilder::<Postgres>::new("");
+    push_filtered_name_current_cte(&mut builder, &filter);
+    builder.push(NAME_CURRENT_LIST_SELECT);
+    builder.push(" LIMIT 1");
+
+    let row = builder
+        .build()
+        .fetch_optional(pool)
+        .await
+        .with_context(|| {
+            format!("failed to load name_current compact row for name {name} in namespace {namespace}")
+        })?;
+    row.map(decode_name_current_list_row).transpose()
+}
+
 /// Load a derived list page by absolute `LIMIT`/`OFFSET` instead of a keyset cursor. Applies the
 /// same ordering and total-order tie-break as [`load_name_current_list_page`], so windows are
 /// stable and disjoint across offsets. Bridges the subgraph `first`/`skip` paging onto the

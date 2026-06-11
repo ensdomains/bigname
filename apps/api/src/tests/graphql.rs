@@ -233,7 +233,23 @@ async fn graphql_domain_op_returns_subgraph_domain_shape() -> Result<()> {
     assert_eq!(domain["resolver"]["addresses"], json!([]));
     assert_eq!(domain["resolver"]["contentHash"], Value::Null);
 
-    // Unknown namehash resolves to null without an error.
+    // The Manager passes the ENS name string as `id`; the name path resolves the same row that the
+    // namehash query above reached via the fallback.
+    let by_name = post_graphql(
+        database.app_state(),
+        r#"query Domain($id: String!) {
+            domain(id: $id) { id name normalizedName owner { id } }
+        }"#,
+        json!({ "id": "alice.eth" }),
+    )
+    .await?;
+    let by_name = &by_name["data"]["domain"];
+    assert_eq!(by_name["id"], json!(GRAPHQL_ALICE_NAMEHASH));
+    assert_eq!(by_name["name"], json!("Alice.eth"));
+    assert_eq!(by_name["normalizedName"], json!("alice.eth"));
+    assert_eq!(by_name["owner"]["id"], json!(GRAPHQL_OWNER));
+
+    // Unknown id (neither a known name nor a known namehash) resolves to null without an error.
     let missing = post_graphql(
         database.app_state(),
         r#"query Domain($id: String!) { domain(id: $id) { id } }"#,

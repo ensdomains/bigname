@@ -2,7 +2,8 @@ use async_graphql::{Context, Object, Result};
 use bigname_storage::{
     AddressNameRelation, NameCurrentAddressFilter, NameCurrentAddressRelationFilter,
     NameCurrentListFilter, NameCurrentListOrder, NameCurrentListSort, count_name_current_list,
-    load_name_current_list_page_offset, load_name_current_list_row_by_namehash,
+    load_name_current_list_page_offset, load_name_current_list_row_by_name,
+    load_name_current_list_row_by_namehash,
 };
 
 use crate::state::AppState;
@@ -21,12 +22,21 @@ pub(crate) struct QueryRoot;
 
 #[Object]
 impl QueryRoot {
-    /// `domain(id: String!)` — `id` is the EIP-137 namehash.
+    /// `domain(id: String!)` — the Manager passes the ENS *name* string (e.g. `"alice.eth"`); the
+    /// canonical subgraph keys a `Domain` by its EIP-137 namehash. Resolve by name first, then fall
+    /// back to the namehash, so both callers work without inferring intent from the id's shape (a
+    /// namehash-shaped name still resolves as a name, since the name lookup is tried first).
     async fn domain(&self, ctx: &Context<'_>, id: String) -> Result<Option<Domain>> {
         let state = ctx.data::<AppState>()?;
-        let row = load_name_current_list_row_by_namehash(&state.pool, &id)
+        let row = match load_name_current_list_row_by_name(&state.pool, NAMESPACE, &id)
             .await
-            .map_err(|error| internal_error("domain", error))?;
+            .map_err(|error| internal_error("domain", error))?
+        {
+            Some(row) => Some(row),
+            None => load_name_current_list_row_by_namehash(&state.pool, &id)
+                .await
+                .map_err(|error| internal_error("domain", error))?,
+        };
         Ok(row.map(Domain::from))
     }
 

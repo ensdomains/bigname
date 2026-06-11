@@ -13,8 +13,8 @@ pub use list::{
     NameCurrentAddressFilter, NameCurrentAddressRelationFilter, NameCurrentListCursor,
     NameCurrentListCursorValue, NameCurrentListFilter, NameCurrentListOrder, NameCurrentListPage,
     NameCurrentListRow, NameCurrentListSort, count_name_current_list, load_name_current_list_page,
-    load_name_current_list_page_offset, load_name_current_list_row_by_namehash,
-    name_current_list_cursor_from_row,
+    load_name_current_list_page_offset, load_name_current_list_row_by_name,
+    load_name_current_list_row_by_namehash, name_current_list_cursor_from_row,
 };
 pub use row::NameCurrentRow;
 use row::decode_name_current_row;

@@ -129,7 +129,8 @@ pub use name_current::{
     clear_name_current, count_name_current_list, delete_name_current, load_name_current,
     load_name_current_by_logical_name_ids, load_name_current_for_snapshot,
     load_name_current_list_page, load_name_current_list_page_offset,
-    load_name_current_list_row_by_namehash, name_current_list_cursor_from_row,
+    load_name_current_list_row_by_name, load_name_current_list_row_by_namehash,
+    name_current_list_cursor_from_row,
     replace_name_current_rows, upsert_name_current_rows,
 };
 pub use normalized_events::{

@@ -383,6 +383,51 @@ async fn by_namehash_returns_derived_row_and_none_for_unknown() -> Result<()> {
 }
 
 #[tokio::test]
+async fn by_name_returns_derived_row_and_none_for_unknown() -> Result<()> {
+    let database = test_database().await?;
+    let owner = "0x000000000000000000000000000000000000a11ce";
+    seed_name(
+        &database,
+        "ens:alice.eth",
+        "alice.eth",
+        "0xABCDEF0123",
+        registered_summary("ens_v2_registry", owner),
+        refs(1),
+    )
+    .await?;
+
+    let found = load_name_current_list_row_by_name(database.pool(), "ens", "alice.eth")
+        .await?
+        .expect("name lookup must find the seeded name");
+    assert_eq!(found.row.canonical_display_name, "alice.eth");
+    assert_eq!(found.row.namehash, "0xABCDEF0123");
+    assert_eq!(found.owner.as_deref(), Some(owner));
+
+    assert!(
+        load_name_current_list_row_by_name(database.pool(), "ens", "bob.eth")
+            .await?
+            .is_none(),
+        "unknown name must return None"
+    );
+    assert!(
+        load_name_current_list_row_by_name(database.pool(), "other", "alice.eth")
+            .await?
+            .is_none(),
+        "name lookup is namespace-scoped"
+    );
+    // The id's shape never reroutes the lookup: a namehash passed as the name matches nothing in
+    // the name column (the resolver falls back to the namehash loader for that case).
+    assert!(
+        load_name_current_list_row_by_name(database.pool(), "ens", "0xABCDEF0123")
+            .await?
+            .is_none(),
+        "a namehash string must not match the name column"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn offset_windows_are_stable_and_disjoint() -> Result<()> {
     let database = test_database().await?;
     seed_name(
