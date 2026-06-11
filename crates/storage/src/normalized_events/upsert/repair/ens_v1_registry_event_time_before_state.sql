@@ -19,7 +19,17 @@
             )
         ),
         repair_map AS (
-            SELECT input.*
+            SELECT
+                input.*,
+                CASE
+                    WHEN input.event_kind = 'AuthorityTransferred'
+                     AND jsonb_typeof(input.old_before_state::JSONB -> 'owner') =
+                         'string'
+                     AND btrim(input.old_before_state::JSONB ->> 'owner') <> ''
+                     AND input.new_before_state::JSONB -> 'owner' = 'null'::JSONB
+                    THEN input.old_before_state::JSONB
+                    ELSE input.new_before_state::JSONB
+                END AS repaired_before_state
             FROM input
             JOIN resources resource
               ON resource.resource_id = input.resource_id
@@ -99,21 +109,14 @@
         updated AS (
             UPDATE normalized_events event
             SET
-                before_state = CASE
-                    WHEN repair.event_kind = 'AuthorityTransferred'
-                     AND jsonb_typeof(repair.old_before_state::JSONB -> 'owner') =
-                         'string'
-                     AND btrim(repair.old_before_state::JSONB ->> 'owner') <> ''
-                     AND repair.new_before_state::JSONB -> 'owner' = 'null'::JSONB
-                    THEN repair.old_before_state::JSONB
-                    ELSE repair.new_before_state::JSONB
-                END,
+                before_state = repair.repaired_before_state,
                 observed_at = now()
             FROM repair_map repair
             WHERE event.event_identity = repair.event_identity
               AND event.resource_id = repair.resource_id
               AND event.event_kind = repair.event_kind
               AND event.before_state IS NOT DISTINCT FROM repair.old_before_state::JSONB
+              AND event.before_state IS DISTINCT FROM repair.repaired_before_state
               AND event.after_state IS NOT DISTINCT FROM repair.after_state::JSONB
             RETURNING
                 event.event_identity,
@@ -121,6 +124,16 @@
                 event.canonicality_state,
                 event.event_kind,
                 event.resource_id
+        ),
+        already_repaired AS (
+            SELECT event.event_identity
+            FROM repair_map repair
+            JOIN normalized_events event
+              ON event.event_identity = repair.event_identity
+            WHERE event.resource_id = repair.resource_id
+              AND event.event_kind = repair.event_kind
+              AND event.before_state IS NOT DISTINCT FROM repair.repaired_before_state
+              AND event.after_state IS NOT DISTINCT FROM repair.after_state::JSONB
         ),
         queued_changes AS (
             INSERT INTO projection_normalized_event_changes (
@@ -192,5 +205,13 @@
         )
         SELECT input.event_identity
         FROM input
-        JOIN updated
-          ON updated.event_identity = input.event_identity
+        WHERE EXISTS (
+            SELECT 1
+            FROM updated
+            WHERE updated.event_identity = input.event_identity
+        )
+        OR EXISTS (
+            SELECT 1
+            FROM already_repaired
+            WHERE already_repaired.event_identity = input.event_identity
+        )

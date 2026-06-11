@@ -4174,6 +4174,165 @@ async fn normalized_event_count_only_upsert_preserves_ens_v1_registry_event_time
 }
 
 #[tokio::test]
+async fn normalized_event_count_only_upsert_preserves_nonconvergent_authority_transfer_repair_idempotently()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let registry_resource_id = Uuid::from_u128(0x15b8);
+    seed_ens_v1_registry_event_time_registry_key_repair_resources(
+        database.pool(),
+        registry_resource_id,
+        Uuid::from_u128(0x15b9),
+    )
+    .await?;
+
+    let event_identity = "ens-v1-unwrapped-authority:registry-event-time:authority-transfer-incoming-null-idempotent";
+    let mut event = ens_v1_registry_event_time_authority_transfer_repair_event(
+        event_identity,
+        registry_resource_id,
+    );
+    event.canonicality_state = CanonicalityState::Observed;
+    event.before_state = json!({
+        "owner": "0x0000000000000000000000000000000000000def"
+    });
+    upsert_normalized_events(database.pool(), std::slice::from_ref(&event)).await?;
+
+    let mut replayed = ens_v1_registry_event_time_authority_transfer_repair_event(
+        event_identity,
+        registry_resource_id,
+    );
+    replayed.before_state = json!({
+        "owner": null
+    });
+    let inserted_count =
+        upsert_normalized_events_count_only(database.pool(), std::slice::from_ref(&replayed))
+            .await?;
+    assert_eq!(inserted_count, 0);
+
+    let anchored_observed_at = sqlx::types::time::OffsetDateTime::from_unix_timestamp(946_684_800)?;
+    sqlx::query("UPDATE normalized_events SET observed_at = $1 WHERE event_identity = $2")
+        .bind(anchored_observed_at)
+        .bind(event_identity)
+        .execute(database.pool())
+        .await?;
+
+    let claim_token = Uuid::from_u128(0x15b8_0000_0000_0000_0000_0000_0000_0001);
+    let claimed_at = sqlx::types::time::OffsetDateTime::from_unix_timestamp(946_684_860)?;
+    sqlx::query(
+        r#"
+        INSERT INTO projection_invalidations (
+            projection,
+            projection_key,
+            key_payload,
+            generation,
+            claim_token,
+            claimed_at
+        )
+        VALUES (
+            'permissions_current',
+            $3,
+            jsonb_build_object('resource_id', $3::TEXT),
+            7,
+            $1,
+            $2
+        )
+        ON CONFLICT (projection, projection_key)
+        DO UPDATE SET
+            generation = 7,
+            claim_token = EXCLUDED.claim_token,
+            claimed_at = EXCLUDED.claimed_at
+        "#,
+    )
+    .bind(claim_token)
+    .bind(claimed_at)
+    .bind(registry_resource_id.to_string())
+    .execute(database.pool())
+    .await?;
+
+    let before_second = sqlx::query_as::<
+        _,
+        (
+            i64,
+            Option<Uuid>,
+            Option<sqlx::types::time::OffsetDateTime>,
+            i64,
+            sqlx::types::time::OffsetDateTime,
+        ),
+    >(
+        r#"
+        SELECT
+            invalidation.generation,
+            invalidation.claim_token,
+            invalidation.claimed_at,
+            (
+                SELECT COUNT(*)::BIGINT
+                FROM projection_normalized_event_changes change
+                JOIN normalized_events event
+                  ON event.normalized_event_id = change.normalized_event_id
+                WHERE event.event_identity = $1
+            ) AS change_count,
+            event.observed_at
+        FROM projection_invalidations invalidation
+        CROSS JOIN normalized_events event
+        WHERE invalidation.projection = 'permissions_current'
+          AND invalidation.projection_key = $2
+          AND event.event_identity = $1
+        "#,
+    )
+    .bind(event_identity)
+    .bind(registry_resource_id.to_string())
+    .fetch_one(database.pool())
+    .await?;
+
+    let inserted_count =
+        upsert_normalized_events_count_only(database.pool(), std::slice::from_ref(&replayed))
+            .await?;
+    assert_eq!(inserted_count, 0);
+
+    let after_second = sqlx::query_as::<
+        _,
+        (
+            i64,
+            Option<Uuid>,
+            Option<sqlx::types::time::OffsetDateTime>,
+            i64,
+            sqlx::types::time::OffsetDateTime,
+        ),
+    >(
+        r#"
+        SELECT
+            invalidation.generation,
+            invalidation.claim_token,
+            invalidation.claimed_at,
+            (
+                SELECT COUNT(*)::BIGINT
+                FROM projection_normalized_event_changes change
+                JOIN normalized_events event
+                  ON event.normalized_event_id = change.normalized_event_id
+                WHERE event.event_identity = $1
+            ) AS change_count,
+            event.observed_at
+        FROM projection_invalidations invalidation
+        CROSS JOIN normalized_events event
+        WHERE invalidation.projection = 'permissions_current'
+          AND invalidation.projection_key = $2
+          AND event.event_identity = $1
+        "#,
+    )
+    .bind(event_identity)
+    .bind(registry_resource_id.to_string())
+    .fetch_one(database.pool())
+    .await?;
+
+    assert_eq!(after_second.3, before_second.3);
+    assert_eq!(after_second.0, before_second.0);
+    assert_eq!(after_second.1, before_second.1);
+    assert_eq!(after_second.2, before_second.2);
+    assert_eq!(after_second.4, before_second.4);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn normalized_event_count_only_upsert_repairs_ens_v1_registry_event_time_authority_transfer_before_owner_from_null()
 -> Result<()> {
     let database = TestDatabase::new().await?;

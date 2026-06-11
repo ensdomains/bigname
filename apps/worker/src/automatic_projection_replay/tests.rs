@@ -124,23 +124,40 @@ fn restart_bootstrap_skip_requires_apply_cursor_and_all_current_markers() {
 }
 
 #[tokio::test]
-async fn restart_bootstrap_skip_requires_target_covering_replay_markers() -> Result<()> {
+async fn restart_bootstrap_skip_requires_apply_cursor_even_with_target_covering_replay_markers()
+-> Result<()> {
+    let database = test_database().await?;
+    seed_ready_normalized_replay_cursor(database.pool(), 20).await?;
+    seed_chain_checkpoint(database.pool(), 20).await?;
+    seed_replay_markers(database.pool(), 20).await?;
+
+    assert!(
+        !projection_bootstrap_already_handed_off_to_apply(database.pool()).await?,
+        "replay markers must not hand off bootstrap before incremental apply has a cursor"
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn restart_handoff_with_apply_cursor_ignores_later_chain_checkpoint() -> Result<()> {
     let database = test_database().await?;
     seed_apply_cursor(database.pool()).await?;
     seed_ready_normalized_replay_cursor(database.pool(), 20).await?;
     seed_chain_checkpoint(database.pool(), 20).await?;
-    seed_replay_markers(database.pool(), 10).await?;
-
-    assert!(
-        !projection_bootstrap_already_handed_off_to_apply(database.pool()).await?,
-        "stale replay markers must not hand off bootstrap to incremental apply"
-    );
-
     seed_replay_markers(database.pool(), 20).await?;
 
     assert!(
         projection_bootstrap_already_handed_off_to_apply(database.pool()).await?,
-        "target-covering replay markers may hand off bootstrap to incremental apply"
+        "current replay markers and an apply cursor should hand off bootstrap"
+    );
+
+    advance_chain_checkpoint(database.pool(), 21).await?;
+
+    assert!(
+        projection_bootstrap_already_handed_off_to_apply(database.pool()).await?,
+        "an existing apply cursor should own post-handoff checkpoint progress"
     );
 
     database.cleanup().await?;
@@ -223,6 +240,22 @@ async fn seed_chain_checkpoint(pool: &PgPool, block_number: i64) -> Result<()> {
     .execute(pool)
     .await
     .context("failed to seed chain checkpoint")?;
+    Ok(())
+}
+
+async fn advance_chain_checkpoint(pool: &PgPool, block_number: i64) -> Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE chain_checkpoints
+        SET canonical_block_hash = $1, canonical_block_number = $2
+        WHERE chain_id = 'ethereum-mainnet'
+        "#,
+    )
+    .bind(format!("0xcheckpoint{block_number}"))
+    .bind(block_number)
+    .execute(pool)
+    .await
+    .context("failed to advance chain checkpoint")?;
     Ok(())
 }
 

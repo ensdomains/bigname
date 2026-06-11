@@ -392,14 +392,7 @@ async fn projection_bootstrap_already_handed_off_to_apply(pool: &PgPool) -> Resu
         return Ok(false);
     }
 
-    let chain_checkpoint_max_block =
-        projection_apply::load_chain_checkpoint_max_block(pool).await?;
-    let replay_target_block = projection_bootstrap_replay_target_block(
-        readiness.normalized_replay_max_target_block,
-        chain_checkpoint_max_block,
-    );
-    let complete_marker_count =
-        load_current_projection_replay_marker_count(pool, replay_target_block).await?;
+    let complete_marker_count = load_current_projection_replay_marker_count(pool, None).await?;
     Ok(should_skip_bootstrap_for_existing_apply_cursor(
         cursor_exists,
         complete_marker_count,
