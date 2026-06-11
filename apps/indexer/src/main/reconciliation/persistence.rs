@@ -27,7 +27,9 @@ use super::{
         raw_payload_candidate_hashes, retained_transaction_keys_from_live_payload,
         selected_address_set,
     },
-    types::{CanonicalReconciliation, HeadChangeSet, HeaderAuditMode},
+    types::{
+        CanonicalReconciliation, CanonicalReconciliationStatus, HeadChangeSet, HeaderAuditMode,
+    },
 };
 
 pub(crate) async fn persist_reconciled_raw_blocks(
@@ -68,8 +70,12 @@ pub(crate) async fn persist_reconciled_raw_blocks(
         );
     }
 
-    upsert_raw_blocks_recanonicalizing_orphaned(pool, &blocks.into_values().collect::<Vec<_>>())
-        .await?;
+    let blocks = blocks.into_values().collect::<Vec<_>>();
+    if canonical.status == CanonicalReconciliationStatus::AwaitingAncestor {
+        upsert_raw_blocks(pool, &blocks).await?;
+    } else {
+        upsert_raw_blocks_recanonicalizing_orphaned(pool, &blocks).await?;
+    }
     Ok(())
 }
 
