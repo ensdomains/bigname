@@ -3,9 +3,10 @@ use sqlx::types::time::OffsetDateTime;
 use sqlx::{PgPool, Row};
 
 use super::{
+    complete::set_backfill_job_completed,
     decode::decode_backfill_range,
     read::{
-        load_active_backfill_range_by_lease, load_backfill_job_for_update,
+        incomplete_range_count, load_active_backfill_range_by_lease, load_backfill_job_for_update,
         load_backfill_range_for_update,
     },
     sql::backfill_range_returning_sql,
@@ -86,6 +87,9 @@ pub async fn reserve_backfill_range(
     .with_context(|| format!("failed to select reservable range for backfill job {backfill_job_id}"))?;
 
     let Some(candidate) = candidate else {
+        if incomplete_range_count(&mut *transaction, backfill_job_id).await? == 0 {
+            set_backfill_job_completed(&mut transaction, backfill_job_id).await?;
+        }
         transaction
             .commit()
             .await

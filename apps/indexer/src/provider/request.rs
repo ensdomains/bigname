@@ -339,6 +339,7 @@ fn raw_value_to_json(value: &serde_json::value::RawValue) -> Result<Value> {
 pub(super) fn is_retryable_provider_error(error: &anyhow::Error) -> bool {
     let message = format!("{error:#}").to_ascii_lowercase();
     message.contains("http 429")
+        || (message.contains("json-rpc error") && message.contains("-32005"))
         || message.contains("http 500")
         || message.contains("http 502")
         || message.contains("http 503")

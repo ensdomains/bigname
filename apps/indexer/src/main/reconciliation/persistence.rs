@@ -4,9 +4,9 @@ use anyhow::{Context, Result, bail};
 use bigname_storage::{
     CanonicalityState, RawBlock, RawCodeHash, RawLog, RawPayloadCacheMetadataUpsert, RawReceipt,
     RawTransaction, load_chain_lineage_block, load_raw_block, load_raw_blocks_by_hashes,
-    load_raw_code_hash_counts_by_block_hashes, upsert_raw_blocks, upsert_raw_code_hashes,
-    upsert_raw_logs, upsert_raw_payload_cache_metadata, upsert_raw_receipts,
-    upsert_raw_transactions,
+    load_raw_code_hash_counts_by_block_hashes, upsert_raw_blocks,
+    upsert_raw_blocks_recanonicalizing_orphaned, upsert_raw_code_hashes, upsert_raw_logs,
+    upsert_raw_payload_cache_metadata, upsert_raw_receipts, upsert_raw_transactions,
 };
 use tracing::info;
 
@@ -68,7 +68,8 @@ pub(crate) async fn persist_reconciled_raw_blocks(
         );
     }
 
-    upsert_raw_blocks(pool, &blocks.into_values().collect::<Vec<_>>()).await?;
+    upsert_raw_blocks_recanonicalizing_orphaned(pool, &blocks.into_values().collect::<Vec<_>>())
+        .await?;
     Ok(())
 }
 

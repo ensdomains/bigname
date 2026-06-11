@@ -467,6 +467,69 @@ async fn json_rpc_provider_retries_transient_batch_errors_without_sequential_fal
 }
 
 #[tokio::test]
+async fn json_rpc_provider_retries_batch_error_code_32005_without_matching_text() -> Result<()> {
+    let block_hash_42 = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let block_hash_43 = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let batch_attempts = Arc::new(AtomicUsize::new(0));
+    let request_batch_sizes = Arc::new(Mutex::new(Vec::new()));
+    let attempts = Arc::clone(&batch_attempts);
+    let batch_sizes = Arc::clone(&request_batch_sizes);
+
+    let (url, server) = spawn_json_rpc_server(Arc::new(move |body| {
+        let batch = body
+            .as_array()
+            .expect("-32005 batch errors must not fall back to single requests");
+        batch_sizes
+            .lock()
+            .expect("request batch sizes must not be poisoned")
+            .push(batch.len());
+        let attempt = attempts.fetch_add(1, Ordering::Relaxed);
+
+        if attempt == 0 {
+            return Value::Array(
+                batch
+                    .iter()
+                    .map(|request| {
+                        json!({
+                            "jsonrpc": "2.0",
+                            "id": request.get("id").cloned().unwrap_or(Value::Null),
+                            "error": {
+                                "code": -32005,
+                                "message": "capacity exceeded"
+                            }
+                        })
+                    })
+                    .collect(),
+            );
+        }
+
+        rpc_block_number_batch_response(&body, &[(42, block_hash_42), (43, block_hash_43)])
+            .expect("second attempt must be a block-number batch")
+    }))
+    .await?;
+    let provider = JsonRpcProvider::new(&url)?;
+
+    let resolved = provider.fetch_block_hashes_by_numbers(&[42, 43]).await?;
+
+    assert_eq!(
+        resolved
+            .iter()
+            .map(|block| (block.block_number, block.block_hash.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(42, block_hash_42), (43, block_hash_43)]
+    );
+    assert_eq!(
+        *request_batch_sizes
+            .lock()
+            .expect("request batch sizes must not be poisoned"),
+        vec![2, 2]
+    );
+
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test]
 async fn json_rpc_provider_accepts_hash_only_transactions_for_block_headers() -> Result<()> {
     let requested_hash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
