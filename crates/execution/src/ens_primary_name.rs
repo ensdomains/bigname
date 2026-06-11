@@ -353,7 +353,7 @@ async fn eth_call_following_ccip_with_block_selector(
     let result =
         eth_call_result_with_block_selector(rpc, to, calldata, block_selector.clone()).await?;
     let result = match &result.result {
-        Err(error) => match follow_ccip_read(rpc, error, &block_selector).await {
+        Err(error) => match follow_ccip_read(rpc, error, &block_selector, to).await {
             Ok(Some(outcome)) => outcome.result,
             Ok(None) | Err(_) => result,
         },

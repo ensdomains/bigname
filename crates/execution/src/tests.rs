@@ -952,6 +952,7 @@ fn record_inventory_entry(query: &VerifiedQuerySummary) -> Value {
         "status": match query.status {
             VerifiedQueryStatus::Success => "success",
             VerifiedQueryStatus::NotFound => "not_found",
+            VerifiedQueryStatus::Unsupported => "unsupported",
             VerifiedQueryStatus::ExecutionFailed => "unsupported",
         }
     });
@@ -974,6 +975,17 @@ fn record_inventory_entry(query: &VerifiedQuerySummary) -> Value {
                 .as_object_mut()
                 .expect("entry must be object")
                 .insert("value".to_owned(), value);
+        }
+        VerifiedQueryStatus::Unsupported => {
+            entry.as_object_mut().expect("entry must be object").insert(
+                "unsupported_reason".to_owned(),
+                json!(
+                    query
+                        .failure_reason
+                        .as_deref()
+                        .unwrap_or("value_not_retained_in_normalized_events")
+                ),
+            );
         }
         VerifiedQueryStatus::NotFound => {}
         VerifiedQueryStatus::ExecutionFailed => {
@@ -3523,6 +3535,52 @@ async fn rejects_still_unsupported_selector_before_writing_any_storage() -> Resu
 }
 
 #[tokio::test]
+async fn rejects_resolution_noncanonical_value_coin_type_before_writing_any_storage() -> Result<()>
+{
+    let database = TestDatabase::new().await?;
+    let mut request = success_request();
+    request.trace.final_payload = Some(json!({
+        "record_kind": "addr",
+        "coin_type": "60",
+        "value": "0x00000000000000000000000000000000000000aa"
+    }));
+    request.outcome.outcome_payload = Some(json!({
+        "verified_queries": [
+            {
+                "record_key": "addr:60",
+                "status": "success",
+                "value": {
+                    "coin_type": "060",
+                    "value": "0x00000000000000000000000000000000000000aa"
+                }
+            }
+        ]
+    }));
+
+    let error = persist_ens_exact_name_verified_resolution_direct(database.pool(), &request)
+        .await
+        .expect_err("noncanonical outcome value coin_type must be rejected");
+    assert!(
+        error.to_string().contains("must be canonical decimal text"),
+        "unexpected error: {error:#}"
+    );
+    assert!(
+        load_execution_trace(database.pool(), request.trace.execution_trace_id)
+            .await?
+            .is_none(),
+        "rejected request must not persist trace rows"
+    );
+    assert!(
+        load_execution_outcome(database.pool(), &request.outcome.cache_key)
+            .await?
+            .is_none(),
+        "rejected request must not persist outcome rows"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn rejects_basenames_path_before_writing_any_storage() -> Result<()> {
     let database = TestDatabase::new().await?;
     let mut request = avatar_success_request();
@@ -4813,6 +4871,42 @@ fn rejects_unnormalized_verified_primary_request_key() -> Result<()> {
     );
 
     Ok(())
+}
+
+#[tokio::test]
+async fn rejects_verified_primary_noncanonical_metadata_coin_type() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let mut request = verified_primary_success_request();
+    request.trace.request_metadata["coin_type"] = json!("060");
+    insert_primary_name_anchor(
+        &database,
+        "0x00000000000000000000000000000000000000aa",
+        "60",
+        PrimaryNameClaimStatus::Success,
+    )
+    .await?;
+
+    let error = persist_ens_verified_primary_name(database.pool(), &request)
+        .await
+        .expect_err("noncanonical metadata coin_type must be rejected before persistence");
+    assert!(
+        error.to_string().contains("must be canonical decimal text"),
+        "unexpected error: {error:#}"
+    );
+    assert!(
+        load_execution_trace(database.pool(), request.trace.execution_trace_id)
+            .await?
+            .is_none(),
+        "rejected verified-primary request must not persist trace rows"
+    );
+    assert!(
+        load_execution_outcome(database.pool(), &request.outcome.cache_key)
+            .await?
+            .is_none(),
+        "rejected verified-primary request must not persist outcome rows"
+    );
+
+    database.cleanup().await
 }
 
 #[tokio::test]

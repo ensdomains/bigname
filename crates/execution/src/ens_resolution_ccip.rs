@@ -4,6 +4,7 @@ use std::time::Duration;
 use alloy_primitives::{Address, Bytes};
 use alloy_sol_types::{SolCall, SolError, SolValue, sol};
 use anyhow::{Context, Result, bail};
+use reqwest::StatusCode;
 use serde_json::{Value, json};
 
 use crate::ens_resolution_abi::{hex_string, hex_to_bytes};
@@ -80,14 +81,17 @@ pub(crate) async fn follow_ccip_read(
     rpc: &JsonRpcHttpClient,
     error: &JsonRpcCallError,
     block_selector: &Value,
+    expected_sender: &str,
 ) -> Result<Option<CcipReadOutcome>> {
     let Some(mut lookup) = offchain_lookup_from_rpc_error(error)? else {
         return Ok(None);
     };
 
+    let mut expected_sender = expected_sender.to_owned();
     let mut gateway_digests = Vec::new();
     let mut step_payloads = Vec::new();
     for redirect_index in 0..MAX_CCIP_REDIRECTS {
+        validate_offchain_lookup_sender(&lookup, &expected_sender)?;
         let gateway_response = fetch_ccip_gateway_response(&lookup)
             .await
             .with_context(|| {
@@ -105,6 +109,7 @@ pub(crate) async fn follow_ccip_read(
             "to": lookup.sender,
             "data": hex_string(&callback_calldata),
         });
+        let callback_sender = lookup.sender.clone();
         let callback_result = rpc
             .call("eth_call", vec![call, block_selector.clone()])
             .await
@@ -120,6 +125,7 @@ pub(crate) async fn follow_ccip_read(
         match &callback_result.result {
             Err(error) if redirect_index + 1 < MAX_CCIP_REDIRECTS => {
                 if let Some(next_lookup) = offchain_lookup_from_rpc_error(error)? {
+                    expected_sender = callback_sender;
                     lookup = next_lookup;
                     continue;
                 }
@@ -137,6 +143,17 @@ pub(crate) async fn follow_ccip_read(
     }
 
     bail!("CCIP-Read exceeded maximum redirect depth");
+}
+
+fn validate_offchain_lookup_sender(lookup: &OffchainLookup, expected_sender: &str) -> Result<()> {
+    if !lookup.sender.eq_ignore_ascii_case(expected_sender) {
+        bail!(
+            "CCIP-Read OffchainLookup sender {} does not match called contract {}",
+            lookup.sender,
+            expected_sender
+        );
+    }
+    Ok(())
 }
 
 struct GatewayFetchResult {
@@ -218,6 +235,13 @@ async fn fetch_standard_gateway_response(
                     used_local_batch_gateway: false,
                 });
             }
+            Err(error)
+                if error
+                    .downcast_ref::<GatewayHttpStatusError>()
+                    .is_some_and(GatewayHttpStatusError::is_client_error) =>
+            {
+                return Err(error);
+            }
             Err(error) => last_error = Some(error),
         }
     }
@@ -234,12 +258,13 @@ async fn fetch_one_gateway(
     sender: &str,
     data: &str,
 ) -> Result<Vec<u8>> {
-    let response = if url.contains("{data}") || url.contains("{sender}") {
-        let url = url.replace("{sender}", sender).replace("{data}", data);
+    let url = url.replace("{sender}", sender);
+    let response = if url.contains("{data}") {
+        let url = url.replace("{data}", data);
         client.get(&url).send().await
     } else {
         client
-            .post(url)
+            .post(&url)
             .json(&json!({
                 "sender": sender,
                 "data": data,
@@ -255,12 +280,40 @@ async fn fetch_one_gateway(
         .await
         .with_context(|| format!("failed to read CCIP gateway response body from {url}"))?;
     if !status.is_success() {
-        bail!("CCIP gateway {url} returned HTTP {status}");
+        return Err(GatewayHttpStatusError {
+            url: url.to_owned(),
+            status,
+        }
+        .into());
     }
 
     decode_gateway_response_body(&body)
         .with_context(|| format!("failed to decode CCIP gateway response body from {url}"))
 }
+
+#[derive(Debug)]
+struct GatewayHttpStatusError {
+    url: String,
+    status: StatusCode,
+}
+
+impl GatewayHttpStatusError {
+    fn is_client_error(&self) -> bool {
+        self.status.is_client_error()
+    }
+}
+
+impl std::fmt::Display for GatewayHttpStatusError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "CCIP gateway {} returned HTTP {}",
+            self.url, self.status
+        )
+    }
+}
+
+impl std::error::Error for GatewayHttpStatusError {}
 
 fn decode_gateway_response_body(body: &[u8]) -> Result<Vec<u8>> {
     gateway_response_hex_payload(body)?.decode()

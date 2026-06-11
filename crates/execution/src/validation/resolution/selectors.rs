@@ -9,8 +9,8 @@ use bigname_storage::{
 use serde_json::Value;
 
 use crate::json_helpers::{
-    ensure_absent, optional_nonempty_string_field, required_array, required_nonempty_string_field,
-    required_object, required_string,
+    ensure_absent, optional_nonempty_string_field, required_array, required_coin_type_field,
+    required_nonempty_string_field, required_object, required_string,
 };
 use crate::validation::{RequestedSelectorSet, VerifiedQueryStatus, VerifiedQuerySummary};
 
@@ -148,9 +148,6 @@ pub(super) fn extract_verified_queries_from_payload(
     for (index, query) in verified_queries.iter().enumerate() {
         let query_context = format!("{context}.verified_queries[{index}]");
         let query = required_object(Some(query), &query_context)?;
-        if query.contains_key("unsupported_reason") {
-            bail!("ENS direct-path verified resolution does not persist unsupported selectors");
-        }
 
         let record_key = required_string(query, "record_key", &query_context)?.to_owned();
         if !seen_record_keys.insert(record_key.clone()) {
@@ -165,10 +162,14 @@ pub(super) fn extract_verified_queries_from_payload(
         )? {
             "success" => {
                 let value = required_object(query.get("value"), &format!("{query_context}.value"))?;
+                ensure_absent(query, "unsupported_reason", &query_context)?;
                 if let SupportedVerifiedRecordKey::Addr { coin_type } = &selector {
-                    let value_coin_type =
-                        required_string(value, "coin_type", &format!("{query_context}.value"))?;
-                    if value_coin_type != coin_type {
+                    let value_coin_type = required_coin_type_field(
+                        value,
+                        "coin_type",
+                        &format!("{query_context}.value"),
+                    )?;
+                    if value_coin_type != *coin_type {
                         bail!(
                             "ENS direct-path verified resolution query value coin_type {} does not match record_key {}",
                             value_coin_type,
@@ -190,12 +191,25 @@ pub(super) fn extract_verified_queries_from_payload(
             }
             "not_found" => {
                 ensure_absent(query, "value", &query_context)?;
+                ensure_absent(query, "unsupported_reason", &query_context)?;
                 let failure_reason =
                     optional_nonempty_string_field(query, "failure_reason", &query_context)?;
                 (VerifiedQueryStatus::NotFound, None, failure_reason)
             }
+            "unsupported" => {
+                ensure_absent(query, "value", &query_context)?;
+                ensure_absent(query, "failure_reason", &query_context)?;
+                let unsupported_reason =
+                    required_nonempty_string_field(query, "unsupported_reason", &query_context)?;
+                (
+                    VerifiedQueryStatus::Unsupported,
+                    None,
+                    Some(unsupported_reason),
+                )
+            }
             "execution_failed" => {
                 ensure_absent(query, "value", &query_context)?;
+                ensure_absent(query, "unsupported_reason", &query_context)?;
                 let failure_reason =
                     required_nonempty_string_field(query, "failure_reason", &query_context)?;
                 (
@@ -205,7 +219,7 @@ pub(super) fn extract_verified_queries_from_payload(
                 )
             }
             status => bail!(
-                "ENS direct-path verified resolution only supports success, not_found, and execution_failed selector results; found {status}"
+                "ENS direct-path verified resolution only supports success, not_found, unsupported, and execution_failed selector results; found {status}"
             ),
         };
 

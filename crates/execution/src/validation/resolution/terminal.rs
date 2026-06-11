@@ -71,6 +71,9 @@ pub(super) fn validate_trace_terminal_payloads(
         VerifiedQueryStatus::NotFound => {
             validate_not_found_final_payload(final_payload, &queries[0])
         }
+        VerifiedQueryStatus::Unsupported => bail!(
+            "ENS direct-path verified resolution unsupported trace.final_payload must include verified_queries"
+        ),
         VerifiedQueryStatus::ExecutionFailed => unreachable!("all execution_failed handled above"),
     }
 }

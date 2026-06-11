@@ -85,13 +85,26 @@ pub(crate) fn required_coin_type_field(
         Some(Value::String(value))
             if !value.is_empty() && value.as_bytes().iter().all(u8::is_ascii_digit) =>
         {
-            Ok(value.clone())
+            canonical_decimal_coin_type(value, context, field_name)
         }
-        Some(Value::Number(value)) if value.as_u64().is_some_and(|coin_type| coin_type > 0) => {
-            Ok(value.to_string())
+        Some(Value::Number(value)) if value.as_u64().is_some() => {
+            Ok(value.as_u64().expect("as_u64 was checked").to_string())
         }
         _ => bail!("{context} field {field_name} must be decimal coin_type text or number"),
     }
+}
+
+fn canonical_decimal_coin_type(value: &str, context: &str, field_name: &str) -> Result<String> {
+    let coin_type = value
+        .parse::<u64>()
+        .with_context(|| format!("{context} field {field_name} must fit in u64"))?;
+    let canonical = coin_type.to_string();
+    if value != canonical {
+        bail!(
+            "{context} field {field_name} must be canonical decimal text; found {value}, expected {canonical}"
+        );
+    }
+    Ok(canonical)
 }
 
 pub(crate) fn ensure_absent(
@@ -103,4 +116,41 @@ pub(crate) fn ensure_absent(
         bail!("{context} must not set field {field_name}");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn required_coin_type_field_rejects_noncanonical_decimal_text() -> Result<()> {
+        let object = json!({
+            "coin_type": "060",
+        });
+        let object = object.as_object().expect("test payload must be an object");
+
+        let error = required_coin_type_field(object, "coin_type", "test payload")
+            .expect_err("noncanonical coin_type text must be rejected");
+        assert!(
+            error.to_string().contains("must be canonical decimal text"),
+            "unexpected error: {error:#}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn required_coin_type_field_accepts_numeric_zero() -> Result<()> {
+        let object = json!({
+            "coin_type": 0,
+        });
+        let object = object.as_object().expect("test payload must be an object");
+
+        assert_eq!(
+            required_coin_type_field(object, "coin_type", "test payload")?,
+            "0"
+        );
+        Ok(())
+    }
 }
