@@ -208,6 +208,9 @@ pub async fn persist_ens_verified_primary_name(
     let trace = upsert_execution_trace_in_transaction(&mut transaction, &request.trace).await?;
     let outcome =
         upsert_execution_outcome_in_transaction(&mut transaction, &request.outcome).await?;
+    // Storage normalizes the cache key before writing outcomes; the trace and
+    // request_metadata must already match that canonical identity for readback.
+    validate_verified_primary_trace_and_outcome(&trace, &outcome)?;
 
     if trace.execution_trace_id != outcome.execution_trace_id {
         bail!(
