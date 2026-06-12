@@ -42,6 +42,41 @@ pub(crate) fn source_scope_bindings(
     (addresses, from_blocks, to_blocks)
 }
 
+/// Collapse multiple watched/discovery rows for one emitting address into a single envelope
+/// interval. A discovered resolver carries one discovery edge per (name, registry) that referenced
+/// it, each with its own activation block — the emitter is in scope from the EARLIEST activation
+/// to the latest deactivation (open-ended when any edge is open). Keeping a single arbitrary
+/// edge's interval instead silently dropped every raw log emitted before that edge's activation
+/// block, which is how record events written around a name's registration went un-normalized.
+fn merge_active_emitter(
+    emitters_by_address: &mut HashMap<String, ActiveEmitter>,
+    emitter: ActiveEmitter,
+) {
+    use std::collections::hash_map::Entry;
+    match emitters_by_address.entry(emitter.address.clone()) {
+        Entry::Vacant(entry) => {
+            entry.insert(emitter);
+        }
+        Entry::Occupied(mut entry) => {
+            let existing = entry.get_mut();
+            existing.active_from_block_number = match (
+                existing.active_from_block_number,
+                emitter.active_from_block_number,
+            ) {
+                (Some(existing_from), Some(merged_from)) => Some(existing_from.min(merged_from)),
+                _ => None,
+            };
+            existing.active_to_block_number = match (
+                existing.active_to_block_number,
+                emitter.active_to_block_number,
+            ) {
+                (Some(existing_to), Some(merged_to)) => Some(existing_to.max(merged_to)),
+                _ => None,
+            };
+        }
+    }
+}
+
 pub(crate) fn emitters_by_address(
     emitters: &[ActiveEmitter],
 ) -> HashMap<String, Vec<ActiveEmitter>> {
@@ -101,8 +136,8 @@ pub(crate) async fn load_active_emitters(
         }
         ensure_watched_contract_manifest_chain(&watched_contract, manifest, source_manifest_id)?;
 
-        emitters_by_address.insert(
-            watched_contract.address.clone(),
+        merge_active_emitter(
+            &mut emitters_by_address,
             ActiveEmitter {
                 address: watched_contract.address,
                 contract_instance_id: watched_contract.contract_instance_id,
@@ -121,9 +156,7 @@ pub(crate) async fn load_active_emitters(
         for emitter in
             load_discovered_resolver_emitters(pool, chain, resolver_edge_kind, &manifest).await?
         {
-            emitters_by_address
-                .entry(emitter.address.clone())
-                .or_insert(emitter);
+            merge_active_emitter(&mut emitters_by_address, emitter);
         }
     }
 
@@ -223,4 +256,51 @@ pub(crate) fn dns_decode(bytes: &[u8]) -> Result<String> {
 
 pub(crate) fn hex_string(bytes: impl AsRef<[u8]>) -> String {
     crate::evm_abi::hex_string_without_prefix(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn emitter(active_from: Option<i64>, active_to: Option<i64>) -> ActiveEmitter {
+        ActiveEmitter {
+            address: "0xresolver".to_owned(),
+            contract_instance_id: Uuid::from_u128(1),
+            source_manifest_id: 1,
+            namespace: "ens".to_owned(),
+            source_family: "ens_v2_resolver_l1".to_owned(),
+            manifest_version: 1,
+            active_from_block_number: active_from,
+            active_to_block_number: active_to,
+        }
+    }
+
+    #[test]
+    fn merge_active_emitter_unions_edge_intervals_per_address() {
+        let mut by_address = HashMap::new();
+
+        // The discovery order is arbitrary — a later-discovered edge must not shadow earlier
+        // coverage (the bug this guards against: only the kept edge's interval was honoured, so
+        // logs before its activation block were silently dropped).
+        merge_active_emitter(&mut by_address, emitter(Some(10_710_418), Some(10_800_000)));
+        merge_active_emitter(&mut by_address, emitter(Some(10_696_215), Some(10_750_000)));
+        let merged = by_address.get("0xresolver").expect("merged emitter");
+        assert_eq!(merged.active_from_block_number, Some(10_696_215));
+        assert_eq!(merged.active_to_block_number, Some(10_800_000));
+
+        // An open-ended edge (no activation / no deactivation bound) opens that side of the
+        // envelope for the address.
+        merge_active_emitter(&mut by_address, emitter(None, None));
+        let merged = by_address.get("0xresolver").expect("merged emitter");
+        assert_eq!(merged.active_from_block_number, None);
+        assert_eq!(merged.active_to_block_number, None);
+    }
+
+    #[test]
+    fn active_emitter_for_block_respects_the_merged_envelope() {
+        let merged = [emitter(Some(10_696_215), None)];
+        assert!(active_emitter_for_block(&merged, 10_696_215).is_some());
+        assert!(active_emitter_for_block(&merged, 10_704_585).is_some());
+        assert!(active_emitter_for_block(&merged, 10_696_214).is_none());
+    }
 }
