@@ -79,6 +79,36 @@ pub(crate) async fn persist_reconciled_raw_blocks(
     Ok(())
 }
 
+pub(crate) async fn persist_reconciled_raw_state(
+    pool: &sqlx::PgPool,
+    task: &IntakeChainTask,
+    provider: &(impl ChainProviderOps + ?Sized),
+    heads: &ProviderHeadSnapshot,
+    canonical: &CanonicalReconciliation,
+    head_change_set: HeadChangeSet,
+    adapter_sync_enabled: bool,
+    header_audit_mode: HeaderAuditMode,
+    event_silent_resolver_addresses: &[String],
+) -> Result<()> {
+    persist_reconciled_raw_blocks(pool, &task.chain, heads, canonical, header_audit_mode).await?;
+    if head_change_set.requires_raw_payload_refresh(canonical.status) {
+        persist_reconciled_raw_payloads(
+            pool,
+            &task.chain,
+            &task.addresses,
+            provider,
+            heads,
+            canonical,
+            head_change_set,
+            adapter_sync_enabled,
+            event_silent_resolver_addresses,
+        )
+        .await?;
+    }
+    persist_reconciled_raw_code_hashes(pool, task, provider, heads, canonical, head_change_set)
+        .await
+}
+
 pub(crate) async fn persist_reconciled_raw_payloads(
     pool: &sqlx::PgPool,
     chain: &str,
