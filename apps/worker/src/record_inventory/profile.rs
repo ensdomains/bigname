@@ -427,7 +427,7 @@ fn resolver_record_fact_families(
         (SOURCE_FAMILY_ENS_V1_RESOLVER_L1, "abi") => {
             vec!["resolver_record:abi", RESOLVER_PROFILE_FACT_FAMILY_RECORD]
         }
-        (SOURCE_FAMILY_ENS_V1_RESOLVER_L1, "content" | UNSUPPORTED_CONTENTHASH_RECORD_FAMILY) => {
+        (SOURCE_FAMILY_ENS_V1_RESOLVER_L1, "content" | CONTENTHASH_RECORD_FAMILY) => {
             vec![
                 "resolver_record:contenthash",
                 RESOLVER_PROFILE_FACT_FAMILY_RECORD,

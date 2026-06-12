@@ -513,6 +513,139 @@ async fn rebuild_surfaces_supported_selectors_gaps_and_unsupported_families() ->
 }
 
 #[tokio::test]
+async fn rebuild_retains_addr_and_contenthash_values_from_event_payloads() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let resource_id = Uuid::from_u128(0x9510);
+
+    seed_resources(database.pool(), &[resource_id]).await?;
+    seed_raw_blocks(
+        database.pool(),
+        &[
+            raw_block("ethereum-mainnet", "0xrec1025", 1025, 1_776_200_025),
+            raw_block("ethereum-mainnet", "0xrec1026", 1026, 1_776_200_026),
+        ],
+    )
+    .await?;
+
+    // Mirror the real adapter payloads: text retains `value`; addr/contenthash carry their raw
+    // payload in `address_bytes_hex`/`contenthash_hex` with no `value` key.
+    let mut addr_event = record_changed_event(
+        "addr-bytes",
+        "ens:retained.eth",
+        resource_id,
+        "addr:60",
+        "addr",
+        Some("60"),
+        1026,
+        0,
+    );
+    addr_event.after_state["value_retained"] = json!(false);
+    addr_event.after_state["address_bytes_hex"] =
+        json!("0x4ce0fb7f128b9f1c6f8f8d5144203801936027b8");
+    let mut contenthash_event = record_changed_event(
+        "contenthash-bytes",
+        "ens:retained.eth",
+        resource_id,
+        "contenthash",
+        "contenthash",
+        None,
+        1026,
+        1,
+    );
+    contenthash_event.after_state["value_retained"] = json!(false);
+    contenthash_event.after_state["contenthash_hex"] = json!("0xe30101701220aabbccdd");
+    let mut text_event = record_changed_event(
+        "text-value",
+        "ens:retained.eth",
+        resource_id,
+        "text:avatar",
+        "text",
+        Some("avatar"),
+        1026,
+        2,
+    );
+    text_event.after_state["value_retained"] = json!(true);
+    text_event.after_state["value"] = json!("https://example.com/a.png");
+
+    seed_events(
+        database.pool(),
+        &[
+            record_version_changed_event(
+                "retained-boundary",
+                "ens:retained.eth",
+                resource_id,
+                9,
+                1025,
+                0,
+            ),
+            addr_event,
+            contenthash_event,
+            text_event,
+        ],
+    )
+    .await?;
+
+    rebuild_record_inventory_current(database.pool(), Some(&resource_id.to_string())).await?;
+
+    let row = load_record_inventory_current(
+        database.pool(),
+        resource_id,
+        &record_version_boundary(
+            "ens:retained.eth",
+            resource_id,
+            Some(1),
+            Some(EVENT_KIND_RECORD_VERSION_CHANGED),
+            1025,
+            "0xrec1025",
+            1_776_200_025,
+            "ethereum-mainnet",
+        ),
+    )
+    .await?
+    .context("row must exist")?;
+
+    // Contenthash is a supported selector family; nothing lands in unsupported_families.
+    assert_eq!(
+        row.selectors,
+        json!([
+            {"record_key": "addr:60", "record_family": "addr", "selector_key": "60", "cacheable": true},
+            {"record_key": "contenthash", "record_family": "contenthash", "selector_key": null, "cacheable": true},
+            {"record_key": "text:avatar", "record_family": "text", "selector_key": "avatar", "cacheable": true},
+        ])
+    );
+    assert_eq!(row.unsupported_families, json!([]));
+    // All three entries retain values: text verbatim, addr/contenthash as their raw payload hex.
+    assert_eq!(
+        row.entries,
+        json!([
+            {
+                "record_key": "addr:60",
+                "record_family": "addr",
+                "selector_key": "60",
+                "status": "success",
+                "value": "0x4ce0fb7f128b9f1c6f8f8d5144203801936027b8",
+            },
+            {
+                "record_key": "contenthash",
+                "record_family": "contenthash",
+                "selector_key": null,
+                "status": "success",
+                "value": "0xe30101701220aabbccdd",
+            },
+            {
+                "record_key": "text:avatar",
+                "record_family": "text",
+                "selector_key": "avatar",
+                "status": "success",
+                "value": "https://example.com/a.png",
+            },
+        ])
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn rebuild_resets_inventory_at_latest_record_version_boundary() -> Result<()> {
     let database = TestDatabase::new().await?;
     let resource_id = Uuid::from_u128(0x9600);

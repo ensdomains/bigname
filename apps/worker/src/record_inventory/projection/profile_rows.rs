@@ -27,8 +27,8 @@ pub(super) async fn build_profile_gated_row(
         }),
         selectors: Value::Array(vec![]),
         explicit_gaps: Value::Array(vec![gap_value(
-            UNSUPPORTED_CONTENTHASH_RECORD_KEY,
-            UNSUPPORTED_CONTENTHASH_RECORD_FAMILY,
+            CONTENTHASH_RECORD_KEY,
+            CONTENTHASH_RECORD_FAMILY,
             None,
         )]),
         unsupported_families: Value::Array(vec![

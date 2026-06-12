@@ -92,8 +92,7 @@ pub(super) fn build_entries(
                 latest_value = event
                     .after_state
                     .as_object()
-                    .and_then(|object| object.get("value"))
-                    .cloned();
+                    .and_then(|object| retained_entry_value(object, &selector.record_family));
                 break;
             }
         }
@@ -167,8 +166,31 @@ fn is_supported_selector(selector: &RecordSelector) -> bool {
             .selector_key
             .as_ref()
             .is_some_and(|selector_key| selector.record_key == format!("addr:{selector_key}")),
+        CONTENTHASH_RECORD_FAMILY => {
+            selector.selector_key.is_none() && selector.record_key == CONTENTHASH_RECORD_KEY
+        }
         _ => false,
     }
+}
+
+/// The value a cache entry retains for a record event. Text events carry a display string in
+/// `value`; addr/contenthash events carry their raw on-chain payload verbatim in
+/// `address_bytes_hex`/`contenthash_hex` (the adapter never interprets typed bytes). The raw hex
+/// IS the wire shape record consumers expect — coin addresses and contenthashes are decoded
+/// client-side per ENSIP-9/11 — so retaining it verbatim stays faithful to the log.
+fn retained_entry_value(
+    after_state: &serde_json::Map<String, Value>,
+    record_family: &str,
+) -> Option<Value> {
+    if let Some(value) = after_state.get("value") {
+        return Some(value.clone());
+    }
+    let payload_field = match record_family {
+        SUPPORTED_ADDR_RECORD_FAMILY => "address_bytes_hex",
+        CONTENTHASH_RECORD_FAMILY => "contenthash_hex",
+        _ => return None,
+    };
+    after_state.get(payload_field).cloned()
 }
 
 fn parse_record_selector(event: &RelevantEvent) -> Result<RecordSelector> {
