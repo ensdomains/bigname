@@ -1,5 +1,5 @@
 <h1 align="center">
-  <img src="docs/assets/bigname-lockup-capheight.svg" alt="bigname" width="420">
+  <img src="docs/assets/bigname-lockup-capheight.svg" alt="bigname" width="100%">
 </h1>
 
 A replayable, auditable indexing and read API for ENS, ENSv2, and Basenames.
