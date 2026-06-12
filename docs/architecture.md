@@ -208,7 +208,7 @@ Stages per chain:
 7. projection updates
 8. execution-cache invalidation
 
-Postgres is the hot indexed and replay-focused store. Lineage anchors, selected target logs, replay-required call snapshots, code-hash observations, and compact payload-cache metadata are durable. Large block payloads, non-indexed transaction or receipt bodies, and non-audit raw-log staging rows are evictable cache once their replay contract is satisfied. Empty historical blocks retain only lineage anchors and audit metadata.
+Postgres is the hot indexed and replay-focused store. Lineage anchors, selected target logs and their same-transaction sibling replay context, replay-required call snapshots, code-hash observations, and compact payload-cache metadata are durable. Large block payloads, non-indexed transaction or receipt bodies, and non-audit raw-log staging rows are evictable cache once their replay contract is satisfied. Empty historical blocks retain only lineage anchors and audit metadata.
 
 Backfill enters as bounded persisted jobs with resumable range checkpoints and uses the same stages as live intake. Backfill checkpoint state is operational worker state — it does not promote canonical, safe, or finalized chain checkpoints.
 

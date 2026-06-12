@@ -46,9 +46,8 @@ pub(crate) use reservation_execution::{
 #[cfg(test)]
 pub(crate) use selection::SelectedTargetIntervalIndex;
 pub(crate) use source::{
-    BackfillTopicPlan, CoinbaseSqlFetchStats, HistoricalBackfillSourceOps,
-    HistoricalCodeObservationScope, HistoricalLogPayload, HistoricalLogPayloadRequest,
-    HistoricalLogValidationFilter,
+    BackfillTopicPlan, CoinbaseSqlFetchStats, HistoricalBackfillSourceOps, HistoricalLogPayload,
+    HistoricalLogPayloadRequest, HistoricalLogValidationFilter,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -43,17 +43,9 @@ pub(crate) struct HistoricalLogPayload {
     pub(crate) receipts_by_block: BTreeMap<i64, Vec<ProviderReceipt>>,
     pub(crate) logs_need_validation_provider_payload: bool,
     pub(crate) logs_filtered_by_selected_target_index: bool,
-    pub(crate) code_observation_scope: HistoricalCodeObservationScope,
     pub(crate) validation_filters: Vec<HistoricalLogValidationFilter>,
     pub(crate) validation_mode: CoinbaseSqlValidationMode,
     pub(crate) source_stats: CoinbaseSqlFetchStats,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) enum HistoricalCodeObservationScope {
-    #[default]
-    SelectedAddresses,
-    LogEmittersOnly,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]

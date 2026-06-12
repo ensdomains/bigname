@@ -824,7 +824,7 @@ async fn bootstrap_auto_backfill_drains_manifest_started_targets_and_preserves_c
     assert_eq!(outcome.reserved_range_count, 1);
     assert_eq!(outcome.completed_range_count, 1);
     assert_eq!(outcome.resolved_block_count, 2);
-    assert_eq!(outcome.raw_log_count, 4);
+    assert_eq!(outcome.raw_log_count, 6);
     assert_eq!(outcome.raw_code_hash_count, 4);
 
     let jobs = sqlx::query_as::<_, (i64, String, String, i64, i64, String, Value)>(
@@ -919,7 +919,7 @@ async fn bootstrap_auto_backfill_drains_manifest_started_targets_and_preserves_c
             .bind(future_address)
             .fetch_one(database.pool())
             .await?,
-        0
+        2
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM raw_logs WHERE emitting_address = $1")
@@ -1081,7 +1081,14 @@ async fn bootstrap_auto_backfill_drains_manifest_started_targets_and_preserves_c
     let log_requests = requests
         .iter()
         .enumerate()
-        .filter(|(_, request)| request.method == "eth_getLogs")
+        .filter(|(_, request)| {
+            request.method == "eth_getLogs"
+                && request
+                    .params
+                    .first()
+                    .and_then(Value::as_object)
+                    .is_some_and(|filter| filter.contains_key("fromBlock"))
+        })
         .collect::<Vec<_>>();
     assert_eq!(
         log_requests.len(),
@@ -1319,7 +1326,7 @@ async fn bootstrap_auto_backfill_scans_ensv1_resolver_events_by_source_family() 
     assert_eq!(outcome.eligible_target_count, 3);
     assert_eq!(outcome.drained_job_count, 1);
     assert_eq!(outcome.resolved_block_count, 4);
-    assert_eq!(outcome.raw_log_count, 4);
+    assert_eq!(outcome.raw_log_count, 5);
 
     let source_identity =
         sqlx::query_scalar::<_, Value>("SELECT source_identity FROM backfill_jobs")
@@ -1364,7 +1371,7 @@ async fn bootstrap_auto_backfill_scans_ensv1_resolver_events_by_source_family() 
 
     for (address, expected_count) in [
         (unlisted_resolver_address, 1_i64),
-        (resolver_a_address, 1_i64),
+        (resolver_a_address, 2_i64),
         (resolver_b_address, 1_i64),
     ] {
         assert_eq!(
@@ -1389,7 +1396,14 @@ async fn bootstrap_auto_backfill_scans_ensv1_resolver_events_by_source_family() 
         .clone();
     let log_requests = requests
         .iter()
-        .filter(|request| request.method == "eth_getLogs")
+        .filter(|request| {
+            request.method == "eth_getLogs"
+                && request
+                    .params
+                    .first()
+                    .and_then(Value::as_object)
+                    .is_some_and(|filter| filter.contains_key("fromBlock"))
+        })
         .collect::<Vec<_>>();
     assert_eq!(log_requests.len(), 2);
     let log_filter = log_requests[0]

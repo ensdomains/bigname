@@ -200,7 +200,7 @@ fn sample_validation_allows_large_decoded_registry_scan_all_payloads() -> Result
     ensure_coinbase_sql_sample_validation_size(
         BackfillBlockRange::new(1, 8_192)?,
         19_894,
-        4_070,
+        MAX_COINBASE_SQL_SAMPLE_VALIDATION_BLOCKS,
         false,
         decoded_payload_log_limit,
     )
@@ -235,14 +235,14 @@ fn sample_validation_allows_moderate_decoded_registrar_address_payloads() -> Res
     ensure_coinbase_sql_sample_validation_size(
         BackfillBlockRange::new(1, 4_096)?,
         9_604,
-        2_131,
+        MAX_COINBASE_SQL_SAMPLE_VALIDATION_BLOCKS,
         false,
         decoded_payload_log_limit,
     )?;
     let error = ensure_coinbase_sql_sample_validation_size(
         BackfillBlockRange::new(1, 8_192)?,
         MAX_COINBASE_SQL_BASENAMES_REGISTRAR_SAMPLE_DECODED_PAYLOAD_LOGS + 1,
-        3_548,
+        MAX_COINBASE_SQL_SAMPLE_VALIDATION_BLOCKS,
         false,
         decoded_payload_log_limit,
     )

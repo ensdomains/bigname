@@ -120,18 +120,6 @@ pub(crate) fn selected_address_set(addresses: &[String]) -> BTreeSet<String> {
         .collect()
 }
 
-pub(crate) fn provider_logs_to_selected_raw_logs(
-    chain: &str,
-    raw_block: &RawBlock,
-    logs: &[ProviderLog],
-    selected_addresses: &BTreeSet<String>,
-) -> Result<Vec<RawLog>> {
-    logs.iter()
-        .filter(|log| selected_addresses.contains(&log.address.to_ascii_lowercase()))
-        .map(|log| provider_log_to_raw_log(chain, raw_block, log))
-        .collect()
-}
-
 pub(crate) fn provider_logs_to_live_selected_raw_logs(
     chain: &str,
     raw_block: &RawBlock,
