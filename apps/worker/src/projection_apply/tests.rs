@@ -801,7 +801,7 @@ async fn root_permission_changes_invalidate_permissions_current() -> Result<()> 
         EventSeed {
             event_identity: "projection-apply:root-permission-change",
             namespace: "ens",
-            logical_name_id: Some("ens:root-permission.eth"),
+            logical_name_id: None,
             resource_id: Some(resource_id),
             event_kind: "RootPermissionChanged",
             source_family: "ens_v2_registry_l1",
