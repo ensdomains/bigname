@@ -19,8 +19,6 @@ pub(super) async fn name_records(
     ))
 }
 
-include!("records_warmup.rs");
-
 async fn compact_name_records_response_for_name(
     state: &AppState,
     namespace: &str,
@@ -40,3 +38,5 @@ async fn compact_name_records_response_for_name(
         read.verified_outcome.as_ref(),
     ))
 }
+
+include!("records_warmup.rs");

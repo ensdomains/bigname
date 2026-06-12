@@ -47,7 +47,8 @@ fn compact_requested_text_keys(
 }
 
 fn compact_should_include_known_or_basic_texts(request: &CompactNameRecordsRequest) -> bool {
-    request.include.known_text_keys
+    request.default_profile_include
+        && request.include.known_text_keys
         && matches!(
             request.mode,
             CompactNameRecordsMode::Auto

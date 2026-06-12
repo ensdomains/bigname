@@ -162,7 +162,7 @@ async fn names_collection_returns_compact_projection_rows_with_counts_and_stable
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v1/names?namespace=ens&account={address}&relation=any&contains=lic&sort=expiry_date&order=asc&include=total_count&page_size=1"
+                    "/v1/names?namespace=ens&account={address}&relation=any&contains=lic&sort=expiry_date&order=asc&include=total_count,record_summaries&page_size=1"
                 ))
                 .body(Body::empty())
                 .expect("request must build"),
@@ -174,7 +174,10 @@ async fn names_collection_returns_compact_projection_rows_with_counts_and_stable
     assert_eq!(payload["page"]["sort"], json!("expiry_date_asc"));
     assert_eq!(payload["page"]["page_size"], json!(1));
     assert_eq!(payload["meta"]["total_count"], json!(2));
-    assert_eq!(payload["meta"]["unsupported_fields"], json!([]));
+    assert_eq!(
+        payload["meta"]["unsupported_fields"],
+        json!(["record_summaries"])
+    );
     assert_eq!(
         payload["data"]
             .as_array()

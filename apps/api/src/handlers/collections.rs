@@ -62,6 +62,11 @@ pub(super) async fn address_names(
             "failed to load current address-name collection for address {normalized_address}"
         ))
     })?;
+    let coverage_samples = storage_page
+        .entries
+        .iter()
+        .map(|entry| entry.coverage.clone())
+        .collect::<Vec<_>>();
     let page = page_response_from_storage_cursor(
         &pagination,
         &cursor_spec,
@@ -75,6 +80,7 @@ pub(super) async fn address_names(
             &state.pool,
             &storage_page.entries,
             &storage_page.summary,
+            &coverage_samples,
             page,
         )
         .await?
@@ -87,6 +93,7 @@ pub(super) async fn address_names(
         build_address_names_response_from_summary(
             &storage_page.summary,
             data,
+            &coverage_samples,
             AddressNamesResponseSupplement::default(),
             page,
         )
@@ -373,6 +380,7 @@ async fn build_address_names_response_with_role_summary(
     pool: &PgPool,
     page_entries: &[AddressNameCurrentEntry],
     collection_summary: &bigname_storage::AddressNamesCurrentSummary,
+    coverage_samples: &[JsonValue],
     page: HistoryPageResponse,
 ) -> ApiResult<AddressNamesResponse> {
     let logical_name_ids = page_entries
@@ -468,6 +476,7 @@ async fn build_address_names_response_with_role_summary(
     Ok(build_address_names_response_from_summary(
         collection_summary,
         data,
+        coverage_samples,
         supplement,
         page,
     ))

@@ -341,6 +341,224 @@ async fn derives_key_scoped_invalidations_from_normalized_event_changes() -> Res
 }
 
 #[tokio::test]
+async fn ensv2_parent_changed_invalidates_linked_children_parent() -> Result<()> {
+    let database = test_database().await?;
+    let parent_contract_instance_id = Uuid::from_u128(0x3801).to_string();
+    let child_registry_contract_instance_id = Uuid::from_u128(0x3802).to_string();
+    let observed_at = timestamp(1_800_000_010);
+
+    insert_name_surface(&database, "ens:old.eth", "old.eth").await?;
+    insert_name_surface(&database, "ens:alice.eth", "alice.eth").await?;
+    insert_name_surface(&database, "ens:bob.alice.eth", "bob.alice.eth").await?;
+    sqlx::query(
+        r#"
+        INSERT INTO children_current (
+            parent_logical_name_id,
+            child_logical_name_id,
+            surface_class,
+            namespace,
+            canonical_display_name,
+            normalized_name,
+            namehash,
+            labelhash,
+            owner,
+            registrant,
+            provenance,
+            chain_positions,
+            canonicality_summary,
+            manifest_version,
+            last_recomputed_at
+        )
+        VALUES (
+            'ens:old.eth',
+            'ens:alice.eth',
+            'declared',
+            'ens',
+            'alice.eth',
+            'alice.eth',
+            'node:alice.eth',
+            '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+            NULL,
+            NULL,
+            '{"source":"projection_apply_test"}'::jsonb,
+            '{}'::jsonb,
+            '{"status":"finalized"}'::jsonb,
+            1,
+            $1
+        ),
+        (
+            'ens:alice.eth',
+            'ens:bob.alice.eth',
+            'declared',
+            'ens',
+            'bob.alice.eth',
+            'bob.alice.eth',
+            'node:bob.alice.eth',
+            '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+            NULL,
+            NULL,
+            '{"source":"projection_apply_test"}'::jsonb,
+            '{}'::jsonb,
+            '{"status":"finalized"}'::jsonb,
+            1,
+            $1
+        )
+        "#,
+    )
+    .bind(observed_at)
+    .execute(database.pool())
+    .await
+    .context("failed to seed stale old-parent children_current row")?;
+    insert_event(
+        &database,
+        EventSeed {
+            event_identity: "projection-apply:ensv2-subregistry-link",
+            namespace: "ens",
+            logical_name_id: Some("ens:alice.eth"),
+            resource_id: None,
+            event_kind: "SubregistryChanged",
+            source_family: "ens_v2_root_l1",
+            derivation_kind: "ens_v2_registry_resource_surface",
+            chain_id: Some("ethereum-mainnet"),
+            block_number: Some(40),
+            block_hash: Some("0xensv2subregistry40"),
+            before_state: json!({}),
+            after_state: json!({
+                "source_event": "SubregistryUpdated",
+                "from_contract_instance_id": parent_contract_instance_id,
+                "to_contract_instance_id": child_registry_contract_instance_id
+            }),
+            observed_at,
+        },
+    )
+    .await?;
+    derive_normalized_event_invalidations(database.pool(), 100).await?;
+    sqlx::query("DELETE FROM projection_invalidations")
+        .execute(database.pool())
+        .await
+        .context("failed to clear subregistry invalidation")?;
+
+    insert_event(
+        &database,
+        EventSeed {
+            event_identity: "projection-apply:ensv2-parent-change",
+            namespace: "ens",
+            logical_name_id: None,
+            resource_id: None,
+            event_kind: "ParentChanged",
+            source_family: "ens_v2_registry_l1",
+            derivation_kind: "ens_v2_registry_resource_surface",
+            chain_id: Some("ethereum-mainnet"),
+            block_number: Some(41),
+            block_hash: Some("0xensv2parent41"),
+            before_state: json!({}),
+            after_state: json!({
+                "source_event": "ParentUpdated",
+                "registry_name": "alice.eth",
+                "registry_contract_instance_id": child_registry_contract_instance_id,
+                "parent_contract_instance_id": parent_contract_instance_id
+            }),
+            observed_at: timestamp(1_800_000_011),
+        },
+    )
+    .await?;
+
+    let summary = derive_normalized_event_invalidations(database.pool(), 100).await?;
+    assert_eq!(summary.scanned_event_count, 1);
+    let invalidations = load_invalidations(&database).await?;
+    assert!(has_key(&invalidations, "children_current", "ens:alice.eth"));
+    assert!(has_key(&invalidations, "children_current", "ens:old.eth"));
+    assert_eq!(
+        load_invalidation_payload(&database, "children_current", "ens:alice.eth").await?,
+        json!({"parent_logical_name_id": "ens:alice.eth"})
+    );
+    assert_eq!(
+        load_invalidation_payload(&database, "children_current", "ens:old.eth").await?,
+        json!({"parent_logical_name_id": "ens:old.eth"})
+    );
+
+    sqlx::query("DELETE FROM projection_invalidations")
+        .execute(database.pool())
+        .await
+        .context("failed to clear registry-source parent invalidation")?;
+    insert_event(
+        &database,
+        EventSeed {
+            event_identity: "projection-apply:ensv2-root-parent-change",
+            namespace: "ens",
+            logical_name_id: None,
+            resource_id: None,
+            event_kind: "ParentChanged",
+            source_family: "ens_v2_root_l1",
+            derivation_kind: "ens_v2_registry_resource_surface",
+            chain_id: Some("ethereum-mainnet"),
+            block_number: Some(42),
+            block_hash: Some("0xensv2parent42"),
+            before_state: json!({}),
+            after_state: json!({
+                "source_event": "ParentUpdated",
+                "registry_name": "alice.eth",
+                "registry_contract_instance_id": child_registry_contract_instance_id,
+                "parent_contract_instance_id": parent_contract_instance_id
+            }),
+            observed_at: timestamp(1_800_000_012),
+        },
+    )
+    .await?;
+
+    let summary = derive_normalized_event_invalidations(database.pool(), 100).await?;
+    assert_eq!(summary.scanned_event_count, 1);
+    let invalidations = load_invalidations(&database).await?;
+    assert!(has_key(&invalidations, "children_current", "ens:alice.eth"));
+    assert!(has_key(&invalidations, "children_current", "ens:old.eth"));
+
+    sqlx::query("DELETE FROM projection_invalidations")
+        .execute(database.pool())
+        .await
+        .context("failed to clear first parent invalidation")?;
+    insert_event(
+        &database,
+        EventSeed {
+            event_identity: "projection-apply:ensv2-parent-change-null-parent",
+            namespace: "ens",
+            logical_name_id: None,
+            resource_id: None,
+            event_kind: "ParentChanged",
+            source_family: "ens_v2_registry_l1",
+            derivation_kind: "ens_v2_registry_resource_surface",
+            chain_id: Some("ethereum-mainnet"),
+            block_number: Some(43),
+            block_hash: Some("0xensv2parent43"),
+            before_state: json!({}),
+            after_state: json!({
+                "source_event": "ParentUpdated",
+                "registry_name": "alice.eth",
+                "registry_contract_instance_id": child_registry_contract_instance_id,
+                "parent_contract_instance_id": null
+            }),
+            observed_at: timestamp(1_800_000_013),
+        },
+    )
+    .await?;
+
+    let summary = derive_normalized_event_invalidations(database.pool(), 100).await?;
+    assert_eq!(summary.scanned_event_count, 1);
+    let invalidations = load_invalidations(&database).await?;
+    assert!(has_key(&invalidations, "children_current", "ens:alice.eth"));
+    assert!(has_key(&invalidations, "children_current", "ens:old.eth"));
+    assert_eq!(
+        load_invalidation_payload(&database, "children_current", "ens:alice.eth").await?,
+        json!({"parent_logical_name_id": "ens:alice.eth"})
+    );
+    assert_eq!(
+        load_invalidation_payload(&database, "children_current", "ens:old.eth").await?,
+        json!({"parent_logical_name_id": "ens:old.eth"})
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn address_names_permission_changes_invalidate_existing_authority_owner() -> Result<()> {
     let database = test_database().await?;
     let resource_id = Uuid::new_v4();

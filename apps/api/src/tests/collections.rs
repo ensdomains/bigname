@@ -1544,6 +1544,39 @@ async fn get_address_names_returns_surface_first_rows_sorted_with_stable_relatio
         ],
     )
     .await?;
+    let partial_coverage = json!({
+        "status": "partial",
+        "exhaustiveness": "best_effort",
+        "source_classes_considered": ["ensv1_registry_path", "ens_v1_registrar_l1"],
+        "unsupported_reason": "registrar lineage unavailable",
+        "enumeration_basis": "surface_current_relations",
+    });
+    let mut alpha_holder_row = address_name_current_row(
+        address,
+        "ens:alpha.eth",
+        bigname_storage::AddressNameRelation::TokenHolder,
+        "alpha.eth",
+        "alpha.eth",
+        "node:alpha.eth",
+        alpha_surface_binding_id,
+        alpha_resource_id,
+        Some(alpha_token_lineage_id),
+        11,
+    );
+    alpha_holder_row.coverage = partial_coverage.clone();
+    let mut alpha_registrant_row = address_name_current_row(
+        address,
+        "ens:alpha.eth",
+        bigname_storage::AddressNameRelation::Registrant,
+        "alpha.eth",
+        "alpha.eth",
+        "node:alpha.eth",
+        alpha_surface_binding_id,
+        alpha_resource_id,
+        Some(alpha_token_lineage_id),
+        11,
+    );
+    alpha_registrant_row.coverage = partial_coverage;
     bigname_storage::upsert_address_names_current_rows(
         &database.pool,
         &[
@@ -1559,30 +1592,8 @@ async fn get_address_names_returns_surface_first_rows_sorted_with_stable_relatio
                 Some(beta_token_lineage_id),
                 12,
             ),
-            address_name_current_row(
-                address,
-                "ens:alpha.eth",
-                bigname_storage::AddressNameRelation::TokenHolder,
-                "alpha.eth",
-                "alpha.eth",
-                "node:alpha.eth",
-                alpha_surface_binding_id,
-                alpha_resource_id,
-                Some(alpha_token_lineage_id),
-                11,
-            ),
-            address_name_current_row(
-                address,
-                "ens:alpha.eth",
-                bigname_storage::AddressNameRelation::Registrant,
-                "alpha.eth",
-                "alpha.eth",
-                "node:alpha.eth",
-                alpha_surface_binding_id,
-                alpha_resource_id,
-                Some(alpha_token_lineage_id),
-                11,
-            ),
+            alpha_holder_row,
+            alpha_registrant_row,
         ],
     )
     .await?;
@@ -1607,15 +1618,22 @@ async fn get_address_names_returns_surface_first_rows_sorted_with_stable_relatio
             .map(|value| value.is_empty())
             .unwrap_or(false)
     );
-    assert_eq!(payload.coverage.status, "full");
-    assert_eq!(payload.coverage.exhaustiveness, "authoritative");
+    assert_eq!(payload.coverage.status, "partial");
+    assert_eq!(payload.coverage.exhaustiveness, "best_effort");
     assert_eq!(
         payload.coverage.source_classes_considered,
-        vec!["ensv1_registry_path".to_owned()]
+        vec![
+            "ensv1_registry_path".to_owned(),
+            "ens_v1_registrar_l1".to_owned()
+        ]
     );
     assert_eq!(
         payload.coverage.enumeration_basis,
         "surface_current_relations"
+    );
+    assert_eq!(
+        payload.coverage.unsupported_reason.as_deref(),
+        Some("registrar lineage unavailable")
     );
     assert_eq!(payload.page.sort, "display_name_asc");
     assert_eq!(payload.page.page_size, 50);
@@ -1698,9 +1716,24 @@ async fn get_address_names_returns_surface_first_rows_sorted_with_stable_relatio
         50,
         1,
     );
-    assert_address_names_collection_metadata_eq(&payload, &first_page_payload);
-    assert_address_names_collection_metadata_eq(&payload, &second_page_payload);
-    assert_address_names_collection_metadata_eq(&payload, &replay_page_payload);
+    assert_eq!(first_page_payload.declared_state, payload.declared_state);
+    assert_eq!(first_page_payload.verified_state, payload.verified_state);
+    assert_eq!(first_page_payload.provenance, payload.provenance);
+    assert_eq!(first_page_payload.chain_positions, payload.chain_positions);
+    assert_eq!(first_page_payload.consistency, payload.consistency);
+    assert_eq!(first_page_payload.last_updated, payload.last_updated);
+    assert_eq!(second_page_payload.declared_state, payload.declared_state);
+    assert_eq!(second_page_payload.verified_state, payload.verified_state);
+    assert_eq!(second_page_payload.provenance, payload.provenance);
+    assert_eq!(second_page_payload.chain_positions, payload.chain_positions);
+    assert_eq!(second_page_payload.consistency, payload.consistency);
+    assert_eq!(second_page_payload.last_updated, payload.last_updated);
+    assert_eq!(replay_page_payload.declared_state, payload.declared_state);
+    assert_eq!(replay_page_payload.verified_state, payload.verified_state);
+    assert_eq!(replay_page_payload.provenance, payload.provenance);
+    assert_eq!(replay_page_payload.chain_positions, payload.chain_positions);
+    assert_eq!(replay_page_payload.consistency, payload.consistency);
+    assert_eq!(replay_page_payload.last_updated, payload.last_updated);
 
     database.cleanup().await?;
     Ok(())

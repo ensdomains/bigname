@@ -2724,19 +2724,6 @@ fn assert_children_collection_metadata_eq(base: &ChildrenResponse, candidate: &C
     assert_eq!(candidate.last_updated, base.last_updated);
 }
 
-fn assert_address_names_collection_metadata_eq(
-    base: &AddressNamesResponse,
-    candidate: &AddressNamesResponse,
-) {
-    assert_eq!(candidate.declared_state, base.declared_state);
-    assert_eq!(candidate.verified_state, base.verified_state);
-    assert_eq!(candidate.provenance, base.provenance);
-    assert_eq!(candidate.coverage, base.coverage);
-    assert_eq!(candidate.chain_positions, base.chain_positions);
-    assert_eq!(candidate.consistency, base.consistency);
-    assert_eq!(candidate.last_updated, base.last_updated);
-}
-
 fn assert_resource_permissions_collection_metadata_eq(
     base: &ResourcePermissionsResponse,
     candidate: &ResourcePermissionsResponse,
