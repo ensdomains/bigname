@@ -14,14 +14,14 @@ pub(super) fn parse_scope(state: &Value) -> Result<PermissionScope> {
     let scope = state
         .get("scope")
         .and_then(Value::as_object)
-        .context("PermissionChanged after_state.scope must be an object")?;
+        .context("permission event after_state.scope must be an object")?;
     let kind = scope
         .get("kind")
         .and_then(Value::as_str)
-        .context("PermissionChanged after_state.scope.kind must be a string")?;
+        .context("permission event after_state.scope.kind must be a string")?;
 
     match kind {
-        "root" => Ok(PermissionScope::Root),
+        "root" | "registry_root" => Ok(PermissionScope::Root),
         "registry" => Ok(PermissionScope::Registry),
         "resource" => Ok(PermissionScope::Resource),
         "resolver" => Ok(PermissionScope::Resolver {
@@ -66,7 +66,7 @@ pub(super) fn parse_scope(state: &Value) -> Result<PermissionScope> {
                 .context("transport_derived scope must include transport")?
                 .to_owned(),
         }),
-        _ => bail!("unsupported PermissionChanged scope kind {kind}"),
+        _ => bail!("unsupported permission event scope kind {kind}"),
     }
 }
 
@@ -75,15 +75,13 @@ pub(super) fn json_text(value: &Value, path: &[&str]) -> Result<String> {
     for segment in path {
         current = current
             .get(*segment)
-            .with_context(|| format!("missing PermissionChanged field {}", path.join(".")))?;
+            .with_context(|| format!("missing permission event field {}", path.join(".")))?;
     }
 
-    current.as_str().map(str::to_owned).with_context(|| {
-        format!(
-            "PermissionChanged field {} must be a string",
-            path.join(".")
-        )
-    })
+    current
+        .as_str()
+        .map(str::to_owned)
+        .with_context(|| format!("permission event field {} must be a string", path.join(".")))
 }
 
 pub(super) fn json_string_array(value: &Value, path: &[&str]) -> Result<Vec<String>> {
@@ -91,22 +89,17 @@ pub(super) fn json_string_array(value: &Value, path: &[&str]) -> Result<Vec<Stri
     for segment in path {
         current = current
             .get(*segment)
-            .with_context(|| format!("missing PermissionChanged field {}", path.join(".")))?;
+            .with_context(|| format!("missing permission event field {}", path.join(".")))?;
     }
 
     current
         .as_array()
-        .with_context(|| {
-            format!(
-                "PermissionChanged field {} must be an array",
-                path.join(".")
-            )
-        })?
+        .with_context(|| format!("permission event field {} must be an array", path.join(".")))?
         .iter()
         .map(|item| {
             item.as_str().map(str::to_owned).with_context(|| {
                 format!(
-                    "PermissionChanged field {} must contain strings",
+                    "permission event field {} must contain strings",
                     path.join(".")
                 )
             })
