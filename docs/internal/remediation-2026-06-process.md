@@ -66,7 +66,7 @@ For each workstream:
 | WS-A ENSv1 authority | merged | `fix/ens-v1-registry-owner-authority` | [#15](https://github.com/TateB/bigname/pull/15) → [#16](https://github.com/TateB/bigname/pull/16) | Items 1-3 closed via #15; gate branch merged to main in 12bcea0 (PR #16, two 9d057a4 blockers fixed on-branch pre-merge); remaining WS-A items branch off main |
 | WS-B ENSv2 + preimage | not started | — | — | |
 | WS-C Projection pipeline | in progress | `fix/ws-c-projection-integrity` | — | Wave 1 started 2026-06-11; dead-letter state migration planned on this branch — migration review (WS-F rule) happens at PR; worktree /home/ubuntu/bigname-worktrees/ws-c |
-| WS-D Intake resilience | in progress | `fix/ws-d-intake-resilience` | — | Wave 1 started 2026-06-11; owns storage backfill_jobs/, lineage/; worktree /home/ubuntu/bigname-worktrees/ws-d |
+| WS-D Intake resilience | merged | `fix/ws-d-intake-resilience` | [#18](https://github.com/TateB/bigname/pull/18) | Merged 36ab81a; pipeline-unification stacked follow-up + new P2/P3 entries pending; stranded-job race fixed (deflakes bootstrap_auto_backfill test) |
 | WS-E Verified execution & primary names | merged | `fix/ws-e-verified-execution` | [#17](https://github.com/TateB/bigname/pull/17) | Merged 5521105; verified-primary wiring follow-up pending, sequenced after WS-C; record-selector canonicalization P2 added |
 | WS-F Storage write-path & perf | not started | — | — | Migration reviewer for all streams |
 | WS-G API contract & pagination | not started | — | — | Owns storage `history.rs` |
