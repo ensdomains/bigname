@@ -17,6 +17,14 @@ use super::objects::{Domain, DomainConnection, RegistrationConnection};
 const NAMESPACE: &str = "ens";
 /// Page size for `domains` when the subgraph `first` argument is omitted.
 const DEFAULT_DOMAINS_PAGE_SIZE: u64 = 100;
+/// Ceiling for client-supplied `first`, matching the REST surface's `MAX_PAGE_SIZE` so the public
+/// GraphQL path cannot request an unbounded page. The dashboard sends at most `first: 200`;
+/// larger values are clamped silently (a GraphQL error would break subgraph-shaped callers).
+const MAX_DOMAINS_PAGE_SIZE: u64 = crate::pagination::MAX_PAGE_SIZE;
+/// Ceiling for client-supplied `skip`. Offset paging over the full Sepolia set stays well under
+/// this (the dashboard walks an owner's names in 200-row windows), while a hostile deep offset
+/// cannot force Postgres to scan an arbitrary prefix of the filtered set.
+const MAX_DOMAINS_SKIP: u64 = 1_000_000;
 
 pub(crate) struct QueryRoot;
 
@@ -52,10 +60,10 @@ impl QueryRoot {
     ) -> Result<Vec<Domain>> {
         let limit = match first {
             Some(first) if first <= 0 => return Ok(Vec::new()),
-            Some(first) => first as u64,
+            Some(first) => (first as u64).min(MAX_DOMAINS_PAGE_SIZE),
             None => DEFAULT_DOMAINS_PAGE_SIZE,
         };
-        let offset = skip.unwrap_or(0).max(0) as u64;
+        let offset = (skip.unwrap_or(0).max(0) as u64).min(MAX_DOMAINS_SKIP);
         let (sort, order) = storage_sort(order_by, order_direction);
         let state = ctx.data::<AppState>()?;
         let rows = load_name_current_list_page_offset(

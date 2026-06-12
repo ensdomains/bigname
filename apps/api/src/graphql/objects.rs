@@ -1,4 +1,11 @@
-use async_graphql::{Object, SimpleObject};
+use async_graphql::{Context, Object, Result, SimpleObject};
+use bigname_storage::load_record_inventory_current_with_anchor_fallback;
+use sqlx::types::Uuid;
+
+use crate::state::AppState;
+
+use super::convert::resolver_from_store;
+use super::error::internal_error;
 
 /// Subgraph `Account` — the lowercased address as `id`.
 #[derive(SimpleObject)]
@@ -7,40 +14,30 @@ pub(crate) struct Account {
     pub(crate) id: String,
 }
 
-/// Subgraph `AddressRecord` — a coin-typed address record. Dashboard scope never populates these,
-/// but the type is declared so `Resolver.addresses` keeps its shape.
+/// Subgraph `AddressRecord` — a coin-typed address record. `coinType` is `u32`, not `i32`:
+/// ENSIP-11 EVM coin types set the top bit (`0x80000000 | chainId`, e.g. `2147483658`), which the
+/// reference endpoint also serves beyond the signed-32-bit range.
 #[derive(SimpleObject)]
 #[graphql(name = "AddressRecord")]
 pub(crate) struct AddressRecord {
     #[graphql(name = "coinType")]
-    pub(crate) coin_type: i32,
+    pub(crate) coin_type: u32,
     pub(crate) address: String,
 }
 
-/// Subgraph `Resolver`. Record fields are stubbed for dashboard scope (`texts`/`addresses` empty,
-/// `contentHash` null); `id`/`address` carry the resolver contract address. The profile page reads
-/// the record fields — that is a planned fast-follow.
+/// Subgraph `Resolver`. `id`/`address` carry the resolver contract address (non-null, matching the
+/// Manager codegen's `address: string`); the record fields (`texts`/`contentHash`/`addresses`) are
+/// read from the `record_inventory_current` projection by [`resolver_from_store`] — a name whose
+/// resolver has no projected records serves the empty shapes.
 #[derive(SimpleObject)]
 #[graphql(name = "Resolver")]
 pub(crate) struct Resolver {
     pub(crate) id: String,
-    pub(crate) address: Option<String>,
+    pub(crate) address: String,
     pub(crate) texts: Option<Vec<String>>,
     #[graphql(name = "contentHash")]
     pub(crate) content_hash: Option<String>,
     pub(crate) addresses: Option<Vec<AddressRecord>>,
-}
-
-impl Resolver {
-    pub(super) fn from_address(address: String) -> Self {
-        Self {
-            id: address.clone(),
-            address: Some(address),
-            texts: Some(Vec::new()),
-            content_hash: None,
-            addresses: Some(Vec::new()),
-        }
-    }
 }
 
 /// Subgraph `DomainConnection` — only `totalCount` is exercised (`MigratedNamesCount`).
@@ -66,10 +63,14 @@ pub(crate) struct Domain {
     pub(crate) name: Option<String>,
     pub(crate) normalized_name: Option<String>,
     pub(crate) token_id: Option<String>,
-    pub(crate) created_at: Option<i32>,
+    pub(crate) created_at: i32,
     pub(crate) expiry_date: Option<i32>,
     pub(crate) resolver_address: Option<String>,
     pub(crate) owner_id: String,
+    /// `(resource_id, record_version_boundary)` for the name's `record_inventory_current` row,
+    /// derived in `convert.rs`; `None` when the row carries no resolvable boundary, in which case
+    /// the resolver serves the empty record shapes without a read.
+    pub(crate) record_inventory_key: Option<(Uuid, serde_json::Value)>,
 }
 
 #[Object]
@@ -93,7 +94,7 @@ impl Domain {
     }
 
     #[graphql(name = "createdAt")]
-    async fn created_at(&self) -> Option<i32> {
+    async fn created_at(&self) -> i32 {
         self.created_at
     }
 
@@ -102,8 +103,27 @@ impl Domain {
         self.expiry_date
     }
 
-    async fn resolver(&self) -> Option<Resolver> {
-        self.resolver_address.clone().map(Resolver::from_address)
+    /// One exact-PK projection read per domain that actually selects `resolver`; page items
+    /// resolve concurrently, and names without a projected inventory row (the common case until
+    /// the resolver-log sweep lands) serve the empty record shapes.
+    async fn resolver(&self, ctx: &Context<'_>) -> Result<Option<Resolver>> {
+        let Some(address) = self.resolver_address.clone() else {
+            return Ok(None);
+        };
+        let inventory = match self.record_inventory_key.as_ref() {
+            Some((resource_id, boundary)) => {
+                let state = ctx.data::<AppState>()?;
+                load_record_inventory_current_with_anchor_fallback(
+                    &state.pool,
+                    *resource_id,
+                    boundary,
+                )
+                .await
+                .map_err(|error| internal_error("Domain.resolver", error))?
+            }
+            None => None,
+        };
+        Ok(Some(resolver_from_store(address, inventory.as_ref())))
     }
 
     async fn owner(&self) -> Account {

@@ -8,8 +8,17 @@ use super::query::QueryRoot;
 
 pub(crate) type SubgraphSchema = Schema<QueryRoot, EmptyMutation, EmptySubscription>;
 
+/// Depth/complexity ceilings. The deepest legitimate documents are GraphiQL's introspection query
+/// (~14 levels through the nested `ofType` fragment) and the Manager's `Domain` fragment (~5);
+/// complexity is counted per field selection, so the full introspection document lands in the low
+/// hundreds. The ceilings block pathological nesting / alias-spam without touching real callers.
+const MAX_QUERY_DEPTH: usize = 32;
+const MAX_QUERY_COMPLEXITY: usize = 4_000;
+
 fn build_schema(state: AppState) -> SubgraphSchema {
     Schema::build(QueryRoot, EmptyMutation, EmptySubscription)
+        .limit_depth(MAX_QUERY_DEPTH)
+        .limit_complexity(MAX_QUERY_COMPLEXITY)
         .data(state)
         .finish()
 }
