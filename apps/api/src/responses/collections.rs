@@ -37,6 +37,7 @@ impl AddressNamesResponseSupplement {
 fn build_address_names_response_from_summary(
     summary: &bigname_storage::AddressNamesCurrentSummary,
     data: Vec<JsonValue>,
+    coverage_samples: &[JsonValue],
     supplement: AddressNamesResponseSupplement,
     page: HistoryPageResponse,
 ) -> AddressNamesResponse {
@@ -58,13 +59,7 @@ fn build_address_names_response_from_summary(
         declared_state: empty_object(),
         verified_state: None,
         provenance,
-        coverage: CoverageResponse {
-            status: "full".to_owned(),
-            exhaustiveness: "authoritative".to_owned(),
-            source_classes_considered: vec!["ensv1_registry_path".to_owned()],
-            enumeration_basis: "surface_current_relations".to_owned(),
-            unsupported_reason: None,
-        },
+        coverage: build_address_names_coverage_from_samples(coverage_samples),
         chain_positions: build_chain_positions_from_values(
             std::iter::once(&summary.chain_positions).chain(supplement.chain_positions.iter()),
         ),
@@ -414,6 +409,37 @@ fn build_permissions_coverage_from_sample(sample: Option<&JsonValue>) -> Coverag
             sample.and_then(|value| provenance_field(value, "enumeration_basis")),
         )
         .unwrap_or_else(|| "resource_permissions".to_owned()),
+        unsupported_reason: string_field(
+            sample.and_then(|value| provenance_field(value, "unsupported_reason")),
+        ),
+    }
+}
+
+fn build_address_names_coverage_from_samples(samples: &[JsonValue]) -> CoverageResponse {
+    let sample = samples
+        .iter()
+        .find(|value| {
+            string_field(provenance_field(value, "status")).as_deref() != Some("full")
+        })
+        .or_else(|| samples.first());
+
+    CoverageResponse {
+        status: string_field(sample.and_then(|value| provenance_field(value, "status")))
+            .unwrap_or_else(|| "full".to_owned()),
+        exhaustiveness: string_field(
+            sample.and_then(|value| provenance_field(value, "exhaustiveness")),
+        )
+        .unwrap_or_else(|| "authoritative".to_owned()),
+        source_classes_considered: match sample
+            .and_then(|value| provenance_field(value, "source_classes_considered"))
+        {
+            Some(JsonValue::Array(values)) => values.iter().filter_map(value_to_string).collect(),
+            _ => vec!["ensv1_registry_path".to_owned()],
+        },
+        enumeration_basis: string_field(
+            sample.and_then(|value| provenance_field(value, "enumeration_basis")),
+        )
+        .unwrap_or_else(|| "surface_current_relations".to_owned()),
         unsupported_reason: string_field(
             sample.and_then(|value| provenance_field(value, "unsupported_reason")),
         ),

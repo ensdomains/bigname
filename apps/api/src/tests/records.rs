@@ -135,6 +135,135 @@ async fn get_name_records_returns_declared_compact_summary() -> Result<()> {
         lean_payload.pointer("/data/text_records/com.twitter/value"),
         Some(&json!("@alice"))
     );
+    assert_eq!(lean_payload.pointer("/data/known_text_keys"), Some(&Value::Null));
+    assert_eq!(lean_payload.pointer("/data/avatar"), Some(&Value::Null));
+    assert_eq!(
+        lean_payload.pointer("/data/content_hash"),
+        Some(&Value::Null)
+    );
+
+    let keys_only_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/names/ens/alice.eth/records?include=known_text_keys&mode=auto")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("compact records known-text-keys-only request failed")?;
+    assert_eq!(keys_only_response.status(), StatusCode::OK);
+    let keys_only_payload: Value = read_json(keys_only_response).await?;
+    assert_eq!(
+        keys_only_payload.pointer("/data/text_records"),
+        Some(&Value::Null),
+        "known_text_keys-only requests must not emit text record values: {keys_only_payload:#}"
+    );
+    assert_eq!(
+        keys_only_payload.pointer("/data/known_text_keys/keys"),
+        Some(&json!(["com.twitter"]))
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_name_records_known_text_keys_only_does_not_request_values() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0x2208);
+    let token_lineage_id = Uuid::from_u128(0x1108);
+    let surface_binding_id = Uuid::from_u128(0x3308);
+
+    database
+        .seed_name_current_binding(
+            logical_name_id,
+            "ens",
+            "alice.eth",
+            "Alice.eth",
+            "namehash:alice.eth",
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    database
+        .insert_name_current_row(exact_name_row(
+            logical_name_id,
+            surface_binding_id,
+            resource_id,
+            token_lineage_id,
+        ))
+        .await?;
+    let mut inventory = compact_records_inventory_current_row(logical_name_id, resource_id);
+    inventory.entries = json!([
+        {
+            "record_key": "addr:0",
+            "record_family": "addr",
+            "selector_key": "0",
+            "status": "not_found",
+        },
+        {
+            "record_key": "addr:60",
+            "record_family": "addr",
+            "selector_key": "60",
+            "status": "success",
+            "value": {
+                "coin_type": "60",
+                "value": "0x0000000000000000000000000000000000000abc",
+            },
+        },
+        {
+            "record_key": "avatar",
+            "record_family": "avatar",
+            "selector_key": null,
+            "status": "success",
+            "value": {
+                "value": "ipfs://avatar",
+            },
+        },
+        {
+            "record_key": "contenthash",
+            "record_family": "contenthash",
+            "selector_key": null,
+            "status": "success",
+            "value": {
+                "value": "ipfs://content",
+            },
+        },
+        {
+            "record_key": "text:com.twitter",
+            "record_family": "text",
+            "selector_key": "com.twitter",
+            "status": "unsupported",
+            "unsupported_reason": "value_not_retained_in_normalized_events",
+        },
+    ]);
+    database
+        .insert_record_inventory_current_row(inventory)
+        .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/names/ens/alice.eth/records?include=known_text_keys&mode=verified")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("compact records known-text-key inventory request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload.pointer("/data/text_records"), Some(&Value::Null));
+    assert_eq!(
+        payload.pointer("/data/known_text_keys/keys"),
+        Some(&json!(["com.twitter"]))
+    );
+    assert_eq!(
+        payload.pointer("/meta/unsupported_fields"),
+        Some(&json!([]))
+    );
 
     database.cleanup().await?;
     Ok(())

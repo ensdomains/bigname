@@ -29,28 +29,32 @@ pub(super) async fn warm_compact_records_route_sql_path(
     }
 
     for task in tasks {
-        let result = task
-            .await
-            .context("compact records route SQL warm-up task failed to join")?;
-        if let Err(error) = result {
-            if is_skippable_compact_records_warmup_error(&error) {
+        let result = match task.await {
+            Ok(result) => result,
+            Err(join_error) => {
                 warn!(
                     service = "api",
                     namespace = %namespace,
                     name = %name,
-                    status = %error.status,
-                    code = error.code,
-                    message = %error.message,
-                    "skipped compact records route SQL warm-up because the selected sample was not readable"
+                    error = ?join_error,
+                    "skipped compact records route SQL warm-up because a warm-up task failed"
                 );
                 return Ok(());
             }
-
-            bail!(
-                "compact records route SQL warm-up failed for {namespace}/{name}: {} ({})",
-                error.message,
-                error.code
+        };
+        if let Err(error) = result
+            && is_skippable_compact_records_warmup_error(&error)
+        {
+            warn!(
+                service = "api",
+                namespace = %namespace,
+                name = %name,
+                status = %error.status,
+                code = error.code,
+                message = %error.message,
+                "skipped compact records route SQL warm-up because the warm-up request failed"
             );
+            return Ok(());
         }
     }
 
@@ -65,7 +69,9 @@ pub(super) async fn warm_compact_records_route_sql_path(
 }
 
 fn is_skippable_compact_records_warmup_error(error: &ApiError) -> bool {
-    error.status == StatusCode::NOT_FOUND && error.code == "not_found"
+    error.status == StatusCode::NOT_FOUND
+        || error.status.is_client_error()
+        || error.status.is_server_error()
 }
 
 async fn compact_records_warmup_sample(pool: &PgPool) -> Result<Option<(String, String)>> {
@@ -121,6 +127,18 @@ async fn compact_records_warmup_sample(pool: &PgPool) -> Result<Option<(String, 
     .transpose()
 }
 
+fn compact_records_warmup_query() -> NameRecordsQuery {
+    NameRecordsQuery {
+        mode: Some("declared".to_owned()),
+        known_text_keys: Some("true".to_owned()),
+        avatar: Some("true".to_owned()),
+        content_hash: Some("true".to_owned()),
+        include: Some("resolver_address,known_text_keys,avatar,content_hash,coins".to_owned()),
+        meta: Some("none".to_owned()),
+        ..NameRecordsQuery::default()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -137,21 +155,9 @@ mod tests {
     }
 
     #[test]
-    fn compact_records_warmup_keeps_internal_errors_fatal() {
+    fn compact_records_warmup_treats_internal_errors_as_nonfatal() {
         let error = ApiError::internal_error("projection read failed");
 
-        assert!(!is_skippable_compact_records_warmup_error(&error));
-    }
-}
-
-fn compact_records_warmup_query() -> NameRecordsQuery {
-    NameRecordsQuery {
-        mode: Some("declared".to_owned()),
-        known_text_keys: Some("true".to_owned()),
-        avatar: Some("true".to_owned()),
-        content_hash: Some("true".to_owned()),
-        include: Some("resolver_address,known_text_keys,avatar,content_hash,coins".to_owned()),
-        meta: Some("none".to_owned()),
-        ..NameRecordsQuery::default()
+        assert!(is_skippable_compact_records_warmup_error(&error));
     }
 }

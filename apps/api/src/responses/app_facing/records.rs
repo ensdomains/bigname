@@ -63,6 +63,7 @@ pub(crate) struct CompactNameRecordsRequest {
     content_hash: bool,
     coin_types: Vec<String>,
     include: CompactNameRecordsInclude,
+    default_profile_include: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -87,10 +88,10 @@ pub(crate) fn parse_compact_name_records_request(
 ) -> ApiResult<CompactNameRecordsRequest> {
     let mode = parse_compact_name_records_mode(query.mode.as_deref(), default_mode.mode())?;
     let meta = parse_meta_mode(query.meta.as_deref(), MetaMode::Summary)?;
-    let mut include = parse_compact_name_records_include(
-        query.include.as_deref(),
-        mode == CompactNameRecordsMode::Auto,
-    )?;
+    let default_profile_include = mode == CompactNameRecordsMode::Auto
+        && !compact_records_has_explicit_section_selection(query);
+    let mut include =
+        parse_compact_name_records_include(query.include.as_deref(), default_profile_include)?;
     let known_text_keys =
         parse_compact_records_bool("known_text_keys", query.known_text_keys.as_deref())?
             || include.known_text_keys;
@@ -125,6 +126,7 @@ pub(crate) fn parse_compact_name_records_request(
         content_hash,
         coin_types,
         include,
+        default_profile_include,
     })
 }
 
@@ -190,47 +192,69 @@ pub(crate) fn build_compact_name_records_response(
     insert_value_field(
         &mut data,
         "text_records",
-        compact_text_records(
-            record_inventory_row,
-            request,
-            &value_entries,
-            &inventory_lookup,
-        ),
+        if !request.texts.is_empty()
+            || (request.default_profile_include && compact_should_include_known_or_basic_texts(request))
+        {
+            compact_text_records(
+                record_inventory_row,
+                request,
+                &value_entries,
+                &inventory_lookup,
+            )
+        } else {
+            JsonValue::Null
+        },
     );
     insert_value_field(
         &mut data,
         "known_text_keys",
-        compact_known_text_keys(row, record_inventory_row, request, &inventory_lookup),
+        if request.known_text_keys {
+            compact_known_text_keys(row, record_inventory_row, request, &inventory_lookup)
+        } else {
+            JsonValue::Null
+        },
     );
     insert_value_field(
         &mut data,
         "avatar",
-        compact_optional_record(
-            request.avatar,
-            "avatar",
-            &value_entries,
-            &inventory_lookup,
-        ),
+        if request.avatar {
+            compact_optional_record(
+                request.avatar,
+                "avatar",
+                &value_entries,
+                &inventory_lookup,
+            )
+        } else {
+            JsonValue::Null
+        },
     );
     insert_value_field(
         &mut data,
         "content_hash",
-        compact_optional_record(
-            request.content_hash,
-            "contenthash",
-            &value_entries,
-            &inventory_lookup,
-        ),
+        if request.content_hash {
+            compact_optional_record(
+                request.content_hash,
+                "contenthash",
+                &value_entries,
+                &inventory_lookup,
+            )
+        } else {
+            JsonValue::Null
+        },
     );
     insert_value_field(
         &mut data,
         "coin_addresses",
-        compact_coin_addresses(
-            request,
-            record_inventory_row,
-            &value_entries,
-            &inventory_lookup,
-        ),
+        if request.include.coins {
+            compact_coin_addresses(
+                request,
+                record_inventory_row,
+                &value_entries,
+                &inventory_lookup,
+            )
+        } else {
+            JsonValue::Null
+        },
     );
     if request.mode == CompactNameRecordsMode::Both {
         insert_value_field(
@@ -249,6 +273,7 @@ pub(crate) fn build_compact_name_records_response(
                 row,
                 record_inventory_row,
                 request,
+                requested_records,
                 value_source,
                 verified_outcome,
             ),
@@ -335,6 +360,22 @@ fn parse_compact_name_records_include(
     }
 
     Ok(parsed)
+}
+
+fn compact_records_has_explicit_section_selection(query: &NameRecordsQuery) -> bool {
+    fn present(value: &Option<String>) -> bool {
+        value
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|value| !value.is_empty())
+    }
+
+    present(&query.include)
+        || present(&query.texts)
+        || present(&query.known_text_keys)
+        || present(&query.avatar)
+        || present(&query.content_hash)
+        || present(&query.coin_types)
 }
 
 fn parse_compact_records_csv(field_name: &str, value: Option<&str>) -> ApiResult<Vec<String>> {

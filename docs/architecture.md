@@ -438,12 +438,14 @@ Wildcard and offchain names cannot be assumed exhaustively enumerable; backfill 
 
 Metrics: chain lag, safe/finalized lag, reorg depth, adapter failure rate, manifest drift, proxy upgrade detection, execution latency, CCIP error rate, verification failure rate, coverage partial rate, replay duration, backfill capacity checks (Postgres size, free disk).
 
-Worker-owned tools (none expose public `v1` routes; none mutate truth):
+Worker-owned tools (none expose public `v1` routes; inspection tools are read-only):
 
 - `bigname-worker inspect canonicality --chain-id <id> --block-hash <hash>` — single-block lineage, canonicality state, parent hash, raw fact counts, normalized-event counts.
-- `bigname-worker inspect ...` — execution traces, manifest drift / proxy alerts, surface bindings, resolver topology, raw facts, manifest versions.
-- replay from checkpoint, backfill source range, rerun projections from normalized events, invalidate execution cache, diff declared vs verified.
-- finalized-head catch-up runs bounded idempotent chunks with capacity preflight (DB size, free disk, configured object-cache budget).
+- `bigname-worker inspect stored-lineage-range --chain-id <id> --from-block <n> --to-block <n>` — stored lineage rows in a bounded block range.
+- `bigname-worker inspect backfill-job --backfill-job-id <id>` — one persisted backfill job plus child ranges.
+- `bigname-worker inspect execution-trace --execution-trace-id <id>` — one persisted execution trace and its persisted steps.
+- `bigname-worker inspect manifest-drift --json` and `bigname-worker inspect watch-plan --json` — persisted manifest/proxy alert observations and runtime watch-plan state.
+- Current projection maintenance is shipped as point-or-full rebuilds for each current projection family, `replay all-current-projections`, execution-cache invalidation commands, and bounded finalized-head/backfill processing with capacity preflight. Range-scoped projection rebuild, historical rewind materialization, surface-binding inspection, resolver-topology inspection, raw-fact inspection beyond canonicality/stored-lineage views, manifest-version inspection, and declared-vs-verified diff tooling are deferred; operators should not treat them as available CLI contracts.
 
 Live manifest drift / proxy upgrade alerting is a worker-owned operational loop. It does not write `normalized_events`, mutate manifests, rewrite discovery, or expose a public route.
 

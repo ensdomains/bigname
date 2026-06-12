@@ -2,6 +2,7 @@ fn compact_value_source(
     row: &NameCurrentRow,
     record_inventory_row: Option<&RecordInventoryCurrentRow>,
     request: &CompactNameRecordsRequest,
+    requested_records: &[ResolutionRecordKey],
     value_source: CompactNameRecordsValueSource,
     verified_outcome: Option<&ExecutionOutcome>,
 ) -> JsonValue {
@@ -14,11 +15,12 @@ fn compact_value_source(
     } else {
         "not_requested"
     };
-    let verified_requested = value_source == CompactNameRecordsValueSource::Verified
-        || matches!(
-            request.mode,
-            CompactNameRecordsMode::Verified | CompactNameRecordsMode::Both
-        );
+    let verified_requested = !requested_records.is_empty()
+        && (value_source == CompactNameRecordsValueSource::Verified
+            || matches!(
+                request.mode,
+                CompactNameRecordsMode::Verified | CompactNameRecordsMode::Both
+            ));
     let verified_status = if verified_requested {
         compact_verified_status(verified_outcome)
     } else {
@@ -83,6 +85,7 @@ fn compact_name_records_meta(
     row: &NameCurrentRow,
     record_inventory_row: Option<&RecordInventoryCurrentRow>,
     request: &CompactNameRecordsRequest,
+    requested_records: &[ResolutionRecordKey],
     value_source: CompactNameRecordsValueSource,
     verified_outcome: Option<&ExecutionOutcome>,
 ) -> JsonValue {
@@ -90,6 +93,7 @@ fn compact_name_records_meta(
         row,
         record_inventory_row,
         request,
+        requested_records,
         value_source,
         verified_outcome,
     );
@@ -108,7 +112,14 @@ fn compact_name_records_meta(
     insert_value_field(
         &mut meta,
         "value_source",
-        compact_value_source(row, record_inventory_row, request, value_source, verified_outcome),
+        compact_value_source(
+            row,
+            record_inventory_row,
+            request,
+            requested_records,
+            value_source,
+            verified_outcome,
+        ),
     );
     if request.meta == MetaMode::Full {
         insert_value_field(
@@ -142,6 +153,7 @@ fn compact_name_records_unsupported_fields(
     row: &NameCurrentRow,
     record_inventory_row: Option<&RecordInventoryCurrentRow>,
     _request: &CompactNameRecordsRequest,
+    requested_records: &[ResolutionRecordKey],
     value_source: CompactNameRecordsValueSource,
     verified_outcome: Option<&ExecutionOutcome>,
 ) -> Vec<String> {
@@ -150,7 +162,10 @@ fn compact_name_records_unsupported_fields(
         fields.insert("record_inventory");
         fields.insert("record_cache");
     }
-    if value_source == CompactNameRecordsValueSource::Verified && verified_outcome.is_none() {
+    if value_source == CompactNameRecordsValueSource::Verified
+        && !requested_records.is_empty()
+        && verified_outcome.is_none()
+    {
         fields.insert("verified_records");
     }
 

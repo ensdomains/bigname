@@ -328,7 +328,7 @@ Response:
 }
 ```
 
-Uses active/shadow `manifest_versions` to include chains expected by the loaded profile, plus `chain_checkpoints`, retained `chain_lineage`, `projection_normalized_event_changes`, `projection_apply_cursors`, and `projection_invalidations` where available. Fields stay `null` when the deployment has not yet retained the corresponding operational metadata. If no chain readiness data exists for an expected chain, or if pending direct invalidations cannot be tied to a normalized-event chain position, `status` is `degraded`.
+Uses active/shadow `manifest_versions` to include chains expected by the loaded profile, plus `chain_checkpoints`, retained `chain_lineage`, `projection_normalized_event_changes`, `projection_apply_cursors`, and `projection_invalidations` where available. Fields stay `null` when the deployment has not yet retained the corresponding operational metadata. If no chain readiness data exists for an expected chain, or if pending direct invalidations cannot be tied to a normalized-event chain position, `status` is `degraded`. If any expected chain has unapplied normalized-event changes beyond the projection-apply cursor, `status` is `stale` and the lag fields identify the affected chain.
 
 ## `GET /v1/names`
 
@@ -350,8 +350,9 @@ Rules:
 - `resolver` filters by current declared resolver address where the exact-name resolver summary is projected.
 - `resolved_address` is supported only where a declared, replay-stable record-value equality projection exists for the namespace and selector family. Otherwise the filter returns a non-2xx `unsupported` error.
 - Sort orders break ties on `(namespace, normalized_name, namehash)`. `null` sort values order after non-null on `asc`, before non-null on `desc`.
-- `include=record_summaries` adds compact record counts, known text-key hints, avatar/content-hash presence, and known coin-type hints from declared inventory/cache. No verified execution.
+- `include=record_summaries` is accepted but not yet backed by the compact names projection; responses keep item shape unchanged and list `record_summaries` in `meta.unsupported_fields` unless `meta=none`.
 - `include=total_count` populates `meta.total_count` for the filtered set before cursor slicing where supported. Unsupported combinations leave `total_count=null` and add `total_count` to `meta.unsupported_fields`.
+- `meta=full` currently returns the same compact collection metadata as `meta=summary`; full-envelope coverage/provenance diagnostics remain on exact-name and explain routes.
 - `view=full` is reserved and still returns `400 invalid_input`; OpenAPI advertises only `view=compact`.
 
 ## `GET /v1/names/{namespace}/{name}/children`
@@ -392,6 +393,7 @@ Rules:
 - `avatar=true` is a compact alias for the `avatar` text key and may also populate the top-level `avatar` field from declared cache.
 - `content_hash=true` requests the declared content-hash selector.
 - `coin_types` is a comma-separated list of textual coin-type selectors.
+- The v1 compact record object always carries the six compact section keys for schema stability. Unrequested sections are `null`; requested sections may also be `null` for no backed value or unsupported data under the selected metadata mode.
 - `mode=declared` uses `record_cache` and `record_inventory`. No live execution.
 - `mode=verified|both` follows the same supported verified-resolution boundary as `GET /v1/profiles/names/{name}`. Supported ENS cache misses execute through the configured Ethereum RPC provider at the selected stored snapshot and persist the trace/outcome before joining it.
 - `mode=auto`: an authoritative declared profile uses local inventory/cache only when the declared cache can satisfy every requested value from replayable state, including worker-hydrated ENSv1 PublicResolver text values for observed selectors after rebuild. Requested selectors with explicit declared gaps, unretained declared values, or no declared selectors use verified output instead, including on-demand Universal Resolver execution at the selected stored snapshot when no exact-snapshot output exists.
@@ -406,7 +408,7 @@ Compact role rows for the name's current resource, plus ENSv2 root fallback rows
 
 Query: `account`, `role_bitmap`, `view=compact`, `meta=none|summary|full`, `cursor`, `page_size`.
 
-Resolves the current `resource_id` for `{namespace, name}` at the exact-name snapshot and returns `RoleRow` items for that resource. For ENSv2 registry resources, the response also includes the owning registry's root-resource `permissions_current` rows when the registry root anchor can be derived from the resolved resource provenance; root-derived rows keep their root `resource_id` and are not fanned out onto the name resource.[^v2-eac-l56][^v2-eac-l187] If role projection is unavailable for the resource, returns empty `data` only when the route can prove no current rows exist; otherwise non-2xx `unsupported` or `409 stale`. `resource_hex` follows the same nullable rule as `GET /v1/resources/lookup`. Pagination uses `account_resource_scope_asc` over the combined rows with the same `(account, resource_id, scope)` cursor tuple as `GET /v1/roles`. `view=full` is reserved and still returns `400 invalid_input`; OpenAPI advertises only `view=compact`.
+Resolves the current `resource_id` for `{namespace, name}` at the exact-name snapshot and returns `RoleRow` items for that resource. For ENSv2 registry resources, the response also includes the owning registry's root-resource `permissions_current` rows when the registry root anchor can be derived from the resolved resource provenance; root-derived rows keep their root `resource_id` and are not fanned out onto the name resource.[^v2-eac-l56][^v2-eac-l187] If role projection is unavailable for the resource, returns empty `data` only when the route can prove no current rows exist; otherwise non-2xx `unsupported` or `409 stale`. `resource_hex` follows the same nullable rule as `GET /v1/resources/lookup`. Pagination uses `account_resource_scope_asc` over the combined rows with the same `(account, resource_id, scope)` cursor tuple as `GET /v1/roles`. `meta=full` currently returns the same compact collection metadata as `meta=summary`; row-granular lineage remains on `GET /v1/resources/{resource_id}/permissions`. `view=full` is reserved and still returns `400 invalid_input`; OpenAPI advertises only `view=compact`.
 
 ## `GET /v1/addresses/{address}/names`
 
@@ -421,6 +423,7 @@ Rules:
 - Malformed `{address}` path values return `400 invalid_input`; valid EVM addresses are normalized before lookup.
 - `dedupe_by=surface` is the default. `dedupe_by=resource` is grouping-only; it doesn't change coverage or turn the route into a resource collection.
 - Default sort is `display_name_asc`. `cursor` and `page_size` page over that frozen order.
+- The compact route envelope's `coverage` summarizes the returned representative rows for the current page; row-granular lineage stays on the dedicated surface/resource reads.
 - `include=role_summary` is additive. It groups current `GET /v1/resources/{resource_id}/permissions` rows by `subject` and keeps `(scope, effective_powers)` pairs. The response provenance summarizes the base address-name collection plus expansion inputs. Row-granular grant lineage stays on the dedicated permissions route.
 - `subname_count` reuses declared-direct-child semantics from `GET /v1/names/{namespace}/{name}/children`.
 - `status` and `expiry` mirror the current `ControlVector.status` and `ControlVector.expiry` for the item's `resource_id`.
@@ -488,6 +491,7 @@ Rules:
 - Compact item unit is one `(resource_id, subject, scope)` row. `effective_powers` is an array within that one scope; the same account appears in separate items when it has both resource-scoped and resolver-scoped powers. ENSv2 root-derived rows keep their root `resource_id`; the route does not fan them out onto the name resource. Summary metadata may group rows by subject, but compact `items` do not.
 - Pagination for name-qualified reads uses `account_resource_scope_asc`; when no `resource_id` filter is present, that order applies over the combined resource and root-resource rows. The cursor remains the same `(account, resource_id, scope)` keyset tuple.
 - Compact role rows do not expose provenance, raw facts, normalized-event IDs, or execution traces. Row-granular grant lineage stays on `GET /v1/resources/{resource_id}/permissions`.
+- `meta=full` currently returns the same compact collection metadata as `meta=summary`; full permission lineage stays on resource-scoped permissions reads.
 - `view=full` is reserved and still returns `400 invalid_input`; OpenAPI advertises only `view=compact`.
 
 ## `GET /v1/resolvers/{chain_id}/{resolver_address}/overview`
