@@ -68,14 +68,22 @@ pub(in crate::identity) async fn upsert_surface_binding(
         return decode_surface_binding(snapshot);
     }
 
-    let existing = load_surface_binding_internal(&mut **executor, binding.surface_binding_id, true)
-        .await?
-        .with_context(|| {
-            format!(
-                "failed to reload existing surface binding {} after insert conflict",
-                binding.surface_binding_id
-            )
-        })?;
+    let existing =
+        load_surface_binding_internal(&mut **executor, binding.surface_binding_id, true, true)
+            .await?
+            .with_context(|| {
+                format!(
+                    "failed to reload existing surface binding {} after insert conflict",
+                    binding.surface_binding_id
+                )
+            })?;
+
+    #[cfg(test)]
+    super::test_hooks::maybe_wait_after_reload(
+        "surface_bindings",
+        binding.surface_binding_id.to_string(),
+    )
+    .await;
 
     ensure_surface_binding_identity_matches(&existing, binding)?;
     let next_active_to = merge_binding_active_to(existing.active_to, binding.active_to)?;

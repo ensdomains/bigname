@@ -15,6 +15,8 @@ use super::validate::{
 };
 
 mod surface_binding;
+#[cfg(test)]
+pub(in crate::identity) mod test_hooks;
 
 pub(super) use surface_binding::upsert_surface_binding;
 
@@ -64,7 +66,7 @@ pub(super) async fn upsert_token_lineage(
     }
 
     let existing =
-        load_token_lineage_internal(&mut **executor, token_lineage.token_lineage_id, true)
+        load_token_lineage_internal(&mut **executor, token_lineage.token_lineage_id, true, true)
             .await?
             .with_context(|| {
                 format!(
@@ -72,6 +74,13 @@ pub(super) async fn upsert_token_lineage(
                     token_lineage.token_lineage_id
                 )
             })?;
+
+    #[cfg(test)]
+    test_hooks::maybe_wait_after_reload(
+        "token_lineages",
+        token_lineage.token_lineage_id.to_string(),
+    )
+    .await;
 
     ensure_token_lineage_identity_matches(&existing, token_lineage)?;
     let next_observation = merge_stable_row_observation(
@@ -181,7 +190,7 @@ pub(super) async fn upsert_resource(
         return decode_resource(snapshot);
     }
 
-    let existing = load_resource_internal(&mut **executor, resource.resource_id, true)
+    let existing = load_resource_internal(&mut **executor, resource.resource_id, true, true)
         .await?
         .with_context(|| {
             format!(
@@ -189,6 +198,9 @@ pub(super) async fn upsert_resource(
                 resource.resource_id
             )
         })?;
+
+    #[cfg(test)]
+    test_hooks::maybe_wait_after_reload("resources", resource.resource_id.to_string()).await;
 
     ensure_resource_identity_matches(&existing, resource)?;
     let next_token_lineage_id =
@@ -355,14 +367,19 @@ pub(super) async fn upsert_name_surface(
         return decode_name_surface(snapshot);
     }
 
-    let existing = load_name_surface_internal(&mut **executor, &name_surface.logical_name_id, true)
-        .await?
-        .with_context(|| {
-            format!(
-                "failed to reload existing name surface {} after insert conflict",
-                name_surface.logical_name_id
-            )
-        })?;
+    let existing =
+        load_name_surface_internal(&mut **executor, &name_surface.logical_name_id, true, true)
+            .await?
+            .with_context(|| {
+                format!(
+                    "failed to reload existing name surface {} after insert conflict",
+                    name_surface.logical_name_id
+                )
+            })?;
+
+    #[cfg(test)]
+    test_hooks::maybe_wait_after_reload("name_surfaces", name_surface.logical_name_id.clone())
+        .await;
 
     ensure_name_surface_identity_matches(&existing, name_surface)?;
     let repair_normalized_path =
