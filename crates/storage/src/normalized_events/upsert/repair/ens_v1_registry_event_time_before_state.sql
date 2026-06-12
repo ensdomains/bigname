@@ -31,9 +31,12 @@
                     ELSE input.new_before_state::JSONB
                 END AS repaired_before_state
             FROM input
+            JOIN normalized_events existing_event
+              ON existing_event.event_identity = input.event_identity
             JOIN resources resource
               ON resource.resource_id = input.resource_id
-             AND resource.chain_id = 'ethereum-mainnet'
+             AND resource.chain_id = existing_event.chain_id
+             AND resource.chain_id IN ('ethereum-mainnet', 'base-mainnet')
              AND resource.canonicality_state IN (
                  'canonical'::canonicality_state,
                  'safe'::canonicality_state,

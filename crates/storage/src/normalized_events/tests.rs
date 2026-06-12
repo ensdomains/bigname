@@ -649,6 +649,65 @@ async fn seed_ens_v1_registry_event_time_registry_key_repair_resources(
     Ok(())
 }
 
+async fn seed_basenames_registry_event_time_registry_key_repair_resources(
+    pool: &PgPool,
+    old_resource_id: Uuid,
+    repaired_resource_id: Uuid,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO resources (
+            resource_id,
+            token_lineage_id,
+            chain_id,
+            block_hash,
+            block_number,
+            provenance,
+            canonicality_state
+        )
+        VALUES
+        (
+            $1,
+            NULL,
+            'base-mainnet',
+            '0xbaselegacyregistrykeyresource',
+            90,
+            jsonb_build_object(
+                'authority_kind', 'registry_only',
+                'authority_key', 'registry-only:base-mainnet:0xcubebucks_labelhash',
+                'logical_name_id', 'basenames:cubebucks.base.eth',
+                'labelhash', '0xcubebucks_labelhash',
+                'current_registry_owner', '0x0000000000000000000000000000000000000abc'
+            ),
+            'canonical'::canonicality_state
+        ),
+        (
+            $2,
+            NULL,
+            'base-mainnet',
+            '0xbaseregistrykeyresource',
+            90,
+            jsonb_build_object(
+                'authority_kind', 'registry_only',
+                'authority_key', 'registry-only:base-mainnet:0xcubebucks_namehash',
+                'logical_name_id', 'basenames:cubebucks.base.eth',
+                'namehash', '0xcubebucks_namehash',
+                'labelhash', '0xcubebucks_labelhash',
+                'current_registry_owner', '0x0000000000000000000000000000000000000abc'
+            ),
+            'canonical'::canonicality_state
+        )
+        "#,
+    )
+    .bind(old_resource_id)
+    .bind(repaired_resource_id)
+    .execute(pool)
+    .await
+    .context("failed to seed Basenames registry event-time registry key repair resources")?;
+
+    Ok(())
+}
+
 async fn seed_ens_v1_registry_event_time_legacy_registry_key_resource(
     pool: &PgPool,
     old_resource_id: Uuid,
@@ -745,6 +804,66 @@ async fn seed_ens_v1_same_transaction_registration_setup_repair_resources(
     .execute(pool)
     .await
     .context("failed to seed ENSv1 same-transaction registration setup repair resources")?;
+
+    Ok(())
+}
+
+async fn seed_basenames_same_transaction_registration_setup_repair_resources(
+    pool: &PgPool,
+    registry_resource_id: Uuid,
+    registrar_resource_id: Uuid,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO resources (
+            resource_id,
+            token_lineage_id,
+            chain_id,
+            block_hash,
+            block_number,
+            provenance,
+            canonicality_state
+        )
+        VALUES
+        (
+            $1,
+            NULL,
+            'base-mainnet',
+            '0xbasesametxregistryresource',
+            90,
+            jsonb_build_object(
+                'authority_kind', 'registry_only',
+                'authority_key', 'registry-only:base-mainnet:0xalice_namehash',
+                'logical_name_id', 'basenames:alice.base.eth',
+                'namehash', '0xalice_namehash',
+                'labelhash', '0xcbf005454c11bc7e583aa4a100988b4a893acb2233dbb77afef8d9f931df3735',
+                'current_registry_owner', '0x0000000000000000000000000000000000000123'
+            ),
+            'canonical'::canonicality_state
+        ),
+        (
+            $2,
+            NULL,
+            'base-mainnet',
+            '0xbasesametxregistrationblock',
+            100,
+            jsonb_build_object(
+                'authority_kind', 'registrar',
+                'authority_key', 'registrar:base-mainnet:10:0xcbf005454c11bc7e583aa4a100988b4a893acb2233dbb77afef8d9f931df3735:0xbasesametxregistrationblock:5',
+                'logical_name_id', 'basenames:alice.base.eth',
+                'labelhash', '0xcbf005454c11bc7e583aa4a100988b4a893acb2233dbb77afef8d9f931df3735',
+                'registrant', '0x0000000000000000000000000000000000000123',
+                'expiry', 1800000000
+            ),
+            'canonical'::canonicality_state
+        )
+        "#,
+    )
+    .bind(registry_resource_id)
+    .bind(registrar_resource_id)
+    .execute(pool)
+    .await
+    .context("failed to seed Basenames same-transaction registration setup repair resources")?;
 
     Ok(())
 }
@@ -870,6 +989,30 @@ fn ens_v1_registry_event_time_authority_transfer_repair_event(
     event.after_state = json!({
         "labelhash": "0xcubebucks_labelhash",
         "owner": "0x0000000000000000000000000000000000000123"
+    });
+    event
+}
+
+fn basenames_registry_event_time_authority_transfer_repair_event(
+    event_identity: &str,
+    resource_id: Uuid,
+) -> NormalizedEvent {
+    let mut event =
+        ens_v1_registry_event_time_authority_transfer_repair_event(event_identity, resource_id);
+    event.namespace = "basenames".to_owned();
+    event.logical_name_id = Some("basenames:cubebucks.base.eth".to_owned());
+    event.source_family = "basenames_base_registry".to_owned();
+    event.chain_id = Some("base-mainnet".to_owned());
+    event.block_hash = Some("0xbaseregistrytransferblock".to_owned());
+    event.transaction_hash = Some("0xbaseregistrytransfertx".to_owned());
+    event.raw_fact_ref = json!({
+        "kind": "raw_log",
+        "chain_id": "base-mainnet",
+        "block_number": 100,
+        "block_hash": "0xbaseregistrytransferblock",
+        "transaction_hash": "0xbaseregistrytransfertx",
+        "transaction_index": 17,
+        "log_index": 7,
     });
     event
 }
@@ -1328,6 +1471,30 @@ fn ens_v1_same_transaction_registration_grant_event(resource_id: Uuid) -> Normal
     event
 }
 
+fn basenames_same_transaction_registration_grant_event(resource_id: Uuid) -> NormalizedEvent {
+    let mut event = ens_v1_same_transaction_registration_grant_event(resource_id);
+    event.event_identity = "ens-v1-unwrapped-authority:base-same-tx-registration:grant".to_owned();
+    event.namespace = "basenames".to_owned();
+    event.logical_name_id = Some("basenames:alice.base.eth".to_owned());
+    event.source_family = "basenames_base_registrar".to_owned();
+    event.chain_id = Some("base-mainnet".to_owned());
+    event.block_hash = Some("0xbasesametxregistrationblock".to_owned());
+    event.transaction_hash = Some("0xbasesametxregistrationtx".to_owned());
+    event.raw_fact_ref = json!({
+        "kind": "raw_log",
+        "chain_id": "base-mainnet",
+        "block_number": 100,
+        "block_hash": "0xbasesametxregistrationblock",
+        "transaction_hash": "0xbasesametxregistrationtx",
+        "transaction_index": 3,
+        "log_index": 5,
+    });
+    event.after_state["authority_key"] = json!(
+        "registrar:base-mainnet:10:0xcbf005454c11bc7e583aa4a100988b4a893acb2233dbb77afef8d9f931df3735:0xbasesametxregistrationblock:5"
+    );
+    event
+}
+
 fn ens_v1_same_transaction_registration_setup_authority_transfer_event(
     resource_id: Uuid,
 ) -> NormalizedEvent {
@@ -1358,6 +1525,31 @@ fn ens_v1_same_transaction_registration_setup_authority_transfer_event(
     event.after_state = json!({
         "owner": "0x0000000000000000000000000000000000000123",
         "labelhash": "0xcbf005454c11bc7e583aa4a100988b4a893acb2233dbb77afef8d9f931df3735"
+    });
+    event
+}
+
+fn basenames_same_transaction_registration_setup_authority_transfer_event(
+    resource_id: Uuid,
+) -> NormalizedEvent {
+    let mut event =
+        ens_v1_same_transaction_registration_setup_authority_transfer_event(resource_id);
+    event.event_identity =
+        "ens-v1-unwrapped-authority:base-same-tx-registration:authority-transfer".to_owned();
+    event.namespace = "basenames".to_owned();
+    event.logical_name_id = Some("basenames:alice.base.eth".to_owned());
+    event.source_family = "basenames_base_registry".to_owned();
+    event.chain_id = Some("base-mainnet".to_owned());
+    event.block_hash = Some("0xbasesametxregistrationblock".to_owned());
+    event.transaction_hash = Some("0xbasesametxregistrationtx".to_owned());
+    event.raw_fact_ref = json!({
+        "kind": "raw_log",
+        "chain_id": "base-mainnet",
+        "block_number": 100,
+        "block_hash": "0xbasesametxregistrationblock",
+        "transaction_hash": "0xbasesametxregistrationtx",
+        "transaction_index": 3,
+        "log_index": 2,
     });
     event
 }
@@ -4127,6 +4319,176 @@ async fn normalized_event_count_only_upsert_repairs_ens_v1_registry_event_time_a
 }
 
 #[tokio::test]
+async fn normalized_event_count_only_upsert_repairs_basenames_registry_event_time_authority_transfer_before_owner_from_null_same_resource()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let registry_resource_id = Uuid::from_u128(0x15b1_0000_0000_0000_0000_0000_0000_0001);
+    seed_basenames_registry_event_time_registry_key_repair_resources(
+        database.pool(),
+        registry_resource_id,
+        Uuid::from_u128(0x15b1_0000_0000_0000_0000_0000_0000_0002),
+    )
+    .await?;
+
+    let mut event = basenames_registry_event_time_authority_transfer_repair_event(
+        "ens-v1-unwrapped-authority:base-registry-event-time:authority-transfer-before-owner-from-null-same-resource",
+        registry_resource_id,
+    );
+    event.canonicality_state = CanonicalityState::Observed;
+    event.before_state = json!({
+        "owner": null
+    });
+    upsert_normalized_events(database.pool(), std::slice::from_ref(&event)).await?;
+
+    let mut repaired = basenames_registry_event_time_authority_transfer_repair_event(
+        "ens-v1-unwrapped-authority:base-registry-event-time:authority-transfer-before-owner-from-null-same-resource",
+        registry_resource_id,
+    );
+    repaired.before_state = json!({
+        "owner": "0x0000000000000000000000000000000000000abc"
+    });
+    let inserted_count =
+        upsert_normalized_events_count_only(database.pool(), std::slice::from_ref(&repaired))
+            .await?;
+    assert_eq!(inserted_count, 0);
+
+    let stored = sqlx::query_as::<_, (Uuid, serde_json::Value, String)>(
+        "SELECT resource_id, before_state, canonicality_state::TEXT FROM normalized_events WHERE event_identity = $1",
+    )
+    .bind(&event.event_identity)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(stored.0, registry_resource_id);
+    assert_eq!(stored.1, repaired.before_state);
+    assert_eq!(stored.2, "canonical");
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn normalized_event_count_only_upsert_repairs_basenames_registry_event_time_authority_transfer_known_to_known_owner_ens_parity()
+-> Result<()> {
+    // Pins ENS-parity semantics: Known -> different Known is an accepted
+    // incoming-wins owner repair for Basenames AuthorityTransferred rows.
+    let database = TestDatabase::new().await?;
+    let registry_resource_id = Uuid::from_u128(0x15b1_0000_0000_0000_0000_0000_0000_0003);
+    seed_basenames_registry_event_time_registry_key_repair_resources(
+        database.pool(),
+        registry_resource_id,
+        Uuid::from_u128(0x15b1_0000_0000_0000_0000_0000_0000_0004),
+    )
+    .await?;
+
+    let mut event = basenames_registry_event_time_authority_transfer_repair_event(
+        "ens-v1-unwrapped-authority:base-registry-event-time:authority-transfer-before-owner-known-to-known-ens-parity",
+        registry_resource_id,
+    );
+    event.canonicality_state = CanonicalityState::Observed;
+    event.before_state = json!({
+        "owner": "0x0000000000000000000000000000000000000def"
+    });
+    upsert_normalized_events(database.pool(), std::slice::from_ref(&event)).await?;
+
+    let mut repaired = basenames_registry_event_time_authority_transfer_repair_event(
+        "ens-v1-unwrapped-authority:base-registry-event-time:authority-transfer-before-owner-known-to-known-ens-parity",
+        registry_resource_id,
+    );
+    repaired.before_state = json!({
+        "owner": "0x0000000000000000000000000000000000000abc"
+    });
+    let inserted_count =
+        upsert_normalized_events_count_only(database.pool(), std::slice::from_ref(&repaired))
+            .await?;
+    assert_eq!(inserted_count, 0);
+
+    let stored = sqlx::query_as::<_, (Uuid, serde_json::Value, String)>(
+        "SELECT resource_id, before_state, canonicality_state::TEXT FROM normalized_events WHERE event_identity = $1",
+    )
+    .bind(&event.event_identity)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(stored.0, registry_resource_id);
+    assert_eq!(stored.1, repaired.before_state);
+    assert_eq!(stored.2, "canonical");
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn normalized_event_count_only_upsert_rejects_basenames_registry_event_time_authority_transfer_before_state_for_cross_chain_anchor()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let registry_resource_id = Uuid::from_u128(0x15b1_0000_0000_0000_0000_0000_0000_0011);
+    seed_basenames_registry_event_time_registry_key_repair_resources(
+        database.pool(),
+        registry_resource_id,
+        Uuid::from_u128(0x15b1_0000_0000_0000_0000_0000_0000_0012),
+    )
+    .await?;
+
+    sqlx::query("UPDATE resources SET chain_id = 'ethereum-mainnet' WHERE resource_id = $1")
+        .bind(registry_resource_id)
+        .execute(database.pool())
+        .await?;
+
+    let mut event = basenames_registry_event_time_authority_transfer_repair_event(
+        "ens-v1-unwrapped-authority:base-registry-event-time:authority-transfer-before-owner-cross-chain-resource",
+        registry_resource_id,
+    );
+    event.canonicality_state = CanonicalityState::Observed;
+    event.before_state = json!({
+        "owner": null
+    });
+    upsert_normalized_events(database.pool(), std::slice::from_ref(&event)).await?;
+
+    let mut repaired = basenames_registry_event_time_authority_transfer_repair_event(
+        "ens-v1-unwrapped-authority:base-registry-event-time:authority-transfer-before-owner-cross-chain-resource",
+        registry_resource_id,
+    );
+    repaired.before_state = json!({
+        "owner": "0x0000000000000000000000000000000000000abc"
+    });
+    let result =
+        upsert_normalized_events_count_only(database.pool(), std::slice::from_ref(&repaired)).await;
+
+    let stored = sqlx::query_as::<_, (Uuid, serde_json::Value, String)>(
+        "SELECT resource_id, before_state, canonicality_state::TEXT FROM normalized_events WHERE event_identity = $1",
+    )
+    .bind(&event.event_identity)
+    .fetch_one(database.pool())
+    .await?;
+    let invalidation_count = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)::BIGINT
+        FROM projection_invalidations
+        WHERE projection = 'permissions_current'
+        "#,
+    )
+    .fetch_one(database.pool())
+    .await?;
+    database.cleanup().await?;
+
+    let error = match result {
+        Ok(inserted_count) => panic!(
+            "Basenames registry event-time before-state repair with cross-chain resource unexpectedly succeeded: {inserted_count}"
+        ),
+        Err(error) => error,
+    };
+    assert!(
+        format!("{error:#}").contains(
+            "ENSv1 registry event-time before_state repair rejected invalid resource anchors"
+        ),
+        "unexpected error for Basenames cross-chain before-state repair: {error:#}"
+    );
+    assert_eq!(stored.0, registry_resource_id);
+    assert_eq!(stored.1, event.before_state);
+    assert_eq!(stored.2, "observed");
+    assert_eq!(invalidation_count, 0);
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn normalized_event_count_only_upsert_preserves_ens_v1_registry_event_time_authority_transfer_before_owner_when_incoming_null()
 -> Result<()> {
     let database = TestDatabase::new().await?;
@@ -4424,7 +4786,189 @@ async fn normalized_event_count_only_upsert_repairs_ens_v1_registry_event_time_a
     assert_eq!(stored.1, event.before_state);
     assert_eq!(stored.2, "canonical");
 
+    let invalidation_keys = sqlx::query_as::<_, (String, String)>(
+        r#"
+        SELECT projection, projection_key
+        FROM projection_invalidations
+        WHERE projection = 'permissions_current'
+        ORDER BY projection_key
+        "#,
+    )
+    .fetch_all(database.pool())
+    .await?;
+    assert_eq!(
+        invalidation_keys,
+        vec![
+            (
+                "permissions_current".to_owned(),
+                legacy_labelhash_registry_resource_id.to_string()
+            ),
+            (
+                "permissions_current".to_owned(),
+                namehash_registry_resource_id.to_string()
+            ),
+        ]
+    );
+
     database.cleanup().await
+}
+
+#[tokio::test]
+async fn normalized_event_count_only_upsert_repairs_basenames_registry_event_time_authority_transfer_resource_id_preserving_before_owner_when_incoming_null()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let legacy_labelhash_registry_resource_id =
+        Uuid::from_u128(0x15b7_0000_0000_0000_0000_0000_0000_0001);
+    let namehash_registry_resource_id = Uuid::from_u128(0x15b7_0000_0000_0000_0000_0000_0000_0002);
+    seed_basenames_registry_event_time_registry_key_repair_resources(
+        database.pool(),
+        legacy_labelhash_registry_resource_id,
+        namehash_registry_resource_id,
+    )
+    .await?;
+
+    let mut event = basenames_registry_event_time_authority_transfer_repair_event(
+        "ens-v1-unwrapped-authority:base-registry-event-time:authority-transfer-resource-before-owner-incoming-null",
+        legacy_labelhash_registry_resource_id,
+    );
+    event.canonicality_state = CanonicalityState::Observed;
+    event.before_state = json!({
+        "owner": "0x0000000000000000000000000000000000000def"
+    });
+    upsert_normalized_events(database.pool(), std::slice::from_ref(&event)).await?;
+
+    let mut replayed = basenames_registry_event_time_authority_transfer_repair_event(
+        "ens-v1-unwrapped-authority:base-registry-event-time:authority-transfer-resource-before-owner-incoming-null",
+        namehash_registry_resource_id,
+    );
+    replayed.before_state = json!({
+        "owner": null
+    });
+    let inserted_count =
+        upsert_normalized_events_count_only(database.pool(), std::slice::from_ref(&replayed))
+            .await?;
+    assert_eq!(inserted_count, 0);
+
+    let stored = sqlx::query_as::<_, (Uuid, serde_json::Value, String)>(
+        "SELECT resource_id, before_state, canonicality_state::TEXT FROM normalized_events WHERE event_identity = $1",
+    )
+    .bind(&event.event_identity)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(stored.0, namehash_registry_resource_id);
+    assert_eq!(stored.1, event.before_state);
+    assert_eq!(stored.2, "canonical");
+
+    let invalidation_keys = sqlx::query_as::<_, (String, String)>(
+        r#"
+        SELECT projection, projection_key
+        FROM projection_invalidations
+        WHERE projection = 'permissions_current'
+        ORDER BY projection_key
+        "#,
+    )
+    .fetch_all(database.pool())
+    .await?;
+    assert_eq!(
+        invalidation_keys,
+        vec![
+            (
+                "permissions_current".to_owned(),
+                legacy_labelhash_registry_resource_id.to_string()
+            ),
+            (
+                "permissions_current".to_owned(),
+                namehash_registry_resource_id.to_string()
+            ),
+        ]
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn normalized_event_count_only_upsert_rejects_basenames_registry_event_time_authority_transfer_resource_repair_for_cross_chain_anchors()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let legacy_labelhash_registry_resource_id =
+        Uuid::from_u128(0x15b7_0000_0000_0000_0000_0000_0000_0011);
+    let namehash_registry_resource_id = Uuid::from_u128(0x15b7_0000_0000_0000_0000_0000_0000_0012);
+    seed_basenames_registry_event_time_registry_key_repair_resources(
+        database.pool(),
+        legacy_labelhash_registry_resource_id,
+        namehash_registry_resource_id,
+    )
+    .await?;
+
+    sqlx::query(
+        r#"
+        UPDATE resources
+        SET chain_id = 'ethereum-mainnet'
+        WHERE resource_id = ANY($1)
+        "#,
+    )
+    .bind(vec![
+        legacy_labelhash_registry_resource_id,
+        namehash_registry_resource_id,
+    ])
+    .execute(database.pool())
+    .await?;
+
+    let mut event = basenames_registry_event_time_authority_transfer_repair_event(
+        "ens-v1-unwrapped-authority:base-registry-event-time:authority-transfer-cross-chain-resource",
+        legacy_labelhash_registry_resource_id,
+    );
+    event.canonicality_state = CanonicalityState::Observed;
+    event.before_state = json!({
+        "owner": "0x0000000000000000000000000000000000000def"
+    });
+    upsert_normalized_events(database.pool(), std::slice::from_ref(&event)).await?;
+
+    let mut replayed = basenames_registry_event_time_authority_transfer_repair_event(
+        "ens-v1-unwrapped-authority:base-registry-event-time:authority-transfer-cross-chain-resource",
+        namehash_registry_resource_id,
+    );
+    replayed.before_state = json!({
+        "owner": null
+    });
+    let result =
+        upsert_normalized_events_count_only(database.pool(), std::slice::from_ref(&replayed)).await;
+
+    let stored = sqlx::query_as::<_, (Uuid, serde_json::Value, String)>(
+        "SELECT resource_id, before_state, canonicality_state::TEXT FROM normalized_events WHERE event_identity = $1",
+    )
+    .bind(&event.event_identity)
+    .fetch_one(database.pool())
+    .await?;
+    let invalidation_count = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)::BIGINT
+        FROM projection_invalidations
+        WHERE projection = 'permissions_current'
+        "#,
+    )
+    .fetch_one(database.pool())
+    .await?;
+    database.cleanup().await?;
+
+    let error = match result {
+        Ok(inserted_count) => panic!(
+            "Basenames registry event-time repair with cross-chain resources unexpectedly succeeded: {inserted_count}"
+        ),
+        Err(error) => error,
+    };
+    assert!(
+        format!("{error:#}").contains(
+            "ENSv1 registry event-time resource_id repair rejected invalid resource anchors"
+        ),
+        "unexpected error for Basenames cross-chain resource repair: {error:#}"
+    );
+    assert_eq!(stored.0, legacy_labelhash_registry_resource_id);
+    assert_eq!(stored.1, event.before_state);
+    assert_eq!(stored.2, "observed");
+    assert_eq!(invalidation_count, 0);
+
+    Ok(())
 }
 
 #[tokio::test]
@@ -5033,6 +5577,72 @@ async fn normalized_event_count_only_upsert_repairs_ens_v1_same_tx_registration_
         "permissions_current".to_owned(),
         registrar_resource_id.to_string()
     )));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn normalized_event_count_only_upsert_repairs_basenames_same_tx_registration_setup_authority_transfer_to_registrar()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let stale_registry_resource_id = Uuid::from_u128(0x1741);
+    let registrar_resource_id = Uuid::from_u128(0x1742);
+    seed_basenames_same_transaction_registration_setup_repair_resources(
+        database.pool(),
+        stale_registry_resource_id,
+        registrar_resource_id,
+    )
+    .await?;
+
+    let stale_transfer = basenames_same_transaction_registration_setup_authority_transfer_event(
+        stale_registry_resource_id,
+    );
+    let registration = basenames_same_transaction_registration_grant_event(registrar_resource_id);
+    upsert_normalized_events(database.pool(), &[stale_transfer.clone(), registration]).await?;
+
+    let repaired = basenames_same_transaction_registration_setup_authority_transfer_event(
+        registrar_resource_id,
+    );
+    let inserted_count =
+        upsert_normalized_events_count_only(database.pool(), std::slice::from_ref(&repaired))
+            .await?;
+    assert_eq!(inserted_count, 0);
+
+    let stored = sqlx::query_as::<_, (Uuid, serde_json::Value)>(
+        "SELECT resource_id, after_state FROM normalized_events WHERE event_identity = $1",
+    )
+    .bind(&stale_transfer.event_identity)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(stored.0, registrar_resource_id);
+    assert_eq!(
+        stored.1["owner"].as_str(),
+        Some("0x0000000000000000000000000000000000000123")
+    );
+
+    let invalidation_keys = sqlx::query_as::<_, (String, String)>(
+        r#"
+        SELECT projection, projection_key
+        FROM projection_invalidations
+        WHERE projection = 'permissions_current'
+        ORDER BY projection_key
+        "#,
+    )
+    .fetch_all(database.pool())
+    .await?;
+    assert_eq!(
+        invalidation_keys,
+        vec![
+            (
+                "permissions_current".to_owned(),
+                stale_registry_resource_id.to_string()
+            ),
+            (
+                "permissions_current".to_owned(),
+                registrar_resource_id.to_string()
+            ),
+        ]
+    );
 
     database.cleanup().await
 }

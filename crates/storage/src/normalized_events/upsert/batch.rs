@@ -393,12 +393,21 @@ pub(super) async fn upsert_normalized_event_batch(
           AND (
               normalized_events.before_state IS NOT DISTINCT FROM EXCLUDED.before_state
               OR (
-                  normalized_events.namespace = 'ens'
+                  (
+                      (
+                          normalized_events.namespace = 'ens'
+                          AND normalized_events.source_family = 'ens_v1_registry_l1'
+                          AND normalized_events.chain_id = 'ethereum-mainnet'
+                      )
+                      OR (
+                          normalized_events.namespace = 'basenames'
+                          AND normalized_events.source_family = 'basenames_base_registry'
+                          AND normalized_events.chain_id = 'base-mainnet'
+                      )
+                  )
                   AND normalized_events.logical_name_id IS NOT NULL
                   AND normalized_events.resource_id IS NOT NULL
                   AND normalized_events.event_kind = 'AuthorityTransferred'
-                  AND normalized_events.source_family = 'ens_v1_registry_l1'
-                  AND normalized_events.chain_id = 'ethereum-mainnet'
                   AND normalized_events.derivation_kind = 'ens_v1_unwrapped_authority'
                   AND normalized_events.before_state - 'owner' =
                       EXCLUDED.before_state - 'owner'

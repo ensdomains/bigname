@@ -77,9 +77,12 @@
                     ELSE input.new_after_state::JSONB
                 END AS repaired_after_state
             FROM input
+            JOIN normalized_events existing_event
+              ON existing_event.event_identity = input.event_identity
             JOIN resources old_resource
               ON old_resource.resource_id = input.old_resource_id
-             AND old_resource.chain_id = 'ethereum-mainnet'
+             AND old_resource.chain_id = existing_event.chain_id
+             AND old_resource.chain_id IN ('ethereum-mainnet', 'base-mainnet')
              AND old_resource.canonicality_state IN (
                  'canonical'::canonicality_state,
                  'safe'::canonicality_state,
@@ -109,7 +112,7 @@
                 OR (
                     new_resource.resource_id IS NOT NULL
                     AND new_resource.resource_id <> old_resource.resource_id
-                    AND new_resource.chain_id = 'ethereum-mainnet'
+                    AND new_resource.chain_id = old_resource.chain_id
                     AND new_resource.canonicality_state IN (
                         'canonical'::canonicality_state,
                         'safe'::canonicality_state,
@@ -158,7 +161,7 @@
                                     AND split_part(new_resource.provenance->>'authority_key', ':', 1) =
                                         'registrar'
                                     AND split_part(new_resource.provenance->>'authority_key', ':', 2) =
-                                        'ethereum-mainnet'
+                                        new_resource.chain_id
                                     AND split_part(new_resource.provenance->>'authority_key', ':', 5) =
                                         input.block_hash
                                     AND split_part(new_resource.provenance->>'authority_key', ':', 6) ~
