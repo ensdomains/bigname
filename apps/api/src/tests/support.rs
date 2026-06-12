@@ -40,6 +40,8 @@ mod execution {
     };
     use sqlx::PgPool;
 
+    // Keep this test SQL copy in sync with
+    // apps/worker/src/execution.rs::invalidate_verified_primary_name_claim_change.
     pub async fn invalidate_verified_primary_name_claim_change(
         pool: &PgPool,
         namespace: &str,

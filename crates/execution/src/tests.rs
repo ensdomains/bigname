@@ -5009,6 +5009,53 @@ async fn rejects_verified_primary_mismatched_cache_identity() -> Result<()> {
 }
 
 #[tokio::test]
+async fn rejects_verified_primary_trace_identity_drift_from_cache_key() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let mut request = verified_primary_success_request();
+    request.trace.manifest_context["manifest_versions"] = json!([
+        {
+            "source_manifest_id": 7,
+            "manifest_version": 3
+        },
+        {
+            "source_family": ENS_EXECUTION_SOURCE_FAMILY,
+            "manifest_version": 1
+        }
+    ]);
+    insert_primary_name_anchor(
+        &database,
+        "0x00000000000000000000000000000000000000aa",
+        "60",
+        PrimaryNameClaimStatus::Success,
+    )
+    .await?;
+
+    let error = persist_ens_verified_primary_name(database.pool(), &request)
+        .await
+        .expect_err("trace identity drift must be rejected before persistence");
+    assert!(
+        error.to_string().contains(
+            "trace.manifest_context.manifest_versions must match cache_key.manifest_versions"
+        ),
+        "unexpected error: {error:#}"
+    );
+    assert!(
+        load_execution_trace(database.pool(), request.trace.execution_trace_id)
+            .await?
+            .is_none(),
+        "rejected verified-primary request must not persist trace rows"
+    );
+    assert!(
+        load_execution_outcome(database.pool(), &request.outcome.cache_key)
+            .await?
+            .is_none(),
+        "rejected verified-primary request must not persist outcome rows"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn rolls_back_verified_primary_trace_when_outcome_write_fails() -> Result<()> {
     let database = TestDatabase::new().await?;
     let request = verified_primary_success_request();

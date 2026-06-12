@@ -22,11 +22,14 @@ use super::{
 
 #[path = "hydration_query.rs"]
 mod hydration_query;
+#[path = "hydration/invalidation.rs"]
+mod invalidation;
 #[path = "hydration/resolver_edge.rs"]
 mod resolver_edge;
 #[path = "hydration/resolver_edge_query.rs"]
 mod resolver_edge_query;
 use hydration_query::load_legacy_reverse_hydration_candidates;
+use invalidation::invalidate_changed_hydration_snapshots;
 use resolver_edge::hydrate_resolver_edge_candidates;
 use resolver_edge_query::load_legacy_reverse_resolver_edge_hydration_candidates;
 
@@ -477,6 +480,7 @@ async fn upsert_hydration_snapshots_in_batches(
 
     let mut upserted_row_count = 0usize;
     for (batch_index, chunk) in snapshots.chunks(batch_size).enumerate() {
+        invalidate_changed_hydration_snapshots(pool, chunk).await?;
         upserted_row_count += bigname_storage::upsert_primary_name_current_snapshots(pool, chunk)
             .await
             .with_context(|| {
