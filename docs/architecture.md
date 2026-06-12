@@ -236,13 +236,13 @@ Permissions and control are anchored to `resource_id`, never to surface text. Th
 
 Identity, preimage, discovery: `PreimageObserved`, `NameClassified`, `SurfaceBound`, `SurfaceUnbound`, `ContractDiscovered`, `MetadataChanged`, `SourceManifestUpdated`.
 
-Registration and authority: `RegistrationReserved`, `RegistrationGranted`, `RegistrationRenewed`, `RegistrationReleased`, `ExpiryChanged`, `AuthorityTransferred`, `AuthorityEpochChanged`, `MigrationApplied`, `CommitmentMade`, `PricingPolicyChanged`.
+Registration and authority: `RegistrationReserved`, `RegistrationGranted`, `RegistrarNameRegistered`, `RegistrationRenewed`, `RegistrationReleased`, `ExpiryChanged`, `AuthorityTransferred`, `AuthorityEpochChanged`, `MigrationApplied`, `PricingPolicyChanged`.
 
 Lineage and control: `TokenResourceLinked`, `TokenRegenerated`, `TokenControlTransferred`, `ResolutionEpochChanged`.
 
-Topology and resolution: `ResolverChanged`, `SubregistryChanged`, `ParentChanged`, `AliasChanged`, `WildcardCoverageChanged`, `RecordChanged`, `RecordDeleted`, `RecordVersionChanged`, `RecordInventoryObserved`.
+Topology and resolution: `ResolverChanged`, `SubregistryChanged`, `ParentChanged`, `AliasChanged`, `WildcardCoverageChanged`, `RecordChanged`, `RecordVersionChanged`, `RecordInventoryObserved`.
 
-Permissions: `PermissionChanged`, `RootPermissionChanged`, `DelegateRetainedAfterTransfer`, `PermissionScopeChanged`.
+Permissions: `PermissionChanged`, `RootPermissionChanged`, `PermissionScopeChanged`.
 
 Reverse and primary: `ReverseChanged`, `PrimaryNameClaimed`, `PrimaryNameVerified`, `PrimaryNameInvalidated`.
 
@@ -254,7 +254,15 @@ ENSv2 mappings:
 - `TokenRegenerated` ← upstream `TokenRegenerated(oldTokenId, newTokenId)`. Preserves `resource_id`, `token_lineage_id`, and active surface binding.[^v2-events-l69][^v2-pr-l451]
 - `SubregistryChanged` ← `SubregistryUpdated`; `ParentChanged` ← `ParentUpdated`.[^v2-events-l49][^v2-events-l75]
 - `AliasChanged` ← `PermissionedResolver.AliasChanged`; the alias path stores source and destination DNS-encoded names.[^v2-iperm-resolver-l14][^v2-pres-l230]
-- `PermissionChanged` and `RootPermissionChanged` ← upstream `EACRolesChanged(resource, account, oldRoleBitmap, newRoleBitmap)`. Root-resource permissions stay distinguishable because EAC root roles are checked separately and satisfy resource-level checks via root fallback.[^v2-eac-l19][^v2-eac-l176][^v2-eac-l181]
+- `PermissionChanged` and `RootPermissionChanged` ← upstream `EACRolesChanged(resource, account, oldRoleBitmap, newRoleBitmap)`. Root-resource permissions stay distinguishable because EAC root roles are checked separately and satisfy resource-level checks via root fallback; this taxonomy admission covers normalized-event emission and manifest watch admission, while current-state projection consumption is a separate projection contract.[^v2-eac-l19][^v2-eac-l176][^v2-eac-l181] Registry/root sources decode role bitmaps with the `RegistryRolesLib` vocabulary (`registrar`, `register_reserved`, `set_parent`, `unregister`, `renew`, `set_subregistry`, `set_resolver`, `upgrade`, `can_transfer_admin`, and `admin_` twins), while resolver sources decode with the resolver role vocabulary. Unknown bits are omitted from `effective_powers` rather than surfaced under invented names.[^v2-regroles-l6][^v2-regroles-l9][^v2-regroles-l14][^v2-regroles-l19][^v2-regroles-l24][^v2-regroles-l29][^v2-regroles-l34][^v2-regroles-l39][^v2-regroles-l45][^v2-regroles-l48][^v2-resroles-l7][^v2-resroles-l52]
+- `RegistrarNameRegistered` ← upstream `ETHRegistrar.NameRegistered`; it is registrar-local registration intent and links back to the registry resource when that registry resource has already been observed.[^v2-iethreg-l32]
+
+Taxonomy reconciliation decisions:
+
+- `RecordDeleted` is not a separate normalized kind for the currently admitted sources. Deletes are represented as `RecordChanged` payloads with deletion metadata, so consumers only need one record-change stream.
+- `CommitmentMade` is not admitted in the normalized taxonomy yet. Upstream ENSv2 `ETHRegistrar` emits `CommitmentMade(bytes32 commitment)`, but current manifests and adapters do not consume it, and no current projection depends on commitment history. (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRegistrar.sol:L19 @ ens_v2@554c309)
+- `DelegateRetainedAfterTransfer` is not admitted until a concrete source event and consumer projection are specified. Current permission transfer behavior is represented by `PermissionChanged`, `RootPermissionChanged`, and `PermissionScopeChanged`.
+- ENSv2 ERC-1155 `TransferSingle` and `TransferBatch` remain unsupported for this sepolia-dev taxonomy slice. Upstream registry token updates can emit those ERC-1155 events, but ownership-transfer normalization requires a manifest/admission update outside this taxonomy-only decision. (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L199 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L230 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L232 @ ens_v2@554c309)
 
 ENSv1 wrapper/resolver mappings: `PreimageObserved`, `SurfaceBound`, `SurfaceUnbound`, `AuthorityTransferred`, `ExpiryChanged`, `TokenControlTransferred`, `ResolverChanged`, `PermissionChanged`, `PermissionScopeChanged`, and `RecordChanged` come from admitted NameWrapper and PublicResolver events.[^v1-iname-l27][^v1-iname-l31][^v1-iname-l35][^v1-iname-l37][^v1-iname-l38][^v1-nw-l1022][^v1-nw-l1034][^v1-pres-l20][^v1-pres-l51][^v1-pres-l58] `PermissionScopeChanged` carries wrapper fuse changes that mask effective powers without inventing new subject grants.
 
@@ -656,9 +664,23 @@ Validate at four layers: raw facts, normalized events, execution traces, public 
 [^v2-pr-l536]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L536 @ ens_v2@554c309)
 [^v2-pr-l545]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L545 @ ens_v2@554c309)
 
+[^v2-regroles-l6]: (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L6 @ ens_v2@554c309)
+[^v2-regroles-l9]: (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L9 @ ens_v2@554c309)
+[^v2-regroles-l14]: (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L14 @ ens_v2@554c309)
+[^v2-regroles-l19]: (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L19 @ ens_v2@554c309)
+[^v2-regroles-l24]: (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L24 @ ens_v2@554c309)
+[^v2-regroles-l29]: (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L29 @ ens_v2@554c309)
+[^v2-regroles-l34]: (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L34 @ ens_v2@554c309)
+[^v2-regroles-l39]: (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L39 @ ens_v2@554c309)
+[^v2-regroles-l45]: (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L45 @ ens_v2@554c309)
+[^v2-regroles-l48]: (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L48 @ ens_v2@554c309)
+
 [^v2-iperm-resolver-l14]: (upstream: .refs/ens_v2/contracts/src/resolver/interfaces/IPermissionedResolver.sol:L14 @ ens_v2@554c309)
 [^v2-iethreg-l32]: (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRegistrar.sol:L32 @ ens_v2@554c309)
 [^v2-iethreg-l53]: (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRegistrar.sol:L53 @ ens_v2@554c309)
+
+[^v2-resroles-l7]: (upstream: .refs/ens_v2/contracts/src/resolver/libraries/PermissionedResolverLib.sol:L7 @ ens_v2@554c309)
+[^v2-resroles-l52]: (upstream: .refs/ens_v2/contracts/src/resolver/libraries/PermissionedResolverLib.sol:L52 @ ens_v2@554c309)
 
 [^v2-pres-l38]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L38 @ ens_v2@554c309)
 [^v2-pres-l56]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L56 @ ens_v2@554c309)

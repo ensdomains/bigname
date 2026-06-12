@@ -10,10 +10,10 @@ use super::constants::{
     EVENT_KIND_PREIMAGE_OBSERVED, NAME_WRAPPED_SIGNATURE, NAMED_ADDR_RESOURCE_SIGNATURE,
     NAMED_RESOURCE_SIGNATURE, NAMED_TEXT_RESOURCE_SIGNATURE, SOURCE_EVENT_ALIAS_CHANGED,
     SOURCE_EVENT_NAME_WRAPPED, SOURCE_EVENT_NAMED_ADDR_RESOURCE, SOURCE_EVENT_NAMED_RESOURCE,
-    SOURCE_EVENT_NAMED_TEXT_RESOURCE, SOURCE_FAMILY_ENS_V1_REGISTRAR_L1,
-    SOURCE_FAMILY_ENS_V1_WRAPPER_L1, SOURCE_FAMILY_ENS_V2_REGISTRAR_L1,
-    SOURCE_FAMILY_ENS_V2_REGISTRY_L1, SOURCE_FAMILY_ENS_V2_RESOLVER_L1,
-    SOURCE_FAMILY_ENS_V2_ROOT_L1,
+    SOURCE_EVENT_NAMED_TEXT_RESOURCE, SOURCE_FAMILY_BASENAMES_BASE_REGISTRAR,
+    SOURCE_FAMILY_ENS_V1_REGISTRAR_L1, SOURCE_FAMILY_ENS_V1_WRAPPER_L1,
+    SOURCE_FAMILY_ENS_V2_REGISTRAR_L1, SOURCE_FAMILY_ENS_V2_REGISTRY_L1,
+    SOURCE_FAMILY_ENS_V2_RESOLVER_L1, SOURCE_FAMILY_ENS_V2_ROOT_L1,
 };
 use super::decoding::{hex_string, hex_string_without_prefix, keccak256_hex};
 use super::event_topics::PreimageObservedEventTopics;
@@ -68,7 +68,7 @@ pub(super) fn build_preimage_observed_events(
     event_topics: &PreimageObservedEventTopics,
 ) -> Result<Vec<NormalizedEvent>> {
     match raw_log.source_family.as_str() {
-        SOURCE_FAMILY_ENS_V1_REGISTRAR_L1 => {
+        SOURCE_FAMILY_ENS_V1_REGISTRAR_L1 | SOURCE_FAMILY_BASENAMES_BASE_REGISTRAR => {
             build_registrar_preimage_observed_events(raw_log, event_topics)
         }
         SOURCE_FAMILY_ENS_V1_WRAPPER_L1 => {
@@ -185,52 +185,68 @@ fn build_ens_v2_preimage_observed_events(
 fn build_ens_v2_alias_preimage_observed_events(
     raw_log: &WatchedRawLogRow,
 ) -> Result<Vec<NormalizedEvent>> {
-    let event = decode_event_log::<AliasChanged>(raw_log, "AliasChanged log is malformed")
-        .with_context(|| {
-            format!(
-                "failed to decode AliasChanged name payload for chain {} block {} log {}",
-                raw_log.chain_id, raw_log.block_hash, raw_log.log_index
-            )
-        })?;
+    let event = match decode_event_log::<AliasChanged>(raw_log, "AliasChanged log is malformed") {
+        Ok(event) => event,
+        Err(error) => {
+            warn_dropped_alias_changed_log(raw_log, "malformed_alias_changed_log", Some(&error));
+            return Ok(Vec::new());
+        }
+    };
     let indexed_from_name = hex_string(event.indexedFromName.as_slice());
     let from_name = event.fromName.to_vec();
     let indexed_to_name = hex_string(event.indexedToName.as_slice());
     let to_name = event.toName.to_vec();
-    validate_indexed_bytes_hash(
-        raw_log,
-        &indexed_from_name,
-        &from_name,
-        "AliasChanged indexedFromName",
-    )?;
-    validate_indexed_bytes_hash(
-        raw_log,
-        &indexed_to_name,
-        &to_name,
-        "AliasChanged indexedToName",
-    )?;
+    if !validate_indexed_bytes_hash(&indexed_from_name, &from_name) {
+        warn_dropped_alias_changed_log(raw_log, "indexed_from_name_hash_mismatch", None);
+        return Ok(Vec::new());
+    }
+    if !validate_indexed_bytes_hash(&indexed_to_name, &to_name) {
+        warn_dropped_alias_changed_log(raw_log, "indexed_to_name_hash_mismatch", None);
+        return Ok(Vec::new());
+    }
 
     let mut events = Vec::new();
-    if !from_name.is_empty() {
-        if let Ok(observation) = observe_dns_encoded_name(&from_name) {
-            events.push(build_preimage_observed_normalized_event(
-                raw_log,
-                SOURCE_EVENT_ALIAS_CHANGED,
-                observation,
-                Some("from_name"),
-            ));
-        }
+    if !from_name.is_empty()
+        && let Ok(observation) = observe_dns_encoded_name(&from_name)
+    {
+        events.push(build_preimage_observed_normalized_event(
+            raw_log,
+            SOURCE_EVENT_ALIAS_CHANGED,
+            observation,
+            Some("from_name"),
+        ));
     }
-    if !to_name.is_empty() {
-        if let Ok(observation) = observe_dns_encoded_name(&to_name) {
-            events.push(build_preimage_observed_normalized_event(
-                raw_log,
-                SOURCE_EVENT_ALIAS_CHANGED,
-                observation,
-                Some("to_name"),
-            ));
-        }
+    if !to_name.is_empty()
+        && let Ok(observation) = observe_dns_encoded_name(&to_name)
+    {
+        events.push(build_preimage_observed_normalized_event(
+            raw_log,
+            SOURCE_EVENT_ALIAS_CHANGED,
+            observation,
+            Some("to_name"),
+        ));
     }
     Ok(events)
+}
+
+fn warn_dropped_alias_changed_log(
+    raw_log: &WatchedRawLogRow,
+    reason: &'static str,
+    error: Option<&anyhow::Error>,
+) {
+    let error = error.map(|error| error.to_string());
+    tracing::warn!(
+        chain_id = %raw_log.chain_id,
+        block_number = raw_log.block_number,
+        transaction_hash = %raw_log.transaction_hash,
+        log_index = raw_log.log_index,
+        emitting_address = %raw_log.emitting_address,
+        source_family = %raw_log.source_family,
+        source_event = SOURCE_EVENT_ALIAS_CHANGED,
+        reason = reason,
+        error = error.as_deref().unwrap_or(""),
+        "dropping malformed AliasChanged log"
+    );
 }
 
 fn build_ens_v2_named_dns_preimage_observed_events(
@@ -350,24 +366,12 @@ fn build_preimage_observed_normalized_event(
     }
 }
 
-fn validate_indexed_bytes_hash(
-    raw_log: &WatchedRawLogRow,
-    indexed_hash: &str,
-    bytes: &[u8],
-    context: &str,
-) -> Result<()> {
+fn validate_indexed_bytes_hash(indexed_hash: &str, bytes: &[u8]) -> bool {
     let observed_hash = keccak256_hex(bytes);
     if !indexed_hash.eq_ignore_ascii_case(&observed_hash) {
-        bail!(
-            "{context} {} does not match decoded bytes hash {} for chain {} block {} log {}",
-            indexed_hash,
-            observed_hash,
-            raw_log.chain_id,
-            raw_log.block_hash,
-            raw_log.log_index
-        );
+        return false;
     }
-    Ok(())
+    true
 }
 
 fn decode_event_log<E>(raw_log: &WatchedRawLogRow, context: &'static str) -> Result<E>
