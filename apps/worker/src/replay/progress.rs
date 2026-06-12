@@ -3,7 +3,9 @@ use sqlx::PgPool;
 
 use super::CurrentProjectionReplayStepSummary;
 
-pub const CURRENT_PROJECTION_REPLAY_VERSION: i32 = 4;
+/// Bump whenever a current projection's consumed input set changes semantically.
+/// Version 5 covers RootPermissionChanged and registry-scope permission consumption added in PR #24.
+pub const CURRENT_PROJECTION_REPLAY_VERSION: i32 = 5;
 
 pub(super) async fn projection_replay_completed(
     pool: &PgPool,

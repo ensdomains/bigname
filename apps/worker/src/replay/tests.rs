@@ -226,6 +226,43 @@ async fn all_current_projection_replay_clears_stale_rows_and_is_idempotent() -> 
     database.cleanup().await
 }
 
+#[tokio::test]
+async fn stale_replay_version_marker_does_not_complete_projection() -> Result<()> {
+    let database = TestDatabase::new().await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO current_projection_replay_status (
+            projection,
+            replay_version,
+            completed_normalized_target_block,
+            requested_key_count,
+            upserted_row_count,
+            deleted_row_count
+        )
+        VALUES ($1, $2, $3, 0, 0, 0)
+        "#,
+    )
+    .bind("permissions_current")
+    .bind(super::progress::CURRENT_PROJECTION_REPLAY_VERSION - 1)
+    .bind(108_i64)
+    .execute(database.pool())
+    .await
+    .context("failed to seed stale replay-version marker")?;
+
+    assert!(
+        !super::progress::projection_replay_completed(
+            database.pool(),
+            "permissions_current",
+            Some(108),
+        )
+        .await?,
+        "stale replay-version markers must not satisfy projection replay completion"
+    );
+
+    database.cleanup().await
+}
+
 async fn load_replay_status_rows(pool: &PgPool) -> Result<BTreeMap<String, (i32, Option<i64>)>> {
     let rows = sqlx::query_as::<_, (String, i32, Option<i64>)>(
         r#"
