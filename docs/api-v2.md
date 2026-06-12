@@ -34,34 +34,75 @@ that step 3 implements.
 
 ## Naming Dictionary
 
-Normative one-name-per-concept dictionary from ADR 0006:
+Normative one-name-per-concept dictionary from ADR 0006, extended with the
+step-3-gate vocabulary needed by the route schemas:
 
 | `v2` name | Meaning | Replaces (`v1`) |
 | --- | --- | --- |
 | `name` | the ENSIP-15 normalized name string | `normalized_name`, `logical_name_id` (derivable as `namespace:name`) |
 | `display_name` | display form of the name | `canonical_display_name` |
+| `namespace` | public namespace slug used to resolve a name or filter a route, such as `ens` or `basenames` | `namespace` path segment/query usage (unchanged; now echoed consistently) |
+| `namehash` | ENS namehash hex string | `namehash` (unchanged) |
+| `token_id` | decimal-string token id for tokenized registrations/names | `token_id` (unchanged; now defined consistently) |
 | `owner` | token/registry owner | `token_holder`, `owner`, `owner_address`, `registry_owner` |
 | `manager` | controller/manager | `effective_controller`, `manager_address` |
 | `registrant` | registrant | `registrant` (unchanged) |
 | `relation` | address-to-name relation filter: one or more of `owner`, `manager`, `registrant` (comma-separated set); `any` = all three | four divergent relation/role enums incl. `owned`/`managed`/`both` (partner `BOTH` = `owner,manager`) |
+| `relations` | address-to-name relations that matched a row, using `owner`, `manager`, and `registrant` values | `relation_facets`, role-specific match arrays |
 | `expires_at` | expiry, RFC 3339 | `expiry_date`, `expiration` (unix), `expiry` |
 | `registered_at` | current registration start, RFC 3339 | `registration_date` |
 | `created_at` | first observation of the name, RFC 3339 | `created_at` (now defined and distinguished from `registered_at`) |
+| `primary_name` | primary name selected or claimed for an address/coin tuple | `claimed_primary_name`, `verified_primary_name` when surfaced as the selected name |
+| `primary_address` | primary/default address value for a name | `primary_address` (unchanged) |
+| `is_primary` | whether an address-name row is the selected primary answer for that address/coin tuple | `is_primary` (unchanged) |
 | `addresses` | coin-type-to-address map, string keys | `coin_addresses`, `coin_type_addresses` |
+| `address` | EVM address used as a subject, filter, or single-address answer | `account`, `subject`, single-address fields named `address` |
+| `coin_type` | ENS/SLIP-44 coin type number | `coin_type` (unchanged; now used consistently for reverse and record lookups) |
 | `text_records` | text-key-to-value map | `text_records` (unchanged) |
 | `content_hash` | contenthash value | `content_hash` (unchanged) |
 | `resolver` | `{chain_id, address}` | `resolver_address`, `current_resolver`, declared resolver summaries |
 | `chain_id` | numeric EVM chain id (`1`, `8453`); string-keyed in maps | string chain ids (`"ethereum-mainnet"`), position slot keys |
 | `network` | display slug (`ethereum`, `base`) | `network` (unchanged, display-only) |
 | `registration_id` | the one opaque stable handle for a registration lifecycle | `resource_id`, `resource_hex`, `resource`, `token_lineage_id`, `surface_binding_id` |
+| `input` | caller-supplied lookup input echoed in a result | `input` (unchanged; now specified as result echo, not a parallel DTO family) |
+| `normalization` | name-normalization result for an input | `corrected_input_normalization`, `unnormalizable_input` status detail |
 | `finality` | `latest`, `safe`, `finalized` (JSON-RPC block-tag vocabulary) | `consistency` = `head`/`safe`/`finalized` |
 | `source` | `indexed`, `verified` (the records route adds `auto`) | `mode` = `declared`/`verified`/`both`/`auto`; `declared_state`/`verified_state` |
 | `as_of` | per-chain `{block_number, block_hash, timestamp}`, keyed by `chain_id` | `chain_positions` (and the `execution_checkpoint` pseudo-slot is diagnostics-only) |
+| `at` | snapshot selector parameter for routes that support point-in-time reads | `chain_positions` query parameter and timestamp-specific ad hoc selectors |
+| `include` | route-documented expansion allowlist | comma-separated expansion flags, `meta` knobs, and route-specific include flags |
+| `sort` | route-documented sort field | `sort` (unchanged; allowed fields are now route-documented) |
+| `order` | sort direction, `asc` or `desc` | `order` (unchanged) |
 | `scope` (history) | `name`, `registration`, `both` | `surface`, `resource`, `both` |
 | `grant_scope` | the protocol scope of a permission row (root/registry/resolver-scoped grants) | permission-row `scope` (renamed so history `scope` and permission scope are two names for two concepts) |
+| `verification` | typed checked-answer summary for claimed-vs-verified answers | `verified_state`, `verified_primary_name` section wrappers |
 | `status` | one result vocabulary: `ok`, `not_found`, `invalid_name`, `mismatch`, `unsupported`, `stale`, `failed` | `ResultStatus`, `IdentityStatus`, `NameRecordStatus`, `unnormalizable_input` (folds into `invalid_name`); `mismatch` kept for verification results |
+| `unsupported_reason` | reason code or short reason string required with `status=unsupported` | `coverage.unsupported_reason`, route-specific unsupported details |
+| `failure_reason` | reason code or short reason string for `failed`, `not_found`, or `mismatch` details | route-specific failure detail fields |
 | `completeness` | `full`, `partial`, `unsupported` | `coverage.status` on product routes (full taxonomy moves to diagnostics) |
 | `powers` | effective permission powers | `effective_powers` |
+| `unsupported_fields` | fields or expansions that could not be served or proved for a response item | `unsupported_filters`, coverage-derived unsupported field lists |
+| `keys` | comma-separated resolver record-key allowlist | `records` query parameter, selector token lists in record diagnostics |
+| `page` | pagination object on collection responses or per-input lookup results | pagination sections with divergent field subsets |
+| `cursor` | opaque request cursor for the current page | `cursor` (unchanged; now opaque and versioned) |
+| `next_cursor` | opaque cursor for the next page, or `null` | `next_cursor` (unchanged) |
+| `page_size` | requested or served page size | `page_size` (unchanged) |
+| `total_count` | nullable total item count when cheap or explicitly requested | `total_count` (unchanged; now nullable and budgeted) |
+| `has_more` | whether another page is available | `has_more` (unchanged) |
+| `meta` | response metadata object for snapshot, completeness, unsupported, and source details | `provenance`, `coverage`, `chain_positions`, `consistency`, `last_updated` top-level peers |
+| `subname_count` | count of direct subnames when requested | `subname_count` (unchanged; now the only count name for child rows) |
+| `record_count` | count of known record keys when requested | `record_count` (unchanged) |
+| `role_summary` | grouped permission powers for dashboard-style name rows | `role_summary` (unchanged; rewritten to dictionary field names inside) |
+| `capabilities` | product-facing summary of supported namespace capabilities | capability flag summaries when exposed to product routes |
+| `type` | product event category label | `event_kind`, compact event `type` aliases |
+| `block_number` | EVM block number | block-number fields inside chain-position objects |
+| `block_hash` | EVM block hash | block-hash fields inside chain-position objects |
+| `timestamp` | RFC 3339 event or block timestamp | event timestamps and chain-position timestamps |
+| `transaction_hash` | EVM transaction hash | `transaction_hash` (unchanged) |
+| `log_index` | EVM log index within a transaction | `log_index` (unchanged) |
+| `from_block` | inclusive lower block-number filter | `from_block` (unchanged) |
+| `to_block` | inclusive upper block-number filter | `to_block` (unchanged) |
+| `data` | envelope root payload, and event-row payload when nested inside an event row | compact event payload objects |
 
 Rules:
 
@@ -108,9 +149,9 @@ Rules:
 - `data` is an object on single-resource routes and an array on collections.
 - `page` appears on collections only. Per-input pagination on `POST /v2/lookup`
   uses the same object inside each result.
-- `total_count` is nullable. It is populated where an indexed count sidecar
-  makes it cheap or where the caller opts in via `include=total_count`.
-  Routes must not run unconditional full counts on the request path to fill it.
+- `total_count` is nullable. It is populated where a precomputed count makes
+  it cheap or where the caller opts in via `include=total_count`. Routes must
+  not run unconditional full counts on the request path to fill it.
 - `meta` is always present. Routes that read chain-derived state include
   `meta.as_of`; control-plane routes (`/v2/status`,
   `/v2/namespaces/{namespace}`) omit it. `meta.completeness`,
@@ -176,8 +217,8 @@ Common parameter rules:
 
 | Parameter | Applies to | Values |
 | --- | --- | --- |
-| `at` | Tier-2 projection reads, except lookup primitives | RFC 3339 timestamp, or a URL-safe opaque snapshot token round-tripped from `meta.as_of` |
-| `finality` | projection-read routes | `latest` (default), `safe`, `finalized` |
+| `at` | Tier-2 chain-derived reads, except lookup primitives | RFC 3339 timestamp, or a URL-safe opaque snapshot token round-tripped from `meta.as_of` |
+| `finality` | snapshot-read routes | `latest` (default), `safe`, `finalized` |
 | `source` | names, records, primary-name | `indexed` (default), `verified`; the records route also accepts `auto` |
 | `namespace` | name-inferred, address-anchored, and collection routes | explicit override or filter |
 | `include` | route-documented expansions | per-route allowlist |
@@ -211,7 +252,7 @@ Rules:
 ## Finality And Snapshots
 
 `finality` values are `latest`, `safe`, and `finalized`. Snapshot selection is
-uniform across projection-read routes. Each chain-derived response carries
+uniform across snapshot-read routes. Each chain-derived response carries
 `meta.as_of`, keyed by stringified `chain_id`, and that response metadata can
 round-trip as an `at` snapshot token to pin exact per-chain positions.
 
@@ -251,7 +292,7 @@ Uniform mapping:
 | `invalid_input` | 400 | malformed input, unnormalizable path name, bad parameter combination |
 | `not_found` | 404 | single-resource GET with no answer |
 | `unsupported` | 422 | the route cannot produce its contract for this input |
-| `stale` | 409 | coherent selector not yet served by projections |
+| `stale` | 409 | coherent selector not yet served for the selected snapshot |
 | `conflict` | 409 | selector cannot form one canonical snapshot |
 | `internal_error` | 500 | unexpected failure |
 
@@ -268,4 +309,4 @@ Rules:
 - The primary-name route is the documented exception to single-resource `404`:
   a valid `{address, coin_type, namespace}` tuple with no claim or an
   unsupported/mismatched verification returns `200` with in-band `status`.
-- Error messages must not name internal tables, projections, or sidecars.
+- Error messages must not name internal storage or pipeline components.
