@@ -67,6 +67,11 @@ pub(super) async fn roles(
         let page = page_response_from_storage_cursor(&pagination, &cursor_spec, None);
         return Ok(Json(build_empty_compact_roles_response(page, meta_mode)));
     }
+    let root_composition_resource_id = if requested_resource_id.is_none() {
+        ensv2_root_resource_id
+    } else {
+        None
+    };
 
     ensure_permissions_current_projection_available(&state.pool, "/v1/roles").await?;
 
@@ -75,7 +80,7 @@ pub(super) async fn roles(
             &state.pool,
             account.as_deref(),
             effective_resource_id,
-            ensv2_root_resource_id,
+            root_composition_resource_id,
             cursor,
             "/v1/roles",
         )
@@ -86,7 +91,7 @@ pub(super) async fn roles(
         &state.pool,
         account.as_deref(),
         effective_resource_id,
-        ensv2_root_resource_id,
+        root_composition_resource_id,
         storage_cursor.as_ref(),
         storage_page_size(&pagination),
         "/v1/roles",

@@ -464,6 +464,54 @@ async fn name_roles_precompose_ensv2_root_fallback_permissions() -> Result<()> {
             && row["name"] == JsonValue::Null
     }));
 
+    let unrelated_resource_id = Uuid::from_u128(0xe299);
+    let unrelated_filtered_query_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/roles?namespace=ens&name=alice.eth&resource_id={unrelated_resource_id}"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("roles query unrelated resource filter request failed")?;
+    assert_eq!(unrelated_filtered_query_response.status(), StatusCode::OK);
+    let unrelated_filtered_query_payload: Value = read_json(unrelated_filtered_query_response).await?;
+    assert_eq!(unrelated_filtered_query_payload["meta"]["total_count"], json!(0));
+    assert_eq!(
+        unrelated_filtered_query_payload["data"]
+            .as_array()
+            .expect("query data must be an array")
+            .len(),
+        0
+    );
+
+    let resource_filtered_query_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/roles?namespace=ens&name=alice.eth&resource_id={resource_id}"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("roles query resource filter request failed")?;
+    assert_eq!(resource_filtered_query_response.status(), StatusCode::OK);
+    let resource_filtered_query_payload: Value = read_json(resource_filtered_query_response).await?;
+    let resource_filtered_query_rows = resource_filtered_query_payload["data"]
+        .as_array()
+        .expect("query data must be an array");
+    assert_eq!(resource_filtered_query_payload["meta"]["total_count"], json!(1));
+    assert_eq!(resource_filtered_query_rows.len(), 1);
+    assert_eq!(resource_filtered_query_rows[0]["account"], json!(local_account));
+    assert_eq!(
+        resource_filtered_query_rows[0]["resource_id"],
+        json!(resource_id.to_string())
+    );
+    assert_eq!(resource_filtered_query_rows[0]["name"], json!("Alice.eth"));
+
     let root_filtered_query_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
