@@ -464,6 +464,31 @@ async fn name_roles_precompose_ensv2_root_fallback_permissions() -> Result<()> {
             && row["name"] == JsonValue::Null
     }));
 
+    let root_filtered_query_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/roles?namespace=ens&name=alice.eth&resource_id={root_resource_id}"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("roles query root fallback resource filter request failed")?;
+    assert_eq!(root_filtered_query_response.status(), StatusCode::OK);
+    let root_filtered_query_payload: Value = read_json(root_filtered_query_response).await?;
+    let root_filtered_query_rows = root_filtered_query_payload["data"]
+        .as_array()
+        .expect("query data must be an array");
+    assert_eq!(root_filtered_query_payload["meta"]["total_count"], json!(1));
+    assert_eq!(root_filtered_query_rows.len(), 1);
+    assert_eq!(root_filtered_query_rows[0]["account"], json!(root_account));
+    assert_eq!(
+        root_filtered_query_rows[0]["resource_id"],
+        json!(root_resource_id.to_string())
+    );
+    assert_eq!(root_filtered_query_rows[0]["name"], JsonValue::Null);
+
     let first_page_response = app_router(database.app_state())
         .oneshot(
             Request::builder()

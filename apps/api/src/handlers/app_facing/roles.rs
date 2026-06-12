@@ -31,10 +31,23 @@ pub(super) async fn roles(
         .as_ref()
         .map(resource_id_from_name_current)
         .transpose()?;
+    let ensv2_root_resource_id = match resolved_resource_id {
+        Some(resource_id) => {
+            load_ensv2_root_resource_id_for_name_resource(
+                &state.pool,
+                resource_id,
+                "/v1/roles",
+            )
+            .await?
+        }
+        None => None,
+    };
     let effective_resource_id = requested_resource_id.or(resolved_resource_id);
     let name_resource_mismatch = requested_resource_id
         .zip(resolved_resource_id)
-        .is_some_and(|(requested, resolved)| requested != resolved);
+        .is_some_and(|(requested, resolved)| {
+            requested != resolved && Some(requested) != ensv2_root_resource_id
+        });
 
     let pagination = parse_pagination(query.cursor.as_deref(), query.page_size)?;
     let cursor_spec = roles_cursor_spec(
@@ -54,18 +67,6 @@ pub(super) async fn roles(
         let page = page_response_from_storage_cursor(&pagination, &cursor_spec, None);
         return Ok(Json(build_empty_compact_roles_response(page, meta_mode)));
     }
-
-    let ensv2_root_resource_id = match resolved_resource_id {
-        Some(resource_id) => {
-            load_ensv2_root_resource_id_for_name_resource(
-                &state.pool,
-                resource_id,
-                "/v1/roles",
-            )
-            .await?
-        }
-        None => None,
-    };
 
     ensure_permissions_current_projection_available(&state.pool, "/v1/roles").await?;
 

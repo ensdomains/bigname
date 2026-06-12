@@ -481,7 +481,7 @@ Each item is `RoleRow`.
 Rules:
 
 - At least one of `account`, `resource_id`, or the pair `{namespace, name}` is required.
-- `{namespace, name}` resolves through `GET /v1/resources/lookup` semantics, then reads current effective permission rows for that resource. For ENSv2 registry resources, name-qualified reads also include the owning registry's root-resource `permissions_current` rows when the registry root anchor can be derived from the resolved resource provenance; missing or malformed root provenance leaves the response resource-only. Non-ENSv2 names remain resource-only.[^v2-eac-l56][^v2-eac-l187]
+- `{namespace, name}` resolves through `GET /v1/resources/lookup` semantics, then reads current effective permission rows for that resource. For ENSv2 registry resources, name-qualified reads also include the owning registry's root-resource `permissions_current` rows when the registry root anchor can be derived from the resolved resource provenance; a simultaneous `resource_id` filter may match either the resolved resource or that derived root resource. Missing or malformed root provenance leaves the response resource-only, and non-matching `resource_id` filters return an empty page. Non-ENSv2 names remain resource-only.[^v2-eac-l56][^v2-eac-l187]
 - `account` filters by effective permission subject. It doesn't search owner, registrant, or address-name relations unless those subjects also exist in `permissions_current`.
 - `role_bitmap` filters only when the projection exposes it; otherwise non-2xx `unsupported` for that filter.
 - `effective_powers` remains the API-owned post-scope result. Don't infer powers from `role_bitmap` alone.
