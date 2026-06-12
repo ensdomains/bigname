@@ -415,6 +415,177 @@ async fn reconcile_fetched_heads_skips_stale_finalized_checkpoint_tag() -> Resul
 }
 
 #[tokio::test]
+async fn reconcile_fetched_heads_does_not_revive_off_branch_safe_head_lineage() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let chain = "base-mainnet";
+    let block_100 = provider_block(
+        "0x1000000000000000000000000000000000000000000000000000000000000000",
+        Some("0x0990000000000000000000000000000000000000000000000000000000000000"),
+        100,
+    );
+    let block_101 = provider_block(
+        "0x1010000000000000000000000000000000000000000000000000000000000000",
+        Some(&block_100.block_hash),
+        101,
+    );
+    let block_102 = provider_block(
+        "0x1020000000000000000000000000000000000000000000000000000000000000",
+        Some(&block_101.block_hash),
+        102,
+    );
+    let off_branch_safe = provider_block(
+        "0x2afe000000000000000000000000000000000000000000000000000000000000",
+        Some("0x2afa000000000000000000000000000000000000000000000000000000000000"),
+        100,
+    );
+    insert_chain_lineage_for_block(
+        database.pool(),
+        chain,
+        &block_100,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    insert_chain_lineage_for_block(
+        database.pool(),
+        chain,
+        &block_101,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    insert_chain_lineage_for_block(
+        database.pool(),
+        chain,
+        &off_branch_safe,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    bigname_storage::mark_chain_lineage_range_orphaned(
+        database.pool(),
+        chain,
+        &off_branch_safe.block_hash,
+        None,
+    )
+    .await?;
+    let (provider, server) = bundle_provider(vec![
+        block_100.clone(),
+        block_101.clone(),
+        block_102.clone(),
+        off_branch_safe.clone(),
+    ])
+    .await?;
+    let task = IntakeChainTask {
+        chain: chain.to_owned(),
+        addresses: Vec::new(),
+        manifest_root_entry_count: 0,
+        manifest_contract_entry_count: 0,
+        discovery_edge_entry_count: 0,
+        checkpoint: ChainCheckpoint {
+            chain_id: chain.to_owned(),
+            canonical_block_hash: Some(block_101.block_hash.clone()),
+            canonical_block_number: Some(block_101.block_number),
+            safe_block_hash: None,
+            safe_block_number: None,
+            finalized_block_hash: None,
+            finalized_block_number: None,
+        },
+    };
+
+    let (task, _outcome) = reconcile_fetched_heads_with_adapter_sync(
+        database.pool(),
+        &task,
+        &provider,
+        &ProviderHeadSnapshot {
+            canonical: block_102,
+            safe: Some(off_branch_safe.clone()),
+            finalized: None,
+        },
+        false,
+        HeaderAuditMode::Minimal,
+        &[],
+    )
+    .await?
+    .expect("canonical append must still advance");
+
+    assert_eq!(task.checkpoint.canonical_block_number, Some(102));
+    assert_eq!(task.checkpoint.safe_block_number, None);
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT canonicality_state::TEXT FROM chain_lineage WHERE block_hash = $1"
+        )
+        .bind(&off_branch_safe.block_hash)
+        .fetch_one(database.pool())
+        .await?,
+        "orphaned".to_owned()
+    );
+
+    server.abort();
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn reconcile_canonical_head_rejects_gap_larger_than_bounded_backfill_chunk() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let chain = "base-mainnet";
+    let gap_end_block = crate::backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS + 2;
+    let mut blocks = Vec::new();
+    let mut parent_hash = None::<String>;
+    for block_number in 1..=gap_end_block {
+        let block_hash = format!("0x{block_number:064x}");
+        let block = provider_block(&block_hash, parent_hash.as_deref(), block_number);
+        parent_hash = Some(block_hash);
+        blocks.push(block);
+    }
+    let current = blocks
+        .first()
+        .expect("test chain must include a current block")
+        .clone();
+    let latest = blocks
+        .last()
+        .expect("test chain must include a latest block")
+        .clone();
+    insert_chain_lineage_for_block(
+        database.pool(),
+        chain,
+        &current,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    let (provider, server) = bundle_provider(blocks).await?;
+    let checkpoint = ChainCheckpoint {
+        chain_id: chain.to_owned(),
+        canonical_block_hash: Some(current.block_hash.clone()),
+        canonical_block_number: Some(current.block_number),
+        safe_block_hash: None,
+        safe_block_number: None,
+        finalized_block_hash: None,
+        finalized_block_number: None,
+    };
+
+    let error = reconcile_canonical_head(
+        database.pool(),
+        &provider,
+        chain,
+        &checkpoint,
+        &latest,
+        HeaderAuditMode::Minimal,
+    )
+    .await
+    .expect_err("live reconciliation must reject unbounded contiguous gaps");
+
+    assert!(
+        error
+            .to_string()
+            .contains("exceeds live gap fill limit"),
+        "unexpected unbounded gap error: {error:#}"
+    );
+
+    server.abort();
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn cache_fill_authorizes_full_block_metadata_from_provider_fetch() -> Result<()> {
     let database = TestDatabase::new().await?;
     let chain = "ethereum-mainnet";

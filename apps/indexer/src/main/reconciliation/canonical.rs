@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Result, bail};
 use bigname_storage::{
     CanonicalityState, ChainCheckpoint, ChainCheckpointUpdate, advance_chain_checkpoints,
     chain_lineage_contains_ancestor, load_chain_lineage_block, mark_chain_lineage_range_orphaned,
@@ -9,6 +9,7 @@ use bigname_storage::{
 use tracing::{info, warn};
 
 use crate::{
+    backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS,
     provider::{ChainProviderOps, ProviderBlock, ProviderHeadSnapshot, ProviderRegistry},
     runtime::{IntakeChainTask, checkpoint_mode},
 };
@@ -19,10 +20,7 @@ use super::{
         provider_block_to_lineage_with_header_audit_mode,
     },
     logging::log_chain_reconciliation_outcome,
-    persistence::{
-        persist_reconciled_raw_blocks, persist_reconciled_raw_code_hashes,
-        persist_reconciled_raw_payloads,
-    },
+    persistence::persist_reconciled_raw_state,
     types::{
         CanonicalReconciliation, CanonicalReconciliationStatus, ChainReconciliationOutcome,
         HeaderAuditMode,
@@ -38,6 +36,9 @@ use checkpoints::{checkpoint_update_for_head, fill_checkpoint_ancestor_path};
 use orphaning::orphan_reorg_losing_branch_payloads;
 
 const MAX_PARENT_FETCH_DEPTH: usize = 131_072;
+// Live polling fails closed before it tries to ingest a large catch-up range.
+// Hash-pinned backfill owns larger bounded gaps.
+const MAX_LIVE_CONTIGUOUS_GAP_FILL_BLOCKS: i64 = DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS;
 
 #[allow(dead_code)]
 pub(crate) async fn poll_provider_heads(
@@ -203,7 +204,7 @@ async fn reconcile_fetched_heads_with_gap_policy(
         header_audit_mode,
     )
     .await?;
-    let head_change_set = head_change_set(task, heads, &canonical);
+    let provider_head_change_set = head_change_set(task, heads, &canonical);
 
     if canonical.status == CanonicalReconciliationStatus::ReorgReconciled {
         orphan_reorg_losing_branch_payloads(
@@ -215,48 +216,6 @@ async fn reconcile_fetched_heads_with_gap_policy(
         .await?;
     }
 
-    persist_reconciled_raw_blocks(pool, &task.chain, heads, &canonical, header_audit_mode).await?;
-    if head_change_set.requires_raw_payload_refresh(canonical.status) {
-        persist_reconciled_raw_payloads(
-            pool,
-            &task.chain,
-            &task.addresses,
-            provider,
-            heads,
-            &canonical,
-            head_change_set,
-            adapter_sync_enabled,
-            event_silent_reverse_resolver_addresses,
-        )
-        .await?;
-    }
-    persist_reconciled_raw_code_hashes(pool, task, provider, heads, &canonical, head_change_set)
-        .await?;
-
-    if let Some(safe_head) = &heads.safe {
-        upsert_recanonicalized_lineage_blocks(
-            pool,
-            &[provider_block_to_lineage_with_header_audit_mode(
-                &task.chain,
-                safe_head,
-                CanonicalityState::Safe,
-                header_audit_mode,
-            )],
-        )
-        .await?;
-    }
-    if let Some(finalized_head) = &heads.finalized {
-        upsert_recanonicalized_lineage_blocks(
-            pool,
-            &[provider_block_to_lineage_with_header_audit_mode(
-                &task.chain,
-                finalized_head,
-                CanonicalityState::Finalized,
-                header_audit_mode,
-            )],
-        )
-        .await?;
-    }
     let fetched_checkpoint_ancestor_count = fill_checkpoint_ancestor_path(
         pool,
         provider,
@@ -302,6 +261,29 @@ async fn reconcile_fetched_heads_with_gap_policy(
     } else {
         (None, None)
     };
+    let accepted_heads = ProviderHeadSnapshot {
+        canonical: heads.canonical.clone(),
+        safe: safe_update
+            .as_ref()
+            .and_then(|_| heads.safe.as_ref().cloned()),
+        finalized: finalized_update
+            .as_ref()
+            .and_then(|_| heads.finalized.as_ref().cloned()),
+    };
+    let head_change_set = head_change_set(task, &accepted_heads, &canonical);
+
+    persist_reconciled_raw_state(
+        pool,
+        task,
+        provider,
+        &accepted_heads,
+        &canonical,
+        head_change_set,
+        adapter_sync_enabled,
+        header_audit_mode,
+        event_silent_reverse_resolver_addresses,
+    )
+    .await?;
 
     let next_checkpoint = advance_chain_checkpoints(
         pool,
@@ -317,6 +299,8 @@ async fn reconcile_fetched_heads_with_gap_policy(
     if !head_change_set.canonical_head_changed
         && !head_change_set.safe_head_changed
         && !head_change_set.finalized_head_changed
+        && !provider_head_change_set.safe_head_changed
+        && !provider_head_change_set.finalized_head_changed
         && canonical.status == CanonicalReconciliationStatus::Unchanged
     {
         return Ok(None);
@@ -414,14 +398,17 @@ pub(crate) async fn reconcile_canonical_head(
     let mut cursor = latest_head.clone();
     let mut fetched_parent_count = 0usize;
     let mut common_ancestor_hash = None::<String>;
+    let mut parent_fetch_limit_exhausted = true;
 
     for _ in 0..MAX_PARENT_FETCH_DEPTH {
         if cursor.parent_hash.as_deref() == current_canonical_hash {
             common_ancestor_hash = current_canonical_hash.map(ToOwned::to_owned);
+            parent_fetch_limit_exhausted = false;
             break;
         }
 
         let Some(parent_hash) = cursor.parent_hash.clone() else {
+            parent_fetch_limit_exhausted = false;
             break;
         };
 
@@ -447,6 +434,7 @@ pub(crate) async fn reconcile_canonical_head(
             };
             if can_be_current_branch_ancestor && is_current_branch_ancestor {
                 common_ancestor_hash = Some(stored_parent.block_hash.clone());
+                parent_fetch_limit_exhausted = false;
                 break;
             }
 
@@ -459,6 +447,7 @@ pub(crate) async fn reconcile_canonical_head(
         fetched_parent_count += 1;
         if Some(fetched_parent.block_hash.as_str()) == current_canonical_hash {
             common_ancestor_hash = Some(fetched_parent.block_hash.clone());
+            parent_fetch_limit_exhausted = false;
             break;
         }
 
@@ -467,6 +456,11 @@ pub(crate) async fn reconcile_canonical_head(
     }
 
     if common_ancestor_hash.is_none() {
+        if parent_fetch_limit_exhausted {
+            bail!(
+                "canonical reorg walk for chain {chain} exceeded parent fetch limit {MAX_PARENT_FETCH_DEPTH}; run bounded catch-up or hash-pinned backfill to repair the ancestry path"
+            );
+        }
         let lineage_blocks = path
             .iter()
             .map(|block| {
@@ -547,6 +541,11 @@ async fn reconcile_contiguous_checkpoint_gap(
         return Ok(None);
     }
     let gap_blocks = latest_head.block_number - current_canonical_number;
+    if gap_blocks > MAX_LIVE_CONTIGUOUS_GAP_FILL_BLOCKS {
+        bail!(
+            "canonical gap of {gap_blocks} blocks for chain {chain} exceeds live gap fill limit {MAX_LIVE_CONTIGUOUS_GAP_FILL_BLOCKS}; run bounded catch-up or hash-pinned backfill for the missing range"
+        );
+    }
     if gap_blocks as usize > MAX_PARENT_FETCH_DEPTH {
         return Ok(None);
     }
@@ -567,7 +566,8 @@ async fn reconcile_contiguous_checkpoint_gap(
     let mut path = provider
         .fetch_block_headers_by_hashes(&resolved_blocks)
         .await?;
-    if path.first().and_then(|block| block.parent_hash.as_deref()) != Some(current_canonical_hash) {
+    let first_parent_hash = path.first().and_then(|block| block.parent_hash.as_deref());
+    if first_parent_hash != Some(current_canonical_hash) {
         return Ok(None);
     }
     if !path

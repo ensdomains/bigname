@@ -1,12 +1,17 @@
-use std::{collections::BTreeMap, time::Instant};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    time::Instant,
+};
 
 use anyhow::{Context, Result, bail};
 use bigname_manifests::WatchedSourceSelectorPlan;
 use bigname_storage::{
-    RawCodeHash, RawLog, upsert_chain_lineage_blocks_without_snapshots, upsert_raw_code_hashes,
+    CanonicalityState, RawCodeHash, RawLog, normalize_evm_address, normalize_evm_b256,
+    upsert_chain_lineage_blocks_without_snapshots, upsert_raw_code_hashes,
     upsert_raw_logs_without_snapshots, upsert_raw_receipts_without_snapshots,
     upsert_raw_transactions_without_snapshots,
 };
+use sqlx::Row;
 use tracing::info;
 
 use crate::{
@@ -321,6 +326,15 @@ pub(super) async fn run_hash_pinned_raw_only_sparse_backfill_range(
     }
     let materialize_ms = materialize_started.elapsed().as_millis();
 
+    let stored_code_hash_observations = load_stored_sparse_code_observation_pairs(
+        pool,
+        &watched_chain.chain,
+        &code_observation_plan.block_hashes(),
+        &code_observation_plan.contract_addresses(),
+    )
+    .await?;
+    code_observation_plan.retain_missing_stored_observations(&stored_code_hash_observations);
+
     let transaction_receipt_requests =
         missing_transaction_receipt_requests_from_raw_facts(&logs, &transactions, &receipts);
     let transaction_receipts_started = Instant::now();
@@ -358,15 +372,20 @@ pub(super) async fn run_hash_pinned_raw_only_sparse_backfill_range(
     let transaction_materialize_ms = transaction_materialize_started.elapsed().as_millis();
 
     let code_started = Instant::now();
-    let code_observation_batches = provider
-        .fetch_code_observations_at_block_hashes(&code_observation_plan.requests())
-        .await
-        .with_context(|| {
-            format!(
-                "failed to fetch hash-pinned code observation batch for chain {} range {}..={}",
-                watched_chain.chain, range.from_block, range.to_block
-            )
-        })?;
+    let code_observation_requests = code_observation_plan.requests();
+    let code_observation_batches = if code_observation_requests.is_empty() {
+        Vec::new()
+    } else {
+        provider
+            .fetch_code_observations_at_block_hashes(&code_observation_requests)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to fetch hash-pinned code observation batch for chain {} range {}..={}",
+                    watched_chain.chain, range.from_block, range.to_block
+                )
+            })?
+    };
     let code_fetch_ms = code_started.elapsed().as_millis();
     let code_materialize_started = Instant::now();
     for batch in code_observation_batches {
@@ -473,6 +492,72 @@ pub(super) async fn run_hash_pinned_raw_only_sparse_backfill_range(
     );
 
     Ok(outcome)
+}
+
+async fn load_stored_sparse_code_observation_pairs(
+    pool: &sqlx::PgPool,
+    chain_id: &str,
+    block_hashes: &[String],
+    contract_addresses: &[String],
+) -> Result<BTreeMap<(String, String), CanonicalityState>> {
+    if block_hashes.is_empty() || contract_addresses.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let block_hashes = block_hashes
+        .iter()
+        .map(|block_hash| normalize_evm_b256(block_hash))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let contract_addresses = contract_addresses
+        .iter()
+        .map(|address| normalize_evm_address(address))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            block_hash,
+            contract_address,
+            canonicality_state::TEXT AS canonicality_state
+        FROM raw_code_hashes
+        WHERE chain_id = $1
+          AND block_hash = ANY($2::TEXT[])
+          AND contract_address = ANY($3::TEXT[])
+        "#,
+    )
+    .bind(chain_id)
+    .bind(&block_hashes)
+    .bind(&contract_addresses)
+    .fetch_all(pool)
+    .await
+    .with_context(|| {
+        format!(
+            "failed to load stored sparse code observations for chain {chain_id} across {} hashes and {} contracts",
+            block_hashes.len(),
+            contract_addresses.len()
+        )
+    })?;
+
+    rows.into_iter()
+        .map(|row| {
+            let block_hash = row
+                .try_get::<String, _>("block_hash")
+                .context("missing block_hash from stored sparse code observation row")?;
+            let contract_address = row
+                .try_get::<String, _>("contract_address")
+                .context("missing contract_address from stored sparse code observation row")?;
+            let canonicality_state = row
+                .try_get::<String, _>("canonicality_state")
+                .context("missing canonicality_state from stored sparse code observation row")?;
+            Ok((
+                (block_hash, contract_address),
+                CanonicalityState::parse(&canonicality_state)?,
+            ))
+        })
+        .collect()
 }
 
 #[cfg(test)]

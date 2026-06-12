@@ -9,8 +9,9 @@ use bigname_manifests::{
     WatchedSourceSelectorPlan, WatchedTargetIdentity, load_watched_source_selector_plan,
 };
 use bigname_storage::{
-    BackfillLifecycleStatus, CanonicalityState, load_backfill_job, load_backfill_ranges,
-    load_chain_lineage_block, mark_chain_lineage_range_orphaned,
+    BackfillLifecycleStatus, CanonicalityState, RawCodeHash, load_backfill_job,
+    load_backfill_ranges, load_chain_lineage_block, mark_chain_lineage_range_orphaned,
+    upsert_raw_code_hashes,
 };
 
 use crate::provider::{ProviderLog, ProviderResolvedBlock};
@@ -1469,6 +1470,285 @@ async fn raw_only_sparse_backfill_retains_tx_sibling_logs_and_code_observations(
             (block.block_number, selected_address.to_owned()),
             (next_block.block_number, selected_address.to_owned()),
         ]
+    );
+
+    server.abort();
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn raw_only_sparse_backfill_skips_complete_stored_code_observations_on_fresh_rerun()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_backfill_job_tables(database.pool()).await?;
+    let contract_instance_id = Uuid::from_u128(9_256);
+    let selected_address = "0x0000000000000000000000000000000000000001";
+
+    insert_watched_manifest_contract(
+        database.pool(),
+        9_256,
+        "ens",
+        "ethereum-mainnet",
+        "ens_v1_wrapper_l1",
+        contract_instance_id,
+        selected_address,
+    )
+    .await?;
+
+    let range = BackfillBlockRange::new(42, 43)?;
+    let source_plan = load_watched_source_selector_plan(
+        database.pool(),
+        "ethereum-mainnet",
+        WatchedSourceSelector::SourceFamily("ens_v1_wrapper_l1".to_owned()),
+        range.from_block,
+        range.to_block,
+    )
+    .await?;
+    let block_42 = provider_block(
+        "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        Some("0x9999999999999999999999999999999999999999999999999999999999999999"),
+        42,
+    );
+    let block_43 = provider_block(
+        "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        Some(&block_42.block_hash),
+        43,
+    );
+    let requests = Arc::new(Mutex::new(Vec::<RecordedRpcRequest>::new()));
+    let (provider, server) = number_resolving_provider_with_fixtures(
+        vec![
+            ProviderBlockFixture {
+                block: block_42.clone(),
+                logs: vec![rpc_log_payload_at_address(&block_42, selected_address, 0)],
+            },
+            ProviderBlockFixture {
+                block: block_43.clone(),
+                logs: vec![rpc_log_payload_at_address(&block_43, selected_address, 0)],
+            },
+        ],
+        Arc::clone(&requests),
+    )
+    .await?;
+    let mut first_config = backfill_job_config(
+        range,
+        "raw-only-sparse-code-skip-first",
+        "lease-code-skip-first",
+    )?;
+    first_config.adapter_sync_mode = backfill::BackfillAdapterSyncMode::RawOnly;
+    let first_outcome = run_resumable_hash_pinned_backfill_job(
+        database.pool(),
+        &source_plan,
+        &provider,
+        first_config,
+    )
+    .await?;
+    assert_eq!(first_outcome.raw_code_hash_count, 2);
+    assert_eq!(table_count(database.pool(), "raw_code_hashes").await?, 2);
+
+    requests
+        .lock()
+        .expect("request log must not be poisoned")
+        .clear();
+    let mut second_config = backfill_job_config(
+        range,
+        "raw-only-sparse-code-skip-second",
+        "lease-code-skip-second",
+    )?;
+    second_config.adapter_sync_mode = backfill::BackfillAdapterSyncMode::RawOnly;
+    let second_outcome = run_resumable_hash_pinned_backfill_job(
+        database.pool(),
+        &source_plan,
+        &provider,
+        second_config,
+    )
+    .await?;
+    let second_code_request_count = requests
+        .lock()
+        .expect("request log must not be poisoned")
+        .iter()
+        .filter(|request| request.method == "eth_getCode")
+        .count();
+
+    assert_eq!(second_outcome.raw_code_hash_count, 0);
+    assert_eq!(second_code_request_count, 0);
+    assert_eq!(table_count(database.pool(), "raw_code_hashes").await?, 2);
+
+    server.abort();
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn raw_only_sparse_backfill_fetches_missing_code_observation_for_selected_address()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_backfill_job_tables(database.pool()).await?;
+    let selected_address = "0x0000000000000000000000000000000000000002";
+    let preexisting_address = "0x0000000000000000000000000000000000000001";
+
+    insert_watched_manifest_contract(
+        database.pool(),
+        9_257,
+        "ens",
+        "ethereum-mainnet",
+        "ens_v1_wrapper_l1",
+        Uuid::from_u128(9_257),
+        selected_address,
+    )
+    .await?;
+
+    let block = provider_block(
+        "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        Some("0x9999999999999999999999999999999999999999999999999999999999999999"),
+        42,
+    );
+    upsert_raw_code_hashes(
+        database.pool(),
+        &[RawCodeHash {
+            chain_id: "ethereum-mainnet".to_owned(),
+            block_hash: block.block_hash.clone(),
+            block_number: block.block_number,
+            contract_address: preexisting_address.to_owned(),
+            code_hash: "0x1111".to_owned(),
+            code_byte_length: 2,
+            canonicality_state: CanonicalityState::Canonical,
+        }],
+    )
+    .await?;
+
+    let range = BackfillBlockRange::new(42, 42)?;
+    let source_plan = load_watched_source_selector_plan(
+        database.pool(),
+        "ethereum-mainnet",
+        WatchedSourceSelector::SourceFamily("ens_v1_wrapper_l1".to_owned()),
+        range.from_block,
+        range.to_block,
+    )
+    .await?;
+    let requests = Arc::new(Mutex::new(Vec::<RecordedRpcRequest>::new()));
+    let (provider, server) = number_resolving_provider_with_fixtures(
+        vec![ProviderBlockFixture {
+            block: block.clone(),
+            logs: vec![rpc_log_payload_at_address(&block, selected_address, 0)],
+        }],
+        Arc::clone(&requests),
+    )
+    .await?;
+
+    let mut config = backfill_job_config(
+        range,
+        "raw-only-sparse-code-skip-partial",
+        "lease-code-skip-partial",
+    )?;
+    config.adapter_sync_mode = backfill::BackfillAdapterSyncMode::RawOnly;
+    let outcome =
+        run_resumable_hash_pinned_backfill_job(database.pool(), &source_plan, &provider, config)
+            .await?;
+    let code_request_count = requests
+        .lock()
+        .expect("request log must not be poisoned")
+        .iter()
+        .filter(|request| request.method == "eth_getCode")
+        .count();
+
+    assert_eq!(outcome.raw_code_hash_count, 1);
+    assert_eq!(code_request_count, 1);
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT contract_address FROM raw_code_hashes WHERE contract_address = $1"
+        )
+        .bind(selected_address)
+        .fetch_one(database.pool())
+        .await?,
+        selected_address
+    );
+    assert_eq!(table_count(database.pool(), "raw_code_hashes").await?, 2);
+
+    server.abort();
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn raw_only_sparse_backfill_repairs_weaker_stored_code_observation_canonicality() -> Result<()>
+{
+    let database = TestDatabase::new().await?;
+    create_backfill_job_tables(database.pool()).await?;
+    let selected_address = "0x0000000000000000000000000000000000000001";
+
+    insert_watched_manifest_contract(
+        database.pool(),
+        9_258,
+        "ens",
+        "ethereum-mainnet",
+        "ens_v1_wrapper_l1",
+        Uuid::from_u128(9_258),
+        selected_address,
+    )
+    .await?;
+
+    let block = provider_block(
+        "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        Some("0x9999999999999999999999999999999999999999999999999999999999999999"),
+        42,
+    );
+    upsert_raw_code_hashes(
+        database.pool(),
+        &[RawCodeHash {
+            chain_id: "ethereum-mainnet".to_owned(),
+            block_hash: block.block_hash.clone(),
+            block_number: block.block_number,
+            contract_address: selected_address.to_owned(),
+            code_hash: keccak256_hex(&[0x60, 0x01, 0x60, 0x01, 0x55]),
+            code_byte_length: 5,
+            canonicality_state: CanonicalityState::Observed,
+        }],
+    )
+    .await?;
+
+    let range = BackfillBlockRange::new(42, 42)?;
+    let source_plan = load_watched_source_selector_plan(
+        database.pool(),
+        "ethereum-mainnet",
+        WatchedSourceSelector::SourceFamily("ens_v1_wrapper_l1".to_owned()),
+        range.from_block,
+        range.to_block,
+    )
+    .await?;
+    let requests = Arc::new(Mutex::new(Vec::<RecordedRpcRequest>::new()));
+    let (provider, server) = number_resolving_provider_with_fixtures(
+        vec![ProviderBlockFixture {
+            block: block.clone(),
+            logs: vec![rpc_log_payload_at_address(&block, selected_address, 0)],
+        }],
+        Arc::clone(&requests),
+    )
+    .await?;
+
+    let mut config = backfill_job_config(
+        range,
+        "raw-only-sparse-code-repair-observed",
+        "lease-code-repair-observed",
+    )?;
+    config.adapter_sync_mode = backfill::BackfillAdapterSyncMode::RawOnly;
+    let outcome =
+        run_resumable_hash_pinned_backfill_job(database.pool(), &source_plan, &provider, config)
+            .await?;
+    let code_request_count = requests
+        .lock()
+        .expect("request log must not be poisoned")
+        .iter()
+        .filter(|request| request.method == "eth_getCode")
+        .count();
+
+    assert_eq!(outcome.raw_code_hash_count, 1);
+    assert_eq!(code_request_count, 1);
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT canonicality_state::TEXT FROM raw_code_hashes WHERE contract_address = $1"
+        )
+        .bind(selected_address)
+        .fetch_one(database.pool())
+        .await?,
+        "canonical"
     );
 
     server.abort();

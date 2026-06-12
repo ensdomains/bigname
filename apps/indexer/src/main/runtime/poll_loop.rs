@@ -349,16 +349,18 @@ pub(crate) async fn run_poll_loop(
                     } else {
                         Vec::new()
                     };
-                let effective_adapter_sync_on_live_poll = if adapter_sync_on_live_poll {
+                let mut effective_adapter_sync_on_live_poll = if adapter_sync_on_live_poll {
                     true
                 } else if adapter_sync_on_live_poll_after_normalized_replay_catchup {
                     !provider_configured_chains.is_empty()
-                        && normalized_replay_cursors_complete(
-                            pool,
-                            &deployment_profile,
-                            &provider_configured_chains,
+                        && live_poll_adapter_sync_ready_after_replay(
+                            normalized_replay_cursors_complete(
+                                pool,
+                                &deployment_profile,
+                                &provider_configured_chains,
+                            )
+                            .await,
                         )
-                        .await?
                 } else {
                     false
                 };
@@ -366,28 +368,51 @@ pub(crate) async fn run_poll_loop(
                     && !adapter_sync_on_live_poll
                     && !live_poll_adapter_sync_restored_after_replay
                 {
-                    let backlog_summary = sync_live_adapter_backlog_after_normalized_replay(
+                    let backlog_sync_failed = match sync_live_adapter_backlog_after_normalized_replay(
                         pool,
                         &deployment_profile,
                         &provider_configured_chains,
                     )
-                    .await?;
-                    info!(
-                        service = "indexer",
-                        command = "poll",
-                        deployment_profile,
-                        post_replay_backlog_chain_count = backlog_summary.chain_count,
-                        post_replay_backlog_selected_block_count =
-                            backlog_summary.selected_block_count,
-                        post_replay_backlog_scanned_log_count = backlog_summary.scanned_log_count,
-                        post_replay_backlog_matched_log_count = backlog_summary.matched_log_count,
-                        post_replay_backlog_normalized_event_synced_count =
-                            backlog_summary.normalized_event_synced_count,
-                        post_replay_backlog_normalized_event_inserted_count =
-                            backlog_summary.normalized_event_inserted_count,
-                        "live raw payload adapter sync enabled after normalized replay catch-up completed"
-                    );
-                    live_poll_adapter_sync_restored_after_replay = true;
+                    .await
+                    {
+                        Ok(backlog_summary) => {
+                            info!(
+                                service = "indexer",
+                                command = "poll",
+                                deployment_profile,
+                                post_replay_backlog_chain_count = backlog_summary.chain_count,
+                                post_replay_backlog_selected_block_count =
+                                    backlog_summary.selected_block_count,
+                                post_replay_backlog_scanned_log_count =
+                                    backlog_summary.scanned_log_count,
+                                post_replay_backlog_matched_log_count =
+                                    backlog_summary.matched_log_count,
+                                post_replay_backlog_normalized_event_synced_count =
+                                    backlog_summary.normalized_event_synced_count,
+                                post_replay_backlog_normalized_event_inserted_count =
+                                    backlog_summary.normalized_event_inserted_count,
+                                "live raw payload adapter sync enabled after normalized replay catch-up completed"
+                            );
+                            live_poll_adapter_sync_restored_after_replay = true;
+                            false
+                        }
+                        Err(error) => {
+                            warn!(
+                                service = "indexer",
+                                command = "poll",
+                                deployment_profile,
+                                provider_configured_chain_count = provider_configured_chains.len(),
+                                error = ?error,
+                                "failed to sync live adapter backlog after normalized replay catch-up; live poll loop will retry"
+                            );
+                            true
+                        }
+                    };
+                    effective_adapter_sync_on_live_poll =
+                        live_poll_adapter_sync_after_backlog_attempt(
+                            effective_adapter_sync_on_live_poll,
+                            backlog_sync_failed,
+                        );
                 }
 
                 poll_provider_heads_with_adapter_sync(
@@ -527,5 +552,48 @@ pub(crate) async fn run_poll_loop(
                 }
             }
         }
+    }
+}
+
+fn live_poll_adapter_sync_ready_after_replay(replay_cursors_complete: Result<bool>) -> bool {
+    match replay_cursors_complete {
+        Ok(complete) => complete,
+        Err(error) => {
+            warn!(
+                service = "indexer",
+                command = "poll",
+                error = ?error,
+                "failed to check normalized replay cursor completion; live adapter sync remains disabled"
+            );
+            false
+        }
+    }
+}
+
+fn live_poll_adapter_sync_after_backlog_attempt(
+    adapter_sync_enabled: bool,
+    backlog_sync_failed: bool,
+) -> bool {
+    adapter_sync_enabled && !backlog_sync_failed
+}
+
+#[cfg(test)]
+mod tests {
+    use anyhow::anyhow;
+
+    use super::{
+        live_poll_adapter_sync_after_backlog_attempt, live_poll_adapter_sync_ready_after_replay,
+    };
+
+    #[test]
+    fn live_poll_adapter_sync_waits_on_replay_cursor_load_errors() {
+        assert!(!live_poll_adapter_sync_ready_after_replay(Err(anyhow!(
+            "transient database timeout"
+        ))));
+    }
+
+    #[test]
+    fn live_poll_adapter_sync_waits_when_backlog_sync_fails() {
+        assert!(!live_poll_adapter_sync_after_backlog_attempt(true, true));
     }
 }
