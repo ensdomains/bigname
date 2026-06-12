@@ -8,15 +8,18 @@ use std::{
 use anyhow::{Context, Result};
 use bigname_execution::ens_namehash_hex;
 use bigname_storage::{
-    CanonicalityState, ENS_NAMESPACE, ETHEREUM_MAINNET_CHAIN_ID, NormalizedEvent,
-    PrimaryNameClaimStatus, PrimaryNameCurrentRow, PrimaryNameCurrentSnapshot,
-    default_database_url, load_primary_name_current_snapshot, upsert_normalized_events,
+    CanonicalityState, ENS_NAMESPACE, ETHEREUM_MAINNET_CHAIN_ID, ExecutionCacheKey,
+    ExecutionOutcome, ExecutionTrace, ExecutionTraceStep, NormalizedEvent, PrimaryNameClaimStatus,
+    PrimaryNameCurrentRow, PrimaryNameCurrentSnapshot, VERIFIED_PRIMARY_NAME_REQUEST_TYPE,
+    default_database_url, load_execution_outcome, load_primary_name_current_snapshot,
+    upsert_execution_outcome, upsert_execution_trace, upsert_normalized_events,
 };
 use futures_util::{FutureExt, future::BoxFuture};
 use serde_json::{Value, json};
 use sqlx::{
     PgPool,
     postgres::{PgConnectOptions, PgPoolOptions},
+    types::{Uuid, time::OffsetDateTime},
 };
 
 use super::super::rebuild_primary_names_current;
@@ -411,6 +414,69 @@ async fn hydrates_current_legacy_reverse_resolver_primary_name() -> Result<()> {
 }
 
 #[tokio::test]
+async fn hydration_claim_change_invalidates_verified_primary_outcome() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let address = "0x0000000000000000000000000000000000000aaa";
+    let reverse_block = 100;
+    let reverse_node = reverse_node_for_block(reverse_block);
+
+    insert_chain_checkpoint(database.pool(), 300).await?;
+    upsert_normalized_events(
+        database.pool(),
+        &[
+            reverse_changed_event("reverse-claim", address, reverse_block, 0),
+            reverse_resolver_changed_event(
+                "reverse-resolver",
+                address,
+                reverse_block,
+                LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESS,
+                120,
+                0,
+            ),
+        ],
+    )
+    .await?;
+    rebuild_primary_names_current(database.pool(), None, None, None).await?;
+
+    let outcome = seed_verified_primary_outcome(
+        database.pool(),
+        Uuid::from_u128(0x0e7ec7ace00000000000000000000101),
+        address,
+        "60",
+    )
+    .await?;
+    assert!(
+        load_execution_outcome(database.pool(), &outcome.cache_key)
+            .await?
+            .is_some(),
+        "test setup must persist the stale verified-primary outcome"
+    );
+
+    let client = MockReverseNameHydrationClient {
+        outcomes_by_node: BTreeMap::from([(
+            reverse_node,
+            ReverseNameHydrationOutcome::Success("Hydrated.eth".to_owned()),
+        )]),
+    };
+    hydrate_legacy_reverse_resolver_primary_names_with_client(
+        database.pool(),
+        &[LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESS.to_owned()],
+        &client,
+    )
+    .await?;
+
+    assert!(
+        load_execution_outcome(database.pool(), &outcome.cache_key)
+            .await?
+            .is_none(),
+        "hydration claim changes must invalidate stale verified-primary outcomes"
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn hydrates_resolver_edge_only_legacy_reverse_resolver_primary_name() -> Result<()> {
     let database = TestDatabase::new().await?;
     let address = "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045";
@@ -510,6 +576,106 @@ async fn hydrates_resolver_edge_only_legacy_reverse_resolver_primary_name() -> R
         hydrated.row.claim_provenance["verified_primary_name_invalidation"]["primary_claim_source"]
             ["tuple_source"],
         json!(TUPLE_SOURCE_RESOLVER_EDGE_FORWARD_CONFIRMED)
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn resolver_edge_delete_and_recreate_invalidates_verified_primary_outcome() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let address = "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045";
+    let normalized_address = bigname_storage::normalize_evm_address(address);
+    let reverse_node = reverse_node_for_address(address)?;
+
+    insert_chain_checkpoint(database.pool(), 300).await?;
+    upsert_normalized_events(
+        database.pool(),
+        &[generic_reverse_resolver_changed_event(
+            "resolver-edge-only",
+            &reverse_node,
+            LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESS,
+            120,
+            0,
+        )],
+    )
+    .await?;
+    rebuild_primary_names_current(database.pool(), None, None, None).await?;
+
+    let initial_client = ForwardCheckingHydrationClient {
+        outcomes_by_node: BTreeMap::from([(
+            reverse_node.clone(),
+            ReverseNameHydrationOutcome::Success("Vitalik.eth".to_owned()),
+        )]),
+        forward_addresses_by_name: BTreeMap::from([(
+            "vitalik.eth".to_owned(),
+            Some(address.to_owned()),
+        )]),
+        ..Default::default()
+    };
+    hydrate_legacy_reverse_resolver_primary_names_with_client(
+        database.pool(),
+        &[LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESS.to_owned()],
+        &initial_client,
+    )
+    .await?;
+
+    let stale_outcome = seed_verified_primary_outcome(
+        database.pool(),
+        Uuid::from_u128(0x0e7ec7ace00000000000000000000102),
+        &normalized_address,
+        "60",
+    )
+    .await?;
+    insert_chain_checkpoint(database.pool(), 350).await?;
+    let deleting_client = ForwardCheckingHydrationClient {
+        outcomes_by_node: BTreeMap::from([(
+            reverse_node.clone(),
+            ReverseNameHydrationOutcome::Success("vitalik.eth".to_owned()),
+        )]),
+        forward_addresses_by_name: BTreeMap::from([(
+            "vitalik.eth".to_owned(),
+            Some("0x0000000000000000000000000000000000000bad".to_owned()),
+        )]),
+        ..Default::default()
+    };
+    hydrate_legacy_reverse_resolver_primary_names_with_client(
+        database.pool(),
+        &[LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESS.to_owned()],
+        &deleting_client,
+    )
+    .await?;
+    assert!(
+        load_execution_outcome(database.pool(), &stale_outcome.cache_key)
+            .await?
+            .is_none(),
+        "resolver-edge delete must invalidate stale verified-primary outcomes"
+    );
+
+    upsert_execution_outcome(database.pool(), &stale_outcome).await?;
+    let recreating_client = ForwardCheckingHydrationClient {
+        outcomes_by_node: BTreeMap::from([(
+            reverse_node,
+            ReverseNameHydrationOutcome::Success("Vitalik.eth".to_owned()),
+        )]),
+        forward_addresses_by_name: BTreeMap::from([(
+            "vitalik.eth".to_owned(),
+            Some(address.to_owned()),
+        )]),
+        ..Default::default()
+    };
+    hydrate_legacy_reverse_resolver_primary_names_with_client(
+        database.pool(),
+        &[LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESS.to_owned()],
+        &recreating_client,
+    )
+    .await?;
+    assert!(
+        load_execution_outcome(database.pool(), &stale_outcome.cache_key)
+            .await?
+            .is_none(),
+        "resolver-edge recreate must invalidate resurrected stale verified-primary outcomes"
     );
 
     database.cleanup().await?;
@@ -2245,4 +2411,115 @@ fn block_hash_for(block_number: i64) -> String {
 
 fn transaction_hash_for(block_number: i64) -> String {
     format!("0xtx{block_number:064x}")
+}
+
+async fn seed_verified_primary_outcome(
+    pool: &PgPool,
+    execution_trace_id: Uuid,
+    address: &str,
+    coin_type: &str,
+) -> Result<ExecutionOutcome> {
+    let normalized_address = bigname_storage::normalize_evm_address(address);
+    let request_key = format!("ens:{normalized_address}:{coin_type}");
+    let finished_at =
+        OffsetDateTime::from_unix_timestamp(1_717_172_100).expect("test timestamp must be valid");
+    let trace = ExecutionTrace {
+        execution_trace_id,
+        request_type: VERIFIED_PRIMARY_NAME_REQUEST_TYPE.to_owned(),
+        request_key: request_key.clone(),
+        namespace: ENS_NAMESPACE.to_owned(),
+        chain_context: json!({
+            "requested_positions": verified_primary_requested_chain_positions(),
+        }),
+        manifest_context: json!({
+            "manifest_versions": verified_primary_manifest_versions(),
+        }),
+        contracts_called: json!([]),
+        gateway_digests: json!([]),
+        final_payload: Some(json!({
+            "verified_primary_name": {
+                "status": "success",
+                "name": {
+                    "logical_name_id": "ens:hydrated.eth",
+                    "namespace": "ens",
+                    "normalized_name": "hydrated.eth",
+                    "canonical_display_name": "hydrated.eth",
+                    "namehash": "0x0000000000000000000000000000000000000000000000000000000000000123"
+                }
+            }
+        })),
+        failure_payload: None,
+        request_metadata: json!({
+            "normalized_address": normalized_address,
+            "namespace": ENS_NAMESPACE,
+            "coin_type": coin_type,
+        }),
+        finished_at: Some(finished_at),
+        steps: vec![ExecutionTraceStep {
+            step_index: 0,
+            step_kind: "load_primary_name_claim".to_owned(),
+            input_digest: Some("sha256:hydration-claim-input".to_owned()),
+            output_digest: Some("sha256:hydration-claim-output".to_owned()),
+            latency_ms: Some(2),
+            canonicality_dependency: json!({
+                ETHEREUM_MAINNET_CHAIN_ID: {
+                    "block_hash": "0xprimary",
+                    "block_number": 21_000_010,
+                    "state": "finalized"
+                }
+            }),
+            step_payload: json!({
+                "address": normalized_address,
+                "coin_type": coin_type
+            }),
+        }],
+    };
+    let outcome = ExecutionOutcome {
+        cache_key: ExecutionCacheKey {
+            request_key,
+            requested_chain_positions: verified_primary_requested_chain_positions(),
+            manifest_versions: verified_primary_manifest_versions(),
+            topology_version_boundary: verified_primary_boundary(),
+            record_version_boundary: verified_primary_boundary(),
+        },
+        execution_trace_id,
+        request_type: VERIFIED_PRIMARY_NAME_REQUEST_TYPE.to_owned(),
+        namespace: ENS_NAMESPACE.to_owned(),
+        outcome_payload: trace.final_payload.clone(),
+        failure_payload: None,
+        finished_at,
+    };
+    upsert_execution_trace(pool, &trace).await?;
+    upsert_execution_outcome(pool, &outcome).await?;
+    Ok(outcome)
+}
+
+fn verified_primary_requested_chain_positions() -> Value {
+    json!([{
+        "chain_id": ETHEREUM_MAINNET_CHAIN_ID,
+        "block_number": 21_000_010,
+        "block_hash": "0xprimary",
+    }])
+}
+
+fn verified_primary_manifest_versions() -> Value {
+    json!([{
+        "source_family": "ens_execution",
+        "manifest_version": 3,
+    }])
+}
+
+fn verified_primary_boundary() -> Value {
+    json!({
+        "logical_name_id": "ens:hydrated.eth",
+        "resource_id": "00000000-0000-0000-0000-00000000b001",
+        "normalized_event_id": null,
+        "event_kind": null,
+        "chain_position": {
+            "chain_id": ETHEREUM_MAINNET_CHAIN_ID,
+            "block_number": 21_000_010,
+            "block_hash": "0xprimary",
+            "timestamp": "2026-04-17T00:00:10Z"
+        }
+    })
 }
