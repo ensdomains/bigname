@@ -7,6 +7,7 @@ use serde_json::json;
 use sqlx::PgPool;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::types::time::OffsetDateTime;
+use tokio::time::{sleep, timeout};
 use uuid::Uuid;
 
 use super::{
@@ -248,6 +249,25 @@ async fn identity_count(pool: &PgPool, address: &str, roles: &str) -> Result<i64
     .context("failed to load address_names_current identity count")
 }
 
+async fn identity_count_updated_at(
+    pool: &PgPool,
+    address: &str,
+    roles: &str,
+) -> Result<OffsetDateTime> {
+    sqlx::query_scalar::<_, OffsetDateTime>(
+        r#"
+        SELECT updated_at
+        FROM address_names_current_identity_counts
+        WHERE address = $1 AND roles = $2
+        "#,
+    )
+    .bind(address)
+    .bind(roles)
+    .fetch_one(pool)
+    .await
+    .context("failed to load address_names_current identity count updated_at")
+}
+
 async fn identity_feed_count(pool: &PgPool, address: &str, roles: &str) -> Result<i64> {
     sqlx::query_scalar::<_, i64>(
         r#"
@@ -261,6 +281,25 @@ async fn identity_feed_count(pool: &PgPool, address: &str, roles: &str) -> Resul
     .fetch_one(pool)
     .await
     .context("failed to count address_names_current identity feed rows")
+}
+
+async fn identity_feed_recomputed_at(
+    pool: &PgPool,
+    address: &str,
+    roles: &str,
+) -> Result<OffsetDateTime> {
+    sqlx::query_scalar::<_, OffsetDateTime>(
+        r#"
+        SELECT last_recomputed_at
+        FROM address_names_current_identity_feed
+        WHERE address = $1 AND roles = $2 AND coin_type = ''
+        "#,
+    )
+    .bind(address)
+    .bind(roles)
+    .fetch_one(pool)
+    .await
+    .context("failed to load address_names_current identity feed last_recomputed_at")
 }
 
 #[tokio::test]
@@ -414,6 +453,183 @@ async fn upsert_surface_binding_tightens_replayed_active_to() -> Result<()> {
         load_surface_binding(database.pool(), surface_binding_id).await?,
         Some(tightened_binding)
     );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn row_path_resource_upsert_preserves_concurrent_orphan_update() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let resource_id = Uuid::from_u128(0x2014);
+    let initial_resource = resource(
+        resource_id,
+        None,
+        "ens",
+        "resource_row_path_orphan",
+        121,
+        CanonicalityState::Canonical,
+    );
+    upsert_resources(database.pool(), std::slice::from_ref(&initial_resource)).await?;
+
+    let mut replayed_resource = initial_resource.clone();
+    replayed_resource.canonicality_state = CanonicalityState::Finalized;
+    let hook =
+        super::write_rows::test_hooks::RowPathReloadHook::new("resources", resource_id.to_string());
+    super::write_rows::test_hooks::install_row_path_reload_hook(hook.clone());
+
+    let upsert_pool = database.pool().clone();
+    let upsert_task = tokio::spawn(async move {
+        upsert_resources(&upsert_pool, std::slice::from_ref(&replayed_resource)).await
+    });
+
+    timeout(std::time::Duration::from_secs(5), hook.wait_until_reached())
+        .await
+        .context("timed out waiting for resource row-path reload hook")?;
+
+    let orphan_pool = database.pool().clone();
+    let orphan_task = tokio::spawn(async move {
+        sqlx::query(
+            r#"
+            UPDATE resources
+            SET canonicality_state = 'orphaned'::canonicality_state
+            WHERE resource_id = $1
+            "#,
+        )
+        .bind(resource_id)
+        .execute(&orphan_pool)
+        .await
+        .context("failed to orphan resource concurrently")
+        .map(|_| ())
+    });
+
+    let _ = timeout(std::time::Duration::from_millis(250), async {
+        while !orphan_task.is_finished() {
+            sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+
+    hook.release();
+    upsert_task
+        .await
+        .context("resource row-path upsert task panicked")??;
+    orphan_task
+        .await
+        .context("concurrent resource orphan task panicked")??;
+
+    let final_resource = load_resource_including_noncanonical(database.pool(), resource_id)
+        .await?
+        .context("resource should still exist after orphaning")?;
+    assert_eq!(
+        final_resource.canonicality_state,
+        CanonicalityState::Orphaned
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn row_path_surface_binding_upsert_preserves_concurrent_tighten() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let resource_id = Uuid::from_u128(0x2015);
+    let surface_binding_id = Uuid::from_u128(0x3015);
+    let earlier_close = timestamp(1_717_171_900);
+    let later_close = timestamp(1_717_172_100);
+
+    upsert_resources(
+        database.pool(),
+        &[resource(
+            resource_id,
+            None,
+            "ens",
+            "resource_row_path_tighten",
+            122,
+            CanonicalityState::Canonical,
+        )],
+    )
+    .await?;
+    upsert_name_surfaces(
+        database.pool(),
+        &[name_surface(
+            "ens:row-path-tighten.eth",
+            "row-path-tighten.eth",
+            "row-path-tighten.eth",
+            "surface_row_path_tighten",
+            123,
+            CanonicalityState::Finalized,
+        )],
+    )
+    .await?;
+
+    let open_binding = binding(BindingSeed {
+        surface_binding_id,
+        logical_name_id: "ens:row-path-tighten.eth",
+        resource_id,
+        binding_kind: SurfaceBindingKind::DeclaredRegistryPath,
+        active_from: timestamp(1_717_171_700),
+        active_to: None,
+        source: "declared_registry_path",
+        chain_label: "binding_row_path_tighten",
+        block_number: 124,
+        canonicality_state: CanonicalityState::Canonical,
+    });
+    upsert_surface_bindings(database.pool(), std::slice::from_ref(&open_binding)).await?;
+
+    let later_close_binding = SurfaceBinding {
+        active_to: Some(later_close),
+        ..open_binding
+    };
+    let hook = super::write_rows::test_hooks::RowPathReloadHook::new(
+        "surface_bindings",
+        surface_binding_id.to_string(),
+    );
+    super::write_rows::test_hooks::install_row_path_reload_hook(hook.clone());
+
+    let upsert_pool = database.pool().clone();
+    let upsert_task = tokio::spawn(async move {
+        upsert_surface_bindings(&upsert_pool, std::slice::from_ref(&later_close_binding)).await
+    });
+
+    timeout(std::time::Duration::from_secs(5), hook.wait_until_reached())
+        .await
+        .context("timed out waiting for surface-binding row-path reload hook")?;
+
+    let tighten_pool = database.pool().clone();
+    let tighten_task = tokio::spawn(async move {
+        sqlx::query(
+            r#"
+            UPDATE surface_bindings
+            SET active_to = $2
+            WHERE surface_binding_id = $1
+            "#,
+        )
+        .bind(surface_binding_id)
+        .bind(earlier_close)
+        .execute(&tighten_pool)
+        .await
+        .context("failed to tighten surface binding concurrently")
+        .map(|_| ())
+    });
+
+    let _ = timeout(std::time::Duration::from_millis(250), async {
+        while !tighten_task.is_finished() {
+            sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+
+    hook.release();
+    upsert_task
+        .await
+        .context("surface-binding row-path upsert task panicked")??;
+    tighten_task
+        .await
+        .context("concurrent surface-binding tighten task panicked")??;
+
+    let final_binding = load_surface_binding(database.pool(), surface_binding_id)
+        .await?
+        .context("surface binding should remain readable")?;
+    assert_eq!(final_binding.active_to, Some(earlier_close));
 
     database.cleanup().await
 }
@@ -2236,6 +2452,20 @@ async fn identity_count_statement_triggers_recompute_name_current_resource_eligi
         .await
         .context("failed to seed identity counts")?;
     assert_eq!(identity_count(database.pool(), address, "owned").await?, 1);
+    let count_updated_at = identity_count_updated_at(database.pool(), address, "owned").await?;
+
+    sleep(std::time::Duration::from_millis(10)).await;
+    sqlx::query("UPDATE resources SET canonicality_state = 'safe' WHERE resource_id = $1")
+        .bind(name_current_resource_id)
+        .execute(database.pool())
+        .await
+        .context("failed to promote name_current resource inside readable class")?;
+
+    assert_eq!(identity_count(database.pool(), address, "owned").await?, 1);
+    assert_eq!(
+        identity_count_updated_at(database.pool(), address, "owned").await?,
+        count_updated_at
+    );
 
     sqlx::query("UPDATE resources SET canonicality_state = 'orphaned' WHERE resource_id = $1")
         .bind(name_current_resource_id)
@@ -2410,6 +2640,23 @@ async fn identity_feed_statement_triggers_recompute_name_current_resource_eligib
         identity_feed_count(database.pool(), address, "owned").await?,
         1
     );
+    let feed_recomputed_at = identity_feed_recomputed_at(database.pool(), address, "owned").await?;
+
+    sleep(std::time::Duration::from_millis(10)).await;
+    sqlx::query("UPDATE resources SET canonicality_state = 'safe' WHERE resource_id = $1")
+        .bind(name_current_resource_id)
+        .execute(database.pool())
+        .await
+        .context("failed to promote name_current resource inside readable class")?;
+
+    assert_eq!(
+        identity_feed_count(database.pool(), address, "owned").await?,
+        1
+    );
+    assert_eq!(
+        identity_feed_recomputed_at(database.pool(), address, "owned").await?,
+        feed_recomputed_at
+    );
 
     sqlx::query("UPDATE resources SET canonicality_state = 'orphaned' WHERE resource_id = $1")
         .bind(name_current_resource_id)
@@ -2421,6 +2668,152 @@ async fn identity_feed_statement_triggers_recompute_name_current_resource_eligib
         identity_feed_count(database.pool(), address, "owned").await?,
         0
     );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn surface_binding_projection_invalidations_fire_on_readable_canonicality_change()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    let logical_name_id = "ens:projection-trigger.eth";
+    let resource_id = Uuid::from_u128(0xf201);
+    let surface_binding_id = Uuid::from_u128(0xf202);
+
+    upsert_name_surfaces(
+        database.pool(),
+        &[name_surface(
+            logical_name_id,
+            "projection-trigger.eth",
+            "projection-trigger.eth",
+            "projection_trigger_surface",
+            900,
+            CanonicalityState::Canonical,
+        )],
+    )
+    .await?;
+    upsert_resources(
+        database.pool(),
+        &[resource(
+            resource_id,
+            None,
+            "ens",
+            "projection_trigger_resource",
+            901,
+            CanonicalityState::Canonical,
+        )],
+    )
+    .await?;
+    upsert_surface_bindings(
+        database.pool(),
+        &[binding(BindingSeed {
+            surface_binding_id,
+            logical_name_id,
+            resource_id,
+            binding_kind: SurfaceBindingKind::DeclaredRegistryPath,
+            active_from: timestamp(1_717_173_300),
+            active_to: None,
+            source: "projection_trigger_relation",
+            chain_label: "projection_trigger_binding",
+            block_number: 902,
+            canonicality_state: CanonicalityState::Canonical,
+        })],
+    )
+    .await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO address_names_current (
+            address,
+            logical_name_id,
+            relation,
+            namespace,
+            canonical_display_name,
+            normalized_name,
+            namehash,
+            surface_binding_id,
+            resource_id,
+            token_lineage_id,
+            binding_kind,
+            provenance,
+            coverage,
+            chain_positions,
+            canonicality_summary,
+            manifest_version
+        )
+        VALUES (
+            $1,
+            $2,
+            'registrant',
+            'ens',
+            'projection-trigger.eth',
+            'projection-trigger.eth',
+            'namehash:projection-trigger.eth',
+            $3,
+            $4,
+            NULL,
+            'declared_registry_path',
+            '{}'::jsonb,
+            '{}'::jsonb,
+            '{}'::jsonb,
+            '{}'::jsonb,
+            1
+        )
+        "#,
+    )
+    .bind(address)
+    .bind(logical_name_id)
+    .bind(surface_binding_id)
+    .bind(resource_id)
+    .execute(database.pool())
+    .await
+    .context("failed to seed address_names_current for projection invalidation test")?;
+
+    sqlx::query("DELETE FROM projection_invalidations")
+        .execute(database.pool())
+        .await
+        .context("failed to clear projection invalidation queue")?;
+
+    sqlx::query(
+        r#"
+        UPDATE surface_bindings
+        SET canonicality_state = 'safe'
+        WHERE surface_binding_id = $1
+        "#,
+    )
+    .bind(surface_binding_id)
+    .execute(database.pool())
+    .await
+    .context("failed to promote surface binding inside readable class")?;
+
+    let name_current_invalidations = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)
+        FROM projection_invalidations
+        WHERE projection = 'name_current'
+          AND projection_key = $1
+        "#,
+    )
+    .bind(logical_name_id)
+    .fetch_one(database.pool())
+    .await
+    .context("failed to count name_current projection invalidations")?;
+    let address_names_current_invalidations = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)
+        FROM projection_invalidations
+        WHERE projection = 'address_names_current'
+          AND projection_key = $1
+        "#,
+    )
+    .bind(format!("{}:{}", address, logical_name_id))
+    .fetch_one(database.pool())
+    .await
+    .context("failed to count address_names_current projection invalidations")?;
+
+    assert_eq!(name_current_invalidations, 1);
+    assert_eq!(address_names_current_invalidations, 1);
 
     database.cleanup().await
 }
