@@ -583,11 +583,9 @@ fn ensure_coinbase_sql_sample_validation_size(
     requires_validation_provider_payload: bool,
     decoded_payload_log_limit: usize,
 ) -> Result<()> {
-    if requires_validation_provider_payload
-        && block_count > MAX_COINBASE_SQL_SAMPLE_VALIDATION_BLOCKS
-    {
+    if block_count > MAX_COINBASE_SQL_SAMPLE_VALIDATION_BLOCKS {
         bail!(
-            "Coinbase SQL sample window {}..={} returned logs across {} blocks; refusing provider log validation above {} blocks so the range can retry smaller",
+            "Coinbase SQL sample window {}..={} returned logs across {} blocks; refusing sample materialization above {} blocks so the range can retry smaller",
             range.from_block,
             range.to_block,
             block_count,
@@ -600,22 +598,24 @@ fn ensure_coinbase_sql_sample_validation_size(
         decoded_payload_log_limit
     };
     if log_count > max_log_count {
-        let validation_label = if requires_validation_provider_payload {
-            "provider log-payload validation"
-        } else {
-            "decoded SQL materialization"
-        };
         bail!(
             "Coinbase SQL sample window {}..={} returned {} logs; refusing {} above {} logs so the range can retry smaller",
             range.from_block,
             range.to_block,
             log_count,
-            validation_label,
+            sample_validation_log_label(requires_validation_provider_payload),
             max_log_count
         );
     }
 
     Ok(())
+}
+
+fn sample_validation_log_label(requires_validation_provider_payload: bool) -> &'static str {
+    match requires_validation_provider_payload {
+        true => "provider log-payload validation",
+        false => "decoded SQL materialization",
+    }
 }
 
 fn coinbase_sql_sample_decoded_payload_log_limit(

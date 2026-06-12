@@ -15,16 +15,13 @@ use tracing::info;
 use crate::{
     provider::{
         ChainProviderOps, ProviderBlock, ProviderBlockCodeObservationRequest, ProviderLog,
-        ProviderResolvedBlock, ProviderTransactionReceiptRequest,
+        ProviderResolvedBlock,
     },
     reconciliation::{
         HeaderAuditMode, provider_block_to_lineage_with_header_audit_mode,
         provider_block_to_raw_block_with_header_audit_mode,
-        provider_code_observation_to_raw_code_hash, provider_logs_to_selected_raw_logs,
-        provider_receipt_to_raw_receipt, provider_receipts_to_selected_raw_receipts,
-        provider_transaction_to_raw_transaction,
-        provider_transactions_to_selected_raw_transactions,
-        retained_transaction_keys_from_raw_logs, sync_adapter_state_from_persisted_raw_payloads,
+        provider_code_observation_to_raw_code_hash, provider_receipt_to_raw_receipt,
+        provider_transaction_to_raw_transaction, sync_adapter_state_from_persisted_raw_payloads,
         sync_adapter_state_from_scoped_persisted_raw_payloads,
     },
     source_scope::SourceScope,
@@ -34,10 +31,14 @@ pub(crate) use log_payloads::fill_log_payloads_from_validation_provider;
 use super::{
     BackfillCanonicalityEvidence,
     log_ranges::{selected_addresses_for_materialized_block, uses_topic_first_source_family_scan},
+    materialization::{
+        fetch_full_payload_bundles_for_log_blocks, materialize_backfill_block_payloads,
+        missing_transaction_receipt_requests_from_raw_facts, selected_seed_log_addresses,
+    },
 };
 use crate::backfill::{
-    BackfillAdapterSyncMode, BackfillBlockRange, BackfillOutcome, HistoricalCodeObservationScope,
-    HistoricalLogPayload, selection::SelectedTargetIntervalIndex,
+    BackfillAdapterSyncMode, BackfillBlockRange, BackfillOutcome, HistoricalLogPayload,
+    selection::{SelectedTargetIntervalIndex, selected_target_addresses_at_block},
 };
 
 pub(crate) async fn materialize_historical_payload_range(
@@ -54,7 +55,6 @@ pub(crate) async fn materialize_historical_payload_range(
     header_audit_mode: HeaderAuditMode,
 ) -> Result<BackfillOutcome> {
     let watched_chain = &source_plan.watched_chain_plan;
-    let code_observation_scope = historical_payload.code_observation_scope;
     let logs_filtered_by_selected_target_index =
         historical_payload.logs_filtered_by_selected_target_index;
     let block_hashes = resolved_blocks
@@ -80,6 +80,15 @@ pub(crate) async fn materialize_historical_payload_range(
             &block_headers,
         )
         .await?;
+    let mut full_payload_bundles_by_hash = fetch_full_payload_bundles_for_log_blocks(
+        validation_provider,
+        resolved_blocks,
+        &historical_payload.logs_by_block,
+        &watched_chain.chain,
+        range,
+        "historical backfill",
+    )
+    .await?;
     let topic_filtered_source_family = uses_topic_first_source_family_scan(source_plan);
     let mut raw_blocks = Vec::with_capacity(resolved_blocks.len());
     let mut lineage_blocks = Vec::with_capacity(resolved_blocks.len());
@@ -108,7 +117,7 @@ pub(crate) async fn materialize_historical_payload_range(
             header_audit_mode,
         ));
 
-        let block_logs = historical_payload
+        let selection_logs = historical_payload
             .logs_by_block
             .remove(&resolved_block.block_number)
             .unwrap_or_default();
@@ -118,21 +127,8 @@ pub(crate) async fn materialize_historical_payload_range(
             topic_filtered_source_family,
             logs_filtered_by_selected_target_index,
             resolved_block.block_number,
-            &block_logs,
+            &selection_logs,
         );
-        let selected_logs = provider_logs_to_selected_raw_logs(
-            &watched_chain.chain,
-            &raw_block,
-            &block_logs,
-            &selected_addresses,
-        )?;
-        let retained_transaction_keys = retained_transaction_keys_from_raw_logs(&selected_logs);
-        let code_observation_addresses = code_observation_addresses_for_materialized_block(
-            code_observation_scope,
-            &selected_addresses,
-            &selected_logs,
-        );
-
         let source_transactions = historical_payload
             .transactions_by_block
             .remove(&resolved_block.block_number)
@@ -141,20 +137,33 @@ pub(crate) async fn materialize_historical_payload_range(
             .receipts_by_block
             .remove(&resolved_block.block_number)
             .unwrap_or_default();
-        transactions.extend(provider_transactions_to_selected_raw_transactions(
+        let (payload_logs, payload_transactions, payload_receipts) =
+            if let Some(full_payload_bundle) =
+                full_payload_bundles_by_hash.remove(&block_header.block_hash)
+            {
+                (
+                    full_payload_bundle.logs,
+                    full_payload_bundle.transactions,
+                    full_payload_bundle.receipts,
+                )
+            } else {
+                (selection_logs.clone(), source_transactions, source_receipts)
+            };
+        let materialized_payloads = materialize_backfill_block_payloads(
             &watched_chain.chain,
             &raw_block,
-            &source_transactions,
-            &retained_transaction_keys,
-        )?);
-        receipts.extend(provider_receipts_to_selected_raw_receipts(
-            &watched_chain.chain,
-            &raw_block,
-            &source_receipts,
-            &retained_transaction_keys,
-        )?);
-        logs.extend(selected_logs);
+            &selection_logs,
+            &payload_logs,
+            &payload_transactions,
+            &payload_receipts,
+            &selected_addresses,
+        )?;
+        transactions.extend(materialized_payloads.transactions);
+        receipts.extend(materialized_payloads.receipts);
+        logs.extend(materialized_payloads.logs);
 
+        let code_observation_addresses =
+            selected_seed_log_addresses(&selection_logs, &selected_addresses);
         if !code_observation_addresses.is_empty() {
             code_observation_requests.push(ProviderBlockCodeObservationRequest {
                 block_hash: raw_block.block_hash.clone(),
@@ -165,6 +174,11 @@ pub(crate) async fn materialize_historical_payload_range(
         raw_blocks.push(raw_block);
     }
     ensure_no_unprocessed_payloads(&historical_payload)?;
+    if !full_payload_bundles_by_hash.is_empty() {
+        bail!(
+            "validation provider returned full payloads for unprocessed historical backfill blocks"
+        );
+    }
     fill_missing_transaction_receipts(
         validation_provider,
         &watched_chain.chain,
@@ -190,12 +204,7 @@ pub(crate) async fn materialize_historical_payload_range(
     upsert_raw_receipts(pool, &receipts).await?;
     upsert_raw_logs(pool, &logs).await?;
     upsert_raw_code_hashes(pool, &code_hashes).await?;
-    let adapter_sync_scope = adapter_sync_scope_for_materialized_range(
-        source_plan,
-        range,
-        code_observation_scope,
-        &logs,
-    );
+    let adapter_sync_scope = adapter_sync_scope_for_materialized_range(source_plan, range);
     maybe_sync_adapters(
         pool,
         source_plan,
@@ -236,24 +245,6 @@ pub(crate) async fn materialize_historical_payload_range(
     Ok(outcome)
 }
 
-fn code_observation_addresses_for_materialized_block(
-    scope: HistoricalCodeObservationScope,
-    selected_addresses: &BTreeSet<String>,
-    selected_logs: &[RawLog],
-) -> Vec<String> {
-    match scope {
-        HistoricalCodeObservationScope::SelectedAddresses => {
-            selected_addresses.iter().cloned().collect()
-        }
-        HistoricalCodeObservationScope::LogEmittersOnly => selected_logs
-            .iter()
-            .map(|log| log.emitting_address.to_ascii_lowercase())
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect(),
-    }
-}
-
 fn selected_addresses_for_payload_block(
     source_plan: &WatchedSourceSelectorPlan,
     selected_target_index: &SelectedTargetIntervalIndex,
@@ -263,7 +254,7 @@ fn selected_addresses_for_payload_block(
     block_logs: &[ProviderLog],
 ) -> BTreeSet<String> {
     if logs_filtered_by_selected_target_index {
-        return selected_target_index.addresses_for_logs_at_block(block_logs, block_number);
+        return selected_target_addresses_at_block(source_plan, block_number);
     }
     if source_plan.selector_kind == WatchedSourceSelectorKind::SourceFamily
         && source_plan.source_family.as_deref() == Some("basenames_base_registry")
@@ -286,29 +277,7 @@ fn selected_addresses_for_payload_block(
 fn adapter_sync_scope_for_materialized_range(
     source_plan: &WatchedSourceSelectorPlan,
     range: BackfillBlockRange,
-    code_observation_scope: HistoricalCodeObservationScope,
-    logs: &[RawLog],
 ) -> Vec<(String, String, i64, i64)> {
-    if code_observation_scope == HistoricalCodeObservationScope::LogEmittersOnly
-        && source_plan.selector_kind == WatchedSourceSelectorKind::SourceFamily
-        && let Some(source_family) = source_plan.source_family.as_ref()
-    {
-        return logs
-            .iter()
-            .map(|log| log.emitting_address.to_ascii_lowercase())
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .map(|address| {
-                (
-                    source_family.clone(),
-                    address,
-                    range.from_block,
-                    range.to_block,
-                )
-            })
-            .collect();
-    }
-
     SourceScope::from_watched_source_plan(source_plan, range.from_block, range.to_block)
         .adapter_sync_scope()
 }
@@ -518,28 +487,15 @@ mod tests {
         WatchedBackfillTarget, WatchedChainPlan, WatchedSourceSelectorKind,
         WatchedSourceSelectorPlan,
     };
+    use bigname_storage::RawBlock;
 
-    fn raw_log(emitting_address: &str, log_index: i64) -> RawLog {
-        RawLog {
-            chain_id: "base-mainnet".to_owned(),
-            block_hash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                .to_owned(),
-            block_number: 42,
-            transaction_hash: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-                .to_owned(),
-            transaction_index: 0,
-            log_index,
-            emitting_address: emitting_address.to_owned(),
-            topics: Vec::new(),
-            data: Vec::new(),
-            canonicality_state: CanonicalityState::Observed,
-        }
-    }
+    use crate::provider::{ProviderReceipt, ProviderTransaction};
+
+    const BLOCK_HASH: &str = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
     fn provider_log(address: &str, block_number: i64) -> ProviderLog {
         ProviderLog {
-            block_hash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                .to_owned(),
+            block_hash: BLOCK_HASH.to_owned(),
             block_number,
             transaction_hash: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
                 .to_owned(),
@@ -552,52 +508,21 @@ mod tests {
     }
 
     #[test]
-    fn selected_address_scope_observes_selected_addresses_even_without_logs() {
-        let selected_addresses = BTreeSet::from([
-            "0x0000000000000000000000000000000000000001".to_owned(),
-            "0x0000000000000000000000000000000000000002".to_owned(),
-        ]);
+    fn historical_code_observations_follow_selected_seed_log_emitters() {
+        let selected_address = "0x0000000000000000000000000000000000000002";
 
         assert_eq!(
-            code_observation_addresses_for_materialized_block(
-                HistoricalCodeObservationScope::SelectedAddresses,
-                &selected_addresses,
-                &[],
+            selected_seed_log_addresses(
+                &[provider_log(selected_address, 42)],
+                &BTreeSet::from([selected_address.to_owned()]),
             ),
-            vec![
-                "0x0000000000000000000000000000000000000001".to_owned(),
-                "0x0000000000000000000000000000000000000002".to_owned(),
-            ]
+            vec![selected_address.to_owned()]
         );
     }
 
     #[test]
-    fn log_emitter_scope_observes_only_unique_selected_log_emitters() {
-        let selected_addresses = BTreeSet::from([
-            "0x0000000000000000000000000000000000000001".to_owned(),
-            "0x0000000000000000000000000000000000000002".to_owned(),
-        ]);
-        let logs = vec![
-            raw_log("0x0000000000000000000000000000000000000002", 0),
-            raw_log("0x0000000000000000000000000000000000000002", 1),
-            raw_log("0x0000000000000000000000000000000000000003", 2),
-        ];
-
-        assert_eq!(
-            code_observation_addresses_for_materialized_block(
-                HistoricalCodeObservationScope::LogEmittersOnly,
-                &selected_addresses,
-                &logs,
-            ),
-            vec![
-                "0x0000000000000000000000000000000000000002".to_owned(),
-                "0x0000000000000000000000000000000000000003".to_owned(),
-            ]
-        );
-    }
-
-    #[test]
-    fn log_emitter_payload_replays_only_materialized_log_emitters() {
+    fn historical_payload_replays_selected_source_scope() {
+        let selected_address = "0x0000000000000000000000000000000000000001";
         let source_plan = WatchedSourceSelectorPlan {
             chain: "base-mainnet".to_owned(),
             selector_kind: WatchedSourceSelectorKind::SourceFamily,
@@ -606,7 +531,7 @@ mod tests {
             selected_targets: vec![WatchedBackfillTarget {
                 source_family: "basenames_base_registry".to_owned(),
                 contract_instance_id: sqlx::types::Uuid::nil(),
-                address: "0x0000000000000000000000000000000000000001".to_owned(),
+                address: selected_address.to_owned(),
                 effective_from_block: 1,
                 effective_to_block: 100,
             }],
@@ -618,38 +543,23 @@ mod tests {
                 discovery_edge_entry_count: 0,
             },
         };
-        let logs = vec![
-            raw_log("0x0000000000000000000000000000000000000002", 0),
-            raw_log("0x0000000000000000000000000000000000000002", 1),
-            raw_log("0x0000000000000000000000000000000000000003", 2),
-        ];
 
         assert_eq!(
             adapter_sync_scope_for_materialized_range(
                 &source_plan,
                 BackfillBlockRange::new(10, 20).unwrap(),
-                HistoricalCodeObservationScope::LogEmittersOnly,
-                &logs,
             ),
-            vec![
-                (
-                    "basenames_base_registry".to_owned(),
-                    "0x0000000000000000000000000000000000000002".to_owned(),
-                    10,
-                    20,
-                ),
-                (
-                    "basenames_base_registry".to_owned(),
-                    "0x0000000000000000000000000000000000000003".to_owned(),
-                    10,
-                    20,
-                ),
-            ]
+            vec![(
+                "basenames_base_registry".to_owned(),
+                selected_address.to_owned(),
+                10,
+                20,
+            )]
         );
     }
 
     #[test]
-    fn prefiltered_payload_uses_log_addresses_without_rescanning_selected_targets() {
+    fn prefiltered_payload_uses_active_selected_targets_for_observations() {
         let source_plan = WatchedSourceSelectorPlan {
             chain: "base-mainnet".to_owned(),
             selector_kind: WatchedSourceSelectorKind::SourceFamily,
@@ -694,12 +604,15 @@ mod tests {
                 42,
                 &logs,
             ),
-            BTreeSet::from(["0x0000000000000000000000000000000000000002".to_owned()])
+            BTreeSet::from([
+                "0x0000000000000000000000000000000000000001".to_owned(),
+                "0x0000000000000000000000000000000000000002".to_owned(),
+            ])
         );
     }
 
     #[test]
-    fn basenames_registry_scan_all_materialization_uses_returned_log_emitters() {
+    fn basenames_registry_materialization_uses_returned_log_emitters_for_observations() {
         let source_plan = WatchedSourceSelectorPlan {
             chain: "base-mainnet".to_owned(),
             selector_kind: WatchedSourceSelectorKind::SourceFamily,
@@ -737,10 +650,8 @@ mod tests {
             },
         };
         let selected_target_index = SelectedTargetIntervalIndex::from_source_plan(&source_plan);
-        let logs = vec![provider_log(
-            "0x0000000000000000000000000000000000000002",
-            42,
-        )];
+        let returned_emitter = "0x00000000000000000000000000000000000000ff";
+        let logs = vec![provider_log(returned_emitter, 42)];
 
         assert_eq!(
             selected_addresses_for_payload_block(
@@ -751,55 +662,144 @@ mod tests {
                 42,
                 &logs,
             ),
-            BTreeSet::from(["0x0000000000000000000000000000000000000002".to_owned()])
+            BTreeSet::from([returned_emitter.to_owned()])
         );
     }
-}
 
-fn missing_transaction_receipt_requests_from_raw_facts(
-    logs: &[RawLog],
-    transactions: &[RawTransaction],
-    receipts: &[RawReceipt],
-) -> Vec<ProviderTransactionReceiptRequest> {
-    let transaction_keys = transactions
-        .iter()
-        .map(|transaction| {
-            (
-                transaction.block_hash.clone(),
-                transaction.transaction_hash.clone(),
-                transaction.transaction_index,
-            )
-        })
-        .collect::<BTreeSet<_>>();
-    let receipt_keys = receipts
-        .iter()
-        .map(|receipt| {
-            (
-                receipt.block_hash.clone(),
-                receipt.transaction_hash.clone(),
-                receipt.transaction_index,
-            )
-        })
-        .collect::<BTreeSet<_>>();
-    let mut requests = BTreeMap::<(String, String, i64), ProviderTransactionReceiptRequest>::new();
-    for log in logs {
-        let key = (
-            log.block_hash.clone(),
-            log.transaction_hash.clone(),
-            log.transaction_index,
+    #[test]
+    fn historical_materialization_retains_tx_sibling_logs() -> Result<()> {
+        let raw_block = raw_block(42);
+        let selected_address = "0x0000000000000000000000000000000000000001";
+        let sibling_address = "0x00000000000000000000000000000000000000ff";
+        let selected_tx_hash = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let unrelated_tx_hash =
+            "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+        let logs = vec![
+            provider_log(selected_address, 42),
+            ProviderLog {
+                address: sibling_address.to_owned(),
+                log_index: 1,
+                ..provider_log(sibling_address, 42)
+            },
+            ProviderLog {
+                transaction_hash: unrelated_tx_hash.to_owned(),
+                transaction_index: 1,
+                log_index: 2,
+                ..provider_log(sibling_address, 42)
+            },
+        ];
+        let transactions = vec![
+            provider_transaction(selected_tx_hash, 0, 42),
+            provider_transaction(unrelated_tx_hash, 1, 42),
+        ];
+        let receipts = vec![
+            provider_receipt(selected_tx_hash, 0, 42),
+            provider_receipt(unrelated_tx_hash, 1, 42),
+        ];
+
+        let materialized = materialize_backfill_block_payloads(
+            "base-mainnet",
+            &raw_block,
+            &logs[..1],
+            &logs,
+            &transactions,
+            &receipts,
+            &BTreeSet::from([selected_address.to_owned()]),
+        )?;
+
+        assert_eq!(
+            materialized
+                .logs
+                .iter()
+                .map(|log| (log.emitting_address.as_str(), log.log_index))
+                .collect::<Vec<_>>(),
+            vec![(selected_address, 0), (sibling_address, 1)]
         );
-        if transaction_keys.contains(&key) && receipt_keys.contains(&key) {
-            continue;
+        Ok(())
+    }
+
+    #[test]
+    fn historical_missing_transaction_receipts_are_deduped_by_transaction() {
+        let raw_block = raw_block(42);
+        let first_log = bigname_storage::RawLog {
+            chain_id: raw_block.chain_id.clone(),
+            block_hash: raw_block.block_hash.clone(),
+            block_number: raw_block.block_number,
+            transaction_hash: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                .to_owned(),
+            transaction_index: 0,
+            log_index: 0,
+            emitting_address: "0x0000000000000000000000000000000000000001".to_owned(),
+            topics: Vec::new(),
+            data: Vec::new(),
+            canonicality_state: CanonicalityState::Observed,
+        };
+        let second_log = bigname_storage::RawLog {
+            log_index: 1,
+            emitting_address: "0x00000000000000000000000000000000000000ff".to_owned(),
+            ..first_log.clone()
+        };
+        let existing_transaction = bigname_storage::RawTransaction {
+            chain_id: raw_block.chain_id.clone(),
+            block_hash: raw_block.block_hash.clone(),
+            block_number: raw_block.block_number,
+            transaction_hash: first_log.transaction_hash.clone(),
+            transaction_index: first_log.transaction_index,
+            from_address: "0x0000000000000000000000000000000000000001".to_owned(),
+            to_address: None,
+            canonicality_state: CanonicalityState::Observed,
+        };
+
+        let requests = missing_transaction_receipt_requests_from_raw_facts(
+            &[first_log, second_log],
+            &[existing_transaction],
+            &[],
+        );
+
+        assert_eq!(requests.len(), 1);
+    }
+
+    fn raw_block(block_number: i64) -> RawBlock {
+        RawBlock {
+            chain_id: "base-mainnet".to_owned(),
+            block_hash: BLOCK_HASH.to_owned(),
+            parent_hash: None,
+            block_number,
+            block_timestamp: sqlx::types::time::OffsetDateTime::UNIX_EPOCH,
+            logs_bloom: None,
+            transactions_root: None,
+            receipts_root: None,
+            state_root: None,
+            canonicality_state: CanonicalityState::Observed,
         }
-        requests
-            .entry(key)
-            .or_insert_with(|| ProviderTransactionReceiptRequest {
-                transaction_hash: log.transaction_hash.clone(),
-                block_hash: log.block_hash.clone(),
-                block_number: log.block_number,
-                transaction_index: log.transaction_index,
-            });
     }
 
-    requests.into_values().collect()
+    fn provider_transaction(
+        tx_hash: &str,
+        tx_index: i64,
+        block_number: i64,
+    ) -> ProviderTransaction {
+        ProviderTransaction {
+            transaction_hash: tx_hash.to_owned(),
+            block_hash: BLOCK_HASH.to_owned(),
+            block_number,
+            transaction_index: tx_index,
+            from: "0x0000000000000000000000000000000000000001".to_owned(),
+            to: Some("0x0000000000000000000000000000000000002".to_owned()),
+        }
+    }
+
+    fn provider_receipt(tx_hash: &str, tx_index: i64, block_number: i64) -> ProviderReceipt {
+        ProviderReceipt {
+            transaction_hash: tx_hash.to_owned(),
+            block_hash: BLOCK_HASH.to_owned(),
+            block_number,
+            transaction_index: tx_index,
+            contract_address: None,
+            status: Some(1),
+            cumulative_gas_used: Some(21_000),
+            gas_used: Some(21_000),
+            logs_bloom: None,
+        }
+    }
 }

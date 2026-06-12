@@ -53,3 +53,21 @@ fn sample_validation_resolves_only_returned_log_blocks() -> Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn sample_validation_caps_decoded_payload_log_blocks() -> Result<()> {
+    let error = ensure_coinbase_sql_sample_validation_size(
+        BackfillBlockRange::new(1, 1_000)?,
+        MAX_COINBASE_SQL_SAMPLE_VALIDATION_BLOCKS + 1,
+        MAX_COINBASE_SQL_SAMPLE_VALIDATION_BLOCKS + 1,
+        false,
+        MAX_COINBASE_SQL_SAMPLE_DECODED_PAYLOAD_LOGS,
+    )
+    .expect_err("decoded Coinbase SQL samples still require bounded full-payload block fetches");
+
+    assert!(
+        format!("{error:#}").contains("above 512 blocks"),
+        "unexpected error: {error:#}"
+    );
+    Ok(())
+}

@@ -21,8 +21,7 @@ use crate::provider::{ProviderLog, ProviderReceipt, ProviderTransaction};
 
 use super::{
     CoinbaseSqlBackfillConfig, CoinbaseSqlValidationMode, HistoricalBackfillSourceOps,
-    HistoricalCodeObservationScope, HistoricalLogPayload, HistoricalLogPayloadRequest,
-    HistoricalLogValidationFilter,
+    HistoricalLogPayload, HistoricalLogPayloadRequest, HistoricalLogValidationFilter,
 };
 
 pub(crate) use planner::load_backfill_topic_plan;
@@ -238,7 +237,6 @@ impl HistoricalBackfillSourceOps for CoinbaseSqlBackfillSource {
                 receipts_by_block,
                 logs_need_validation_provider_payload,
                 logs_filtered_by_selected_target_index,
-                code_observation_scope: HistoricalCodeObservationScope::LogEmittersOnly,
                 validation_filters,
                 validation_mode: request.validation_mode,
                 source_stats: stats,
