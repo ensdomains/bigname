@@ -217,8 +217,8 @@ Common parameter rules:
 
 | Parameter | Applies to | Values |
 | --- | --- | --- |
-| `at` | Tier-2 chain-derived reads, except lookup primitives | RFC 3339 timestamp, or a URL-safe opaque snapshot token round-tripped from `meta.as_of` |
-| `finality` | snapshot-read routes | `latest` (default), `safe`, `finalized` |
+| `at` | Tier-2 snapshot reads: names, records, subnames, history, permissions, address name/history collections, search, events, and resolver overview; not lookup, status, primary-name, or namespace metadata | RFC 3339 timestamp, or a URL-safe opaque snapshot token round-tripped from `meta.as_of` |
+| `finality` | snapshot-read routes; not lookup, status, primary-name, or namespace metadata | `latest` (default), `safe`, `finalized` |
 | `source` | names, records, primary-name | `indexed` (default), `verified`; the records route also accepts `auto` |
 | `namespace` | name-inferred, address-anchored, and collection routes | explicit override or filter |
 | `include` | route-documented expansions | per-route allowlist |
@@ -259,6 +259,9 @@ round-trip as an `at` snapshot token to pin exact per-chain positions.
 `POST /v2/lookup` is a current-state read. It does not accept `at` or
 `finality`; its `meta.as_of` records the served positions for staleness
 attribution and shadow-diff correlation.
+
+`GET /v2/addresses/{address}/primary-name` is also a current-state read. It
+does not accept `at` or `finality`.
 
 The `chain_positions` query parameter from `v1` does not exist in `v2`.
 

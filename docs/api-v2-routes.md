@@ -36,11 +36,11 @@ Field ownership:
 
 - Shared record, lookup, primary-name, event, and count concepts are dictionary
   fields in `api-v2.md`.
-- Lookup-only transport fields are route-local: `id` is caller correlation,
-  `kind` is the result discriminator, `profile` and `inputs` are request
-  controls, `record` holds a single name result, `records` holds reverse
-  result rows, and `changed`, `input_name`, and `reason` live inside
-  `normalization` only.
+- Lookup-only transport fields are route-local: `id` is caller correlation
+  inside the echoed `input`, `kind` is the result discriminator, `profile` and
+  `inputs` are request controls, `record` holds a single name result, `records`
+  holds reverse result rows, and `changed`, `input_name`, and `reason` live
+  inside `normalization` only.
 - Search-only request fields are route-local: `q`, `match`, and `dedupe`.
 - Records-route containers are route-local: `records`, `inventory`,
   `known_keys`, `unset_keys`, `unsupported_keys`, and `value` are the per-key
@@ -79,9 +79,10 @@ Field ownership:
   and is configurable with `BIGNAME_API_LOOKUP_BATCH_LIMIT`.
 - Response shape: the common envelope. `data` is an array of result objects,
   not an object wrapper. The array contains one result per input in caller
-  order. Each result is `{id?, input, kind, status, normalization?, record?,
-  records?, page?}`. `kind` is `name` or `address`. Name results use `record`
-  for the single record object. Reverse results use `records` for zero or more
+  order. Each result is `{input, kind, status, normalization?, record?,
+  records?, page?}`. `input` echoes the caller-supplied input, including `id`
+  when supplied. `kind` is `name` or `address`. Name results use `record` for
+  the single record object. Reverse results use `records` for zero or more
   record rows with `is_primary` and `relations` in addition to the shared
   record fields. `profile=feed` returns a documented core-field subset of the
   same record object; it does not introduce another DTO.
@@ -240,7 +241,8 @@ Field ownership:
 - Tier: product read.
 - Purpose: primary name for an address.
 - Request parameters: path `address`; query `coin_type` default `60`,
-  `namespace` default `ens`, and `source`.
+  `namespace` default `ens`, and `source`. This is a current-state read and
+  does not accept `at` or `finality`.
 - Response shape: `data` is
   `{address, coin_type, namespace, answers, verification?}`. `answers` is an
   array of `{source, status, name?, raw_claim_name?, unsupported_reason?,
@@ -292,8 +294,8 @@ Field ownership:
 - Purpose: compact event search across name, address, registration, type, and
   block filters.
 - Request parameters: query `namespace`, `name`, `address`,
-  `registration_id`, `type`, `from_block`, `to_block`, `cursor`, and
-  `page_size`.
+  `registration_id`, `type`, `from_block`, `to_block`, `at`, `finality`,
+  `cursor`, and `page_size`.
 - Response shape: `data` is an array of compact event rows with friendly
   `type` vocabulary. Raw upstream event kinds are diagnostics-only.
 - Pagination behavior: standard collection pagination.
@@ -327,7 +329,7 @@ Field ownership:
 - Purpose: namespace metadata and supported-capability summary in product
   vocabulary.
 - Request parameters: path `namespace`.
-- Response shape: `data` is `{namespace, status, capabilities, networks}`.
+- Response shape: `data` is `{namespace, capabilities, networks}`.
   `capabilities` is a product-facing object keyed by capability name; each
   value is `{completeness, unsupported_reason?}` using the common
   completeness vocabulary. `networks` is an array of `{network, chain_id?}`
@@ -455,8 +457,8 @@ Diagnostic snapshot rules:
 - Purpose: raw normalized-event rows: upstream event kinds, event identity, and
   full provenance.
 - Request parameters: query `namespace`, `name`, `address`,
-  `registration_id`, `type`, `from_block`, `to_block`, `cursor`, and
-  `page_size`.
+  `registration_id`, `type`, `from_block`, `to_block`, `at`, `finality`,
+  `cursor`, and `page_size`.
 - Response shape: `data` is an array of raw normalized-event rows in
   diagnostics vocabulary:
   `{normalized_event_id, event_identity, namespace, name?, registration_id?,
