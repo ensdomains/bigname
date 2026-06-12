@@ -75,6 +75,142 @@ pub async fn load_record_inventory_current(
     row.map(decode_record_inventory_current_row).transpose()
 }
 
+/// Load one record-inventory projection row by resource and version boundary, falling back to a
+/// row that shares the boundary's anchor when the exact key misses. A caller-derived boundary is
+/// pointer-less (`normalized_event_id`/`event_kind` null), while the projection may key its row
+/// with the anchoring event pointer filled in; both describe the same anchor (`logical_name_id` +
+/// chain position), so the fallback matches on the anchor and rejects ambiguous multi-row matches.
+/// Callers whose boundary already carries a pointer get the exact read only.
+pub async fn load_record_inventory_current_with_anchor_fallback(
+    pool: &PgPool,
+    resource_id: Uuid,
+    record_version_boundary: &Value,
+) -> Result<Option<RecordInventoryCurrentRow>> {
+    if let Some(row) =
+        load_record_inventory_current(pool, resource_id, record_version_boundary).await?
+    {
+        return Ok(Some(row));
+    }
+    if boundary_has_event_pointer(record_version_boundary) {
+        return Ok(None);
+    }
+
+    let Some(anchored_boundary) =
+        find_record_inventory_boundary_by_anchor(pool, resource_id, record_version_boundary)
+            .await?
+    else {
+        return Ok(None);
+    };
+    load_record_inventory_current(pool, resource_id, &anchored_boundary)
+        .await?
+        .with_context(|| {
+            format!(
+                "matched record_inventory_current anchor for resource_id {resource_id} but the projection row was not loadable"
+            )
+        })
+        .map(Some)
+}
+
+fn boundary_has_event_pointer(record_version_boundary: &Value) -> bool {
+    record_version_boundary
+        .get("normalized_event_id")
+        .is_some_and(|value| !value.is_null())
+        && record_version_boundary
+            .get("event_kind")
+            .is_some_and(|value| !value.is_null())
+}
+
+fn boundary_str<'a>(value: &'a Value, path: &[&str]) -> Option<&'a str> {
+    path.iter()
+        .try_fold(value, |current, key| current.get(*key))
+        .and_then(Value::as_str)
+}
+
+/// Find the persisted boundary of the (at most one) projection row sharing the caller boundary's
+/// anchor. Errors on an ambiguous match — the projection holds one row per resource, so two rows
+/// with the same anchor mean the table is in a state the caller must not silently pick from.
+async fn find_record_inventory_boundary_by_anchor(
+    pool: &PgPool,
+    resource_id: Uuid,
+    record_version_boundary: &Value,
+) -> Result<Option<Value>> {
+    let logical_name_id =
+        boundary_str(record_version_boundary, &["logical_name_id"]).with_context(|| {
+            format!(
+                "record inventory anchor lookup for resource_id {resource_id} requires logical_name_id"
+            )
+        })?;
+    let chain_id = boundary_str(record_version_boundary, &["chain_position", "chain_id"])
+        .with_context(|| {
+            format!(
+                "record inventory anchor lookup for resource_id {resource_id} requires chain_position.chain_id"
+            )
+        })?;
+    let block_number = record_version_boundary
+        .get("chain_position")
+        .and_then(|position| position.get("block_number"))
+        .and_then(Value::as_i64)
+        .with_context(|| {
+            format!(
+                "record inventory anchor lookup for resource_id {resource_id} requires chain_position.block_number"
+            )
+        })?;
+    let block_hash = boundary_str(record_version_boundary, &["chain_position", "block_hash"])
+        .with_context(|| {
+            format!(
+                "record inventory anchor lookup for resource_id {resource_id} requires chain_position.block_hash"
+            )
+        })?;
+    let timestamp = boundary_str(record_version_boundary, &["chain_position", "timestamp"])
+        .with_context(|| {
+            format!(
+                "record inventory anchor lookup for resource_id {resource_id} requires chain_position.timestamp"
+            )
+        })?;
+
+    let boundaries = sqlx::query(
+        r#"
+        SELECT record_version_boundary
+        FROM record_inventory_current
+        WHERE resource_id = $1
+          AND record_version_boundary ->> 'logical_name_id' = $2
+          AND record_version_boundary -> 'chain_position' ->> 'chain_id' = $3
+          AND (record_version_boundary -> 'chain_position' ->> 'block_number')::bigint = $4
+          AND record_version_boundary -> 'chain_position' ->> 'block_hash' = $5
+          AND record_version_boundary -> 'chain_position' ->> 'timestamp' = $6
+        ORDER BY
+          (record_version_boundary ->> 'normalized_event_id') IS NULL ASC,
+          (record_version_boundary ->> 'normalized_event_id')::bigint DESC NULLS LAST
+        LIMIT 2
+        "#,
+    )
+    .bind(resource_id)
+    .bind(logical_name_id)
+    .bind(chain_id)
+    .bind(block_number)
+    .bind(block_hash)
+    .bind(timestamp)
+    .fetch_all(pool)
+    .await
+    .with_context(|| {
+        format!(
+            "failed to locate record_inventory_current anchor boundary for resource_id {resource_id}"
+        )
+    })?
+    .into_iter()
+    .map(|row| {
+        crate::sql_row::get::<Value>(&row, "record_version_boundary")
+    })
+    .collect::<Result<Vec<Value>>>()?;
+
+    if boundaries.len() > 1 {
+        anyhow::bail!(
+            "record inventory anchor lookup for resource_id {resource_id} matched multiple projection rows"
+        );
+    }
+    Ok(boundaries.into_iter().next())
+}
+
 /// Load one record-inventory projection row only if it is eligible for the selected snapshot.
 ///
 /// A present row with different chain-position context is reported as `stale`

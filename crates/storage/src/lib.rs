@@ -130,8 +130,7 @@ pub use name_current::{
     load_name_current_by_logical_name_ids, load_name_current_for_snapshot,
     load_name_current_list_page, load_name_current_list_page_offset,
     load_name_current_list_row_by_name, load_name_current_list_row_by_namehash,
-    name_current_list_cursor_from_row,
-    replace_name_current_rows, upsert_name_current_rows,
+    name_current_list_cursor_from_row, replace_name_current_rows, upsert_name_current_rows,
 };
 pub use normalized_events::{
     NormalizedEvent, NormalizedEventUpsertSummary, load_normalized_event_counts_by_kind,
@@ -184,7 +183,7 @@ pub use raw_payload_cache::{
 pub use record_inventory::{
     RecordInventoryCurrentRow, clear_record_inventory_current, delete_record_inventory_current,
     load_record_inventory_current, load_record_inventory_current_for_snapshot,
-    upsert_record_inventory_current_rows,
+    load_record_inventory_current_with_anchor_fallback, upsert_record_inventory_current_rows,
 };
 pub use resolution_support::{
     BASE_MAINNET_CHAIN_ID, BASENAMES_L1_RESOLVER_ADDRESS, BASENAMES_NAMESPACE,
@@ -197,6 +196,7 @@ pub use resolution_support::{
     parse_supported_verified_resolution_record_key, projected_resolution_boundaries_from_topology,
     projected_resolution_topology, record_version_boundary_has_pointer,
     resolution_execution_cache_lookup_records, resolution_record_inventory_lookup_key,
+    resolution_record_inventory_lookup_key_any_chain,
     resolution_record_inventory_lookup_key_for_revalidation, resolution_record_version_boundary,
     resolution_record_version_boundary_for_revalidation,
     resolution_requested_chain_positions_from_projection, resolution_supports_avatar_readback,

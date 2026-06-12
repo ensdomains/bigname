@@ -311,7 +311,9 @@ pub async fn load_name_current_list_row_by_name(
         .fetch_optional(pool)
         .await
         .with_context(|| {
-            format!("failed to load name_current compact row for name {name} in namespace {namespace}")
+            format!(
+                "failed to load name_current compact row for name {name} in namespace {namespace}"
+            )
         })?;
     row.map(decode_name_current_list_row).transpose()
 }
