@@ -264,18 +264,23 @@ pub(crate) fn ens_v1_unwrapped_authority_registry_event_time_resource_id_repair_
     if !registry_event_time_repair_differences_allowed(differing_fields) {
         return false;
     }
+    let source_allowed = (existing.namespace == "ens"
+        && existing.chain_id.as_deref() == Some("ethereum-mainnet")
+        && matches!(
+            existing.source_family.as_str(),
+            "ens_v1_registry_l1" | "ens_v1_registrar_l1" | "ens_v1_resolver_l1"
+        ))
+        || (existing.namespace == "basenames"
+            && existing.chain_id.as_deref() == Some("base-mainnet")
+            && existing.source_family == "basenames_base_registry"
+            && existing.event_kind == "AuthorityTransferred");
     if existing.resource_id.is_none()
         || existing.logical_name_id.is_none()
         || incoming.logical_name_id.is_none()
         || existing.logical_name_id != incoming.logical_name_id
         || existing.block_number.is_none()
-        || existing.namespace != "ens"
-        || existing.chain_id.as_deref() != Some("ethereum-mainnet")
         || existing.derivation_kind != "ens_v1_unwrapped_authority"
-        || !matches!(
-            existing.source_family.as_str(),
-            "ens_v1_registry_l1" | "ens_v1_registrar_l1" | "ens_v1_resolver_l1"
-        )
+        || !source_allowed
         || !matches!(
             existing.event_kind.as_str(),
             "ResolverChanged"
@@ -332,26 +337,47 @@ pub(crate) fn ens_v1_unwrapped_authority_registry_event_time_before_state_repair
     if !matches!(differing_fields, ["before_state"]) {
         return false;
     }
+    let source_allowed = matches!(
+        (
+            existing.namespace.as_str(),
+            existing.chain_id.as_deref(),
+            existing.source_family.as_str(),
+            existing.event_kind.as_str(),
+        ),
+        (
+            "ens",
+            Some("ethereum-mainnet"),
+            "ens_v1_registry_l1",
+            "AuthorityTransferred"
+        ) | (
+            "ens",
+            Some("ethereum-mainnet"),
+            "ens_v1_resolver_l1",
+            "RecordVersionChanged"
+        ) | (
+            "basenames",
+            Some("base-mainnet"),
+            "basenames_base_registry",
+            "AuthorityTransferred"
+        )
+    );
     if existing.resource_id.is_none()
         || existing.resource_id != incoming.resource_id
         || existing.logical_name_id.is_none()
         || incoming.logical_name_id.is_none()
         || existing.logical_name_id != incoming.logical_name_id
-        || existing.namespace != "ens"
-        || existing.chain_id.as_deref() != Some("ethereum-mainnet")
         || existing.derivation_kind != "ens_v1_unwrapped_authority"
+        || !source_allowed
     {
         return false;
     }
-
     if existing.event_kind == "AuthorityTransferred" {
-        return existing.source_family == "ens_v1_registry_l1"
-            && authority_transfer_state_repair_allowed(
-                &existing.before_state,
-                &incoming.before_state,
-                &existing.after_state,
-                &incoming.after_state,
-            );
+        return authority_transfer_state_repair_allowed(
+            &existing.before_state,
+            &incoming.before_state,
+            &existing.after_state,
+            &incoming.after_state,
+        );
     }
 
     existing.event_kind == "RecordVersionChanged"
@@ -373,7 +399,6 @@ fn registry_event_time_repair_differences_allowed(differing_fields: &[&'static s
             | ["resource_id", "before_state", "after_state"]
     )
 }
-
 fn authority_transfer_state_repair_allowed(
     existing_before_state: &Value,
     incoming_before_state: &Value,
@@ -383,11 +408,9 @@ fn authority_transfer_state_repair_allowed(
     if existing_after_state != incoming_after_state {
         return false;
     }
-
     if !authority_transfer_owner_transition_allowed(existing_before_state, incoming_before_state) {
         return false;
     }
-
     let mut existing_without_owner = existing_before_state.clone();
     if let Some(object) = existing_without_owner.as_object_mut() {
         object.remove("owner");
@@ -396,10 +419,8 @@ fn authority_transfer_state_repair_allowed(
     if let Some(object) = incoming_without_owner.as_object_mut() {
         object.remove("owner");
     }
-
     existing_without_owner == incoming_without_owner
 }
-
 fn authority_transfer_owner_transition_allowed(
     existing_before_state: &Value,
     incoming_before_state: &Value,
@@ -414,12 +435,10 @@ fn authority_transfer_owner_transition_allowed(
             | (Some(OwnerState::Null), Some(OwnerState::Known))
     )
 }
-
 enum OwnerState {
     Known,
     Null,
 }
-
 fn owner_state(value: &Value) -> Option<OwnerState> {
     match value.get("owner")? {
         Value::Null => Some(OwnerState::Null),
@@ -427,7 +446,6 @@ fn owner_state(value: &Value) -> Option<OwnerState> {
         _ => None,
     }
 }
-
 fn record_version_state_repair_allowed(
     existing_before_state: &Value,
     incoming_before_state: &Value,
@@ -437,14 +455,12 @@ fn record_version_state_repair_allowed(
     if existing_after_state != incoming_after_state {
         return false;
     }
-
     let Some(after_version) = incoming_after_state
         .get("record_version")
         .and_then(Value::as_i64)
     else {
         return false;
     };
-
     let mut existing_without_version = existing_before_state.clone();
     if let Some(object) = existing_without_version.as_object_mut() {
         object.remove("record_version");
@@ -453,11 +469,9 @@ fn record_version_state_repair_allowed(
     if let Some(object) = incoming_without_version.as_object_mut() {
         object.remove("record_version");
     }
-
     if existing_without_version != incoming_without_version {
         return false;
     }
-
     let existing_version = existing_before_state.get("record_version");
     let incoming_version = incoming_before_state.get("record_version");
     let previous_version = match (existing_version, incoming_version) {
@@ -465,10 +479,8 @@ fn record_version_state_repair_allowed(
         (Some(value), Some(Value::Null)) => value.as_i64(),
         _ => None,
     };
-
     previous_version.and_then(|version| version.checked_add(1)) == Some(after_version)
 }
-
 fn record_changed_text_value_state_repair_allowed(
     existing_before_state: &Value,
     incoming_before_state: &Value,
@@ -481,13 +493,11 @@ fn record_changed_text_value_state_repair_allowed(
     {
         return false;
     }
-
     let existing_value = existing_after_state.get("value").and_then(Value::as_str);
     let incoming_value = incoming_after_state.get("value").and_then(Value::as_str);
     if existing_value.is_some() == incoming_value.is_some() {
         return false;
     }
-
     let mut existing_without_value = existing_after_state.clone();
     if let Some(object) = existing_without_value.as_object_mut() {
         object.remove("value");
@@ -496,10 +506,8 @@ fn record_changed_text_value_state_repair_allowed(
     if let Some(object) = incoming_without_value.as_object_mut() {
         object.remove("value");
     }
-
     existing_without_value == incoming_without_value
 }
-
 fn selector_text_record_state(state: &Value) -> bool {
     let Some(record_family) = state.get("record_family").and_then(Value::as_str) else {
         return false;
@@ -510,10 +518,8 @@ fn selector_text_record_state(state: &Value) -> bool {
     let Some(selector_key) = state.get("selector_key").and_then(Value::as_str) else {
         return false;
     };
-
     record_family == "text" && record_key.starts_with("text:") && !selector_key.is_empty()
 }
-
 fn permission_state_authority_repair_allowed(
     existing_state: &Value,
     incoming_state: &Value,
@@ -521,13 +527,11 @@ fn permission_state_authority_repair_allowed(
     if existing_state == incoming_state {
         return true;
     }
-
     if permission_state_without_authority_sources(existing_state)
         != permission_state_without_authority_sources(incoming_state)
     {
         return false;
     }
-
     let grant_source_repair_allowed = authority_source_unchanged_or_repaired(
         existing_state.get("grant_source"),
         incoming_state.get("grant_source"),
@@ -536,10 +540,8 @@ fn permission_state_authority_repair_allowed(
         existing_state.get("revocation_source"),
         incoming_state.get("revocation_source"),
     );
-
     grant_source_repair_allowed && revocation_source_repair_allowed
 }
-
 fn permission_state_without_authority_sources(state: &Value) -> Value {
     let mut value = state.clone();
     if let Some(object) = value.as_object_mut() {
@@ -548,7 +550,6 @@ fn permission_state_without_authority_sources(state: &Value) -> Value {
     }
     value
 }
-
 fn authority_source_unchanged_or_repaired(
     existing_source: Option<&Value>,
     incoming_source: Option<&Value>,
@@ -556,7 +557,6 @@ fn authority_source_unchanged_or_repaired(
     existing_source == incoming_source
         || authority_source_transition_allowed(existing_source, incoming_source)
 }
-
 fn authority_source_transition_allowed(
     existing_source: Option<&Value>,
     incoming_source: Option<&Value>,
