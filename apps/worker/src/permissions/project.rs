@@ -31,6 +31,19 @@ const RESOURCE_CONTROL_FUSE_MASK: i64 = CANNOT_UNWRAP
     | CANNOT_CREATE_SUBDOMAIN
     | CANNOT_APPROVE;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FuseMaskState {
+    NoModifier,
+    Proven(i64),
+    Unproven,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct FuseMaskedPowers {
+    pub(crate) effective_powers: Vec<String>,
+    pub(crate) changed: bool,
+}
+
 pub(super) async fn build_rows(
     pool: &PgPool,
     resource_ids: &[Uuid],
@@ -145,19 +158,46 @@ fn mask_effective_powers(
     powers: Vec<String>,
     modifier: Option<&RelevantEvent>,
 ) -> Result<(Vec<String>, bool)> {
-    let Some(modifier) = modifier else {
-        return Ok((powers, false));
+    let masked = mask_effective_powers_for_fuse_state(
+        powers,
+        scope_fuse_state_from_after_state(modifier.map(|modifier| &modifier.after_state)),
+    );
+    Ok((masked.effective_powers, masked.changed))
+}
+
+pub(crate) fn scope_fuse_state_from_after_state(after_state: Option<&Value>) -> FuseMaskState {
+    let Some(after_state) = after_state else {
+        return FuseMaskState::NoModifier;
     };
-    let Some(fuses) = modifier
-        .after_state
+    after_state
         .get("fuses")
         .and_then(Value::as_i64)
         .filter(|fuses| *fuses >= 0)
-    else {
-        return Ok((Vec::new(), true));
+        .map(FuseMaskState::Proven)
+        .unwrap_or(FuseMaskState::Unproven)
+}
+
+pub(crate) fn mask_effective_powers_for_fuse_state(
+    powers: Vec<String>,
+    fuse_state: FuseMaskState,
+) -> FuseMaskedPowers {
+    let fuses = match fuse_state {
+        FuseMaskState::NoModifier => {
+            return FuseMaskedPowers {
+                effective_powers: powers,
+                changed: false,
+            };
+        }
+        FuseMaskState::Proven(fuses) => fuses,
+        FuseMaskState::Unproven => {
+            return FuseMaskedPowers {
+                effective_powers: Vec::new(),
+                changed: true,
+            };
+        }
     };
     let mut changed = false;
-    let masked = powers
+    let effective_powers = powers
         .into_iter()
         .filter(|power| {
             let keep = !power_masked_by_fuses(power, fuses);
@@ -165,7 +205,10 @@ fn mask_effective_powers(
             keep
         })
         .collect::<Vec<_>>();
-    Ok((masked, changed))
+    FuseMaskedPowers {
+        effective_powers,
+        changed,
+    }
 }
 
 fn power_masked_by_fuses(power: &str, fuses: i64) -> bool {

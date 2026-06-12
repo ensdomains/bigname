@@ -312,6 +312,44 @@ candidate_keys AS (
       AND scope.scope ->> 'chain_id' IS NOT NULL
       AND scope.scope ->> 'resolver_address' IS NOT NULL
       AND scope.scope ->> 'resolver_address' <> ''
+
+    UNION ALL
+
+    SELECT
+        'resolver_current'::TEXT AS projection,
+        scope.scope ->> 'chain_id'
+            || ':' || lower(scope.scope ->> 'resolver_address') AS projection_key,
+        jsonb_build_object(
+            'chain_id', scope.scope ->> 'chain_id',
+            'resolver_address', lower(scope.scope ->> 'resolver_address')
+        ) AS key_payload,
+        ne.normalized_event_id,
+        ne.change_id,
+        ne.changed_at
+    FROM changed_events ne
+    JOIN normalized_events permission
+      ON permission.resource_id = ne.resource_id
+     AND permission.event_kind = 'PermissionChanged'
+     AND permission.canonicality_state IN (
+         'canonical'::canonicality_state,
+         'safe'::canonicality_state,
+         'finalized'::canonicality_state
+     )
+    CROSS JOIN LATERAL (
+        VALUES
+            (permission.after_state -> 'scope'),
+            (permission.before_state -> 'scope')
+    ) AS scope(scope)
+    WHERE ne.event_kind = 'PermissionScopeChanged'
+      AND ne.resource_id IS NOT NULL
+      AND (
+          ne.after_state -> 'scope' ->> 'kind' = 'resource'
+          OR ne.before_state -> 'scope' ->> 'kind' = 'resource'
+      )
+      AND scope.scope ->> 'kind' = 'resolver'
+      AND scope.scope ->> 'chain_id' IS NOT NULL
+      AND scope.scope ->> 'resolver_address' IS NOT NULL
+      AND scope.scope ->> 'resolver_address' <> ''
 )
 "#;
 
@@ -331,11 +369,23 @@ resource_permission_changed_names AS (
         change_id,
         changed_at
     FROM changed_events
-    WHERE event_kind = 'PermissionChanged'
-      AND logical_name_id IS NOT NULL
+    WHERE logical_name_id IS NOT NULL
       AND (
-          after_state -> 'scope' ->> 'kind' = 'resource'
-          OR before_state -> 'scope' ->> 'kind' = 'resource'
+          (
+              event_kind = 'PermissionChanged'
+              AND (
+                  after_state -> 'scope' ->> 'kind' = 'resource'
+                  OR before_state -> 'scope' ->> 'kind' = 'resource'
+              )
+          )
+          OR (
+              event_kind = 'PermissionScopeChanged'
+              AND resource_id IS NOT NULL
+              AND (
+                  after_state -> 'scope' ->> 'kind' = 'resource'
+                  OR before_state -> 'scope' ->> 'kind' = 'resource'
+              )
+          )
       )
 ),
 candidate_keys AS (
@@ -396,6 +446,44 @@ candidate_keys AS (
             (ne.before_state ->> 'subject', ne.before_state -> 'scope')
     ) AS address(address, scope)
     WHERE ne.event_kind = 'PermissionChanged'
+      AND address.scope ->> 'kind' = 'resource'
+      AND address.address IS NOT NULL
+      AND address.address <> ''
+
+    UNION ALL
+
+    SELECT
+        'address_names_current'::TEXT AS projection,
+        lower(address.address) || ':' || ne.logical_name_id AS projection_key,
+        jsonb_build_object(
+            'address', lower(address.address),
+            'logical_name_id', ne.logical_name_id
+        ) AS key_payload,
+        ne.normalized_event_id,
+        ne.change_id,
+        ne.changed_at
+    FROM changed_events ne
+    JOIN normalized_events permission
+      ON permission.resource_id = ne.resource_id
+     AND permission.logical_name_id = ne.logical_name_id
+     AND permission.event_kind = 'PermissionChanged'
+     AND permission.canonicality_state IN (
+         'canonical'::canonicality_state,
+         'safe'::canonicality_state,
+         'finalized'::canonicality_state
+     )
+    CROSS JOIN LATERAL (
+        VALUES
+            (permission.after_state ->> 'subject', permission.after_state -> 'scope'),
+            (permission.before_state ->> 'subject', permission.before_state -> 'scope')
+    ) AS address(address, scope)
+    WHERE ne.event_kind = 'PermissionScopeChanged'
+      AND ne.resource_id IS NOT NULL
+      AND ne.logical_name_id IS NOT NULL
+      AND (
+          ne.after_state -> 'scope' ->> 'kind' = 'resource'
+          OR ne.before_state -> 'scope' ->> 'kind' = 'resource'
+      )
       AND address.scope ->> 'kind' = 'resource'
       AND address.address IS NOT NULL
       AND address.address <> ''

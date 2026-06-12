@@ -16,6 +16,7 @@ use futures_util::{TryStreamExt, pin_mut};
 use load::stream_target_resource_ids;
 use persist::delete_stale_permissions_current_rows_for_resource;
 use project::build_rows;
+pub(crate) use project::{mask_effective_powers_for_fuse_state, scope_fuse_state_from_after_state};
 use sqlx::PgPool;
 use tokio::task::JoinSet;
 use uuid::Uuid;
