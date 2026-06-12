@@ -74,18 +74,19 @@ pub(super) fn permission_changed_event(
     old_role_bitmap: String,
     new_role_bitmap: String,
 ) -> Result<NormalizedEvent> {
-    let effective_powers = role_bitmap_powers(&new_role_bitmap)?;
-    let old_powers = role_bitmap_powers(&old_role_bitmap)?;
+    let registry_permission_source = is_registry_permission_source(&raw_log.source_family);
+    let role_vocabulary = permission_role_vocabulary(registry_permission_source);
+    let effective_powers = role_bitmap_powers(&new_role_bitmap, role_vocabulary)?;
+    let old_powers = role_bitmap_powers(&old_role_bitmap, role_vocabulary)?;
     let has_effective_powers = !effective_powers.is_empty();
     let fully_revoked = !has_effective_powers && !old_powers.is_empty();
     let root_resource = resource_is_root(&hint.upstream_resource);
-    let registry_permission_source = is_registry_permission_source(&raw_log.source_family);
     let event_kind = if registry_permission_source && root_resource {
         EVENT_KIND_ROOT_PERMISSION_CHANGED
     } else {
         EVENT_KIND_PERMISSION_CHANGED
     };
-    let changed_powers = changed_role_powers(&old_role_bitmap, &new_role_bitmap)?;
+    let changed_powers = changed_role_powers(&old_role_bitmap, &new_role_bitmap, role_vocabulary)?;
     let source_contract_instance_key = if registry_permission_source {
         "registry_contract_instance_id"
     } else {
@@ -227,47 +228,95 @@ fn raw_fact_ref(raw_log: &PermissionsRawLogRow) -> Value {
     })
 }
 
-fn role_bitmap_powers(bitmap: &str) -> Result<Vec<String>> {
+#[derive(Clone, Copy)]
+enum RoleVocabulary {
+    Registry,
+    Resolver,
+}
+
+fn permission_role_vocabulary(registry_permission_source: bool) -> RoleVocabulary {
+    if registry_permission_source {
+        RoleVocabulary::Registry
+    } else {
+        RoleVocabulary::Resolver
+    }
+}
+
+fn role_bitmap_powers(bitmap: &str, vocabulary: RoleVocabulary) -> Result<Vec<String>> {
     let bytes = decode_hex_32(bitmap)?;
-    let role_bits = [
-        (0usize, "set_addr"),
-        (4, "set_text"),
-        (8, "set_contenthash"),
-        (12, "set_pubkey"),
-        (16, "set_abi"),
-        (20, "set_interface"),
-        (24, "set_name"),
-        (28, "set_alias"),
-        (32, "clear_records"),
-        (124, "upgrade"),
-        (128, "admin_set_addr"),
-        (132, "admin_set_text"),
-        (136, "admin_set_contenthash"),
-        (140, "admin_set_pubkey"),
-        (144, "admin_set_abi"),
-        (148, "admin_set_interface"),
-        (152, "admin_set_name"),
-        (156, "admin_set_alias"),
-        (160, "admin_clear_records"),
-        (252, "admin_upgrade"),
-    ];
-    Ok(role_bits
-        .into_iter()
+    Ok(role_bits_for(vocabulary)
+        .iter()
         .filter(|(bit, _)| bit_is_set(&bytes, *bit))
-        .map(|(_, power)| power.to_owned())
+        .map(|(_, power)| (*power).to_owned())
         .collect())
 }
 
-fn changed_role_powers(old_bitmap: &str, new_bitmap: &str) -> Result<Vec<String>> {
-    let old = role_bitmap_powers(old_bitmap)?
+fn role_bits_for(vocabulary: RoleVocabulary) -> &'static [(usize, &'static str)] {
+    match vocabulary {
+        RoleVocabulary::Registry => REGISTRY_ROLE_BITS,
+        RoleVocabulary::Resolver => RESOLVER_ROLE_BITS,
+    }
+}
+
+const REGISTRY_ROLE_BITS: &[(usize, &str)] = &[
+    (0, "registrar"),
+    (4, "register_reserved"),
+    (8, "set_parent"),
+    (12, "unregister"),
+    (16, "renew"),
+    (20, "set_subregistry"),
+    (24, "set_resolver"),
+    (124, "upgrade"),
+    (128, "admin_registrar"),
+    (132, "admin_register_reserved"),
+    (136, "admin_set_parent"),
+    (140, "admin_unregister"),
+    (144, "admin_renew"),
+    (148, "admin_set_subregistry"),
+    (152, "admin_set_resolver"),
+    (156, "can_transfer_admin"),
+    (252, "admin_upgrade"),
+];
+
+const RESOLVER_ROLE_BITS: &[(usize, &str)] = &[
+    (0usize, "set_addr"),
+    (4, "set_text"),
+    (8, "set_contenthash"),
+    (12, "set_pubkey"),
+    (16, "set_abi"),
+    (20, "set_interface"),
+    (24, "set_name"),
+    (28, "set_alias"),
+    (32, "clear_records"),
+    (124, "upgrade"),
+    (128, "admin_set_addr"),
+    (132, "admin_set_text"),
+    (136, "admin_set_contenthash"),
+    (140, "admin_set_pubkey"),
+    (144, "admin_set_abi"),
+    (148, "admin_set_interface"),
+    (152, "admin_set_name"),
+    (156, "admin_set_alias"),
+    (160, "admin_clear_records"),
+    (252, "admin_upgrade"),
+];
+
+fn changed_role_powers(
+    old_bitmap: &str,
+    new_bitmap: &str,
+    vocabulary: RoleVocabulary,
+) -> Result<Vec<String>> {
+    let old = role_bitmap_powers(old_bitmap, vocabulary)?
         .into_iter()
         .collect::<HashSet<_>>();
-    let new = role_bitmap_powers(new_bitmap)?
+    let new = role_bitmap_powers(new_bitmap, vocabulary)?
         .into_iter()
         .collect::<HashSet<_>>();
-    let mut changed = old.symmetric_difference(&new).cloned().collect::<Vec<_>>();
-    changed.sort();
-    Ok(changed)
+    Ok(role_bits_for(vocabulary)
+        .iter()
+        .map(|(_, power)| (*power).to_owned())
+        .filter(|power| old.contains(power) != new.contains(power))
+        .collect())
 }
 
 fn bit_is_set(bytes: &[u8; 32], bit: usize) -> bool {

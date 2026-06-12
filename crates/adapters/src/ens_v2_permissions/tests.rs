@@ -341,9 +341,113 @@ fn registry_root_resource_builds_root_permission_changed_event_payload() -> Resu
     );
     assert_eq!(event.after_state["grant_source"]["root_resource"], true);
     assert_eq!(
+        event.after_state["effective_powers"],
+        json!(["registrar", "register_reserved"])
+    );
+    assert_eq!(
+        event.after_state["grant_source"]["changed_powers"],
+        json!(["registrar", "register_reserved"])
+    );
+    assert_eq!(
         event.after_state["inheritance_path"][0]["kind"],
         "registry_root_fallback"
     );
+
+    Ok(())
+}
+
+#[test]
+fn root_source_root_resource_uses_registry_role_vocabulary() -> Result<()> {
+    let account = "0x1111111111111111111111111111111111111111";
+    let root_resource = topic_word(0);
+    let raw_log = raw_log_with_source_family(
+        SOURCE_FAMILY_ENS_V2_ROOT_L1,
+        vec![
+            keccak_signature_hex("EACRolesChanged(uint256,address,uint256,uint256)"),
+            root_resource.clone(),
+            address_topic(account),
+        ],
+        [hex_word(0), bitmap_with_last_byte(0x11)]
+            .into_iter()
+            .flatten()
+            .collect(),
+    );
+    let hint = fallback_resource_hint(&raw_log, root_resource, true);
+    let resource_id = Uuid::parse_str("11111111-1111-5111-8111-111111111111")?;
+    let event = permission_changed_event(
+        &raw_log,
+        &hint,
+        resource_id,
+        account.to_owned(),
+        topic_word(0),
+        bitmap_hex_with_last_byte(0x11),
+    )?;
+
+    assert_eq!(event.event_kind, EVENT_KIND_ROOT_PERMISSION_CHANGED);
+    assert_eq!(
+        event.after_state["effective_powers"],
+        json!(["registrar", "register_reserved"])
+    );
+    assert_eq!(
+        event.after_state["grant_source"]["changed_powers"],
+        json!(["registrar", "register_reserved"])
+    );
+
+    Ok(())
+}
+
+#[test]
+fn unknown_role_bits_fail_closed_for_registry_and_resolver_vocabularies() -> Result<()> {
+    let account = "0x1111111111111111111111111111111111111111";
+    let resource = topic_word(0);
+    let registry_raw_log = raw_log_with_source_family(
+        SOURCE_FAMILY_ENS_V2_REGISTRY_L1,
+        vec![
+            keccak_signature_hex("EACRolesChanged(uint256,address,uint256,uint256)"),
+            resource.clone(),
+            address_topic(account),
+        ],
+        [hex_word(0), bitmap_with_bits(&[32])]
+            .into_iter()
+            .flatten()
+            .collect(),
+    );
+    let registry_hint = fallback_resource_hint(&registry_raw_log, resource.clone(), true);
+    let resolver_raw_log = raw_log(
+        vec![
+            keccak_signature_hex("EACRolesChanged(uint256,address,uint256,uint256)"),
+            resource.clone(),
+            address_topic(account),
+        ],
+        [hex_word(0), bitmap_with_bits(&[36])]
+            .into_iter()
+            .flatten()
+            .collect(),
+    );
+    let resolver_hint = fallback_resource_hint(&resolver_raw_log, resource, false);
+    let resource_id = Uuid::parse_str("11111111-1111-5111-8111-111111111111")?;
+
+    let registry_event = permission_changed_event(
+        &registry_raw_log,
+        &registry_hint,
+        resource_id,
+        account.to_owned(),
+        topic_word(0),
+        bitmap_hex_with_bits(&[32]),
+    )?;
+    let resolver_event = permission_changed_event(
+        &resolver_raw_log,
+        &resolver_hint,
+        resource_id,
+        account.to_owned(),
+        topic_word(0),
+        bitmap_hex_with_bits(&[36]),
+    )?;
+
+    assert_eq!(registry_event.after_state["effective_powers"], json!([]));
+    assert_eq!(registry_event.after_state["grant_source"], json!({}));
+    assert_eq!(resolver_event.after_state["effective_powers"], json!([]));
+    assert_eq!(resolver_event.after_state["grant_source"], json!({}));
 
     Ok(())
 }
@@ -456,6 +560,13 @@ async fn sync_ens_v2_permissions_consumes_registry_root_eac_roles_changed() -> R
         event.after_state["registry_contract_instance_id"]
             .as_str()
             .is_some()
+    }));
+    assert!(events.iter().all(|event| {
+        event.after_state["effective_powers"] == json!(["registrar", "register_reserved"])
+    }));
+    assert!(events.iter().all(|event| {
+        event.after_state["grant_source"]["changed_powers"]
+            == json!(["registrar", "register_reserved"])
     }));
 
     database.cleanup().await
@@ -592,6 +703,19 @@ fn bitmap_with_last_byte(value: u8) -> Vec<u8> {
 
 fn bitmap_hex_with_last_byte(value: u8) -> String {
     format!("0x{}", hex_string(bitmap_with_last_byte(value)))
+}
+
+fn bitmap_with_bits(bits: &[usize]) -> Vec<u8> {
+    let mut bytes = [0u8; 32];
+    for bit in bits {
+        let byte_index = 31usize.saturating_sub(bit / 8);
+        bytes[byte_index] |= 1u8 << (bit % 8);
+    }
+    bytes.to_vec()
+}
+
+fn bitmap_hex_with_bits(bits: &[usize]) -> String {
+    format!("0x{}", hex_string(bitmap_with_bits(bits)))
 }
 
 fn test_permissions_event_topics() -> ActiveManifestEventTopic0sBySignature {

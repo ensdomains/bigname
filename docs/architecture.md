@@ -254,7 +254,7 @@ ENSv2 mappings:
 - `TokenRegenerated` ← upstream `TokenRegenerated(oldTokenId, newTokenId)`. Preserves `resource_id`, `token_lineage_id`, and active surface binding.[^v2-events-l69][^v2-pr-l451]
 - `SubregistryChanged` ← `SubregistryUpdated`; `ParentChanged` ← `ParentUpdated`.[^v2-events-l49][^v2-events-l75]
 - `AliasChanged` ← `PermissionedResolver.AliasChanged`; the alias path stores source and destination DNS-encoded names.[^v2-iperm-resolver-l14][^v2-pres-l230]
-- `PermissionChanged` and `RootPermissionChanged` ← upstream `EACRolesChanged(resource, account, oldRoleBitmap, newRoleBitmap)`. Root-resource permissions stay distinguishable because EAC root roles are checked separately and satisfy resource-level checks via root fallback; this taxonomy admission covers normalized-event emission and manifest watch admission, while current-state projection consumption is a separate projection contract.[^v2-eac-l19][^v2-eac-l176][^v2-eac-l181]
+- `PermissionChanged` and `RootPermissionChanged` ← upstream `EACRolesChanged(resource, account, oldRoleBitmap, newRoleBitmap)`. Root-resource permissions stay distinguishable because EAC root roles are checked separately and satisfy resource-level checks via root fallback; this taxonomy admission covers normalized-event emission and manifest watch admission, while current-state projection consumption is a separate projection contract.[^v2-eac-l19][^v2-eac-l176][^v2-eac-l181] Registry/root sources decode role bitmaps with the `RegistryRolesLib` vocabulary (`registrar`, `register_reserved`, `set_parent`, `unregister`, `renew`, `set_subregistry`, `set_resolver`, `upgrade`, `can_transfer_admin`, and `admin_` twins), while resolver sources decode with the resolver role vocabulary. Unknown bits are omitted from `effective_powers` rather than surfaced under invented names.[^v2-regroles-l6][^v2-regroles-l9][^v2-regroles-l14][^v2-regroles-l19][^v2-regroles-l24][^v2-regroles-l29][^v2-regroles-l34][^v2-regroles-l39][^v2-regroles-l45][^v2-regroles-l48][^v2-resroles-l7][^v2-resroles-l52]
 - `RegistrarNameRegistered` ← upstream `ETHRegistrar.NameRegistered`; it is registrar-local registration intent and links back to the registry resource when that registry resource has already been observed.[^v2-iethreg-l32]
 
 Taxonomy reconciliation decisions:
@@ -664,9 +664,23 @@ Validate at four layers: raw facts, normalized events, execution traces, public 
 [^v2-pr-l536]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L536 @ ens_v2@554c309)
 [^v2-pr-l545]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L545 @ ens_v2@554c309)
 
+[^v2-regroles-l6]: (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L6 @ ens_v2@554c309)
+[^v2-regroles-l9]: (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L9 @ ens_v2@554c309)
+[^v2-regroles-l14]: (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L14 @ ens_v2@554c309)
+[^v2-regroles-l19]: (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L19 @ ens_v2@554c309)
+[^v2-regroles-l24]: (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L24 @ ens_v2@554c309)
+[^v2-regroles-l29]: (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L29 @ ens_v2@554c309)
+[^v2-regroles-l34]: (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L34 @ ens_v2@554c309)
+[^v2-regroles-l39]: (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L39 @ ens_v2@554c309)
+[^v2-regroles-l45]: (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L45 @ ens_v2@554c309)
+[^v2-regroles-l48]: (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L48 @ ens_v2@554c309)
+
 [^v2-iperm-resolver-l14]: (upstream: .refs/ens_v2/contracts/src/resolver/interfaces/IPermissionedResolver.sol:L14 @ ens_v2@554c309)
 [^v2-iethreg-l32]: (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRegistrar.sol:L32 @ ens_v2@554c309)
 [^v2-iethreg-l53]: (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRegistrar.sol:L53 @ ens_v2@554c309)
+
+[^v2-resroles-l7]: (upstream: .refs/ens_v2/contracts/src/resolver/libraries/PermissionedResolverLib.sol:L7 @ ens_v2@554c309)
+[^v2-resroles-l52]: (upstream: .refs/ens_v2/contracts/src/resolver/libraries/PermissionedResolverLib.sol:L52 @ ens_v2@554c309)
 
 [^v2-pres-l38]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L38 @ ens_v2@554c309)
 [^v2-pres-l56]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L56 @ ens_v2@554c309)

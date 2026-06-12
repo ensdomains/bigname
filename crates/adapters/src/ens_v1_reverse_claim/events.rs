@@ -43,22 +43,41 @@ fn build_ens_reverse_claimed_event(raw_log: &ReverseRawLogRow) -> Result<Vec<Nor
     }
 
     let Some(raw_claimed_address) = raw_log.topics.get(1) else {
+        warn_dropped_reverse_claimed_log(raw_log, "missing_claimed_address_topic", None);
         return Ok(Vec::new());
     };
-    let Ok(claimed_address) = normalize_topic_address(raw_claimed_address) else {
-        return Ok(Vec::new());
+    let claimed_address = match normalize_topic_address(raw_claimed_address) {
+        Ok(claimed_address) => claimed_address,
+        Err(error) => {
+            warn_dropped_reverse_claimed_log(
+                raw_log,
+                "malformed_claimed_address_topic",
+                Some(&error),
+            );
+            return Ok(Vec::new());
+        }
     };
     let Some(raw_indexed_reverse_node) = raw_log.topics.get(2) else {
+        warn_dropped_reverse_claimed_log(raw_log, "missing_indexed_reverse_node_topic", None);
         return Ok(Vec::new());
     };
-    let Ok(indexed_reverse_node) = normalize_hex_32(raw_indexed_reverse_node) else {
-        return Ok(Vec::new());
+    let indexed_reverse_node = match normalize_hex_32(raw_indexed_reverse_node) {
+        Ok(indexed_reverse_node) => indexed_reverse_node,
+        Err(error) => {
+            warn_dropped_reverse_claimed_log(
+                raw_log,
+                "malformed_indexed_reverse_node_topic",
+                Some(&error),
+            );
+            return Ok(Vec::new());
+        }
     };
     let reverse_label = reverse_label_for_address(&claimed_address)?;
     let reverse_name = reverse_name_for_source_family(&raw_log.source_family, &claimed_address)?;
     let derived_reverse_node =
         reverse_node_for_source_family(&raw_log.source_family, &claimed_address)?;
     if !indexed_reverse_node.eq_ignore_ascii_case(&derived_reverse_node) {
+        warn_dropped_reverse_claimed_log(raw_log, "indexed_reverse_node_mismatch", None);
         return Ok(Vec::new());
     }
 
@@ -71,6 +90,26 @@ fn build_ens_reverse_claimed_event(raw_log: &ReverseRawLogRow) -> Result<Vec<Nor
         &reverse_name,
         &derived_reverse_node,
     )])
+}
+
+fn warn_dropped_reverse_claimed_log(
+    raw_log: &ReverseRawLogRow,
+    reason: &'static str,
+    error: Option<&anyhow::Error>,
+) {
+    let error = error.map(|error| error.to_string());
+    tracing::warn!(
+        chain_id = %raw_log.chain_id,
+        block_number = raw_log.block_number,
+        transaction_hash = %raw_log.transaction_hash,
+        log_index = raw_log.log_index,
+        emitting_address = %raw_log.emitting_address,
+        source_family = %raw_log.source_family,
+        source_event = SOURCE_EVENT_REVERSE_CLAIMED,
+        reason = reason,
+        error = error.as_deref().unwrap_or(""),
+        "dropping malformed ReverseClaimed log"
+    );
 }
 
 fn build_basenames_l2_reverse_name_events(

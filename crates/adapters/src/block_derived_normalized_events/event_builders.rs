@@ -185,18 +185,23 @@ fn build_ens_v2_preimage_observed_events(
 fn build_ens_v2_alias_preimage_observed_events(
     raw_log: &WatchedRawLogRow,
 ) -> Result<Vec<NormalizedEvent>> {
-    let Ok(event) = decode_event_log::<AliasChanged>(raw_log, "AliasChanged log is malformed")
-    else {
-        return Ok(Vec::new());
+    let event = match decode_event_log::<AliasChanged>(raw_log, "AliasChanged log is malformed") {
+        Ok(event) => event,
+        Err(error) => {
+            warn_dropped_alias_changed_log(raw_log, "malformed_alias_changed_log", Some(&error));
+            return Ok(Vec::new());
+        }
     };
     let indexed_from_name = hex_string(event.indexedFromName.as_slice());
     let from_name = event.fromName.to_vec();
     let indexed_to_name = hex_string(event.indexedToName.as_slice());
     let to_name = event.toName.to_vec();
     if !validate_indexed_bytes_hash(&indexed_from_name, &from_name) {
+        warn_dropped_alias_changed_log(raw_log, "indexed_from_name_hash_mismatch", None);
         return Ok(Vec::new());
     }
     if !validate_indexed_bytes_hash(&indexed_to_name, &to_name) {
+        warn_dropped_alias_changed_log(raw_log, "indexed_to_name_hash_mismatch", None);
         return Ok(Vec::new());
     }
 
@@ -222,6 +227,26 @@ fn build_ens_v2_alias_preimage_observed_events(
         ));
     }
     Ok(events)
+}
+
+fn warn_dropped_alias_changed_log(
+    raw_log: &WatchedRawLogRow,
+    reason: &'static str,
+    error: Option<&anyhow::Error>,
+) {
+    let error = error.map(|error| error.to_string());
+    tracing::warn!(
+        chain_id = %raw_log.chain_id,
+        block_number = raw_log.block_number,
+        transaction_hash = %raw_log.transaction_hash,
+        log_index = raw_log.log_index,
+        emitting_address = %raw_log.emitting_address,
+        source_family = %raw_log.source_family,
+        source_event = SOURCE_EVENT_ALIAS_CHANGED,
+        reason = reason,
+        error = error.as_deref().unwrap_or(""),
+        "dropping malformed AliasChanged log"
+    );
 }
 
 fn build_ens_v2_named_dns_preimage_observed_events(
