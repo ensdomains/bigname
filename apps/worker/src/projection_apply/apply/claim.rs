@@ -162,8 +162,9 @@ pub(super) async fn claim_pending_invalidations(
                   OR last_failure_at < now() - $2::INTERVAL
               )
             ORDER BY
+                projection_priority ASC,
+                namespace_priority ASC,
                 claimed_at ASC,
-                projection ASC,
                 projection_key ASC
             LIMIT $1
             FOR UPDATE SKIP LOCKED

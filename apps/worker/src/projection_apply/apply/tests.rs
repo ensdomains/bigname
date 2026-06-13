@@ -1,7 +1,8 @@
 use super::*;
 use crate::projection_apply::apply_locks::{
     acquire_invalidation_apply_locks_with_timeout, ensure_invalidation_apply_locks_alive,
-    invalidation_apply_lock_key, invalidation_apply_locks_backend_pid,
+    ensure_invalidation_apply_locks_probe_alive_for_test, invalidation_apply_lock_key,
+    invalidation_apply_locks_backend_pid, open_invalidation_apply_locks_connection_for_test,
 };
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 
@@ -55,6 +56,65 @@ async fn stale_projection_invalidation_claims_are_reclaimed() -> Result<()> {
     assert_eq!(
         attempt_count, 0,
         "claim recovery is not a failed projection apply attempt"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn stale_projection_invalidation_reclaim_preserves_dependency_priority_across_limit()
+-> Result<()> {
+    let database = test_database().await?;
+    let stale_token = Uuid::new_v4();
+    let new_token = Uuid::new_v4();
+
+    insert_claimed_invalidation(
+        &database,
+        "address_names_current",
+        "0x1111111111111111111111111111111111111111",
+        stale_token,
+        "10 minutes",
+    )
+    .await?;
+    insert_claimed_invalidation(
+        &database,
+        "name_current",
+        "ens:priority.eth",
+        stale_token,
+        "10 minutes",
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE projection_invalidations
+        SET claimed_at = now() - '10 minutes'::INTERVAL
+        WHERE projection IN ('address_names_current', 'name_current')
+        "#,
+    )
+    .execute(database.pool())
+    .await
+    .context("failed to align stale claim timestamps")?;
+
+    let claimed = claim_pending_invalidations(database.pool(), 1, new_token).await?;
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].projection, "name_current");
+    assert_eq!(claimed[0].projection_key, "ens:priority.eth");
+    assert_eq!(claimed[0].claim_token, new_token);
+
+    let address_claim_token: Uuid = sqlx::query_scalar(
+        r#"
+        SELECT claim_token
+        FROM projection_invalidations
+        WHERE projection = 'address_names_current'
+          AND projection_key = '0x1111111111111111111111111111111111111111'
+        "#,
+    )
+    .fetch_one(database.pool())
+    .await
+    .context("failed to load lower-priority stale invalidation")?;
+    assert_eq!(
+        address_claim_token, stale_token,
+        "lower-priority stale invalidation must remain unreclaimed until higher-priority work fits"
     );
 
     database.cleanup().await
@@ -394,6 +454,31 @@ async fn projection_invalidation_apply_lock_liveness_detects_dead_connection() -
     assert!(
         liveness.is_err(),
         "dead projection invalidation apply lock connection must fail liveness check"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn projection_invalidation_apply_lock_liveness_probe_is_bounded_when_blocked() -> Result<()> {
+    let database = test_database().await?;
+    let mut conn = open_invalidation_apply_locks_connection_for_test(database.pool()).await?;
+
+    let blocked = timeout(
+        Duration::from_secs(1),
+        ensure_invalidation_apply_locks_probe_alive_for_test(
+            &mut conn,
+            Duration::from_millis(100),
+            "SELECT 1 FROM pg_sleep(5)",
+        ),
+    )
+    .await;
+    let result = blocked.context("liveness probe ignored its timeout and blocked the worker")?;
+    let error = result.expect_err("blocked liveness probe unexpectedly succeeded");
+    assert!(
+        format!("{error:#}")
+            .contains("timed out running projection invalidation apply lock liveness probe"),
+        "unexpected blocked liveness probe error: {error:#}"
     );
 
     database.cleanup().await

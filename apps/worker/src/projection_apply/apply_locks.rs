@@ -80,15 +80,47 @@ pub(super) async fn ensure_invalidation_apply_locks_alive(
 }
 
 async fn ensure_invalidation_apply_locks_connection_alive(conn: &mut PgConnection) -> Result<()> {
-    let probe: i32 = sqlx::query_scalar("SELECT 1")
-        .fetch_one(conn)
+    ensure_invalidation_apply_locks_connection_alive_with_probe(
+        conn,
+        APPLY_LOCK_ACQUIRE_TIMEOUT,
+        "SELECT 1",
+    )
+    .await
+}
+
+async fn ensure_invalidation_apply_locks_connection_alive_with_probe(
+    conn: &mut PgConnection,
+    probe_timeout: Duration,
+    probe_sql: &str,
+) -> Result<()> {
+    let probe: i32 = timeout(probe_timeout, sqlx::query_scalar(probe_sql).fetch_one(conn))
         .await
+        .context("timed out running projection invalidation apply lock liveness probe")?
         .context("failed to run projection invalidation apply lock liveness probe")?;
     if probe != 1 {
         bail!("projection invalidation apply lock liveness probe returned {probe}");
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+pub(super) async fn ensure_invalidation_apply_locks_probe_alive_for_test(
+    conn: &mut PgConnection,
+    probe_timeout: Duration,
+    probe_sql: &str,
+) -> Result<()> {
+    ensure_invalidation_apply_locks_connection_alive_with_probe(conn, probe_timeout, probe_sql)
+        .await
+}
+
+#[cfg(test)]
+pub(super) async fn open_invalidation_apply_locks_connection_for_test(
+    pool: &PgPool,
+) -> Result<PgConnection> {
+    PgConnection::connect_with(&pool.connect_options())
+        .await
+        .context("failed to open projection invalidation apply lock test connection")
 }
 
 #[cfg(test)]
