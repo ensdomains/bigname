@@ -1,7 +1,10 @@
-use std::{collections::HashSet, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    sync::Arc,
+};
 
 #[cfg(not(test))]
-use std::{collections::HashMap, sync::OnceLock};
+use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
 use sqlx::{PgPool, Row};
@@ -68,7 +71,6 @@ impl MigratedRegistryNodes {
     }
 }
 
-#[cfg(not(test))]
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct RegistryMigrationMarkerCacheKey {
     chain: String,
@@ -76,11 +78,11 @@ struct RegistryMigrationMarkerCacheKey {
     emitters: Vec<RegistryMigrationMarkerEmitter>,
 }
 
-#[cfg(not(test))]
 #[derive(Debug)]
 struct RegistryMigrationMarkerCacheEntry {
-    loaded_before_block: i64,
-    nodes: HashSet<String>,
+    finalized_loaded_before_block: i64,
+    finalized_nodes_by_block: BTreeMap<i64, HashSet<String>>,
+    volatile_nodes: HashSet<String>,
 }
 
 #[cfg(not(test))]
@@ -125,7 +127,7 @@ where
             &decode_node,
         )
         .await?;
-        return Ok(MigratedRegistryNodes::from_baseline(nodes));
+        Ok(MigratedRegistryNodes::from_baseline(nodes))
     }
 
     #[cfg(not(test))]
@@ -135,35 +137,83 @@ where
             marker_topic0: marker_topic0.to_ascii_lowercase(),
             emitters,
         };
-        let key_emitters = key.emitters.clone();
         let mut cache = registry_migration_marker_cache().lock().await;
-        let entry = cache
-            .entry(key)
-            .or_insert_with(|| RegistryMigrationMarkerCacheEntry {
-                loaded_before_block: 0,
-                nodes: HashSet::new(),
-            });
-
-        if before_block > entry.loaded_before_block {
-            let loaded_before_block = entry.loaded_before_block;
-            let nodes = load_marker_nodes_between(
-                pool,
-                chain,
-                &key_emitters,
-                loaded_before_block,
-                before_block,
-                marker_topic0,
-                &decode_node,
-            )
-            .await?;
-            if !nodes.is_empty() {
-                entry.nodes.extend(nodes);
-            }
-            entry.loaded_before_block = before_block;
-        }
-
-        return Ok(MigratedRegistryNodes::from_baseline(entry.nodes.clone()));
+        return load_migrated_registry_nodes_before_block_with_cache(
+            pool,
+            chain,
+            key,
+            before_block,
+            marker_topic0,
+            &decode_node,
+            &mut cache,
+        )
+        .await;
     }
+}
+
+async fn load_migrated_registry_nodes_before_block_with_cache<F>(
+    pool: &PgPool,
+    chain: &str,
+    key: RegistryMigrationMarkerCacheKey,
+    before_block: i64,
+    marker_topic0: &str,
+    decode_node: &F,
+    cache: &mut HashMap<RegistryMigrationMarkerCacheKey, RegistryMigrationMarkerCacheEntry>,
+) -> Result<MigratedRegistryNodes>
+where
+    F: Fn(&[String]) -> Result<String>,
+{
+    let key_emitters = key.emitters.clone();
+    let entry = cache
+        .entry(key)
+        .or_insert_with(|| RegistryMigrationMarkerCacheEntry {
+            finalized_loaded_before_block: 0,
+            finalized_nodes_by_block: BTreeMap::new(),
+            volatile_nodes: HashSet::new(),
+        });
+    let finalized_watermark =
+        load_finalized_watermark_before_block(pool, chain, before_block).await?;
+    let stable_before_block = finalized_watermark.min(before_block);
+
+    if stable_before_block > entry.finalized_loaded_before_block {
+        let finalized_nodes = load_marker_node_rows_between(
+            pool,
+            chain,
+            &key_emitters,
+            entry.finalized_loaded_before_block,
+            stable_before_block,
+            marker_topic0,
+            decode_node,
+        )
+        .await?;
+        for (block_number, node) in finalized_nodes {
+            entry
+                .finalized_nodes_by_block
+                .entry(block_number)
+                .or_default()
+                .insert(node);
+        }
+        entry.finalized_loaded_before_block = stable_before_block;
+    }
+
+    entry.volatile_nodes = load_marker_nodes_between(
+        pool,
+        chain,
+        &key_emitters,
+        stable_before_block,
+        before_block,
+        marker_topic0,
+        decode_node,
+    )
+    .await?;
+
+    let mut nodes = HashSet::new();
+    for (_block_number, block_nodes) in entry.finalized_nodes_by_block.range(..before_block) {
+        nodes.extend(block_nodes.iter().cloned());
+    }
+    nodes.extend(entry.volatile_nodes.iter().cloned());
+
+    Ok(MigratedRegistryNodes::from_baseline(nodes))
 }
 
 async fn load_marker_nodes_between<F>(
@@ -178,8 +228,35 @@ async fn load_marker_nodes_between<F>(
 where
     F: Fn(&[String]) -> Result<String>,
 {
+    Ok(load_marker_node_rows_between(
+        pool,
+        chain,
+        emitters,
+        from_block,
+        before_block,
+        marker_topic0,
+        decode_node,
+    )
+    .await?
+    .into_iter()
+    .map(|(_block_number, node)| node)
+    .collect())
+}
+
+async fn load_marker_node_rows_between<F>(
+    pool: &PgPool,
+    chain: &str,
+    emitters: &[RegistryMigrationMarkerEmitter],
+    from_block: i64,
+    before_block: i64,
+    marker_topic0: &str,
+    decode_node: &F,
+) -> Result<Vec<(i64, String)>>
+where
+    F: Fn(&[String]) -> Result<String>,
+{
     if from_block >= before_block {
-        return Ok(HashSet::new());
+        return Ok(Vec::new());
     }
 
     let addresses = emitters
@@ -197,7 +274,7 @@ where
 
     let rows = sqlx::query(
         r#"
-        SELECT topics
+        SELECT block_number, topics
         FROM raw_logs
         WHERE chain_id = $1
           AND emitting_address = ANY($2::TEXT[])
@@ -239,28 +316,39 @@ where
 
     rows.into_iter()
         .map(|row| {
+            let block_number = row
+                .try_get::<i64, _>("block_number")
+                .context("missing block_number")?;
             let topics = row
                 .try_get::<Vec<String>, _>("topics")
                 .context("missing topics")?;
-            decode_node(&topics)
+            Ok((block_number, decode_node(&topics)?))
         })
         .collect()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn migrated_registry_nodes_snapshots_do_not_learn_later_cache_nodes() {
-        let early = MigratedRegistryNodes::from_baseline(HashSet::from(["0x01".to_owned()]));
-        let later = MigratedRegistryNodes::from_baseline(HashSet::from([
-            "0x01".to_owned(),
-            "0x02".to_owned(),
-        ]));
-
-        assert!(early.contains("0x01"));
-        assert!(!early.contains("0x02"));
-        assert!(later.contains("0x02"));
-    }
+async fn load_finalized_watermark_before_block(
+    pool: &PgPool,
+    chain: &str,
+    before_block: i64,
+) -> Result<i64> {
+    sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COALESCE(MAX(block_number) + 1, 0)::BIGINT
+        FROM chain_lineage
+        WHERE chain_id = $1
+          AND block_number < $2
+          AND canonicality_state = 'finalized'::canonicality_state
+        "#,
+    )
+    .bind(chain)
+    .bind(before_block)
+    .fetch_one(pool)
+    .await
+    .with_context(|| {
+        format!("failed to load finalized lineage watermark for chain {chain} before block {before_block}")
+    })
 }
+
+#[cfg(test)]
+mod tests;
