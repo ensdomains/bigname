@@ -6,10 +6,10 @@ use std::{
 use anyhow::{Context, Result, bail};
 use bigname_manifests::WatchedSourceSelectorPlan;
 use bigname_storage::{
-    CanonicalityState, RawCodeHash, RawLog, normalize_evm_address, normalize_evm_b256,
-    upsert_chain_lineage_blocks_without_snapshots, upsert_raw_code_hashes,
-    upsert_raw_logs_without_snapshots, upsert_raw_receipts_without_snapshots,
-    upsert_raw_transactions_without_snapshots,
+    CanonicalityState, RawCodeHash, RawLog, RawPayloadCacheMetadataUpsert, normalize_evm_address,
+    normalize_evm_b256, upsert_chain_lineage_blocks_without_snapshots, upsert_raw_code_hashes,
+    upsert_raw_logs_without_snapshots, upsert_raw_payload_cache_metadata,
+    upsert_raw_receipts_without_snapshots, upsert_raw_transactions_without_snapshots,
 };
 use sqlx::Row;
 use tracing::info;
@@ -19,8 +19,8 @@ use crate::{
     reconciliation::{
         HeaderAuditMode, provider_block_to_lineage_with_header_audit_mode,
         provider_block_to_raw_block_with_header_audit_mode,
-        provider_code_observation_to_raw_code_hash, provider_receipt_to_raw_receipt,
-        provider_transaction_to_raw_transaction,
+        provider_code_observation_to_raw_code_hash, provider_raw_payload_cache_metadata_to_upserts,
+        provider_receipt_to_raw_receipt, provider_transaction_to_raw_transaction,
     },
 };
 
@@ -246,6 +246,7 @@ pub(super) async fn run_hash_pinned_raw_only_sparse_backfill_range(
     let mut receipts = Vec::new();
     let mut logs = Vec::<RawLog>::new();
     let mut code_hashes = Vec::<RawCodeHash>::new();
+    let mut cache_metadata = Vec::<RawPayloadCacheMetadataUpsert>::new();
     let mut raw_blocks_by_hash = BTreeMap::new();
     let mut lineage_blocks = Vec::with_capacity(resolved_blocks.len());
     let mut code_observation_plan = SparseCodeObservationPlan::default();
@@ -298,6 +299,11 @@ pub(super) async fn run_hash_pinned_raw_only_sparse_backfill_range(
             &selection_logs,
         );
         if let Some(full_payload_bundle) = full_payload_bundles_by_hash.remove(&block.block_hash) {
+            cache_metadata.extend(provider_raw_payload_cache_metadata_to_upserts(
+                &watched_chain.chain,
+                &raw_block,
+                &full_payload_bundle.raw_payloads,
+            ));
             let materialized_payloads = materialize_backfill_block_payloads(
                 &watched_chain.chain,
                 &raw_block,
@@ -414,6 +420,9 @@ pub(super) async fn run_hash_pinned_raw_only_sparse_backfill_range(
     let header_anchor_upsert_started = Instant::now();
     upsert_chain_lineage_blocks_without_snapshots(pool, &lineage_blocks).await?;
     let header_anchor_upsert_ms = header_anchor_upsert_started.elapsed().as_millis();
+    let cache_metadata_upsert_started = Instant::now();
+    upsert_raw_payload_cache_metadata(pool, &cache_metadata).await?;
+    let cache_metadata_upsert_ms = cache_metadata_upsert_started.elapsed().as_millis();
     let transactions_upsert_started = Instant::now();
     upsert_raw_transactions_without_snapshots(pool, &transactions).await?;
     let transactions_upsert_ms = transactions_upsert_started.elapsed().as_millis();
@@ -457,6 +466,7 @@ pub(super) async fn run_hash_pinned_raw_only_sparse_backfill_range(
         code_fetch_ms,
         code_materialize_ms,
         header_anchor_upsert_ms,
+        cache_metadata_upsert_ms,
         transactions_upsert_ms,
         receipts_upsert_ms,
         logs_upsert_ms,

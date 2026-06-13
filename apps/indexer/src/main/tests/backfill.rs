@@ -55,6 +55,7 @@ struct MaterializedRawFactSet {
     code_hashes: Vec<(i64, String)>,
     transaction_count: i64,
     receipt_count: i64,
+    payload_cache_metadata_count: i64,
 }
 
 #[test]
@@ -4009,12 +4010,17 @@ async fn load_materialized_raw_fact_set(pool: &PgPool) -> Result<MaterializedRaw
     let receipt_count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM raw_receipts")
         .fetch_one(pool)
         .await?;
+    let payload_cache_metadata_count =
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM raw_payload_cache_metadata")
+            .fetch_one(pool)
+            .await?;
 
     Ok(MaterializedRawFactSet {
         logs,
         code_hashes,
         transaction_count,
         receipt_count,
+        payload_cache_metadata_count,
     })
 }
 

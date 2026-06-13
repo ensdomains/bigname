@@ -6,9 +6,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use anyhow::{Context, Result, bail};
 use bigname_manifests::{WatchedSourceSelectorKind, WatchedSourceSelectorPlan};
 use bigname_storage::{
-    CanonicalityState, RawCodeHash, RawLog, RawReceipt, RawTransaction,
-    upsert_chain_lineage_blocks, upsert_raw_code_hashes, upsert_raw_logs, upsert_raw_receipts,
-    upsert_raw_transactions,
+    CanonicalityState, RawCodeHash, RawLog, RawPayloadCacheMetadataUpsert, RawReceipt,
+    RawTransaction, upsert_chain_lineage_blocks, upsert_raw_code_hashes, upsert_raw_logs,
+    upsert_raw_payload_cache_metadata, upsert_raw_receipts, upsert_raw_transactions,
 };
 use tracing::info;
 
@@ -20,8 +20,9 @@ use crate::{
     reconciliation::{
         HeaderAuditMode, provider_block_to_lineage_with_header_audit_mode,
         provider_block_to_raw_block_with_header_audit_mode,
-        provider_code_observation_to_raw_code_hash, provider_receipt_to_raw_receipt,
-        provider_transaction_to_raw_transaction, sync_adapter_state_from_persisted_raw_payloads,
+        provider_code_observation_to_raw_code_hash, provider_raw_payload_cache_metadata_to_upserts,
+        provider_receipt_to_raw_receipt, provider_transaction_to_raw_transaction,
+        sync_adapter_state_from_persisted_raw_payloads,
         sync_adapter_state_from_scoped_persisted_raw_payloads,
     },
     source_scope::SourceScope,
@@ -55,6 +56,8 @@ pub(crate) async fn materialize_historical_payload_range(
     header_audit_mode: HeaderAuditMode,
 ) -> Result<BackfillOutcome> {
     let watched_chain = &source_plan.watched_chain_plan;
+    let chain = watched_chain.chain.as_str();
+
     let logs_filtered_by_selected_target_index =
         historical_payload.logs_filtered_by_selected_target_index;
     let block_hashes = resolved_blocks
@@ -73,18 +76,13 @@ pub(crate) async fn materialize_historical_payload_range(
         .await?;
     }
     let canonicality_states = canonicality_evidence
-        .states_for_blocks(
-            pool,
-            &watched_chain.chain,
-            validation_provider,
-            &block_headers,
-        )
+        .states_for_blocks(pool, chain, validation_provider, &block_headers)
         .await?;
     let mut full_payload_bundles_by_hash = fetch_full_payload_bundles_for_log_blocks(
         validation_provider,
         resolved_blocks,
         &historical_payload.logs_by_block,
-        &watched_chain.chain,
+        chain,
         range,
         "historical backfill",
     )
@@ -96,6 +94,7 @@ pub(crate) async fn materialize_historical_payload_range(
     let mut transactions = Vec::<RawTransaction>::new();
     let mut receipts = Vec::<RawReceipt>::new();
     let mut code_hashes = Vec::<RawCodeHash>::new();
+    let mut cache_metadata = Vec::<RawPayloadCacheMetadataUpsert>::new();
     let mut raw_blocks_by_hash = BTreeMap::new();
     let mut code_observation_requests = Vec::new();
 
@@ -105,13 +104,13 @@ pub(crate) async fn materialize_historical_payload_range(
             .copied()
             .unwrap_or(CanonicalityState::Observed);
         let raw_block = provider_block_to_raw_block_with_header_audit_mode(
-            &watched_chain.chain,
+            chain,
             block_header,
             canonicality_state,
             header_audit_mode,
         );
         lineage_blocks.push(provider_block_to_lineage_with_header_audit_mode(
-            &watched_chain.chain,
+            chain,
             block_header,
             canonicality_state,
             header_audit_mode,
@@ -141,6 +140,11 @@ pub(crate) async fn materialize_historical_payload_range(
             if let Some(full_payload_bundle) =
                 full_payload_bundles_by_hash.remove(&block_header.block_hash)
             {
+                cache_metadata.extend(provider_raw_payload_cache_metadata_to_upserts(
+                    chain,
+                    &raw_block,
+                    &full_payload_bundle.raw_payloads,
+                ));
                 (
                     full_payload_bundle.logs,
                     full_payload_bundle.transactions,
@@ -150,7 +154,7 @@ pub(crate) async fn materialize_historical_payload_range(
                 (selection_logs.clone(), source_transactions, source_receipts)
             };
         let materialized_payloads = materialize_backfill_block_payloads(
-            &watched_chain.chain,
+            chain,
             &raw_block,
             &selection_logs,
             &payload_logs,
@@ -181,7 +185,7 @@ pub(crate) async fn materialize_historical_payload_range(
     }
     fill_missing_transaction_receipts(
         validation_provider,
-        &watched_chain.chain,
+        chain,
         range,
         &raw_blocks_by_hash,
         &logs,
@@ -191,7 +195,7 @@ pub(crate) async fn materialize_historical_payload_range(
     .await?;
     fetch_code_observations(
         validation_provider,
-        &watched_chain.chain,
+        chain,
         range,
         &raw_blocks_by_hash,
         &code_observation_requests,
@@ -200,6 +204,7 @@ pub(crate) async fn materialize_historical_payload_range(
     .await?;
 
     upsert_chain_lineage_blocks(pool, &lineage_blocks).await?;
+    upsert_raw_payload_cache_metadata(pool, &cache_metadata).await?;
     upsert_raw_transactions(pool, &transactions).await?;
     upsert_raw_receipts(pool, &receipts).await?;
     upsert_raw_logs(pool, &logs).await?;
@@ -446,19 +451,14 @@ async fn maybe_sync_adapters(
     adapter_sync_mode: BackfillAdapterSyncMode,
     adapter_sync_scope: &[(String, String, i64, i64)],
 ) -> Result<()> {
-    let watched_chain = &source_plan.watched_chain_plan;
+    let chain = source_plan.watched_chain_plan.chain.as_str();
     if !logs.is_empty() && adapter_sync_mode == BackfillAdapterSyncMode::Inline {
         if source_plan.selector_kind == WatchedSourceSelectorKind::WholeActiveWatchedChain {
-            sync_adapter_state_from_persisted_raw_payloads(
-                pool,
-                &watched_chain.chain,
-                block_hashes,
-            )
-            .await?;
+            sync_adapter_state_from_persisted_raw_payloads(pool, chain, block_hashes).await?;
         } else {
             sync_adapter_state_from_scoped_persisted_raw_payloads(
                 pool,
-                &watched_chain.chain,
+                chain,
                 block_hashes,
                 adapter_sync_scope,
             )
@@ -468,7 +468,7 @@ async fn maybe_sync_adapters(
         info!(
             service = "indexer",
             command = "backfill",
-            chain = %watched_chain.chain,
+            chain,
             from_block = range.from_block,
             to_block = range.to_block,
             raw_log_count = logs.len(),
