@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     sync::Arc,
 };
 
@@ -80,7 +80,9 @@ struct RegistryMigrationMarkerCacheKey {
 
 #[derive(Debug)]
 struct RegistryMigrationMarkerCacheEntry {
-    nodes: HashSet<String>,
+    finalized_loaded_before_block: i64,
+    finalized_nodes_by_block: BTreeMap<i64, HashSet<String>>,
+    volatile_nodes: HashSet<String>,
 }
 
 #[cfg(not(test))]
@@ -165,21 +167,53 @@ where
     let entry = cache
         .entry(key)
         .or_insert_with(|| RegistryMigrationMarkerCacheEntry {
-            nodes: HashSet::new(),
+            finalized_loaded_before_block: 0,
+            finalized_nodes_by_block: BTreeMap::new(),
+            volatile_nodes: HashSet::new(),
         });
-    let nodes = load_marker_nodes_between(
+    let finalized_watermark =
+        load_finalized_watermark_before_block(pool, chain, before_block).await?;
+    let stable_before_block = finalized_watermark.min(before_block);
+
+    if stable_before_block > entry.finalized_loaded_before_block {
+        let finalized_nodes = load_marker_node_rows_between(
+            pool,
+            chain,
+            &key_emitters,
+            entry.finalized_loaded_before_block,
+            stable_before_block,
+            marker_topic0,
+            decode_node,
+        )
+        .await?;
+        for (block_number, node) in finalized_nodes {
+            entry
+                .finalized_nodes_by_block
+                .entry(block_number)
+                .or_default()
+                .insert(node);
+        }
+        entry.finalized_loaded_before_block = stable_before_block;
+    }
+
+    entry.volatile_nodes = load_marker_nodes_between(
         pool,
         chain,
         &key_emitters,
-        0,
+        stable_before_block,
         before_block,
         marker_topic0,
         decode_node,
     )
     .await?;
-    entry.nodes = nodes;
 
-    Ok(MigratedRegistryNodes::from_baseline(entry.nodes.clone()))
+    let mut nodes = HashSet::new();
+    for (_block_number, block_nodes) in entry.finalized_nodes_by_block.range(..before_block) {
+        nodes.extend(block_nodes.iter().cloned());
+    }
+    nodes.extend(entry.volatile_nodes.iter().cloned());
+
+    Ok(MigratedRegistryNodes::from_baseline(nodes))
 }
 
 async fn load_marker_nodes_between<F>(
@@ -194,8 +228,35 @@ async fn load_marker_nodes_between<F>(
 where
     F: Fn(&[String]) -> Result<String>,
 {
+    Ok(load_marker_node_rows_between(
+        pool,
+        chain,
+        emitters,
+        from_block,
+        before_block,
+        marker_topic0,
+        decode_node,
+    )
+    .await?
+    .into_iter()
+    .map(|(_block_number, node)| node)
+    .collect())
+}
+
+async fn load_marker_node_rows_between<F>(
+    pool: &PgPool,
+    chain: &str,
+    emitters: &[RegistryMigrationMarkerEmitter],
+    from_block: i64,
+    before_block: i64,
+    marker_topic0: &str,
+    decode_node: &F,
+) -> Result<Vec<(i64, String)>>
+where
+    F: Fn(&[String]) -> Result<String>,
+{
     if from_block >= before_block {
-        return Ok(HashSet::new());
+        return Ok(Vec::new());
     }
 
     let addresses = emitters
@@ -213,7 +274,7 @@ where
 
     let rows = sqlx::query(
         r#"
-        SELECT topics
+        SELECT block_number, topics
         FROM raw_logs
         WHERE chain_id = $1
           AND emitting_address = ANY($2::TEXT[])
@@ -255,207 +316,39 @@ where
 
     rows.into_iter()
         .map(|row| {
+            let block_number = row
+                .try_get::<i64, _>("block_number")
+                .context("missing block_number")?;
             let topics = row
                 .try_get::<Vec<String>, _>("topics")
                 .context("missing topics")?;
-            decode_node(&topics)
+            Ok((block_number, decode_node(&topics)?))
         })
         .collect()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use bigname_storage::{
-        CanonicalityState, RawBlock, RawLog, default_database_url, upsert_raw_blocks,
-        upsert_raw_logs,
-    };
-    use sqlx::{
-        PgPool,
-        postgres::{PgConnectOptions, PgPoolOptions},
-        types::time::OffsetDateTime,
-    };
-    use std::{
-        str::FromStr,
-        sync::atomic::{AtomicU64, Ordering},
-        time::{SystemTime, UNIX_EPOCH},
-    };
-
-    static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
-
-    struct TestDatabase {
-        admin_pool: PgPool,
-        pool: PgPool,
-        database_name: String,
-    }
-
-    impl TestDatabase {
-        async fn new() -> Result<Self> {
-            let database_url = std::env::var("BIGNAME_DATABASE_URL")
-                .or_else(|_| std::env::var("DATABASE_URL"))
-                .unwrap_or_else(|_| default_database_url().to_owned());
-            let base_options = PgConnectOptions::from_str(&database_url)
-                .context("failed to parse database URL for registry migration cache tests")?;
-            let unique = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .context("system clock is before unix epoch")?
-                .as_nanos();
-            let sequence = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
-            let database_name = format!("bn_ad_mig_{}_{}_{}", std::process::id(), sequence, unique);
-
-            let admin_pool = PgPoolOptions::new()
-                .max_connections(1)
-                .connect_with(base_options.clone().database("postgres"))
-                .await
-                .context("failed to connect admin pool for registry migration cache tests")?;
-
-            sqlx::query(&format!(r#"CREATE DATABASE "{}""#, database_name))
-                .execute(&admin_pool)
-                .await
-                .with_context(|| format!("failed to create test database {database_name}"))?;
-
-            let pool = PgPoolOptions::new()
-                .max_connections(5)
-                .connect_with(base_options.database(&database_name))
-                .await
-                .context("failed to connect test pool for registry migration cache tests")?;
-
-            bigname_storage::MIGRATOR
-                .run(&pool)
-                .await
-                .context("failed to apply migrations for registry migration cache tests")?;
-
-            Ok(Self {
-                admin_pool,
-                pool,
-                database_name,
-            })
-        }
-
-        fn pool(&self) -> &PgPool {
-            &self.pool
-        }
-
-        async fn cleanup(self) -> Result<()> {
-            self.pool.close().await;
-            sqlx::query(&format!(
-                r#"DROP DATABASE IF EXISTS "{}" WITH (FORCE)"#,
-                self.database_name
-            ))
-            .execute(&self.admin_pool)
-            .await
-            .with_context(|| format!("failed to drop test database {}", self.database_name))?;
-            self.admin_pool.close().await;
-            Ok(())
-        }
-    }
-
-    #[test]
-    fn migrated_registry_nodes_snapshots_do_not_learn_later_cache_nodes() {
-        let early = MigratedRegistryNodes::from_baseline(HashSet::from(["0x01".to_owned()]));
-        let later = MigratedRegistryNodes::from_baseline(HashSet::from([
-            "0x01".to_owned(),
-            "0x02".to_owned(),
-        ]));
-
-        assert!(early.contains("0x01"));
-        assert!(!early.contains("0x02"));
-        assert!(later.contains("0x02"));
-    }
-
-    #[tokio::test]
-    async fn migration_marker_cache_drops_reorged_away_marker_without_restart() -> Result<()> {
-        let _permit = crate::acquire_test_db_permit().await;
-        let database = TestDatabase::new().await?;
-        let chain = "ethereum-mainnet";
-        let marker_topic0 = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-        let migrated_node = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-        let emitter = RegistryMigrationMarkerEmitter::new(
-            "0x00000000000000000000000000000000000000aa",
-            0,
-            100,
-        );
-        let key = RegistryMigrationMarkerCacheKey {
-            chain: chain.to_owned(),
-            marker_topic0: marker_topic0.to_owned(),
-            emitters: vec![emitter.clone()],
-        };
-        let mut cache = HashMap::new();
-
-        upsert_raw_blocks(
-            database.pool(),
-            &[RawBlock {
-                chain_id: chain.to_owned(),
-                block_hash: "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-                    .to_owned(),
-                parent_hash: None,
-                block_number: 10,
-                block_timestamp: OffsetDateTime::from_unix_timestamp(1_700_000_010)?,
-                logs_bloom: None,
-                transactions_root: None,
-                receipts_root: None,
-                state_root: None,
-                canonicality_state: CanonicalityState::Canonical,
-            }],
-        )
-        .await?;
-        upsert_raw_logs(
-            database.pool(),
-            &[RawLog {
-                chain_id: chain.to_owned(),
-                block_hash: "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-                    .to_owned(),
-                block_number: 10,
-                transaction_hash:
-                    "0xtxcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_owned(),
-                transaction_index: 0,
-                log_index: 0,
-                emitting_address: emitter.address.clone(),
-                topics: vec![marker_topic0.to_owned(), migrated_node.to_owned()],
-                data: Vec::new(),
-                canonicality_state: CanonicalityState::Canonical,
-            }],
-        )
-        .await?;
-
-        let decode_node = |topics: &[String]| {
-            topics
-                .get(1)
-                .cloned()
-                .context("marker test log is missing node topic")
-        };
-        let first = load_migrated_registry_nodes_before_block_with_cache(
-            database.pool(),
-            chain,
-            key.clone(),
-            11,
-            marker_topic0,
-            &decode_node,
-            &mut cache,
-        )
-        .await?;
-        assert!(first.contains(migrated_node));
-
-        sqlx::query(
-            "UPDATE raw_logs SET canonicality_state = 'orphaned'::canonicality_state WHERE block_hash = $1",
-        )
-        .bind("0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
-        .execute(database.pool())
-        .await
-        .context("failed to orphan cached migration marker")?;
-
-        let reloaded = load_migrated_registry_nodes_before_block_with_cache(
-            database.pool(),
-            chain,
-            key,
-            11,
-            marker_topic0,
-            &decode_node,
-            &mut cache,
-        )
-        .await?;
-        assert!(!reloaded.contains(migrated_node));
-
-        database.cleanup().await
-    }
+async fn load_finalized_watermark_before_block(
+    pool: &PgPool,
+    chain: &str,
+    before_block: i64,
+) -> Result<i64> {
+    sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COALESCE(MAX(block_number) + 1, 0)::BIGINT
+        FROM chain_lineage
+        WHERE chain_id = $1
+          AND block_number < $2
+          AND canonicality_state = 'finalized'::canonicality_state
+        "#,
+    )
+    .bind(chain)
+    .bind(before_block)
+    .fetch_one(pool)
+    .await
+    .with_context(|| {
+        format!("failed to load finalized lineage watermark for chain {chain} before block {before_block}")
+    })
 }
+
+#[cfg(test)]
+mod tests;

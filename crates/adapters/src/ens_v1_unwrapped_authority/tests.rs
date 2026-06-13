@@ -3547,67 +3547,6 @@ fn build_authority_observation_decodes_resolver_record_logs() -> Result<()> {
 }
 
 #[test]
-fn apply_record_changed_retains_record_from_non_current_resolver() -> Result<()> {
-    let name = observe_registrar_eth_name_with_version("alice", ENS_NORMALIZER_VERSION)?;
-    let labelhash = name.labelhashes[0].clone();
-    let current_resolver = "0x00000000000000000000000000000000000000cc";
-    let emitting_resolver = "0x00000000000000000000000000000000000000dd";
-    let registration_ref = AuthorityRawLogRow {
-        block_hash: "0x5353535353535353535353535353535353535353535353535353535353535353".to_owned(),
-        block_number: 53,
-        block_timestamp: OffsetDateTime::from_unix_timestamp(1_700_000_053)?,
-        source_family: SOURCE_FAMILY_ENS_V1_REGISTRAR_L1.to_owned(),
-        source_manifest_id: 1,
-        contract_role: Some("registrar_controller".to_owned()),
-        ..registrar_raw_log(Vec::new(), Vec::new(), 0)
-    }
-    .reference();
-    let mut history = empty_preloaded_history(labelhash.clone(), Some(name.clone()));
-    history.current_registration = Some(RegistrationLease {
-        authority_key: format!(
-            "registrar:ethereum-mainnet:1:{labelhash}:{}:0",
-            registration_ref.block_hash
-        ),
-        labelhash,
-        registrant: "0x0000000000000000000000000000000000000001".to_owned(),
-        expiry: OffsetDateTime::from_unix_timestamp(1_800_000_000)?,
-        release_ref: None,
-        start_ref: registration_ref,
-    });
-    history.current_resolver = Some(current_resolver.to_owned());
-    let registrar_anchor = build_registrar_anchor(history.current_registration.as_ref().unwrap());
-
-    apply_record_changed(
-        &mut history,
-        RecordChangeObservation {
-            namehash: name.namehash,
-            resolver: emitting_resolver.to_owned(),
-            selector: RecordSelector {
-                record_key: "text:com.twitter".to_owned(),
-                record_family: "text".to_owned(),
-                selector_key: Some("com.twitter".to_owned()),
-            },
-            value: Some(json!("alice-twitter")),
-            raw_name: None,
-            reference: resolver_raw_log(emitting_resolver, Vec::new(), Vec::new(), 2).reference(),
-        },
-    )?;
-
-    let record_event = history
-        .events
-        .iter()
-        .find(|event| event.event_kind == EVENT_KIND_RECORD_CHANGED)
-        .context("record event from non-current resolver should be retained")?;
-    assert_eq!(record_event.resource_id, Some(registrar_anchor.resource_id));
-    assert_eq!(
-        record_event.after_state.get("record_key"),
-        Some(&json!("text:com.twitter"))
-    );
-
-    Ok(())
-}
-
-#[test]
 fn build_authority_observation_decodes_wrapper_logs() -> Result<()> {
     let event_topics = AuthorityEventTopics::for_tests();
     let alice = observe_registrar_eth_name_with_version("alice", ENS_NORMALIZER_VERSION)?;
@@ -12028,7 +11967,7 @@ async fn sync_ens_v1_unwrapped_authority_backfills_basenames_primary_claim_sourc
 }
 
 #[tokio::test]
-async fn sync_ens_v1_unwrapped_authority_retains_resolver_record_logs_without_current_context()
+async fn sync_ens_v1_unwrapped_authority_drops_resolver_record_logs_without_current_context()
 -> Result<()> {
     let _permit = crate::acquire_test_db_permit().await;
     let database = TestDatabase::new().await?;
@@ -12178,20 +12117,15 @@ async fn sync_ens_v1_unwrapped_authority_retains_resolver_record_logs_without_cu
     let summary = sync_ens_v1_unwrapped_authority(database.pool(), "ethereum-mainnet").await?;
     assert_eq!(summary.scanned_log_count, 4);
     assert_eq!(summary.matched_log_count, 4);
-    assert_eq!(summary.total_normalized_event_count, 9);
+    assert_eq!(summary.total_normalized_event_count, 7);
+    assert_eq!(summary.by_kind.get(EVENT_KIND_RECORD_CHANGED), None);
     assert_eq!(
-        summary.by_kind.get(EVENT_KIND_RECORD_CHANGED),
-        Some(&2_usize)
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, Vec<String>>(
-            "SELECT ARRAY_AGG(after_state->>'record_key' ORDER BY log_index)
-             FROM normalized_events
-             WHERE event_kind = 'RecordChanged'"
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM normalized_events WHERE event_kind = 'RecordChanged'"
         )
         .fetch_one(database.pool())
         .await?,
-        vec!["text:com.twitter".to_owned(), "text:com.github".to_owned()]
+        0
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
