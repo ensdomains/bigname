@@ -7,9 +7,10 @@ mod resolver;
 mod support;
 mod wrapper_registry;
 
+use registrar_history::preload_superseded_registrar_lease;
 pub(super) use registrar_history::{
     empty_preloaded_history, preload_registrar_history, preload_selected_registrar_lease,
-    preload_superseded_registrar_lease, registrar_labelhash_from_authority_key,
+    registrar_labelhash_from_authority_key,
 };
 use registrar_state::*;
 use resolver::*;
@@ -153,6 +154,7 @@ pub(super) async fn preload_restricted_name_histories(
             .get("authority_kind")
             .and_then(Value::as_str)
             .unwrap_or_default();
+        // Scope-0 registrar preload is a full per-name history scan; diverged names are rare.
         let lower_block_number = if matches!(authority_kind, "registry_only" | "wrapper") {
             0
         } else {
