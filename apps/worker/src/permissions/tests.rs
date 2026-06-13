@@ -524,6 +524,85 @@ async fn ensv2_registry_and_root_permission_events_project_registry_vocabulary()
 }
 
 #[tokio::test]
+async fn root_permission_changed_revocation_to_empty_drops_root_row() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let root_resource_id = Uuid::from_u128(0x73c2);
+    let root_subject = "0x0000000000000000000000000000000000000bbb";
+    let root_upstream_resource =
+        "0x0000000000000000000000000000000000000000000000000000000000000000";
+
+    seed_resources(database.pool(), &[root_resource_id]).await?;
+    seed_raw_blocks(
+        database.pool(),
+        &[
+            raw_block("ethereum-mainnet", "0xperm0090", 144, 1_776_100_144),
+            raw_block("ethereum-mainnet", "0xperm0091", 145, 1_776_100_145),
+        ],
+    )
+    .await?;
+    seed_permission_events(
+        database.pool(),
+        &[
+            ensv2_permission_event(
+                "ensv2-root-permission-grant",
+                "RootPermissionChanged",
+                "ens_v2_registry_l1",
+                root_resource_id,
+                root_upstream_resource,
+                root_subject,
+                json!({
+                    "kind": "registry_root",
+                    "chain_id": "ethereum-mainnet",
+                    "registry_address": "0x0000000000000000000000000000000000000eee"
+                }),
+                json!(["registrar"]),
+                json!([]),
+                json!(["registrar"]),
+                "0x0000000000000000000000000000000000000000000000000000000000000000",
+                "0x0000000000000000000000000000000000000000000000000000000000000001",
+                144,
+                0,
+            ),
+            ensv2_permission_event(
+                "ensv2-root-permission-revoke",
+                "RootPermissionChanged",
+                "ens_v2_registry_l1",
+                root_resource_id,
+                root_upstream_resource,
+                root_subject,
+                json!({
+                    "kind": "registry_root",
+                    "chain_id": "ethereum-mainnet",
+                    "registry_address": "0x0000000000000000000000000000000000000eee"
+                }),
+                json!([]),
+                json!(["registrar"]),
+                json!(["registrar"]),
+                "0x0000000000000000000000000000000000000000000000000000000000000001",
+                "0x0000000000000000000000000000000000000000000000000000000000000000",
+                145,
+                0,
+            ),
+        ],
+    )
+    .await?;
+
+    let summary =
+        rebuild_permissions_current(database.pool(), Some(&root_resource_id.to_string())).await?;
+    assert_eq!(summary.requested_resource_count, 1);
+    assert_eq!(summary.upserted_row_count, 0);
+    assert_eq!(summary.deleted_row_count, 0);
+
+    let rows = load_permissions_current(database.pool(), root_resource_id, None, None).await?;
+    assert!(
+        rows.is_empty(),
+        "latest RootPermissionChanged with no effective powers must drop the root row"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn wrapper_scope_fuses_mask_resource_control_powers() -> Result<()> {
     let database = TestDatabase::new().await?;
     let resource_id = Uuid::from_u128(0x73b1);
