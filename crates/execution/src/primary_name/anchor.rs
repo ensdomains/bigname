@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, bail};
 use bigname_storage::{PrimaryNameClaimStatus, load_primary_name_current_snapshot};
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, Transaction};
 
 use super::context::verified_primary_context_label;
 use super::{VerifiedPrimaryNameSection, VerifiedPrimaryNameStatus, VerifiedPrimaryNameTuple};
@@ -27,20 +27,87 @@ pub(crate) async fn ensure_primary_name_anchor_matches(
         );
     };
 
+    ensure_anchor_content_matches(
+        context,
+        tuple,
+        verified_primary_name,
+        snapshot.row.claim_status.as_str(),
+        snapshot.normalized_claim_name.as_deref(),
+    )
+}
+
+pub(crate) async fn ensure_primary_name_anchor_matches_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    tuple: &VerifiedPrimaryNameTuple,
+    verified_primary_name: &VerifiedPrimaryNameSection,
+) -> Result<()> {
+    let context = verified_primary_context_label(&tuple.namespace)?;
+    let Some(anchor) = sqlx::query_as::<_, LockedPrimaryNameAnchor>(
+        r#"
+        SELECT claim_status, normalized_claim_name
+        FROM primary_names_current
+        WHERE address = $1
+          AND namespace = $2
+          AND coin_type = $3
+        FOR UPDATE
+        "#,
+    )
+    .bind(&tuple.normalized_address)
+    .bind(&tuple.namespace)
+    .bind(&tuple.coin_type)
+    .fetch_optional(&mut **transaction)
+    .await
+    .with_context(|| {
+        format!(
+            "failed to lock primary_names_current anchor for address {} namespace {} coin_type {}",
+            tuple.normalized_address, tuple.namespace, tuple.coin_type
+        )
+    })?
+    else {
+        bail!(
+            "{context} persistence requires primary_names_current anchor for address {} namespace {} coin_type {}",
+            tuple.normalized_address,
+            tuple.namespace,
+            tuple.coin_type
+        );
+    };
+
+    ensure_anchor_content_matches(
+        context,
+        tuple,
+        verified_primary_name,
+        &anchor.claim_status,
+        anchor.normalized_claim_name.as_deref(),
+    )
+}
+
+#[derive(sqlx::FromRow)]
+struct LockedPrimaryNameAnchor {
+    claim_status: String,
+    normalized_claim_name: Option<String>,
+}
+
+fn ensure_anchor_content_matches(
+    context: &str,
+    tuple: &VerifiedPrimaryNameTuple,
+    verified_primary_name: &VerifiedPrimaryNameSection,
+    current_claim_status: &str,
+    current_normalized_claim_name: Option<&str>,
+) -> Result<()> {
     let expected_claim_status = match verified_primary_name.status {
         VerifiedPrimaryNameStatus::Success
         | VerifiedPrimaryNameStatus::Mismatch
-        | VerifiedPrimaryNameStatus::ExecutionFailed => PrimaryNameClaimStatus::Success,
-        VerifiedPrimaryNameStatus::NotFound => PrimaryNameClaimStatus::NotFound,
-        VerifiedPrimaryNameStatus::InvalidName => PrimaryNameClaimStatus::InvalidName,
+        | VerifiedPrimaryNameStatus::ExecutionFailed => PrimaryNameClaimStatus::Success.as_str(),
+        VerifiedPrimaryNameStatus::NotFound => PrimaryNameClaimStatus::NotFound.as_str(),
+        VerifiedPrimaryNameStatus::InvalidName => PrimaryNameClaimStatus::InvalidName.as_str(),
     };
-    if snapshot.row.claim_status != expected_claim_status {
+    if current_claim_status != expected_claim_status {
         bail!(
             "{context} persistence claim content changed for address {} namespace {} coin_type {}: current claim_status {} does not match verified status {:?}",
             tuple.normalized_address,
             tuple.namespace,
             tuple.coin_type,
-            snapshot.row.claim_status.as_str(),
+            current_claim_status,
             verified_primary_name.status
         );
     }
@@ -49,7 +116,7 @@ pub(crate) async fn ensure_primary_name_anchor_matches(
         verified_primary_name.status,
         VerifiedPrimaryNameStatus::Success | VerifiedPrimaryNameStatus::Mismatch
     ) {
-        let Some(current_claim_name) = snapshot.normalized_claim_name.as_deref() else {
+        let Some(current_claim_name) = current_normalized_claim_name else {
             return Ok(());
         };
         let verified_claim_name = verified_primary_name
