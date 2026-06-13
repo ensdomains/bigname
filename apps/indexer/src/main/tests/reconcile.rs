@@ -310,7 +310,8 @@ async fn reconcile_fetched_heads_initializes_chain_from_provider_heads() -> Resu
 }
 
 #[tokio::test]
-async fn reconcile_fetched_heads_fetches_code_only_for_reconciled_log_emitters() -> Result<()> {
+async fn reconcile_fetched_heads_fetches_missing_emitter_code_despite_unrelated_block_code_row()
+-> Result<()> {
     let database = TestDatabase::new().await?;
     let emitter_address = "0x0000000000000000000000000000000000000001";
     let quiet_address = "0x0000000000000000000000000000000000000002";
@@ -327,17 +328,56 @@ async fn reconcile_fetched_heads_fetches_code_only_for_reconciled_log_emitters()
         discovery_edge_entry_count: 0,
         checkpoint: bigname_storage::ChainCheckpoint {
             chain_id: "ethereum-mainnet".to_owned(),
-            canonical_block_hash: None,
-            canonical_block_number: None,
+            canonical_block_hash: Some(canonical_head.block_hash.clone()),
+            canonical_block_number: Some(canonical_head.block_number),
             safe_block_hash: None,
             safe_block_number: None,
             finalized_block_hash: None,
             finalized_block_number: None,
         },
     };
+    upsert_raw_blocks(
+        database.pool(),
+        &[provider_block_to_raw_block(
+            "ethereum-mainnet",
+            &canonical_head,
+            CanonicalityState::Canonical,
+        )],
+    )
+    .await?;
+    upsert_raw_logs(
+        database.pool(),
+        &[RawLog {
+            chain_id: "ethereum-mainnet".to_owned(),
+            block_hash: canonical_head.block_hash.clone(),
+            block_number: canonical_head.block_number,
+            transaction_hash: transaction_hash_for_block(&canonical_head),
+            transaction_index: 0,
+            log_index: 0,
+            emitting_address: emitter_address.to_owned(),
+            topics: vec![name_wrapped_topic0()],
+            data: Vec::new(),
+            canonicality_state: CanonicalityState::Canonical,
+        }],
+    )
+    .await?;
+    upsert_raw_code_hashes(
+        database.pool(),
+        &[RawCodeHash {
+            chain_id: "ethereum-mainnet".to_owned(),
+            block_hash: canonical_head.block_hash.clone(),
+            block_number: canonical_head.block_number,
+            contract_address: quiet_address.to_owned(),
+            code_hash: "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+                .to_owned(),
+            code_byte_length: 0,
+            canonicality_state: CanonicalityState::Canonical,
+        }],
+    )
+    .await?;
+
     let code_requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
     let request_log = std::sync::Arc::clone(&code_requests);
-    let rpc_head = canonical_head.clone();
     let (url, server) = spawn_json_rpc_server(std::sync::Arc::new(move |body| {
         let method = body
             .get("method")
@@ -355,24 +395,12 @@ async fn reconcile_fetched_heads_fetches_code_only_for_reconciled_log_emitters()
             .to_ascii_lowercase();
 
         let result = match method {
-            "eth_getBlockByHash" if first_param == rpc_head.block_hash => {
-                rpc_block_bundle_payload(&rpc_head)
-            }
-            "eth_getLogs" => Value::Array(vec![rpc_log_payload(&rpc_head)]),
-            "eth_getBlockReceipts" if first_param == rpc_head.block_hash => {
-                Value::Array(vec![rpc_receipt_payload(&rpc_head)])
-            }
             "eth_getCode" => {
                 request_log
                     .lock()
                     .expect("code request log must not be poisoned")
                     .push(first_param.clone());
-                let code = if first_param == quiet_address {
-                    "0x"
-                } else {
-                    "0x6001600155"
-                };
-                Value::String(code.to_owned())
+                Value::String("0x6001600155".to_owned())
             }
             _ => panic!("unexpected reconciliation RPC request: {body}"),
         };
@@ -386,21 +414,33 @@ async fn reconcile_fetched_heads_fetches_code_only_for_reconciled_log_emitters()
     .await?;
     let provider = provider::JsonRpcProvider::new(&url)?;
 
-    reconcile_fetched_heads_with_adapter_sync(
+    persist_reconciled_raw_code_hashes(
         database.pool(),
         &task,
         &provider,
         &ProviderHeadSnapshot {
-            canonical: canonical_head,
+            canonical: canonical_head.clone(),
             safe: None,
             finalized: None,
         },
-        false,
-        HeaderAuditMode::Minimal,
-        &[],
+        &CanonicalReconciliation {
+            status: CanonicalReconciliationStatus::Unchanged,
+            canonical: Some(CheckpointBlockRef {
+                block_hash: canonical_head.block_hash.clone(),
+                block_number: canonical_head.block_number,
+            }),
+            fetched_parent_count: 0,
+            orphaned_block_count: 0,
+            reconciled_blocks: Vec::new(),
+            raw_orphan_stop_before_hash: None,
+        },
+        HeadChangeSet {
+            canonical_head_changed: false,
+            safe_head_changed: false,
+            finalized_head_changed: false,
+        },
     )
-    .await?
-    .expect("cold-start reconciliation must update task state");
+    .await?;
 
     assert_eq!(
         *code_requests
@@ -412,7 +452,7 @@ async fn reconcile_fetched_heads_fetches_code_only_for_reconciled_log_emitters()
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM raw_code_hashes")
             .fetch_one(database.pool())
             .await?,
-        1
+        2
     );
 
     server.abort();

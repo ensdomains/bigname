@@ -4,9 +4,9 @@ use anyhow::{Context, Result, bail};
 use bigname_storage::{
     CanonicalityState, RawBlock, RawCodeHash, RawLog, RawPayloadCacheMetadataUpsert, RawReceipt,
     RawTransaction, load_chain_lineage_block, load_raw_block, load_raw_blocks_by_hashes,
-    load_raw_code_hash_counts_by_block_hashes, upsert_raw_blocks,
-    upsert_raw_blocks_recanonicalizing_orphaned, upsert_raw_code_hashes, upsert_raw_logs,
-    upsert_raw_payload_cache_metadata, upsert_raw_receipts, upsert_raw_transactions,
+    upsert_raw_blocks, upsert_raw_blocks_recanonicalizing_orphaned, upsert_raw_code_hashes,
+    upsert_raw_logs, upsert_raw_payload_cache_metadata, upsert_raw_receipts,
+    upsert_raw_transactions,
 };
 use sqlx::Row;
 use tracing::info;
@@ -361,32 +361,53 @@ pub(crate) async fn persist_reconciled_raw_code_hashes(
         );
     }
 
-    let stored_counts =
-        load_raw_code_hash_counts_by_block_hashes(pool, &task.chain, &candidate_hashes).await?;
-    let code_addresses_by_block_hash = load_raw_code_observation_addresses_by_block_hashes(
+    let watched_addresses = selected_address_set(&task.addresses)
+        .into_iter()
+        .collect::<Vec<_>>();
+    let emitter_addresses_by_block_hash = load_raw_log_emitter_addresses_by_block_hashes(
         pool,
         &task.chain,
         &candidate_hashes,
-        &task.addresses,
+        &watched_addresses,
     )
     .await?;
+    let stored_code_addresses_by_block_hash = load_raw_code_addresses_by_block_hashes(
+        pool,
+        &task.chain,
+        &candidate_hashes,
+        &watched_addresses,
+    )
+    .await?;
+    let baseline_addresses =
+        load_missing_raw_code_baseline_addresses(pool, &task.chain, &watched_addresses).await?;
+    let canonical_baseline_hash = canonical
+        .canonical
+        .as_ref()
+        .map(|canonical| canonical.block_hash.as_str());
     let raw_blocks = raw_blocks
         .into_iter()
         .filter_map(|raw_block| {
-            let addresses = code_addresses_by_block_hash
+            let mut addresses = BTreeSet::<String>::new();
+            let stored_code_addresses = stored_code_addresses_by_block_hash
                 .get(&raw_block.block_hash)
                 .cloned()
                 .unwrap_or_default();
+            let block_refreshed = refreshed_block_hashes.contains(&raw_block.block_hash);
+            if let Some(emitter_addresses) =
+                emitter_addresses_by_block_hash.get(&raw_block.block_hash)
+            {
+                addresses.extend(emitter_addresses.iter().filter_map(|address| {
+                    (block_refreshed || !stored_code_addresses.contains(address))
+                        .then_some(address.clone())
+                }));
+            }
+            if canonical_baseline_hash == Some(raw_block.block_hash.as_str()) {
+                addresses.extend(baseline_addresses.iter().cloned());
+            }
             if addresses.is_empty() {
                 return None;
             }
-            let needs_refresh = refreshed_block_hashes.contains(&raw_block.block_hash)
-                || stored_counts
-                    .get(&raw_block.block_hash)
-                    .copied()
-                    .unwrap_or(0)
-                    < addresses.len();
-            needs_refresh.then_some((raw_block, addresses))
+            Some((raw_block, addresses.into_iter().collect::<Vec<_>>()))
         })
         .collect::<Vec<_>>();
     if raw_blocks.is_empty() {
@@ -415,19 +436,16 @@ pub(crate) async fn persist_reconciled_raw_code_hashes(
     Ok(())
 }
 
-async fn load_raw_code_observation_addresses_by_block_hashes(
+async fn load_raw_log_emitter_addresses_by_block_hashes(
     pool: &sqlx::PgPool,
     chain: &str,
     block_hashes: &[String],
     watched_addresses: &[String],
-) -> Result<BTreeMap<String, Vec<String>>> {
+) -> Result<BTreeMap<String, BTreeSet<String>>> {
     if block_hashes.is_empty() || watched_addresses.is_empty() {
         return Ok(BTreeMap::new());
     }
 
-    let watched_addresses = selected_address_set(watched_addresses)
-        .into_iter()
-        .collect::<Vec<_>>();
     let rows = sqlx::query(
         r#"
         SELECT
@@ -443,7 +461,7 @@ async fn load_raw_code_observation_addresses_by_block_hashes(
     )
     .bind(chain)
     .bind(block_hashes)
-    .bind(&watched_addresses)
+    .bind(watched_addresses)
     .fetch_all(pool)
     .await
     .with_context(|| {
@@ -453,7 +471,7 @@ async fn load_raw_code_observation_addresses_by_block_hashes(
         )
     })?;
 
-    let mut addresses_by_block_hash = BTreeMap::<String, Vec<String>>::new();
+    let mut addresses_by_block_hash = BTreeMap::<String, BTreeSet<String>>::new();
     for row in rows {
         let block_hash = row
             .try_get::<String, _>("block_hash")
@@ -464,8 +482,100 @@ async fn load_raw_code_observation_addresses_by_block_hashes(
         addresses_by_block_hash
             .entry(block_hash)
             .or_default()
-            .push(emitting_address);
+            .insert(emitting_address);
     }
 
     Ok(addresses_by_block_hash)
+}
+
+async fn load_raw_code_addresses_by_block_hashes(
+    pool: &sqlx::PgPool,
+    chain: &str,
+    block_hashes: &[String],
+    watched_addresses: &[String],
+) -> Result<BTreeMap<String, BTreeSet<String>>> {
+    if block_hashes.is_empty() || watched_addresses.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            block_hash,
+            LOWER(contract_address) AS contract_address
+        FROM raw_code_hashes
+        WHERE chain_id = $1
+          AND block_hash = ANY($2::TEXT[])
+          AND LOWER(contract_address) = ANY($3::TEXT[])
+          AND canonicality_state <> 'orphaned'::canonicality_state
+        GROUP BY block_hash, LOWER(contract_address)
+        ORDER BY block_hash, LOWER(contract_address)
+        "#,
+    )
+    .bind(chain)
+    .bind(block_hashes)
+    .bind(watched_addresses)
+    .fetch_all(pool)
+    .await
+    .with_context(|| {
+        format!(
+            "failed to load raw code-hash addresses for chain {chain} across {} blocks",
+            block_hashes.len()
+        )
+    })?;
+
+    let mut addresses_by_block_hash = BTreeMap::<String, BTreeSet<String>>::new();
+    for row in rows {
+        let block_hash = row
+            .try_get::<String, _>("block_hash")
+            .context("missing block_hash from raw code-hash row")?;
+        let contract_address = row
+            .try_get::<String, _>("contract_address")
+            .context("missing contract_address from raw code-hash row")?;
+        addresses_by_block_hash
+            .entry(block_hash)
+            .or_default()
+            .insert(contract_address);
+    }
+
+    Ok(addresses_by_block_hash)
+}
+
+async fn load_missing_raw_code_baseline_addresses(
+    pool: &sqlx::PgPool,
+    chain: &str,
+    watched_addresses: &[String],
+) -> Result<BTreeSet<String>> {
+    if watched_addresses.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+
+    let rows = sqlx::query(
+        r#"
+        SELECT watched.contract_address
+        FROM UNNEST($2::TEXT[]) AS watched(contract_address)
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM raw_code_hashes
+            WHERE chain_id = $1
+              AND LOWER(raw_code_hashes.contract_address) = watched.contract_address
+              AND canonicality_state <> 'orphaned'::canonicality_state
+        )
+        ORDER BY watched.contract_address
+        "#,
+    )
+    .bind(chain)
+    .bind(watched_addresses)
+    .fetch_all(pool)
+    .await
+    .with_context(|| {
+        format!("failed to load missing raw code-hash baseline addresses for chain {chain}")
+    })?;
+
+    rows.into_iter()
+        .map(|row| {
+            row.try_get::<String, _>("contract_address")
+                .context("missing contract_address from baseline address row")
+        })
+        .collect()
 }
