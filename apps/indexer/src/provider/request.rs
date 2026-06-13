@@ -220,8 +220,12 @@ impl JsonRpcProvider {
             .await?;
         let response_packet = serde_json::from_slice::<ResponsePacket>(&body)
             .context("failed to decode JSON-RPC batch response")?;
-        let ResponsePacket::Batch(response_values) = response_packet else {
-            bail!("expected JSON-RPC batch response array");
+        let response_values = match response_packet {
+            ResponsePacket::Batch(response_values) => response_values,
+            ResponsePacket::Single(response) => {
+                json_rpc_response_result(response, "batch")?;
+                bail!("expected JSON-RPC batch response array");
+            }
         };
         let expected_methods = calls
             .iter()

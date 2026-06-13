@@ -530,6 +530,83 @@ async fn json_rpc_provider_retries_batch_error_code_32005_without_matching_text(
 }
 
 #[tokio::test]
+async fn json_rpc_provider_retries_single_error_batch_throttle_without_sequential_fallback()
+-> Result<()> {
+    let block_hash_42 = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let block_hash_43 = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let request_batch_sizes = Arc::new(Mutex::new(Vec::new()));
+    let request_attempts = Arc::clone(&attempts);
+    let batch_sizes = Arc::clone(&request_batch_sizes);
+
+    let (url, server) = spawn_json_rpc_server(Arc::new(move |body| {
+        batch_sizes
+            .lock()
+            .expect("request batch sizes must not be poisoned")
+            .push(body.as_array().map(Vec::len).unwrap_or(1));
+        let attempt = request_attempts.fetch_add(1, Ordering::Relaxed);
+
+        if attempt == 0 {
+            assert!(body.is_array(), "first request must be the original batch");
+            return json!({
+                "jsonrpc": "2.0",
+                "id": null,
+                "error": {
+                    "code": -32005,
+                    "message": "capacity exceeded"
+                }
+            });
+        }
+
+        if body.is_array() {
+            return rpc_block_number_batch_response(
+                &body,
+                &[(42, block_hash_42), (43, block_hash_43)],
+            )
+            .expect("retry attempt must be a block-number batch");
+        }
+
+        let selection = body
+            .get("params")
+            .and_then(Value::as_array)
+            .and_then(|params| params.first())
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let (number, hash) = match selection {
+            "0x2a" => (42, block_hash_42),
+            "0x2b" => (43, block_hash_43),
+            _ => panic!("unexpected sequential fallback request: {body}"),
+        };
+        json!({
+            "jsonrpc": "2.0",
+            "id": body.get("id").cloned().unwrap_or(Value::Null),
+            "result": rpc_block_payload(hash, ZERO_HASH, number, None)
+        })
+    }))
+    .await?;
+    let provider = JsonRpcProvider::new(&url)?;
+
+    let resolved = provider.fetch_block_hashes_by_numbers(&[42, 43]).await?;
+
+    assert_eq!(
+        resolved
+            .iter()
+            .map(|block| (block.block_number, block.block_hash.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(42, block_hash_42), (43, block_hash_43)]
+    );
+    assert_eq!(
+        *request_batch_sizes
+            .lock()
+            .expect("request batch sizes must not be poisoned"),
+        vec![2, 2]
+    );
+
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test]
 async fn json_rpc_provider_accepts_hash_only_transactions_for_block_headers() -> Result<()> {
     let requested_hash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -703,6 +780,68 @@ async fn json_rpc_provider_degrades_safe_and_finalized_tag_errors_to_none() -> R
                     "error": {
                         "code": -32000,
                         "message": format!("unsupported block tag {first_param}")
+                    }
+                }),
+                ("eth_getBlockByHash", hash) if hash == canonical_hash => json!({
+                    "jsonrpc": "2.0",
+                    "id": request.get("id").cloned().unwrap_or(Value::Null),
+                    "result": rpc_block_payload(canonical_hash, canonical_parent, 43, None)
+                }),
+                _ => panic!("unexpected RPC request: {request}"),
+            }
+        };
+
+        if let Some(batch) = body.as_array() {
+            Value::Array(batch.iter().map(response_for_request).collect())
+        } else {
+            response_for_request(&body)
+        }
+    }))
+    .await?;
+    let provider = JsonRpcProvider::new(&url)?;
+
+    let heads = provider.fetch_chain_heads().await?;
+
+    assert_eq!(heads.canonical.block_hash, canonical_hash);
+    assert_eq!(heads.safe, None);
+    assert_eq!(heads.finalized, None);
+
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn json_rpc_provider_degrades_checkpoint_tag_errors_without_echoed_tag_name() -> Result<()> {
+    let canonical_hash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let canonical_parent = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    let (url, server) = spawn_json_rpc_server(Arc::new(move |body| {
+        let response_for_request = |request: &Value| {
+            let method = request
+                .get("method")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let first_param = request
+                .get("params")
+                .and_then(Value::as_array)
+                .and_then(|params| params.first())
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+
+            match (method, first_param) {
+                ("eth_getBlockByNumber", "latest") => json!({
+                    "jsonrpc": "2.0",
+                    "id": request.get("id").cloned().unwrap_or(Value::Null),
+                    "result": {
+                        "hash": canonical_hash,
+                    }
+                }),
+                ("eth_getBlockByNumber", "safe" | "finalized") => json!({
+                    "jsonrpc": "2.0",
+                    "id": request.get("id").cloned().unwrap_or(Value::Null),
+                    "error": {
+                        "code": -32000,
+                        "message": "unsupported block parameter"
                     }
                 }),
                 ("eth_getBlockByHash", hash) if hash == canonical_hash => json!({
@@ -2857,6 +2996,153 @@ async fn json_rpc_provider_uses_receipt_fallback_endpoint_when_block_receipts_er
 
     primary_server.abort();
     fallback_server.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn json_rpc_provider_refuses_sequential_receipt_fallback_after_retryable_batch_exhaustion()
+-> Result<()> {
+    let block_hash_42 = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let block_hash_43 = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let parent_hash = "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+    let tx_hash_42 = "0x1111111111111111111111111111111111111111111111111111111111111111";
+    let tx_hash_43 = "0x2222222222222222222222222222222222222222222222222222222222222222";
+    let request_methods = Arc::new(Mutex::new(Vec::new()));
+    let request_log = Arc::clone(&request_methods);
+
+    let (url, server) = spawn_json_rpc_server(Arc::new(move |body| {
+        let requests = body
+            .as_array()
+            .cloned()
+            .unwrap_or_else(|| vec![body.clone()]);
+        let methods = requests
+            .iter()
+            .map(|request| {
+                request
+                    .get("method")
+                    .and_then(Value::as_str)
+                    .expect("request method must be present")
+                    .to_owned()
+            })
+            .collect::<Vec<_>>();
+        request_log
+            .lock()
+            .expect("request log must not be poisoned")
+            .push(methods.clone());
+
+        let responses = requests
+            .iter()
+            .map(|request| {
+                let method = request
+                    .get("method")
+                    .and_then(Value::as_str)
+                    .expect("request method must be present");
+                let id = request.get("id").cloned().unwrap_or(Value::Null);
+                let params = request
+                    .get("params")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                match method {
+                    "eth_getBlockByHash" => {
+                        let block_hash = params
+                            .first()
+                            .and_then(Value::as_str)
+                            .expect("block hash must be present");
+                        let (number, tx_hash) = match block_hash {
+                            hash if hash == block_hash_42 => (42, tx_hash_42),
+                            hash if hash == block_hash_43 => (43, tx_hash_43),
+                            _ => panic!("unexpected block hash request: {request}"),
+                        };
+                        json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "result": rpc_exact_block_payload(
+                                block_hash,
+                                parent_hash,
+                                number,
+                                Some("0x0102"),
+                                vec![rpc_transaction_payload(
+                                    tx_hash,
+                                    block_hash,
+                                    number,
+                                    0,
+                                    "0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                                    Some("0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"),
+                                )],
+                            )
+                        })
+                    }
+                    "eth_getBlockReceipts" if body.is_array() => json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "error": {
+                            "code": -32005,
+                            "message": "capacity exceeded"
+                        }
+                    }),
+                    "eth_getBlockReceipts" => {
+                        let block_hash = params
+                            .first()
+                            .and_then(Value::as_str)
+                            .expect("block hash must be present");
+                        let (number, tx_hash) = match block_hash {
+                            hash if hash == block_hash_42 => (42, tx_hash_42),
+                            hash if hash == block_hash_43 => (43, tx_hash_43),
+                            _ => panic!("unexpected block receipt request: {request}"),
+                        };
+                        json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "result": [rpc_receipt_payload(tx_hash, block_hash, number, 0, None)]
+                        })
+                    }
+                    _ => panic!("unexpected RPC request: {request}"),
+                }
+            })
+            .collect::<Vec<_>>();
+
+        if body.is_array() {
+            Value::Array(responses)
+        } else {
+            responses
+                .into_iter()
+                .next()
+                .expect("single response must be present")
+        }
+    }))
+    .await?;
+    let provider = JsonRpcProvider::new(&url)?;
+
+    let error = provider
+        .fetch_block_bundles_without_logs_by_hashes(&[
+            ProviderResolvedBlock {
+                block_hash: block_hash_42.to_owned(),
+                block_number: 42,
+            },
+            ProviderResolvedBlock {
+                block_hash: block_hash_43.to_owned(),
+                block_number: 43,
+            },
+        ])
+        .await
+        .expect_err("retryable block receipt batch exhaustion must not fan out sequentially");
+    assert!(
+        format!("{error:#}").contains("retryable"),
+        "unexpected error: {error:#}"
+    );
+    let request_methods = request_methods
+        .lock()
+        .expect("request log must not be poisoned")
+        .clone();
+    assert!(
+        !request_methods
+            .iter()
+            .any(|methods| methods == &vec!["eth_getBlockReceipts".to_owned()]),
+        "retryable batch exhaustion must not issue single block-receipt requests: {request_methods:?}"
+    );
+
+    server.abort();
     Ok(())
 }
 

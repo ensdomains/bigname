@@ -1042,13 +1042,13 @@ async fn reconcile_fetched_heads_backfills_code_hashes_for_new_watched_addresses
         2
     );
     assert_eq!(
-            sqlx::query_scalar::<_, i64>(
-                "SELECT code_byte_length FROM raw_code_hashes WHERE contract_address = '0x0000000000000000000000000000000000000002'"
-            )
-            .fetch_one(database.pool())
-            .await?,
-            0
-        );
+        sqlx::query_scalar::<_, i64>(
+            "SELECT code_byte_length FROM raw_code_hashes WHERE contract_address = '0x0000000000000000000000000000000000000002'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        0
+    );
 
     server.abort();
     database.cleanup().await?;
@@ -1228,13 +1228,13 @@ async fn storage_discovery_refresh_adds_ensv1_address_without_manifest_reload_an
         2
     );
     assert_eq!(
-            sqlx::query_scalar::<_, i64>(
-                "SELECT code_byte_length FROM raw_code_hashes WHERE contract_address = '0x0000000000000000000000000000000000000002'"
-            )
-            .fetch_one(database.pool())
-            .await?,
-            0
-        );
+        sqlx::query_scalar::<_, i64>(
+            "SELECT code_byte_length FROM raw_code_hashes WHERE contract_address = '0x0000000000000000000000000000000000000002'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        0
+    );
     server.abort();
     database.cleanup().await?;
     Ok(())
