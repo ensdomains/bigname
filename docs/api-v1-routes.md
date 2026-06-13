@@ -552,6 +552,7 @@ Rules:
 - `scope=both`: union.
 - Observed and orphaned events are excluded.
 - `view=compact` returns `CompactHistoryEvent` rows with `meta=summary`. `view=full` returns the existing normalized-event history row shape.
+- `view=full` also computes the route summary over the full matching anchor universe for each page, not only over the returned page rows. That O(universe) aggregate work is part of the documented full-history contract; clients that do not need the aggregate envelope should use `view=compact` or narrower filters.
 - Pages over `chain_position_desc`.
 - `declared_state` is `{}`. The rows themselves are the declared answer.
 
