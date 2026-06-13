@@ -97,8 +97,8 @@ fn ensure_anchor_content_matches(
     let expected_claim_status = match verified_primary_name.status {
         VerifiedPrimaryNameStatus::Success
         | VerifiedPrimaryNameStatus::Mismatch
+        | VerifiedPrimaryNameStatus::NotFound
         | VerifiedPrimaryNameStatus::ExecutionFailed => PrimaryNameClaimStatus::Success.as_str(),
-        VerifiedPrimaryNameStatus::NotFound => PrimaryNameClaimStatus::NotFound.as_str(),
         VerifiedPrimaryNameStatus::InvalidName => PrimaryNameClaimStatus::InvalidName.as_str(),
     };
     if current_claim_status != expected_claim_status {
@@ -112,6 +112,10 @@ fn ensure_anchor_content_matches(
         );
     }
 
+    // Payload validation keeps name absent for not_found, invalid_name, and execution_failed.
+    // Those statuses can only be fenced by claim existence/status here; full name fencing for
+    // stale error outcomes would require carrying the claimed name in the verified-primary
+    // error payload contract.
     if matches!(
         verified_primary_name.status,
         VerifiedPrimaryNameStatus::Success | VerifiedPrimaryNameStatus::Mismatch

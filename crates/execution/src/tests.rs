@@ -4999,7 +4999,7 @@ async fn persists_basenames_verified_primary_not_found_without_l1_resolver_call(
         &database,
         "0x00000000000000000000000000000000000000bb",
         "60",
-        PrimaryNameClaimStatus::NotFound,
+        PrimaryNameClaimStatus::Success,
     )
     .await?;
 
@@ -5094,7 +5094,7 @@ async fn persists_verified_primary_not_found_without_resolver_call() -> Result<(
         &database,
         "0x00000000000000000000000000000000000000ac",
         "60",
-        PrimaryNameClaimStatus::NotFound,
+        PrimaryNameClaimStatus::Success,
     )
     .await?;
 
