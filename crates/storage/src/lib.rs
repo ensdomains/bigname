@@ -201,7 +201,7 @@ pub use resolution_support::{
     SupportedVerifiedResolutionRecordKey, VerifiedResolutionPathClass, VerifiedResolutionRecord,
     VerifiedResolutionRequestedChainPosition, VerifiedResolutionSupportBoundary,
     build_resolution_execution_cache_key, build_resolution_requested_chain_positions,
-    classify_supported_resolution_topology, is_resolution_avatar_record,
+    canonical_addr_coin_type, classify_supported_resolution_topology, is_resolution_avatar_record,
     normalized_resolution_request_key, normalized_resolution_request_key_from_record_keys,
     parse_supported_verified_resolution_record_key, projected_resolution_boundaries_from_topology,
     projected_resolution_topology, record_version_boundary_has_pointer,

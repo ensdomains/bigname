@@ -70,14 +70,11 @@ pub(super) fn primary_name_projection_unavailable(load_error: &anyhow::Error) ->
 }
 
 pub(super) fn canonical_primary_name_coin_type(coin_type: &str) -> ApiResult<String> {
-    coin_type
-        .parse::<u64>()
-        .map(|value| value.to_string())
-        .map_err(|_| ApiError {
-            status: StatusCode::BAD_REQUEST,
-            code: "invalid_input",
-            message: "coin_type must fit in an unsigned 64-bit integer".to_owned(),
-        })
+    bigname_storage::canonical_addr_coin_type(coin_type).ok_or_else(|| ApiError {
+        status: StatusCode::BAD_REQUEST,
+        code: "invalid_input",
+        message: "coin_type must fit in an unsigned 64-bit integer".to_owned(),
+    })
 }
 
 pub(super) async fn load_persisted_primary_name_verified_readback(
