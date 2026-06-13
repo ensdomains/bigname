@@ -2,11 +2,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
-use sqlx::{PgPool, Row};
-use tokio::{
-    task::JoinHandle,
-    time::{MissedTickBehavior, interval, timeout},
-};
+use sqlx::PgPool;
+use tokio::time::timeout;
 use uuid::Uuid;
 
 use crate::{
@@ -14,13 +11,19 @@ use crate::{
 };
 
 use super::{
-    CLAIM_RETRY_DELAY, FAILURE_RETRY_DELAY,
-    apply_locks::{acquire_invalidation_apply_locks, release_invalidation_apply_locks},
+    apply_locks::{
+        acquire_invalidation_apply_locks, ensure_invalidation_apply_locks_alive,
+        release_invalidation_apply_locks,
+    },
     dead_letters::dead_letter_invalidation,
 };
 
+mod claim;
+#[cfg(test)]
+use claim::refresh_claimed_invalidation_claim;
+use claim::{claim_pending_invalidations, spawn_claim_heartbeats, stop_claim_heartbeats};
+
 const NAME_CURRENT_SINGLE_APPLY_TIMEOUT: Duration = Duration::from_secs(120);
-const CLAIM_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
 const MAX_PROJECTION_INVALIDATION_ATTEMPTS: i64 = 5;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -65,6 +68,7 @@ pub(super) async fn apply_pending_invalidations(
                 let mut locks = acquire_invalidation_apply_locks(pool, &group).await?;
                 let result = apply_address_names_group(pool, &group).await;
                 let finish = async {
+                    ensure_invalidation_apply_locks_alive(&mut locks).await?;
                     match result {
                         Ok(()) => {
                             for invalidation in &group {
@@ -97,6 +101,7 @@ pub(super) async fn apply_pending_invalidations(
                 apply_one(pool, &invalidation, text_hydration_config).await
             };
             let finish = async {
+                ensure_invalidation_apply_locks_alive(&mut locks).await?;
                 match result {
                     Ok(()) => {
                         complete_invalidation(pool, &invalidation).await?;
@@ -142,17 +147,6 @@ fn drain_address_names_group(
     invalidations.drain(..split_at).collect()
 }
 
-fn spawn_claim_heartbeats(
-    pool: &PgPool,
-    invalidations: &[ClaimedInvalidation],
-) -> Vec<JoinHandle<()>> {
-    invalidations
-        .iter()
-        .cloned()
-        .map(|invalidation| spawn_claim_heartbeat(pool.clone(), invalidation))
-        .collect()
-}
-
 async fn apply_address_names_group(
     pool: &PgPool,
     invalidations: &[ClaimedInvalidation],
@@ -186,31 +180,6 @@ fn address_names_invalidation_address(invalidation: &ClaimedInvalidation) -> Res
         .context("address_names_current invalidation missing address")
 }
 
-fn spawn_claim_heartbeat(pool: PgPool, invalidation: ClaimedInvalidation) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut heartbeat = interval(CLAIM_HEARTBEAT_INTERVAL);
-        heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
-        loop {
-            heartbeat.tick().await;
-            if let Err(error) = refresh_claimed_invalidation_claim(&pool, &invalidation).await {
-                tracing::warn!(
-                    projection = %invalidation.projection,
-                    projection_key = %invalidation.projection_key,
-                    error = %error,
-                    "failed to refresh projection invalidation claim heartbeat"
-                );
-            }
-        }
-    })
-}
-
-async fn stop_claim_heartbeats(mut heartbeats: Vec<JoinHandle<()>>) {
-    while let Some(heartbeat) = heartbeats.pop() {
-        heartbeat.abort();
-        let _ = heartbeat.await;
-    }
-}
-
 async fn apply_name_current_single(
     pool: &PgPool,
     invalidation: &ClaimedInvalidation,
@@ -226,34 +195,6 @@ async fn apply_name_current_single(
             invalidation.projection_key
         )
     })??;
-    Ok(())
-}
-
-async fn refresh_claimed_invalidation_claim(
-    pool: &PgPool,
-    invalidation: &ClaimedInvalidation,
-) -> Result<()> {
-    sqlx::query(
-        r#"
-        UPDATE projection_invalidations
-        SET claimed_at = now()
-        WHERE projection = $1
-          AND projection_key = $2
-          AND claim_token = $3
-        "#,
-    )
-    .bind(&invalidation.projection)
-    .bind(&invalidation.projection_key)
-    .bind(invalidation.claim_token)
-    .execute(pool)
-    .await
-    .with_context(|| {
-        format!(
-            "failed to refresh projection invalidation claim {}:{}",
-            invalidation.projection, invalidation.projection_key
-        )
-    })?;
-
     Ok(())
 }
 
@@ -287,84 +228,6 @@ fn claimed_invalidation_apply_key(invalidation: &ClaimedInvalidation) -> (u16, u
         namespace_rank,
         invalidation.projection_key.as_str(),
     )
-}
-
-async fn claim_pending_invalidations(
-    pool: &PgPool,
-    batch_limit: i64,
-    claim_token: Uuid,
-) -> Result<Vec<ClaimedInvalidation>> {
-    let rows = sqlx::query(
-        r#"
-        WITH candidates AS (
-            SELECT projection, projection_key
-            FROM projection_invalidations
-            WHERE (
-                  claim_token IS NULL
-                  OR claimed_at < now() - $3::INTERVAL
-              )
-              AND state = 'pending'::projection_invalidation_state
-              AND (
-                  last_failure_at IS NULL
-                  OR last_failure_at < now() - $2::INTERVAL
-              )
-            ORDER BY
-                CASE projection
-                    WHEN 'name_current' THEN 10
-                    WHEN 'children_current' THEN 20
-                    WHEN 'permissions_current' THEN 30
-                    WHEN 'record_inventory_current' THEN 40
-                    WHEN 'resolver_current' THEN 50
-                    WHEN 'address_names_current' THEN 60
-                    WHEN 'primary_names_current' THEN 70
-                    ELSE 1000
-                END,
-                CASE
-                    WHEN projection = 'name_current'
-                     AND projection_key LIKE 'basenames:%' THEN 0
-                    ELSE 1
-                END,
-                last_changed_at ASC,
-                projection_key ASC
-            LIMIT $1
-            FOR UPDATE SKIP LOCKED
-        )
-        UPDATE projection_invalidations invalidation
-        SET
-            claim_token = $4,
-            claimed_at = now()
-        FROM candidates
-        WHERE invalidation.projection = candidates.projection
-          AND invalidation.projection_key = candidates.projection_key
-        RETURNING
-            invalidation.projection,
-            invalidation.projection_key,
-            invalidation.key_payload,
-            invalidation.generation,
-            invalidation.claim_token,
-            invalidation.attempt_count
-        "#,
-    )
-    .bind(batch_limit)
-    .bind(FAILURE_RETRY_DELAY)
-    .bind(CLAIM_RETRY_DELAY)
-    .bind(claim_token)
-    .fetch_all(pool)
-    .await
-    .context("failed to claim projection invalidations")?;
-
-    rows.into_iter()
-        .map(|row| {
-            Ok(ClaimedInvalidation {
-                projection: row.try_get("projection")?,
-                projection_key: row.try_get("projection_key")?,
-                key_payload: row.try_get("key_payload")?,
-                generation: row.try_get("generation")?,
-                claim_token: row.try_get("claim_token")?,
-                attempt_count: row.try_get("attempt_count")?,
-            })
-        })
-        .collect()
 }
 
 async fn apply_one(
@@ -504,7 +367,8 @@ async fn fail_invalidation(
 ) -> Result<()> {
     let failure_reason = postgres_text_safe(&format!("{error:#}"));
     let failed_attempt_count = invalidation.attempt_count + 1;
-    let rows_affected = if failed_attempt_count >= MAX_PROJECTION_INVALIDATION_ATTEMPTS {
+    let should_dead_letter = failed_attempt_count >= MAX_PROJECTION_INVALIDATION_ATTEMPTS;
+    let rows_affected = if should_dead_letter {
         dead_letter_invalidation(pool, invalidation, &failure_reason, failed_attempt_count).await?
     } else {
         sqlx::query(
@@ -538,6 +402,17 @@ async fn fail_invalidation(
         })?
         .rows_affected()
     };
+    if should_dead_letter && rows_affected > 0 {
+        tracing::warn!(
+            projection = %invalidation.projection,
+            projection_key = %invalidation.projection_key,
+            generation = invalidation.generation,
+            failed_attempt_count = failed_attempt_count,
+            max_attempts = MAX_PROJECTION_INVALIDATION_ATTEMPTS,
+            failure_reason = %failure_reason,
+            "moved projection invalidation to dead letter"
+        );
+    }
     if rows_affected == 0 {
         release_superseded_claim(pool, invalidation).await?;
     }

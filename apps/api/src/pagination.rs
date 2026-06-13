@@ -12,7 +12,7 @@ pub(crate) struct HistoryPageResponse {
 
 pub(crate) const DEFAULT_PAGE_SIZE: u64 = 50;
 pub(crate) const MAX_PAGE_SIZE: u64 = 200;
-pub(crate) const CURSOR_VERSION: u8 = 1;
+pub(crate) const CURSOR_VERSION: u8 = 2;
 
 #[derive(Clone, Debug)]
 pub(crate) struct PaginationRequest {
