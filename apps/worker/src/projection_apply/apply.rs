@@ -296,13 +296,28 @@ async fn claim_pending_invalidations(
 ) -> Result<Vec<ClaimedInvalidation>> {
     let rows = sqlx::query(
         r#"
-        WITH candidates AS (
-            SELECT projection, projection_key
+        WITH unclaimed_candidates AS (
+            SELECT
+                projection,
+                projection_key,
+                CASE projection
+                    WHEN 'name_current' THEN 10
+                    WHEN 'children_current' THEN 20
+                    WHEN 'permissions_current' THEN 30
+                    WHEN 'record_inventory_current' THEN 40
+                    WHEN 'resolver_current' THEN 50
+                    WHEN 'address_names_current' THEN 60
+                    WHEN 'primary_names_current' THEN 70
+                    ELSE 1000
+                END AS projection_priority,
+                CASE
+                    WHEN projection = 'name_current'
+                     AND projection_key LIKE 'basenames:%' THEN 0
+                    ELSE 1
+                END AS namespace_priority,
+                last_changed_at
             FROM projection_invalidations
-            WHERE (
-                  claim_token IS NULL
-                  OR claimed_at < now() - $3::INTERVAL
-              )
+            WHERE claim_token IS NULL
               AND state = 'pending'::projection_invalidation_state
               AND (
                   last_failure_at IS NULL
@@ -328,6 +343,55 @@ async fn claim_pending_invalidations(
                 projection_key ASC
             LIMIT $1
             FOR UPDATE SKIP LOCKED
+        ),
+        stale_claim_candidates AS (
+            SELECT
+                projection,
+                projection_key,
+                CASE projection
+                    WHEN 'name_current' THEN 10
+                    WHEN 'children_current' THEN 20
+                    WHEN 'permissions_current' THEN 30
+                    WHEN 'record_inventory_current' THEN 40
+                    WHEN 'resolver_current' THEN 50
+                    WHEN 'address_names_current' THEN 60
+                    WHEN 'primary_names_current' THEN 70
+                    ELSE 1000
+                END AS projection_priority,
+                CASE
+                    WHEN projection = 'name_current'
+                     AND projection_key LIKE 'basenames:%' THEN 0
+                    ELSE 1
+                END AS namespace_priority,
+                last_changed_at
+            FROM projection_invalidations
+            WHERE claim_token IS NOT NULL
+              AND claimed_at < now() - $3::INTERVAL
+              AND state = 'pending'::projection_invalidation_state
+              AND (
+                  last_failure_at IS NULL
+                  OR last_failure_at < now() - $2::INTERVAL
+              )
+            ORDER BY
+                claimed_at ASC,
+                projection ASC,
+                projection_key ASC
+            LIMIT $1
+            FOR UPDATE SKIP LOCKED
+        ),
+        candidates AS (
+            SELECT projection, projection_key
+            FROM (
+                SELECT * FROM unclaimed_candidates
+                UNION ALL
+                SELECT * FROM stale_claim_candidates
+            ) candidate
+            ORDER BY
+                projection_priority ASC,
+                namespace_priority ASC,
+                last_changed_at ASC,
+                projection_key ASC
+            LIMIT $1
         )
         UPDATE projection_invalidations invalidation
         SET
