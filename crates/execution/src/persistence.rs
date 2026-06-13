@@ -9,7 +9,7 @@ use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::primary_name::{
-    ensure_primary_name_anchor_exists, extract_verified_primary_readback_provenance,
+    ensure_primary_name_anchor_matches, extract_verified_primary_readback_provenance,
     validate_verified_primary_request, validate_verified_primary_trace_and_outcome,
     verified_primary_context_label,
 };
@@ -196,7 +196,8 @@ pub async fn persist_ens_verified_primary_name(
 ) -> Result<PersistedVerifiedPrimaryNameIdentity> {
     let validated = validate_verified_primary_request(request)?;
     let context = verified_primary_context_label(&validated.tuple.namespace)?;
-    ensure_primary_name_anchor_exists(pool, &validated.tuple).await?;
+    ensure_primary_name_anchor_matches(pool, &validated.tuple, &validated.verified_primary_name)
+        .await?;
 
     let mut transaction = pool
         .begin()

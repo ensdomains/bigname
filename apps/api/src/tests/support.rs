@@ -40,7 +40,7 @@ mod execution {
     };
     use sqlx::PgPool;
 
-    // Keep this test SQL copy in sync with
+    // Test-local SQL copy of the canonical worker invalidation helper. Keep this in sync with
     // apps/worker/src/execution.rs::invalidate_verified_primary_name_claim_change.
     pub async fn invalidate_verified_primary_name_claim_change(
         pool: &PgPool,

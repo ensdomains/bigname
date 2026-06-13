@@ -10,7 +10,7 @@ mod readback;
 mod request;
 mod trace;
 
-pub(crate) use anchor::ensure_primary_name_anchor_exists;
+pub(crate) use anchor::ensure_primary_name_anchor_matches;
 pub(crate) use context::verified_primary_context_label;
 pub(crate) use name_ref::validate_verified_primary_name_ref;
 pub(crate) use readback::extract_verified_primary_readback_provenance;
