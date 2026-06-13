@@ -8,6 +8,7 @@ use bigname_storage::{
     upsert_raw_blocks_recanonicalizing_orphaned, upsert_raw_code_hashes, upsert_raw_logs,
     upsert_raw_payload_cache_metadata, upsert_raw_receipts, upsert_raw_transactions,
 };
+use sqlx::Row;
 use tracing::info;
 
 use crate::{
@@ -362,15 +363,30 @@ pub(crate) async fn persist_reconciled_raw_code_hashes(
 
     let stored_counts =
         load_raw_code_hash_counts_by_block_hashes(pool, &task.chain, &candidate_hashes).await?;
+    let code_addresses_by_block_hash = load_raw_code_observation_addresses_by_block_hashes(
+        pool,
+        &task.chain,
+        &candidate_hashes,
+        &task.addresses,
+    )
+    .await?;
     let raw_blocks = raw_blocks
         .into_iter()
-        .filter(|raw_block| {
-            refreshed_block_hashes.contains(&raw_block.block_hash)
+        .filter_map(|raw_block| {
+            let addresses = code_addresses_by_block_hash
+                .get(&raw_block.block_hash)
+                .cloned()
+                .unwrap_or_default();
+            if addresses.is_empty() {
+                return None;
+            }
+            let needs_refresh = refreshed_block_hashes.contains(&raw_block.block_hash)
                 || stored_counts
                     .get(&raw_block.block_hash)
                     .copied()
                     .unwrap_or(0)
-                    < task.addresses.len()
+                    < addresses.len();
+            needs_refresh.then_some((raw_block, addresses))
         })
         .collect::<Vec<_>>();
     if raw_blocks.is_empty() {
@@ -378,10 +394,10 @@ pub(crate) async fn persist_reconciled_raw_code_hashes(
     }
 
     let mut code_hashes = Vec::<RawCodeHash>::new();
-    for raw_block in &raw_blocks {
+    for (raw_block, addresses) in &raw_blocks {
         let observations = provider
             .fetch_code_observations_at_block(
-                &task.addresses,
+                addresses,
                 ProviderBlockSelection::Hash(raw_block.block_hash.clone()),
             )
             .await?;
@@ -397,4 +413,59 @@ pub(crate) async fn persist_reconciled_raw_code_hashes(
 
     upsert_raw_code_hashes(pool, &code_hashes).await?;
     Ok(())
+}
+
+async fn load_raw_code_observation_addresses_by_block_hashes(
+    pool: &sqlx::PgPool,
+    chain: &str,
+    block_hashes: &[String],
+    watched_addresses: &[String],
+) -> Result<BTreeMap<String, Vec<String>>> {
+    if block_hashes.is_empty() || watched_addresses.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+
+    let watched_addresses = selected_address_set(watched_addresses)
+        .into_iter()
+        .collect::<Vec<_>>();
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            block_hash,
+            LOWER(emitting_address) AS emitting_address
+        FROM raw_logs
+        WHERE chain_id = $1
+          AND block_hash = ANY($2::TEXT[])
+          AND LOWER(emitting_address) = ANY($3::TEXT[])
+        GROUP BY block_hash, LOWER(emitting_address)
+        ORDER BY block_hash, LOWER(emitting_address)
+        "#,
+    )
+    .bind(chain)
+    .bind(block_hashes)
+    .bind(&watched_addresses)
+    .fetch_all(pool)
+    .await
+    .with_context(|| {
+        format!(
+            "failed to load raw-log code observation emitters for chain {chain} across {} blocks",
+            block_hashes.len()
+        )
+    })?;
+
+    let mut addresses_by_block_hash = BTreeMap::<String, Vec<String>>::new();
+    for row in rows {
+        let block_hash = row
+            .try_get::<String, _>("block_hash")
+            .context("missing block_hash from raw-log emitter row")?;
+        let emitting_address = row
+            .try_get::<String, _>("emitting_address")
+            .context("missing emitting_address from raw-log emitter row")?;
+        addresses_by_block_hash
+            .entry(block_hash)
+            .or_default()
+            .push(emitting_address);
+    }
+
+    Ok(addresses_by_block_hash)
 }

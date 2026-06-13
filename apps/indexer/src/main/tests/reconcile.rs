@@ -310,6 +310,117 @@ async fn reconcile_fetched_heads_initializes_chain_from_provider_heads() -> Resu
 }
 
 #[tokio::test]
+async fn reconcile_fetched_heads_fetches_code_only_for_reconciled_log_emitters() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let emitter_address = "0x0000000000000000000000000000000000000001";
+    let quiet_address = "0x0000000000000000000000000000000000000002";
+    let canonical_head = provider_block(
+        "0xabababababababababababababababababababababababababababababababab",
+        Some("0xcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"),
+        42,
+    );
+    let task = crate::runtime::IntakeChainTask {
+        chain: "ethereum-mainnet".to_owned(),
+        addresses: vec![emitter_address.to_owned(), quiet_address.to_owned()],
+        manifest_root_entry_count: 1,
+        manifest_contract_entry_count: 1,
+        discovery_edge_entry_count: 0,
+        checkpoint: bigname_storage::ChainCheckpoint {
+            chain_id: "ethereum-mainnet".to_owned(),
+            canonical_block_hash: None,
+            canonical_block_number: None,
+            safe_block_hash: None,
+            safe_block_number: None,
+            finalized_block_hash: None,
+            finalized_block_number: None,
+        },
+    };
+    let code_requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let request_log = std::sync::Arc::clone(&code_requests);
+    let rpc_head = canonical_head.clone();
+    let (url, server) = spawn_json_rpc_server(std::sync::Arc::new(move |body| {
+        let method = body
+            .get("method")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let params = body
+            .get("params")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let first_param = params
+            .first()
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+
+        let result = match method {
+            "eth_getBlockByHash" if first_param == rpc_head.block_hash => {
+                rpc_block_bundle_payload(&rpc_head)
+            }
+            "eth_getLogs" => Value::Array(vec![rpc_log_payload(&rpc_head)]),
+            "eth_getBlockReceipts" if first_param == rpc_head.block_hash => {
+                Value::Array(vec![rpc_receipt_payload(&rpc_head)])
+            }
+            "eth_getCode" => {
+                request_log
+                    .lock()
+                    .expect("code request log must not be poisoned")
+                    .push(first_param.clone());
+                let code = if first_param == quiet_address {
+                    "0x"
+                } else {
+                    "0x6001600155"
+                };
+                Value::String(code.to_owned())
+            }
+            _ => panic!("unexpected reconciliation RPC request: {body}"),
+        };
+
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": result,
+        })
+    }))
+    .await?;
+    let provider = provider::JsonRpcProvider::new(&url)?;
+
+    reconcile_fetched_heads_with_adapter_sync(
+        database.pool(),
+        &task,
+        &provider,
+        &ProviderHeadSnapshot {
+            canonical: canonical_head,
+            safe: None,
+            finalized: None,
+        },
+        false,
+        HeaderAuditMode::Minimal,
+        &[],
+    )
+    .await?
+    .expect("cold-start reconciliation must update task state");
+
+    assert_eq!(
+        *code_requests
+            .lock()
+            .expect("code request log must not be poisoned"),
+        vec![emitter_address.to_owned()]
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM raw_code_hashes")
+            .fetch_one(database.pool())
+            .await?,
+        1
+    );
+
+    server.abort();
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn reconcile_fetched_heads_skips_stale_finalized_checkpoint_tag() -> Result<()> {
     let database = TestDatabase::new().await?;
     let chain = "base-mainnet";

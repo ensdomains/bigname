@@ -923,7 +923,7 @@ async fn build_manifest_runtime_state_accepts_empty_root_and_clears_watch_plan()
 }
 
 #[tokio::test]
-async fn reconcile_fetched_heads_backfills_code_hashes_for_new_watched_addresses() -> Result<()> {
+async fn reconcile_fetched_heads_skips_code_hashes_for_quiet_new_watched_addresses() -> Result<()> {
     let database = TestDatabase::new().await?;
     let first_root_contract_instance_id = Uuid::from_u128(61);
     let second_contract_instance_id = Uuid::from_u128(62);
@@ -1039,16 +1039,16 @@ async fn reconcile_fetched_heads_backfills_code_hashes_for_new_watched_addresses
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM raw_code_hashes")
             .fetch_one(database.pool())
             .await?,
-        2
+        1
     );
     assert_eq!(
-            sqlx::query_scalar::<_, i64>(
-                "SELECT code_byte_length FROM raw_code_hashes WHERE contract_address = '0x0000000000000000000000000000000000000002'"
-            )
-            .fetch_one(database.pool())
-            .await?,
-            0
-        );
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM raw_code_hashes WHERE contract_address = '0x0000000000000000000000000000000000000002'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        0
+    );
 
     server.abort();
     database.cleanup().await?;
@@ -1056,7 +1056,7 @@ async fn reconcile_fetched_heads_backfills_code_hashes_for_new_watched_addresses
 }
 
 #[tokio::test]
-async fn storage_discovery_refresh_adds_ensv1_address_without_manifest_reload_and_next_poll_backfills_code_hash()
+async fn storage_discovery_refresh_adds_ensv1_address_without_manifest_reload_and_next_poll_skips_quiet_code_hash()
 -> Result<()> {
     let database = TestDatabase::new().await?;
     let manifests = TestManifestDir::new()?;
@@ -1103,7 +1103,7 @@ async fn storage_discovery_refresh_adds_ensv1_address_without_manifest_reload_an
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM raw_code_hashes")
             .fetch_one(database.pool())
             .await?,
-        1
+        0
     );
 
     insert_raw_new_owner_log(
@@ -1219,22 +1219,22 @@ async fn storage_discovery_refresh_adds_ensv1_address_without_manifest_reload_an
     .await?;
     assert!(
         unchanged.is_none(),
-        "unchanged heads should still backfill code hashes for newly watched ENSv1 addresses"
+        "unchanged heads should not backfill code hashes for quiet newly watched ENSv1 addresses"
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM raw_code_hashes")
             .fetch_one(database.pool())
             .await?,
-        2
+        1
     );
     assert_eq!(
-            sqlx::query_scalar::<_, i64>(
-                "SELECT code_byte_length FROM raw_code_hashes WHERE contract_address = '0x0000000000000000000000000000000000000002'"
-            )
-            .fetch_one(database.pool())
-            .await?,
-            0
-        );
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM raw_code_hashes WHERE contract_address = '0x0000000000000000000000000000000000000002'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        0
+    );
     server.abort();
     database.cleanup().await?;
     Ok(())
@@ -1389,7 +1389,7 @@ async fn runtime_refresh_adds_ensv1_resolver_watch_target_without_manifest_reloa
 }
 
 #[tokio::test]
-async fn storage_discovery_refresh_adds_basenames_address_without_manifest_reload_and_next_poll_backfills_code_hash()
+async fn storage_discovery_refresh_adds_basenames_address_without_manifest_reload_and_next_poll_skips_quiet_code_hash()
 -> Result<()> {
     let database = TestDatabase::new().await?;
     let manifests = TestManifestDir::new()?;
@@ -1439,7 +1439,7 @@ async fn storage_discovery_refresh_adds_basenames_address_without_manifest_reloa
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM raw_code_hashes")
             .fetch_one(database.pool())
             .await?,
-        1
+        0
     );
 
     insert_raw_new_owner_log_for_parent(
@@ -1556,17 +1556,17 @@ async fn storage_discovery_refresh_adds_basenames_address_without_manifest_reloa
     .await?;
     assert!(
         unchanged.is_none(),
-        "unchanged heads should still backfill code hashes for newly watched Basenames addresses"
+        "unchanged heads should not backfill code hashes for quiet newly watched Basenames addresses"
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM raw_code_hashes")
             .fetch_one(database.pool())
             .await?,
-        2
+        1
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
-            "SELECT code_byte_length FROM raw_code_hashes WHERE contract_address = '0x0000000000000000000000000000000000000002'"
+            "SELECT COUNT(*) FROM raw_code_hashes WHERE contract_address = '0x0000000000000000000000000000000000000002'"
         )
         .fetch_one(database.pool())
         .await?,
