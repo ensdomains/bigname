@@ -202,6 +202,12 @@ pub(super) async fn name_children(
                 .iter()
                 .map(|row| row.child_logical_name_id.clone())
                 .collect::<Vec<_>>();
+            let child_surface_lookup_ids = storage_page
+                .rows
+                .iter()
+                .filter(|row| include_counts || row.labelhash.is_none())
+                .map(|row| row.child_logical_name_id.clone())
+                .collect::<Vec<_>>();
             let child_name_rows = async {
                 bigname_storage::load_name_current_by_logical_name_ids(
                     &state.pool,
@@ -246,9 +252,29 @@ pub(super) async fn name_children(
                     Ok(Vec::new())
                 }
             };
+            let child_surfaces = async {
+                bigname_storage::load_name_surfaces_by_logical_name_ids(
+                    &state.pool,
+                    &child_surface_lookup_ids,
+                )
+                .await
+                .map_err(|load_error| {
+                    error!(
+                        service = "api",
+                        namespace = %namespace,
+                        name = %name,
+                        logical_name_id = %logical_name_id,
+                        error = ?load_error,
+                        "failed to batch load child name surfaces for compact children labelhash fallback"
+                    );
+                    ApiError::internal_error(format!(
+                        "failed to load compact child collection for name {namespace}/{name}"
+                    ))
+                })
+            };
 
-            let (child_name_rows, child_summaries) =
-                tokio::try_join!(child_name_rows, child_summaries)?;
+            let (child_name_rows, child_summaries, child_surfaces) =
+                tokio::try_join!(child_name_rows, child_summaries, child_surfaces)?;
             let child_summaries = child_summaries
                 .into_iter()
                 .map(|summary| (summary.parent_logical_name_id.clone(), summary))
@@ -260,28 +286,12 @@ pub(super) async fn name_children(
                 .iter()
                 .filter(|row| include_counts || row.labelhash.is_none())
             {
-                let child_surface = load_name_surface(&state.pool, &row.child_logical_name_id)
-                    .await
-                    .map_err(|load_error| {
-                        error!(
-                            service = "api",
-                            namespace = %namespace,
-                            name = %name,
-                            logical_name_id = %logical_name_id,
-                            child_logical_name_id = %row.child_logical_name_id,
-                            error = ?load_error,
-                            "failed to load child name surface for compact children labelhash fallback"
-                        );
-                        ApiError::internal_error(format!(
-                            "failed to load compact child collection for name {namespace}/{name}"
-                        ))
-                    })?;
-                if let Some(surface) = child_surface {
+                if let Some(surface) = child_surfaces.get(&row.child_logical_name_id) {
                     child_surface_ids.insert(row.child_logical_name_id.clone());
                     if row.labelhash.is_none() {
                         child_surface_labelhashes.insert(
                             row.child_logical_name_id.clone(),
-                            surface.labelhashes.into_iter().next(),
+                            surface.labelhashes.first().cloned(),
                         );
                     }
                 } else if row.labelhash.is_none() {
