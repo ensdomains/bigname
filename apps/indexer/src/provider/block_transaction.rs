@@ -464,6 +464,11 @@ impl JsonRpcProvider {
                 }
             }
             Err(batch_error) => {
+                if is_retryable_provider_error(&batch_error) {
+                    return Err(batch_error).context(
+                        "retryable block-scoped receipt batch exhausted; refusing sequential fallback",
+                    );
+                }
                 for bundle in bundles {
                     let receipts = self
                         .fetch_receipts_by_block_hash(
@@ -524,7 +529,7 @@ fn head_hash_from_tag_result(tag: &str, result: Option<Value>) -> Result<Option<
         .transpose()
 }
 
-fn is_optional_checkpoint_tag_error(tag: &str, error: &anyhow::Error) -> bool {
+fn is_optional_checkpoint_tag_error(_tag: &str, error: &anyhow::Error) -> bool {
     if is_retryable_provider_error(error) {
         return false;
     }
@@ -534,8 +539,6 @@ fn is_optional_checkpoint_tag_error(tag: &str, error: &anyhow::Error) -> bool {
         return false;
     }
 
-    let tag = tag.to_ascii_lowercase();
-    let tag_is_named = message.contains(&tag);
     let unsupported_tag = message.contains("unsupported block tag")
         || message.contains("unsupported block parameter")
         || message.contains("unknown block tag")
@@ -547,5 +550,5 @@ fn is_optional_checkpoint_tag_error(tag: &str, error: &anyhow::Error) -> bool {
         || message.contains("-32602")
         || message.contains("invalid argument 0");
 
-    (tag_is_named && unsupported_tag) || invalid_params
+    unsupported_tag || invalid_params
 }
