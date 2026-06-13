@@ -9,9 +9,10 @@ mod write_rows;
 
 pub use orphan::{mark_identity_rows_range_orphaned, mark_surface_binding_range_orphaned};
 pub use read::{
-    load_name_surface, load_name_surface_including_noncanonical, load_resource,
-    load_resource_including_noncanonical, load_surface_binding,
-    load_surface_binding_including_noncanonical, load_surface_bindings_by_logical_name_id,
+    load_name_surface, load_name_surface_including_noncanonical,
+    load_name_surfaces_by_logical_name_ids, load_resource, load_resource_including_noncanonical,
+    load_surface_binding, load_surface_binding_including_noncanonical,
+    load_surface_bindings_by_logical_name_id,
     load_surface_bindings_by_logical_name_id_including_noncanonical,
     load_surface_bindings_by_resource_id,
     load_surface_bindings_by_resource_id_including_noncanonical, load_token_lineage,

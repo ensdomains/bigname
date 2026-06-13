@@ -12,9 +12,10 @@ use uuid::Uuid;
 
 use super::{
     IdentityOrphanCounts, NameSurface, Resource, SurfaceBinding, SurfaceBindingKind, TokenLineage,
-    load_name_surface, load_name_surface_including_noncanonical, load_resource,
-    load_resource_including_noncanonical, load_surface_binding,
-    load_surface_binding_including_noncanonical, load_surface_bindings_by_logical_name_id,
+    load_name_surface, load_name_surface_including_noncanonical,
+    load_name_surfaces_by_logical_name_ids, load_resource, load_resource_including_noncanonical,
+    load_surface_binding, load_surface_binding_including_noncanonical,
+    load_surface_bindings_by_logical_name_id,
     load_surface_bindings_by_logical_name_id_including_noncanonical,
     load_surface_bindings_by_resource_id,
     load_surface_bindings_by_resource_id_including_noncanonical, load_token_lineage,
@@ -390,6 +391,71 @@ async fn persists_canonical_surface_round_trip_with_resource_and_token_lineage()
         load_surface_bindings_by_resource_id(database.pool(), resource_id).await?,
         vec![expected_binding]
     );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn name_surface_batch_load_matches_per_row_lookup_for_duplicates_and_missing_ids()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let alpha = name_surface(
+        "ens:alpha.eth",
+        "alpha.eth",
+        "alpha.eth",
+        "surface_batch_alpha",
+        105,
+        CanonicalityState::Finalized,
+    );
+    let beta = name_surface(
+        "ens:beta.eth",
+        "beta.eth",
+        "beta.eth",
+        "surface_batch_beta",
+        106,
+        CanonicalityState::Safe,
+    );
+    let observed = name_surface(
+        "ens:observed.eth",
+        "observed.eth",
+        "observed.eth",
+        "surface_batch_observed",
+        107,
+        CanonicalityState::Observed,
+    );
+
+    upsert_name_surfaces(
+        database.pool(),
+        &[alpha.clone(), beta.clone(), observed.clone()],
+    )
+    .await?;
+
+    let requested_ids = vec![
+        "ens:beta.eth".to_owned(),
+        "ens:missing.eth".to_owned(),
+        "ens:alpha.eth".to_owned(),
+        "ens:beta.eth".to_owned(),
+        "ens:observed.eth".to_owned(),
+    ];
+    let expected = futures_util::future::try_join_all(
+        requested_ids
+            .iter()
+            .map(|logical_name_id| load_name_surface(database.pool(), logical_name_id)),
+    )
+    .await?;
+
+    let loaded = load_name_surfaces_by_logical_name_ids(database.pool(), &requested_ids).await?;
+    let actual = requested_ids
+        .iter()
+        .map(|logical_name_id| loaded.get(logical_name_id).cloned())
+        .collect::<Vec<_>>();
+
+    assert_eq!(actual, expected);
+    assert_eq!(actual[0], Some(beta.clone()));
+    assert_eq!(actual[1], None);
+    assert_eq!(actual[2], Some(alpha));
+    assert_eq!(actual[3], Some(beta));
+    assert_eq!(actual[4], None);
 
     database.cleanup().await
 }

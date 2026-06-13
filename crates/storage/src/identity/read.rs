@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use anyhow::{Context, Result};
 use sqlx::{Executor, PgPool, Postgres, postgres::PgRow};
 use uuid::Uuid;
@@ -47,6 +49,53 @@ pub async fn load_name_surface(
     logical_name_id: &str,
 ) -> Result<Option<NameSurface>> {
     load_name_surface_internal(pool, logical_name_id, false, false).await
+}
+
+/// Load canonical surface rows by deterministic logical name identities.
+pub async fn load_name_surfaces_by_logical_name_ids(
+    pool: &PgPool,
+    logical_name_ids: &[String],
+) -> Result<BTreeMap<String, NameSurface>> {
+    if logical_name_ids.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+
+    let rows = sqlx::query(&format!(
+        r#"
+        SELECT
+            logical_name_id,
+            namespace,
+            input_name,
+            canonical_display_name,
+            normalized_name,
+            dns_encoded_name,
+            namehash,
+            labelhashes,
+            normalizer_version,
+            normalization_warnings,
+            normalization_errors,
+            chain_id,
+            block_hash,
+            block_number,
+            provenance,
+            canonicality_state::TEXT AS canonicality_state
+        FROM name_surfaces
+        WHERE logical_name_id = ANY($1)
+        {}
+        "#,
+        identity_read_filter(false),
+    ))
+    .bind(logical_name_ids)
+    .fetch_all(pool)
+    .await
+    .context("failed to batch load name surfaces by logical_name_id")?;
+
+    let mut surfaces = BTreeMap::new();
+    for row in rows {
+        let surface = decode_name_surface(row)?;
+        surfaces.insert(surface.logical_name_id.clone(), surface);
+    }
+    Ok(surfaces)
 }
 
 /// Load one surface row by deterministic logical name identity, including observed and orphaned rows.
