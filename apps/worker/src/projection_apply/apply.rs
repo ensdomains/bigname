@@ -568,7 +568,8 @@ async fn fail_invalidation(
 ) -> Result<()> {
     let failure_reason = postgres_text_safe(&format!("{error:#}"));
     let failed_attempt_count = invalidation.attempt_count + 1;
-    let rows_affected = if failed_attempt_count >= MAX_PROJECTION_INVALIDATION_ATTEMPTS {
+    let should_dead_letter = failed_attempt_count >= MAX_PROJECTION_INVALIDATION_ATTEMPTS;
+    let rows_affected = if should_dead_letter {
         dead_letter_invalidation(pool, invalidation, &failure_reason, failed_attempt_count).await?
     } else {
         sqlx::query(
@@ -602,6 +603,17 @@ async fn fail_invalidation(
         })?
         .rows_affected()
     };
+    if should_dead_letter && rows_affected > 0 {
+        tracing::warn!(
+            projection = %invalidation.projection,
+            projection_key = %invalidation.projection_key,
+            generation = invalidation.generation,
+            failed_attempt_count = failed_attempt_count,
+            max_attempts = MAX_PROJECTION_INVALIDATION_ATTEMPTS,
+            failure_reason = %failure_reason,
+            "moved projection invalidation to dead letter"
+        );
+    }
     if rows_affected == 0 {
         release_superseded_claim(pool, invalidation).await?;
     }
