@@ -867,6 +867,160 @@ async fn rebuild_retains_selector_specific_text_record_values() -> Result<()> {
 }
 
 #[tokio::test]
+async fn rebuild_treats_empty_contenthash_bytes_as_not_found() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let contenthash_hex_resource_id = Uuid::from_u128(0x9703);
+    let retained_value_resource_id = Uuid::from_u128(0x9704);
+    let mut non_empty_contenthash_hex = record_changed_event(
+        "contenthash-hex-set",
+        "ens:contenthash-hex.eth",
+        contenthash_hex_resource_id,
+        "contenthash",
+        "contenthash",
+        None,
+        1047,
+        0,
+    );
+    non_empty_contenthash_hex.after_state["contenthash_hex"] = json!("0xe30101701220");
+    let mut empty_contenthash_hex = record_changed_event(
+        "contenthash-hex-clear",
+        "ens:contenthash-hex.eth",
+        contenthash_hex_resource_id,
+        "contenthash",
+        "contenthash",
+        None,
+        1048,
+        0,
+    );
+    empty_contenthash_hex.after_state["contenthash_hex"] = json!("0x");
+
+    seed_resources(
+        database.pool(),
+        &[contenthash_hex_resource_id, retained_value_resource_id],
+    )
+    .await?;
+    seed_raw_blocks(
+        database.pool(),
+        &[
+            raw_block("ethereum-mainnet", "0xrec1046", 1046, 1_776_200_046),
+            raw_block("ethereum-mainnet", "0xrec1047", 1047, 1_776_200_047),
+            raw_block("ethereum-mainnet", "0xrec1048", 1048, 1_776_200_048),
+            raw_block("ethereum-mainnet", "0xrec1049", 1049, 1_776_200_049),
+            raw_block("ethereum-mainnet", "0xrec1050", 1050, 1_776_200_050),
+        ],
+    )
+    .await?;
+    seed_events(
+        database.pool(),
+        &[
+            record_version_changed_event(
+                "contenthash-hex-boundary",
+                "ens:contenthash-hex.eth",
+                contenthash_hex_resource_id,
+                15,
+                1046,
+                0,
+            ),
+            record_version_changed_event(
+                "contenthash-value-boundary",
+                "ens:contenthash-value.eth",
+                retained_value_resource_id,
+                16,
+                1046,
+                1,
+            ),
+            non_empty_contenthash_hex,
+            empty_contenthash_hex,
+            record_changed_event_with_value(
+                "contenthash-value-set",
+                "ens:contenthash-value.eth",
+                retained_value_resource_id,
+                "contenthash",
+                "contenthash",
+                None,
+                json!({
+                    "encoding": "hex",
+                    "bytes": "0xe30101701220",
+                }),
+                1049,
+                0,
+            ),
+            record_changed_event_with_value(
+                "contenthash-value-clear",
+                "ens:contenthash-value.eth",
+                retained_value_resource_id,
+                "contenthash",
+                "contenthash",
+                None,
+                json!({
+                    "encoding": "hex",
+                    "bytes": "",
+                }),
+                1050,
+                0,
+            ),
+        ],
+    )
+    .await?;
+
+    rebuild_record_inventory_current(database.pool(), None).await?;
+
+    let contenthash_hex_row = load_record_inventory_current(
+        database.pool(),
+        contenthash_hex_resource_id,
+        &record_version_boundary(
+            "ens:contenthash-hex.eth",
+            contenthash_hex_resource_id,
+            Some(1),
+            Some(EVENT_KIND_RECORD_VERSION_CHANGED),
+            1046,
+            "0xrec1046",
+            1_776_200_046,
+            "ethereum-mainnet",
+        ),
+    )
+    .await?
+    .context("contenthash_hex row must exist")?;
+    assert_eq!(
+        contenthash_hex_row.entries,
+        json!([{
+            "record_key": "contenthash",
+            "record_family": "contenthash",
+            "selector_key": null,
+            "status": "not_found",
+        }])
+    );
+
+    let retained_value_row = load_record_inventory_current(
+        database.pool(),
+        retained_value_resource_id,
+        &record_version_boundary(
+            "ens:contenthash-value.eth",
+            retained_value_resource_id,
+            Some(2),
+            Some(EVENT_KIND_RECORD_VERSION_CHANGED),
+            1046,
+            "0xrec1046",
+            1_776_200_046,
+            "ethereum-mainnet",
+        ),
+    )
+    .await?
+    .context("retained value row must exist")?;
+    assert_eq!(
+        retained_value_row.entries,
+        json!([{
+            "record_key": "contenthash",
+            "record_family": "contenthash",
+            "selector_key": null,
+            "status": "not_found",
+        }])
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn rebuild_consumes_ensv2_resolver_record_events() -> Result<()> {
     let database = TestDatabase::new().await?;
     let resource_id = Uuid::from_u128(0x9701);

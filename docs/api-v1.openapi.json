@@ -103,6 +103,7 @@
       "CompactDomainSummary": {
         "properties": {
           "created_at": {
+            "description": "RFC 3339 timestamp for the first observation of the name itself, excluding supplemental cross-name wildcard or transport positions.",
             "type": [
               "object",
               "array",
@@ -213,6 +214,7 @@
             ]
           },
           "registration_date": {
+            "description": "RFC 3339 timestamp for the last RegistrationGranted block that started the current or most recently released registration epoch.",
             "type": [
               "object",
               "array",
