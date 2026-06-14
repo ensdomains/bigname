@@ -160,7 +160,8 @@ mod tests {
     fn error_response_serializes_transport_envelope_shape() {
         let mut details = Map::new();
         details.insert("field".to_owned(), json!("page_size"));
-        let error = V2Error::invalid_input("page_size must be at most 200").with_details(details);
+        let error =
+            V2Error::invalid_input("page_size must be between 1 and 200").with_details(details);
 
         let value = serde_json::to_value(error.envelope()).expect("error must serialize");
 
@@ -169,7 +170,7 @@ mod tests {
             json!({
                 "error": {
                     "code": "invalid_input",
-                    "message": "page_size must be at most 200",
+                    "message": "page_size must be between 1 and 200",
                     "details": {
                         "field": "page_size"
                     }
