@@ -26,7 +26,7 @@ use super::{
     json::{
         build_canonicality_summary, build_coverage, build_entries, build_explicit_gaps,
         build_last_change, build_provenance, build_selectors, build_unsupported_families,
-        gap_value, resolver_family_status_value,
+        resolver_family_status_value,
     },
     loading::{load_relevant_events, stream_target_resource_ids},
     profile::{

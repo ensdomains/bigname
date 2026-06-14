@@ -2072,6 +2072,17 @@
                 Some(&json!([]))
             );
             assert_eq!(
+                payload.pointer("/declared_state/record_inventory/explicit_gaps"),
+                Some(&json!([
+                    {
+                        "record_key": "contenthash",
+                        "record_family": "contenthash",
+                        "selector_key": null,
+                        "gap_reason": "not_observed_on_current_resolver",
+                    }
+                ]))
+            );
+            assert_eq!(
                 payload.pointer("/declared_state/record_cache/entries"),
                 Some(&json!([
                     {
@@ -2087,6 +2098,12 @@
                         "selector_key": null,
                         "status": "unsupported",
                         "unsupported_reason": "value_not_retained_in_normalized_events",
+                    },
+                    {
+                        "record_key": "contenthash",
+                        "record_family": "contenthash",
+                        "selector_key": null,
+                        "status": "not_found",
                     }
                 ]))
             );
@@ -2154,10 +2171,19 @@
                 "case {case_label}"
             );
             assert_eq!(
+                payload.pointer("/declared_state/record_inventory/explicit_gaps"),
+                Some(&json!([])),
+                "case {case_label}"
+            );
+            assert_eq!(
                 payload.pointer("/declared_state/record_inventory/unsupported_families"),
                 Some(&json!([
                     {
                         "record_family": "addr",
+                        "unsupported_reason": resolver_family_reason,
+                    },
+                    {
+                        "record_family": "contenthash",
                         "unsupported_reason": resolver_family_reason,
                     },
                     {
@@ -2171,10 +2197,45 @@
                 payload.pointer("/declared_state/record_cache/entries"),
                 Some(&json!([
                     {
+                        "record_key": "addr:60",
+                        "record_family": "addr",
+                        "selector_key": "60",
+                        "status": "unsupported",
+                        "unsupported_reason": resolver_family_reason,
+                    },
+                    {
+                        "record_key": "avatar",
+                        "record_family": "avatar",
+                        "selector_key": null,
+                        "status": "not_found",
+                    },
+                    {
                         "record_key": "contenthash",
                         "record_family": "contenthash",
                         "selector_key": null,
-                        "status": "not_found",
+                        "status": "unsupported",
+                        "unsupported_reason": resolver_family_reason,
+                    },
+                    {
+                        "record_key": "text:description",
+                        "record_family": "text",
+                        "selector_key": "description",
+                        "status": "unsupported",
+                        "unsupported_reason": resolver_family_reason,
+                    },
+                    {
+                        "record_key": "text:url",
+                        "record_family": "text",
+                        "selector_key": "url",
+                        "status": "unsupported",
+                        "unsupported_reason": resolver_family_reason,
+                    },
+                    {
+                        "record_key": "text:email",
+                        "record_family": "text",
+                        "selector_key": "email",
+                        "status": "unsupported",
+                        "unsupported_reason": resolver_family_reason,
                     }
                 ])),
                 "case {case_label}"

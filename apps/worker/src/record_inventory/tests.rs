@@ -418,6 +418,17 @@ async fn keyed_rebuild_keeps_visible_rows_when_projection_build_fails() -> Resul
 async fn rebuild_surfaces_supported_selectors_gaps_and_unsupported_families() -> Result<()> {
     let database = TestDatabase::new().await?;
     let resource_id = Uuid::from_u128(0x9500);
+    let mut contenthash_record = record_changed_event(
+        "contenthash",
+        "ens:alice.eth",
+        resource_id,
+        "contenthash",
+        "contenthash",
+        None,
+        1021,
+        1,
+    );
+    contenthash_record.after_state["contenthash_hex"] = json!("0xe30101701220");
 
     seed_resources(database.pool(), &[resource_id]).await?;
     seed_raw_blocks(
@@ -442,20 +453,7 @@ async fn rebuild_surfaces_supported_selectors_gaps_and_unsupported_families() ->
                 1021,
                 0,
             ),
-            record_changed_event_with_value(
-                "contenthash",
-                "ens:alice.eth",
-                resource_id,
-                "contenthash",
-                "contenthash",
-                None,
-                json!({
-                    "encoding": "hex",
-                    "bytes": "0xe30101701220",
-                }),
-                1021,
-                1,
-            ),
+            contenthash_record,
             record_changed_event(
                 "unsupported-avatar",
                 "ens:alice.eth",
@@ -757,12 +755,20 @@ async fn rebuild_limits_cache_entries_to_cacheable_selectors() -> Result<()> {
     );
     assert_eq!(
         row.explicit_gaps,
-        json!([{
-            "record_key": "addr:60",
-            "record_family": "addr",
-            "selector_key": "60",
-            "gap_reason": GAP_REASON_NOT_OBSERVED,
-        }])
+        json!([
+            {
+                "record_key": "addr:60",
+                "record_family": "addr",
+                "selector_key": "60",
+                "gap_reason": GAP_REASON_NOT_OBSERVED,
+            },
+            {
+                "record_key": "contenthash",
+                "record_family": "contenthash",
+                "selector_key": null,
+                "gap_reason": GAP_REASON_NOT_OBSERVED,
+            }
+        ])
     );
 
     database.cleanup().await
@@ -841,12 +847,20 @@ async fn rebuild_retains_selector_specific_text_record_values() -> Result<()> {
     );
     assert_eq!(
         row.explicit_gaps,
-        json!([{
-            "record_key": "addr:60",
-            "record_family": "addr",
-            "selector_key": "60",
-            "gap_reason": GAP_REASON_NOT_OBSERVED,
-        }])
+        json!([
+            {
+                "record_key": "addr:60",
+                "record_family": "addr",
+                "selector_key": "60",
+                "gap_reason": GAP_REASON_NOT_OBSERVED,
+            },
+            {
+                "record_key": "contenthash",
+                "record_family": "contenthash",
+                "selector_key": null,
+                "gap_reason": GAP_REASON_NOT_OBSERVED,
+            }
+        ])
     );
 
     database.cleanup().await
@@ -1396,6 +1410,10 @@ async fn rebuild_keeps_unadmitted_basenames_dynamic_resolver_inventory_explicit(
                 "unsupported_reason": RESOLVER_FAMILY_PENDING_REASON,
             },
             {
+                "record_family": "contenthash",
+                "unsupported_reason": RESOLVER_FAMILY_PENDING_REASON,
+            },
+            {
                 "record_family": "text",
                 "unsupported_reason": RESOLVER_FAMILY_PENDING_REASON,
             }
@@ -1488,6 +1506,10 @@ async fn rebuild_keeps_newer_record_version_boundary_for_pending_resolver() -> R
         json!([
             {
                 "record_family": "addr",
+                "unsupported_reason": RESOLVER_FAMILY_PENDING_REASON,
+            },
+            {
+                "record_family": "contenthash",
                 "unsupported_reason": RESOLVER_FAMILY_PENDING_REASON,
             },
             {
@@ -1689,6 +1711,10 @@ async fn rebuild_basenames_dynamic_resolver_inventory_gates_supported_pending_an
                     "unsupported_reason": unsupported_reason,
                 },
                 {
+                    "record_family": "contenthash",
+                    "unsupported_reason": unsupported_reason,
+                },
+                {
                     "record_family": "text",
                     "unsupported_reason": unsupported_reason,
                 }
@@ -1823,20 +1849,16 @@ async fn rebuild_keeps_pending_ensv1_dynamic_resolver_inventory_explicit() -> Re
     .context("pending resolver inventory row must exist")?;
 
     assert_eq!(row.selectors, json!([]));
-    assert_eq!(
-        row.explicit_gaps,
-        json!([{
-            "record_key": "contenthash",
-            "record_family": "contenthash",
-            "selector_key": null,
-            "gap_reason": GAP_REASON_NOT_OBSERVED,
-        }])
-    );
+    assert_eq!(row.explicit_gaps, json!([]));
     assert_eq!(
         row.unsupported_families,
         json!([
             {
                 "record_family": "addr",
+                "unsupported_reason": RESOLVER_FAMILY_PENDING_REASON,
+            },
+            {
+                "record_family": "contenthash",
                 "unsupported_reason": RESOLVER_FAMILY_PENDING_REASON,
             },
             {
@@ -2024,6 +2046,10 @@ async fn rebuild_keeps_observed_addr_record_for_unknown_ensv1_current_resolver()
                 "unsupported_reason": RESOLVER_FAMILY_PENDING_REASON,
             },
             {
+                "record_family": "contenthash",
+                "unsupported_reason": RESOLVER_FAMILY_PENDING_REASON,
+            },
+            {
                 "record_family": "data",
                 "unsupported_reason": RESOLVER_FAMILY_PENDING_REASON,
             },
@@ -2194,6 +2220,12 @@ async fn rebuild_surfaces_dataresolver_and_ignores_pubkey_for_known_ensv1_resolv
                 "record_key": "addr:60",
                 "record_family": "addr",
                 "selector_key": "60",
+                "gap_reason": GAP_REASON_NOT_OBSERVED,
+            },
+            {
+                "record_key": "contenthash",
+                "record_family": "contenthash",
+                "selector_key": null,
                 "gap_reason": GAP_REASON_NOT_OBSERVED,
             },
             {
@@ -2368,6 +2400,15 @@ async fn rebuild_supports_known_legacy_ensv1_resolver_without_latest_capabilitie
                 "cacheable": true,
             }
         ])
+    );
+    assert_eq!(
+        row.explicit_gaps,
+        json!([{
+            "record_key": "contenthash",
+            "record_family": "contenthash",
+            "selector_key": null,
+            "gap_reason": GAP_REASON_NOT_OBSERVED,
+        }])
     );
     assert_eq!(
         row.unsupported_families,
@@ -4129,10 +4170,16 @@ async fn rebuild_keeps_unsupported_legacy_ensv1_resolver_family_explicit() -> Re
     );
     assert_eq!(
         row.unsupported_families,
-        json!([{
-            "record_family": "text",
-            "unsupported_reason": RESOLVER_FAMILY_UNSUPPORTED_REASON,
-        }])
+        json!([
+            {
+                "record_family": "contenthash",
+                "unsupported_reason": RESOLVER_FAMILY_UNSUPPORTED_REASON,
+            },
+            {
+                "record_family": "text",
+                "unsupported_reason": RESOLVER_FAMILY_UNSUPPORTED_REASON,
+            }
+        ])
     );
     assert_eq!(
         row.coverage["unsupported_reason"],

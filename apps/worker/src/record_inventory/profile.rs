@@ -16,6 +16,7 @@ pub(super) struct ResolverProfileGate {
 pub(super) struct ResolverRecordFamilyStatuses {
     pub(super) addr: String,
     pub(super) text: String,
+    pub(super) contenthash: String,
     pub(super) data: String,
 }
 
@@ -38,6 +39,12 @@ impl ResolverRecordFamilyStatuses {
         if self.text != RESOLVER_PROFILE_STATUS_SUPPORTED {
             families.push((SUPPORTED_TEXT_RECORD_FAMILY, self.text.as_str()));
         }
+        if self.contenthash != RESOLVER_PROFILE_STATUS_SUPPORTED {
+            families.push((
+                SUPPORTED_CONTENTHASH_RECORD_FAMILY,
+                self.contenthash.as_str(),
+            ));
+        }
         families
     }
 
@@ -45,6 +52,7 @@ impl ResolverRecordFamilyStatuses {
         match record_family {
             SUPPORTED_ADDR_RECORD_FAMILY => Some(self.addr.as_str()),
             SUPPORTED_TEXT_RECORD_FAMILY => Some(self.text.as_str()),
+            SUPPORTED_CONTENTHASH_RECORD_FAMILY => Some(self.contenthash.as_str()),
             DATA_RESOLVER_RECORD_FAMILY => Some(self.data.as_str()),
             _ => None,
         }
@@ -218,6 +226,13 @@ impl ResolverProfileGate {
                 source_family,
                 &resolver_address,
                 SUPPORTED_TEXT_RECORD_FAMILY,
+                None,
+            ),
+            contenthash: self.record_family_status(
+                &event.chain_id,
+                source_family,
+                &resolver_address,
+                SUPPORTED_CONTENTHASH_RECORD_FAMILY,
                 None,
             ),
             data: self.record_family_status(
@@ -427,7 +442,7 @@ fn resolver_record_fact_families(
         (SOURCE_FAMILY_ENS_V1_RESOLVER_L1, "abi") => {
             vec!["resolver_record:abi", RESOLVER_PROFILE_FACT_FAMILY_RECORD]
         }
-        (SOURCE_FAMILY_ENS_V1_RESOLVER_L1, "content" | UNSUPPORTED_CONTENTHASH_RECORD_FAMILY) => {
+        (SOURCE_FAMILY_ENS_V1_RESOLVER_L1, "content" | SUPPORTED_CONTENTHASH_RECORD_FAMILY) => {
             vec![
                 "resolver_record:contenthash",
                 RESOLVER_PROFILE_FACT_FAMILY_RECORD,

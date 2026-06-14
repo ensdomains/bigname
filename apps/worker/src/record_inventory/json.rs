@@ -48,6 +48,13 @@ pub(super) fn build_explicit_gaps(selectors: &BTreeMap<String, RecordSelector>) 
             None,
         ));
     }
+    if !selectors.contains_key(SUPPORTED_CONTENTHASH_RECORD_KEY) {
+        gaps.push(gap_value(
+            SUPPORTED_CONTENTHASH_RECORD_KEY,
+            SUPPORTED_CONTENTHASH_RECORD_FAMILY,
+            None,
+        ));
+    }
 
     gaps.sort_by(|left, right| {
         left["record_key"]
@@ -89,11 +96,27 @@ pub(super) fn build_entries(
         let mut latest_value = None;
         for event in record_change_events.iter().rev() {
             if parse_record_selector(event)? == *selector {
-                latest_value = event
-                    .after_state
-                    .as_object()
-                    .and_then(|object| object.get("value"))
-                    .cloned();
+                latest_value =
+                    event
+                        .after_state
+                        .as_object()
+                        .and_then(|object| match object.get("value") {
+                            Some(value) => Some(value.clone()),
+                            None if selector.record_family
+                                == SUPPORTED_CONTENTHASH_RECORD_FAMILY =>
+                            {
+                                object
+                                    .get("contenthash_hex")
+                                    .and_then(Value::as_str)
+                                    .map(|bytes| {
+                                        json!({
+                                            "encoding": "hex",
+                                            "bytes": bytes,
+                                        })
+                                    })
+                            }
+                            None => None,
+                        });
                 break;
             }
         }
