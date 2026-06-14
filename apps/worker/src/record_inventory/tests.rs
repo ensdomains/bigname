@@ -4051,6 +4051,19 @@ async fn rebuild_rejects_multicoin_addr_for_eth_only_legacy_ensv1_resolver() -> 
             }
         ])
     );
+    assert_eq!(
+        row.unsupported_families,
+        json!([{
+            "record_family": "contenthash",
+            "unsupported_reason": RESOLVER_FAMILY_UNSUPPORTED_REASON,
+        }])
+    );
+    assert_eq!(row.coverage["status"], json!("partial"));
+    assert_eq!(row.coverage["exhaustiveness"], json!("best_effort"));
+    assert_eq!(
+        row.coverage["unsupported_reason"],
+        json!(RESOLVER_FAMILY_UNSUPPORTED_REASON)
+    );
     assert_eq!(row.provenance["normalized_event_ids"], json!([1]));
 
     let legacy_resolver_address = legacy_resolver_address.to_ascii_lowercase();
@@ -4066,6 +4079,12 @@ async fn rebuild_rejects_multicoin_addr_for_eth_only_legacy_ensv1_resolver() -> 
         "unsupported"
     );
     assert_eq!(feature_statuses["resolver_record:addr"], "supported");
+    assert_eq!(feature_statuses["resolver_record:text"], "supported");
+    assert_eq!(
+        feature_statuses["resolver_record:contenthash"],
+        "unsupported"
+    );
+    assert_eq!(feature_statuses["resolver_record:data"], "unsupported");
 
     database.cleanup().await
 }

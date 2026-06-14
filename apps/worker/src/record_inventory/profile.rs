@@ -24,6 +24,7 @@ impl ResolverRecordFamilyStatuses {
     pub(super) fn all_supported(&self) -> bool {
         self.addr == RESOLVER_PROFILE_STATUS_SUPPORTED
             && self.text == RESOLVER_PROFILE_STATUS_SUPPORTED
+            && self.contenthash == RESOLVER_PROFILE_STATUS_SUPPORTED
     }
 
     pub(super) fn any_supported(&self) -> bool {
