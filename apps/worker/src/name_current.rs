@@ -228,14 +228,10 @@ async fn build_name_current_row(pool: &PgPool, name: &NameSurfaceSeed) -> Result
     )
     .await?;
     let mut facts = project_facts(&events, current_binding.as_ref(), &history_heads)?;
-    facts.created_at = min_timestamp(
-        name,
-        current_binding.as_ref(),
-        &events,
-        &history_heads,
-        &supplemental_chain_observations,
-    )
-    .map(|timestamp| timestamp.unix_timestamp());
+    // created_at is the first observation of this name. Supplemental observations
+    // can come from parent wildcard names or Basenames transport lineage.
+    facts.created_at = min_timestamp(name, current_binding.as_ref(), &events, &history_heads, &[])
+        .map(|timestamp| timestamp.unix_timestamp());
     let chain_positions = build_chain_positions(
         name,
         current_binding.as_ref(),
