@@ -35,6 +35,8 @@ pub(super) fn build_declared_summary(facts: ProjectedFacts, topology: Option<Val
             "authority_key": facts.authority_key,
             "registrant": facts.registrant,
             "expiry": facts.expiry,
+            "registered_at": format_unix_timestamp_value(facts.registered_at),
+            "created_at": format_unix_timestamp_value(facts.created_at),
             "released_at": facts.released_at,
             "latest_event_kind": facts.latest_registration_event_kind,
         }),

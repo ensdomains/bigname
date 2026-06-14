@@ -442,6 +442,20 @@ async fn rebuild_surfaces_supported_selectors_gaps_and_unsupported_families() ->
                 1021,
                 0,
             ),
+            record_changed_event_with_value(
+                "contenthash",
+                "ens:alice.eth",
+                resource_id,
+                "contenthash",
+                "contenthash",
+                None,
+                json!({
+                    "encoding": "hex",
+                    "bytes": "0xe30101701220",
+                }),
+                1021,
+                1,
+            ),
             record_changed_event(
                 "unsupported-avatar",
                 "ens:alice.eth",
@@ -450,7 +464,7 @@ async fn rebuild_surfaces_supported_selectors_gaps_and_unsupported_families() ->
                 "avatar",
                 None,
                 1021,
-                1,
+                2,
             ),
         ],
     )
@@ -477,12 +491,20 @@ async fn rebuild_surfaces_supported_selectors_gaps_and_unsupported_families() ->
 
     assert_eq!(
         row.selectors,
-        json!([{
-            "record_key": "addr:61",
-            "record_family": "addr",
-            "selector_key": "61",
-            "cacheable": true,
-        }])
+        json!([
+            {
+                "record_key": "addr:61",
+                "record_family": "addr",
+                "selector_key": "61",
+                "cacheable": true,
+            },
+            {
+                "record_key": "contenthash",
+                "record_family": "contenthash",
+                "selector_key": null,
+                "cacheable": true,
+            }
+        ])
     );
     assert_eq!(
         row.explicit_gaps,
@@ -507,6 +529,28 @@ async fn rebuild_surfaces_supported_selectors_gaps_and_unsupported_families() ->
             "record_family": "avatar",
             "unsupported_reason": UNSUPPORTED_FAMILY_REASON,
         }])
+    );
+    assert_eq!(
+        row.entries,
+        json!([
+            {
+                "record_key": "addr:61",
+                "record_family": "addr",
+                "selector_key": "61",
+                "status": "unsupported",
+                "unsupported_reason": CACHE_UNSUPPORTED_REASON_VALUE_NOT_RETAINED,
+            },
+            {
+                "record_key": "contenthash",
+                "record_family": "contenthash",
+                "selector_key": null,
+                "status": "success",
+                "value": {
+                    "encoding": "hex",
+                    "bytes": "0xe30101701220",
+                },
+            }
+        ])
     );
 
     database.cleanup().await

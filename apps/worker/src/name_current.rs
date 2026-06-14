@@ -17,7 +17,9 @@ use load::{
     load_canonical_name_surface, load_canonical_name_surfaces, load_current_binding_context,
     load_history_heads, load_relevant_events,
 };
-use project::{build_canonicality_summary, build_chain_positions, max_timestamp, project_facts};
+use project::{
+    build_canonicality_summary, build_chain_positions, max_timestamp, min_timestamp, project_facts,
+};
 use resolution::build_supported_resolution_projection;
 use sqlx::{PgPool, types::time::OffsetDateTime};
 use supplemental::{
@@ -225,7 +227,15 @@ async fn build_name_current_row(pool: &PgPool, name: &NameSurfaceSeed) -> Result
         basenames_execution_manifest.as_ref(),
     )
     .await?;
-    let facts = project_facts(&events, current_binding.as_ref(), &history_heads)?;
+    let mut facts = project_facts(&events, current_binding.as_ref(), &history_heads)?;
+    facts.created_at = min_timestamp(
+        name,
+        current_binding.as_ref(),
+        &events,
+        &history_heads,
+        &supplemental_chain_observations,
+    )
+    .map(|timestamp| timestamp.unix_timestamp());
     let chain_positions = build_chain_positions(
         name,
         current_binding.as_ref(),

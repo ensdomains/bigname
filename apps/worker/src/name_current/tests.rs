@@ -101,12 +101,12 @@ async fn rebuilds_first_registration_into_name_current() -> Result<()> {
     seed_raw_blocks(
         database.pool(),
         &[
-            raw_block("ethereum-mainnet", "0xname", 100, 1_717_171_700),
-            raw_block("ethereum-mainnet", "0xgrant", 101, 1_717_171_701),
+            raw_block("ethereum-mainnet", "0xgrant", 100, 1_717_171_700),
+            raw_block("ethereum-mainnet", "0xbound", 101, 1_717_171_701),
         ],
     )
     .await?;
-    seed_identity(database.pool(), &binding, "0xgrant", 101, 1_717_171_701).await?;
+    seed_identity(database.pool(), &binding, "0xbound", 101, 1_717_171_701).await?;
     seed_events(
         database.pool(),
         &[
@@ -115,7 +115,7 @@ async fn rebuilds_first_registration_into_name_current() -> Result<()> {
                 "grant-1",
                 "RegistrationGranted",
                 "0xgrant",
-                101,
+                100,
                 Some(0),
                 json!({}),
                 json!({
@@ -129,7 +129,7 @@ async fn rebuilds_first_registration_into_name_current() -> Result<()> {
                 &binding,
                 "epoch-1",
                 "AuthorityEpochChanged",
-                "0xgrant",
+                "0xbound",
                 101,
                 None,
                 json!({}),
@@ -142,7 +142,7 @@ async fn rebuilds_first_registration_into_name_current() -> Result<()> {
                 &binding,
                 "bound-1",
                 "SurfaceBound",
-                "0xgrant",
+                "0xbound",
                 101,
                 None,
                 json!({}),
@@ -182,6 +182,14 @@ async fn rebuilds_first_registration_into_name_current() -> Result<()> {
     assert_eq!(
         row.declared_summary["registration"]["registrant"],
         Value::String("0x0000000000000000000000000000000000000aaa".to_owned())
+    );
+    assert_eq!(
+        row.declared_summary["registration"]["registered_at"],
+        Value::String(format_timestamp(timestamp(1_717_171_700)))
+    );
+    assert_eq!(
+        row.declared_summary["registration"]["created_at"],
+        Value::String(format_timestamp(timestamp(1_717_171_700)))
     );
     assert_eq!(
         row.declared_summary["control"]["expiry"],
@@ -2367,6 +2375,10 @@ async fn rebuild_keeps_same_binding_for_renewal_and_transfer() -> Result<()> {
     assert_eq!(
         row.declared_summary["registration"]["expiry"],
         Value::Number(1_900_000_000_i64.into())
+    );
+    assert_eq!(
+        row.declared_summary["registration"]["registered_at"],
+        Value::String(format_timestamp(timestamp(1_717_171_801)))
     );
     assert_eq!(
         row.declared_summary["registration"]["registrant"],

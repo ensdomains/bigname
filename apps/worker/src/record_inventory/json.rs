@@ -167,6 +167,10 @@ fn is_supported_selector(selector: &RecordSelector) -> bool {
             .selector_key
             .as_ref()
             .is_some_and(|selector_key| selector.record_key == format!("addr:{selector_key}")),
+        SUPPORTED_CONTENTHASH_RECORD_FAMILY => {
+            selector.selector_key.is_none()
+                && selector.record_key == SUPPORTED_CONTENTHASH_RECORD_KEY
+        }
         _ => false,
     }
 }
