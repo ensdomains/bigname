@@ -212,6 +212,358 @@ async fn v2_get_name_reads_basenames_record_with_base_network() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn v2_get_name_records_returns_indexed_values() -> Result<()> {
+    let payload = v2_name_records_payload("/v2/names/Alice.eth/records").await?;
+
+    assert!(payload["data"].get("records").is_none());
+    assert_eq!(payload["meta"]["source"], json!("indexed"));
+    assert_eq!(
+        payload["data"]["resolver"],
+        json!({
+            "chain_id": 1,
+            "address": "0x0000000000000000000000000000000000000abc"
+        })
+    );
+    assert_eq!(
+        payload["data"]["addresses"],
+        json!({
+            "60": "0x0000000000000000000000000000000000000def"
+        })
+    );
+    assert_eq!(
+        payload["data"]["text_records"],
+        json!({
+            "avatar": "https://example.test/avatar.png",
+            "description": "Alice profile"
+        })
+    );
+    assert_eq!(payload["data"]["content_hash"], json!("ipfs://alice"));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_name_records_keys_filter_values_and_per_key_answers() -> Result<()> {
+    let payload =
+        v2_name_records_payload("/v2/names/Alice.eth/records?keys=addr:60,text:description")
+            .await?;
+
+    assert_eq!(
+        payload["data"]["addresses"],
+        json!({
+            "60": "0x0000000000000000000000000000000000000def"
+        })
+    );
+    assert_eq!(
+        payload["data"]["text_records"],
+        json!({
+            "description": "Alice profile"
+        })
+    );
+    assert_eq!(payload["data"]["content_hash"], Value::Null);
+    assert_eq!(
+        payload["data"]["records"],
+        json!({
+            "addr:60": {
+                "status": "ok",
+                "value": "0x0000000000000000000000000000000000000def"
+            },
+            "text:description": {
+                "status": "ok",
+                "value": "Alice profile"
+            }
+        })
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_name_records_reports_unset_and_unsupported_per_key() -> Result<()> {
+    let payload = v2_name_records_payload_with_setup(
+        "/v2/names/Alice.eth/records?keys=contenthash,text:email",
+        |_, _, inventory| {
+            inventory.selectors = json!([
+                {
+                    "record_key": "addr:60",
+                    "record_family": "addr",
+                    "selector_key": "60",
+                    "cacheable": true
+                },
+                {
+                    "record_key": "avatar",
+                    "record_family": "avatar",
+                    "selector_key": null,
+                    "cacheable": true
+                }
+            ]);
+            inventory.entries = json!([
+                {
+                    "record_key": "addr:60",
+                    "record_family": "addr",
+                    "selector_key": "60",
+                    "status": "success",
+                    "value": {
+                        "coin_type": "60",
+                        "value": "0x0000000000000000000000000000000000000def"
+                    }
+                },
+                {
+                    "record_key": "avatar",
+                    "record_family": "avatar",
+                    "selector_key": null,
+                    "status": "success",
+                    "value": {
+                        "value": "https://example.test/avatar.png"
+                    }
+                }
+            ]);
+            inventory.explicit_gaps = json!([
+                {
+                    "record_key": "contenthash",
+                    "record_family": "contenthash",
+                    "selector_key": null,
+                    "gap_reason": "not_observed_on_current_resolver"
+                }
+            ]);
+            inventory.unsupported_families = json!([
+                {
+                    "record_family": "text",
+                    "unsupported_reason": "resolver_family_pending"
+                }
+            ]);
+        },
+        None,
+    )
+    .await?;
+
+    assert_eq!(payload["data"]["content_hash"], Value::Null);
+    assert_eq!(
+        payload["data"]["records"],
+        json!({
+            "contenthash": {
+                "status": "not_found",
+                "failure_reason": "not_observed_on_current_resolver"
+            },
+            "text:email": {
+                "status": "unsupported",
+                "unsupported_reason": "resolver_family_pending"
+            }
+        })
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_name_records_include_inventory_uses_product_key_lists() -> Result<()> {
+    let payload = v2_name_records_payload_with_setup(
+        "/v2/names/Alice.eth/records?keys=contenthash,text:email&include=inventory",
+        |_, _, inventory| {
+            inventory.selectors = json!([
+                {
+                    "record_key": "addr:60",
+                    "record_family": "addr",
+                    "selector_key": "60",
+                    "cacheable": true
+                },
+                {
+                    "record_key": "avatar",
+                    "record_family": "avatar",
+                    "selector_key": null,
+                    "cacheable": true
+                }
+            ]);
+            inventory.entries = json!([
+                {
+                    "record_key": "addr:60",
+                    "record_family": "addr",
+                    "selector_key": "60",
+                    "status": "success",
+                    "value": {
+                        "coin_type": "60",
+                        "value": "0x0000000000000000000000000000000000000def"
+                    }
+                },
+                {
+                    "record_key": "avatar",
+                    "record_family": "avatar",
+                    "selector_key": null,
+                    "status": "success",
+                    "value": {
+                        "value": "https://example.test/avatar.png"
+                    }
+                }
+            ]);
+            inventory.explicit_gaps = json!([
+                {
+                    "record_key": "contenthash",
+                    "record_family": "contenthash",
+                    "selector_key": null,
+                    "gap_reason": "not_observed_on_current_resolver"
+                }
+            ]);
+            inventory.unsupported_families = json!([
+                {
+                    "record_family": "text",
+                    "unsupported_reason": "resolver_family_pending"
+                }
+            ]);
+        },
+        None,
+    )
+    .await?;
+
+    assert_eq!(
+        payload["data"]["inventory"],
+        json!({
+            "known_keys": ["addr:60", "avatar"],
+            "unset_keys": ["contenthash"],
+            "unsupported_keys": ["text:email"]
+        })
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_name_records_source_verified_reads_persisted_verified_values() -> Result<()> {
+    let verified_queries = json!([
+        {
+            "record_key": "addr:60",
+            "status": "success",
+            "value": {
+                "coin_type": "60",
+                "value": "0x0000000000000000000000000000000000000fed"
+            },
+            "provenance": {
+                "execution_trace_id": Uuid::from_u128(0x0e7ec7ace00000000000000000000072).to_string()
+            }
+        }
+    ]);
+    let payload = v2_name_records_payload_with_setup(
+        "/v2/names/Alice.eth/records?source=verified&keys=addr:60",
+        |_, _, _| {},
+        Some((&["addr:60"], verified_queries)),
+    )
+    .await?;
+
+    assert_eq!(payload["meta"]["source"], json!("verified"));
+    assert_eq!(
+        payload["data"]["addresses"],
+        json!({
+            "60": "0x0000000000000000000000000000000000000fed"
+        })
+    );
+    assert_eq!(
+        payload["data"]["records"]["addr:60"],
+        json!({
+            "status": "ok",
+            "value": "0x0000000000000000000000000000000000000fed"
+        })
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_name_records_source_auto_falls_back_to_verified_when_indexed_does_not_satisfy(
+) -> Result<()> {
+    let verified_queries = json!([
+        {
+            "record_key": "addr:60",
+            "status": "success",
+            "value": {
+                "coin_type": "60",
+                "value": "0x00000000000000000000000000000000000000ee"
+            },
+            "provenance": {
+                "execution_trace_id": Uuid::from_u128(0x0e7ec7ace00000000000000000000073).to_string()
+            }
+        }
+    ]);
+    let payload = v2_name_records_payload_with_setup(
+        "/v2/names/Alice.eth/records?source=auto&keys=addr:60",
+        |logical_name_id, resource_id, inventory| {
+            *inventory = dynamic_resolver_unsupported_profile_record_inventory_current_row(
+                logical_name_id,
+                resource_id,
+            );
+        },
+        Some((&["addr:60"], verified_queries)),
+    )
+    .await?;
+
+    assert_eq!(payload["meta"]["source"], json!("verified"));
+    assert_eq!(
+        payload["data"]["addresses"],
+        json!({
+            "60": "0x00000000000000000000000000000000000000ee"
+        })
+    );
+    assert_eq!(
+        payload["data"]["records"]["addr:60"],
+        json!({
+            "status": "ok",
+            "value": "0x00000000000000000000000000000000000000ee"
+        })
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_name_records_missing_name_returns_not_found() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    seed_v2_alice_name_records_fixture(&database, |_, _, _| {}, None).await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v2/names/missing.eth/records")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("v2 missing name records request failed")?;
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["error"]["code"], json!("not_found"));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_name_records_response_omits_banned_v1_spellings() -> Result<()> {
+    let payload =
+        v2_name_records_payload("/v2/names/Alice.eth/records?keys=addr:60&include=inventory")
+            .await?;
+    assert_no_banned_v1_spellings(&payload);
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_name_records_uses_envelope_shape() -> Result<()> {
+    let payload = v2_name_records_payload("/v2/names/Alice.eth/records?keys=addr:60").await?;
+
+    assert!(payload.get("page").is_none());
+    assert!(payload["data"].is_object());
+    assert_eq!(payload["meta"]["source"], json!("indexed"));
+    assert_eq!(
+        payload["meta"]["as_of"]["1"],
+        json!({
+            "block_number": 21_000_003,
+            "block_hash": "0xbinding",
+            "timestamp": "2026-04-17T00:00:03Z"
+        })
+    );
+
+    Ok(())
+}
+
 async fn v2_name_record_payload(uri: &str) -> Result<Value> {
     v2_name_record_payload_with_row(uri, |_| {}).await
 }
@@ -353,6 +705,161 @@ async fn v2_name_record_payload_with_row(
 
     database.cleanup().await?;
     Ok(payload)
+}
+
+async fn v2_name_records_payload(uri: &str) -> Result<Value> {
+    v2_name_records_payload_with_setup(uri, |_, _, _| {}, None).await
+}
+
+async fn v2_name_records_payload_with_setup(
+    uri: &str,
+    configure_inventory: impl FnOnce(&str, Uuid, &mut bigname_storage::RecordInventoryCurrentRow),
+    verified: Option<(&[&str], Value)>,
+) -> Result<Value> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    seed_v2_alice_name_records_fixture(&database, configure_inventory, verified).await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(uri)
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("v2 name records request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+
+    database.cleanup().await?;
+    Ok(payload)
+}
+
+async fn seed_v2_alice_name_records_fixture(
+    database: &TestDatabase,
+    configure_inventory: impl FnOnce(&str, Uuid, &mut bigname_storage::RecordInventoryCurrentRow),
+    verified: Option<(&[&str], Value)>,
+) -> Result<()> {
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0x2200);
+    let token_lineage_id = Uuid::from_u128(0x1100);
+    let surface_binding_id = Uuid::from_u128(0x3300);
+
+    database
+        .seed_name_current_binding(
+            logical_name_id,
+            "ens",
+            "alice.eth",
+            "Alice.eth",
+            "namehash:alice.eth",
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    database
+        .insert_name_current_row(exact_name_row(
+            logical_name_id,
+            surface_binding_id,
+            resource_id,
+            token_lineage_id,
+        ))
+        .await?;
+
+    let mut inventory = record_inventory_current_row(logical_name_id, resource_id);
+    inventory.selectors = json!([
+        {
+            "record_key": "addr:60",
+            "record_family": "addr",
+            "selector_key": "60",
+            "cacheable": true
+        },
+        {
+            "record_key": "avatar",
+            "record_family": "avatar",
+            "selector_key": null,
+            "cacheable": true
+        },
+        {
+            "record_key": "contenthash",
+            "record_family": "contenthash",
+            "selector_key": null,
+            "cacheable": true
+        },
+        {
+            "record_key": "text:description",
+            "record_family": "text",
+            "selector_key": "description",
+            "cacheable": true
+        }
+    ]);
+    inventory.explicit_gaps = json!([]);
+    inventory.unsupported_families = json!([]);
+    inventory.entries = json!([
+        {
+            "record_key": "addr:60",
+            "record_family": "addr",
+            "selector_key": "60",
+            "status": "success",
+            "value": {
+                "coin_type": "60",
+                "value": "0x0000000000000000000000000000000000000def"
+            }
+        },
+        {
+            "record_key": "avatar",
+            "record_family": "avatar",
+            "selector_key": null,
+            "status": "success",
+            "value": {
+                "value": "https://example.test/avatar.png"
+            }
+        },
+        {
+            "record_key": "contenthash",
+            "record_family": "contenthash",
+            "selector_key": null,
+            "status": "success",
+            "value": {
+                "value": "ipfs://alice"
+            }
+        },
+        {
+            "record_key": "text:description",
+            "record_family": "text",
+            "selector_key": "description",
+            "status": "success",
+            "value": {
+                "key": "description",
+                "value": "Alice profile"
+            }
+        }
+    ]);
+    configure_inventory(logical_name_id, resource_id, &mut inventory);
+    database.insert_record_inventory_current_row(inventory).await?;
+
+    if let Some((record_keys, verified_queries)) = verified {
+        let request_key = resolution_execution_request_key(record_keys);
+        let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000070);
+        let trace = resolution_execution_trace(
+            execution_trace_id,
+            &request_key,
+            record_keys,
+            verified_queries.clone(),
+        );
+        let outcome = resolution_execution_outcome(
+            execution_trace_id,
+            &request_key,
+            verified_queries,
+            logical_name_id,
+            resource_id,
+        );
+        upsert_execution_trace(&database.pool, &trace).await?;
+        upsert_execution_outcome(&database.pool, &outcome).await?;
+    }
+
+    Ok(())
 }
 
 fn assert_no_banned_v1_spellings(value: &Value) {
