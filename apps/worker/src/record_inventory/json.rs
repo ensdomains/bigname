@@ -12,6 +12,11 @@ use super::{
     types::{RecordSelector, RelevantEvent},
 };
 
+enum RecordCacheEntryValue {
+    Success(Value),
+    NotFound,
+}
+
 pub(super) fn build_selectors(
     record_change_events: &[&RelevantEvent],
 ) -> Result<BTreeMap<String, RecordSelector>> {
@@ -45,6 +50,13 @@ pub(super) fn build_explicit_gaps(selectors: &BTreeMap<String, RecordSelector>) 
         gaps.push(gap_value(
             SUPPORTED_TEXT_RECORD_KEY,
             SUPPORTED_TEXT_RECORD_FAMILY,
+            None,
+        ));
+    }
+    if !selectors.contains_key(SUPPORTED_CONTENTHASH_RECORD_KEY) {
+        gaps.push(gap_value(
+            SUPPORTED_CONTENTHASH_RECORD_KEY,
+            SUPPORTED_CONTENTHASH_RECORD_FAMILY,
             None,
         ));
     }
@@ -89,17 +101,13 @@ pub(super) fn build_entries(
         let mut latest_value = None;
         for event in record_change_events.iter().rev() {
             if parse_record_selector(event)? == *selector {
-                latest_value = event
-                    .after_state
-                    .as_object()
-                    .and_then(|object| object.get("value"))
-                    .cloned();
+                latest_value = latest_record_cache_entry_value(event, selector);
                 break;
             }
         }
 
-        let entry = latest_value
-            .map(|value| {
+        let entry = match latest_value {
+            Some(RecordCacheEntryValue::Success(value)) => {
                 json!({
                     "record_key": selector.record_key,
                     "record_family": selector.record_family,
@@ -107,8 +115,16 @@ pub(super) fn build_entries(
                     "status": "success",
                     "value": value,
                 })
-            })
-            .unwrap_or_else(|| {
+            }
+            Some(RecordCacheEntryValue::NotFound) => {
+                json!({
+                    "record_key": selector.record_key,
+                    "record_family": selector.record_family,
+                    "selector_key": selector.selector_key,
+                    "status": "not_found",
+                })
+            }
+            None => {
                 json!({
                     "record_key": selector.record_key,
                     "record_family": selector.record_family,
@@ -116,7 +132,8 @@ pub(super) fn build_entries(
                     "status": "unsupported",
                     "unsupported_reason": CACHE_UNSUPPORTED_REASON_VALUE_NOT_RETAINED,
                 })
-            });
+            }
+        };
         entries.push(entry);
     }
 
@@ -126,6 +143,54 @@ pub(super) fn build_entries(
             .cmp(&right["record_key"].as_str())
     });
     Ok(entries)
+}
+
+fn latest_record_cache_entry_value(
+    event: &RelevantEvent,
+    selector: &RecordSelector,
+) -> Option<RecordCacheEntryValue> {
+    let object = event.after_state.as_object()?;
+    if let Some(value) = object.get("value") {
+        if selector.record_family == SUPPORTED_CONTENTHASH_RECORD_FAMILY
+            && contenthash_value_is_empty(value)
+        {
+            return Some(RecordCacheEntryValue::NotFound);
+        }
+        return Some(RecordCacheEntryValue::Success(value.clone()));
+    }
+
+    if selector.record_family == SUPPORTED_CONTENTHASH_RECORD_FAMILY {
+        return object
+            .get("contenthash_hex")
+            .and_then(Value::as_str)
+            .map(|bytes| {
+                if contenthash_hex_is_empty(bytes) {
+                    RecordCacheEntryValue::NotFound
+                } else {
+                    RecordCacheEntryValue::Success(json!({
+                        "encoding": "hex",
+                        "bytes": bytes,
+                    }))
+                }
+            });
+    }
+
+    None
+}
+
+fn contenthash_value_is_empty(value: &Value) -> bool {
+    match value {
+        Value::String(bytes) => contenthash_hex_is_empty(bytes),
+        Value::Object(object) => object
+            .get("bytes")
+            .and_then(Value::as_str)
+            .is_some_and(contenthash_hex_is_empty),
+        _ => false,
+    }
+}
+
+fn contenthash_hex_is_empty(bytes: &str) -> bool {
+    matches!(bytes, "" | "0x")
 }
 
 pub(super) fn build_last_change(event: &RelevantEvent) -> Result<Value> {
@@ -167,6 +232,10 @@ fn is_supported_selector(selector: &RecordSelector) -> bool {
             .selector_key
             .as_ref()
             .is_some_and(|selector_key| selector.record_key == format!("addr:{selector_key}")),
+        SUPPORTED_CONTENTHASH_RECORD_FAMILY => {
+            selector.selector_key.is_none()
+                && selector.record_key == SUPPORTED_CONTENTHASH_RECORD_KEY
+        }
         _ => false,
     }
 }

@@ -190,6 +190,14 @@ async fn names_collection_returns_compact_projection_rows_with_counts_and_stable
     assert_eq!(payload["data"][0]["owner"], json!(address));
     assert_eq!(payload["data"][0]["registrant"], json!(address));
     assert_eq!(payload["data"][0]["resolver_address"], json!(resolver));
+    assert_eq!(
+        payload["data"][0]["registration_date"],
+        json!("2026-04-17T00:00:22Z")
+    );
+    assert_eq!(
+        payload["data"][0]["created_at"],
+        json!("2026-04-17T00:00:12Z")
+    );
     assert!(payload["data"][0].get("logical_name_id").is_none());
     assert!(payload["data"][0].get("provenance").is_none());
     let cursor = payload["page"]["next_cursor"]
@@ -210,8 +218,68 @@ async fn names_collection_returns_compact_projection_rows_with_counts_and_stable
     assert_eq!(response.status(), StatusCode::OK);
     let second_payload: Value = read_json(response).await?;
     assert_eq!(second_payload["data"][0]["name"], json!("Alice.eth"));
+    assert_eq!(
+        second_payload["data"][0]["registration_date"],
+        json!("2026-04-17T00:00:21Z")
+    );
+    assert_eq!(
+        second_payload["data"][0]["created_at"],
+        json!("2026-04-17T00:00:11Z")
+    );
     assert_eq!(second_payload["meta"]["total_count"], json!(2));
     assert_eq!(second_payload["page"]["next_cursor"], Value::Null);
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/names?namespace=ens&account={address}&relation=any&contains=lic&sort=registration_date&order=asc&page_size=1"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("compact names registration_date sort request failed")?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let registration_sort_payload: Value = read_json(response).await?;
+    assert_eq!(
+        registration_sort_payload["page"]["sort"],
+        json!("registration_date_asc")
+    );
+    assert_eq!(registration_sort_payload["data"][0]["name"], json!("Alice.eth"));
+    assert_eq!(
+        registration_sort_payload["data"][0]["registration_date"],
+        json!("2026-04-17T00:00:21Z")
+    );
+    let registration_sort_cursor = registration_sort_payload["page"]["next_cursor"]
+        .as_str()
+        .expect("registration_date first compact names page must include cursor");
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/names?namespace=ens&account={address}&relation=any&contains=lic&sort=registration_date&order=asc&page_size=1&cursor={registration_sort_cursor}"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("compact names registration_date second page request failed")?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let registration_sort_second_payload: Value = read_json(response).await?;
+    assert_eq!(
+        registration_sort_second_payload["data"][0]["name"],
+        json!("Alicia.eth")
+    );
+    assert_eq!(
+        registration_sort_second_payload["data"][0]["registration_date"],
+        json!("2026-04-17T00:00:22Z")
+    );
+    assert_eq!(
+        registration_sort_second_payload["page"]["next_cursor"],
+        Value::Null
+    );
 
     let response = app_router(database.app_state())
         .oneshot(
@@ -258,7 +326,7 @@ fn compact_name_declared_summary(
     registrant: &str,
     resolver: &str,
     expiry: i64,
-    registration_date: &str,
+    registered_at: &str,
     created_at: &str,
 ) -> Value {
     json!({
@@ -266,7 +334,7 @@ fn compact_name_declared_summary(
             "status": "active",
             "registrant": registrant,
             "expiry": expiry,
-            "registration_date": registration_date,
+            "registered_at": registered_at,
             "created_at": created_at,
         },
         "control": {

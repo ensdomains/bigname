@@ -45,7 +45,7 @@ Query: `at`, `chain_positions`, `consistency`.
 
 `declared_state`:
 
-- `registration`
+- `registration`: current declared registration summary. `registered_at` is the RFC 3339 timestamp of the last `RegistrationGranted` block that started the current or most recently released registration epoch; it is retained when a later release marks the registration `released`. `created_at` is the RFC 3339 timestamp of the first observation of the name itself, distinct from `registered_at` and excluding supplemental cross-name wildcard or transport positions.
 - `authority`
 - `control`: `ExactNameControlSummary | UnsupportedSummary`
 - `resolver`: `ExactNameResolverSummary | UnsupportedSummary`

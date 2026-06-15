@@ -418,6 +418,17 @@ async fn keyed_rebuild_keeps_visible_rows_when_projection_build_fails() -> Resul
 async fn rebuild_surfaces_supported_selectors_gaps_and_unsupported_families() -> Result<()> {
     let database = TestDatabase::new().await?;
     let resource_id = Uuid::from_u128(0x9500);
+    let mut contenthash_record = record_changed_event(
+        "contenthash",
+        "ens:alice.eth",
+        resource_id,
+        "contenthash",
+        "contenthash",
+        None,
+        1021,
+        1,
+    );
+    contenthash_record.after_state["contenthash_hex"] = json!("0xe30101701220");
 
     seed_resources(database.pool(), &[resource_id]).await?;
     seed_raw_blocks(
@@ -442,6 +453,7 @@ async fn rebuild_surfaces_supported_selectors_gaps_and_unsupported_families() ->
                 1021,
                 0,
             ),
+            contenthash_record,
             record_changed_event(
                 "unsupported-avatar",
                 "ens:alice.eth",
@@ -450,7 +462,7 @@ async fn rebuild_surfaces_supported_selectors_gaps_and_unsupported_families() ->
                 "avatar",
                 None,
                 1021,
-                1,
+                2,
             ),
         ],
     )
@@ -477,12 +489,20 @@ async fn rebuild_surfaces_supported_selectors_gaps_and_unsupported_families() ->
 
     assert_eq!(
         row.selectors,
-        json!([{
-            "record_key": "addr:61",
-            "record_family": "addr",
-            "selector_key": "61",
-            "cacheable": true,
-        }])
+        json!([
+            {
+                "record_key": "addr:61",
+                "record_family": "addr",
+                "selector_key": "61",
+                "cacheable": true,
+            },
+            {
+                "record_key": "contenthash",
+                "record_family": "contenthash",
+                "selector_key": null,
+                "cacheable": true,
+            }
+        ])
     );
     assert_eq!(
         row.explicit_gaps,
@@ -507,6 +527,28 @@ async fn rebuild_surfaces_supported_selectors_gaps_and_unsupported_families() ->
             "record_family": "avatar",
             "unsupported_reason": UNSUPPORTED_FAMILY_REASON,
         }])
+    );
+    assert_eq!(
+        row.entries,
+        json!([
+            {
+                "record_key": "addr:61",
+                "record_family": "addr",
+                "selector_key": "61",
+                "status": "unsupported",
+                "unsupported_reason": CACHE_UNSUPPORTED_REASON_VALUE_NOT_RETAINED,
+            },
+            {
+                "record_key": "contenthash",
+                "record_family": "contenthash",
+                "selector_key": null,
+                "status": "success",
+                "value": {
+                    "encoding": "hex",
+                    "bytes": "0xe30101701220",
+                },
+            }
+        ])
     );
 
     database.cleanup().await
@@ -713,12 +755,20 @@ async fn rebuild_limits_cache_entries_to_cacheable_selectors() -> Result<()> {
     );
     assert_eq!(
         row.explicit_gaps,
-        json!([{
-            "record_key": "addr:60",
-            "record_family": "addr",
-            "selector_key": "60",
-            "gap_reason": GAP_REASON_NOT_OBSERVED,
-        }])
+        json!([
+            {
+                "record_key": "addr:60",
+                "record_family": "addr",
+                "selector_key": "60",
+                "gap_reason": GAP_REASON_NOT_OBSERVED,
+            },
+            {
+                "record_key": "contenthash",
+                "record_family": "contenthash",
+                "selector_key": null,
+                "gap_reason": GAP_REASON_NOT_OBSERVED,
+            }
+        ])
     );
 
     database.cleanup().await
@@ -797,11 +847,173 @@ async fn rebuild_retains_selector_specific_text_record_values() -> Result<()> {
     );
     assert_eq!(
         row.explicit_gaps,
+        json!([
+            {
+                "record_key": "addr:60",
+                "record_family": "addr",
+                "selector_key": "60",
+                "gap_reason": GAP_REASON_NOT_OBSERVED,
+            },
+            {
+                "record_key": "contenthash",
+                "record_family": "contenthash",
+                "selector_key": null,
+                "gap_reason": GAP_REASON_NOT_OBSERVED,
+            }
+        ])
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn rebuild_treats_empty_contenthash_bytes_as_not_found() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let contenthash_hex_resource_id = Uuid::from_u128(0x9703);
+    let retained_value_resource_id = Uuid::from_u128(0x9704);
+    let mut non_empty_contenthash_hex = record_changed_event(
+        "contenthash-hex-set",
+        "ens:contenthash-hex.eth",
+        contenthash_hex_resource_id,
+        "contenthash",
+        "contenthash",
+        None,
+        1047,
+        0,
+    );
+    non_empty_contenthash_hex.after_state["contenthash_hex"] = json!("0xe30101701220");
+    let mut empty_contenthash_hex = record_changed_event(
+        "contenthash-hex-clear",
+        "ens:contenthash-hex.eth",
+        contenthash_hex_resource_id,
+        "contenthash",
+        "contenthash",
+        None,
+        1048,
+        0,
+    );
+    empty_contenthash_hex.after_state["contenthash_hex"] = json!("0x");
+
+    seed_resources(
+        database.pool(),
+        &[contenthash_hex_resource_id, retained_value_resource_id],
+    )
+    .await?;
+    seed_raw_blocks(
+        database.pool(),
+        &[
+            raw_block("ethereum-mainnet", "0xrec1046", 1046, 1_776_200_046),
+            raw_block("ethereum-mainnet", "0xrec1047", 1047, 1_776_200_047),
+            raw_block("ethereum-mainnet", "0xrec1048", 1048, 1_776_200_048),
+            raw_block("ethereum-mainnet", "0xrec1049", 1049, 1_776_200_049),
+            raw_block("ethereum-mainnet", "0xrec1050", 1050, 1_776_200_050),
+        ],
+    )
+    .await?;
+    seed_events(
+        database.pool(),
+        &[
+            record_version_changed_event(
+                "contenthash-hex-boundary",
+                "ens:contenthash-hex.eth",
+                contenthash_hex_resource_id,
+                15,
+                1046,
+                0,
+            ),
+            record_version_changed_event(
+                "contenthash-value-boundary",
+                "ens:contenthash-value.eth",
+                retained_value_resource_id,
+                16,
+                1046,
+                1,
+            ),
+            non_empty_contenthash_hex,
+            empty_contenthash_hex,
+            record_changed_event_with_value(
+                "contenthash-value-set",
+                "ens:contenthash-value.eth",
+                retained_value_resource_id,
+                "contenthash",
+                "contenthash",
+                None,
+                json!({
+                    "encoding": "hex",
+                    "bytes": "0xe30101701220",
+                }),
+                1049,
+                0,
+            ),
+            record_changed_event_with_value(
+                "contenthash-value-clear",
+                "ens:contenthash-value.eth",
+                retained_value_resource_id,
+                "contenthash",
+                "contenthash",
+                None,
+                json!({
+                    "encoding": "hex",
+                    "bytes": "",
+                }),
+                1050,
+                0,
+            ),
+        ],
+    )
+    .await?;
+
+    rebuild_record_inventory_current(database.pool(), None).await?;
+
+    let contenthash_hex_row = load_record_inventory_current(
+        database.pool(),
+        contenthash_hex_resource_id,
+        &record_version_boundary(
+            "ens:contenthash-hex.eth",
+            contenthash_hex_resource_id,
+            Some(1),
+            Some(EVENT_KIND_RECORD_VERSION_CHANGED),
+            1046,
+            "0xrec1046",
+            1_776_200_046,
+            "ethereum-mainnet",
+        ),
+    )
+    .await?
+    .context("contenthash_hex row must exist")?;
+    assert_eq!(
+        contenthash_hex_row.entries,
         json!([{
-            "record_key": "addr:60",
-            "record_family": "addr",
-            "selector_key": "60",
-            "gap_reason": GAP_REASON_NOT_OBSERVED,
+            "record_key": "contenthash",
+            "record_family": "contenthash",
+            "selector_key": null,
+            "status": "not_found",
+        }])
+    );
+
+    let retained_value_row = load_record_inventory_current(
+        database.pool(),
+        retained_value_resource_id,
+        &record_version_boundary(
+            "ens:contenthash-value.eth",
+            retained_value_resource_id,
+            Some(2),
+            Some(EVENT_KIND_RECORD_VERSION_CHANGED),
+            1046,
+            "0xrec1046",
+            1_776_200_046,
+            "ethereum-mainnet",
+        ),
+    )
+    .await?
+    .context("retained value row must exist")?;
+    assert_eq!(
+        retained_value_row.entries,
+        json!([{
+            "record_key": "contenthash",
+            "record_family": "contenthash",
+            "selector_key": null,
+            "status": "not_found",
         }])
     );
 
@@ -1352,6 +1564,10 @@ async fn rebuild_keeps_unadmitted_basenames_dynamic_resolver_inventory_explicit(
                 "unsupported_reason": RESOLVER_FAMILY_PENDING_REASON,
             },
             {
+                "record_family": "contenthash",
+                "unsupported_reason": RESOLVER_FAMILY_PENDING_REASON,
+            },
+            {
                 "record_family": "text",
                 "unsupported_reason": RESOLVER_FAMILY_PENDING_REASON,
             }
@@ -1444,6 +1660,10 @@ async fn rebuild_keeps_newer_record_version_boundary_for_pending_resolver() -> R
         json!([
             {
                 "record_family": "addr",
+                "unsupported_reason": RESOLVER_FAMILY_PENDING_REASON,
+            },
+            {
+                "record_family": "contenthash",
                 "unsupported_reason": RESOLVER_FAMILY_PENDING_REASON,
             },
             {
@@ -1645,6 +1865,10 @@ async fn rebuild_basenames_dynamic_resolver_inventory_gates_supported_pending_an
                     "unsupported_reason": unsupported_reason,
                 },
                 {
+                    "record_family": "contenthash",
+                    "unsupported_reason": unsupported_reason,
+                },
+                {
                     "record_family": "text",
                     "unsupported_reason": unsupported_reason,
                 }
@@ -1779,20 +2003,16 @@ async fn rebuild_keeps_pending_ensv1_dynamic_resolver_inventory_explicit() -> Re
     .context("pending resolver inventory row must exist")?;
 
     assert_eq!(row.selectors, json!([]));
-    assert_eq!(
-        row.explicit_gaps,
-        json!([{
-            "record_key": "contenthash",
-            "record_family": "contenthash",
-            "selector_key": null,
-            "gap_reason": GAP_REASON_NOT_OBSERVED,
-        }])
-    );
+    assert_eq!(row.explicit_gaps, json!([]));
     assert_eq!(
         row.unsupported_families,
         json!([
             {
                 "record_family": "addr",
+                "unsupported_reason": RESOLVER_FAMILY_PENDING_REASON,
+            },
+            {
+                "record_family": "contenthash",
                 "unsupported_reason": RESOLVER_FAMILY_PENDING_REASON,
             },
             {
@@ -1980,6 +2200,10 @@ async fn rebuild_keeps_observed_addr_record_for_unknown_ensv1_current_resolver()
                 "unsupported_reason": RESOLVER_FAMILY_PENDING_REASON,
             },
             {
+                "record_family": "contenthash",
+                "unsupported_reason": RESOLVER_FAMILY_PENDING_REASON,
+            },
+            {
                 "record_family": "data",
                 "unsupported_reason": RESOLVER_FAMILY_PENDING_REASON,
             },
@@ -2150,6 +2374,12 @@ async fn rebuild_surfaces_dataresolver_and_ignores_pubkey_for_known_ensv1_resolv
                 "record_key": "addr:60",
                 "record_family": "addr",
                 "selector_key": "60",
+                "gap_reason": GAP_REASON_NOT_OBSERVED,
+            },
+            {
+                "record_key": "contenthash",
+                "record_family": "contenthash",
+                "selector_key": null,
                 "gap_reason": GAP_REASON_NOT_OBSERVED,
             },
             {
@@ -2324,6 +2554,15 @@ async fn rebuild_supports_known_legacy_ensv1_resolver_without_latest_capabilitie
                 "cacheable": true,
             }
         ])
+    );
+    assert_eq!(
+        row.explicit_gaps,
+        json!([{
+            "record_key": "contenthash",
+            "record_family": "contenthash",
+            "selector_key": null,
+            "gap_reason": GAP_REASON_NOT_OBSERVED,
+        }])
     );
     assert_eq!(
         row.unsupported_families,
@@ -3966,6 +4205,19 @@ async fn rebuild_rejects_multicoin_addr_for_eth_only_legacy_ensv1_resolver() -> 
             }
         ])
     );
+    assert_eq!(
+        row.unsupported_families,
+        json!([{
+            "record_family": "contenthash",
+            "unsupported_reason": RESOLVER_FAMILY_UNSUPPORTED_REASON,
+        }])
+    );
+    assert_eq!(row.coverage["status"], json!("partial"));
+    assert_eq!(row.coverage["exhaustiveness"], json!("best_effort"));
+    assert_eq!(
+        row.coverage["unsupported_reason"],
+        json!(RESOLVER_FAMILY_UNSUPPORTED_REASON)
+    );
     assert_eq!(row.provenance["normalized_event_ids"], json!([1]));
 
     let legacy_resolver_address = legacy_resolver_address.to_ascii_lowercase();
@@ -3981,6 +4233,12 @@ async fn rebuild_rejects_multicoin_addr_for_eth_only_legacy_ensv1_resolver() -> 
         "unsupported"
     );
     assert_eq!(feature_statuses["resolver_record:addr"], "supported");
+    assert_eq!(feature_statuses["resolver_record:text"], "supported");
+    assert_eq!(
+        feature_statuses["resolver_record:contenthash"],
+        "unsupported"
+    );
+    assert_eq!(feature_statuses["resolver_record:data"], "unsupported");
 
     database.cleanup().await
 }
@@ -4085,10 +4343,16 @@ async fn rebuild_keeps_unsupported_legacy_ensv1_resolver_family_explicit() -> Re
     );
     assert_eq!(
         row.unsupported_families,
-        json!([{
-            "record_family": "text",
-            "unsupported_reason": RESOLVER_FAMILY_UNSUPPORTED_REASON,
-        }])
+        json!([
+            {
+                "record_family": "contenthash",
+                "unsupported_reason": RESOLVER_FAMILY_UNSUPPORTED_REASON,
+            },
+            {
+                "record_family": "text",
+                "unsupported_reason": RESOLVER_FAMILY_UNSUPPORTED_REASON,
+            }
+        ])
     );
     assert_eq!(
         row.coverage["unsupported_reason"],

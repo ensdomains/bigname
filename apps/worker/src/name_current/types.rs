@@ -63,6 +63,8 @@ pub(super) struct ProjectedFacts {
     pub(super) authority_key: Option<String>,
     pub(super) registrant: Option<String>,
     pub(super) expiry: Option<i64>,
+    pub(super) registered_at: Option<i64>,
+    pub(super) created_at: Option<i64>,
     pub(super) released_at: Option<i64>,
     pub(super) registry_owner: Option<String>,
     pub(super) latest_registration_event_kind: Option<String>,
