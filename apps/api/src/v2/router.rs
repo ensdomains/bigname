@@ -14,11 +14,14 @@ use crate::{
 };
 
 use super::{
-    Envelope, Meta, NameRecord, NameRecords, QueryParams, RequestSource, Source, Status, V2Error,
-    V2Result, VerifiedRecordLookup, as_of_meta, build_indexed_name_records, build_name_record,
-    build_verified_name_records, default_requested_records, indexed_records_satisfy_request,
-    resolve_v2_snapshot, validate_product_record,
+    Envelope, MAX_PAGE_SIZE, Meta, NameRecord, NameRecords, QueryParams, RequestSource, Source,
+    Status, V2Error, V2Result, VerifiedRecordLookup, as_of_meta, build_auto_name_records,
+    build_indexed_name_records, build_name_record, build_verified_name_records,
+    default_requested_records, indexed_records_requiring_verified_fallback, resolve_v2_snapshot,
+    validate_product_record,
 };
+
+const MAX_RECORD_KEYS: usize = MAX_PAGE_SIZE as usize;
 
 pub(super) fn router() -> Router<AppState> {
     Router::new()
@@ -141,7 +144,7 @@ async fn get_name_records(
         }
         RequestSource::Auto => {
             let records = requested_records.unwrap_or_default();
-            if indexed_records_satisfy_request(&row, record_inventory.as_ref(), records) {
+            if records.is_empty() {
                 (
                     Source::Indexed,
                     build_indexed_name_records(
@@ -152,24 +155,26 @@ async fn get_name_records(
                     ),
                 )
             } else {
+                let fallback_records = indexed_records_requiring_verified_fallback(
+                    &row,
+                    record_inventory.as_ref(),
+                    records,
+                );
                 let verified_lookup = load_verified_record_lookup(
                     &state,
                     &row,
                     record_inventory.as_ref(),
-                    records,
+                    &fallback_records,
                     &selected_snapshot,
                 )
                 .await?;
-                (
-                    Source::Verified,
-                    build_verified_name_records(
-                        &row,
-                        record_inventory.as_ref(),
-                        requested_records,
-                        verified_lookup,
-                        include_inventory,
-                    )?,
-                )
+                build_auto_name_records(
+                    &row,
+                    record_inventory.as_ref(),
+                    records,
+                    verified_lookup,
+                    include_inventory,
+                )?
             }
         }
     };
@@ -292,6 +297,11 @@ fn parse_record_keys(keys: Option<&str>) -> V2Result<Option<Vec<crate::Resolutio
     let mut parsed = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
     for key in keys.split(',').map(str::trim) {
+        if parsed.len() >= MAX_RECORD_KEYS {
+            return Err(V2Error::invalid_input(format!(
+                "keys must contain at most {MAX_RECORD_KEYS} record keys"
+            )));
+        }
         if key.is_empty() {
             return Err(V2Error::invalid_input(
                 "keys must be a comma-separated record-key list",

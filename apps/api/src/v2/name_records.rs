@@ -7,7 +7,7 @@ use serde_json::Value;
 use crate::{ExecutionOutcome, ResolutionRecordKey, build_resolution_verified_state};
 
 use super::{
-    Resolver, Status, V2Error, V2Result,
+    Resolver, Source, Status, V2Error, V2Result,
     name_record::{
         record_addresses, record_content_hash, record_text_records, record_value_string, resolver,
         string_field, value_to_string,
@@ -92,25 +92,63 @@ pub(crate) fn build_indexed_name_records(
     }
 }
 
-pub(crate) fn indexed_records_satisfy_request(
+pub(crate) fn indexed_records_requiring_verified_fallback(
     row: &NameCurrentRow,
     record_inventory: Option<&RecordInventoryCurrentRow>,
     requested_records: &[ResolutionRecordKey],
-) -> bool {
-    if requested_records.is_empty() {
-        return true;
-    }
-    if terminal_no_declared_resolver(row) {
-        return true;
-    }
-    if !indexed_inventory_is_authoritative(record_inventory) {
-        return false;
+) -> Vec<ResolutionRecordKey> {
+    requested_records
+        .iter()
+        .filter(|record| indexed_satisfying_record_answer(row, record_inventory, record).is_none())
+        .cloned()
+        .collect()
+}
+
+pub(crate) fn build_auto_name_records(
+    row: &NameCurrentRow,
+    record_inventory: Option<&RecordInventoryCurrentRow>,
+    requested_records: &[ResolutionRecordKey],
+    verified_lookup: Option<VerifiedRecordLookup>,
+    include_inventory: bool,
+) -> V2Result<(Source, NameRecords)> {
+    let mut fallback_records = Vec::new();
+    let mut answers = BTreeMap::new();
+
+    for record in requested_records {
+        if let Some(answer) = indexed_satisfying_record_answer(row, record_inventory, record) {
+            answers.insert(record.record_key.clone(), answer);
+        } else {
+            fallback_records.push(record.clone());
+        }
     }
 
-    requested_records.iter().all(|record| {
-        let answer = indexed_record_answer(record_inventory, record);
-        matches!(answer.status, Status::Ok | Status::NotFound)
-    })
+    let source = if fallback_records.is_empty() {
+        Source::Indexed
+    } else {
+        let verified_answers = verified_record_answers(row, &fallback_records, verified_lookup)?;
+        for record in &fallback_records {
+            let answer = verified_answers
+                .get(&record.record_key)
+                .cloned()
+                .unwrap_or_else(|| unsupported_answer(VERIFIED_NOT_SUPPORTED_REASON));
+            answers.insert(record.record_key.clone(), answer);
+        }
+        Source::Verified
+    };
+    let values = RecordValues::from_answers(requested_records, &answers);
+
+    Ok((
+        source,
+        NameRecords {
+            resolver: resolver(&row.declared_summary),
+            addresses: values.addresses,
+            text_records: values.text_records,
+            content_hash: values.content_hash,
+            records: Some(answers),
+            inventory: include_inventory
+                .then(|| inventory_summary(record_inventory, Some(requested_records))),
+        },
+    ))
 }
 
 pub(crate) fn build_verified_name_records(
@@ -231,6 +269,22 @@ fn indexed_record_answer(
     not_found_answer(None)
 }
 
+fn indexed_satisfying_record_answer(
+    row: &NameCurrentRow,
+    record_inventory: Option<&RecordInventoryCurrentRow>,
+    record: &ResolutionRecordKey,
+) -> Option<RecordAnswer> {
+    if terminal_no_declared_resolver(row) {
+        return Some(not_found_answer(None));
+    }
+    if !indexed_inventory_is_authoritative(record_inventory) {
+        return None;
+    }
+
+    let answer = indexed_record_answer(record_inventory, record);
+    matches!(answer.status, Status::Ok | Status::NotFound).then_some(answer)
+}
+
 fn indexed_entry_for_record<'a>(
     record_inventory: &'a RecordInventoryCurrentRow,
     record: &ResolutionRecordKey,
@@ -277,7 +331,7 @@ fn verified_record_answers(
                 .iter()
                 .map(|record| {
                     let answer = if supported.contains(&record.record_key) {
-                        failed_answer(VERIFIED_NOT_AVAILABLE_REASON)
+                        stale_answer(VERIFIED_NOT_AVAILABLE_REASON)
                     } else {
                         unsupported_answer(VERIFIED_NOT_SUPPORTED_REASON)
                     };
@@ -409,6 +463,15 @@ fn unsupported_answer(reason: &str) -> RecordAnswer {
         value: None,
         unsupported_reason: Some(reason.to_owned()),
         failure_reason: None,
+    }
+}
+
+fn stale_answer(reason: impl Into<String>) -> RecordAnswer {
+    RecordAnswer {
+        status: Status::Stale,
+        value: None,
+        unsupported_reason: None,
+        failure_reason: Some(reason.into()),
     }
 }
 

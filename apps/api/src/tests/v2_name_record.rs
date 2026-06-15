@@ -280,6 +280,37 @@ async fn v2_get_name_records_keys_filter_values_and_per_key_answers() -> Result<
 }
 
 #[tokio::test]
+async fn v2_get_name_records_rejects_too_many_keys() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let keys = (0..=200)
+        .map(|index| format!("text:key{index}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let uri = format!("/v2/names/alice.eth/records?keys={keys}");
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(uri)
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("v2 oversized records keys request failed")?;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["error"]["code"], json!("invalid_input"));
+    assert_eq!(
+        payload["error"]["message"],
+        json!("keys must contain at most 200 record keys")
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn v2_get_name_records_reports_unset_and_unsupported_per_key() -> Result<()> {
     let payload = v2_name_records_payload_with_setup(
         "/v2/names/Alice.eth/records?keys=contenthash,text:email",
@@ -428,6 +459,81 @@ async fn v2_get_name_records_include_inventory_uses_product_key_lists() -> Resul
 }
 
 #[tokio::test]
+async fn v2_get_name_records_inventory_partitions_unsupported_entries() -> Result<()> {
+    let payload = v2_name_records_payload_with_setup(
+        "/v2/names/Alice.eth/records?keys=addr:60,avatar&include=inventory",
+        |_, _, inventory| {
+            inventory.selectors = json!([
+                {
+                    "record_key": "addr:60",
+                    "record_family": "addr",
+                    "selector_key": "60",
+                    "cacheable": true
+                },
+                {
+                    "record_key": "avatar",
+                    "record_family": "avatar",
+                    "selector_key": null,
+                    "cacheable": true
+                }
+            ]);
+            inventory.entries = json!([
+                {
+                    "record_key": "addr:60",
+                    "record_family": "addr",
+                    "selector_key": "60",
+                    "status": "success",
+                    "value": {
+                        "coin_type": "60",
+                        "value": "0x0000000000000000000000000000000000000def"
+                    }
+                },
+                {
+                    "record_key": "avatar",
+                    "record_family": "avatar",
+                    "selector_key": null,
+                    "status": "unsupported",
+                    "unsupported_reason": "resolver_family_pending"
+                }
+            ]);
+            inventory.explicit_gaps = json!([]);
+            inventory.unsupported_families = json!([]);
+        },
+        None,
+    )
+    .await?;
+
+    assert_eq!(
+        payload["data"]["inventory"],
+        json!({
+            "known_keys": ["addr:60"],
+            "unset_keys": [],
+            "unsupported_keys": ["avatar"]
+        })
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_name_records_inventory_absence_is_unknown_not_unsupported() -> Result<()> {
+    let payload =
+        v2_name_records_payload_without_inventory("/v2/names/Alice.eth/records?keys=addr:60&include=inventory")
+            .await?;
+
+    assert_eq!(
+        payload["data"]["inventory"],
+        json!({
+            "known_keys": [],
+            "unset_keys": [],
+            "unsupported_keys": []
+        })
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn v2_get_name_records_source_verified_reads_persisted_verified_values() -> Result<()> {
     let verified_queries = json!([
         {
@@ -461,6 +567,53 @@ async fn v2_get_name_records_source_verified_reads_persisted_verified_values() -
         json!({
             "status": "ok",
             "value": "0x0000000000000000000000000000000000000fed"
+        })
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_name_records_source_verified_cache_miss_reports_stale_for_supported_key(
+) -> Result<()> {
+    let payload = v2_name_records_payload_with_setup(
+        "/v2/names/Alice.eth/records?source=verified&keys=addr:60",
+        |_, _, _| {},
+        None,
+    )
+    .await?;
+
+    assert_eq!(payload["meta"]["source"], json!("verified"));
+    assert_eq!(
+        payload["data"]["records"]["addr:60"],
+        json!({
+            "status": "stale",
+            "failure_reason": "verified_records_not_available"
+        })
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_name_records_source_verified_reports_unsupported_without_verified_boundary(
+) -> Result<()> {
+    let payload = v2_name_records_payload_with_row_and_setup(
+        "/v2/names/Alice.eth/records?source=verified&keys=avatar",
+        |row| {
+            row.binding_kind = Some(bigname_storage::SurfaceBindingKind::ObservedOnly);
+        },
+        |_, _, _| {},
+        None,
+    )
+    .await?;
+
+    assert_eq!(payload["meta"]["source"], json!("verified"));
+    assert_eq!(
+        payload["data"]["records"]["avatar"],
+        json!({
+            "status": "unsupported",
+            "unsupported_reason": "verified_records_not_supported"
         })
     );
 
@@ -507,6 +660,46 @@ async fn v2_get_name_records_source_auto_falls_back_to_verified_when_indexed_doe
         json!({
             "status": "ok",
             "value": "0x00000000000000000000000000000000000000ee"
+        })
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_name_records_source_auto_blends_indexed_and_verified_per_key() -> Result<()> {
+    let payload = v2_name_records_payload_with_setup(
+        "/v2/names/Alice.eth/records?source=auto&keys=addr:60,text:email",
+        |_, _, inventory| {
+            inventory.unsupported_families = json!([
+                {
+                    "record_family": "text",
+                    "unsupported_reason": "resolver_family_pending"
+                }
+            ]);
+        },
+        None,
+    )
+    .await?;
+
+    assert_eq!(payload["meta"]["source"], json!("verified"));
+    assert_eq!(
+        payload["data"]["addresses"],
+        json!({
+            "60": "0x0000000000000000000000000000000000000def"
+        })
+    );
+    assert_eq!(
+        payload["data"]["records"],
+        json!({
+            "addr:60": {
+                "status": "ok",
+                "value": "0x0000000000000000000000000000000000000def"
+            },
+            "text:email": {
+                "status": "stale",
+                "failure_reason": "verified_records_not_available"
+            }
         })
     );
 
@@ -716,8 +909,23 @@ async fn v2_name_records_payload_with_setup(
     configure_inventory: impl FnOnce(&str, Uuid, &mut bigname_storage::RecordInventoryCurrentRow),
     verified: Option<(&[&str], Value)>,
 ) -> Result<Value> {
+    v2_name_records_payload_with_row_and_setup(uri, |_| {}, configure_inventory, verified).await
+}
+
+async fn v2_name_records_payload_with_row_and_setup(
+    uri: &str,
+    configure_row: impl FnOnce(&mut bigname_storage::NameCurrentRow),
+    configure_inventory: impl FnOnce(&str, Uuid, &mut bigname_storage::RecordInventoryCurrentRow),
+    verified: Option<(&[&str], Value)>,
+) -> Result<Value> {
     let database = TestDatabase::new_with_schemas(false, true).await?;
-    seed_v2_alice_name_records_fixture(&database, configure_inventory, verified).await?;
+    seed_v2_alice_name_records_fixture_with_row(
+        &database,
+        configure_row,
+        configure_inventory,
+        verified,
+    )
+    .await?;
 
     let response = app_router(database.app_state())
         .oneshot(
@@ -736,11 +944,8 @@ async fn v2_name_records_payload_with_setup(
     Ok(payload)
 }
 
-async fn seed_v2_alice_name_records_fixture(
-    database: &TestDatabase,
-    configure_inventory: impl FnOnce(&str, Uuid, &mut bigname_storage::RecordInventoryCurrentRow),
-    verified: Option<(&[&str], Value)>,
-) -> Result<()> {
+async fn v2_name_records_payload_without_inventory(uri: &str) -> Result<Value> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
     let logical_name_id = "ens:alice.eth";
     let resource_id = Uuid::from_u128(0x2200);
     let token_lineage_id = Uuid::from_u128(0x1100);
@@ -765,6 +970,68 @@ async fn seed_v2_alice_name_records_fixture(
             resource_id,
             token_lineage_id,
         ))
+        .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(uri)
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("v2 name records request without inventory failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+
+    database.cleanup().await?;
+    Ok(payload)
+}
+
+async fn seed_v2_alice_name_records_fixture(
+    database: &TestDatabase,
+    configure_inventory: impl FnOnce(&str, Uuid, &mut bigname_storage::RecordInventoryCurrentRow),
+    verified: Option<(&[&str], Value)>,
+) -> Result<()> {
+    seed_v2_alice_name_records_fixture_with_row(database, |_| {}, configure_inventory, verified)
+        .await
+}
+
+async fn seed_v2_alice_name_records_fixture_with_row(
+    database: &TestDatabase,
+    configure_row: impl FnOnce(&mut bigname_storage::NameCurrentRow),
+    configure_inventory: impl FnOnce(&str, Uuid, &mut bigname_storage::RecordInventoryCurrentRow),
+    verified: Option<(&[&str], Value)>,
+) -> Result<()> {
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0x2200);
+    let token_lineage_id = Uuid::from_u128(0x1100);
+    let surface_binding_id = Uuid::from_u128(0x3300);
+
+    database
+        .seed_name_current_binding(
+            logical_name_id,
+            "ens",
+            "alice.eth",
+            "Alice.eth",
+            "namehash:alice.eth",
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    database
+        .insert_name_current_row({
+            let mut row = exact_name_row(
+                logical_name_id,
+                surface_binding_id,
+                resource_id,
+                token_lineage_id,
+            );
+            configure_row(&mut row);
+            row
+        })
         .await?;
 
     let mut inventory = record_inventory_current_row(logical_name_id, resource_id);

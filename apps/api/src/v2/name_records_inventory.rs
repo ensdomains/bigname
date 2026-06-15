@@ -57,17 +57,9 @@ pub(super) fn inventory_summary(
     requested_records: Option<&[ResolutionRecordKey]>,
 ) -> RecordInventory {
     let Some(record_inventory) = record_inventory else {
-        return RecordInventory {
-            unsupported_keys: requested_records
-                .unwrap_or_default()
-                .iter()
-                .map(|record| record.record_key.clone())
-                .collect(),
-            ..RecordInventory::default()
-        };
+        return RecordInventory::default();
     };
 
-    let known_keys = keys_from_sections(&[&record_inventory.selectors, &record_inventory.entries]);
     let unset_keys = keys_from_sections(&[&record_inventory.explicit_gaps]);
     let mut unsupported_keys = record_inventory
         .entries
@@ -86,6 +78,11 @@ pub(super) fn inventory_summary(
             }
         }
     }
+    let known_keys = keys_from_sections(&[&record_inventory.selectors, &record_inventory.entries])
+        .into_iter()
+        // Route-local inventory partitions unsupported-status entries into unsupported_keys only.
+        .filter(|key| !unsupported_keys.contains(key))
+        .collect();
 
     RecordInventory {
         known_keys,

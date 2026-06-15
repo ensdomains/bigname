@@ -18,8 +18,8 @@ pub(crate) use envelope::{AsOf, Envelope, Meta, Page};
 pub(crate) use error::{ErrorBody, ErrorCode, ErrorEnvelope, V2Error, V2Result};
 pub(crate) use name_record::{NameRecord, build_name_record, classify_registration_status};
 pub(crate) use name_records::{
-    NameRecords, VerifiedRecordLookup, build_indexed_name_records, build_verified_name_records,
-    indexed_records_satisfy_request,
+    NameRecords, VerifiedRecordLookup, build_auto_name_records, build_indexed_name_records,
+    build_verified_name_records, indexed_records_requiring_verified_fallback,
 };
 pub(crate) use name_records_inventory::{default_requested_records, validate_product_record};
 pub(crate) use params::{
