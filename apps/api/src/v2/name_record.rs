@@ -50,14 +50,6 @@ pub(crate) fn build_name_record(
         &row.declared_summary,
         &[&["control", "owner"], &["control", "registry_owner"]],
     );
-    let manager = json_address_at_paths(
-        &row.declared_summary,
-        &[
-            &["control", "manager"],
-            &["control", "effective_controller"],
-            &["control", "controller"],
-        ],
-    );
     let registrant = json_address_at_paths(
         &row.declared_summary,
         &[&["registration", "registrant"], &["control", "registrant"]],
@@ -71,17 +63,12 @@ pub(crate) fn build_name_record(
 
     NameRecord {
         registration_id: row.resource_id.map(|value| value.to_string()),
-        token_id: json_string_at_paths(
-            &row.declared_summary,
-            &[
-                &["authority", "token_id"],
-                &["registration", "token_id"],
-                &["registration", "upstream_resource"],
-                &["control", "token_id"],
-            ],
-        ),
+        // The current worker-emitted declared_summary has no token_id or
+        // manager/controller source; keep these null until projection enrichment
+        // adds canonical fields.
+        token_id: None,
         owner: owner.clone(),
-        manager,
+        manager: None,
         registrant,
         registered_at: json_timestamp_at_paths(
             &row.declared_summary,
@@ -138,6 +125,9 @@ pub(crate) fn classify_registration_status(
     owner: Option<&str>,
     has_binding: bool,
 ) -> RegistrationStatus {
+    // Classification is state at the indexed head. A registrar name past grace
+    // whose release block is not indexed yet still reads active with a past
+    // expires_at until reprojection observes released_at/status=released.
     if !has_binding {
         return RegistrationStatus::Unregistered;
     }
@@ -155,9 +145,14 @@ pub(crate) fn classify_registration_status(
         Some("registry_only") if owner.is_some_and(|value| !value.trim().is_empty()) => {
             RegistrationStatus::Registered
         }
+        Some("ens_v2_registry") if owner.is_some_and(|value| !value.trim().is_empty()) => {
+            RegistrationStatus::Registered
+        }
         Some("wrapper") if namespace != bigname_storage::BASENAMES_NAMESPACE => {
             RegistrationStatus::Wrapped
         }
+        // At this point the name is bound; an unrecognized authority_kind or
+        // missing required owner evidence cannot be classified as registered.
         _ => RegistrationStatus::Unregistered,
     }
 }
@@ -167,10 +162,7 @@ fn resolver(summary: &Value) -> Option<Resolver> {
     let address = string_field(resolver.get("address"))
         .map(|value| value.to_ascii_lowercase())
         .filter(|value| !value.trim().is_empty())?;
-    let chain_id = resolver
-        .get("chain_id")
-        .and_then(json_chain_id)
-        .or(Some(1))?;
+    let chain_id = resolver.get("chain_id").and_then(json_chain_id)?;
 
     Some(Resolver { chain_id, address })
 }
@@ -395,14 +387,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn registration_status_classifier_covers_all_v2_labels() {
+    fn registration_status_classifier_covers_authority_kind_domain() {
         let active = json!({
             "status": "active",
             "authority_kind": "registrar",
-            "released_at": null
+            "released_at": null,
+            "expiry": "2000-01-01T00:00:00Z"
         });
         assert_eq!(
             classify_registration_status("ens", Some(&active), Some("0xabc"), true),
+            RegistrationStatus::Active
+        );
+        assert_eq!(
+            classify_registration_status("basenames", Some(&active), Some("0xabc"), true),
             RegistrationStatus::Active
         );
 
@@ -416,6 +413,16 @@ mod tests {
             RegistrationStatus::Registered
         );
 
+        let ens_v2_registered = json!({
+            "status": "active",
+            "authority_kind": "ens_v2_registry",
+            "released_at": null
+        });
+        assert_eq!(
+            classify_registration_status("ens", Some(&ens_v2_registered), Some("0xabc"), true),
+            RegistrationStatus::Registered
+        );
+
         let wrapped = json!({
             "status": "active",
             "authority_kind": "wrapper",
@@ -424,6 +431,10 @@ mod tests {
         assert_eq!(
             classify_registration_status("ens", Some(&wrapped), Some("0xabc"), true),
             RegistrationStatus::Wrapped
+        );
+        assert_eq!(
+            classify_registration_status("basenames", Some(&wrapped), Some("0xabc"), true),
+            RegistrationStatus::Unregistered
         );
 
         let released = json!({
@@ -438,12 +449,34 @@ mod tests {
 
         let unregistered = json!({
             "status": "active",
-            "authority_kind": "registry_only",
+            "authority_kind": "unknown_authority",
             "released_at": null
         });
         assert_eq!(
-            classify_registration_status("ens", Some(&unregistered), None, false),
+            classify_registration_status("ens", Some(&active), Some("0xabc"), false),
             RegistrationStatus::Unregistered
         );
+        assert_eq!(
+            classify_registration_status("ens", Some(&unregistered), Some("0xabc"), true),
+            RegistrationStatus::Unregistered
+        );
+    }
+
+    #[test]
+    fn resolver_omits_unknown_chain_id_instead_of_guessing_mainnet() {
+        let missing_chain = json!({
+            "resolver": {
+                "address": "0x0000000000000000000000000000000000000abc"
+            }
+        });
+        assert_eq!(resolver(&missing_chain), None);
+
+        let unknown_chain = json!({
+            "resolver": {
+                "chain_id": "unknown-mainnet",
+                "address": "0x0000000000000000000000000000000000000abc"
+            }
+        });
+        assert_eq!(resolver(&unknown_chain), None);
     }
 }

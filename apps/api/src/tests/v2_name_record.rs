@@ -33,15 +33,12 @@ async fn v2_get_name_returns_flat_name_record_envelope() -> Result<()> {
         data.get("registration_id"),
         Some(&json!(Uuid::from_u128(0x2200).to_string()))
     );
-    assert_eq!(data.get("token_id"), Some(&json!("1234")));
+    assert_eq!(data.get("token_id"), Some(&Value::Null));
     assert_eq!(
         data.get("owner"),
         Some(&json!("0x00000000000000000000000000000000000000bb"))
     );
-    assert_eq!(
-        data.get("manager"),
-        Some(&json!("0x00000000000000000000000000000000000000cc"))
-    );
+    assert_eq!(data.get("manager"), Some(&Value::Null));
     assert_eq!(
         data.get("registrant"),
         Some(&json!("0x00000000000000000000000000000000000000aa"))
@@ -94,7 +91,135 @@ async fn v2_get_name_verified_source_uses_in_record_failed_status() -> Result<()
     Ok(())
 }
 
+#[tokio::test]
+async fn v2_get_name_classifies_ens_v2_registry_as_registered() -> Result<()> {
+    let payload = v2_name_record_payload_with_row("/v2/names/Alice.eth", |row| {
+        row.declared_summary["registration"] = json!({
+            "status": "active",
+            "authority_kind": "ens_v2_registry",
+            "authority_key": "registry:ens-v2:alice",
+            "released_at": null,
+            "registrant": null,
+            "latest_event_kind": "NameTransferred"
+        });
+    })
+    .await?;
+
+    assert_eq!(payload["data"]["registration_status"], json!("registered"));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_name_classifies_released_as_released() -> Result<()> {
+    let payload = v2_name_record_payload_with_row("/v2/names/Alice.eth", |row| {
+        row.declared_summary["registration"] = json!({
+            "status": "released",
+            "authority_kind": "registrar",
+            "authority_key": "registrar:ethereum-mainnet:alice",
+            "released_at": "2026-06-14T00:00:00Z",
+            "registrant": "0x00000000000000000000000000000000000000aa",
+            "expiry": "2026-03-01T00:00:00Z",
+            "latest_event_kind": "RegistrationReleased"
+        });
+    })
+    .await?;
+
+    assert_eq!(payload["data"]["registration_status"], json!("released"));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_name_classifies_no_binding_as_unregistered() -> Result<()> {
+    let payload = v2_name_record_payload_with_row("/v2/names/Alice.eth", |row| {
+        row.surface_binding_id = None;
+        row.resource_id = None;
+        row.token_lineage_id = None;
+        row.binding_kind = None;
+    })
+    .await?;
+
+    assert_eq!(payload["data"]["registration_status"], json!("unregistered"));
+    assert_eq!(payload["data"]["registration_id"], Value::Null);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_name_rejects_source_auto() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v2/names/alice.eth?source=auto")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("v2 source=auto request failed")?;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["error"]["code"], json!("invalid_input"));
+    assert_eq!(
+        payload["error"]["message"],
+        json!("source must be one of: indexed, verified")
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_name_reads_basenames_record_with_base_network() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let logical_name_id = "basenames:alice.base.eth";
+    let resource_id = Uuid::from_u128(0x9200);
+    let token_lineage_id = Uuid::from_u128(0x9201);
+    let surface_binding_id = Uuid::from_u128(0x9202);
+
+    database
+        .seed_basenames_exact_name_rebuild_inputs(
+            logical_name_id,
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    database.rebuild_name_current(logical_name_id).await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v2/names/alice.base.eth")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("v2 basenames name record request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["data"]["namespace"], json!("basenames"));
+    assert_eq!(payload["data"]["network"], json!("base"));
+    assert_eq!(payload["data"]["chain_id"], json!(8453));
+    assert_eq!(payload["data"]["registration_status"], json!("active"));
+    assert_eq!(payload["data"]["resolver"]["chain_id"], json!(8453));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
 async fn v2_name_record_payload(uri: &str) -> Result<Value> {
+    v2_name_record_payload_with_row(uri, |_| {}).await
+}
+
+async fn v2_name_record_payload_with_row(
+    uri: &str,
+    configure_row: impl FnOnce(&mut bigname_storage::NameCurrentRow),
+) -> Result<Value> {
     let database = TestDatabase::new_with_schemas(false, true).await?;
     let logical_name_id = "ens:alice.eth";
     let resource_id = Uuid::from_u128(0x2200);
@@ -120,25 +245,26 @@ async fn v2_name_record_payload(uri: &str) -> Result<Value> {
         resource_id,
         token_lineage_id,
     );
-    row.declared_summary["authority"] = json!({
-        "token_id": "1234"
-    });
     row.declared_summary["registration"] = json!({
         "status": "active",
         "authority_kind": "registrar",
+        "authority_key": "registrar:ethereum-mainnet:alice",
         "released_at": null,
         "registrant": "0x00000000000000000000000000000000000000aa",
+        "expiry": "2027-01-02T03:04:05Z",
         "registered_at": "2024-01-02T03:04:05Z",
         "created_at": "2023-01-02T03:04:05Z",
-        "expiry": "2027-01-02T03:04:05Z"
+        "latest_event_kind": "NameRegistered"
     });
     row.declared_summary["control"] = json!({
+        "status": "active",
+        "expiry": "2027-01-02T03:04:05Z",
         "registry_owner": "0x00000000000000000000000000000000000000bb",
-        "effective_controller": "0x00000000000000000000000000000000000000cc",
         "registrant": "0x00000000000000000000000000000000000000aa",
-        "expiry": "2027-01-02T03:04:05Z"
+        "latest_event_kind": "NameTransferred"
     });
     row.declared_summary["primary_name"] = json!("alice.eth");
+    configure_row(&mut row);
     database.insert_name_current_row(row).await?;
 
     let mut inventory = record_inventory_current_row(logical_name_id, resource_id);
