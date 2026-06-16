@@ -152,12 +152,13 @@ Field ownership:
   `text:<key>`, `avatar`, and `contenthash`. Requested-key outcomes are also
   returned in route-local `records`, keyed by the requested key; each value is
   `{status, value?, unsupported_reason?, failure_reason?}`. `source=verified`
-  and verified fallback from `source=auto` currently serve persisted verified
-  outcomes only; on-demand verified execution is deferred to a later turn. A
-  supported verified value not yet served for the selected snapshot is reported
-  per key as `status=stale` with a `failure_reason`. `source=auto` blends per
-  key: indexed answers are used where they satisfy the requested key, and only
-  the remaining supported keys fall back to persisted verified values.
+  and verified fallback from `source=auto` use persisted verified outcomes when
+  available and otherwise attempt on-demand verified execution behind `source=`.
+  A supported verified value that cannot be served or executed for the selected
+  snapshot is reported per key as `status=stale` with a `failure_reason`.
+  `source=auto` blends per key: indexed answers are used where they satisfy the
+  requested key, and only the remaining supported keys fall back to verified
+  readback or on-demand execution.
   `include=inventory` adds route-local
   `inventory: {known_keys, unset_keys, unsupported_keys}`. Deep inventory
   internals stay on diagnostics.
