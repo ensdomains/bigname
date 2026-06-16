@@ -19,7 +19,6 @@ use super::{
 
 const INDEXED_INVENTORY_UNAVAILABLE_REASON: &str = "inventory_not_available";
 const VERIFIED_NOT_SUPPORTED_REASON: &str = "verified_records_not_supported";
-const VERIFIED_NOT_AVAILABLE_REASON: &str = "verified_records_not_available";
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub(crate) struct NameRecords {
@@ -46,7 +45,7 @@ pub(crate) struct RecordAnswer {
 
 pub(crate) enum VerifiedRecordLookup {
     Found(Box<ExecutionOutcome>),
-    CacheMiss,
+    Stale(String),
     NotSupported,
 }
 
@@ -325,13 +324,13 @@ fn verified_record_answers(
                 .map_err(|error| V2Error::internal_error(error.to_string()))?;
             Ok(verified_queries_from_state(&state, records))
         }
-        Some(VerifiedRecordLookup::CacheMiss) => {
+        Some(VerifiedRecordLookup::Stale(reason)) => {
             let supported = supported_verified_record_keys(row, records);
             Ok(records
                 .iter()
                 .map(|record| {
                     let answer = if supported.contains(&record.record_key) {
-                        stale_answer(VERIFIED_NOT_AVAILABLE_REASON)
+                        stale_answer(reason.clone())
                     } else {
                         unsupported_answer(VERIFIED_NOT_SUPPORTED_REASON)
                     };

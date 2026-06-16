@@ -4,11 +4,14 @@ use axum::{
     http::StatusCode,
     routing::{get, post},
 };
-use bigname_storage::{RecordInventoryCurrentRow, SelectedSnapshot, SnapshotSelectionScope};
+use bigname_storage::{
+    RecordInventoryCurrentRow, SelectedSnapshot, SnapshotSelectionErrorKind, SnapshotSelectionScope,
+};
 
 use crate::{
-    ApiError, AppState, ExactNameSnapshotSelector, load_name_current_for_selected_snapshot,
-    load_supported_record_inventory_current_for_snapshot, lookup_resolution_verified_outcome,
+    ApiError, AppState, ExactNameSnapshotSelector,
+    handler_resolution_on_demand::load_or_execute_resolution_verified_outcome,
+    load_name_current_for_selected_snapshot, load_supported_record_inventory_current_for_snapshot,
     map_internal_api_error, normalize_inferred_route_name, parse_resolution_record_key,
     snapshot_selection_api_error,
 };
@@ -267,25 +270,23 @@ async fn load_verified_record_lookup(
         return Ok(None);
     }
 
-    match lookup_resolution_verified_outcome(
-        &state.pool,
+    match load_or_execute_resolution_verified_outcome(
+        state,
         row,
         records,
         record_inventory,
         selected_snapshot,
+        false,
+        true,
     )
     .await
-    .map_err(|error| api_error_to_v2(snapshot_selection_api_error(error)))?
     {
-        crate::ResolutionVerifiedOutcomeLookup::Found(outcome) => {
-            Ok(Some(VerifiedRecordLookup::Found(Box::new(outcome))))
-        }
-        crate::ResolutionVerifiedOutcomeLookup::CacheMiss => {
-            Ok(Some(VerifiedRecordLookup::CacheMiss))
-        }
-        crate::ResolutionVerifiedOutcomeLookup::NotSupported => {
-            Ok(Some(VerifiedRecordLookup::NotSupported))
-        }
+        Ok(Some(outcome)) => Ok(Some(VerifiedRecordLookup::Found(Box::new(outcome)))),
+        Ok(None) => Ok(Some(VerifiedRecordLookup::NotSupported)),
+        Err(error) if error.kind() == SnapshotSelectionErrorKind::Stale => Ok(Some(
+            VerifiedRecordLookup::Stale(error.message().to_owned()),
+        )),
+        Err(error) => Err(api_error_to_v2(snapshot_selection_api_error(error))),
     }
 }
 
