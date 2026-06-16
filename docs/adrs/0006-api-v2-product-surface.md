@@ -411,7 +411,8 @@ filters, the reserved `/v1/events` parameter block, the `resource` vs
   Resolver (upstream: .refs/basenames/README.md:L69 @ basenames@1809bbc)
   (upstream: .refs/basenames/README.md:L22 @ basenames@1809bbc)), and
   on-demand execution on the records/profile/primary-name paths — behind
-  `source=`.
+  `source=`. Implementation note: v2 `/records` currently serves persisted
+  verified outcomes only; on-demand execution is deferred to a tracked follow-up.
 - Explicit unsupported semantics — as `meta.completeness`,
   `unsupported_fields`, and per-item `status`, with the full taxonomy intact on
   diagnostics routes. "Never silent omission" is unchanged.

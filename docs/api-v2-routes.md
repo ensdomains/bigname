@@ -151,9 +151,14 @@ Field ownership:
   record-key allowlist using the existing app key grammar: `addr:<coin_type>`,
   `text:<key>`, `avatar`, and `contenthash`. Requested-key outcomes are also
   returned in route-local `records`, keyed by the requested key; each value is
-  `{status, value?, unsupported_reason?, failure_reason?}`. `source=auto` uses
-  indexed values when they satisfy the requested keys and otherwise falls back
-  to verified values for supported keys. `include=inventory` adds route-local
+  `{status, value?, unsupported_reason?, failure_reason?}`. `source=verified`
+  and verified fallback from `source=auto` currently serve persisted verified
+  outcomes only; on-demand verified execution is deferred to a later turn. A
+  supported verified value not yet served for the selected snapshot is reported
+  per key as `status=stale` with a `failure_reason`. `source=auto` blends per
+  key: indexed answers are used where they satisfy the requested key, and only
+  the remaining supported keys fall back to persisted verified values.
+  `include=inventory` adds route-local
   `inventory: {known_keys, unset_keys, unsupported_keys}`. Deep inventory
   internals stay on diagnostics.
 - Pagination behavior: none.

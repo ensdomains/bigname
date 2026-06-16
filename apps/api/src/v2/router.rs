@@ -4,25 +4,31 @@ use axum::{
     http::StatusCode,
     routing::{get, post},
 };
-use bigname_storage::{SelectedSnapshot, SnapshotSelectionScope};
+use bigname_storage::{RecordInventoryCurrentRow, SelectedSnapshot, SnapshotSelectionScope};
 
 use crate::{
     ApiError, AppState, ExactNameSnapshotSelector, load_name_current_for_selected_snapshot,
-    load_supported_record_inventory_current_for_snapshot, map_internal_api_error,
-    normalize_inferred_route_name, snapshot_selection_api_error,
+    load_supported_record_inventory_current_for_snapshot, lookup_resolution_verified_outcome,
+    map_internal_api_error, normalize_inferred_route_name, parse_resolution_record_key,
+    snapshot_selection_api_error,
 };
 
 use super::{
-    Envelope, Meta, NameRecord, QueryParams, RequestSource, Source, Status, V2Error, V2Result,
-    as_of_meta, build_name_record, resolve_v2_snapshot,
+    Envelope, MAX_PAGE_SIZE, Meta, NameRecord, NameRecords, QueryParams, RequestSource, Source,
+    Status, V2Error, V2Result, VerifiedRecordLookup, as_of_meta, build_auto_name_records,
+    build_indexed_name_records, build_name_record, build_verified_name_records,
+    default_requested_records, indexed_records_requiring_verified_fallback, resolve_v2_snapshot,
+    validate_product_record,
 };
+
+const MAX_RECORD_KEYS: usize = MAX_PAGE_SIZE as usize;
 
 pub(super) fn router() -> Router<AppState> {
     Router::new()
         .route("/v2/lookup", post(not_implemented))
         .route("/v2/status", get(not_implemented))
         .route("/v2/names/{name}", get(get_name_record))
-        .route("/v2/names/{name}/records", get(not_implemented))
+        .route("/v2/names/{name}/records", get(get_name_records))
         .route("/v2/names/{name}/subnames", get(not_implemented))
         .route("/v2/names/{name}/history", get(not_implemented))
         .route("/v2/permissions", get(not_implemented))
@@ -56,6 +62,134 @@ pub(super) fn router() -> Router<AppState> {
 
 async fn not_implemented() -> StatusCode {
     StatusCode::NOT_IMPLEMENTED
+}
+
+async fn get_name_records(
+    Path(input_name): Path<String>,
+    params: QueryParams,
+    State(state): State<AppState>,
+) -> V2Result<Json<Envelope<NameRecords>>> {
+    let normalized = normalize_inferred_route_name(&input_name)
+        .map_err(|error| V2Error::invalid_input(error.message))?;
+    let namespace = params
+        .namespace
+        .clone()
+        .unwrap_or_else(|| normalized.namespace.to_owned());
+    let requested_records = parse_record_keys(params.keys.as_deref())?;
+    let include_inventory = records_include_inventory(&params.include)?;
+
+    let scope = v2_exact_name_snapshot_scope(&state, &namespace).await?;
+    let selected_snapshot =
+        resolve_v2_snapshot(&state.pool, &scope, params.at.as_ref(), params.finality).await?;
+    let row = load_name_current_for_selected_snapshot(
+        &state.pool,
+        &namespace,
+        &normalized.normalized_name,
+        &selected_snapshot,
+    )
+    .await
+    .map_err(|error| {
+        api_error_to_v2(map_internal_api_error(
+            error,
+            format!(
+                "failed to load name records for {}/{}",
+                namespace, normalized.normalized_name
+            ),
+        ))
+    })?;
+
+    let record_inventory =
+        load_supported_record_inventory_current_for_snapshot(&state.pool, &row, &selected_snapshot)
+            .await
+            .map_err(|error| api_error_to_v2(snapshot_selection_api_error(error)))?;
+    let default_records;
+    let requested_records = match requested_records.as_deref() {
+        Some(records) => Some(records),
+        None if params.source == RequestSource::Verified => {
+            default_records = default_requested_records(record_inventory.as_ref());
+            Some(default_records.as_slice())
+        }
+        None => None,
+    };
+
+    let (route_source, data) = match params.source {
+        RequestSource::Indexed => (
+            Source::Indexed,
+            build_indexed_name_records(
+                &row,
+                record_inventory.as_ref(),
+                requested_records,
+                include_inventory,
+            ),
+        ),
+        RequestSource::Verified => {
+            let verified_lookup = load_verified_record_lookup(
+                &state,
+                &row,
+                record_inventory.as_ref(),
+                requested_records.unwrap_or_default(),
+                &selected_snapshot,
+            )
+            .await?;
+            (
+                Source::Verified,
+                build_verified_name_records(
+                    &row,
+                    record_inventory.as_ref(),
+                    requested_records,
+                    verified_lookup,
+                    include_inventory,
+                )?,
+            )
+        }
+        RequestSource::Auto => {
+            let records = requested_records.unwrap_or_default();
+            if records.is_empty() {
+                (
+                    Source::Indexed,
+                    build_indexed_name_records(
+                        &row,
+                        record_inventory.as_ref(),
+                        requested_records,
+                        include_inventory,
+                    ),
+                )
+            } else {
+                let fallback_records = indexed_records_requiring_verified_fallback(
+                    &row,
+                    record_inventory.as_ref(),
+                    records,
+                );
+                let verified_lookup = load_verified_record_lookup(
+                    &state,
+                    &row,
+                    record_inventory.as_ref(),
+                    &fallback_records,
+                    &selected_snapshot,
+                )
+                .await?;
+                build_auto_name_records(
+                    &row,
+                    record_inventory.as_ref(),
+                    records,
+                    verified_lookup,
+                    include_inventory,
+                )?
+            }
+        }
+    };
+
+    let meta = Meta {
+        as_of: Some(as_of_meta(&selected_snapshot)?),
+        source: Some(route_source),
+        ..Meta::default()
+    };
+
+    Ok(Json(Envelope {
+        data,
+        page: None,
+        meta,
+    }))
 }
 
 async fn get_name_record(
@@ -120,6 +254,90 @@ async fn get_name_record(
         page: None,
         meta,
     }))
+}
+
+async fn load_verified_record_lookup(
+    state: &AppState,
+    row: &bigname_storage::NameCurrentRow,
+    record_inventory: Option<&RecordInventoryCurrentRow>,
+    records: &[crate::ResolutionRecordKey],
+    selected_snapshot: &SelectedSnapshot,
+) -> V2Result<Option<VerifiedRecordLookup>> {
+    if records.is_empty() {
+        return Ok(None);
+    }
+
+    match lookup_resolution_verified_outcome(
+        &state.pool,
+        row,
+        records,
+        record_inventory,
+        selected_snapshot,
+    )
+    .await
+    .map_err(|error| api_error_to_v2(snapshot_selection_api_error(error)))?
+    {
+        crate::ResolutionVerifiedOutcomeLookup::Found(outcome) => {
+            Ok(Some(VerifiedRecordLookup::Found(Box::new(outcome))))
+        }
+        crate::ResolutionVerifiedOutcomeLookup::CacheMiss => {
+            Ok(Some(VerifiedRecordLookup::CacheMiss))
+        }
+        crate::ResolutionVerifiedOutcomeLookup::NotSupported => {
+            Ok(Some(VerifiedRecordLookup::NotSupported))
+        }
+    }
+}
+
+fn parse_record_keys(keys: Option<&str>) -> V2Result<Option<Vec<crate::ResolutionRecordKey>>> {
+    let Some(keys) = keys.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+
+    let mut parsed = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for key in keys.split(',').map(str::trim) {
+        if parsed.len() >= MAX_RECORD_KEYS {
+            return Err(V2Error::invalid_input(format!(
+                "keys must contain at most {MAX_RECORD_KEYS} record keys"
+            )));
+        }
+        if key.is_empty() {
+            return Err(V2Error::invalid_input(
+                "keys must be a comma-separated record-key list",
+            ));
+        }
+        let record = parse_resolution_record_key(key)
+            .and_then(validate_product_record)
+            .ok_or_else(|| {
+                V2Error::invalid_input(
+                    "keys must contain only addr:<coin_type>, text:<key>, avatar, or contenthash",
+                )
+            })?;
+        if !seen.insert(record.record_key.clone()) {
+            return Err(V2Error::invalid_input(
+                "keys must not contain duplicate record keys",
+            ));
+        }
+        parsed.push(record);
+    }
+
+    Ok(Some(parsed))
+}
+
+fn records_include_inventory(include: &[String]) -> V2Result<bool> {
+    let mut include_inventory = false;
+    for value in include {
+        match value.as_str() {
+            "inventory" => include_inventory = true,
+            _ => {
+                return Err(V2Error::invalid_input(
+                    "include must contain only inventory",
+                ));
+            }
+        }
+    }
+    Ok(include_inventory)
 }
 
 fn mark_unserved_verified_fields(record: &mut NameRecord) {

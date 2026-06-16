@@ -157,7 +157,7 @@ pub(crate) fn classify_registration_status(
     }
 }
 
-fn resolver(summary: &Value) -> Option<Resolver> {
+pub(super) fn resolver(summary: &Value) -> Option<Resolver> {
     let resolver = object_field(summary, "resolver")?;
     let address = string_field(resolver.get("address"))
         .map(|value| value.to_ascii_lowercase())
@@ -167,7 +167,7 @@ fn resolver(summary: &Value) -> Option<Resolver> {
     Some(Resolver { chain_id, address })
 }
 
-fn record_addresses(
+pub(super) fn record_addresses(
     record_inventory: Option<&RecordInventoryCurrentRow>,
 ) -> BTreeMap<String, String> {
     success_record_entries(record_inventory, "addr")
@@ -184,7 +184,7 @@ fn record_addresses(
         .collect()
 }
 
-fn record_text_records(
+pub(super) fn record_text_records(
     record_inventory: Option<&RecordInventoryCurrentRow>,
 ) -> BTreeMap<String, String> {
     let mut records = BTreeMap::new();
@@ -208,11 +208,13 @@ fn record_text_records(
     records
 }
 
-fn record_content_hash(record_inventory: Option<&RecordInventoryCurrentRow>) -> Option<String> {
+pub(super) fn record_content_hash(
+    record_inventory: Option<&RecordInventoryCurrentRow>,
+) -> Option<String> {
     success_record_entries(record_inventory, "contenthash").find_map(record_value_string)
 }
 
-fn success_record_entries<'a>(
+pub(super) fn success_record_entries<'a>(
     record_inventory: Option<&'a RecordInventoryCurrentRow>,
     record_family: &'static str,
 ) -> impl Iterator<Item = &'a Value> {
@@ -226,7 +228,7 @@ fn success_record_entries<'a>(
         })
 }
 
-fn record_value_string(entry: &Value) -> Option<String> {
+pub(super) fn record_value_string(entry: &Value) -> Option<String> {
     let value = entry.get("value")?;
     value
         .get("value")
@@ -341,11 +343,11 @@ fn json_path<'a>(mut value: &'a Value, path: &[&str]) -> Option<&'a Value> {
     Some(value)
 }
 
-fn string_field(value: Option<&Value>) -> Option<String> {
+pub(super) fn string_field(value: Option<&Value>) -> Option<String> {
     value.and_then(value_to_string)
 }
 
-fn value_to_string(value: &Value) -> Option<String> {
+pub(super) fn value_to_string(value: &Value) -> Option<String> {
     match value {
         Value::String(value) => Some(value.clone()),
         Value::Number(value) => Some(value.to_string()),
