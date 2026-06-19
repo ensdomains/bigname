@@ -615,7 +615,9 @@ async fn graphql_domain_op_returns_subgraph_domain_shape() -> Result<()> {
     assert_eq!(domain["createdAt"], json!(1_700_000_000));
     assert_eq!(domain["expiryDate"], json!(1_900_000_000));
     assert!(domain["createdAt"].is_number());
-    // Dashboard-scope resolver stubs: address present, texts/addresses empty, contentHash null.
+    // alice.eth has no record_inventory_current row seeded, so the resolver serves its empty
+    // shapes: address present, texts/addresses empty, contentHash null. (Populated record fields
+    // are covered by graphql_domain_resolver_serves_record_inventory_fields.)
     assert_eq!(domain["resolver"]["address"], json!(GRAPHQL_RESOLVER));
     assert_eq!(domain["resolver"]["texts"], json!([]));
     assert_eq!(domain["resolver"]["addresses"], json!([]));
