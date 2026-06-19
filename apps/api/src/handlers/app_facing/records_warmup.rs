@@ -29,15 +29,32 @@ pub(super) async fn warm_compact_records_route_sql_path(
     }
 
     for task in tasks {
-        let result = task
-            .await
-            .context("compact records route SQL warm-up task failed to join")?;
-        if let Err(error) = result {
-            bail!(
-                "compact records route SQL warm-up failed for {namespace}/{name}: {} ({})",
-                error.message,
-                error.code
+        let result = match task.await {
+            Ok(result) => result,
+            Err(join_error) => {
+                warn!(
+                    service = "api",
+                    namespace = %namespace,
+                    name = %name,
+                    error = ?join_error,
+                    "skipped compact records route SQL warm-up because a warm-up task failed"
+                );
+                return Ok(());
+            }
+        };
+        if let Err(error) = result
+            && is_skippable_compact_records_warmup_error(&error)
+        {
+            warn!(
+                service = "api",
+                namespace = %namespace,
+                name = %name,
+                status = %error.status,
+                code = error.code,
+                message = %error.message,
+                "skipped compact records route SQL warm-up because the warm-up request failed"
             );
+            return Ok(());
         }
     }
 
@@ -49,6 +66,12 @@ pub(super) async fn warm_compact_records_route_sql_path(
         "warmed compact records route SQL path"
     );
     Ok(())
+}
+
+fn is_skippable_compact_records_warmup_error(error: &ApiError) -> bool {
+    error.status == StatusCode::NOT_FOUND
+        || error.status.is_client_error()
+        || error.status.is_server_error()
 }
 
 async fn compact_records_warmup_sample(pool: &PgPool) -> Result<Option<(String, String)>> {
@@ -113,5 +136,28 @@ fn compact_records_warmup_query() -> NameRecordsQuery {
         include: Some("resolver_address,known_text_keys,avatar,content_hash,coins".to_owned()),
         meta: Some("none".to_owned()),
         ..NameRecordsQuery::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compact_records_warmup_skips_not_found_samples() {
+        let error = ApiError {
+            status: StatusCode::NOT_FOUND,
+            code: "not_found",
+            message: "name missing".to_owned(),
+        };
+
+        assert!(is_skippable_compact_records_warmup_error(&error));
+    }
+
+    #[test]
+    fn compact_records_warmup_treats_internal_errors_as_nonfatal() {
+        let error = ApiError::internal_error("projection read failed");
+
+        assert!(is_skippable_compact_records_warmup_error(&error));
     }
 }

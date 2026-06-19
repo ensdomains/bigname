@@ -1,9 +1,11 @@
+mod invalidations;
 mod reads;
 mod source_decode;
 mod sources;
 mod types;
 mod writes;
 
+pub(crate) use invalidations::enqueue_children_current_invalidations_for_parent_surfaces;
 pub use reads::{
     load_children_current, load_children_current_including_noncanonical,
     load_children_current_page, load_children_current_summaries,
@@ -36,10 +38,14 @@ const DEFAULT_CHILDREN_CURRENT_READ_FILTER: &str = r#"
       'safe'::canonicality_state,
       'finalized'::canonicality_state
   )
-  AND child.canonicality_state IN (
-      'canonical'::canonicality_state,
-      'safe'::canonicality_state,
-      'finalized'::canonicality_state
+  AND (
+      child.logical_name_id IS NULL
+      OR cc.provenance #>> '{label,source}' = 'label_preimage'
+      OR child.canonicality_state IN (
+          'canonical'::canonicality_state,
+          'safe'::canonicality_state,
+          'finalized'::canonicality_state
+      )
   )
 "#;
 

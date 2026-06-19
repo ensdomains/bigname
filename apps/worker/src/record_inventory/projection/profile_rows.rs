@@ -26,15 +26,15 @@ pub(super) async fn build_profile_gated_row(
             "globally_enumerable": false,
         }),
         selectors: Value::Array(vec![]),
-        explicit_gaps: Value::Array(vec![gap_value(
-            CONTENTHASH_RECORD_KEY,
-            CONTENTHASH_RECORD_FAMILY,
-            None,
-        )]),
+        explicit_gaps: Value::Array(vec![]),
         unsupported_families: Value::Array(vec![
             resolver_family_value_for_status(
                 SUPPORTED_ADDR_RECORD_FAMILY,
                 latest_resolver_record_statuses.map(|statuses| statuses.addr.as_str()),
+            ),
+            resolver_family_value_for_status(
+                SUPPORTED_CONTENTHASH_RECORD_FAMILY,
+                latest_resolver_record_statuses.map(|statuses| statuses.contenthash.as_str()),
             ),
             resolver_family_value_for_status(
                 SUPPORTED_TEXT_RECORD_FAMILY,
@@ -198,6 +198,9 @@ fn record_family_supported(statuses: &ResolverRecordFamilyStatuses, record_famil
     match record_family {
         SUPPORTED_ADDR_RECORD_FAMILY => statuses.addr == RESOLVER_PROFILE_STATUS_SUPPORTED,
         SUPPORTED_TEXT_RECORD_FAMILY => statuses.text == RESOLVER_PROFILE_STATUS_SUPPORTED,
+        SUPPORTED_CONTENTHASH_RECORD_FAMILY => {
+            statuses.contenthash == RESOLVER_PROFILE_STATUS_SUPPORTED
+        }
         _ => true,
     }
 }

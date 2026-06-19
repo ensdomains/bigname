@@ -3,6 +3,43 @@ use super::*;
 #[path = "observation/resolver_records.rs"]
 mod resolver_records;
 
+pub(super) fn build_authority_observations(
+    raw_log: &AuthorityRawLogRow,
+    event_topics: &AuthorityEventTopics,
+) -> Result<Vec<AuthorityObservation>> {
+    let Some(topic0) = raw_log.topics.first() else {
+        return Ok(Vec::new());
+    };
+    let profile = authority_profile_for_source_family(&raw_log.source_family);
+
+    if matches!(profile, Some(profile) if profile.wrapper_source_family() == Some(raw_log.source_family.as_str()))
+        && event_topics.matches(TRANSFER_BATCH_SIGNATURE, topic0)?
+    {
+        return decode_wrapper_transfer_batch_data(raw_log)?
+            .into_iter()
+            .enumerate()
+            .map(|(index, transfer)| {
+                Ok(AuthorityObservation::WrapperTokenTransferred(
+                    WrapperTokenTransferObservation {
+                        namehash: normalize_hex_32(&transfer.namehash)?,
+                        from_address: transfer.from_address,
+                        to_address: transfer.to_address,
+                        value: transfer.value,
+                        transfer_index: Some(
+                            i64::try_from(index).context("TransferBatch index exceeds i64")?,
+                        ),
+                        reference: raw_log.reference(),
+                    },
+                ))
+            })
+            .collect();
+    }
+
+    Ok(build_authority_observation(raw_log, event_topics)?
+        .into_iter()
+        .collect())
+}
+
 pub(super) fn build_authority_observation(
     raw_log: &AuthorityRawLogRow,
     event_topics: &AuthorityEventTopics,
@@ -135,21 +172,37 @@ pub(super) fn build_authority_observation(
                 .get(1)
                 .context("NewOwner log is missing parent node")?,
         )?;
-        if parent_node
-            != profile
-                .context("registry observation is missing an authority profile")?
-                .root_node()
-        {
-            return Ok(None);
-        }
+        let labelhash = normalize_hex_32(
+            raw_log
+                .topics
+                .get(2)
+                .context("NewOwner log is missing indexed labelhash")?,
+        )?;
+        let namehash = child_namehash_hex(&parent_node, &labelhash)?;
         return Ok(Some(AuthorityObservation::RegistryOwnerChanged(
             RegistryOwnerObservation {
-                labelhash: normalize_hex_32(
+                parent_node: Some(parent_node),
+                labelhash,
+                namehash: Some(namehash),
+                owner: decode_owner_address(&raw_log.data)?,
+                reference: raw_log.reference(),
+            },
+        )));
+    }
+
+    if matches!(profile, Some(profile) if raw_log.source_family == profile.registry_source_family())
+        && event_topics.matches(REGISTRY_TRANSFER_SIGNATURE, topic0)?
+    {
+        return Ok(Some(AuthorityObservation::RegistryOwnerChanged(
+            RegistryOwnerObservation {
+                parent_node: None,
+                labelhash: String::new(),
+                namehash: Some(normalize_hex_32(
                     raw_log
                         .topics
-                        .get(2)
-                        .context("NewOwner log is missing indexed labelhash")?,
-                )?,
+                        .get(1)
+                        .context("Transfer log is missing indexed node")?,
+                )?),
                 owner: decode_owner_address(&raw_log.data)?,
                 reference: raw_log.reference(),
             },
@@ -377,6 +430,7 @@ pub(super) fn build_authority_observation(
                 from_address: transfer.from_address,
                 to_address: transfer.to_address,
                 value: transfer.value,
+                transfer_index: None,
                 reference: raw_log.reference(),
             },
         )));
@@ -470,6 +524,7 @@ pub(super) fn observation_namehash(observation: &AuthorityObservation) -> Option
         AuthorityObservation::WrapperFusesSet(value) => Some(&value.namehash),
         AuthorityObservation::WrapperExpiryExtended(value) => Some(&value.namehash),
         AuthorityObservation::WrapperTokenTransferred(value) => Some(&value.namehash),
+        AuthorityObservation::RegistryOwnerChanged(value) => value.namehash.as_deref(),
         _ => None,
     }
 }

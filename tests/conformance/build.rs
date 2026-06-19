@@ -234,7 +234,6 @@ fn rewrite_openapi_components(source: &str) -> String {
                 "normalized_event_ids",
                 "raw_fact_refs",
                 "manifest_versions",
-                "execution_trace_id",
                 "derivation_kind",
             ],
             "properties": {
@@ -251,7 +250,7 @@ fn rewrite_openapi_components(source: &str) -> String {
                     "items": {},
                 },
                 "execution_trace_id": {
-                    "type": ["string", "null"],
+                    "type": "string",
                 },
                 "derivation_kind": {
                     "type": "string",
@@ -608,14 +607,12 @@ fn rewrite_openapi_components(source: &str) -> String {
         SPLIT_SCHEMA_END,
         SPLIT_SCHEMA_VISIBLE_END,
     ]
-        .into_iter()
-        .filter_map(|marker| source[start..].find(marker).map(|offset| start + offset))
-        .min()
-        .unwrap_or_else(|| {
-            panic!(
-                "failed to find an OpenAPI component helper after `{START}` in copied api source"
-            )
-        });
+    .into_iter()
+    .filter_map(|marker| source[start..].find(marker).map(|offset| start + offset))
+    .min()
+    .unwrap_or_else(|| {
+        panic!("failed to find an OpenAPI component helper after `{START}` in copied api source")
+    });
 
     let mut rewritten = String::with_capacity(source.len() + REPLACEMENT.len());
     rewritten.push_str(&source[..start]);

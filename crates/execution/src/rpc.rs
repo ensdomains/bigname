@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::LazyLock};
 
 use alloy_json_rpc::{
     Id, Request as JsonRpcRequest, RequestPacket, ResponsePacket, ResponsePayload,
@@ -8,6 +8,8 @@ use anyhow::{Context, Result, bail};
 use reqwest::Url;
 use serde_json::Value;
 use tower::Service;
+
+static JSON_RPC_HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(reqwest::Client::new);
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ChainRpcUrls {
@@ -77,14 +79,14 @@ impl JsonRpcHttpClient {
         let endpoint = endpoint
             .parse::<Url>()
             .with_context(|| format!("failed to parse RPC endpoint {endpoint}"))?;
-        if endpoint.scheme() != "http" {
+        if !matches!(endpoint.scheme(), "http" | "https") {
             bail!(
-                "unsupported RPC endpoint scheme for {endpoint}; bootstrap on-demand execution currently supports only http:// URLs"
+                "unsupported RPC endpoint scheme for {endpoint}; on-demand execution supports http:// and https:// URLs"
             );
         }
 
         Ok(Self {
-            transport: Http::with_client(reqwest::Client::new(), endpoint),
+            transport: Http::with_client(JSON_RPC_HTTP_CLIENT.clone(), endpoint),
         })
     }
 
@@ -141,4 +143,15 @@ impl JsonRpcHttpClient {
 
 fn raw_value_to_json(value: &serde_json::value::RawValue) -> Result<Value> {
     serde_json::from_str(value.get()).context("failed to decode raw JSON value")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn json_rpc_client_accepts_https_endpoints() -> Result<()> {
+        JsonRpcHttpClient::new("https://rpc.example.test")?;
+        Ok(())
+    }
 }

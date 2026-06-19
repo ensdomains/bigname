@@ -103,6 +103,7 @@
       "CompactDomainSummary": {
         "properties": {
           "created_at": {
+            "description": "RFC 3339 timestamp for the first observation of the name itself, excluding supplemental cross-name wildcard or transport positions.",
             "type": [
               "object",
               "array",
@@ -213,6 +214,7 @@
             ]
           },
           "registration_date": {
+            "description": "RFC 3339 timestamp for the last RegistrationGranted block that started the current or most recently released registration epoch.",
             "type": [
               "object",
               "array",
@@ -1670,10 +1672,7 @@
             "type": "string"
           },
           "execution_trace_id": {
-            "type": [
-              "string",
-              "null"
-            ]
+            "type": "string"
           },
           "manifest_versions": {
             "items": {},
@@ -1694,7 +1693,6 @@
           "normalized_event_ids",
           "raw_fact_refs",
           "manifest_versions",
-          "execution_trace_id",
           "derivation_kind"
         ],
         "type": "object"
@@ -2009,7 +2007,7 @@
         "operationId": "address_names",
         "parameters": [
           {
-            "description": "Address anchor for the collection or history read. Addresses are normalized to lowercase.",
+            "description": "Address anchor for the collection or history read. Malformed addresses return 400 invalid_input; valid addresses are normalized to lowercase.",
             "in": "path",
             "name": "address",
             "required": true,
@@ -2149,7 +2147,7 @@
             }
           },
           {
-            "description": "Normalized name within the namespace.",
+            "description": "ENSIP-15 normalized name within the namespace; non-normalized exact path input returns 400 invalid_input.",
             "in": "path",
             "name": "name",
             "required": true,
@@ -2276,7 +2274,7 @@
             }
           },
           {
-            "description": "Address relation event filter.",
+            "description": "Address relation event filter. Malformed addresses return 400 invalid_input; valid addresses are normalized to lowercase.",
             "in": "query",
             "name": "address",
             "required": false,
@@ -2453,7 +2451,7 @@
             }
           },
           {
-            "description": "Normalized name within the namespace.",
+            "description": "ENSIP-15 normalized name within the namespace; non-normalized exact path input returns 400 invalid_input.",
             "in": "path",
             "name": "name",
             "required": true,
@@ -2571,7 +2569,7 @@
             }
           },
           {
-            "description": "Normalized name within the namespace.",
+            "description": "ENSIP-15 normalized name within the namespace; non-normalized exact path input returns 400 invalid_input.",
             "in": "path",
             "name": "name",
             "required": true,
@@ -2689,7 +2687,7 @@
             }
           },
           {
-            "description": "Normalized name within the namespace.",
+            "description": "ENSIP-15 normalized name within the namespace; non-normalized exact path input returns 400 invalid_input.",
             "in": "path",
             "name": "name",
             "required": true,
@@ -2698,7 +2696,7 @@
             }
           },
           {
-            "description": "Comma-separated record selectors. Required for the persisted execution explain lookup.",
+            "description": "Comma-separated record selectors. Required for the persisted execution explain lookup. addr:<coin_type> selectors are canonicalized as unsigned 64-bit decimal text before selector dedupe.",
             "explode": false,
             "in": "query",
             "name": "records",
@@ -2762,7 +2760,7 @@
         "operationId": "address_history",
         "parameters": [
           {
-            "description": "Address anchor for the collection or history read. Addresses are normalized to lowercase.",
+            "description": "Address anchor for the collection or history read. Malformed addresses return 400 invalid_input; valid addresses are normalized to lowercase.",
             "in": "path",
             "name": "address",
             "required": true,
@@ -2818,7 +2816,7 @@
             "name": "view",
             "required": false,
             "schema": {
-              "default": "compact",
+              "default": "full",
               "enum": [
                 "compact",
                 "full"
@@ -2918,7 +2916,7 @@
             }
           },
           {
-            "description": "Normalized name within the namespace.",
+            "description": "ENSIP-15 normalized name within the namespace; non-normalized exact path input returns 400 invalid_input.",
             "in": "path",
             "name": "name",
             "required": true,
@@ -2947,7 +2945,7 @@
             "name": "view",
             "required": false,
             "schema": {
-              "default": "compact",
+              "default": "full",
               "enum": [
                 "compact",
                 "full"
@@ -3074,7 +3072,7 @@
             "name": "view",
             "required": false,
             "schema": {
-              "default": "compact",
+              "default": "full",
               "enum": [
                 "compact",
                 "full"
@@ -3537,7 +3535,7 @@
             }
           },
           {
-            "description": "Normalized name within the namespace.",
+            "description": "ENSIP-15 normalized name within the namespace; non-normalized exact path input returns 400 invalid_input.",
             "in": "path",
             "name": "name",
             "required": true,
@@ -3655,7 +3653,7 @@
             }
           },
           {
-            "description": "Normalized name within the namespace.",
+            "description": "ENSIP-15 normalized name within the namespace; non-normalized exact path input returns 400 invalid_input.",
             "in": "path",
             "name": "name",
             "required": true,
@@ -3805,7 +3803,7 @@
             }
           },
           {
-            "description": "Normalized name within the namespace.",
+            "description": "ENSIP-15 normalized name within the namespace; non-normalized exact path input returns 400 invalid_input.",
             "in": "path",
             "name": "name",
             "required": true,
@@ -3868,7 +3866,7 @@
             }
           },
           {
-            "description": "Requested textual coin-type selector keys.",
+            "description": "Requested textual coin-type selector keys; decimal addr coin types are canonicalized as unsigned 64-bit decimal text before duplicate detection, and exact or canonical duplicates are invalid input.",
             "explode": false,
             "in": "query",
             "name": "coin_types",
@@ -3992,7 +3990,7 @@
             }
           },
           {
-            "description": "Normalized name within the namespace.",
+            "description": "ENSIP-15 normalized name within the namespace; non-normalized exact path input returns 400 invalid_input.",
             "in": "path",
             "name": "name",
             "required": true,
@@ -4109,7 +4107,7 @@
             "description": "Internal error"
           }
         },
-        "summary": "App-facing role rows for a name's current resource",
+        "summary": "App-facing role rows for a name, including ENSv2 root fallback",
         "tags": [
           "Collections"
         ]
@@ -4176,7 +4174,7 @@
         "operationId": "primary_names",
         "parameters": [
           {
-            "description": "Address anchor for the collection or history read. Addresses are normalized to lowercase.",
+            "description": "Address anchor for the collection or history read. Malformed addresses return 400 invalid_input; valid addresses are normalized to lowercase.",
             "in": "path",
             "name": "address",
             "required": true,

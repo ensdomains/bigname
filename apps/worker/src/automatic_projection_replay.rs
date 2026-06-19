@@ -30,6 +30,11 @@ const DEFERRED_NORMALIZED_EVENT_INDEXES: &[&str] = &[
     "normalized_events_name_relevant_projection_idx",
     "normalized_events_record_inventory_resource_replay_idx",
 ];
+const ACTIVE_INDEX_BUILDS_QUERY: &str = r#"
+    SELECT COUNT(*)::bigint
+    FROM pg_stat_progress_create_index
+    WHERE datname = current_database()
+"#;
 
 pub(crate) fn all_current_projections_database_config(
     mut database: DatabaseConfig,
@@ -95,6 +100,7 @@ pub(crate) async fn run_automatic_current_projection_replay(
     let mut bootstrap_completed = false;
     let mut bootstrap_text_hydration_completed = text_hydration_config.is_none();
     let mut primary_hydration_started = primary_hydration_config.is_none();
+    let mut projection_derivation_started = false;
     let projection_apply_generation = Arc::new(AtomicU64::new(0));
     let projection_apply_hydration_lock = Arc::new(Mutex::new(()));
 
@@ -108,7 +114,7 @@ pub(crate) async fn run_automatic_current_projection_replay(
                     info!(
                         service = "worker",
                         replay = "all_current_projections",
-                        "automatic all-current projection replay skipped because durable apply cursor and replay markers exist"
+                        "automatic all-current projection replay skipped because durable apply cursor and target-covering replay markers exist"
                     );
                 }
                 Ok(false) => {}
@@ -148,6 +154,14 @@ pub(crate) async fn run_automatic_current_projection_replay(
         }
 
         if bootstrap_completed {
+            if !projection_derivation_started {
+                spawn_continuous_projection_invalidation_derivation(
+                    pool.clone(),
+                    poll_interval_secs,
+                );
+                projection_derivation_started = true;
+            }
+
             let hydration_schedule = bootstrap_hydration_schedule(
                 bootstrap_text_hydration_completed,
                 primary_hydration_started,
@@ -205,6 +219,51 @@ pub(crate) async fn run_automatic_current_projection_replay(
                         "continuous projection apply iteration failed"
                     );
                 }
+            }
+        }
+
+        if !progressed {
+            sleep(poll_interval).await;
+        }
+    }
+}
+
+fn spawn_continuous_projection_invalidation_derivation(pool: PgPool, poll_interval_secs: u64) {
+    tokio::spawn(async move {
+        run_continuous_projection_invalidation_derivation(pool, poll_interval_secs).await;
+    });
+}
+
+async fn run_continuous_projection_invalidation_derivation(pool: PgPool, poll_interval_secs: u64) {
+    let poll_interval = Duration::from_secs(poll_interval_secs.max(1));
+    info!(
+        service = "worker",
+        projection_apply = true,
+        "continuous projection invalidation derive loop started"
+    );
+
+    loop {
+        let mut progressed = false;
+        match projection_apply::derive_once(&pool).await {
+            Ok(summary) => {
+                progressed = summary.scanned_event_count > 0;
+                if progressed {
+                    info!(
+                        service = "worker",
+                        projection_apply = true,
+                        scanned_event_count = summary.scanned_event_count,
+                        enqueued_invalidation_count = summary.enqueued_invalidation_count,
+                        "continuous projection invalidation derive iteration completed"
+                    );
+                }
+            }
+            Err(error) => {
+                warn!(
+                    service = "worker",
+                    projection_apply = true,
+                    error = %format!("{error:#}"),
+                    "continuous projection invalidation derive iteration failed"
+                );
             }
         }
 
@@ -333,7 +392,7 @@ async fn projection_bootstrap_already_handed_off_to_apply(pool: &PgPool) -> Resu
         return Ok(false);
     }
 
-    let complete_marker_count = load_current_projection_replay_marker_count(pool).await?;
+    let complete_marker_count = load_current_projection_replay_marker_count(pool, None).await?;
     Ok(should_skip_bootstrap_for_existing_apply_cursor(
         cursor_exists,
         complete_marker_count,
@@ -404,11 +463,10 @@ async fn load_projection_replay_readiness(pool: &PgPool) -> Result<ProjectionRep
     .await
     .context("failed to inspect normalized replay cursor readiness")?;
 
-    let active_index_build_count =
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::bigint FROM pg_stat_progress_create_index")
-            .fetch_one(pool)
-            .await
-            .context("failed to inspect active PostgreSQL index builds")?;
+    let active_index_build_count = sqlx::query_scalar::<_, i64>(ACTIVE_INDEX_BUILDS_QUERY)
+        .fetch_one(pool)
+        .await
+        .context("failed to inspect active PostgreSQL index builds")?;
 
     let missing_projection_index_count = missing_projection_index_count(pool).await?;
 
@@ -440,7 +498,10 @@ async fn missing_projection_index_count(pool: &PgPool) -> Result<i64> {
         .context("failed to inspect deferred normalized-event projection indexes")
 }
 
-async fn load_current_projection_replay_marker_count(pool: &PgPool) -> Result<i64> {
+async fn load_current_projection_replay_marker_count(
+    pool: &PgPool,
+    replay_target_block: Option<i64>,
+) -> Result<i64> {
     let projections = replay::ALL_CURRENT_PROJECTION_ORDER
         .iter()
         .copied()
@@ -452,10 +513,15 @@ async fn load_current_projection_replay_marker_count(pool: &PgPool) -> Result<i6
         FROM current_projection_replay_status
         WHERE replay_version = $1
           AND projection = ANY($2::TEXT[])
+          AND (
+              $3::BIGINT IS NULL
+              OR completed_normalized_target_block >= $3
+          )
         "#,
     )
     .bind(replay::CURRENT_PROJECTION_REPLAY_VERSION)
     .bind(&projections)
+    .bind(replay_target_block)
     .fetch_one(pool)
     .await
     .context("failed to inspect current projection replay markers")

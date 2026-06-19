@@ -3,7 +3,7 @@ use std::{
     process::Command,
     str::FromStr,
     sync::{
-        Mutex,
+        Arc, Condvar, Mutex,
         atomic::{AtomicU64, Ordering},
     },
     time::{SystemTime, UNIX_EPOCH},
@@ -16,7 +16,12 @@ use sqlx::{
     postgres::{PgConnectOptions, PgPoolOptions},
     types::time::OffsetDateTime,
 };
-use tokio::time::{Duration, timeout};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpListener,
+    task::JoinHandle,
+    time::{Duration, timeout},
+};
 
 use super::primary_name::{
     normalized_verified_primary_name_request_key, validate_verified_primary_request,
@@ -34,17 +39,218 @@ use super::*;
 use bigname_storage::{
     ChainLineageBlock, ExecutionCacheKey, ExecutionOutcome, ExecutionTrace, MIGRATOR,
     NameCurrentRow, NameSurface, NormalizedEvent, PrimaryNameClaimStatus, PrimaryNameCurrentRow,
-    RawCallSnapshot, RecordInventoryCurrentRow, Resource,
+    PrimaryNameCurrentSnapshot, RawCallSnapshot, RecordInventoryCurrentRow, Resource,
     SupportedVerifiedResolutionRecordKey as SupportedVerifiedRecordKey, SurfaceBinding,
     SurfaceBindingKind, TokenLineage, default_database_url, upsert_chain_lineage_blocks,
     upsert_execution_outcome, upsert_execution_trace, upsert_name_current_rows,
-    upsert_name_surfaces, upsert_primary_name_current_rows, upsert_record_inventory_current_rows,
-    upsert_resources, upsert_surface_bindings, upsert_token_lineages,
+    upsert_name_surfaces, upsert_primary_name_current_rows, upsert_primary_name_current_snapshots,
+    upsert_record_inventory_current_rows, upsert_resources, upsert_surface_bindings,
+    upsert_token_lineages,
 };
 use uuid::Uuid;
 
 static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
 static WORKER_CARGO_LOCK: Mutex<()> = Mutex::new(());
+
+struct ResolutionMockRpcResponse {
+    code: i64,
+    message: &'static str,
+}
+
+async fn spawn_resolution_mock_rpc(
+    responses: Vec<ResolutionMockRpcResponse>,
+) -> Result<(String, JoinHandle<Result<Vec<Value>>>)> {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .context("failed to bind resolution mock RPC listener")?;
+    let url = format!("http://{}", listener.local_addr()?);
+    let handle = tokio::spawn(async move {
+        let mut requests = Vec::new();
+        for response in responses {
+            let (mut socket, _) = listener
+                .accept()
+                .await
+                .context("failed to accept resolution mock RPC request")?;
+            requests.push(read_mock_http_json_body(&mut socket).await?);
+            write_mock_json_rpc_error(&mut socket, response).await?;
+        }
+        Ok(requests)
+    });
+
+    Ok((url, handle))
+}
+
+async fn read_mock_http_json_body(socket: &mut tokio::net::TcpStream) -> Result<Value> {
+    let mut buffer = Vec::new();
+    let mut scratch = [0_u8; 1024];
+    let (body_start, content_length) = loop {
+        let bytes_read = socket
+            .read(&mut scratch)
+            .await
+            .context("failed to read resolution mock RPC request")?;
+        if bytes_read == 0 {
+            bail!("resolution mock RPC request closed before headers finished");
+        }
+        buffer.extend_from_slice(&scratch[..bytes_read]);
+        if let Some(body_start) = find_mock_header_end(&buffer) {
+            let headers = std::str::from_utf8(&buffer[..body_start])
+                .context("resolution mock RPC request headers were not utf8")?;
+            let content_length = parse_mock_content_length(headers)?;
+            break (body_start, content_length);
+        }
+    };
+
+    while buffer.len() < body_start + content_length {
+        let bytes_read = socket
+            .read(&mut scratch)
+            .await
+            .context("failed to read resolution mock RPC request body")?;
+        if bytes_read == 0 {
+            bail!("resolution mock RPC request closed before body finished");
+        }
+        buffer.extend_from_slice(&scratch[..bytes_read]);
+    }
+
+    serde_json::from_slice(&buffer[body_start..body_start + content_length])
+        .context("failed to parse resolution mock RPC request body")
+}
+
+fn find_mock_header_end(buffer: &[u8]) -> Option<usize> {
+    buffer
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|position| position + 4)
+}
+
+fn parse_mock_content_length(headers: &str) -> Result<usize> {
+    headers
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse::<usize>())
+        })
+        .transpose()
+        .context("resolution mock RPC request content-length was invalid")?
+        .with_context(|| "resolution mock RPC request did not include content-length")
+}
+
+async fn write_mock_json_rpc_error(
+    socket: &mut tokio::net::TcpStream,
+    response: ResolutionMockRpcResponse,
+) -> Result<()> {
+    let body = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "error": {
+            "code": response.code,
+            "message": response.message,
+        },
+    })
+    .to_string();
+    let response = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nconnection: close\r\ncontent-length: {}\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    socket
+        .write_all(response.as_bytes())
+        .await
+        .context("failed to write resolution mock RPC response")
+}
+
+async fn join_resolution_mock_requests(
+    handle: JoinHandle<Result<Vec<Value>>>,
+) -> Result<Vec<Value>> {
+    handle
+        .await
+        .context("resolution mock RPC task panicked")?
+        .context("resolution mock RPC task failed")
+}
+
+#[test]
+fn ccip_step_records_trace_payload_digest_and_latency() {
+    let payload = json!({
+        "sender": "0x00000000000000000000000000000000000000cc",
+        "gateway_count": 1,
+        "used_local_batch_gateway": false,
+        "response_bytes": 32,
+        "latency_ms": 17,
+    });
+    let block = ens_resolution::ExecutionBlock {
+        chain_id: ETHEREUM_MAINNET_CHAIN_ID.to_owned(),
+        block_number: 21_000_000,
+        block_hash: "0xabc123".to_owned(),
+    };
+
+    let step = ens_resolution::ccip_step(2, &payload, &block);
+
+    assert_eq!(step.step_index, 2);
+    assert_eq!(step.step_kind, "ccip_offchain_lookup");
+    assert_eq!(step.input_digest, None);
+    assert_eq!(
+        step.output_digest,
+        Some(ens_resolution_abi::digest_json(&payload))
+    );
+    assert_eq!(step.latency_ms, Some(17));
+    assert_eq!(
+        step.canonicality_dependency,
+        json!({
+            ETHEREUM_MAINNET_CHAIN_ID: {
+                "block_hash": "0xabc123",
+                "block_number": 21_000_000,
+                "state": "canonical",
+            }
+        })
+    );
+    assert_eq!(step.step_payload, payload);
+}
+
+#[test]
+fn declared_topology_step_records_latency() {
+    let row = NameCurrentRow {
+        logical_name_id: "ens:alice.eth".to_owned(),
+        namespace: ENS_NAMESPACE.to_owned(),
+        canonical_display_name: "alice.eth".to_owned(),
+        normalized_name: "alice.eth".to_owned(),
+        namehash: "namehash:alice.eth".to_owned(),
+        surface_binding_id: None,
+        resource_id: None,
+        token_lineage_id: None,
+        binding_kind: None,
+        declared_summary: json!({"resolver": {"address": ENS_UNIVERSAL_RESOLVER_ADDRESS}}),
+        provenance: json!({}),
+        coverage: json!({}),
+        chain_positions: json!({}),
+        canonicality_summary: json!({"state": "canonical"}),
+        manifest_version: 1,
+        last_recomputed_at: timestamp(1),
+    };
+    let block = ens_resolution::ExecutionBlock {
+        chain_id: ETHEREUM_MAINNET_CHAIN_ID.to_owned(),
+        block_number: 21_000_000,
+        block_hash: "0xabc123".to_owned(),
+    };
+    let cache_key = ExecutionCacheKey {
+        request_key: "ens:alice.eth:addr:60".to_owned(),
+        requested_chain_positions: json!([{
+            "chain_id": ETHEREUM_MAINNET_CHAIN_ID,
+            "block_number": 21_000_000,
+            "block_hash": "0xabc123"
+        }]),
+        manifest_versions: json!([{
+            "source_family": ENS_EXECUTION_SOURCE_FAMILY,
+            "manifest_version": 1
+        }]),
+        topology_version_boundary: json!({"logical_name_id": "ens:alice.eth"}),
+        record_version_boundary: json!({"logical_name_id": "ens:alice.eth"}),
+    };
+
+    assert_eq!(
+        ens_resolution::declared_topology_step(&row, &cache_key, &block).latency_ms,
+        Some(0)
+    );
+}
 
 struct TestDatabase {
     admin_pool: PgPool,
@@ -952,6 +1158,7 @@ fn record_inventory_entry(query: &VerifiedQuerySummary) -> Value {
         "status": match query.status {
             VerifiedQueryStatus::Success => "success",
             VerifiedQueryStatus::NotFound => "not_found",
+            VerifiedQueryStatus::Unsupported => "unsupported",
             VerifiedQueryStatus::ExecutionFailed => "unsupported",
         }
     });
@@ -974,6 +1181,17 @@ fn record_inventory_entry(query: &VerifiedQuerySummary) -> Value {
                 .as_object_mut()
                 .expect("entry must be object")
                 .insert("value".to_owned(), value);
+        }
+        VerifiedQueryStatus::Unsupported => {
+            entry.as_object_mut().expect("entry must be object").insert(
+                "unsupported_reason".to_owned(),
+                json!(
+                    query
+                        .failure_reason
+                        .as_deref()
+                        .unwrap_or("value_not_retained_in_normalized_events")
+                ),
+            );
         }
         VerifiedQueryStatus::NotFound => {}
         VerifiedQueryStatus::ExecutionFailed => {
@@ -3017,6 +3235,82 @@ async fn persists_execution_failed_direct_path_without_raw_call_snapshots() -> R
 }
 
 #[tokio::test]
+async fn on_demand_all_failed_persists_typed_failure_payloads() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let seed_request = success_request();
+    seed_supported_resolution_storage(&database, &seed_request).await?;
+    let resource_id = boundary_resource_id(&seed_request.outcome.cache_key.record_version_boundary);
+    let row = bigname_storage::load_name_current(database.pool(), "ens:alice.eth")
+        .await?
+        .context("on-demand resolution test must load name_current row")?;
+    let record_inventory_row = bigname_storage::load_record_inventory_current(
+        database.pool(),
+        resource_id,
+        &seed_request.outcome.cache_key.record_version_boundary,
+    )
+    .await?
+    .context("on-demand resolution test must load record_inventory_current row")?;
+    let (rpc_url, handle) = spawn_resolution_mock_rpc(vec![ResolutionMockRpcResponse {
+        code: 3,
+        message: "execution reverted",
+    }])
+    .await?;
+    let chain_rpc_urls =
+        ChainRpcUrls::from_entries(&[format!("{ETHEREUM_MAINNET_CHAIN_ID}={rpc_url}")])?;
+    let records = vec![EnsResolutionRecord::new(
+        "addr:60",
+        "addr",
+        Some("60".to_owned()),
+    )];
+
+    let outcome = execute_ens_universal_resolver_verified_resolution(
+        database.pool(),
+        OnDemandEnsResolutionRequest {
+            row: &row,
+            records: &records,
+            record_inventory_row: Some(&record_inventory_row),
+            chain_positions: row.chain_positions.clone(),
+            chain_rpc_urls: &chain_rpc_urls,
+            use_latest_block_tag: false,
+            persist_execution: true,
+        },
+    )
+    .await
+    .context("on-demand resolution execution failed")?;
+    assert_eq!(join_resolution_mock_requests(handle).await?.len(), 1);
+
+    assert_eq!(
+        outcome
+            .failure_payload
+            .as_ref()
+            .and_then(|payload| payload.get("failure_reason")),
+        Some(&json!("resolver_call_reverted"))
+    );
+    let loaded_trace = load_execution_trace(database.pool(), outcome.execution_trace_id)
+        .await?
+        .context("on-demand resolution trace must persist")?;
+    assert_eq!(
+        loaded_trace
+            .failure_payload
+            .as_ref()
+            .and_then(|payload| payload.get("failure_reason")),
+        Some(&json!("resolver_call_reverted"))
+    );
+    let loaded_outcome = load_execution_outcome(database.pool(), &outcome.cache_key)
+        .await?
+        .context("on-demand resolution outcome must persist")?;
+    assert_eq!(
+        loaded_outcome
+            .failure_payload
+            .as_ref()
+            .and_then(|payload| payload.get("failure_reason")),
+        Some(&json!("resolver_call_reverted"))
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn persists_contenthash_success_direct_path() -> Result<()> {
     let database = TestDatabase::new().await?;
     let request = contenthash_success_request();
@@ -3403,6 +3697,126 @@ async fn rejects_duplicate_selectors_before_writing_any_storage() -> Result<()> 
 }
 
 #[tokio::test]
+async fn rejects_noncanonical_addr_selector_before_writing_any_storage() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let seed_request = multi_selector_request();
+    seed_supported_resolution_storage(&database, &seed_request).await?;
+
+    let mut request = seed_request;
+    let record_keys = vec!["addr:060".to_owned()];
+    let request_key = normalized_request_key(ENS_NAMESPACE, "alice.eth", &record_keys);
+    request.trace.execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000016);
+    request.trace.request_key = request_key.clone();
+    request.trace.request_metadata = json!({
+        "surface": "alice.eth",
+        "record_keys": record_keys,
+        "normalizer_version": "ensip15@ens-normalize-0.1.1"
+    });
+    request.trace.final_payload = Some(json!({
+        "verified_queries": [{
+            "record_key": "addr:060",
+            "status": "success",
+            "value": {
+                "coin_type": "60",
+                "value": "0x00000000000000000000000000000000000000aa"
+            }
+        }]
+    }));
+    request.outcome.execution_trace_id = request.trace.execution_trace_id;
+    request.outcome.cache_key.request_key = request_key;
+    request.outcome.outcome_payload = request.trace.final_payload.clone();
+
+    let error = persist_ens_exact_name_verified_resolution_direct(database.pool(), &request)
+        .await
+        .expect_err("non-canonical addr selector must be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("must use canonical selector addr:60"),
+        "unexpected error: {error:#}"
+    );
+    assert!(
+        load_execution_trace(database.pool(), request.trace.execution_trace_id)
+            .await?
+            .is_none(),
+        "rejected request must not persist trace rows"
+    );
+    assert!(
+        load_execution_outcome(database.pool(), &request.outcome.cache_key)
+            .await?
+            .is_none(),
+        "rejected request must not persist outcome rows"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn rejects_canonical_duplicate_addr_selectors_before_writing_any_storage() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let seed_request = multi_selector_request();
+    seed_supported_resolution_storage(&database, &seed_request).await?;
+
+    let mut request = seed_request;
+    let record_keys = vec!["addr:060".to_owned(), "addr:60".to_owned()];
+    let request_key = normalized_request_key(ENS_NAMESPACE, "alice.eth", &record_keys);
+    request.trace.execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000017);
+    request.trace.request_key = request_key.clone();
+    request.trace.request_metadata = json!({
+        "surface": "alice.eth",
+        "record_keys": record_keys,
+        "normalizer_version": "ensip15@ens-normalize-0.1.1"
+    });
+    request.trace.final_payload = Some(json!({
+        "verified_queries": [
+            {
+                "record_key": "addr:060",
+                "status": "success",
+                "value": {
+                    "coin_type": "60",
+                    "value": "0x00000000000000000000000000000000000000aa"
+                }
+            },
+            {
+                "record_key": "addr:60",
+                "status": "not_found",
+                "failure_reason": "no_addr_record"
+            }
+        ]
+    }));
+    request.outcome.execution_trace_id = request.trace.execution_trace_id;
+    request.outcome.cache_key.request_key = request_key;
+    request.outcome.outcome_payload = request.trace.final_payload.clone();
+
+    let error = persist_ens_exact_name_verified_resolution_direct(database.pool(), &request)
+        .await
+        .expect_err("canonical duplicate selectors must be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("must use canonical selector addr:60")
+            || error
+                .to_string()
+                .contains("must not contain duplicate selectors"),
+        "unexpected error: {error:#}"
+    );
+    assert!(
+        load_execution_trace(database.pool(), request.trace.execution_trace_id)
+            .await?
+            .is_none(),
+        "rejected request must not persist trace rows"
+    );
+    assert!(
+        load_execution_outcome(database.pool(), &request.outcome.cache_key)
+            .await?
+            .is_none(),
+        "rejected request must not persist outcome rows"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn persists_text_selector_results_before_writing_storage() -> Result<()> {
     let database = TestDatabase::new().await?;
     let mut request = multi_selector_request();
@@ -3517,6 +3931,52 @@ async fn rejects_still_unsupported_selector_before_writing_any_storage() -> Resu
         .await?
         .is_empty(),
         "rejected request must not persist raw call snapshots"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn rejects_resolution_noncanonical_value_coin_type_before_writing_any_storage() -> Result<()>
+{
+    let database = TestDatabase::new().await?;
+    let mut request = success_request();
+    request.trace.final_payload = Some(json!({
+        "record_kind": "addr",
+        "coin_type": "60",
+        "value": "0x00000000000000000000000000000000000000aa"
+    }));
+    request.outcome.outcome_payload = Some(json!({
+        "verified_queries": [
+            {
+                "record_key": "addr:60",
+                "status": "success",
+                "value": {
+                    "coin_type": "060",
+                    "value": "0x00000000000000000000000000000000000000aa"
+                }
+            }
+        ]
+    }));
+
+    let error = persist_ens_exact_name_verified_resolution_direct(database.pool(), &request)
+        .await
+        .expect_err("noncanonical outcome value coin_type must be rejected");
+    assert!(
+        error.to_string().contains("must be canonical decimal text"),
+        "unexpected error: {error:#}"
+    );
+    assert!(
+        load_execution_trace(database.pool(), request.trace.execution_trace_id)
+            .await?
+            .is_none(),
+        "rejected request must not persist trace rows"
+    );
+    assert!(
+        load_execution_outcome(database.pool(), &request.outcome.cache_key)
+            .await?
+            .is_none(),
+        "rejected request must not persist outcome rows"
     );
 
     database.cleanup().await
@@ -3990,6 +4450,17 @@ fn verified_primary_request_for_namespace(
         BASENAMES_NAMESPACE => basenames_manifest_versions(),
         other => panic!("unsupported verified-primary test namespace {other}"),
     };
+    let requested_chain_positions = requested_chain_positions();
+    let topology_version_boundary =
+        version_boundary(Uuid::from_u128(0x0e7ec7ace0000000000000000000bbb1));
+    let record_version_boundary =
+        version_boundary(Uuid::from_u128(0x0e7ec7ace0000000000000000000bbb2));
+    let cache_identity = json!({
+        "requested_chain_positions": requested_chain_positions.clone(),
+        "manifest_versions": manifest_versions.clone(),
+        "topology_version_boundary": topology_version_boundary.clone(),
+        "record_version_boundary": record_version_boundary.clone(),
+    });
     let contracts_called = match namespace {
         ENS_NAMESPACE => json!([
             {
@@ -4132,7 +4603,7 @@ fn verified_primary_request_for_namespace(
             request_key: request_key.clone(),
             namespace: namespace.to_owned(),
             chain_context: json!({
-                "requested_positions": requested_chain_positions(),
+                "requested_positions": requested_chain_positions.clone(),
                 "topology_version_boundary": {
                     ETHEREUM_MAINNET_CHAIN_ID: 21_000_000
                 }
@@ -4150,7 +4621,8 @@ fn verified_primary_request_for_namespace(
             request_metadata: json!({
                 "normalized_address": normalized_address,
                 "coin_type": coin_type,
-                "namespace": namespace
+                "namespace": namespace,
+                "cache_identity": cache_identity
             }),
             finished_at: Some(finished_at),
             steps,
@@ -4158,14 +4630,10 @@ fn verified_primary_request_for_namespace(
         outcome: ExecutionOutcome {
             cache_key: ExecutionCacheKey {
                 request_key,
-                requested_chain_positions: requested_chain_positions(),
+                requested_chain_positions,
                 manifest_versions,
-                topology_version_boundary: version_boundary(Uuid::from_u128(
-                    0x0e7ec7ace0000000000000000000bbb1,
-                )),
-                record_version_boundary: version_boundary(Uuid::from_u128(
-                    0x0e7ec7ace0000000000000000000bbb2,
-                )),
+                topology_version_boundary,
+                record_version_boundary,
             },
             execution_trace_id,
             request_type: VERIFIED_PRIMARY_NAME_REQUEST_TYPE.to_owned(),
@@ -4201,6 +4669,15 @@ fn expected_verified_primary_readback_provenance(
         execution_trace_id: request.trace.execution_trace_id,
         manifest_versions: request.outcome.cache_key.manifest_versions.clone(),
     }
+}
+
+fn verified_primary_cache_identity(request: &PersistEnsVerifiedPrimaryNameRequest) -> Value {
+    json!({
+        "requested_chain_positions": request.outcome.cache_key.requested_chain_positions.clone(),
+        "manifest_versions": request.outcome.cache_key.manifest_versions.clone(),
+        "topology_version_boundary": request.outcome.cache_key.topology_version_boundary.clone(),
+        "record_version_boundary": request.outcome.cache_key.record_version_boundary.clone(),
+    })
 }
 
 fn verified_primary_success_request() -> PersistEnsVerifiedPrimaryNameRequest {
@@ -4522,7 +4999,7 @@ async fn persists_basenames_verified_primary_not_found_without_l1_resolver_call(
         &database,
         "0x00000000000000000000000000000000000000bb",
         "60",
-        PrimaryNameClaimStatus::NotFound,
+        PrimaryNameClaimStatus::Success,
     )
     .await?;
 
@@ -4617,7 +5094,7 @@ async fn persists_verified_primary_not_found_without_resolver_call() -> Result<(
         &database,
         "0x00000000000000000000000000000000000000ac",
         "60",
-        PrimaryNameClaimStatus::NotFound,
+        PrimaryNameClaimStatus::Success,
     )
     .await?;
 
@@ -4797,6 +5274,196 @@ async fn verified_primary_readback_returns_none_when_anchor_is_missing() -> Resu
     database.cleanup().await
 }
 
+#[tokio::test]
+async fn rejects_verified_primary_stale_success_after_claim_name_changes() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let request = verified_primary_success_request();
+    upsert_primary_name_current_snapshots(
+        database.pool(),
+        &[PrimaryNameCurrentSnapshot {
+            row: primary_name_anchor_row_for_namespace(
+                ENS_NAMESPACE,
+                "0x00000000000000000000000000000000000000aa",
+                "60",
+                PrimaryNameClaimStatus::Success,
+            ),
+            normalized_claim_name: Some("alice.eth".to_owned()),
+        }],
+    )
+    .await?;
+    upsert_primary_name_current_snapshots(
+        database.pool(),
+        &[PrimaryNameCurrentSnapshot {
+            row: primary_name_anchor_row_for_namespace(
+                ENS_NAMESPACE,
+                "0x00000000000000000000000000000000000000aa",
+                "60",
+                PrimaryNameClaimStatus::Success,
+            ),
+            normalized_claim_name: Some("bob.eth".to_owned()),
+        }],
+    )
+    .await?;
+
+    let error = persist_ens_verified_primary_name(database.pool(), &request)
+        .await
+        .expect_err("stale verified-primary producer must fail after claim-name change");
+    assert!(
+        error.to_string().contains("claim content"),
+        "unexpected error: {error:#}"
+    );
+    assert!(
+        load_execution_trace(database.pool(), request.trace.execution_trace_id)
+            .await?
+            .is_none(),
+        "rejected stale verified-primary request must not persist trace rows"
+    );
+    assert!(
+        load_execution_outcome(database.pool(), &request.outcome.cache_key)
+            .await?
+            .is_none(),
+        "rejected stale verified-primary request must not persist outcome rows"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn rejects_verified_primary_when_claim_changes_after_fast_path_before_transaction()
+-> Result<()> {
+    struct HookState {
+        reached: bool,
+        release: bool,
+    }
+
+    let database = TestDatabase::new().await?;
+    let mut request = verified_primary_success_request();
+    let execution_trace_id = Uuid::from_u128(0x0e7ec7ace0000000000000000000002a);
+    request.trace.execution_trace_id = execution_trace_id;
+    request.outcome.execution_trace_id = execution_trace_id;
+    upsert_primary_name_current_snapshots(
+        database.pool(),
+        &[PrimaryNameCurrentSnapshot {
+            row: primary_name_anchor_row_for_namespace(
+                ENS_NAMESPACE,
+                "0x00000000000000000000000000000000000000aa",
+                "60",
+                PrimaryNameClaimStatus::Success,
+            ),
+            normalized_claim_name: Some("alice.eth".to_owned()),
+        }],
+    )
+    .await?;
+
+    let hook_state = Arc::new((
+        Mutex::new(HookState {
+            reached: false,
+            release: false,
+        }),
+        Condvar::new(),
+    ));
+    let hook_trace_id = request.trace.execution_trace_id;
+    let hook_state_for_hook = Arc::clone(&hook_state);
+    let _hook_guard = super::persistence::test_hooks::install_verified_primary_pre_transaction_hook(
+        Arc::new(move |execution_trace_id| {
+            if execution_trace_id != hook_trace_id {
+                return;
+            }
+            let (lock, condvar) = &*hook_state_for_hook;
+            let mut state = lock
+                .lock()
+                .expect("verified-primary hook state mutex poisoned");
+            state.reached = true;
+            condvar.notify_all();
+            while !state.release {
+                state = condvar
+                    .wait(state)
+                    .expect("verified-primary hook state mutex poisoned while waiting");
+            }
+        }),
+    );
+
+    let pool = database.pool().clone();
+    let request_for_thread = request.clone();
+    let persist_thread = std::thread::spawn(move || -> Result<_> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .context("failed to build verified-primary persistence test runtime")?;
+        runtime.block_on(persist_ens_verified_primary_name(
+            &pool,
+            &request_for_thread,
+        ))
+    });
+
+    let hook_state_for_wait = Arc::clone(&hook_state);
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        let (lock, condvar) = &*hook_state_for_wait;
+        let mut state = lock
+            .lock()
+            .expect("verified-primary hook state mutex poisoned");
+        while !state.reached {
+            state = condvar
+                .wait(state)
+                .expect("verified-primary hook state mutex poisoned while waiting");
+        }
+        Ok(())
+    })
+    .await
+    .context("verified-primary hook wait task panicked")??;
+
+    upsert_primary_name_current_snapshots(
+        database.pool(),
+        &[PrimaryNameCurrentSnapshot {
+            row: primary_name_anchor_row_for_namespace(
+                ENS_NAMESPACE,
+                "0x00000000000000000000000000000000000000aa",
+                "60",
+                PrimaryNameClaimStatus::Success,
+            ),
+            normalized_claim_name: Some("bob.eth".to_owned()),
+        }],
+    )
+    .await?;
+
+    {
+        let (lock, condvar) = &*hook_state;
+        let mut state = lock
+            .lock()
+            .expect("verified-primary hook state mutex poisoned");
+        state.release = true;
+        condvar.notify_all();
+    }
+
+    let persist_result = tokio::task::spawn_blocking(move || {
+        persist_thread
+            .join()
+            .map_err(|_| anyhow::anyhow!("verified-primary persistence test thread panicked"))
+    })
+    .await
+    .context("verified-primary persistence join task panicked")??;
+    let error = persist_result
+        .expect_err("stale verified-primary producer must fail after interleaved claim change");
+    assert!(
+        error.to_string().contains("claim content"),
+        "unexpected error: {error:#}"
+    );
+    assert!(
+        load_execution_trace(database.pool(), request.trace.execution_trace_id)
+            .await?
+            .is_none(),
+        "interleaved stale verified-primary request must not persist trace rows"
+    );
+    assert!(
+        load_execution_outcome(database.pool(), &request.outcome.cache_key)
+            .await?
+            .is_none(),
+        "interleaved stale verified-primary request must not persist outcome rows"
+    );
+
+    database.cleanup().await
+}
+
 #[test]
 fn rejects_unnormalized_verified_primary_request_key() -> Result<()> {
     let mut request = verified_primary_success_request();
@@ -4813,6 +5480,222 @@ fn rejects_unnormalized_verified_primary_request_key() -> Result<()> {
     );
 
     Ok(())
+}
+
+#[tokio::test]
+async fn rejects_verified_primary_noncanonical_metadata_coin_type() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let mut request = verified_primary_success_request();
+    request.trace.request_metadata["coin_type"] = json!("060");
+    insert_primary_name_anchor(
+        &database,
+        "0x00000000000000000000000000000000000000aa",
+        "60",
+        PrimaryNameClaimStatus::Success,
+    )
+    .await?;
+
+    let error = persist_ens_verified_primary_name(database.pool(), &request)
+        .await
+        .expect_err("noncanonical metadata coin_type must be rejected before persistence");
+    assert!(
+        error.to_string().contains("must be canonical decimal text"),
+        "unexpected error: {error:#}"
+    );
+    assert!(
+        load_execution_trace(database.pool(), request.trace.execution_trace_id)
+            .await?
+            .is_none(),
+        "rejected verified-primary request must not persist trace rows"
+    );
+    assert!(
+        load_execution_outcome(database.pool(), &request.outcome.cache_key)
+            .await?
+            .is_none(),
+        "rejected verified-primary request must not persist outcome rows"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn rejects_verified_primary_missing_cache_identity() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let mut request = verified_primary_success_request();
+    request
+        .trace
+        .request_metadata
+        .as_object_mut()
+        .expect("verified-primary request_metadata must be an object")
+        .remove("cache_identity");
+    insert_primary_name_anchor(
+        &database,
+        "0x00000000000000000000000000000000000000aa",
+        "60",
+        PrimaryNameClaimStatus::Success,
+    )
+    .await?;
+
+    let error = persist_ens_verified_primary_name(database.pool(), &request)
+        .await
+        .expect_err("missing verified-primary cache_identity must be rejected");
+    assert!(
+        error.to_string().contains("cache_identity"),
+        "unexpected error: {error:#}"
+    );
+    assert!(
+        load_execution_trace(database.pool(), request.trace.execution_trace_id)
+            .await?
+            .is_none(),
+        "rejected verified-primary request must not persist trace rows"
+    );
+    assert!(
+        load_execution_outcome(database.pool(), &request.outcome.cache_key)
+            .await?
+            .is_none(),
+        "rejected verified-primary request must not persist outcome rows"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn rejects_verified_primary_mismatched_cache_identity() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let mut request = verified_primary_success_request();
+    request.trace.request_metadata["cache_identity"] = verified_primary_cache_identity(&request);
+    request.trace.request_metadata["cache_identity"]["record_version_boundary"] = json!({
+        "drift": true
+    });
+    insert_primary_name_anchor(
+        &database,
+        "0x00000000000000000000000000000000000000aa",
+        "60",
+        PrimaryNameClaimStatus::Success,
+    )
+    .await?;
+
+    let error = persist_ens_verified_primary_name(database.pool(), &request)
+        .await
+        .expect_err("mismatched verified-primary cache_identity must be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("cache_identity.record_version_boundary"),
+        "unexpected error: {error:#}"
+    );
+    assert!(
+        load_execution_trace(database.pool(), request.trace.execution_trace_id)
+            .await?
+            .is_none(),
+        "rejected verified-primary request must not persist trace rows"
+    );
+    assert!(
+        load_execution_outcome(database.pool(), &request.outcome.cache_key)
+            .await?
+            .is_none(),
+        "rejected verified-primary request must not persist outcome rows"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn rejects_verified_primary_trace_identity_drift_from_cache_key() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let mut request = verified_primary_success_request();
+    request.trace.manifest_context["manifest_versions"] = json!([
+        {
+            "source_manifest_id": 7,
+            "manifest_version": 3
+        },
+        {
+            "source_family": ENS_EXECUTION_SOURCE_FAMILY,
+            "manifest_version": 1
+        }
+    ]);
+    insert_primary_name_anchor(
+        &database,
+        "0x00000000000000000000000000000000000000aa",
+        "60",
+        PrimaryNameClaimStatus::Success,
+    )
+    .await?;
+
+    let error = persist_ens_verified_primary_name(database.pool(), &request)
+        .await
+        .expect_err("trace identity drift must be rejected before persistence");
+    assert!(
+        error.to_string().contains(
+            "trace.manifest_context.manifest_versions must match cache_key.manifest_versions"
+        ),
+        "unexpected error: {error:#}"
+    );
+    assert!(
+        load_execution_trace(database.pool(), request.trace.execution_trace_id)
+            .await?
+            .is_none(),
+        "rejected verified-primary request must not persist trace rows"
+    );
+    assert!(
+        load_execution_outcome(database.pool(), &request.outcome.cache_key)
+            .await?
+            .is_none(),
+        "rejected verified-primary request must not persist outcome rows"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn rejects_verified_primary_noncanonical_cache_identity() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let mut request = verified_primary_success_request();
+    let noncanonical_manifest_versions = json!([
+        {
+            "source_manifest_id": 7,
+            "manifest_version": 3
+        },
+        {
+            "source_family": ENS_EXECUTION_SOURCE_FAMILY,
+            "manifest_version": 1
+        }
+    ]);
+    request.outcome.cache_key.manifest_versions = noncanonical_manifest_versions.clone();
+    request.trace.manifest_context["manifest_versions"] = noncanonical_manifest_versions.clone();
+    request.trace.request_metadata["cache_identity"]["manifest_versions"] =
+        noncanonical_manifest_versions;
+    insert_primary_name_anchor(
+        &database,
+        "0x00000000000000000000000000000000000000aa",
+        "60",
+        PrimaryNameClaimStatus::Success,
+    )
+    .await?;
+
+    let error = persist_ens_verified_primary_name(database.pool(), &request)
+        .await
+        .expect_err("noncanonical cache identity must be rejected before persistence");
+    assert!(
+        error.to_string().contains(
+            "trace.manifest_context.manifest_versions must match cache_key.manifest_versions"
+        ),
+        "unexpected error: {error:#}"
+    );
+    assert!(
+        load_execution_trace(database.pool(), request.trace.execution_trace_id)
+            .await?
+            .is_none(),
+        "rejected verified-primary request must not persist trace rows"
+    );
+    assert!(
+        load_execution_outcome(database.pool(), &request.outcome.cache_key)
+            .await?
+            .is_none(),
+        "rejected verified-primary request must not persist outcome rows"
+    );
+
+    database.cleanup().await
 }
 
 #[tokio::test]

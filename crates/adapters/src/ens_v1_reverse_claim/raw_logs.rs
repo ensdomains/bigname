@@ -18,6 +18,7 @@ pub(super) struct ReverseRawLogRow {
     pub(super) emitting_address: String,
     pub(super) emitting_contract_instance_id: sqlx::types::Uuid,
     pub(super) topics: Vec<String>,
+    pub(super) data: Vec<u8>,
     pub(super) canonicality_state: CanonicalityState,
     pub(super) source_manifest_id: i64,
     pub(super) namespace: String,
@@ -56,6 +57,7 @@ pub(super) async fn load_reverse_raw_logs(
             rl.log_index AS log_index,
             rl.emitting_address AS emitting_address,
             rl.topics AS topics,
+            rl.data AS data,
             rl.canonicality_state::TEXT AS canonicality_state
         FROM raw_logs rl
         WHERE rl.chain_id = $1
@@ -109,6 +111,7 @@ pub(super) async fn load_reverse_raw_logs(
                 emitting_address: address,
                 emitting_contract_instance_id: emitter.contract_instance_id,
                 topics: sql_row::get(&row, "topics")?,
+                data: sql_row::get(&row, "data")?,
                 canonicality_state: sql_row::get(&row, "canonicality_state")?,
                 source_manifest_id: emitter.source_manifest_id,
                 namespace: emitter.namespace.clone(),

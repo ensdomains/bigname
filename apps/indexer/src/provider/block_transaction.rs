@@ -4,13 +4,15 @@ use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
 use super::{
-    JsonRpcProvider, PROVIDER_BATCH_ITEM_LIMIT, ProviderBlock, ProviderBlockBundle,
-    ProviderBlockSelection, ProviderHeadHashSnapshot, ProviderHeadSnapshot, ProviderResolvedBlock,
+    JsonRpcProvider, ProviderBlock, ProviderBlockBundle, ProviderBlockSelection,
+    ProviderHeadHashSnapshot, ProviderHeadSnapshot, ProviderResolvedBlock,
     RAW_PAYLOAD_KIND_FULL_BLOCK,
     decode::{block_hash_from_value, normalize_hash},
     logs_receipts::ProviderBlockLogFetch,
-    request::JsonRpcBatchCall,
+    provider_batch_item_limit,
+    request::{JsonRpcBatchCall, is_retryable_provider_error},
 };
+use tracing::warn;
 
 mod cache_fill;
 
@@ -98,17 +100,51 @@ impl JsonRpcProvider {
 
     async fn fetch_chain_head_hashes(&self) -> Result<ProviderHeadHashSnapshot> {
         let canonical = self
-            .fetch_head_hash_by_tag("latest")
+            .fetch_head_hash_for_tag("latest")
             .await?
             .context("provider did not return a latest block")?;
-        let safe = self.fetch_head_hash_by_tag("safe").await?;
-        let finalized = self.fetch_head_hash_by_tag("finalized").await?;
+        let safe = self
+            .fetch_optional_checkpoint_head_hash_for_tag("safe")
+            .await?;
+        let finalized = self
+            .fetch_optional_checkpoint_head_hash_for_tag("finalized")
+            .await?;
 
         Ok(ProviderHeadHashSnapshot {
             canonical,
             safe,
             finalized,
         })
+    }
+
+    async fn fetch_head_hash_for_tag(&self, tag: &str) -> Result<Option<String>> {
+        let result = self
+            .fetch_json_rpc_result(
+                "eth_getBlockByNumber",
+                vec![Value::String(tag.to_owned()), Value::Bool(false)],
+            )
+            .await?;
+        head_hash_from_tag_result(tag, result)
+    }
+
+    async fn fetch_optional_checkpoint_head_hash_for_tag(
+        &self,
+        tag: &str,
+    ) -> Result<Option<String>> {
+        match self.fetch_head_hash_for_tag(tag).await {
+            Ok(hash) => Ok(hash),
+            Err(error) if is_optional_checkpoint_tag_error(tag, &error) => {
+                warn!(
+                    service = "indexer",
+                    component = "provider",
+                    tag,
+                    error = %format!("{error:#}"),
+                    "provider checkpoint tag is unavailable; degrading to absent optional head"
+                );
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     #[allow(dead_code, reason = "staged provider helper covered by tests")]
@@ -140,7 +176,7 @@ impl JsonRpcProvider {
     ) -> Result<Vec<ProviderResolvedBlock>> {
         let mut resolved = Vec::with_capacity(block_numbers.len());
 
-        for chunk in block_numbers.chunks(PROVIDER_BATCH_ITEM_LIMIT) {
+        for chunk in block_numbers.chunks(provider_batch_item_limit()) {
             let calls = chunk
                 .iter()
                 .map(|block_number| {
@@ -204,7 +240,7 @@ impl JsonRpcProvider {
     ) -> Result<Vec<ProviderBlock>> {
         let mut blocks = Vec::with_capacity(resolved_blocks.len());
 
-        for chunk in resolved_blocks.chunks(PROVIDER_BATCH_ITEM_LIMIT) {
+        for chunk in resolved_blocks.chunks(provider_batch_item_limit()) {
             let calls = chunk
                 .iter()
                 .map(|resolved_block| JsonRpcBatchCall {
@@ -256,7 +292,7 @@ impl JsonRpcProvider {
 
         // Keep retained payload fetches single-response scoped: cache-fill verifies the stored
         // digest against the same full block/log/receipt JSON-RPC response body.
-        for chunk in resolved_blocks.chunks(PROVIDER_BATCH_ITEM_LIMIT) {
+        for chunk in resolved_blocks.chunks(provider_batch_item_limit()) {
             for resolved_block in chunk {
                 let bundle = self
                     .fetch_block_bundle_by_hash(&resolved_block.block_hash)
@@ -282,7 +318,7 @@ impl JsonRpcProvider {
     ) -> Result<Vec<ProviderBlockBundle>> {
         let mut bundles = Vec::with_capacity(resolved_blocks.len());
 
-        for chunk in resolved_blocks.chunks(PROVIDER_BATCH_ITEM_LIMIT) {
+        for chunk in resolved_blocks.chunks(provider_batch_item_limit()) {
             let calls = chunk
                 .iter()
                 .map(|resolved_block| JsonRpcBatchCall {
@@ -428,6 +464,11 @@ impl JsonRpcProvider {
                 }
             }
             Err(batch_error) => {
+                if is_retryable_provider_error(&batch_error) {
+                    return Err(batch_error).context(
+                        "retryable block-scoped receipt batch exhausted; refusing sequential fallback",
+                    );
+                }
                 for bundle in bundles {
                     let receipts = self
                         .fetch_receipts_by_block_hash(
@@ -449,16 +490,6 @@ impl JsonRpcProvider {
         }
 
         Ok(())
-    }
-
-    async fn fetch_head_hash_by_tag(&self, tag: &str) -> Result<Option<String>> {
-        self.fetch_json_rpc_result(
-            "eth_getBlockByNumber",
-            vec![Value::String(tag.to_owned()), Value::Bool(false)],
-        )
-        .await?
-        .map(|value| block_hash_from_value(&value))
-        .transpose()
     }
 
     async fn fetch_blocks_by_hashes<I>(&self, hashes: I) -> Result<BTreeMap<String, ProviderBlock>>
@@ -487,4 +518,37 @@ impl JsonRpcProvider {
             .map(ProviderBlock::from_value)
             .transpose()
     }
+}
+
+fn head_hash_from_tag_result(tag: &str, result: Option<Value>) -> Result<Option<String>> {
+    result
+        .map(|value| {
+            block_hash_from_value(&value)
+                .with_context(|| format!("failed to decode {tag} block hash from provider result"))
+        })
+        .transpose()
+}
+
+fn is_optional_checkpoint_tag_error(_tag: &str, error: &anyhow::Error) -> bool {
+    if is_retryable_provider_error(error) {
+        return false;
+    }
+
+    let message = format!("{error:#}").to_ascii_lowercase();
+    if !message.contains("provider returned json-rpc error for eth_getblockbynumber") {
+        return false;
+    }
+
+    let unsupported_tag = message.contains("unsupported block tag")
+        || message.contains("unsupported block parameter")
+        || message.contains("unknown block tag")
+        || message.contains("unknown block parameter")
+        || message.contains("invalid block tag")
+        || message.contains("invalid block parameter")
+        || message.contains("not support");
+    let invalid_params = message.contains("invalid params")
+        || message.contains("-32602")
+        || message.contains("invalid argument 0");
+
+    unsupported_tag || invalid_params
 }

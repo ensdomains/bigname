@@ -123,6 +123,7 @@ fn identity_coin_type_addresses(
                     .and_then(|value| provenance_field(value, "coin_type"))
                     .and_then(value_to_string)
             })?;
+            let coin_type = bigname_storage::canonical_addr_coin_type(&coin_type)?;
             let value = identity_record_value_string(entry)?;
             Some((coin_type, value))
         })

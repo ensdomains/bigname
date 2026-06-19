@@ -11,10 +11,12 @@ use super::read::{
 use super::types::{NameSurface, Resource, TokenLineage};
 use super::validate::{
     ensure_name_surface_identity_matches, ensure_resource_identity_matches,
-    ensure_token_lineage_identity_matches,
+    ensure_token_lineage_identity_matches, name_surface_normalized_path_repair_allowed,
 };
 
 mod surface_binding;
+#[cfg(test)]
+pub(in crate::identity) mod test_hooks;
 
 pub(super) use surface_binding::upsert_surface_binding;
 
@@ -64,7 +66,7 @@ pub(super) async fn upsert_token_lineage(
     }
 
     let existing =
-        load_token_lineage_internal(&mut **executor, token_lineage.token_lineage_id, true)
+        load_token_lineage_internal(&mut **executor, token_lineage.token_lineage_id, true, true)
             .await?
             .with_context(|| {
                 format!(
@@ -72,6 +74,13 @@ pub(super) async fn upsert_token_lineage(
                     token_lineage.token_lineage_id
                 )
             })?;
+
+    #[cfg(test)]
+    test_hooks::maybe_wait_after_reload(
+        "token_lineages",
+        token_lineage.token_lineage_id.to_string(),
+    )
+    .await;
 
     ensure_token_lineage_identity_matches(&existing, token_lineage)?;
     let next_observation = merge_stable_row_observation(
@@ -181,7 +190,7 @@ pub(super) async fn upsert_resource(
         return decode_resource(snapshot);
     }
 
-    let existing = load_resource_internal(&mut **executor, resource.resource_id, true)
+    let existing = load_resource_internal(&mut **executor, resource.resource_id, true, true)
         .await?
         .with_context(|| {
             format!(
@@ -189,6 +198,9 @@ pub(super) async fn upsert_resource(
                 resource.resource_id
             )
         })?;
+
+    #[cfg(test)]
+    test_hooks::maybe_wait_after_reload("resources", resource.resource_id.to_string()).await;
 
     ensure_resource_identity_matches(&existing, resource)?;
     let next_token_lineage_id =
@@ -355,16 +367,23 @@ pub(super) async fn upsert_name_surface(
         return decode_name_surface(snapshot);
     }
 
-    let existing = load_name_surface_internal(&mut **executor, &name_surface.logical_name_id, true)
-        .await?
-        .with_context(|| {
-            format!(
-                "failed to reload existing name surface {} after insert conflict",
-                name_surface.logical_name_id
-            )
-        })?;
+    let existing =
+        load_name_surface_internal(&mut **executor, &name_surface.logical_name_id, true, true)
+            .await?
+            .with_context(|| {
+                format!(
+                    "failed to reload existing name surface {} after insert conflict",
+                    name_surface.logical_name_id
+                )
+            })?;
+
+    #[cfg(test)]
+    test_hooks::maybe_wait_after_reload("name_surfaces", name_surface.logical_name_id.clone())
+        .await;
 
     ensure_name_surface_identity_matches(&existing, name_surface)?;
+    let repair_normalized_path =
+        name_surface_normalized_path_repair_allowed(&existing, name_surface);
     let next_observation = merge_stable_row_observation(
         existing.canonicality_state,
         StableObservationInput {
@@ -394,6 +413,9 @@ pub(super) async fn upsert_name_surface(
         r#"
         UPDATE name_surfaces
         SET
+            dns_encoded_name = CASE WHEN $7 THEN $8 ELSE dns_encoded_name END,
+            namehash = CASE WHEN $7 THEN $9 ELSE namehash END,
+            labelhashes = CASE WHEN $7 THEN $10 ELSE labelhashes END,
             chain_id = $2,
             block_hash = $3,
             block_number = $4,
@@ -426,6 +448,10 @@ pub(super) async fn upsert_name_surface(
     .bind(next_observation.block_number)
     .bind(next_observation.provenance)
     .bind(next_state.as_str())
+    .bind(repair_normalized_path)
+    .bind(&name_surface.dns_encoded_name)
+    .bind(&name_surface.namehash)
+    .bind(&name_surface.labelhashes)
     .fetch_one(&mut **executor)
     .await
     .with_context(|| {

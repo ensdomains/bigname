@@ -52,6 +52,7 @@ pub(crate) fn app_router(state: AppState) -> Router {
         .route("/openapi.json", get(openapi_json))
         .route("/docs", get(openapi_docs))
         .route("/docs/", get(openapi_docs))
+        .merge(crate::v2::router())
         .with_state(state.clone())
         .merge(crate::graphql::graphql_routes(state))
         // The API is read-only public data served cross-origin to browser clients (the ENS Manager

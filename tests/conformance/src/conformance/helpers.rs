@@ -1832,11 +1832,35 @@ fn assert_primary_name_bootstrap_invariants(payload: &PrimaryNameResponse) {
             "normalized_event_ids": [],
             "raw_fact_refs": [],
             "manifest_versions": [],
-            "execution_trace_id": null,
             "derivation_kind": "primary_name_route_bootstrap",
         })
     );
     assert_primary_name_route_common_invariants(payload);
+    assert!(payload.last_updated.ends_with('Z'));
+}
+
+fn assert_primary_name_supported_bootstrap_invariants(payload: &PrimaryNameResponse) {
+    assert_eq!(
+        payload.provenance,
+        json!({
+            "normalized_event_ids": [],
+            "raw_fact_refs": [],
+            "manifest_versions": [],
+            "derivation_kind": "primary_name_route_bootstrap",
+        })
+    );
+    assert_eq!(
+        payload.coverage,
+        json!({
+            "status": "partial",
+            "exhaustiveness": "non_enumerable",
+            "source_classes_considered": ["ens_v1_reverse_l1", "ens_execution"],
+            "enumeration_basis": "primary_name_lookup",
+            "unsupported_reason": null,
+        })
+    );
+    assert_eq!(payload.chain_positions, json!({}));
+    assert_eq!(payload.consistency, "head");
     assert!(payload.last_updated.ends_with('Z'));
 }
 
@@ -2077,7 +2101,7 @@ fn collection_name_surface(
         normalized_name: display_name.to_owned(),
         dns_encoded_name: display_name.as_bytes().to_vec(),
         namehash: namehash.to_owned(),
-        labelhashes: vec![format!("labelhash:{display_name}")],
+        labelhashes: vec![direct_child_labelhash(display_name)],
         normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
         normalization_warnings: json!([]),
         normalization_errors: json!([]),
@@ -2087,6 +2111,15 @@ fn collection_name_surface(
         provenance: json!({"seed": "children_surface"}),
         canonicality_state: CanonicalityState::Finalized,
     }
+}
+
+fn direct_child_labelhash(display_name: &str) -> String {
+    let child_label = display_name.split('.').next().unwrap_or(display_name);
+
+    format!(
+        "0x{}",
+        alloy_primitives::hex::encode(alloy_primitives::keccak256(child_label.as_bytes()))
+    )
 }
 
 fn declared_child_row(
@@ -2112,6 +2145,9 @@ fn declared_child_row(
         canonical_display_name: display_name.to_owned(),
         normalized_name: display_name.to_owned(),
         namehash: namehash.to_owned(),
+        labelhash: Some(direct_child_labelhash(display_name)),
+        owner: None,
+        registrant: None,
         provenance: json!({
             "normalized_event_ids": [normalized_event_id],
             "raw_fact_refs": [{
@@ -2674,7 +2710,6 @@ impl EnsV2DeclaredChildFixture {
                     "source_manifest_id": null
                 }
             ],
-            "execution_trace_id": null,
             "derivation_kind": "children_current_rebuild"
         }))
     }
@@ -6189,6 +6224,29 @@ fn primary_name_execution_trace(
     verified_primary_name: Value,
     finished_at: OffsetDateTime,
 ) -> ExecutionTrace {
+    primary_name_execution_trace_with_cache_identity(
+        execution_trace_id,
+        namespace,
+        address,
+        coin_type,
+        verified_primary_name,
+        finished_at,
+        primary_name_shared_topology_boundary(),
+        primary_name_shared_record_boundary(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn primary_name_execution_trace_with_cache_identity(
+    execution_trace_id: Uuid,
+    namespace: &str,
+    address: &str,
+    coin_type: &str,
+    verified_primary_name: Value,
+    finished_at: OffsetDateTime,
+    topology_version_boundary: Value,
+    record_version_boundary: Value,
+) -> ExecutionTrace {
     let normalized_address = address.to_ascii_lowercase();
     let manifest_versions = primary_name_execution_manifest_versions_for_namespace(namespace);
     let status = verified_primary_name
@@ -6357,6 +6415,12 @@ fn primary_name_execution_trace(
             "normalized_address": normalized_address,
             "coin_type": coin_type,
             "namespace": namespace,
+            "cache_identity": {
+                "requested_chain_positions": primary_name_execution_requested_chain_positions(),
+                "manifest_versions": manifest_versions,
+                "topology_version_boundary": topology_version_boundary,
+                "record_version_boundary": record_version_boundary,
+            }
         }),
         finished_at: Some(finished_at),
         steps,
@@ -6996,8 +7060,7 @@ async fn run_primary_name_execution_invalidation_case(
         verified_after_payload.verified_state,
         Some(json!({
             "verified_primary_name": {
-                "status": "unsupported",
-                "unsupported_reason": "verified primary-name entrypoint is not yet supported",
+                "status": "not_found",
             }
         }))
     );
@@ -7014,8 +7077,8 @@ async fn run_primary_name_execution_invalidation_case(
         both_after_payload.verified_state,
         verified_after_payload.verified_state
     );
-    assert_primary_name_bootstrap_invariants(&verified_after_payload);
-    assert_primary_name_bootstrap_invariants(&both_after_payload);
+    assert_primary_name_supported_bootstrap_invariants(&verified_after_payload);
+    assert_primary_name_supported_bootstrap_invariants(&both_after_payload);
     let mut expected_sibling_verified_primary_name = fixture.sibling_verified_primary_name.clone();
     expected_sibling_verified_primary_name
         .as_object_mut()

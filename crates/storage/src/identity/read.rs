@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use anyhow::{Context, Result};
 use sqlx::{Executor, PgPool, Postgres, postgres::PgRow};
 use uuid::Uuid;
@@ -17,7 +19,7 @@ pub async fn load_token_lineage(
     pool: &PgPool,
     token_lineage_id: Uuid,
 ) -> Result<Option<TokenLineage>> {
-    load_token_lineage_internal(pool, token_lineage_id, false).await
+    load_token_lineage_internal(pool, token_lineage_id, false, false).await
 }
 
 /// Load one token lineage anchor by stable identity, including observed and orphaned rows.
@@ -25,12 +27,12 @@ pub async fn load_token_lineage_including_noncanonical(
     pool: &PgPool,
     token_lineage_id: Uuid,
 ) -> Result<Option<TokenLineage>> {
-    load_token_lineage_internal(pool, token_lineage_id, true).await
+    load_token_lineage_internal(pool, token_lineage_id, true, false).await
 }
 
 /// Load one backing resource by stable identity.
 pub async fn load_resource(pool: &PgPool, resource_id: Uuid) -> Result<Option<Resource>> {
-    load_resource_internal(pool, resource_id, false).await
+    load_resource_internal(pool, resource_id, false, false).await
 }
 
 /// Load one backing resource by stable identity, including observed and orphaned rows.
@@ -38,7 +40,7 @@ pub async fn load_resource_including_noncanonical(
     pool: &PgPool,
     resource_id: Uuid,
 ) -> Result<Option<Resource>> {
-    load_resource_internal(pool, resource_id, true).await
+    load_resource_internal(pool, resource_id, true, false).await
 }
 
 /// Load one canonical surface row by deterministic logical name identity.
@@ -46,7 +48,54 @@ pub async fn load_name_surface(
     pool: &PgPool,
     logical_name_id: &str,
 ) -> Result<Option<NameSurface>> {
-    load_name_surface_internal(pool, logical_name_id, false).await
+    load_name_surface_internal(pool, logical_name_id, false, false).await
+}
+
+/// Load canonical surface rows by deterministic logical name identities.
+pub async fn load_name_surfaces_by_logical_name_ids(
+    pool: &PgPool,
+    logical_name_ids: &[String],
+) -> Result<BTreeMap<String, NameSurface>> {
+    if logical_name_ids.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+
+    let rows = sqlx::query(&format!(
+        r#"
+        SELECT
+            logical_name_id,
+            namespace,
+            input_name,
+            canonical_display_name,
+            normalized_name,
+            dns_encoded_name,
+            namehash,
+            labelhashes,
+            normalizer_version,
+            normalization_warnings,
+            normalization_errors,
+            chain_id,
+            block_hash,
+            block_number,
+            provenance,
+            canonicality_state::TEXT AS canonicality_state
+        FROM name_surfaces
+        WHERE logical_name_id = ANY($1)
+        {}
+        "#,
+        identity_read_filter(false),
+    ))
+    .bind(logical_name_ids)
+    .fetch_all(pool)
+    .await
+    .context("failed to batch load name surfaces by logical_name_id")?;
+
+    let mut surfaces = BTreeMap::new();
+    for row in rows {
+        let surface = decode_name_surface(row)?;
+        surfaces.insert(surface.logical_name_id.clone(), surface);
+    }
+    Ok(surfaces)
 }
 
 /// Load one surface row by deterministic logical name identity, including observed and orphaned rows.
@@ -54,7 +103,7 @@ pub async fn load_name_surface_including_noncanonical(
     pool: &PgPool,
     logical_name_id: &str,
 ) -> Result<Option<NameSurface>> {
-    load_name_surface_internal(pool, logical_name_id, true).await
+    load_name_surface_internal(pool, logical_name_id, true, false).await
 }
 
 /// Load one time-ranged surface binding by stable identity.
@@ -62,7 +111,7 @@ pub async fn load_surface_binding(
     pool: &PgPool,
     surface_binding_id: Uuid,
 ) -> Result<Option<SurfaceBinding>> {
-    load_surface_binding_internal(pool, surface_binding_id, false).await
+    load_surface_binding_internal(pool, surface_binding_id, false, false).await
 }
 
 /// Load one time-ranged surface binding by stable identity, including observed and orphaned rows.
@@ -70,7 +119,7 @@ pub async fn load_surface_binding_including_noncanonical(
     pool: &PgPool,
     surface_binding_id: Uuid,
 ) -> Result<Option<SurfaceBinding>> {
-    load_surface_binding_internal(pool, surface_binding_id, true).await
+    load_surface_binding_internal(pool, surface_binding_id, true, false).await
 }
 
 /// Load all bindings for one logical surface in chronological order from the default canonical read set.
@@ -109,10 +158,12 @@ pub(super) async fn load_token_lineage_internal<'e, E>(
     executor: E,
     token_lineage_id: Uuid,
     include_noncanonical: bool,
+    lock_for_update: bool,
 ) -> Result<Option<TokenLineage>>
 where
     E: Executor<'e, Database = Postgres>,
 {
+    let lock_clause = row_lock_clause(lock_for_update);
     let row = sqlx::query(&format!(
         r#"
         SELECT
@@ -125,8 +176,10 @@ where
         FROM token_lineages
         WHERE token_lineage_id = $1
         {}
+        {}
         "#,
         identity_read_filter(include_noncanonical),
+        lock_clause,
     ))
     .bind(token_lineage_id)
     .fetch_optional(executor)
@@ -140,10 +193,12 @@ pub(super) async fn load_resource_internal<'e, E>(
     executor: E,
     resource_id: Uuid,
     include_noncanonical: bool,
+    lock_for_update: bool,
 ) -> Result<Option<Resource>>
 where
     E: Executor<'e, Database = Postgres>,
 {
+    let lock_clause = row_lock_clause(lock_for_update);
     let row = sqlx::query(&format!(
         r#"
         SELECT
@@ -157,8 +212,10 @@ where
         FROM resources
         WHERE resource_id = $1
         {}
+        {}
         "#,
         identity_read_filter(include_noncanonical),
+        lock_clause,
     ))
     .bind(resource_id)
     .fetch_optional(executor)
@@ -172,10 +229,12 @@ pub(super) async fn load_name_surface_internal<'e, E>(
     executor: E,
     logical_name_id: &str,
     include_noncanonical: bool,
+    lock_for_update: bool,
 ) -> Result<Option<NameSurface>>
 where
     E: Executor<'e, Database = Postgres>,
 {
+    let lock_clause = row_lock_clause(lock_for_update);
     let row = sqlx::query(&format!(
         r#"
         SELECT
@@ -198,8 +257,10 @@ where
         FROM name_surfaces
         WHERE logical_name_id = $1
         {}
+        {}
         "#,
         identity_read_filter(include_noncanonical),
+        lock_clause,
     ))
     .bind(logical_name_id)
     .fetch_optional(executor)
@@ -213,10 +274,12 @@ pub(super) async fn load_surface_binding_internal<'e, E>(
     executor: E,
     surface_binding_id: Uuid,
     include_noncanonical: bool,
+    lock_for_update: bool,
 ) -> Result<Option<SurfaceBinding>>
 where
     E: Executor<'e, Database = Postgres>,
 {
+    let lock_clause = row_lock_clause(lock_for_update);
     let row = sqlx::query(&format!(
         r#"
         SELECT
@@ -234,8 +297,10 @@ where
         FROM surface_bindings
         WHERE surface_binding_id = $1
         {}
+        {}
         "#,
         identity_read_filter(include_noncanonical),
+        lock_clause,
     ))
     .bind(surface_binding_id)
     .fetch_optional(executor)
@@ -327,6 +392,10 @@ fn identity_read_filter(include_noncanonical: bool) -> &'static str {
     } else {
         DEFAULT_IDENTITY_READ_FILTER
     }
+}
+
+fn row_lock_clause(lock_for_update: bool) -> &'static str {
+    if lock_for_update { "FOR UPDATE" } else { "" }
 }
 
 pub(super) fn decode_token_lineage(row: PgRow) -> Result<TokenLineage> {

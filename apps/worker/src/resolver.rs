@@ -1,10 +1,16 @@
 use anyhow::{Result, bail};
-use bigname_storage::{
-    ResolverCurrentRow, clear_resolver_current, delete_resolver_current,
-    upsert_resolver_current_rows,
-};
+use bigname_storage::{ResolverCurrentRow, delete_resolver_current, upsert_resolver_current_rows};
 use sqlx::PgPool;
 use tokio::task::JoinSet;
+
+#[allow(clippy::duplicate_mod)]
+#[path = "staged_rebuild.rs"]
+mod staged_rebuild;
+
+use staged_rebuild::{
+    RESOLVER_CURRENT_COLUMNS, count_rows, create_stage_table, drop_stage_table,
+    publish_stage_table, stage_resolver_current_rows,
+};
 
 mod profile;
 mod state_helpers;
@@ -13,7 +19,10 @@ mod target_loading;
 
 use profile::ResolverProfileGate;
 use summary_json::build_resolver_current_row;
-use target_loading::{ResolverTarget, load_target_resolvers, normalize_resolver_address};
+use target_loading::{
+    ResolverTarget, count_current_binding_candidate_pairs, load_target_resolvers,
+    normalize_resolver_address,
+};
 
 #[cfg(test)]
 use bigname_storage::{CanonicalityState, SurfaceBindingKind};
@@ -40,6 +49,7 @@ const RESOLVER_CURRENT_ENUMERATION_BASIS: &str = "resolver_overview";
 const RESOLVER_CURRENT_REBUILD_BATCH_SIZE: usize = 1_000;
 const RESOLVER_CURRENT_REBUILD_CONCURRENCY: usize = 1;
 const RESOLVER_CURRENT_REBUILD_LOG_INTERVAL: usize = 100;
+const TARGETED_RESOLVER_BINDING_ENUMERATION_CANDIDATE_LIMIT: i64 = 10_000;
 const RESOLVER_BINDING_ENUMERATION_NOT_PROJECTED_REASON: &str =
     "resolver_binding_enumeration_not_projected";
 const RESOLVER_PROFILE_STATUS_PENDING: &str = "pending";
@@ -84,13 +94,15 @@ async fn rebuild_all_resolvers(pool: &PgPool) -> Result<ResolverCurrentRebuildSu
     let profile_gate = ResolverProfileGate::load(pool).await?;
     let targets = load_target_resolvers(pool).await?;
     let requested_resolver_count = targets.len();
+    let mut conn = pool.acquire().await.map_err(anyhow::Error::from)?;
+    let stage_table = create_stage_table(&mut conn, "resolver_current").await?;
+    let previous_row_count = count_rows(&mut conn, "resolver_current", None).await?;
     tracing::info!(
         projection = "resolver_current",
         requested_resolver_count,
         rebuild_concurrency = RESOLVER_CURRENT_REBUILD_CONCURRENCY,
         "resolver_current rebuild targets loaded"
     );
-    let deleted_row_count = clear_resolver_current(pool).await?;
 
     let mut rows = Vec::with_capacity(RESOLVER_CURRENT_REBUILD_BATCH_SIZE);
     let mut completed_resolver_count = 0usize;
@@ -112,7 +124,8 @@ async fn rebuild_all_resolvers(pool: &PgPool) -> Result<ResolverCurrentRebuildSu
         }
 
         if rows.len() >= RESOLVER_CURRENT_REBUILD_BATCH_SIZE {
-            upserted_row_count += upsert_resolver_current_rows(pool, &rows).await?.len();
+            upserted_row_count +=
+                stage_resolver_current_rows(&mut conn, &stage_table, &rows).await? as usize;
             rows.clear();
         }
 
@@ -132,13 +145,24 @@ async fn rebuild_all_resolvers(pool: &PgPool) -> Result<ResolverCurrentRebuildSu
     }
 
     if !rows.is_empty() {
-        upserted_row_count += upsert_resolver_current_rows(pool, &rows).await?.len();
+        upserted_row_count +=
+            stage_resolver_current_rows(&mut conn, &stage_table, &rows).await? as usize;
     }
+    let (_deleted_row_count, published_row_count) = publish_stage_table(
+        &mut conn,
+        "resolver_current",
+        &stage_table,
+        RESOLVER_CURRENT_COLUMNS,
+        None,
+    )
+    .await?;
+    drop_stage_table(&mut conn, &stage_table).await?;
+    debug_assert_eq!(published_row_count as usize, upserted_row_count);
 
     Ok(ResolverCurrentRebuildSummary {
         requested_resolver_count,
         upserted_row_count,
-        deleted_row_count,
+        deleted_row_count: previous_row_count,
     })
 }
 
@@ -157,11 +181,16 @@ async fn rebuild_one_resolver(
     chain_id: &str,
     resolver_address: &str,
 ) -> Result<ResolverCurrentRebuildSummary> {
+    let resolver_address = normalize_resolver_address(resolver_address);
     let target = ResolverTarget {
         chain_id: chain_id.to_owned(),
-        resolver_address: normalize_resolver_address(resolver_address),
+        resolver_address,
         profile_source_family: None,
         enumerate_bindings: true,
+    };
+    let target = ResolverTarget {
+        enumerate_bindings: should_enumerate_targeted_resolver_bindings(pool, &target).await?,
+        ..target
     };
     let profile_gate = ResolverProfileGate::load_for_target(pool, &target).await?;
     let Some(row) = build_resolver_current_row(pool, &profile_gate, &target).await? else {
@@ -180,6 +209,31 @@ async fn rebuild_one_resolver(
         upserted_row_count,
         deleted_row_count: 0,
     })
+}
+
+async fn should_enumerate_targeted_resolver_bindings(
+    pool: &PgPool,
+    target: &ResolverTarget,
+) -> Result<bool> {
+    let candidate_count = count_current_binding_candidate_pairs(
+        pool,
+        target,
+        TARGETED_RESOLVER_BINDING_ENUMERATION_CANDIDATE_LIMIT + 1,
+    )
+    .await?;
+    if candidate_count <= TARGETED_RESOLVER_BINDING_ENUMERATION_CANDIDATE_LIMIT {
+        return Ok(true);
+    }
+
+    tracing::info!(
+        projection = "resolver_current",
+        chain_id = %target.chain_id,
+        resolver_address = %target.resolver_address,
+        candidate_count,
+        candidate_limit = TARGETED_RESOLVER_BINDING_ENUMERATION_CANDIDATE_LIMIT,
+        "resolver_current targeted binding enumeration skipped because candidate set is too large"
+    );
+    Ok(false)
 }
 
 #[cfg(test)]

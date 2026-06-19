@@ -220,6 +220,19 @@ async fn get_name_returns_current_projection_envelope() -> Result<()> {
         })
     );
 
+    let unnormalized_path_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/names/ens/Alice.eth")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("unnormalized path name request failed")?;
+    assert_eq!(unnormalized_path_response.status(), StatusCode::BAD_REQUEST);
+    let unnormalized_path_payload: ErrorResponse = read_json(unnormalized_path_response).await?;
+    assert_eq!(unnormalized_path_payload.error.code, "invalid_input");
+
     database.cleanup().await?;
     Ok(())
 }
@@ -281,6 +294,41 @@ async fn exact_name_routes_reject_invalid_snapshot_selectors_as_invalid_input() 
 
             assert_public_invalid_input_response(response, expected_message_fragment).await?;
         }
+    }
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn exact_name_routes_reject_unnormalizable_path_names_as_invalid_input() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    let routes = [
+        "/v1/names/ens/bad%20name.eth",
+        "/v1/coverage/ens/bad%20name.eth",
+        "/v1/explain/names/ens/bad%20name.eth/surface-binding",
+        "/v1/explain/names/ens/bad%20name.eth/authority-control",
+        "/v1/names/ens/bad%20name.eth/children",
+        "/v1/names/ens/bad%20name.eth/records",
+        "/v1/names/ens/bad%20name.eth/roles",
+        "/v1/history/names/ens/bad%20name.eth",
+        "/v1/explain/resolutions/ens/bad%20name.eth/execution?records=addr:60",
+    ];
+
+    for route in routes {
+        let response = app_router(database.app_state())
+            .oneshot(
+                Request::builder()
+                    .uri(route)
+                    .body(Body::empty())
+                    .expect("request must build"),
+            )
+            .await
+            .with_context(|| format!("unnormalizable exact-name route request failed for {route}"))?;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{route}");
+        let payload: ErrorResponse = read_json(response).await?;
+        assert_eq!(payload.error.code, "invalid_input");
     }
 
     database.cleanup().await?;
@@ -953,6 +1001,72 @@ async fn get_name_reads_rebuilt_basenames_exact_name_control_vectors() -> Result
         assert_eq!(payload.coverage["status"], json!("full"));
         assert_eq!(payload.verified_state, None);
     }
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_name_reads_basenames_row_with_auxiliary_chain_position() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let logical_name_id = "basenames:alice.base.eth";
+    let resource_id = Uuid::from_u128(0x9285);
+    let token_lineage_id = Uuid::from_u128(0x9286);
+    let surface_binding_id = Uuid::from_u128(0x9287);
+
+    database
+        .seed_basenames_exact_name_rebuild_inputs(
+            logical_name_id,
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    bigname_storage::upsert_raw_blocks(
+        &database.pool,
+        &[raw_block(
+            "ethereum-mainnet",
+            "0xbasenamesl1",
+            None,
+            21_000_100,
+            1_717_171_703,
+        )],
+    )
+    .await
+    .context("failed to upsert auxiliary ethereum block for Basenames exact-name test")?;
+    database.rebuild_name_current(logical_name_id).await?;
+    let mut row = bigname_storage::load_name_current(&database.pool, logical_name_id)
+        .await?
+        .context("rebuilt Basenames exact-name row must exist")?;
+    insert_basenames_supported_ethereum_position(&mut row);
+    database.insert_name_current_row(row).await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/names/basenames/alice.base.eth")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("Basenames exact-name request with auxiliary chain position failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: NameResponse = read_json(response).await?;
+    assert_eq!(payload.data["logical_name_id"], json!(logical_name_id));
+    assert_eq!(payload.data["namespace"], json!("basenames"));
+    assert_eq!(payload.coverage["status"], json!("full"));
+    assert_eq!(
+        payload.chain_positions,
+        json!({
+            "base": {
+                "chain_id": "base-mainnet",
+                "block_number": 103,
+                "block_hash": "0xbase-resolver",
+                "timestamp": "2024-05-31T16:08:23Z"
+            }
+        })
+    );
 
     database.cleanup().await?;
     Ok(())

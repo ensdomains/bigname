@@ -33,12 +33,20 @@ docker run --rm ghcr.io/tateb/bigname:latest bigname-worker inspect watch-plan -
 docker compose --env-file .env.server -f docker-compose.server.yml up -d
 ```
 
-The server compose file starts PostgreSQL, MinIO, a one-shot migration service,
-the API, the indexer, and the worker. The API listens on the host port from
+The server compose file starts PostgreSQL, a one-shot migration service, the API,
+the indexer, and the worker. The API listens on the host port from
 `BIGNAME_API_PORT` and answers readiness at `/healthz`. Set
 `BIGNAME_API_HOST` to control the host bind address; production public-edge
 deployments normally set it to `127.0.0.1` and expose traffic through the Caddy
 override documented in `docs/production.md`.
+
+The indexer and worker healthcheck commands verify that applied database
+migrations exactly match the migration set compiled into the running binary.
+They fail closed for missing, failed, checksum-mismatched, or newer unknown
+migrations. During rolling upgrades, running `migrate` before recreating old
+service containers can therefore mark those old indexer/worker containers
+unhealthy until they are replaced with the matching image; treat that as version
+skew, not evidence that PostgreSQL is down.
 
 The indexer loads exactly one manifest profile root. Use `/app/manifests/mainnet`
 for the mainnet profile or `/app/manifests/sepolia` for the ENSv2 Sepolia
@@ -46,7 +54,7 @@ profile. Do not point one runtime at both manifest roots.
 
 If `BIGNAME_INDEXER_CHAIN_RPC_URLS` is unset, the indexer still syncs
 manifest/watch state, but provider-backed live ingestion remains idle. Current
-bootstrap RPC support accepts `http://` endpoints.
+bootstrap RPC support accepts `http://` and `https://` endpoints.
 
 The API service also needs its own Ethereum JSON-RPC provider for live ENS
 verified resolution and the ENS/60 primary-name on-demand reverse/forward RPC fallback, configured as
@@ -105,10 +113,12 @@ Deployments with a same-host Reth database can layer
 `BIGNAME_INDEXER_RETH_DATADIR_HOST` to the host Reth datadir,
 `BIGNAME_INDEXER_RETH_DATADIR_CONTAINER` to the in-container mount path, and
 `BIGNAME_INDEXER_CHAIN_RETH_DB_SOURCES` to comma-delimited `<chain>=<path>`
-entries that use that in-container path. The override clears
-`BIGNAME_INDEXER_CHAIN_RPC_URLS` for the indexer so each chain still has only
-one provider source. Reth DB sources remain operational intake sources; they do
-not replace bigname raw facts or normalized-event `raw_fact_ref` identities.
+entries that use that in-container path. `BIGNAME_INDEXER_CHAIN_RPC_URLS` may
+still provide RPC sources for other active watched chains, for example
+Base Mainnet while Ethereum Mainnet uses same-host Reth. Do not configure the
+same chain in both settings; duplicate provider sources fail at startup. Reth
+DB sources remain operational intake sources; they do not replace bigname raw
+facts or normalized-event `raw_fact_ref` identities.
 The repository Dockerfile builds `bigname-indexer` with the
 `bigname-indexer/reth-db` Cargo feature so this override keeps the Reth provider
 path available. Custom images that omit that feature fail fast when
@@ -139,6 +149,7 @@ chunk immediately for small ranges and enable broad runtime refreshes.
 ```sh
 BIGNAME_INDEXER_RETH_DATADIR_HOST=/var/lib/reth \
 BIGNAME_INDEXER_RETH_DATADIR_CONTAINER=/reth-data \
+BIGNAME_INDEXER_CHAIN_RPC_URLS=base-mainnet=http://host.docker.internal:9545 \
 BIGNAME_INDEXER_CHAIN_RETH_DB_SOURCES=ethereum-mainnet=/reth-data \
 BIGNAME_INDEXER_RETH_DB_USER=0:0 \
 BIGNAME_INDEXER_RETH_DB_NOFILE_SOFT=1048576 \
@@ -189,6 +200,70 @@ each materialized push with
 split before transaction and receipt fetch/persist work. The older
 `BIGNAME_INDEXER_HASH_PINNED_BACKFILL_MAX_LOGS_PER_RANGE` name is still accepted
 as a fallback.
+
+Manual Base historical backfills can select Coinbase CDP SQL with
+`BIGNAME_INDEXER_BACKFILL_SOURCE=coinbase-sql` or allow Base-only automatic
+selection with `BIGNAME_INDEXER_BACKFILL_SOURCE=auto` plus
+`BIGNAME_INDEXER_COINBASE_SQL_URLS=base-mainnet=default`. The `default` URL is
+the CDP SQL `/run` endpoint; custom URLs must use `https://` because the runner
+sends generated bearer JWTs. Configure `COINBASE_CDP_SQL_API_KEY_ID` and
+`COINBASE_CDP_SQL_API_KEY_SECRET`, or override the env var names with
+`BIGNAME_INDEXER_COINBASE_SQL_API_KEY_ID_ENV` and
+`BIGNAME_INDEXER_COINBASE_SQL_API_KEY_SECRET_ENV`. The runner keeps the Secret
+API Key material in env and generates a fresh CDP REST bearer JWT for each SQL
+request, so operators should not paste a short-lived JWT into the server
+configuration. The generated JWT is passed to the HTTPS client through a
+0600-permission temporary config file and removed after the request; operators
+should still treat process temp directories as sensitive because a crash can
+leave a short-lived JWT behind until normal temp cleanup. This source is
+backfill-only and finite-range-only: it is
+unavailable to `run` live following, `ops-catchup`, repair, chain-head
+promotion, and checkpoint promotion. Operators must still configure
+`BIGNAME_INDEXER_CHAIN_RPC_URLS` or `BIGNAME_INDEXER_CHAIN_RETH_DB_SOURCES` for
+the same Base chain so the validation provider owns block hashes, headers,
+canonicality evidence, selected-log-emitter code observations, and
+transaction/receipt fills. The Coinbase SQL runner respects
+`BIGNAME_INDEXER_COINBASE_SQL_PAGE_LIMIT`,
+`BIGNAME_INDEXER_COINBASE_SQL_QUERY_CHAR_LIMIT`,
+`BIGNAME_INDEXER_COINBASE_SQL_QUERY_TIMEOUT_SECS`, and
+`BIGNAME_INDEXER_COINBASE_SQL_RATE_LIMIT_QPS`; query length and timeout defaults
+track the stricter currently published CDP SQL limits, while the row default
+uses bigname's conservative 10,000-row effective cap because Coinbase's
+[SQL FAQ](https://docs.cdp.coinbase.com/data/sql-api/faq) and
+[REST reference](https://docs.cdp.coinbase.com/api-reference/v2/rest-api/onchain-data/run-sql-query)
+currently publish different row/query-length ceilings. If the configured page
+limit is above the effective result cap, pagination and window tuning use the
+cap. The QPS default is a conservative per-process guardrail and remains
+operator-configurable if product limits change. The default validation mode is
+`full`, so the validation provider fetches the same address/topic log span and
+fails the range if Coinbase SQL omitted or added a selected log identity.
+Coinbase SQL reads decoded event rows and undecoded encoded-log rows; undecoded
+rows require validation-provider payload fill because Coinbase SQL supplies only
+the log identity and topics for them. Empty Coinbase SQL windows do not force
+code observations for every selected address. `sample` uses Coinbase SQL
+identities for selected logs, resolves and hash-checks only the returned log
+blocks with the validation provider, fills exact logs from those block bundles,
+and then uses the same validation provider for canonicality evidence, selected
+transaction/receipt fills, and selected-log-emitter code observations.
+
+Coinbase SQL backfills can split a finite range into concurrent range workers
+with `BIGNAME_INDEXER_COINBASE_SQL_WORKERS`; the default `1` keeps one worker.
+`BIGNAME_INDEXER_COINBASE_SQL_RANGE_BLOCKS` chooses the fixed range size used by
+that concurrent mode. The default `0` keeps the normal adaptive resumable range
+planner. Basenames authority Coinbase SQL backfills remain raw-only in both the
+single-worker and concurrent paths so ordered normalized-event replay owns
+authority closure materialization.
+
+JSON-RPC validation providers can tune batch shape with
+`BIGNAME_INDEXER_JSON_RPC_BATCH_ITEM_LIMIT` and
+`BIGNAME_INDEXER_JSON_RPC_BATCH_CONCURRENCY`. The defaults favor conservative
+provider compatibility; higher values reduce round trips but can trip provider
+payload or rate limits. Receipt-heavy backfills can configure
+`BIGNAME_INDEXER_CHAIN_RPC_RECEIPT_FALLBACK_URLS` as comma-separated
+`<chain>=<url>` entries. The provider uses those URLs only for transaction
+receipt fallback work; block hashes, headers, canonicality, and primary payload
+validation still come from the chain's configured primary validation provider.
+
 Automatic normalized-event replay catch-up keeps its block cursor, but also caps
 each replay chunk with `BIGNAME_INDEXER_NORMALIZED_REPLAY_CATCHUP_MAX_LOGS_PER_CHUNK`
 so sparse eras can move in large block jumps while dense spans are bounded by
@@ -214,7 +289,10 @@ stateful/contextual adapters that do not have a documented closure/dependency
 replay session, rather than advancing the cursor over possibly divergent
 transition rows. Source-scoped replay is reserved for explicit repair/backfill
 runs and is not deterministic stateful/contextual regeneration unless the
-selection is closure-complete.
+selection is closure-complete. After automatic replay catch-up completes, the
+post-replay live-adapter backlog cursor pages already-persisted raw-log blocks
+with `BIGNAME_INDEXER_LIVE_ADAPTER_BACKLOG_BLOCK_BATCH_SIZE`. The default `1`
+keeps the handoff conservative; values above the internal cap are clamped.
 Use `RUST_LOG=info,sqlx::query=error` for these runs; otherwise SQLx slow-query
 warnings can print huge generated INSERT statements for dense chunks and waste
 time on logging instead of ingest.
@@ -234,9 +312,9 @@ The repository publishes the image to:
 ghcr.io/tateb/bigname
 ```
 
-The GitHub Actions workflow publishes `latest` on the default branch and a short
-commit SHA tag on every push to `main`. Tags pushed to the repository are also
-published with the same tag name.
+The GitHub Actions workflow publishes only after the full CI workflow succeeds
+for a push to `main`. Successful main pushes publish `latest` and the short
+commit SHA tag. Release-tag image publishing is deferred and is not automatic.
 
 Manual publish from an authenticated checkout:
 

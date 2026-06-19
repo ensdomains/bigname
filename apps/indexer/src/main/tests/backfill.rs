@@ -8,7 +8,13 @@ use bigname_manifests::{
     WatchedBackfillTarget, WatchedChainPlan, WatchedSourceSelector, WatchedSourceSelectorKind,
     WatchedSourceSelectorPlan, WatchedTargetIdentity, load_watched_source_selector_plan,
 };
-use bigname_storage::{BackfillLifecycleStatus, load_backfill_job, load_backfill_ranges};
+use bigname_storage::{
+    BackfillLifecycleStatus, CanonicalityState, RawCodeHash, load_backfill_job,
+    load_backfill_ranges, load_chain_lineage_block, mark_chain_lineage_range_orphaned,
+    upsert_raw_code_hashes,
+};
+
+use crate::provider::{ProviderLog, ProviderResolvedBlock};
 
 include!("support.rs");
 
@@ -41,6 +47,15 @@ struct DynamicResolverBackfillFixture {
     manifest_id_base: i64,
     uuid_base: u128,
     idempotency_key: &'static str,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct MaterializedRawFactSet {
+    logs: Vec<(String, i64)>,
+    code_hashes: Vec<(i64, String)>,
+    transaction_count: i64,
+    receipt_count: i64,
+    payload_cache_metadata_count: i64,
 }
 
 #[test]
@@ -121,6 +136,136 @@ fn large_source_family_backfill_source_identity_uses_compact_digest() -> Result<
             .and_then(Value::as_str),
         payload.get("source_identity_hash").and_then(Value::as_str)
     );
+
+    Ok(())
+}
+
+#[test]
+fn basenames_registry_source_identity_changes_when_discovery_expands_before_checkpoint()
+-> Result<()> {
+    let source_plan = WatchedSourceSelectorPlan {
+        chain: "base-mainnet".to_owned(),
+        selector_kind: WatchedSourceSelectorKind::SourceFamily,
+        source_family: Some("basenames_base_registry".to_owned()),
+        requested_watched_targets: Vec::new(),
+        selected_targets: vec![WatchedBackfillTarget {
+            source_family: "basenames_base_registry".to_owned(),
+            contract_instance_id: Uuid::from_u128(1),
+            address: "0x0000000000000000000000000000000000000001".to_owned(),
+            effective_from_block: 18_735_838,
+            effective_to_block: 46_636_366,
+        }],
+        watched_chain_plan: WatchedChainPlan {
+            chain: "base-mainnet".to_owned(),
+            addresses: Vec::new(),
+            manifest_root_entry_count: 0,
+            manifest_contract_entry_count: 0,
+            discovery_edge_entry_count: 0,
+        },
+    };
+    let checkpoint_block_number = 18_995_933;
+    let original_payload = backfill::backfill_job_source_identity_payload(&source_plan)?;
+
+    let mut expanded_source_plan = source_plan.clone();
+    expanded_source_plan
+        .selected_targets
+        .push(WatchedBackfillTarget {
+            source_family: "basenames_base_registry".to_owned(),
+            contract_instance_id: Uuid::from_u128(2),
+            address: "0x0000000000000000000000000000000000000002".to_owned(),
+            effective_from_block: 18_900_000,
+            effective_to_block: 46_636_366,
+        });
+    let expanded_payload = backfill::backfill_job_source_identity_payload(&expanded_source_plan)?;
+
+    assert!(
+        expanded_source_plan
+            .selected_targets
+            .iter()
+            .any(|target| target.effective_from_block <= checkpoint_block_number)
+    );
+    assert_ne!(
+        expanded_payload.get("source_identity_hash"),
+        original_payload.get("source_identity_hash")
+    );
+    assert_ne!(expanded_payload, original_payload);
+
+    Ok(())
+}
+
+#[test]
+fn basenames_registry_coinbase_sql_scan_all_identity_ignores_discovery_expansion() -> Result<()> {
+    let source_plan = WatchedSourceSelectorPlan {
+        chain: "base-mainnet".to_owned(),
+        selector_kind: WatchedSourceSelectorKind::SourceFamily,
+        source_family: Some("basenames_base_registry".to_owned()),
+        requested_watched_targets: Vec::new(),
+        selected_targets: vec![WatchedBackfillTarget {
+            source_family: "basenames_base_registry".to_owned(),
+            contract_instance_id: Uuid::from_u128(1),
+            address: "0x0000000000000000000000000000000000000001".to_owned(),
+            effective_from_block: 18_735_838,
+            effective_to_block: 46_636_366,
+        }],
+        watched_chain_plan: WatchedChainPlan {
+            chain: "base-mainnet".to_owned(),
+            addresses: Vec::new(),
+            manifest_root_entry_count: 0,
+            manifest_contract_entry_count: 0,
+            discovery_edge_entry_count: 0,
+        },
+    };
+    let topic_plan = backfill::BackfillTopicPlan::new(
+        BTreeMap::from([(
+            "basenames_base_registry".to_owned(),
+            vec!["0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_owned()],
+        )]),
+        BTreeMap::from([(
+            "basenames_base_registry".to_owned(),
+            vec!["NewOwner(bytes32,bytes32,address)".to_owned()],
+        )]),
+        BTreeSet::new(),
+    );
+    let config = backfill::CoinbaseSqlBackfillConfig {
+        initial_window_blocks: 8_192,
+        max_window_blocks: 16_384,
+        page_limit: 50_000,
+        sql_char_limit: 10_000,
+        query_timeout_secs: 30,
+        rate_limit_qps: 5,
+        validation_mode: backfill::CoinbaseSqlValidationMode::Sample,
+    };
+    let original_payload = backfill::coinbase_sql_backfill_job_source_identity_payload(
+        &source_plan,
+        &config,
+        &topic_plan,
+    )?;
+
+    let mut expanded_source_plan = source_plan.clone();
+    expanded_source_plan
+        .selected_targets
+        .push(WatchedBackfillTarget {
+            source_family: "basenames_base_registry".to_owned(),
+            contract_instance_id: Uuid::from_u128(2),
+            address: "0x0000000000000000000000000000000000000002".to_owned(),
+            effective_from_block: 18_900_000,
+            effective_to_block: 46_636_366,
+        });
+    let expanded_payload = backfill::coinbase_sql_backfill_job_source_identity_payload(
+        &expanded_source_plan,
+        &config,
+        &topic_plan,
+    )?;
+
+    assert_eq!(expanded_payload, original_payload);
+    assert_eq!(
+        original_payload
+            .get("source_identity_payload_format")
+            .and_then(Value::as_str),
+        Some("basenames_registry_scan_all_event_signatures_v1")
+    );
+    assert!(original_payload.get("selected_targets").is_none());
+    assert!(original_payload.get("selected_targets_digest").is_none());
 
     Ok(())
 }
@@ -370,7 +515,7 @@ async fn hash_pinned_backfill_persists_range_and_is_idempotent_without_advancing
     assert_eq!(table_count(database.pool(), "raw_code_hashes").await?, 2);
     assert_eq!(
         table_count(database.pool(), "raw_payload_cache_metadata").await?,
-        0
+        6
     );
     let payload_cache_summary =
         sqlx::query_as::<_, (String, i64, i64, i64, Vec<String>, Vec<String>)>(
@@ -391,8 +536,33 @@ async fn hash_pinned_backfill_persists_range_and_is_idempotent_without_advancing
         .await?;
     assert_eq!(
         payload_cache_summary,
-        Vec::<(String, i64, i64, i64, Vec<String>, Vec<String>)>::new(),
-        "multi-block batched fetches must not fake hash-scoped retained payload metadata"
+        vec![
+            (
+                provider::RAW_PAYLOAD_KIND_BLOCK_LOGS.to_owned(),
+                2,
+                2,
+                2,
+                vec!["eth_getLogs".to_owned()],
+                vec!["block_hash".to_owned()],
+            ),
+            (
+                provider::RAW_PAYLOAD_KIND_BLOCK_RECEIPTS.to_owned(),
+                2,
+                2,
+                2,
+                vec!["eth_getBlockReceipts".to_owned()],
+                vec!["block_hash".to_owned()],
+            ),
+            (
+                provider::RAW_PAYLOAD_KIND_FULL_BLOCK.to_owned(),
+                2,
+                2,
+                2,
+                vec!["eth_getBlockByHash".to_owned()],
+                vec!["block_hash".to_owned()],
+            ),
+        ],
+        "selected-log blocks retain exact hash-scoped payload metadata for sibling-log materialization"
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
@@ -449,7 +619,7 @@ async fn hash_pinned_backfill_persists_range_and_is_idempotent_without_advancing
         .lock()
         .expect("request log must not be poisoned")
         .clone();
-    assert_eq!(requests.len(), 21);
+    assert_eq!(requests.len(), 27);
     let tagged_head_requests = requests
         .iter()
         .filter(|request| {
@@ -549,7 +719,14 @@ async fn hash_pinned_backfill_persists_range_and_is_idempotent_without_advancing
     );
     let log_requests = requests
         .iter()
-        .filter(|request| request.method == "eth_getLogs")
+        .filter(|request| {
+            request.method == "eth_getLogs"
+                && request
+                    .params
+                    .first()
+                    .and_then(Value::as_object)
+                    .is_some_and(|filter| filter.contains_key("fromBlock"))
+        })
         .collect::<Vec<_>>();
     assert_eq!(log_requests.len(), 1);
     assert_eq!(log_requests[0].batch_size, 1);
@@ -584,45 +761,38 @@ async fn hash_pinned_backfill_persists_range_and_is_idempotent_without_advancing
                 && request.params.get(1) == Some(&Value::Bool(true))
         })
         .collect::<Vec<_>>();
-    assert_eq!(full_block_requests.len(), 2);
-    assert_eq!(full_block_requests[0].method, "eth_getBlockByHash");
     assert_eq!(
-        full_block_requests[0]
-            .params
-            .first()
-            .and_then(Value::as_str),
-        Some(block_42.block_hash.as_str())
+        full_block_requests
+            .iter()
+            .map(|request| request.params.first().and_then(Value::as_str))
+            .collect::<Vec<_>>(),
+        vec![
+            Some(block_42.block_hash.as_str()),
+            Some(block_43.block_hash.as_str()),
+            Some(block_42.block_hash.as_str()),
+            Some(block_43.block_hash.as_str())
+        ]
     );
-    assert_eq!(full_block_requests[1].method, "eth_getBlockByHash");
     assert_eq!(
-        full_block_requests[1]
-            .params
-            .first()
-            .and_then(Value::as_str),
-        Some(block_43.block_hash.as_str())
+        full_block_requests.len(),
+        4,
+        "hash-pinned inline materialization first hydrates hash-pinned block bodies, then refetches selected-log blocks with full log payloads"
     );
     let receipt_requests = requests
         .iter()
         .filter(|request| request.method == "eth_getBlockReceipts")
         .collect::<Vec<_>>();
-    assert_eq!(receipt_requests.len(), 2);
-    assert_eq!(receipt_requests[0].batch_size, 2);
-    assert!(
+    assert_eq!(
         receipt_requests
             .iter()
-            .all(
-                |request| request.http_request_id == receipt_requests[0].http_request_id
-                    && request.batch_size == 2
-            ),
-        "hash-pinned receipt hydration must share one JSON-RPC batch HTTP request"
-    );
-    assert_eq!(
-        receipt_requests[0].params.first().and_then(Value::as_str),
-        Some(block_42.block_hash.as_str())
-    );
-    assert_eq!(
-        receipt_requests[1].params.first().and_then(Value::as_str),
-        Some(block_43.block_hash.as_str())
+            .map(|request| request.params.first().and_then(Value::as_str))
+            .collect::<Vec<_>>(),
+        vec![
+            Some(block_42.block_hash.as_str()),
+            Some(block_43.block_hash.as_str()),
+            Some(block_42.block_hash.as_str()),
+            Some(block_43.block_hash.as_str())
+        ]
     );
     let code_requests = requests
         .iter()
@@ -656,6 +826,75 @@ async fn hash_pinned_backfill_persists_range_and_is_idempotent_without_advancing
             .and_then(Value::as_str),
         Some(block_43.block_hash.as_str())
     );
+
+    server.abort();
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn hash_pinned_backfill_preserves_orphaned_lineage_when_reorg_lands_after_evidence_load()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let source_plan = WatchedSourceSelectorPlan {
+        chain: "ethereum-mainnet".to_owned(),
+        selector_kind: WatchedSourceSelectorKind::WholeActiveWatchedChain,
+        source_family: None,
+        requested_watched_targets: Vec::new(),
+        selected_targets: Vec::new(),
+        watched_chain_plan: WatchedChainPlan {
+            chain: "ethereum-mainnet".to_owned(),
+            addresses: Vec::new(),
+            manifest_root_entry_count: 0,
+            manifest_contract_entry_count: 0,
+            discovery_edge_entry_count: 0,
+        },
+    };
+    let block = provider_block(
+        "0xacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacac",
+        Some("0x9999999999999999999999999999999999999999999999999999999999999999"),
+        42,
+    );
+    let requests = Arc::new(Mutex::new(Vec::<RecordedRpcRequest>::new()));
+    let (provider, server) =
+        number_resolving_provider(vec![block.clone()], Arc::clone(&requests)).await?;
+
+    let evidence = backfill::load_backfill_canonicality_evidence(
+        database.pool(),
+        "ethereum-mainnet",
+        &provider,
+    )
+    .await?;
+    insert_chain_lineage_for_block(
+        database.pool(),
+        "ethereum-mainnet",
+        &block,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    mark_chain_lineage_range_orphaned(database.pool(), "ethereum-mainnet", &block.block_hash, None)
+        .await?;
+
+    let selected_target_index =
+        backfill::SelectedTargetIntervalIndex::from_source_plan(&source_plan);
+    let selected_target_addresses = Vec::new();
+    let outcome = backfill::run_hash_pinned_backfill_range(
+        database.pool(),
+        &source_plan,
+        &selected_target_index,
+        &selected_target_addresses,
+        &provider,
+        BackfillBlockRange::new(42, 42)?,
+        evidence,
+        backfill::BackfillAdapterSyncMode::RawOnly,
+        HeaderAuditMode::Minimal,
+    )
+    .await?;
+    assert_eq!(outcome.resolved_block_count, 1);
+
+    let lineage = load_chain_lineage_block(database.pool(), "ethereum-mainnet", &block.block_hash)
+        .await?
+        .expect("backfill must leave a lineage row for the orphaned hash");
+    assert_eq!(lineage.canonicality_state, CanonicalityState::Orphaned);
 
     server.abort();
     database.cleanup().await
@@ -983,7 +1222,7 @@ async fn single_block_ensv1_resolver_backfill_uses_topic_filtered_logs() -> Resu
     )
     .await?;
 
-    assert_eq!(outcome.raw_log_count, 1);
+    assert_eq!(outcome.raw_log_count, 2);
     assert_eq!(
         sqlx::query_scalar::<_, Vec<String>>(
             r#"
@@ -996,15 +1235,15 @@ async fn single_block_ensv1_resolver_backfill_uses_topic_filtered_logs() -> Resu
         )
         .fetch_one(database.pool())
         .await?,
-        vec![resolver_address.to_owned()]
+        vec![resolver_address.to_owned(), unrelated_address.to_owned()]
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM raw_logs WHERE emitting_address = $1")
             .bind(unrelated_address)
             .fetch_one(database.pool())
             .await?,
-        0,
-        "single-block resolver-family backfill must not retain unrelated same-block logs"
+        1,
+        "single-block resolver-family backfill retains same-transaction sibling logs"
     );
 
     let recorded_requests = requests
@@ -1013,7 +1252,14 @@ async fn single_block_ensv1_resolver_backfill_uses_topic_filtered_logs() -> Resu
         .clone();
     let log_requests = recorded_requests
         .iter()
-        .filter(|request| request.method == "eth_getLogs")
+        .filter(|request| {
+            request.method == "eth_getLogs"
+                && request
+                    .params
+                    .first()
+                    .and_then(Value::as_object)
+                    .is_some_and(|filter| filter.contains_key("fromBlock"))
+        })
         .collect::<Vec<_>>();
     assert_eq!(log_requests.len(), 1);
     let log_filter = log_requests[0]
@@ -1115,28 +1361,429 @@ async fn raw_only_hash_pinned_backfill_skips_adapter_replay_after_raw_persistenc
         requests
             .iter()
             .filter(|request| request.method == "eth_getBlockByHash")
-            .all(|request| request.params.get(1) == Some(&Value::Bool(false))),
-        "raw-only multi-block backfill must fetch block headers without full transaction payloads"
+            .any(|request| request.params.get(1) == Some(&Value::Bool(true))),
+        "raw-only multi-block backfill must fetch full selected-log block payloads for sibling retention"
     );
     assert!(
         requests
             .iter()
-            .any(|request| request.method == "eth_getTransactionByHash")
+            .all(|request| request.method != "eth_getTransactionByHash")
     );
     assert!(
         requests
             .iter()
-            .any(|request| request.method == "eth_getTransactionReceipt")
+            .all(|request| request.method != "eth_getTransactionReceipt")
     );
     assert!(
         requests
             .iter()
-            .all(|request| request.method != "eth_getBlockReceipts"),
-        "raw-only multi-block backfill must not fetch whole-block receipts"
+            .any(|request| request.method == "eth_getBlockReceipts"),
+        "raw-only multi-block backfill must retain receipts from the same full selected-log block payloads"
     );
 
     server.abort();
     database.cleanup().await
+}
+
+#[tokio::test]
+async fn raw_only_sparse_backfill_retains_tx_sibling_logs_and_code_observations() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_backfill_job_tables(database.pool()).await?;
+    let contract_instance_id = Uuid::from_u128(9_255);
+    let selected_address = "0x0000000000000000000000000000000000000001";
+    let sibling_address = "0x00000000000000000000000000000000000000ff";
+
+    insert_watched_manifest_contract(
+        database.pool(),
+        9_255,
+        "ens",
+        "ethereum-mainnet",
+        "ens_v1_wrapper_l1",
+        contract_instance_id,
+        selected_address,
+    )
+    .await?;
+
+    let range = BackfillBlockRange::new(42, 43)?;
+    let source_plan = load_watched_source_selector_plan(
+        database.pool(),
+        "ethereum-mainnet",
+        WatchedSourceSelector::SourceFamily("ens_v1_wrapper_l1".to_owned()),
+        range.from_block,
+        range.to_block,
+    )
+    .await?;
+    let block = provider_block(
+        "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        Some("0x9999999999999999999999999999999999999999999999999999999999999999"),
+        42,
+    );
+    let next_block = provider_block(
+        "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        Some(&block.block_hash),
+        43,
+    );
+    let requests = Arc::new(Mutex::new(Vec::<RecordedRpcRequest>::new()));
+    let (provider, server) = number_resolving_provider_with_fixtures(
+        vec![
+            ProviderBlockFixture {
+                block: block.clone(),
+                logs: vec![
+                    rpc_log_payload_at_address(&block, selected_address, 0),
+                    rpc_log_payload_at_address(&block, sibling_address, 1),
+                ],
+            },
+            ProviderBlockFixture {
+                block: next_block.clone(),
+                logs: Vec::new(),
+            },
+        ],
+        Arc::clone(&requests),
+    )
+    .await?;
+    let mut config = backfill_job_config(range, "raw-only-sparse-unified", "lease-raw-unified")?;
+    config.adapter_sync_mode = backfill::BackfillAdapterSyncMode::RawOnly;
+
+    let outcome =
+        run_resumable_hash_pinned_backfill_job(database.pool(), &source_plan, &provider, config)
+            .await?;
+
+    assert_eq!(outcome.raw_log_count, 2);
+    assert_eq!(outcome.raw_code_hash_count, 2);
+    assert_eq!(
+        sqlx::query_as::<_, (String, i64)>(
+            "SELECT emitting_address, log_index FROM raw_logs ORDER BY log_index"
+        )
+        .fetch_all(database.pool())
+        .await?,
+        vec![
+            (selected_address.to_owned(), 0),
+            (sibling_address.to_owned(), 1)
+        ]
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (i64, String)>(
+            "SELECT block_number, contract_address FROM raw_code_hashes ORDER BY block_number"
+        )
+        .fetch_all(database.pool())
+        .await?,
+        vec![
+            (block.block_number, selected_address.to_owned()),
+            (next_block.block_number, selected_address.to_owned()),
+        ]
+    );
+
+    server.abort();
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn raw_only_sparse_backfill_skips_complete_stored_code_observations_on_fresh_rerun()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_backfill_job_tables(database.pool()).await?;
+    let contract_instance_id = Uuid::from_u128(9_256);
+    let selected_address = "0x0000000000000000000000000000000000000001";
+
+    insert_watched_manifest_contract(
+        database.pool(),
+        9_256,
+        "ens",
+        "ethereum-mainnet",
+        "ens_v1_wrapper_l1",
+        contract_instance_id,
+        selected_address,
+    )
+    .await?;
+
+    let range = BackfillBlockRange::new(42, 43)?;
+    let source_plan = load_watched_source_selector_plan(
+        database.pool(),
+        "ethereum-mainnet",
+        WatchedSourceSelector::SourceFamily("ens_v1_wrapper_l1".to_owned()),
+        range.from_block,
+        range.to_block,
+    )
+    .await?;
+    let block_42 = provider_block(
+        "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        Some("0x9999999999999999999999999999999999999999999999999999999999999999"),
+        42,
+    );
+    let block_43 = provider_block(
+        "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        Some(&block_42.block_hash),
+        43,
+    );
+    let requests = Arc::new(Mutex::new(Vec::<RecordedRpcRequest>::new()));
+    let (provider, server) = number_resolving_provider_with_fixtures(
+        vec![
+            ProviderBlockFixture {
+                block: block_42.clone(),
+                logs: vec![rpc_log_payload_at_address(&block_42, selected_address, 0)],
+            },
+            ProviderBlockFixture {
+                block: block_43.clone(),
+                logs: vec![rpc_log_payload_at_address(&block_43, selected_address, 0)],
+            },
+        ],
+        Arc::clone(&requests),
+    )
+    .await?;
+    let mut first_config = backfill_job_config(
+        range,
+        "raw-only-sparse-code-skip-first",
+        "lease-code-skip-first",
+    )?;
+    first_config.adapter_sync_mode = backfill::BackfillAdapterSyncMode::RawOnly;
+    let first_outcome = run_resumable_hash_pinned_backfill_job(
+        database.pool(),
+        &source_plan,
+        &provider,
+        first_config,
+    )
+    .await?;
+    assert_eq!(first_outcome.raw_code_hash_count, 2);
+    assert_eq!(table_count(database.pool(), "raw_code_hashes").await?, 2);
+
+    requests
+        .lock()
+        .expect("request log must not be poisoned")
+        .clear();
+    let mut second_config = backfill_job_config(
+        range,
+        "raw-only-sparse-code-skip-second",
+        "lease-code-skip-second",
+    )?;
+    second_config.adapter_sync_mode = backfill::BackfillAdapterSyncMode::RawOnly;
+    let second_outcome = run_resumable_hash_pinned_backfill_job(
+        database.pool(),
+        &source_plan,
+        &provider,
+        second_config,
+    )
+    .await?;
+    let second_code_request_count = requests
+        .lock()
+        .expect("request log must not be poisoned")
+        .iter()
+        .filter(|request| request.method == "eth_getCode")
+        .count();
+
+    assert_eq!(second_outcome.raw_code_hash_count, 0);
+    assert_eq!(second_code_request_count, 0);
+    assert_eq!(table_count(database.pool(), "raw_code_hashes").await?, 2);
+
+    server.abort();
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn raw_only_sparse_backfill_fetches_missing_code_observation_for_selected_address()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_backfill_job_tables(database.pool()).await?;
+    let selected_address = "0x0000000000000000000000000000000000000002";
+    let preexisting_address = "0x0000000000000000000000000000000000000001";
+
+    insert_watched_manifest_contract(
+        database.pool(),
+        9_257,
+        "ens",
+        "ethereum-mainnet",
+        "ens_v1_wrapper_l1",
+        Uuid::from_u128(9_257),
+        selected_address,
+    )
+    .await?;
+
+    let block = provider_block(
+        "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        Some("0x9999999999999999999999999999999999999999999999999999999999999999"),
+        42,
+    );
+    upsert_raw_code_hashes(
+        database.pool(),
+        &[RawCodeHash {
+            chain_id: "ethereum-mainnet".to_owned(),
+            block_hash: block.block_hash.clone(),
+            block_number: block.block_number,
+            contract_address: preexisting_address.to_owned(),
+            code_hash: "0x1111".to_owned(),
+            code_byte_length: 2,
+            canonicality_state: CanonicalityState::Canonical,
+        }],
+    )
+    .await?;
+
+    let range = BackfillBlockRange::new(42, 42)?;
+    let source_plan = load_watched_source_selector_plan(
+        database.pool(),
+        "ethereum-mainnet",
+        WatchedSourceSelector::SourceFamily("ens_v1_wrapper_l1".to_owned()),
+        range.from_block,
+        range.to_block,
+    )
+    .await?;
+    let requests = Arc::new(Mutex::new(Vec::<RecordedRpcRequest>::new()));
+    let (provider, server) = number_resolving_provider_with_fixtures(
+        vec![ProviderBlockFixture {
+            block: block.clone(),
+            logs: vec![rpc_log_payload_at_address(&block, selected_address, 0)],
+        }],
+        Arc::clone(&requests),
+    )
+    .await?;
+
+    let mut config = backfill_job_config(
+        range,
+        "raw-only-sparse-code-skip-partial",
+        "lease-code-skip-partial",
+    )?;
+    config.adapter_sync_mode = backfill::BackfillAdapterSyncMode::RawOnly;
+    let outcome =
+        run_resumable_hash_pinned_backfill_job(database.pool(), &source_plan, &provider, config)
+            .await?;
+    let code_request_count = requests
+        .lock()
+        .expect("request log must not be poisoned")
+        .iter()
+        .filter(|request| request.method == "eth_getCode")
+        .count();
+
+    assert_eq!(outcome.raw_code_hash_count, 1);
+    assert_eq!(code_request_count, 1);
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT contract_address FROM raw_code_hashes WHERE contract_address = $1"
+        )
+        .bind(selected_address)
+        .fetch_one(database.pool())
+        .await?,
+        selected_address
+    );
+    assert_eq!(table_count(database.pool(), "raw_code_hashes").await?, 2);
+
+    server.abort();
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn raw_only_sparse_backfill_repairs_weaker_stored_code_observation_canonicality() -> Result<()>
+{
+    let database = TestDatabase::new().await?;
+    create_backfill_job_tables(database.pool()).await?;
+    let selected_address = "0x0000000000000000000000000000000000000001";
+
+    insert_watched_manifest_contract(
+        database.pool(),
+        9_258,
+        "ens",
+        "ethereum-mainnet",
+        "ens_v1_wrapper_l1",
+        Uuid::from_u128(9_258),
+        selected_address,
+    )
+    .await?;
+
+    let block = provider_block(
+        "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        Some("0x9999999999999999999999999999999999999999999999999999999999999999"),
+        42,
+    );
+    upsert_raw_code_hashes(
+        database.pool(),
+        &[RawCodeHash {
+            chain_id: "ethereum-mainnet".to_owned(),
+            block_hash: block.block_hash.clone(),
+            block_number: block.block_number,
+            contract_address: selected_address.to_owned(),
+            code_hash: keccak256_hex(&[0x60, 0x01, 0x60, 0x01, 0x55]),
+            code_byte_length: 5,
+            canonicality_state: CanonicalityState::Observed,
+        }],
+    )
+    .await?;
+
+    let range = BackfillBlockRange::new(42, 42)?;
+    let source_plan = load_watched_source_selector_plan(
+        database.pool(),
+        "ethereum-mainnet",
+        WatchedSourceSelector::SourceFamily("ens_v1_wrapper_l1".to_owned()),
+        range.from_block,
+        range.to_block,
+    )
+    .await?;
+    let requests = Arc::new(Mutex::new(Vec::<RecordedRpcRequest>::new()));
+    let (provider, server) = number_resolving_provider_with_fixtures(
+        vec![ProviderBlockFixture {
+            block: block.clone(),
+            logs: vec![rpc_log_payload_at_address(&block, selected_address, 0)],
+        }],
+        Arc::clone(&requests),
+    )
+    .await?;
+
+    let mut config = backfill_job_config(
+        range,
+        "raw-only-sparse-code-repair-observed",
+        "lease-code-repair-observed",
+    )?;
+    config.adapter_sync_mode = backfill::BackfillAdapterSyncMode::RawOnly;
+    let outcome =
+        run_resumable_hash_pinned_backfill_job(database.pool(), &source_plan, &provider, config)
+            .await?;
+    let code_request_count = requests
+        .lock()
+        .expect("request log must not be poisoned")
+        .iter()
+        .filter(|request| request.method == "eth_getCode")
+        .count();
+
+    assert_eq!(outcome.raw_code_hash_count, 1);
+    assert_eq!(code_request_count, 1);
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT canonicality_state::TEXT FROM raw_code_hashes WHERE contract_address = $1"
+        )
+        .bind(selected_address)
+        .fetch_one(database.pool())
+        .await?,
+        "canonical"
+    );
+
+    server.abort();
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn materialization_pipelines_produce_matching_raw_fact_sets() -> Result<()> {
+    let sparse_facts = run_hash_pinned_materialization_fact_set(
+        backfill::BackfillAdapterSyncMode::RawOnly,
+        "pipeline-unified-sparse",
+        "lease-pipeline-sparse",
+    )
+    .await?;
+    let inline_facts = run_hash_pinned_materialization_fact_set(
+        backfill::BackfillAdapterSyncMode::Inline,
+        "pipeline-unified-inline",
+        "lease-pipeline-inline",
+    )
+    .await?;
+    let historical_facts = run_historical_materialization_fact_set().await?;
+    let expected_logs = vec![
+        ("0x0000000000000000000000000000000000000001".to_owned(), 0),
+        ("0x00000000000000000000000000000000000000ff".to_owned(), 1),
+    ];
+    let expected_code_hashes = vec![(42, "0x0000000000000000000000000000000000000001".to_owned())];
+
+    assert_eq!(sparse_facts, inline_facts);
+    assert_eq!(sparse_facts, historical_facts);
+    assert_eq!(sparse_facts.logs, expected_logs);
+    assert_eq!(sparse_facts.code_hashes, expected_code_hashes);
+    assert_eq!(sparse_facts.transaction_count, 1);
+    assert_eq!(sparse_facts.receipt_count, 1);
+    Ok(())
 }
 
 #[tokio::test]
@@ -1616,7 +2263,14 @@ async fn backfill_uses_finalized_safe_and_canonical_evidence_for_admitted_rows()
     )
     .fetch_all(database.pool())
     .await?;
-    assert_eq!(payload_states, Vec::<(i64, Vec<String>)>::new());
+    assert_eq!(
+        payload_states,
+        vec![
+            (40, vec!["finalized".to_owned()]),
+            (41, vec!["safe".to_owned()]),
+            (42, vec!["canonical".to_owned()]),
+        ]
+    );
 
     let normalized_event_states = sqlx::query_as::<_, (i64, String)>(
         r#"
@@ -1635,8 +2289,7 @@ async fn backfill_uses_finalized_safe_and_canonical_evidence_for_admitted_rows()
 }
 
 #[tokio::test]
-async fn source_family_backfill_persists_selector_identity_and_only_selected_target_facts()
--> Result<()> {
+async fn source_family_backfill_persists_selector_identity_and_tx_sibling_facts() -> Result<()> {
     let database = TestDatabase::new().await?;
     create_backfill_job_tables(database.pool()).await?;
     let registry_contract_instance_id = Uuid::from_u128(1_001);
@@ -1691,7 +2344,7 @@ async fn source_family_backfill_persists_selector_identity_and_only_selected_tar
             logs: vec![
                 rpc_ens_v2_label_registered_log_payload(&block_42, registry_address, "alice", 1, 0),
                 rpc_ens_v2_token_resource_log_payload(&block_42, registry_address, 1, 1_001, 1),
-                rpc_log_payload_at_address(&block_42, registrar_address, 1),
+                rpc_log_payload_at_address(&block_42, registrar_address, 2),
             ],
         }],
         Arc::clone(&requests),
@@ -1705,7 +2358,7 @@ async fn source_family_backfill_persists_selector_identity_and_only_selected_tar
         backfill_job_config(range, "source-family-idempotent", "lease-source-family")?,
     )
     .await?;
-    assert_eq!(outcome.raw_log_count, 2);
+    assert_eq!(outcome.raw_log_count, 3);
     assert_eq!(outcome.raw_code_hash_count, 1);
     assert_eq!(table_count(database.pool(), "raw_transactions").await?, 1);
     assert_eq!(table_count(database.pool(), "raw_receipts").await?, 1);
@@ -1790,7 +2443,7 @@ async fn source_family_backfill_persists_selector_identity_and_only_selected_tar
             .bind(registrar_address)
             .fetch_one(database.pool())
             .await?,
-        0
+        1
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM raw_logs WHERE emitting_address = $1")
@@ -2274,17 +2927,22 @@ async fn source_scoped_backfill_enforces_selected_target_effective_ranges_during
         backfill_job_config(range, "source-effective-ranges", "lease-effective")?,
     )
     .await?;
-    assert_eq!(outcome.raw_log_count, 2);
+    assert_eq!(outcome.raw_log_count, 4);
     assert_eq!(outcome.raw_code_hash_count, 2);
     assert_eq!(
         sqlx::query_as::<_, (Vec<i64>, Vec<String>)>(
-            "SELECT ARRAY_AGG(block_number ORDER BY block_number), ARRAY_AGG(emitting_address ORDER BY block_number) FROM raw_logs"
+            "SELECT ARRAY_AGG(block_number ORDER BY block_number, log_index), ARRAY_AGG(emitting_address ORDER BY block_number, log_index) FROM raw_logs"
         )
         .fetch_one(database.pool())
         .await?,
         (
-            vec![42, 43],
-            vec![first_address.to_owned(), second_address.to_owned()]
+            vec![42, 42, 43, 43],
+            vec![
+                first_address.to_owned(),
+                second_address.to_owned(),
+                first_address.to_owned(),
+                second_address.to_owned()
+            ]
         )
     );
     assert_eq!(
@@ -2305,7 +2963,14 @@ async fn source_scoped_backfill_enforces_selected_target_effective_ranges_during
         .clone();
     let log_requests = recorded_requests
         .iter()
-        .filter(|request| request.method == "eth_getLogs")
+        .filter(|request| {
+            request.method == "eth_getLogs"
+                && request
+                    .params
+                    .first()
+                    .and_then(Value::as_object)
+                    .is_some_and(|filter| filter.contains_key("fromBlock"))
+        })
         .collect::<Vec<_>>();
     assert_eq!(
         log_requests.len(),
@@ -3082,6 +3747,281 @@ async fn hash_pinned_backfill_fails_missing_hash_payload_without_number_fallback
 
     server.abort();
     database.cleanup().await
+}
+
+#[tokio::test]
+async fn historical_materialization_skips_code_observations_without_selected_log_emitters()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let range = BackfillBlockRange::new(42, 42)?;
+    let source_plan = materialization_pipeline_source_plan(database.pool(), 9_302, range).await?;
+    let selected_target_index =
+        backfill::SelectedTargetIntervalIndex::from_source_plan(&source_plan);
+    let (block, _) = materialization_pipeline_blocks();
+    let requests = Arc::new(Mutex::new(Vec::<RecordedRpcRequest>::new()));
+    let (provider, server) = number_resolving_provider_with_fixtures(
+        vec![ProviderBlockFixture {
+            block: block.clone(),
+            logs: Vec::new(),
+        }],
+        Arc::clone(&requests),
+    )
+    .await?;
+    let evidence = backfill::load_backfill_canonicality_evidence(
+        database.pool(),
+        "ethereum-mainnet",
+        &provider,
+    )
+    .await?;
+    let resolved_blocks = vec![ProviderResolvedBlock {
+        block_number: block.block_number,
+        block_hash: block.block_hash.clone(),
+    }];
+    let historical_payload = backfill::HistoricalLogPayload {
+        validation_mode: backfill::CoinbaseSqlValidationMode::Sample,
+        ..Default::default()
+    };
+
+    let outcome = backfill::materialize_historical_payload_range(
+        database.pool(),
+        &source_plan,
+        &selected_target_index,
+        &provider,
+        range,
+        evidence,
+        &resolved_blocks,
+        vec![block],
+        historical_payload,
+        backfill::BackfillAdapterSyncMode::RawOnly,
+        HeaderAuditMode::Minimal,
+    )
+    .await?;
+
+    assert_eq!(outcome.raw_log_count, 0);
+    assert_eq!(outcome.raw_code_hash_count, 0);
+    assert_eq!(table_count(database.pool(), "raw_code_hashes").await?, 0);
+    let code_requests = requests
+        .lock()
+        .expect("request log must not be poisoned")
+        .iter()
+        .filter(|request| request.method == "eth_getCode")
+        .count();
+    assert_eq!(code_requests, 0);
+
+    server.abort();
+    database.cleanup().await
+}
+
+async fn run_hash_pinned_materialization_fact_set(
+    adapter_sync_mode: backfill::BackfillAdapterSyncMode,
+    idempotency_key: &str,
+    lease_token: &str,
+) -> Result<MaterializedRawFactSet> {
+    let database = TestDatabase::new().await?;
+    create_backfill_job_tables(database.pool()).await?;
+    let range = BackfillBlockRange::new(42, 42)?;
+    let source_plan = materialization_pipeline_source_plan(database.pool(), 9_300, range).await?;
+    let requests = Arc::new(Mutex::new(Vec::<RecordedRpcRequest>::new()));
+    let (provider, server) = number_resolving_provider_with_fixtures(
+        materialization_pipeline_provider_fixtures(),
+        Arc::clone(&requests),
+    )
+    .await?;
+    let mut config = backfill_job_config(range, idempotency_key, lease_token)?;
+    config.adapter_sync_mode = adapter_sync_mode;
+
+    let outcome =
+        run_resumable_hash_pinned_backfill_job(database.pool(), &source_plan, &provider, config)
+            .await?;
+    assert_eq!(outcome.raw_log_count, 2);
+    assert_eq!(outcome.raw_code_hash_count, 1);
+    let facts = load_materialized_raw_fact_set(database.pool()).await?;
+
+    server.abort();
+    database.cleanup().await?;
+    Ok(facts)
+}
+
+async fn run_historical_materialization_fact_set() -> Result<MaterializedRawFactSet> {
+    let database = TestDatabase::new().await?;
+    let range = BackfillBlockRange::new(42, 42)?;
+    let source_plan = materialization_pipeline_source_plan(database.pool(), 9_301, range).await?;
+    let selected_target_index =
+        backfill::SelectedTargetIntervalIndex::from_source_plan(&source_plan);
+    let (block, _) = materialization_pipeline_blocks();
+    let requests = Arc::new(Mutex::new(Vec::<RecordedRpcRequest>::new()));
+    let (provider, server) = number_resolving_provider_with_fixtures(
+        materialization_pipeline_provider_fixtures(),
+        Arc::clone(&requests),
+    )
+    .await?;
+    let evidence = backfill::load_backfill_canonicality_evidence(
+        database.pool(),
+        "ethereum-mainnet",
+        &provider,
+    )
+    .await?;
+    let resolved_blocks = vec![ProviderResolvedBlock {
+        block_number: block.block_number,
+        block_hash: block.block_hash.clone(),
+    }];
+    let selected_address = materialization_pipeline_selected_address();
+    let historical_payload = backfill::HistoricalLogPayload {
+        logs_by_block: BTreeMap::from([(
+            block.block_number,
+            vec![provider_log_for_materialization_block(
+                &block,
+                selected_address,
+                0,
+            )],
+        )]),
+        logs_need_validation_provider_payload: true,
+        validation_filters: vec![backfill::HistoricalLogValidationFilter {
+            from_block: range.from_block,
+            to_block: range.to_block,
+            addresses: vec![selected_address.to_owned()],
+            topic0s: Vec::new(),
+        }],
+        validation_mode: backfill::CoinbaseSqlValidationMode::Full,
+        ..Default::default()
+    };
+
+    let outcome = backfill::materialize_historical_payload_range(
+        database.pool(),
+        &source_plan,
+        &selected_target_index,
+        &provider,
+        range,
+        evidence,
+        &resolved_blocks,
+        vec![block],
+        historical_payload,
+        backfill::BackfillAdapterSyncMode::RawOnly,
+        HeaderAuditMode::Minimal,
+    )
+    .await?;
+    assert_eq!(outcome.raw_log_count, 2);
+    assert_eq!(outcome.raw_code_hash_count, 1);
+    let facts = load_materialized_raw_fact_set(database.pool()).await?;
+
+    server.abort();
+    database.cleanup().await?;
+    Ok(facts)
+}
+
+async fn materialization_pipeline_source_plan(
+    pool: &PgPool,
+    manifest_id: i64,
+    range: BackfillBlockRange,
+) -> Result<WatchedSourceSelectorPlan> {
+    insert_watched_manifest_contract(
+        pool,
+        manifest_id,
+        "ens",
+        "ethereum-mainnet",
+        "ens_v1_wrapper_l1",
+        Uuid::from_u128(manifest_id as u128),
+        materialization_pipeline_selected_address(),
+    )
+    .await?;
+
+    load_watched_source_selector_plan(
+        pool,
+        "ethereum-mainnet",
+        WatchedSourceSelector::SourceFamily("ens_v1_wrapper_l1".to_owned()),
+        range.from_block,
+        range.to_block,
+    )
+    .await
+}
+
+fn materialization_pipeline_provider_fixtures() -> Vec<ProviderBlockFixture> {
+    let (block, next_block) = materialization_pipeline_blocks();
+    vec![
+        ProviderBlockFixture {
+            block: block.clone(),
+            logs: vec![
+                rpc_log_payload_at_address(&block, materialization_pipeline_selected_address(), 0),
+                rpc_log_payload_at_address(&block, materialization_pipeline_sibling_address(), 1),
+            ],
+        },
+        ProviderBlockFixture {
+            block: next_block,
+            logs: Vec::new(),
+        },
+    ]
+}
+
+fn materialization_pipeline_blocks() -> (ProviderBlock, ProviderBlock) {
+    let block = provider_block(
+        "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        Some("0x9999999999999999999999999999999999999999999999999999999999999999"),
+        42,
+    );
+    let next_block = provider_block(
+        "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        Some(&block.block_hash),
+        43,
+    );
+    (block, next_block)
+}
+
+fn provider_log_for_materialization_block(
+    block: &ProviderBlock,
+    address: &str,
+    log_index: i64,
+) -> ProviderLog {
+    let dns_name = dns_encoded_test_name();
+    ProviderLog {
+        block_hash: block.block_hash.clone(),
+        block_number: block.block_number,
+        transaction_hash: transaction_hash_for_block(block),
+        transaction_index: 0,
+        log_index,
+        address: address.to_owned(),
+        topics: vec![name_wrapped_topic0(), namehash_for_dns_name(&dns_name)],
+        data: encode_name_wrapped_log_data(&dns_name),
+    }
+}
+
+fn materialization_pipeline_selected_address() -> &'static str {
+    "0x0000000000000000000000000000000000000001"
+}
+
+fn materialization_pipeline_sibling_address() -> &'static str {
+    "0x00000000000000000000000000000000000000ff"
+}
+
+async fn load_materialized_raw_fact_set(pool: &PgPool) -> Result<MaterializedRawFactSet> {
+    let logs = sqlx::query_as::<_, (String, i64)>(
+        "SELECT emitting_address, log_index FROM raw_logs ORDER BY log_index",
+    )
+    .fetch_all(pool)
+    .await?;
+    let code_hashes = sqlx::query_as::<_, (i64, String)>(
+        "SELECT block_number, contract_address FROM raw_code_hashes ORDER BY block_number, contract_address",
+    )
+    .fetch_all(pool)
+    .await?;
+    let transaction_count =
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM raw_transactions")
+            .fetch_one(pool)
+            .await?;
+    let receipt_count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM raw_receipts")
+        .fetch_one(pool)
+        .await?;
+    let payload_cache_metadata_count =
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM raw_payload_cache_metadata")
+            .fetch_one(pool)
+            .await?;
+
+    Ok(MaterializedRawFactSet {
+        logs,
+        code_hashes,
+        transaction_count,
+        receipt_count,
+        payload_cache_metadata_count,
+    })
 }
 
 async fn number_resolving_provider(
@@ -4111,10 +5051,7 @@ async fn assert_dynamic_resolver_backfill_scope_behavior(
     .await?;
     let generic_ensv1_resolver = fixture.resolver_source_family == "ens_v1_resolver_l1";
     assert_eq!(outcome.resolved_block_count, 5);
-    assert_eq!(
-        outcome.raw_log_count,
-        if generic_ensv1_resolver { 10 } else { 7 }
-    );
+    assert_eq!(outcome.raw_log_count, 10);
     assert_eq!(
         outcome.raw_code_hash_count,
         if generic_ensv1_resolver { 7 } else { 6 }
@@ -4158,30 +5095,18 @@ async fn assert_dynamic_resolver_backfill_scope_behavior(
         )
         .fetch_one(database.pool())
         .await?,
-        if generic_ensv1_resolver {
-            vec![
-                selected_resolver_address.to_owned(),
-                selected_resolver_address.to_owned(),
-                pending_resolver_address.to_owned(),
-                pending_resolver_address.to_owned(),
-                unsupported_resolver_address.to_owned(),
-                unsupported_resolver_address.to_owned(),
-                closed_resolver_address.to_owned(),
-                deactivated_resolver_address.to_owned(),
-                orphan_equivalent_resolver_address.to_owned(),
-                selected_resolver_address.to_owned(),
-            ]
-        } else {
-            vec![
-                selected_resolver_address.to_owned(),
-                selected_resolver_address.to_owned(),
-                pending_resolver_address.to_owned(),
-                pending_resolver_address.to_owned(),
-                unsupported_resolver_address.to_owned(),
-                unsupported_resolver_address.to_owned(),
-                selected_resolver_address.to_owned(),
-            ]
-        }
+        vec![
+            selected_resolver_address.to_owned(),
+            selected_resolver_address.to_owned(),
+            pending_resolver_address.to_owned(),
+            pending_resolver_address.to_owned(),
+            unsupported_resolver_address.to_owned(),
+            unsupported_resolver_address.to_owned(),
+            closed_resolver_address.to_owned(),
+            deactivated_resolver_address.to_owned(),
+            orphan_equivalent_resolver_address.to_owned(),
+            selected_resolver_address.to_owned(),
+        ]
     );
     assert_eq!(
         sqlx::query_scalar::<_, Vec<i64>>(
@@ -4195,11 +5120,7 @@ async fn assert_dynamic_resolver_backfill_scope_behavior(
         )
         .fetch_one(database.pool())
         .await?,
-        if generic_ensv1_resolver {
-            vec![42, 42, 42, 42, 42, 42, 42, 42, 42, 43]
-        } else {
-            vec![42, 42, 42, 42, 42, 42, 43]
-        }
+        vec![42, 42, 42, 42, 42, 42, 42, 42, 42, 43]
     );
     assert_eq!(
         sqlx::query_scalar::<_, Vec<String>>(
@@ -4213,30 +5134,18 @@ async fn assert_dynamic_resolver_backfill_scope_behavior(
         )
         .fetch_one(database.pool())
         .await?,
-        if generic_ensv1_resolver {
-            vec![
-                block_42.block_hash.clone(),
-                block_42.block_hash.clone(),
-                block_42.block_hash.clone(),
-                block_42.block_hash.clone(),
-                block_42.block_hash.clone(),
-                block_42.block_hash.clone(),
-                block_42.block_hash.clone(),
-                block_42.block_hash.clone(),
-                block_42.block_hash.clone(),
-                block_43.block_hash.clone(),
-            ]
-        } else {
-            vec![
-                block_42.block_hash.clone(),
-                block_42.block_hash.clone(),
-                block_42.block_hash.clone(),
-                block_42.block_hash.clone(),
-                block_42.block_hash.clone(),
-                block_42.block_hash.clone(),
-                block_43.block_hash.clone(),
-            ]
-        }
+        vec![
+            block_42.block_hash.clone(),
+            block_42.block_hash.clone(),
+            block_42.block_hash.clone(),
+            block_42.block_hash.clone(),
+            block_42.block_hash.clone(),
+            block_42.block_hash.clone(),
+            block_42.block_hash.clone(),
+            block_42.block_hash.clone(),
+            block_42.block_hash.clone(),
+            block_43.block_hash.clone(),
+        ]
     );
     assert_eq!(
         sqlx::query_scalar::<_, Vec<String>>(
@@ -4298,17 +5207,7 @@ async fn assert_dynamic_resolver_backfill_scope_behavior(
         0,
         "source-scoped resolver-family backfill must not bypass resolver-profile replay gates"
     );
-    let excluded_addresses = if generic_ensv1_resolver {
-        vec![seed_resolver_address]
-    } else {
-        vec![
-            seed_resolver_address,
-            closed_resolver_address,
-            deactivated_resolver_address,
-            orphan_equivalent_resolver_address,
-        ]
-    };
-    for excluded_address in excluded_addresses {
+    for excluded_address in [seed_resolver_address] {
         assert_eq!(
             sqlx::query_scalar::<_, i64>(
                 "SELECT COUNT(*) FROM raw_logs WHERE emitting_address = $1"
@@ -4319,6 +5218,18 @@ async fn assert_dynamic_resolver_backfill_scope_behavior(
             0,
             "{excluded_address} must not be admitted as raw logs"
         );
+    }
+    let code_hash_excluded_addresses = if generic_ensv1_resolver {
+        vec![seed_resolver_address]
+    } else {
+        vec![
+            seed_resolver_address,
+            closed_resolver_address,
+            deactivated_resolver_address,
+            orphan_equivalent_resolver_address,
+        ]
+    };
+    for excluded_address in code_hash_excluded_addresses {
         assert_eq!(
             sqlx::query_scalar::<_, i64>(
                 "SELECT COUNT(*) FROM raw_code_hashes WHERE contract_address = $1"
@@ -4363,7 +5274,14 @@ async fn assert_dynamic_resolver_backfill_scope_behavior(
         .clone();
     let log_requests = recorded_requests
         .iter()
-        .filter(|request| request.method == "eth_getLogs")
+        .filter(|request| {
+            request.method == "eth_getLogs"
+                && request
+                    .params
+                    .first()
+                    .and_then(Value::as_object)
+                    .is_some_and(|filter| filter.contains_key("fromBlock"))
+        })
         .collect::<Vec<_>>();
     assert_eq!(
         log_requests.len(),

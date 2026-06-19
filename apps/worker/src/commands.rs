@@ -5,19 +5,21 @@ mod execution_invalidation;
 
 use crate::cli::*;
 use crate::{
-    address_names, automatic_projection_replay, children, inspect, manifest_drift, name_current,
-    permissions, primary_name, raw_facts, record_inventory, replay, resolver,
+    address_names, automatic_projection_replay, children, healthcheck, inspect, manifest_drift,
+    name_current, permissions, primary_name, raw_facts, record_inventory, replay, resolver,
 };
 use execution_invalidation::execution_command;
 
 pub(crate) async fn dispatch(command: Command) -> Result<()> {
     match command {
         Command::Run(args) => automatic_projection_replay::run_worker(args).await,
+        Command::Healthcheck(args) => healthcheck::healthcheck(args).await,
         Command::Migrate(args) => migrate(args).await,
         Command::AddressNamesCurrent(args) => address_names_current(args).await,
         Command::ChildrenCurrent(args) => children_current(args).await,
         Command::Execution(args) => execution_command(args).await,
         Command::Inspect(args) => inspect::inspect_command(args).await,
+        Command::LabelPreimages(args) => label_preimages_command(args).await,
         Command::ManifestDrift(args) => manifest_drift_command(args).await,
         Command::NameCurrent(args) => name_current(args).await,
         Command::PermissionsCurrent(args) => permissions_current(args).await,
@@ -51,6 +53,14 @@ async fn address_names_current(args: AddressNamesCurrentArgs) -> Result<()> {
 async fn children_current(args: ChildrenCurrentArgs) -> Result<()> {
     match args.command {
         ChildrenCurrentCommand::Rebuild(args) => rebuild_children_current(args).await,
+    }
+}
+
+async fn label_preimages_command(args: LabelPreimagesArgs) -> Result<()> {
+    match args.command {
+        LabelPreimagesCommand::ImportEnsRainbow(args) => {
+            import_ens_rainbow_label_preimages(args).await
+        }
     }
 }
 
@@ -106,6 +116,7 @@ async fn resolver_current(args: ResolverCurrentArgs) -> Result<()> {
 
 async fn rebuild_name_current(args: NameCurrentRebuildArgs) -> Result<()> {
     let pool = bigname_storage::connect(&args.database).await?;
+    clear_projection_replay_marker(&pool, "name_current").await?;
     let summary =
         name_current::rebuild_name_current(&pool, args.logical_name_id.as_deref()).await?;
 
@@ -124,6 +135,7 @@ async fn rebuild_name_current(args: NameCurrentRebuildArgs) -> Result<()> {
 
 async fn rebuild_address_names_current(args: AddressNamesCurrentRebuildArgs) -> Result<()> {
     let pool = bigname_storage::connect(&args.database).await?;
+    clear_projection_replay_marker(&pool, "address_names_current").await?;
     let summary =
         address_names::rebuild_address_names_current(&pool, args.address.as_deref()).await?;
 
@@ -142,6 +154,7 @@ async fn rebuild_address_names_current(args: AddressNamesCurrentRebuildArgs) -> 
 
 async fn rebuild_children_current(args: ChildrenCurrentRebuildArgs) -> Result<()> {
     let pool = bigname_storage::connect(&args.database).await?;
+    clear_projection_replay_marker(&pool, "children_current").await?;
     let summary =
         children::rebuild_children_current(&pool, args.logical_name_id.as_deref()).await?;
 
@@ -158,8 +171,31 @@ async fn rebuild_children_current(args: ChildrenCurrentRebuildArgs) -> Result<()
     Ok(())
 }
 
+async fn import_ens_rainbow_label_preimages(
+    args: LabelPreimagesImportEnsRainbowArgs,
+) -> Result<()> {
+    let pool = bigname_storage::connect(&args.database).await?;
+    let summary = bigname_storage::import_label_preimages_from_ens_names_table(
+        &pool,
+        args.batch_size,
+        args.limit,
+    )
+    .await?;
+
+    info!(
+        service = "worker",
+        scanned_row_count = summary.scanned_row_count,
+        retained_row_count = summary.retained_row_count,
+        invalidated_parent_count = summary.invalidated_parent_count,
+        "ENS rainbow label preimage import completed"
+    );
+
+    Ok(())
+}
+
 async fn rebuild_permissions_current(args: PermissionsCurrentRebuildArgs) -> Result<()> {
     let pool = bigname_storage::connect(&args.database).await?;
+    clear_projection_replay_marker(&pool, "permissions_current").await?;
     let summary =
         permissions::rebuild_permissions_current(&pool, args.resource_id.as_deref()).await?;
 
@@ -178,6 +214,7 @@ async fn rebuild_permissions_current(args: PermissionsCurrentRebuildArgs) -> Res
 
 async fn rebuild_primary_names_current(args: PrimaryNamesCurrentRebuildArgs) -> Result<()> {
     let pool = bigname_storage::connect(&args.database).await?;
+    clear_projection_replay_marker(&pool, "primary_names_current").await?;
     let summary = primary_name::rebuild_primary_names_current(
         &pool,
         args.address.as_deref(),
@@ -267,6 +304,7 @@ async fn replay_all_current_projections(args: AllCurrentProjectionsArgs) -> Resu
 
 async fn rebuild_record_inventory_current(args: RecordInventoryCurrentRebuildArgs) -> Result<()> {
     let pool = bigname_storage::connect(&args.database).await?;
+    clear_projection_replay_marker(&pool, "record_inventory_current").await?;
     let summary =
         record_inventory::rebuild_record_inventory_current(&pool, args.resource_id.as_deref())
             .await?;
@@ -379,6 +417,7 @@ fn optional_primary_name_legacy_reverse_hydration_config(
 
 async fn rebuild_resolver_current(args: ResolverCurrentRebuildArgs) -> Result<()> {
     let pool = bigname_storage::connect(&args.database).await?;
+    clear_projection_replay_marker(&pool, "resolver_current").await?;
     let summary = resolver::rebuild_resolver_current(
         &pool,
         args.chain_id.as_deref(),
@@ -398,4 +437,92 @@ async fn rebuild_resolver_current(args: ResolverCurrentRebuildArgs) -> Result<()
     );
 
     Ok(())
+}
+
+async fn clear_projection_replay_marker(pool: &sqlx::PgPool, projection: &str) -> Result<()> {
+    sqlx::query(
+        r#"
+        DELETE FROM current_projection_replay_status
+        WHERE projection = $1
+        "#,
+    )
+    .bind(projection)
+    .execute(pool)
+    .await
+    .with_context(|| format!("failed to clear replay marker for {projection}"))?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use anyhow::{Context, Result};
+    use bigname_storage::DatabaseConfig;
+    use sqlx::{ConnectOptions, postgres::PgConnectOptions};
+    use std::str::FromStr;
+    use uuid::Uuid;
+
+    fn database_config(database: &bigname_test_support::TestDatabase) -> Result<DatabaseConfig> {
+        let base_url = bigname_test_support::database_url_from_env();
+        let database_url = PgConnectOptions::from_str(&base_url)
+            .context("failed to parse test database URL")?
+            .database(database.database_name())
+            .to_url_lossy()
+            .to_string();
+        Ok(DatabaseConfig {
+            database_url: Some(database_url),
+            max_connections: 5,
+        })
+    }
+
+    #[tokio::test]
+    async fn one_shot_rebuild_clears_projection_replay_marker() -> Result<()> {
+        let database = bigname_test_support::TestDatabase::create_migrated(
+            bigname_test_support::TestDatabaseConfig::new(
+                "bigname_worker_command_marker_hygiene_test",
+            ),
+            &bigname_storage::MIGRATOR,
+            "failed to apply migrations for worker command marker hygiene test",
+        )
+        .await?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO current_projection_replay_status (
+                projection,
+                replay_version,
+                completed_normalized_target_block,
+                requested_key_count,
+                upserted_row_count,
+                deleted_row_count
+            )
+            VALUES ('permissions_current', 4, 100, 1, 1, 0)
+            "#,
+        )
+        .execute(database.pool())
+        .await
+        .context("failed to seed permissions_current replay marker")?;
+
+        rebuild_permissions_current(PermissionsCurrentRebuildArgs {
+            database: database_config(&database)?,
+            resource_id: Some(Uuid::new_v4().to_string()),
+        })
+        .await?;
+
+        let marker_count = sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)::BIGINT
+            FROM current_projection_replay_status
+            WHERE projection = 'permissions_current'
+            "#,
+        )
+        .fetch_one(database.pool())
+        .await
+        .context("failed to count permissions_current replay markers")?;
+        assert_eq!(marker_count, 0);
+
+        database.cleanup().await?;
+        Ok(())
+    }
 }

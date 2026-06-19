@@ -5,7 +5,7 @@ pub(super) async fn name_records(
     Query(query): Query<NameRecordsQuery>,
     State(state): State<AppState>,
 ) -> ApiResult<Json<CompactNameRecordsResponse>> {
-    ensure_public_namespace(&namespace)?;
+    let name = parse_exact_name_path_name(&namespace, &name)?;
 
     Ok(Json(
         compact_name_records_response_for_name(
@@ -18,8 +18,6 @@ pub(super) async fn name_records(
         .await?,
     ))
 }
-
-include!("records_warmup.rs");
 
 async fn compact_name_records_response_for_name(
     state: &AppState,
@@ -40,3 +38,5 @@ async fn compact_name_records_response_for_name(
         read.verified_outcome.as_ref(),
     ))
 }
+
+include!("records_warmup.rs");

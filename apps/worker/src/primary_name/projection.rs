@@ -2,12 +2,67 @@ use anyhow::{Context, Result, bail};
 use bigname_storage::{
     PrimaryNameClaimStatus, PrimaryNameCurrentRow, PrimaryNameCurrentSnapshot,
     VERIFIED_PRIMARY_NAME_INVALIDATION_KEY, VERIFIED_PRIMARY_NAME_LOOKUP_KEY,
-    clear_primary_names_current, delete_primary_name_current, normalize_evm_address,
-    upsert_primary_name_current_snapshots,
+    delete_primary_name_current_in_transaction,
+    load_primary_name_current_snapshot_for_update_in_transaction, normalize_evm_address,
+    upsert_primary_name_current_snapshots_in_transaction, verified_primary_name_claim_hooks,
 };
 use futures_util::{TryStreamExt, pin_mut};
 use serde_json::{Map, Value, json};
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool, Row};
+
+#[allow(clippy::duplicate_mod)]
+#[path = "../staged_rebuild.rs"]
+mod staged_rebuild;
+
+use staged_rebuild::{
+    PRIMARY_NAMES_CURRENT_COLUMNS, count_rows, create_stage_table, drop_stage_table,
+    publish_stage_table, stage_primary_names_current_snapshots,
+};
+
+#[cfg(test)]
+pub(crate) mod test_hooks {
+    use std::sync::{Arc, Mutex};
+
+    type TargetedRebuildAfterInvalidationHook =
+        Arc<dyn Fn(&str, &str, &str) + Send + Sync + 'static>;
+
+    static TARGETED_REBUILD_AFTER_INVALIDATION_HOOK: Mutex<
+        Option<TargetedRebuildAfterInvalidationHook>,
+    > = Mutex::new(None);
+
+    pub(crate) struct TargetedRebuildAfterInvalidationHookGuard;
+
+    impl Drop for TargetedRebuildAfterInvalidationHookGuard {
+        fn drop(&mut self) {
+            *TARGETED_REBUILD_AFTER_INVALIDATION_HOOK
+                .lock()
+                .expect("targeted rebuild after invalidation hook mutex poisoned") = None;
+        }
+    }
+
+    pub(crate) fn install_targeted_rebuild_after_invalidation_hook(
+        hook: TargetedRebuildAfterInvalidationHook,
+    ) -> TargetedRebuildAfterInvalidationHookGuard {
+        *TARGETED_REBUILD_AFTER_INVALIDATION_HOOK
+            .lock()
+            .expect("targeted rebuild after invalidation hook mutex poisoned") = Some(hook);
+        TargetedRebuildAfterInvalidationHookGuard
+    }
+
+    pub(super) fn run_targeted_rebuild_after_invalidation_hook(
+        address: &str,
+        namespace: &str,
+        coin_type: &str,
+    ) {
+        let hook = TARGETED_REBUILD_AFTER_INVALIDATION_HOOK
+            .lock()
+            .expect("targeted rebuild after invalidation hook mutex poisoned")
+            .clone();
+        if let Some(hook) = hook {
+            hook(address, namespace, coin_type);
+        }
+    }
+}
 
 use super::{
     PrimaryNamesCurrentRebuildSummary,
@@ -38,7 +93,12 @@ pub async fn rebuild_primary_names_current(
 }
 
 async fn rebuild_all_primary_names(pool: &PgPool) -> Result<PrimaryNamesCurrentRebuildSummary> {
-    let deleted_row_count = clear_primary_names_current(pool).await?;
+    let mut conn = pool
+        .acquire()
+        .await
+        .context("failed to acquire primary_names_current staging connection")?;
+    let stage_table = create_stage_table(&mut conn, "primary_names_current").await?;
+    let previous_row_count = count_rows(&mut conn, "primary_names_current", None).await?;
     let mut projections = Vec::with_capacity(PRIMARY_NAMES_CURRENT_REBUILD_BATCH_SIZE);
     let mut status_counts = StatusCounts::default();
     let mut requested_tuple_count = 0usize;
@@ -54,9 +114,9 @@ async fn rebuild_all_primary_names(pool: &PgPool) -> Result<PrimaryNamesCurrentR
         projections.push(projection);
 
         if projections.len() >= PRIMARY_NAMES_CURRENT_REBUILD_BATCH_SIZE {
-            upserted_row_count += upsert_primary_name_current_snapshots(pool, &projections)
-                .await?
-                .len();
+            upserted_row_count +=
+                stage_primary_names_current_snapshots(&mut conn, &stage_table, &projections).await?
+                    as usize;
             projections.clear();
         }
 
@@ -72,15 +132,28 @@ async fn rebuild_all_primary_names(pool: &PgPool) -> Result<PrimaryNamesCurrentR
     }
 
     if !projections.is_empty() {
-        upserted_row_count += upsert_primary_name_current_snapshots(pool, &projections)
-            .await?
-            .len();
+        upserted_row_count +=
+            stage_primary_names_current_snapshots(&mut conn, &stage_table, &projections).await?
+                as usize;
     }
+    let invalidation_targets =
+        load_full_rebuild_claim_change_invalidation_targets(&mut conn, &stage_table).await?;
+    invalidate_verified_primary_name_claim_changes(pool, &invalidation_targets).await?;
+    let (_deleted_row_count, published_row_count) = publish_stage_table(
+        &mut conn,
+        "primary_names_current",
+        &stage_table,
+        PRIMARY_NAMES_CURRENT_COLUMNS,
+        None,
+    )
+    .await?;
+    drop_stage_table(&mut conn, &stage_table).await?;
+    debug_assert_eq!(published_row_count as usize, upserted_row_count);
 
     Ok(PrimaryNamesCurrentRebuildSummary {
         requested_tuple_count,
         upserted_row_count,
-        deleted_row_count,
+        deleted_row_count: previous_row_count,
         success_row_count: status_counts.success_row_count,
         not_found_row_count: status_counts.not_found_row_count,
         invalid_name_row_count: status_counts.invalid_name_row_count,
@@ -105,21 +178,88 @@ async fn rebuild_one_primary_name(
         }
         None => None,
     };
+    let mut transaction = pool
+        .begin()
+        .await
+        .with_context(|| {
+            format!(
+                "failed to open primary_names_current targeted rebuild transaction for address {} namespace {} coin_type {}",
+                target.address, target.namespace, target.coin_type
+            )
+        })?;
+    let previous_row = load_primary_name_current_snapshot_for_update_in_transaction(
+        &mut transaction,
+        &target.address,
+        &target.namespace,
+        &target.coin_type,
+    )
+    .await?;
     let upserted_row_count = match projected_row.as_ref() {
         Some(projection) => {
-            upsert_primary_name_current_snapshots(pool, std::slice::from_ref(projection))
-                .await?
-                .len()
+            let claim_row_changed = previous_row.as_ref() != Some(projection);
+            if claim_row_changed {
+                let hooks = verified_primary_name_claim_hooks(&projection.row)?;
+                super::super::execution::invalidate_verified_primary_name_claim_change_in_transaction(
+                    &mut transaction,
+                    &hooks.lookup.namespace,
+                    &hooks.lookup.request_key(),
+                )
+                .await?;
+                #[cfg(test)]
+                test_hooks::run_targeted_rebuild_after_invalidation_hook(
+                    &target.address,
+                    &target.namespace,
+                    &target.coin_type,
+                );
+            }
+            upsert_primary_name_current_snapshots_in_transaction(
+                &mut transaction,
+                std::slice::from_ref(projection),
+            )
+            .await?
+            .len()
         }
         None => 0,
     };
     let deleted_row_count = match projected_row.as_ref() {
         Some(_) => 0,
         None => {
-            delete_primary_name_current(pool, &target.address, &target.namespace, &target.coin_type)
-                .await?
+            if previous_row.is_some() {
+                super::super::execution::invalidate_verified_primary_name_claim_change_in_transaction(
+                    &mut transaction,
+                    &target.namespace,
+                    &verified_primary_name_request_key(
+                        &target.namespace,
+                        &target.address,
+                        &target.coin_type,
+                    ),
+                )
+                .await?;
+                #[cfg(test)]
+                test_hooks::run_targeted_rebuild_after_invalidation_hook(
+                    &target.address,
+                    &target.namespace,
+                    &target.coin_type,
+                );
+            }
+            delete_primary_name_current_in_transaction(
+                &mut transaction,
+                &target.address,
+                &target.namespace,
+                &target.coin_type,
+            )
+            .await?
         }
     };
+    transaction
+        .commit()
+        .await
+        .with_context(|| {
+            format!(
+                "failed to commit primary_names_current targeted rebuild for address {} namespace {} coin_type {}",
+                target.address, target.namespace, target.coin_type
+            )
+        })?;
     let projected_rows = projected_row
         .iter()
         .map(|projection| projection.row.clone())
@@ -134,6 +274,75 @@ async fn rebuild_one_primary_name(
         not_found_row_count: status_counts.not_found_row_count,
         invalid_name_row_count: status_counts.invalid_name_row_count,
     })
+}
+
+async fn load_full_rebuild_claim_change_invalidation_targets(
+    conn: &mut PgConnection,
+    stage_table: &str,
+) -> Result<Vec<VerifiedPrimaryNameClaimChangeTarget>> {
+    let rows = sqlx::query(&format!(
+        r#"
+        SELECT DISTINCT
+            COALESCE(stage.namespace, current.namespace) AS namespace,
+            COALESCE(stage.address, current.address) AS address,
+            COALESCE(stage.coin_type, current.coin_type) AS coin_type
+        FROM primary_names_current AS current
+        FULL OUTER JOIN {stage_table} AS stage
+          ON stage.address = current.address
+         AND stage.namespace = current.namespace
+         AND stage.coin_type = current.coin_type
+        WHERE current.address IS NULL
+           OR stage.address IS NULL
+           OR current.claim_status IS DISTINCT FROM stage.claim_status
+           OR current.raw_claim_name IS DISTINCT FROM stage.raw_claim_name
+           OR current.normalized_claim_name IS DISTINCT FROM stage.normalized_claim_name
+           OR current.claim_provenance IS DISTINCT FROM stage.claim_provenance
+        "#
+    ))
+    .fetch_all(conn)
+    .await
+    .with_context(|| {
+        format!(
+            "failed to load verified primary-name claim invalidation targets from staging table {stage_table}"
+        )
+    })?;
+
+    rows.into_iter()
+        .map(|row| {
+            let namespace: String = row.try_get("namespace")?;
+            let address: String = row.try_get("address")?;
+            let coin_type: String = row.try_get("coin_type")?;
+            Ok(VerifiedPrimaryNameClaimChangeTarget {
+                request_key: verified_primary_name_request_key(&namespace, &address, &coin_type),
+                namespace,
+            })
+        })
+        .collect()
+}
+
+async fn invalidate_verified_primary_name_claim_changes(
+    pool: &PgPool,
+    targets: &[VerifiedPrimaryNameClaimChangeTarget],
+) -> Result<()> {
+    for target in targets {
+        super::super::execution::invalidate_verified_primary_name_claim_change(
+            pool,
+            &target.namespace,
+            &target.request_key,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct VerifiedPrimaryNameClaimChangeTarget {
+    namespace: String,
+    request_key: String,
+}
+
+fn verified_primary_name_request_key(namespace: &str, address: &str, coin_type: &str) -> String {
+    format!("{namespace}:{}:{coin_type}", normalize_evm_address(address))
 }
 
 pub(super) fn primary_name_row(

@@ -1,7 +1,8 @@
 use anyhow::Result;
 use bigname_storage::{
-    NameSurface, NormalizedEvent, RawBlock, RawLog, load_children_current, upsert_name_surfaces,
-    upsert_normalized_events, upsert_raw_blocks, upsert_raw_logs,
+    NameSurface, NormalizedEvent, RawBlock, RawLog, label_preimage_from_label,
+    load_children_current, upsert_label_preimages, upsert_name_surfaces, upsert_normalized_events,
+    upsert_raw_blocks, upsert_raw_logs,
 };
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 use sqlx::types::time::OffsetDateTime;
@@ -118,6 +119,93 @@ async fn rebuilds_declared_children_for_one_parent() -> Result<()> {
     );
     assert_eq!(rows[1].child_logical_name_id, "ens:carol.parent.eth");
     assert_eq!(rows[1].last_recomputed_at, timestamp(1_717_172_102));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn rebuilds_unknown_label_children_and_repairs_them_after_label_preimage() -> Result<()> {
+    let database = test_database().await?;
+    let parent = "ens:parent.eth";
+    let child_node = "node:mystery.parent.eth";
+    let labelhash = labelhash_for_label("mystery");
+    let placeholder = format!("[{}].parent.eth", labelhash.trim_start_matches("0x"));
+    let unknown_child = format!("ens:{placeholder}");
+    let owner = "0x0000000000000000000000000000000000000001";
+
+    seed_raw_blocks(
+        database.pool(),
+        &[raw_block(
+            "ethereum-mainnet",
+            "0xblock82",
+            130,
+            1_717_172_130,
+        )],
+    )
+    .await?;
+    seed_name_surfaces(
+        database.pool(),
+        &[name_surface(parent, "parent.eth", "node:parent.eth", 70)],
+    )
+    .await?;
+    seed_subregistry_events(
+        database.pool(),
+        &[subregistry_event(
+            "ens",
+            "mystery-active",
+            "node:parent.eth",
+            child_node,
+            130,
+            0,
+            false,
+            true,
+        )],
+    )
+    .await?;
+
+    let summary = rebuild_children_current(database.pool(), Some(parent)).await?;
+    assert_eq!(summary.upserted_row_count, 1);
+
+    let rows = load_children_current(database.pool(), parent).await?;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].child_logical_name_id, unknown_child);
+    assert_eq!(rows[0].normalized_name, placeholder);
+    assert_eq!(rows[0].labelhash, Some(labelhash.clone()));
+    assert_eq!(rows[0].owner, Some(owner.to_owned()));
+    assert_eq!(rows[0].provenance["label"]["status"], json!("unknown"));
+
+    let preimage = label_preimage_from_label(
+        "mystery",
+        "worker_children_current_test",
+        100,
+        json!({"source": "worker_children_current_test"}),
+    )?;
+    upsert_label_preimages(database.pool(), &[preimage]).await?;
+
+    let invalidation_count: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*)
+        FROM projection_invalidations
+        WHERE projection = 'children_current'
+          AND projection_key = $1
+        "#,
+    )
+    .bind(parent)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(invalidation_count, 1);
+
+    let summary = rebuild_children_current(database.pool(), Some(parent)).await?;
+    assert_eq!(summary.upserted_row_count, 1);
+    assert_eq!(summary.deleted_row_count, 1);
+
+    let rows = load_children_current(database.pool(), parent).await?;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].child_logical_name_id, "ens:mystery.parent.eth");
+    assert_eq!(rows[0].normalized_name, "mystery.parent.eth");
+    assert_eq!(rows[0].canonical_display_name, "mystery.parent.eth");
+    assert_eq!(rows[0].labelhash, Some(labelhash));
+    assert_eq!(rows[0].provenance["label"]["status"], json!("known"));
 
     database.cleanup().await
 }
@@ -259,6 +347,11 @@ async fn rebuild_all_clears_stale_rows_and_is_idempotent() -> Result<()> {
             canonical_display_name: "stale-child.stale.eth".to_owned(),
             normalized_name: "stale-child.stale.eth".to_owned(),
             namehash: "node:stale-child.stale.eth".to_owned(),
+            labelhash: labelhashes_for_name("stale-child.stale.eth")
+                .into_iter()
+                .next(),
+            owner: None,
+            registrant: None,
             provenance: json!({
                 "normalized_event_ids": [1],
                 "raw_fact_refs": [],
@@ -345,6 +438,9 @@ async fn keyed_rebuild_keeps_visible_rows_when_rebuild_sources_fail() -> Result<
             canonical_display_name: "alice.parent.eth".to_owned(),
             normalized_name: "alice.parent.eth".to_owned(),
             namehash: "node:alice.parent.eth".to_owned(),
+            labelhash: labelhashes_for_name("alice.parent.eth").into_iter().next(),
+            owner: None,
+            registrant: None,
             provenance: json!({
                 "normalized_event_ids": [1],
                 "raw_fact_refs": [],
@@ -716,7 +812,7 @@ fn name_surface_on_chain(
         normalized_name: display_name.to_owned(),
         dns_encoded_name: display_name.as_bytes().to_vec(),
         namehash: namehash.to_owned(),
-        labelhashes: vec![format!("labelhash:{display_name}")],
+        labelhashes: labelhashes_for_name(display_name),
         normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
         normalization_warnings: json!([]),
         normalization_errors: json!([]),
@@ -773,12 +869,29 @@ fn subregistry_event(
             "edge_kind": "subregistry",
             "parent_node": parent_namehash,
             "child_node": child_namehash,
-            "labelhash": format!("labelhash:{child_namehash}"),
+            "labelhash": labelhash_for_child_namehash(child_namehash),
             "owner": "0x0000000000000000000000000000000000000001",
             "tombstone": tombstone,
             "active_edge": active_edge
         }),
     }
+}
+
+fn labelhashes_for_name(name: &str) -> Vec<String> {
+    name.split('.').map(labelhash_for_label).collect()
+}
+
+fn labelhash_for_child_namehash(child_namehash: &str) -> String {
+    let child_name = child_namehash
+        .strip_prefix("node:")
+        .unwrap_or(child_namehash);
+    labelhash_for_label(child_name.split('.').next().unwrap_or(child_name))
+}
+
+fn labelhash_for_label(label: &str) -> String {
+    label_preimage_from_label(label, "worker_children_current_test", 1, json!({}))
+        .expect("test label must hash")
+        .labelhash
 }
 
 fn ensv2_subregistry_event(

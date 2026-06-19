@@ -10,6 +10,8 @@ mod bootstrap_backfill;
 mod cli;
 #[path = "main/ens_v1_resolver.rs"]
 mod ens_v1_resolver;
+#[path = "main/healthcheck.rs"]
+mod healthcheck;
 #[path = "main/normalized_replay_catchup.rs"]
 mod normalized_replay_catchup;
 #[path = "main/ops_catchup.rs"]
@@ -44,7 +46,9 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use backfill::{
-    BackfillAdapterSyncMode, BackfillBlockRange, BackfillJobRunConfig,
+    BackfillAdapterSyncMode, BackfillBlockRange, BackfillJobRunConfig, BackfillSourceKind,
+    CoinbaseSqlBackfillConfig, CoinbaseSqlSourceRegistry, hash_pinned_backfill_range_specs,
+    run_resumable_coinbase_sql_backfill_job, run_resumable_coinbase_sql_backfill_job_concurrently,
     run_resumable_hash_pinned_backfill_job,
 };
 #[cfg(test)]
@@ -64,8 +68,8 @@ use bigname_storage::{
 use bootstrap_backfill::*;
 use clap::Parser;
 use cli::{
-    BackfillArgs, Cli, Command, OpsCatchupArgs, RepairArgs, RepairCommand, ReplayArgs,
-    ReplayCommand, ReplayNormalizedEventsArgs, RewindArgs,
+    BackfillArgs, Cli, Command, HealthcheckArgs, OpsCatchupArgs, RepairArgs, RepairCommand,
+    ReplayArgs, ReplayCommand, ReplayNormalizedEventsArgs, RewindArgs,
 };
 #[allow(unused_imports)]
 use provider::{
@@ -92,12 +96,17 @@ async fn main() -> Result<()> {
 
     match Cli::parse().command {
         Command::Run(args) => run::run(args).await,
+        Command::Healthcheck(args) => run_healthcheck(args).await,
         Command::Backfill(args) => run_backfill(args).await,
         Command::OpsCatchup(args) => run_ops_catchup(args).await,
         Command::Replay(args) => run_replay(args).await,
         Command::Rewind(args) => run_rewind(args).await.map(|_| ()),
         Command::Repair(args) => run_repair(args).await,
     }
+}
+
+async fn run_healthcheck(args: HealthcheckArgs) -> Result<()> {
+    healthcheck::healthcheck(args).await
 }
 
 async fn run_backfill(args: BackfillArgs) -> Result<()> {
@@ -125,6 +134,22 @@ async fn run_backfill(args: BackfillArgs) -> Result<()> {
     log_watched_chain_plan("backfill", &manifest_runtime_state.watched_chain_plan);
     let provider_registry =
         ProviderRegistry::from_sources(&args.chain_rpc_urls, &args.chain_reth_db_sources)?;
+    let coinbase_sql_config = CoinbaseSqlBackfillConfig {
+        initial_window_blocks: args.coinbase_sql_initial_window_blocks,
+        max_window_blocks: args.coinbase_sql_max_window_blocks,
+        page_limit: args.coinbase_sql_page_limit,
+        sql_char_limit: args.coinbase_sql_query_char_limit,
+        query_timeout_secs: args.coinbase_sql_query_timeout_secs,
+        rate_limit_qps: args.coinbase_sql_rate_limit_qps,
+        validation_mode: args.coinbase_sql_validation_mode,
+    };
+    coinbase_sql_config.validate()?;
+    let coinbase_sql_registry = CoinbaseSqlSourceRegistry::from_entries(
+        &args.coinbase_sql_urls,
+        args.coinbase_sql_api_key_id_env.clone(),
+        args.coinbase_sql_api_key_secret_env.clone(),
+        coinbase_sql_config.clone(),
+    )?;
     provider_registry.ensure_configured_chains_admitted(
         manifest_runtime_state
             .watched_chain_plan
@@ -152,17 +177,24 @@ async fn run_backfill(args: BackfillArgs) -> Result<()> {
             provider_registry.configured_chain_count_by_kind(ChainProviderKind::JsonRpc),
         reth_db_provider_configured_chain_count =
             provider_registry.configured_chain_count_by_kind(ChainProviderKind::RethDb),
-        "provider registry loaded for hash-pinned backfill"
+        backfill_source = args.backfill_source.as_str(),
+        coinbase_sql_provider_configured = coinbase_sql_registry.has_source_for(&args.chain),
+        "provider registry loaded for backfill"
     );
 
     let provider = provider_registry.provider_for(&args.chain).ok_or_else(|| {
         anyhow::anyhow!(
-            "no provider source configured for watched chain {}; pass --chain-rpc-url {}=<url> or --chain-reth-db-source {}=<reth-datadir>",
+            "no validation provider source configured for watched chain {}; pass --chain-rpc-url {}=<url> or --chain-reth-db-source {}=<reth-datadir>; Coinbase SQL backfill also requires one of these validation providers",
             args.chain,
             args.chain,
             args.chain
         )
     })?;
+    let selected_backfill_source = selected_backfill_source(
+        args.backfill_source,
+        &args.chain,
+        coinbase_sql_registry.has_source_for(&args.chain),
+    );
 
     let deployment_profile = args
         .deployment_profile
@@ -190,8 +222,77 @@ async fn run_backfill(args: BackfillArgs) -> Result<()> {
         header_audit_mode,
     };
 
-    run_resumable_hash_pinned_backfill_job(&pool, &source_plan, provider, config).await?;
+    match selected_backfill_source {
+        BackfillSourceKind::HashPinned => {
+            run_resumable_hash_pinned_backfill_job(&pool, &source_plan, provider, config).await?;
+        }
+        BackfillSourceKind::CoinbaseSql => {
+            if !is_base_chain(&args.chain) {
+                anyhow::bail!(
+                    "Coinbase SQL backfill currently supports Base chains only, got {}; use --backfill-source hash-pinned for this chain",
+                    args.chain
+                );
+            }
+            let source = coinbase_sql_registry
+                .source_for(&args.chain)?
+                .with_context(|| {
+                    format!(
+                        "no Coinbase SQL source configured for {}; pass --coinbase-sql-url {}=default or {}=<url>",
+                        args.chain, args.chain, args.chain
+                    )
+                })?;
+            if args.coinbase_sql_workers > 1 || args.coinbase_sql_range_blocks > 0 {
+                if args.coinbase_sql_range_blocks <= 0 {
+                    anyhow::bail!(
+                        "--coinbase-sql-range-blocks must be positive when --coinbase-sql-workers is greater than 1"
+                    );
+                }
+                let ranges =
+                    hash_pinned_backfill_range_specs(range, args.coinbase_sql_range_blocks)?;
+                run_resumable_coinbase_sql_backfill_job_concurrently(
+                    &pool,
+                    &source_plan,
+                    provider,
+                    &source,
+                    config,
+                    coinbase_sql_config,
+                    ranges,
+                    args.coinbase_sql_workers,
+                )
+                .await?;
+            } else {
+                run_resumable_coinbase_sql_backfill_job(
+                    &pool,
+                    &source_plan,
+                    provider,
+                    &source,
+                    config,
+                    coinbase_sql_config,
+                )
+                .await?;
+            }
+        }
+        BackfillSourceKind::Auto => unreachable!("auto must be resolved before execution"),
+    }
     Ok(())
+}
+
+fn selected_backfill_source(
+    requested: BackfillSourceKind,
+    chain: &str,
+    coinbase_sql_configured: bool,
+) -> BackfillSourceKind {
+    match requested {
+        BackfillSourceKind::Auto if is_base_chain(chain) && coinbase_sql_configured => {
+            BackfillSourceKind::CoinbaseSql
+        }
+        BackfillSourceKind::Auto => BackfillSourceKind::HashPinned,
+        source => source,
+    }
+}
+
+fn is_base_chain(chain: &str) -> bool {
+    matches!(chain, "base-mainnet" | "base" | "base-sepolia")
 }
 
 async fn run_ops_catchup(args: OpsCatchupArgs) -> Result<()> {

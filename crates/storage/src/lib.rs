@@ -10,6 +10,7 @@ mod execution;
 mod history;
 mod identity;
 mod identity_facade;
+mod label_preimages;
 mod lineage;
 mod name_current;
 mod normalized_events;
@@ -45,7 +46,8 @@ pub use address_names::{
     insert_address_names_current_full_rebuild_rows, load_address_names_current,
     load_address_names_current_including_noncanonical, load_address_names_current_page,
     publish_address_names_current_address_replacement, publish_address_names_current_full_rebuild,
-    rebuild_address_names_current_identity_sidecars, upsert_address_names_current_rows,
+    rebuild_address_names_current_identity_sidecars, replace_address_names_current_logical_names,
+    upsert_address_names_current_rows,
 };
 pub use audit::{
     CanonicalityInspection, CanonicalityInspectionStatus, ManifestDriftAlertInspection,
@@ -90,15 +92,18 @@ pub use execution::{
     upsert_execution_trace_in_transaction,
 };
 pub use history::{
-    EventHistoryAddressFilter, EventHistoryFilter, HistoryEvent, HistoryScope,
-    load_address_history, load_event_history, load_name_history, load_name_history_head,
-    load_resource_history,
+    EventHistoryAddressFilter, EventHistoryFilter, HistoryChainPositionSample, HistoryCursor,
+    HistoryEvent, HistoryPage, HistoryScope, HistorySummary, HistorySummaryMode,
+    InvalidHistoryCursor, load_address_history, load_address_history_page, load_event_history,
+    load_event_history_page, load_name_history, load_name_history_head, load_name_history_page,
+    load_resource_history, load_resource_history_page,
 };
 pub use identity::{
     IdentityOrphanCounts, NameSurface, Resource, SurfaceBinding, SurfaceBindingKind, TokenLineage,
-    load_name_surface, load_name_surface_including_noncanonical, load_resource,
-    load_resource_including_noncanonical, load_surface_binding,
-    load_surface_binding_including_noncanonical, load_surface_bindings_by_logical_name_id,
+    load_name_surface, load_name_surface_including_noncanonical,
+    load_name_surfaces_by_logical_name_ids, load_resource, load_resource_including_noncanonical,
+    load_surface_binding, load_surface_binding_including_noncanonical,
+    load_surface_bindings_by_logical_name_id,
     load_surface_bindings_by_logical_name_id_including_noncanonical,
     load_surface_bindings_by_resource_id,
     load_surface_bindings_by_resource_id_including_noncanonical, load_token_lineage,
@@ -117,10 +122,17 @@ pub use identity_facade::{
     load_identity_records_by_names, load_indexing_status, load_reverse_identity_feed_records,
     load_reverse_identity_records,
 };
+pub use label_preimages::{
+    LabelPreimage, LabelPreimageImportSummary, backfill_label_preimages_from_existing_facts,
+    import_label_preimages_from_ens_names_table, label_preimage_from_label, upsert_label_preimages,
+    upsert_label_preimages_from_normalized_events, upsert_label_preimages_in_transaction,
+};
 pub use lineage::{
     CanonicalityState, ChainLineageBlock, chain_lineage_contains_ancestor,
     load_chain_lineage_block, mark_chain_lineage_range_orphaned, upsert_chain_lineage_blocks,
+    upsert_chain_lineage_blocks_recanonicalizing_orphaned,
     upsert_chain_lineage_blocks_without_snapshots,
+    upsert_chain_lineage_blocks_without_snapshots_recanonicalizing_orphaned,
 };
 pub use name_current::{
     NameCurrentAddressFilter, NameCurrentAddressRelationFilter, NameCurrentListCursor,
@@ -143,24 +155,29 @@ pub use permissions::{
     PermissionsCurrentAccountResourcePage, PermissionsCurrentFullFilterSummary,
     PermissionsCurrentKeysetCursor, PermissionsCurrentPage, PermissionsCurrentRow,
     clear_permissions_current, delete_permissions_current, load_permissions_current,
-    load_permissions_current_account_resource_page, load_permissions_current_by_resource_ids,
-    load_permissions_current_for_resolver_scope, load_permissions_current_page,
-    load_permissions_current_resolver_targets, upsert_permissions_current_rows,
+    load_permissions_current_account_resource_page,
+    load_permissions_current_account_resource_page_count_summary,
+    load_permissions_current_by_resource_ids, load_permissions_current_for_resolver_scope,
+    load_permissions_current_page, load_permissions_current_resolver_targets,
+    upsert_permissions_current_rows,
 };
 pub use primary_name::{
     PrimaryNameClaimStatus, PrimaryNameCurrentRow, PrimaryNameCurrentSnapshot,
     VERIFIED_PRIMARY_NAME_INVALIDATION_KEY, VERIFIED_PRIMARY_NAME_LOOKUP_KEY,
     VERIFIED_PRIMARY_NAME_REQUEST_TYPE, VerifiedPrimaryNameClaimHooks,
     VerifiedPrimaryNameInvalidationHook, VerifiedPrimaryNameLookupHook,
-    clear_primary_names_current, delete_primary_name_current, load_primary_name_current,
-    load_primary_name_current_snapshot, upsert_primary_name_current_rows,
-    upsert_primary_name_current_snapshots, verified_primary_name_claim_hooks,
+    clear_primary_names_current, delete_primary_name_current,
+    delete_primary_name_current_in_transaction, load_primary_name_current,
+    load_primary_name_current_snapshot,
+    load_primary_name_current_snapshot_for_update_in_transaction, upsert_primary_name_current_rows,
+    upsert_primary_name_current_snapshots, upsert_primary_name_current_snapshots_in_transaction,
+    verified_primary_name_claim_hooks,
 };
 pub use raw::{
     RawBlock, RawLogReplayInput, list_canonical_raw_log_replay_inputs,
     list_canonical_raw_log_replay_inputs_for_block_hashes, load_raw_block,
     load_raw_blocks_by_hashes, mark_raw_block_range_orphaned, upsert_raw_blocks,
-    upsert_raw_blocks_without_snapshots,
+    upsert_raw_blocks_recanonicalizing_orphaned, upsert_raw_blocks_without_snapshots,
 };
 pub use raw_calls::{
     RawCallSnapshot, load_raw_call_snapshots_by_block_hash, upsert_raw_call_snapshots,
@@ -191,7 +208,7 @@ pub use resolution_support::{
     SupportedVerifiedResolutionRecordKey, VerifiedResolutionPathClass, VerifiedResolutionRecord,
     VerifiedResolutionRequestedChainPosition, VerifiedResolutionSupportBoundary,
     build_resolution_execution_cache_key, build_resolution_requested_chain_positions,
-    classify_supported_resolution_topology, is_resolution_avatar_record,
+    canonical_addr_coin_type, classify_supported_resolution_topology, is_resolution_avatar_record,
     normalized_resolution_request_key, normalized_resolution_request_key_from_record_keys,
     parse_supported_verified_resolution_record_key, projected_resolution_boundaries_from_topology,
     projected_resolution_topology, record_version_boundary_has_pointer,
@@ -269,5 +286,14 @@ pub async fn migrate(pool: &PgPool) -> Result<()> {
         .await
         .context("failed to apply checked-in migrations")?;
     info!("checked-in migrations applied");
+    let summary = backfill_label_preimages_from_existing_facts(pool, None)
+        .await
+        .context("failed to backfill label preimages from retained facts")?;
+    info!(
+        scanned_row_count = summary.scanned_row_count,
+        retained_row_count = summary.retained_row_count,
+        invalidated_parent_count = summary.invalidated_parent_count,
+        "retained label preimage backfill checked"
+    );
     Ok(())
 }

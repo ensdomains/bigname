@@ -14,6 +14,9 @@ fn reject_role_bitmap_filter(role_bitmap: Option<&str>) -> ApiResult<()> {
     Ok(())
 }
 
+// Keep in sync with apps/worker replay::CURRENT_PROJECTION_REPLAY_VERSION.
+const CURRENT_PROJECTION_REPLAY_VERSION: i32 = 5;
+
 fn parse_roles_account(account: Option<&str>) -> Option<String> {
     parse_permissions_subject(account).map(|account| account.to_ascii_lowercase())
 }
@@ -91,18 +94,15 @@ async fn ensure_permissions_current_projection_available(
 ) -> ApiResult<()> {
     let available = sqlx::query_scalar::<_, bool>(
         r#"
-        SELECT
-            EXISTS (
-                SELECT 1
-                FROM current_projection_replay_status
-                WHERE projection = 'permissions_current'
-            )
-            OR EXISTS (
-                SELECT 1
-                FROM projection_apply_cursors
-            )
+        SELECT EXISTS (
+            SELECT 1
+            FROM current_projection_replay_status
+            WHERE projection = 'permissions_current'
+              AND replay_version = $1
+        )
         "#,
     )
+    .bind(CURRENT_PROJECTION_REPLAY_VERSION)
     .fetch_one(pool)
     .await
     .map_err(|load_error| {
@@ -275,6 +275,25 @@ async fn ensure_roles_cursor_exists(
     }
 }
 
+async fn ensure_composed_roles_cursor_exists(
+    pool: &PgPool,
+    account: Option<&str>,
+    resource_id: Option<Uuid>,
+    root_resource_id: Option<Uuid>,
+    cursor: &bigname_storage::PermissionsCurrentAccountResourceCursor,
+    route: &'static str,
+) -> ApiResult<()> {
+    if let (Some(resource_id), Some(root_resource_id)) = (resource_id, root_resource_id) {
+        if cursor.resource_id != resource_id && cursor.resource_id != root_resource_id {
+            return Err(invalid_cursor_error());
+        }
+        return ensure_roles_cursor_exists(pool, account, Some(cursor.resource_id), cursor, route)
+            .await;
+    }
+
+    ensure_roles_cursor_exists(pool, account, resource_id, cursor, route).await
+}
+
 async fn load_roles_page(
     pool: &PgPool,
     account: Option<&str>,
@@ -282,15 +301,32 @@ async fn load_roles_page(
     cursor: Option<&bigname_storage::PermissionsCurrentAccountResourceCursor>,
     page_size: u64,
     route: &'static str,
+    summary_mode: RolesSummaryMode,
 ) -> ApiResult<bigname_storage::PermissionsCurrentAccountResourcePage> {
-    bigname_storage::load_permissions_current_account_resource_page(
-        pool,
-        account,
-        resource_id,
-        cursor,
-        page_size,
-    )
-    .await
+    let page = match summary_mode {
+        RolesSummaryMode::Full => {
+            bigname_storage::load_permissions_current_account_resource_page(
+                pool,
+                account,
+                resource_id,
+                cursor,
+                page_size,
+            )
+            .await
+        }
+        RolesSummaryMode::CountOnly => {
+            bigname_storage::load_permissions_current_account_resource_page_count_summary(
+                pool,
+                account,
+                resource_id,
+                cursor,
+                page_size,
+            )
+            .await
+        }
+    };
+
+    page
     .map_err(|load_error| {
         error!(
             service = "api",
@@ -303,6 +339,134 @@ async fn load_roles_page(
         ApiError::internal_error("failed to load app-facing roles")
     })
 }
+
+#[derive(Clone, Copy)]
+enum RolesSummaryMode {
+    Full,
+    CountOnly,
+}
+
+async fn load_composed_roles_page(
+    pool: &PgPool,
+    account: Option<&str>,
+    resource_id: Option<Uuid>,
+    root_resource_id: Option<Uuid>,
+    cursor: Option<&bigname_storage::PermissionsCurrentAccountResourceCursor>,
+    page_size: u64,
+    route: &'static str,
+) -> ApiResult<bigname_storage::PermissionsCurrentAccountResourcePage> {
+    let Some(resource_id) = resource_id else {
+        return load_roles_page(pool, account, None, cursor, page_size, route, RolesSummaryMode::Full)
+            .await;
+    };
+    let Some(root_resource_id) = root_resource_id.filter(|root| *root != resource_id) else {
+        return load_roles_page(
+            pool,
+            account,
+            Some(resource_id),
+            cursor,
+            page_size,
+            route,
+            RolesSummaryMode::Full,
+        )
+        .await;
+    };
+
+    let fetch_size = page_size.saturating_add(1);
+    let resource_page =
+        load_roles_page(
+            pool,
+            account,
+            Some(resource_id),
+            cursor,
+            fetch_size,
+            route,
+            RolesSummaryMode::Full,
+        )
+        .await?;
+    let root_page = load_roles_page(
+        pool,
+        account,
+        Some(root_resource_id),
+        cursor,
+        fetch_size,
+        route,
+        RolesSummaryMode::CountOnly,
+    )
+    .await?;
+
+    Ok(merge_roles_pages(resource_page, root_page, page_size))
+}
+
+fn merge_roles_pages(
+    resource_page: bigname_storage::PermissionsCurrentAccountResourcePage,
+    root_page: bigname_storage::PermissionsCurrentAccountResourcePage,
+    page_size: u64,
+) -> bigname_storage::PermissionsCurrentAccountResourcePage {
+    let bigname_storage::PermissionsCurrentAccountResourcePage {
+        rows: mut resource_rows,
+        next_cursor: _,
+        summary: resource_summary,
+    } = resource_page;
+    let bigname_storage::PermissionsCurrentAccountResourcePage {
+        rows: root_rows,
+        next_cursor: _,
+        summary: root_summary,
+    } = root_page;
+
+    resource_rows.extend(root_rows);
+    resource_rows.sort_by(|left, right| {
+        left.subject
+            .cmp(&right.subject)
+            .then_with(|| left.resource_id.cmp(&right.resource_id))
+            .then_with(|| left.scope.storage_key().cmp(&right.scope.storage_key()))
+    });
+
+    let page_size = usize::try_from(page_size).expect("bounded role page_size must fit usize");
+    let next_cursor = if resource_rows.len() > page_size {
+        resource_rows.truncate(page_size);
+        resource_rows
+            .last()
+            .map(bigname_storage::PermissionsCurrentAccountResourceCursor::from)
+    } else {
+        None
+    };
+
+    bigname_storage::PermissionsCurrentAccountResourcePage {
+        rows: resource_rows,
+        next_cursor,
+        summary: merge_role_summaries(resource_summary, root_summary),
+    }
+}
+
+fn merge_role_summaries(
+    mut resource_summary: bigname_storage::PermissionsCurrentFullFilterSummary,
+    root_summary: bigname_storage::PermissionsCurrentFullFilterSummary,
+) -> bigname_storage::PermissionsCurrentFullFilterSummary {
+    resource_summary.row_count = resource_summary
+        .row_count
+        .saturating_add(root_summary.row_count);
+    if resource_summary.coverage.is_none() {
+        resource_summary.coverage = root_summary.coverage;
+    }
+    resource_summary.provenance.extend(root_summary.provenance);
+    resource_summary
+        .chain_positions
+        .extend(root_summary.chain_positions);
+    resource_summary
+        .canonicality_summaries
+        .extend(root_summary.canonicality_summaries);
+    resource_summary.last_recomputed_at =
+        match (resource_summary.last_recomputed_at, root_summary.last_recomputed_at) {
+            (Some(resource), Some(root)) => Some(resource.max(root)),
+            (Some(resource), None) => Some(resource),
+            (None, Some(root)) => Some(root),
+            (None, None) => None,
+        };
+    resource_summary
+}
+
+include!("roles_ensv2_root.rs");
 
 async fn load_associated_role_names(
     pool: &PgPool,
@@ -360,6 +524,7 @@ async fn load_associated_role_names(
                       'safe'::canonicality_state,
                       'finalized'::canonicality_state
                   )
+                  AND binding.active_to IS NULL
                   AND (
                       nc.token_lineage_id IS NULL
                       OR token_lineage.canonicality_state IN (

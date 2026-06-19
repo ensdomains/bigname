@@ -43,7 +43,7 @@ const CONTENT_HASH_QUERY: ApiRouteParameter = ApiRouteParameter::query(
 );
 const COIN_TYPES_QUERY: ApiRouteParameter = ApiRouteParameter::csv_query(
     "coin_types",
-    "Requested textual coin-type selector keys.",
+    "Requested textual coin-type selector keys; decimal addr coin types are canonicalized as unsigned 64-bit decimal text before duplicate detection, and exact or canonical duplicates are invalid input.",
     ApiParameterSchema::String,
 );
 const RECORDS_INCLUDE_DECLARED_QUERY: ApiRouteParameter = ApiRouteParameter::csv_query(
@@ -126,7 +126,7 @@ pub(crate) const EVENTS_PARAMETERS: &[ApiRouteParameter] = &[
     ),
     ApiRouteParameter::query(
         "address",
-        "Address relation event filter.",
+        "Address relation event filter. Malformed addresses return 400 invalid_input; valid addresses are normalized to lowercase.",
         ApiParameterSchema::String,
     ),
     ApiRouteParameter::query(

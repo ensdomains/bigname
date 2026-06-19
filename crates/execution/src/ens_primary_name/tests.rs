@@ -192,9 +192,12 @@ fn abi_word_usize(value: usize) -> [u8; 32] {
 }
 
 fn encoded_local_batch_offchain_lookup_error() -> String {
+    let sender = ENS_UNIVERSAL_RESOLVER_ADDRESS
+        .parse::<Address>()
+        .expect("Universal Resolver address must parse");
     hex_string(
         &ccip_test_abi::OffchainLookup {
-            sender: Address::repeat_byte(0x11),
+            sender,
             urls: vec!["x-batch-gateway:true".to_owned()],
             callData: Bytes::from(ccip_test_abi::queryCall { requests: vec![] }.abi_encode()),
             callbackFunction: FixedBytes::from(&[0x12, 0x34, 0x56, 0x78]),

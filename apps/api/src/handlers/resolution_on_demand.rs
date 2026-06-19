@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) async fn load_or_execute_resolution_verified_outcome(
+pub(crate) async fn load_or_execute_resolution_verified_outcome(
     state: &AppState,
     row: &NameCurrentRow,
     records: &[ResolutionRecordKey],

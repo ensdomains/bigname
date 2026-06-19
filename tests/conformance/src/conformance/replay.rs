@@ -278,7 +278,11 @@
             rebuild_resolver_current(database, None, None).await?;
             rebuild_address_names_current(database, None).await?;
             database
-                .rebuild_primary_names_current(corpus.primary_name_address, "basenames", "60")
+                .rebuild_primary_names_current(
+                    corpus.primary_name_address,
+                    "basenames",
+                    BASENAMES_PRIMARY_COIN_TYPE,
+                )
                 .await?;
             seed_replay_primary_name_execution(database, &corpus).await?;
             mark_replay_losing_branch_source_rows_orphaned(database).await?;
@@ -887,7 +891,7 @@
                     execution_trace_id,
                     "basenames",
                     corpus.primary_name_address,
-                    "60",
+                    BASENAMES_PRIMARY_COIN_TYPE,
                     verified_primary_name.clone(),
                     finished_at,
                 ),
@@ -900,7 +904,7 @@
                     execution_trace_id,
                     "basenames",
                     corpus.primary_name_address,
-                    "60",
+                    BASENAMES_PRIMARY_COIN_TYPE,
                     verified_primary_name,
                     finished_at,
                     primary_name_shared_topology_boundary(),
@@ -1791,13 +1795,13 @@
                         canonicality_state,
                         before_state: json!({}),
                         after_state: json!({
-                            "source_event": "ReverseClaimed",
+                            "source_event": "NameForAddrChanged",
                             "address": normalized_address.clone(),
-                            "coin_type": "60",
+                            "coin_type": BASENAMES_PRIMARY_COIN_TYPE,
                             "namespace": "basenames",
                             "reverse_namespace": "basenames",
                             "reverse_label": reverse_label.clone(),
-                            "reverse_name": format!("{reverse_label}.addr.reverse"),
+                            "reverse_name": format!("{reverse_label}.80002105.reverse"),
                             "reverse_node": format!("0xreplay{branch}reverse"),
                             "claim_provenance": {
                                 "source_family": "basenames_base_primary",
@@ -1813,7 +1817,7 @@
                         logical_name_id: None,
                         resource_id: None,
                         event_kind: "RecordChanged".to_owned(),
-                        source_family: "basenames_base_resolver".to_owned(),
+                        source_family: "basenames_base_primary".to_owned(),
                         manifest_version: 1,
                         source_manifest_id: None,
                         chain_id: Some("base-mainnet".to_owned()),
@@ -1826,19 +1830,20 @@
                             "branch": branch,
                             "event_identity": claim_event_identity,
                         }),
-                        derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+                        derivation_kind: "ens_v1_reverse_claim".to_owned(),
                         canonicality_state,
                         before_state: json!({}),
                         after_state: json!({
                             "record_key": "name",
                             "record_family": "name",
                             "selector_key": null,
+                            "source_event": "NameForAddrChanged",
                             "raw_name": raw_name,
                             "primary_claim_source": {
                                 "address": normalized_address,
                                 "namespace": "basenames",
-                                "coin_type": "60",
-                                "reverse_name": format!("{reverse_label}.addr.reverse"),
+                                "coin_type": BASENAMES_PRIMARY_COIN_TYPE,
+                                "reverse_name": format!("{reverse_label}.80002105.reverse"),
                                 "reverse_node": format!("0xreplay{branch}claim"),
                                 "claim_provenance": {
                                     "source_family": "basenames_base_primary",
@@ -2067,6 +2072,17 @@
                 Some(&json!([]))
             );
             assert_eq!(
+                payload.pointer("/declared_state/record_inventory/explicit_gaps"),
+                Some(&json!([
+                    {
+                        "record_key": "contenthash",
+                        "record_family": "contenthash",
+                        "selector_key": null,
+                        "gap_reason": "not_observed_on_current_resolver",
+                    }
+                ]))
+            );
+            assert_eq!(
                 payload.pointer("/declared_state/record_cache/entries"),
                 Some(&json!([
                     {
@@ -2082,6 +2098,12 @@
                         "selector_key": null,
                         "status": "unsupported",
                         "unsupported_reason": "value_not_retained_in_normalized_events",
+                    },
+                    {
+                        "record_key": "contenthash",
+                        "record_family": "contenthash",
+                        "selector_key": null,
+                        "status": "not_found",
                     }
                 ]))
             );
@@ -2149,10 +2171,19 @@
                 "case {case_label}"
             );
             assert_eq!(
+                payload.pointer("/declared_state/record_inventory/explicit_gaps"),
+                Some(&json!([])),
+                "case {case_label}"
+            );
+            assert_eq!(
                 payload.pointer("/declared_state/record_inventory/unsupported_families"),
                 Some(&json!([
                     {
                         "record_family": "addr",
+                        "unsupported_reason": resolver_family_reason,
+                    },
+                    {
+                        "record_family": "contenthash",
                         "unsupported_reason": resolver_family_reason,
                     },
                     {
@@ -2166,10 +2197,45 @@
                 payload.pointer("/declared_state/record_cache/entries"),
                 Some(&json!([
                     {
+                        "record_key": "addr:60",
+                        "record_family": "addr",
+                        "selector_key": "60",
+                        "status": "unsupported",
+                        "unsupported_reason": resolver_family_reason,
+                    },
+                    {
+                        "record_key": "avatar",
+                        "record_family": "avatar",
+                        "selector_key": null,
+                        "status": "not_found",
+                    },
+                    {
                         "record_key": "contenthash",
                         "record_family": "contenthash",
                         "selector_key": null,
-                        "status": "not_found",
+                        "status": "unsupported",
+                        "unsupported_reason": resolver_family_reason,
+                    },
+                    {
+                        "record_key": "text:description",
+                        "record_family": "text",
+                        "selector_key": "description",
+                        "status": "unsupported",
+                        "unsupported_reason": resolver_family_reason,
+                    },
+                    {
+                        "record_key": "text:url",
+                        "record_family": "text",
+                        "selector_key": "url",
+                        "status": "unsupported",
+                        "unsupported_reason": resolver_family_reason,
+                    },
+                    {
+                        "record_key": "text:email",
+                        "record_family": "text",
+                        "selector_key": "email",
+                        "status": "unsupported",
+                        "unsupported_reason": resolver_family_reason,
                     }
                 ])),
                 "case {case_label}"
@@ -2282,14 +2348,23 @@
             );
             assert_eq!(name_payload["verified_state"], Value::Null);
             assert_eq!(coverage_payload["verified_state"], Value::Null);
+            assert_eq!(name_payload["provenance"], Value::Null);
+            let coverage_provenance = coverage_payload["provenance"]
+                .as_object()
+                .expect("coverage route provenance must be an object");
             assert_eq!(
-                name_payload["provenance"]["derivation_kind"],
-                json!("name_current_rebuild")
+                coverage_provenance.get("derivation_kind"),
+                Some(&json!("name_current_rebuild"))
+            );
+            assert!(
+                !coverage_provenance.contains_key("execution_trace_id"),
+                "declared-only coverage provenance must omit execution_trace_id"
             );
 
-            let manifest_versions = name_payload["provenance"]["manifest_versions"]
-                .as_array()
-                .expect("name provenance manifest_versions must be an array");
+            let manifest_versions = coverage_provenance
+                .get("manifest_versions")
+                .and_then(Value::as_array)
+                .expect("coverage provenance manifest_versions must be an array");
             assert!(manifest_versions.iter().any(|entry| {
                 entry.get("source_family") == Some(&json!("ens_v2_registry_l1"))
                     && entry.get("manifest_version") == Some(&json!(11))
@@ -2470,7 +2545,7 @@
                 ReplayRoute {
                     label: "primary-name",
                     uri: format!(
-                        "/v1/primary-names/{}?namespace=basenames&coin_type=60&mode=both",
+                        "/v1/primary-names/{}?namespace=basenames&coin_type={BASENAMES_PRIMARY_COIN_TYPE}&mode=both",
                         corpus.primary_name_address
                     ),
                 },
@@ -2485,7 +2560,7 @@
                 },
                 ReplayRoute {
                     label: "children-collection",
-                    uri: "/v1/names/ens/parent.eth/children".to_owned(),
+                    uri: "/v1/names/ens/parent.eth/children?meta=full".to_owned(),
                 },
                 ReplayRoute {
                     label: "address-names-collection",
@@ -2561,7 +2636,7 @@
                 ReplayRoute {
                     label: "primary-name",
                     uri: format!(
-                        "/v1/primary-names/{}?namespace=basenames&coin_type=60&mode=both",
+                        "/v1/primary-names/{}?namespace=basenames&coin_type={BASENAMES_PRIMARY_COIN_TYPE}&mode=both",
                         corpus.primary_name_address
                     ),
                 },

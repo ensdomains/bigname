@@ -339,17 +339,14 @@ fn dynamic_resolver_unsupported_profile_record_inventory_current_row(
             "globally_enumerable": false,
         }),
         selectors: json!([]),
-        explicit_gaps: json!([
-            {
-                "record_key": "contenthash",
-                "record_family": "contenthash",
-                "selector_key": null,
-                "gap_reason": "not_observed_on_current_resolver",
-            }
-        ]),
+        explicit_gaps: json!([]),
         unsupported_families: json!([
             {
                 "record_family": "addr",
+                "unsupported_reason": "resolver_family_pending",
+            },
+            {
+                "record_family": "contenthash",
                 "unsupported_reason": "resolver_family_pending",
             },
             {
@@ -1031,6 +1028,8 @@ async fn assert_ensv1_dynamic_profile_pending_or_unsupported_readback(
         resolver_family_reason(record_inventory_row, "addr").context("missing addr reason")?;
     let text_unsupported_reason =
         resolver_family_reason(record_inventory_row, "text").context("missing text reason")?;
+    let contenthash_unsupported_reason = resolver_family_reason(record_inventory_row, "contenthash")
+        .context("missing contenthash reason")?;
     let payload = get_resolution_payload(
         database,
         "/v1/profiles/names/alice.eth?mode=declared&meta=full",
@@ -1053,18 +1052,15 @@ async fn assert_ensv1_dynamic_profile_pending_or_unsupported_readback(
             "record_version_boundary": record_inventory_row.record_version_boundary.clone(),
             "enumeration_basis": record_inventory_row.enumeration_basis.clone(),
             "selectors": [],
-            "explicit_gaps": [
-                {
-                    "record_key": "contenthash",
-                    "record_family": "contenthash",
-                    "selector_key": null,
-                    "gap_reason": "not_observed_on_current_resolver",
-                }
-            ],
+            "explicit_gaps": [],
             "unsupported_families": [
                 {
                     "record_family": "addr",
                     "unsupported_reason": addr_unsupported_reason.clone(),
+                },
+                {
+                    "record_family": "contenthash",
+                    "unsupported_reason": contenthash_unsupported_reason.clone(),
                 },
                 {
                     "record_family": "text",
@@ -1081,10 +1077,45 @@ async fn assert_ensv1_dynamic_profile_pending_or_unsupported_readback(
             "record_version_boundary": record_inventory_row.record_version_boundary.clone(),
             "entries": [
                 {
+                    "record_key": "addr:60",
+                    "record_family": "addr",
+                    "selector_key": "60",
+                    "status": "unsupported",
+                    "unsupported_reason": addr_unsupported_reason.clone(),
+                },
+                {
+                    "record_key": "avatar",
+                    "record_family": "avatar",
+                    "selector_key": null,
+                    "status": "not_found",
+                },
+                {
                     "record_key": "contenthash",
                     "record_family": "contenthash",
                     "selector_key": null,
-                    "status": "not_found",
+                    "status": "unsupported",
+                    "unsupported_reason": contenthash_unsupported_reason.clone(),
+                },
+                {
+                    "record_key": "text:description",
+                    "record_family": "text",
+                    "selector_key": "description",
+                    "status": "unsupported",
+                    "unsupported_reason": text_unsupported_reason.clone(),
+                },
+                {
+                    "record_key": "text:url",
+                    "record_family": "text",
+                    "selector_key": "url",
+                    "status": "unsupported",
+                    "unsupported_reason": text_unsupported_reason.clone(),
+                },
+                {
+                    "record_key": "text:email",
+                    "record_family": "text",
+                    "selector_key": "email",
+                    "status": "unsupported",
+                    "unsupported_reason": text_unsupported_reason.clone(),
                 }
             ]
         })),
@@ -1105,6 +1136,8 @@ async fn assert_basenames_dynamic_profile_pending_or_unsupported_readback(
         resolver_family_reason(record_inventory_row, "addr").context("missing addr reason")?;
     let text_unsupported_reason =
         resolver_family_reason(record_inventory_row, "text").context("missing text reason")?;
+    let contenthash_unsupported_reason = resolver_family_reason(record_inventory_row, "contenthash")
+        .context("missing contenthash reason")?;
     let payload = get_resolution_payload(
         database,
         "/v1/profiles/names/alice.base.eth?mode=declared&meta=full",
@@ -1132,18 +1165,15 @@ async fn assert_basenames_dynamic_profile_pending_or_unsupported_readback(
             "record_version_boundary": record_inventory_row.record_version_boundary.clone(),
             "enumeration_basis": record_inventory_row.enumeration_basis.clone(),
             "selectors": [],
-            "explicit_gaps": [
-                {
-                    "record_key": "contenthash",
-                    "record_family": "contenthash",
-                    "selector_key": null,
-                    "gap_reason": "not_observed_on_current_resolver",
-                }
-            ],
+            "explicit_gaps": [],
             "unsupported_families": [
                 {
                     "record_family": "addr",
                     "unsupported_reason": addr_unsupported_reason.clone(),
+                },
+                {
+                    "record_family": "contenthash",
+                    "unsupported_reason": contenthash_unsupported_reason.clone(),
                 },
                 {
                     "record_family": "text",
@@ -1160,10 +1190,45 @@ async fn assert_basenames_dynamic_profile_pending_or_unsupported_readback(
             "record_version_boundary": record_inventory_row.record_version_boundary.clone(),
             "entries": [
                 {
+                    "record_key": "addr:60",
+                    "record_family": "addr",
+                    "selector_key": "60",
+                    "status": "unsupported",
+                    "unsupported_reason": addr_unsupported_reason.clone(),
+                },
+                {
+                    "record_key": "avatar",
+                    "record_family": "avatar",
+                    "selector_key": null,
+                    "status": "not_found",
+                },
+                {
                     "record_key": "contenthash",
                     "record_family": "contenthash",
                     "selector_key": null,
-                    "status": "not_found",
+                    "status": "unsupported",
+                    "unsupported_reason": contenthash_unsupported_reason.clone(),
+                },
+                {
+                    "record_key": "text:description",
+                    "record_family": "text",
+                    "selector_key": "description",
+                    "status": "unsupported",
+                    "unsupported_reason": text_unsupported_reason.clone(),
+                },
+                {
+                    "record_key": "text:url",
+                    "record_family": "text",
+                    "selector_key": "url",
+                    "status": "unsupported",
+                    "unsupported_reason": text_unsupported_reason.clone(),
+                },
+                {
+                    "record_key": "text:email",
+                    "record_family": "text",
+                    "selector_key": "email",
+                    "status": "unsupported",
+                    "unsupported_reason": text_unsupported_reason.clone(),
                 }
             ]
         })),
@@ -1435,7 +1500,14 @@ async fn dynamic_resolver_profile_gate_controls_ensv1_record_readback() -> Resul
                     "cacheable": true,
                 }
             ],
-            "explicit_gaps": [],
+            "explicit_gaps": [
+                {
+                    "record_key": "contenthash",
+                    "record_family": "contenthash",
+                    "selector_key": null,
+                    "gap_reason": "not_observed_on_current_resolver",
+                }
+            ],
             "unsupported_families": [],
             "last_change": supported_row.last_change.clone().unwrap_or(Value::Null),
         }))
@@ -1458,6 +1530,12 @@ async fn dynamic_resolver_profile_gate_controls_ensv1_record_readback() -> Resul
                     "selector_key": null,
                     "status": "unsupported",
                     "unsupported_reason": "value_not_retained_in_normalized_events",
+                },
+                {
+                    "record_key": "contenthash",
+                    "record_family": "contenthash",
+                    "selector_key": null,
+                    "status": "not_found",
                 }
             ]
         }))
@@ -1597,14 +1675,7 @@ async fn dynamic_resolver_profile_non_graduation_keeps_ensv1_record_sections_exp
         declared_state
             .get("record_inventory")
             .and_then(|inventory| inventory.get("explicit_gaps")),
-        Some(&json!([
-            {
-                "record_key": "contenthash",
-                "record_family": "contenthash",
-                "selector_key": null,
-                "gap_reason": "not_observed_on_current_resolver",
-            }
-        ]))
+        Some(&json!([]))
     );
     assert_eq!(
         declared_state
@@ -1613,6 +1684,10 @@ async fn dynamic_resolver_profile_non_graduation_keeps_ensv1_record_sections_exp
         Some(&json!([
             {
                 "record_family": "addr",
+                "unsupported_reason": "resolver_family_pending",
+            },
+            {
+                "record_family": "contenthash",
                 "unsupported_reason": "resolver_family_pending",
             },
             {
@@ -1630,10 +1705,45 @@ async fn dynamic_resolver_profile_non_graduation_keeps_ensv1_record_sections_exp
             ),
             "entries": [
                 {
+                    "record_key": "addr:60",
+                    "record_family": "addr",
+                    "selector_key": "60",
+                    "status": "unsupported",
+                    "unsupported_reason": "resolver_family_pending",
+                },
+                {
+                    "record_key": "avatar",
+                    "record_family": "avatar",
+                    "selector_key": null,
+                    "status": "not_found",
+                },
+                {
                     "record_key": "contenthash",
                     "record_family": "contenthash",
                     "selector_key": null,
-                    "status": "not_found",
+                    "status": "unsupported",
+                    "unsupported_reason": "resolver_family_pending",
+                },
+                {
+                    "record_key": "text:description",
+                    "record_family": "text",
+                    "selector_key": "description",
+                    "status": "unsupported",
+                    "unsupported_reason": "resolver_family_pending",
+                },
+                {
+                    "record_key": "text:url",
+                    "record_family": "text",
+                    "selector_key": "url",
+                    "status": "unsupported",
+                    "unsupported_reason": "resolver_family_pending",
+                },
+                {
+                    "record_key": "text:email",
+                    "record_family": "text",
+                    "selector_key": "email",
+                    "status": "unsupported",
+                    "unsupported_reason": "resolver_family_pending",
                 }
             ]
         }))
@@ -1841,7 +1951,14 @@ async fn dynamic_resolver_profile_gate_controls_basenames_l2resolver_readback() 
                     "cacheable": true,
                 }
             ],
-            "explicit_gaps": [],
+            "explicit_gaps": [
+                {
+                    "record_key": "contenthash",
+                    "record_family": "contenthash",
+                    "selector_key": null,
+                    "gap_reason": "not_observed_on_current_resolver",
+                }
+            ],
             "unsupported_families": [],
             "last_change": supported_row.last_change.clone().unwrap_or(Value::Null),
         }))
@@ -1864,6 +1981,12 @@ async fn dynamic_resolver_profile_gate_controls_basenames_l2resolver_readback() 
                     "selector_key": null,
                     "status": "unsupported",
                     "unsupported_reason": "value_not_retained_in_normalized_events",
+                },
+                {
+                    "record_key": "contenthash",
+                    "record_family": "contenthash",
+                    "selector_key": null,
+                    "status": "not_found",
                 }
             ]
         }))
@@ -4894,7 +5017,6 @@ async fn resolver_overview_contract_returns_declared_state_with_shared_projectio
                 "chain": chain_id,
                 "deployment_epoch": "ens_v2",
             }],
-            "execution_trace_id": null,
             "derivation_kind": "resolver_current_rebuild",
         })
     );

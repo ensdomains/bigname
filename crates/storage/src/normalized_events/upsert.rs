@@ -7,16 +7,24 @@ use anyhow::{Context, Result, bail};
 use sqlx::{PgPool, Postgres};
 use tracing::info;
 
+use crate::label_preimages::upsert_label_preimages_from_normalized_events;
+
 use super::{types::NormalizedEvent, validation::validate_normalized_event};
 
 #[path = "upsert/batch.rs"]
 mod batch;
+#[path = "upsert/repair.rs"]
+mod repair;
 #[path = "upsert/sanitize.rs"]
 mod sanitize;
 
 use batch::{
     insert_normalized_events_do_nothing, load_normalized_events_by_identities,
     upsert_normalized_event_batch,
+};
+use repair::{
+    normalized_event_identity_repair_allowed, repair_after_state_conflicts,
+    repair_resource_id_conflicts,
 };
 use sanitize::jsonb_safe_normalized_event;
 pub use sanitize::serialize_jsonb_value;
@@ -75,6 +83,12 @@ pub async fn upsert_normalized_events_with_summary(
     let mut conflict_load_ms = 0u128;
     let mut conflict_snapshot_ms = 0u128;
     let mut conflict_update_ms = 0u128;
+    let mut after_state_repair_ms = 0u128;
+    let mut after_state_repaired_count = 0usize;
+    let mut resource_id_repair_ms = 0u128;
+    let mut resource_id_repaired_count = 0usize;
+    let mut label_preimage_ms = 0u128;
+    let mut label_preimage_count = 0usize;
     let mut output_snapshot_ms = 0u128;
     for chunk in jsonb_safe_events.chunks(NORMALIZED_EVENT_FAST_INSERT_BATCH_SIZE) {
         chunk_count += 1;
@@ -116,6 +130,18 @@ pub async fn upsert_normalized_events_with_summary(
             conflicted_events.extend(raced_conflicted_events);
         }
 
+        let after_state_repair_started = Instant::now();
+        after_state_repaired_count +=
+            repair_after_state_conflicts(&mut transaction, &conflicted_events, &existing_events)
+                .await?;
+        after_state_repair_ms += after_state_repair_started.elapsed().as_millis();
+
+        let resource_id_repair_started = Instant::now();
+        resource_id_repaired_count +=
+            repair_resource_id_conflicts(&mut transaction, &conflicted_events, &existing_events)
+                .await?;
+        resource_id_repair_ms += resource_id_repair_started.elapsed().as_millis();
+
         let events_requiring_canonicality_refresh = conflicted_events
             .iter()
             .filter(|event| {
@@ -146,6 +172,12 @@ pub async fn upsert_normalized_events_with_summary(
             upsert_normalized_event_batch(&mut transaction, std::slice::from_ref(event)).await?;
         }
         conflict_update_ms += conflict_update_started.elapsed().as_millis();
+
+        let label_preimage_started = Instant::now();
+        let changed_labelhashes =
+            upsert_label_preimages_from_normalized_events(&mut transaction, chunk).await?;
+        label_preimage_count += changed_labelhashes.len();
+        label_preimage_ms += label_preimage_started.elapsed().as_millis();
 
         let output_snapshot_started = Instant::now();
         for event in chunk {
@@ -185,6 +217,12 @@ pub async fn upsert_normalized_events_with_summary(
         conflict_load_ms,
         conflict_snapshot_ms,
         conflict_update_ms,
+        after_state_repair_ms,
+        after_state_repaired_count,
+        resource_id_repair_ms,
+        resource_id_repaired_count,
+        label_preimage_ms,
+        label_preimage_count,
         output_snapshot_ms,
         commit_ms,
         elapsed_ms = total_started.elapsed().as_millis(),
@@ -217,6 +255,12 @@ pub async fn upsert_normalized_events_count_only(
     let mut conflict_partition_ms = 0u128;
     let mut conflict_load_ms = 0u128;
     let mut conflict_update_ms = 0u128;
+    let mut after_state_repair_ms = 0u128;
+    let mut after_state_repaired_count = 0usize;
+    let mut resource_id_repair_ms = 0u128;
+    let mut resource_id_repaired_count = 0usize;
+    let mut label_preimage_ms = 0u128;
+    let mut label_preimage_count = 0usize;
     let mut commit_ms = 0u128;
 
     for raw_chunk in events.chunks(NORMALIZED_EVENT_FAST_INSERT_BATCH_SIZE) {
@@ -274,6 +318,18 @@ pub async fn upsert_normalized_events_count_only(
             conflicted_events.extend(raced_conflicted_events);
         }
 
+        let after_state_repair_started = Instant::now();
+        after_state_repaired_count +=
+            repair_after_state_conflicts(&mut transaction, &conflicted_events, &existing_events)
+                .await?;
+        after_state_repair_ms += after_state_repair_started.elapsed().as_millis();
+
+        let resource_id_repair_started = Instant::now();
+        resource_id_repaired_count +=
+            repair_resource_id_conflicts(&mut transaction, &conflicted_events, &existing_events)
+                .await?;
+        resource_id_repair_ms += resource_id_repair_started.elapsed().as_millis();
+
         let events_requiring_canonicality_refresh = conflicted_events
             .iter()
             .filter(|event| {
@@ -295,6 +351,12 @@ pub async fn upsert_normalized_events_count_only(
             upsert_normalized_event_batch(&mut transaction, std::slice::from_ref(event)).await?;
         }
         conflict_update_ms += conflict_update_started.elapsed().as_millis();
+
+        let label_preimage_started = Instant::now();
+        let changed_labelhashes =
+            upsert_label_preimages_from_normalized_events(&mut transaction, &chunk).await?;
+        label_preimage_count += changed_labelhashes.len();
+        label_preimage_ms += label_preimage_started.elapsed().as_millis();
 
         let commit_started = Instant::now();
         transaction
@@ -319,6 +381,12 @@ pub async fn upsert_normalized_events_count_only(
         conflict_partition_ms,
         conflict_load_ms,
         conflict_update_ms,
+        after_state_repair_ms,
+        after_state_repaired_count,
+        resource_id_repair_ms,
+        resource_id_repaired_count,
+        label_preimage_ms,
+        label_preimage_count,
         commit_ms,
         elapsed_ms = total_started.elapsed().as_millis(),
         "normalized-event count-only upsert timing completed"
@@ -390,6 +458,10 @@ fn ensure_normalized_event_identity_matches(
 ) -> Result<()> {
     let differing_fields = normalized_event_identity_differences(existing, incoming);
     if !differing_fields.is_empty() {
+        if normalized_event_identity_repair_allowed(existing, incoming, &differing_fields) {
+            return Ok(());
+        }
+
         bail!(
             "normalized event identity mismatch for event {} (differing_fields={}, existing={}, incoming={})",
             existing.event_identity,
@@ -402,7 +474,7 @@ fn ensure_normalized_event_identity_matches(
     Ok(())
 }
 
-fn normalized_event_identity_differences(
+pub(super) fn normalized_event_identity_differences(
     existing: &NormalizedEvent,
     incoming: &NormalizedEvent,
 ) -> Vec<&'static str> {
@@ -458,7 +530,7 @@ fn normalized_event_identity_differences(
     fields
 }
 
-fn normalized_event_identity_summary(event: &NormalizedEvent) -> String {
+pub(super) fn normalized_event_identity_summary(event: &NormalizedEvent) -> String {
     format!(
         "namespace={:?} logical_name_id={:?} resource_id={:?} event_kind={:?} source_family={:?} manifest_version={:?} source_manifest_id={:?} chain_id={:?} block_number={:?} block_hash={:?} transaction_hash={:?} log_index={:?} raw_fact_ref={} derivation_kind={:?} before_state={} after_state={}",
         event.namespace,

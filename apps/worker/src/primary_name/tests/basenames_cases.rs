@@ -7,7 +7,7 @@ use bigname_storage::{
 use super::super::{PrimaryNamesCurrentRebuildSummary, rebuild_primary_names_current};
 
 use super::support::{
-    BASENAMES_NAMESPACE, TestDatabase, basenames_expected_claim_provenance,
+    BASE_COIN_TYPE, BASENAMES_NAMESPACE, TestDatabase, basenames_expected_claim_provenance,
     basenames_reverse_changed_event, basenames_reverse_linked_name_event,
 };
 
@@ -22,7 +22,7 @@ async fn full_rebuild_projects_basenames_claim_name_from_base_resolver_observati
             basenames_reverse_changed_event(
                 "basenames-reverse-a-60",
                 address,
-                "60",
+                BASE_COIN_TYPE,
                 500,
                 0,
                 CanonicalityState::Canonical,
@@ -30,7 +30,7 @@ async fn full_rebuild_projects_basenames_claim_name_from_base_resolver_observati
             basenames_reverse_linked_name_event(
                 "basenames-record-a-60-success",
                 address,
-                "60",
+                BASE_COIN_TYPE,
                 Some("alice.base.eth"),
                 501,
                 0,
@@ -53,16 +53,22 @@ async fn full_rebuild_projects_basenames_claim_name_from_base_resolver_observati
         }
     );
     assert_eq!(
-        load_primary_name_current(database.pool(), address, BASENAMES_NAMESPACE, "60").await?,
+        load_primary_name_current(
+            database.pool(),
+            address,
+            BASENAMES_NAMESPACE,
+            BASE_COIN_TYPE
+        )
+        .await?,
         Some(PrimaryNameCurrentRow {
             address: address.to_owned(),
             namespace: BASENAMES_NAMESPACE.to_owned(),
-            coin_type: "60".to_owned(),
+            coin_type: BASE_COIN_TYPE.to_owned(),
             claim_status: PrimaryNameClaimStatus::Success,
             raw_claim_name: None,
             claim_provenance: basenames_expected_claim_provenance(
                 address,
-                "60",
+                BASE_COIN_TYPE,
                 500,
                 PrimaryNameClaimStatus::Success,
                 Some(501),
@@ -70,9 +76,14 @@ async fn full_rebuild_projects_basenames_claim_name_from_base_resolver_observati
         })
     );
     assert_eq!(
-        load_primary_name_current_snapshot(database.pool(), address, BASENAMES_NAMESPACE, "60")
-            .await?
-            .map(|snapshot| snapshot.normalized_claim_name),
+        load_primary_name_current_snapshot(
+            database.pool(),
+            address,
+            BASENAMES_NAMESPACE,
+            BASE_COIN_TYPE,
+        )
+        .await?
+        .map(|snapshot| snapshot.normalized_claim_name),
         Some(Some("alice.base.eth".to_owned()))
     );
 
@@ -91,7 +102,7 @@ async fn targeted_rebuild_projects_basenames_claim_name_from_base_resolver_obser
             basenames_reverse_changed_event(
                 "basenames-reverse-b-60",
                 address,
-                "60",
+                BASE_COIN_TYPE,
                 600,
                 0,
                 CanonicalityState::Canonical,
@@ -99,7 +110,7 @@ async fn targeted_rebuild_projects_basenames_claim_name_from_base_resolver_obser
             basenames_reverse_linked_name_event(
                 "basenames-record-b-60-success",
                 address,
-                "60",
+                BASE_COIN_TYPE,
                 Some("bob.base.eth"),
                 601,
                 0,
@@ -113,7 +124,7 @@ async fn targeted_rebuild_projects_basenames_claim_name_from_base_resolver_obser
         database.pool(),
         Some(address),
         Some(BASENAMES_NAMESPACE),
-        Some("60"),
+        Some(BASE_COIN_TYPE),
     )
     .await?;
     assert_eq!(
@@ -128,16 +139,22 @@ async fn targeted_rebuild_projects_basenames_claim_name_from_base_resolver_obser
         }
     );
     assert_eq!(
-        load_primary_name_current(database.pool(), address, BASENAMES_NAMESPACE, "60").await?,
+        load_primary_name_current(
+            database.pool(),
+            address,
+            BASENAMES_NAMESPACE,
+            BASE_COIN_TYPE
+        )
+        .await?,
         Some(PrimaryNameCurrentRow {
             address: address.to_owned(),
             namespace: BASENAMES_NAMESPACE.to_owned(),
-            coin_type: "60".to_owned(),
+            coin_type: BASE_COIN_TYPE.to_owned(),
             claim_status: PrimaryNameClaimStatus::Success,
             raw_claim_name: None,
             claim_provenance: basenames_expected_claim_provenance(
                 address,
-                "60",
+                BASE_COIN_TYPE,
                 600,
                 PrimaryNameClaimStatus::Success,
                 Some(601),
@@ -145,9 +162,14 @@ async fn targeted_rebuild_projects_basenames_claim_name_from_base_resolver_obser
         })
     );
     assert_eq!(
-        load_primary_name_current_snapshot(database.pool(), address, BASENAMES_NAMESPACE, "60")
-            .await?
-            .map(|snapshot| snapshot.normalized_claim_name),
+        load_primary_name_current_snapshot(
+            database.pool(),
+            address,
+            BASENAMES_NAMESPACE,
+            BASE_COIN_TYPE,
+        )
+        .await?
+        .map(|snapshot| snapshot.normalized_claim_name),
         Some(Some("bob.base.eth".to_owned()))
     );
 

@@ -4,9 +4,10 @@ use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
 use super::{
-    JsonRpcProvider, PROVIDER_BATCH_ITEM_LIMIT, ProviderBlockLogRequest, ProviderLog,
-    ProviderRawPayloadCacheMetadata, ProviderReceipt, ProviderResolvedBlock,
+    JsonRpcProvider, ProviderBlockLogRequest, ProviderLog, ProviderRawPayloadCacheMetadata,
+    ProviderReceipt, ProviderResolvedBlock,
     decode::{address_hex_from_str, hash_hex_from_str, normalize_hash},
+    provider_batch_item_limit,
     request::JsonRpcBatchCall,
     types::ProviderLogFilter,
 };
@@ -77,7 +78,7 @@ impl JsonRpcProvider {
             .filter(|request| !request.addresses.is_empty())
             .collect::<Vec<_>>();
 
-        for chunk in fetch_requests.chunks(PROVIDER_BATCH_ITEM_LIMIT) {
+        for chunk in fetch_requests.chunks(provider_batch_item_limit()) {
             let calls = chunk
                 .iter()
                 .map(|request| {
@@ -477,6 +478,11 @@ fn validate_contiguous_log_range(
 }
 
 fn is_log_range_result_limit_error(error: &anyhow::Error) -> bool {
-    let message = format!("{error:#}");
+    let message = format!("{error:#}").to_ascii_lowercase();
     message.contains("query exceeds max results")
+        || message.contains("query returned more than")
+        || message.contains("log response size exceeded")
+        || message.contains("response size exceeded")
+        || message.contains("result size exceeded")
+        || message.contains("more than 10000 results")
 }

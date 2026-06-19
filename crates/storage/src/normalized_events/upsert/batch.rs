@@ -1,11 +1,14 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail};
 use sqlx::Postgres;
 
 use crate::normalized_events::{decode::decode_normalized_event, types::NormalizedEvent};
 
-use super::{NORMALIZED_EVENT_FAST_INSERT_BATCH_SIZE, sanitize::serialize_jsonb_value};
+use super::{
+    NORMALIZED_EVENT_FAST_INSERT_BATCH_SIZE, normalized_event_identity_differences,
+    normalized_event_identity_summary, sanitize::serialize_jsonb_value,
+};
 
 pub(super) async fn insert_normalized_events_do_nothing(
     executor: &mut sqlx::Transaction<'_, Postgres>,
@@ -387,7 +390,33 @@ pub(super) async fn upsert_normalized_event_batch(
           AND normalized_events.log_index IS NOT DISTINCT FROM EXCLUDED.log_index
           AND normalized_events.raw_fact_ref IS NOT DISTINCT FROM EXCLUDED.raw_fact_ref
           AND normalized_events.derivation_kind IS NOT DISTINCT FROM EXCLUDED.derivation_kind
-          AND normalized_events.before_state IS NOT DISTINCT FROM EXCLUDED.before_state
+          AND (
+              normalized_events.before_state IS NOT DISTINCT FROM EXCLUDED.before_state
+              OR (
+                  (
+                      (
+                          normalized_events.namespace = 'ens'
+                          AND normalized_events.source_family = 'ens_v1_registry_l1'
+                          AND normalized_events.chain_id = 'ethereum-mainnet'
+                      )
+                      OR (
+                          normalized_events.namespace = 'basenames'
+                          AND normalized_events.source_family = 'basenames_base_registry'
+                          AND normalized_events.chain_id = 'base-mainnet'
+                      )
+                  )
+                  AND normalized_events.logical_name_id IS NOT NULL
+                  AND normalized_events.resource_id IS NOT NULL
+                  AND normalized_events.event_kind = 'AuthorityTransferred'
+                  AND normalized_events.derivation_kind = 'ens_v1_unwrapped_authority'
+                  AND normalized_events.before_state - 'owner' =
+                      EXCLUDED.before_state - 'owner'
+                  AND jsonb_typeof(normalized_events.before_state -> 'owner') =
+                      'string'
+                  AND btrim(normalized_events.before_state ->> 'owner') <> ''
+                  AND EXCLUDED.before_state -> 'owner' = 'null'::JSONB
+              )
+          )
           AND normalized_events.after_state IS NOT DISTINCT FROM EXCLUDED.after_state
         "#,
     )
@@ -414,11 +443,63 @@ pub(super) async fn upsert_normalized_event_batch(
     .context("failed to upsert normalized-event batch")?
     .rows_affected();
 
-    ensure!(
-        usize::try_from(rows_affected).context("normalized-event upsert count overflowed")?
-            == events.len(),
-        "normalized event identity mismatch in batch upsert"
-    );
+    let rows_affected =
+        usize::try_from(rows_affected).context("normalized-event upsert count overflowed")?;
+    if rows_affected != events.len() {
+        let mismatch_summary =
+            normalized_event_batch_count_mismatch_summary(executor, events).await?;
+        bail!(
+            "normalized event identity mismatch in batch upsert (rows_affected={}, expected={}, mismatches={})",
+            rows_affected,
+            events.len(),
+            mismatch_summary
+        );
+    }
 
     Ok(())
+}
+
+async fn normalized_event_batch_count_mismatch_summary(
+    executor: &mut sqlx::Transaction<'_, Postgres>,
+    events: &[NormalizedEvent],
+) -> Result<String> {
+    let event_identities = events
+        .iter()
+        .map(|event| event.event_identity.clone())
+        .collect::<Vec<_>>();
+    let existing_events = load_normalized_events_by_identities(executor, &event_identities).await?;
+    let existing_by_identity = existing_events
+        .into_iter()
+        .map(|event| (event.event_identity.clone(), event))
+        .collect::<HashMap<_, _>>();
+
+    let mut mismatches = Vec::new();
+    for event in events {
+        let Some(existing) = existing_by_identity.get(&event.event_identity) else {
+            mismatches.push(format!(
+                "{} missing_existing incoming={}",
+                event.event_identity,
+                normalized_event_identity_summary(event)
+            ));
+            continue;
+        };
+
+        let differing_fields = normalized_event_identity_differences(existing, event);
+        if differing_fields.is_empty() {
+            continue;
+        }
+        mismatches.push(format!(
+            "{} differing_fields={} existing={} incoming={}",
+            event.event_identity,
+            differing_fields.join(","),
+            normalized_event_identity_summary(existing),
+            normalized_event_identity_summary(event)
+        ));
+    }
+
+    if mismatches.is_empty() {
+        Ok("no identity diffs found after failed count update".to_owned())
+    } else {
+        Ok(mismatches.join("; "))
+    }
 }

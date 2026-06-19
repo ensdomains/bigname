@@ -42,7 +42,6 @@ pub(super) fn openapi_components() -> JsonValue {
                     "normalized_event_ids",
                     "raw_fact_refs",
                     "manifest_versions",
-                    "execution_trace_id",
                     "derivation_kind",
                 ],
                 "properties": {
@@ -59,7 +58,7 @@ pub(super) fn openapi_components() -> JsonValue {
                         "items": {},
                     },
                     "execution_trace_id": {
-                        "type": ["string", "null"],
+                        "type": "string",
                     },
                     "derivation_kind": {
                         "type": "string",
@@ -431,14 +430,28 @@ fn compact_object_schema(required: &[&str], fields: &[&str]) -> JsonValue {
 fn compact_object_properties(fields: &[&str]) -> JsonValue {
     let mut properties = serde_json::Map::new();
     for field in fields {
-        properties.insert(
-            (*field).to_owned(),
-            json!({
-                "type": ["object", "array", "string", "integer", "boolean", "null"],
-            }),
-        );
+        properties.insert((*field).to_owned(), compact_object_property_schema(field));
     }
     JsonValue::Object(properties)
+}
+
+fn compact_object_property_schema(field: &str) -> JsonValue {
+    let mut schema = json!({
+        "type": ["object", "array", "string", "integer", "boolean", "null"],
+    });
+    let description = match field {
+        "created_at" => Some(
+            "RFC 3339 timestamp for the first observation of the name itself, excluding supplemental cross-name wildcard or transport positions.",
+        ),
+        "registration_date" => Some(
+            "RFC 3339 timestamp for the last RegistrationGranted block that started the current or most recently released registration epoch.",
+        ),
+        _ => None,
+    };
+    if let Some(description) = description {
+        schema["description"] = JsonValue::String(description.to_owned());
+    }
+    schema
 }
 
 pub(super) fn schema_ref(schema_name: &str) -> JsonValue {

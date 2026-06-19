@@ -1,13 +1,10 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    time::Duration,
+};
 
 use anyhow::{Context, Result, bail};
-use bytes::Bytes;
-use http_body_util::Full;
-use hyper::Uri;
-use hyper_util::{
-    client::legacy::{Client, connect::HttpConnector},
-    rt::TokioExecutor,
-};
+use reqwest::Url;
 #[cfg(test)]
 use serde_json::json;
 
@@ -38,8 +35,16 @@ pub use types::{
 };
 
 const ZERO_HASH: &str = "0x0000000000000000000000000000000000000000000000000000000000000000";
-const PROVIDER_BATCH_ITEM_LIMIT: usize = 32;
+const DEFAULT_PROVIDER_BATCH_ITEM_LIMIT: usize = 32;
+const MAX_PROVIDER_BATCH_ITEM_LIMIT: usize = 256;
+const PROVIDER_BATCH_ITEM_LIMIT_ENV: &str = "BIGNAME_INDEXER_JSON_RPC_BATCH_ITEM_LIMIT";
+const DEFAULT_PROVIDER_BATCH_REQUEST_CONCURRENCY: usize = 1;
+const MAX_PROVIDER_BATCH_REQUEST_CONCURRENCY: usize = 16;
+const PROVIDER_BATCH_REQUEST_CONCURRENCY_ENV: &str = "BIGNAME_INDEXER_JSON_RPC_BATCH_CONCURRENCY";
+const PROVIDER_RECEIPT_FALLBACK_URLS_ENV: &str = "BIGNAME_INDEXER_CHAIN_RPC_RECEIPT_FALLBACK_URLS";
 const MAX_TRANSACTION_RECEIPT_FALLBACK: usize = 128;
+const JSON_RPC_PROVIDER_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const JSON_RPC_PROVIDER_REQUEST_TIMEOUT: Duration = Duration::from_secs(45);
 pub(crate) const RAW_PAYLOAD_KIND_FULL_BLOCK: &str = "full_block";
 pub(crate) const RAW_PAYLOAD_KIND_BLOCK_LOGS: &str = "block_logs";
 pub(crate) const RAW_PAYLOAD_KIND_BLOCK_RECEIPTS: &str = "block_receipts";
@@ -65,7 +70,7 @@ impl ProviderRegistry {
             insert_provider(
                 &mut providers,
                 &chain,
-                ChainProvider::JsonRpc(JsonRpcProvider::new(&url)?),
+                ChainProvider::JsonRpc(JsonRpcProvider::new_for_chain(&chain, &url)?),
             )?;
         }
 
@@ -239,26 +244,102 @@ pub(crate) trait ChainProviderOps {
 
 #[derive(Clone)]
 pub struct JsonRpcProvider {
-    endpoint: Uri,
-    client: Client<HttpConnector, Full<Bytes>>,
+    endpoint: Url,
+    client: reqwest::Client,
+    receipt_fallback_endpoint: Option<Url>,
 }
 
 impl JsonRpcProvider {
+    #[allow(dead_code)]
     pub fn new(endpoint: &str) -> Result<Self> {
-        let endpoint = endpoint
-            .parse::<Uri>()
+        Self::new_with_receipt_fallback(endpoint, None)
+    }
+
+    pub fn new_for_chain(chain: &str, endpoint: &str) -> Result<Self> {
+        Self::new_with_receipt_fallback(endpoint, receipt_fallback_endpoint_for_chain(chain)?)
+    }
+
+    fn new_with_receipt_fallback(
+        endpoint: &str,
+        receipt_fallback_endpoint: Option<Url>,
+    ) -> Result<Self> {
+        let endpoint = Url::parse(endpoint)
             .with_context(|| format!("failed to parse RPC endpoint {endpoint}"))?;
-        if endpoint.scheme_str() != Some("http") {
-            bail!(
-                "unsupported RPC endpoint scheme for {endpoint}; bootstrap head fetch currently supports only http:// URLs"
-            );
+        if !matches!(endpoint.scheme(), "http" | "https") {
+            bail!("unsupported RPC endpoint scheme for {endpoint}; expected http:// or https://");
         }
 
-        let connector = HttpConnector::new();
-        let client = Client::builder(TokioExecutor::new()).build(connector);
+        let client = reqwest::Client::builder()
+            .connect_timeout(JSON_RPC_PROVIDER_CONNECT_TIMEOUT)
+            .timeout(JSON_RPC_PROVIDER_REQUEST_TIMEOUT)
+            .build()
+            .context("failed to build JSON-RPC HTTP client")?;
 
-        Ok(Self { endpoint, client })
+        Ok(Self {
+            endpoint,
+            client,
+            receipt_fallback_endpoint,
+        })
     }
+}
+
+fn receipt_fallback_endpoint_for_chain(chain: &str) -> Result<Option<Url>> {
+    let Some(raw_entries) = std::env::var(PROVIDER_RECEIPT_FALLBACK_URLS_ENV).ok() else {
+        return Ok(None);
+    };
+    let mut fallback_endpoint = None;
+    for entry in raw_entries
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+    {
+        let (entry_chain, value) =
+            parse_chain_source_entry(entry, "chain RPC receipt fallback", "<chain>=<url>")?;
+        if entry_chain != chain {
+            continue;
+        }
+        if fallback_endpoint.is_some() {
+            bail!("duplicate receipt fallback provider source configuration for {chain}");
+        }
+        let parsed = Url::parse(&value)
+            .with_context(|| format!("failed to parse receipt fallback RPC endpoint {value}"))?;
+        if !matches!(parsed.scheme(), "http" | "https") {
+            bail!(
+                "unsupported receipt fallback RPC endpoint scheme for {value}; expected http:// or https://"
+            );
+        }
+        fallback_endpoint = Some(parsed);
+    }
+
+    Ok(fallback_endpoint)
+}
+
+pub(super) fn provider_batch_item_limit() -> usize {
+    parse_provider_batch_item_limit(std::env::var(PROVIDER_BATCH_ITEM_LIMIT_ENV).ok().as_deref())
+}
+
+pub(super) fn provider_batch_request_concurrency() -> usize {
+    parse_provider_batch_request_concurrency(
+        std::env::var(PROVIDER_BATCH_REQUEST_CONCURRENCY_ENV)
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn parse_provider_batch_item_limit(value: Option<&str>) -> usize {
+    value
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .map(|value| value.min(MAX_PROVIDER_BATCH_ITEM_LIMIT))
+        .unwrap_or(DEFAULT_PROVIDER_BATCH_ITEM_LIMIT)
+}
+
+fn parse_provider_batch_request_concurrency(value: Option<&str>) -> usize {
+    value
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .map(|value| value.min(MAX_PROVIDER_BATCH_REQUEST_CONCURRENCY))
+        .unwrap_or(DEFAULT_PROVIDER_BATCH_REQUEST_CONCURRENCY)
 }
 
 #[cfg(test)]

@@ -256,6 +256,150 @@ async fn identity_forward_matches_record_inventory_to_active_boundary() -> Resul
 }
 
 #[tokio::test]
+async fn identity_lookup_canonicalizes_retained_addr_coin_type_selectors() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    let logical_name_id = "ens:canonical-coin.eth";
+    let resource_id = Uuid::from_u128(0x1d0281);
+    seed_identity_name(
+        &database,
+        logical_name_id,
+        "canonical-coin.eth",
+        "canonical-coin.eth",
+        "namehash:canonical-coin.eth",
+        resource_id,
+        Uuid::from_u128(0x1d0282),
+        Uuid::from_u128(0x1d0283),
+        address,
+        bigname_storage::AddressNameRelation::TokenHolder,
+        34,
+    )
+    .await?;
+
+    let mut inventory = compact_records_inventory_current_row(logical_name_id, resource_id);
+    inventory.selectors = json!([
+        {
+            "record_key": "addr:060",
+            "record_family": "addr",
+            "selector_key": "060",
+            "cacheable": true
+        }
+    ]);
+    inventory.explicit_gaps = json!([]);
+    inventory.entries = json!([
+        {
+            "record_key": "addr:060",
+            "record_family": "addr",
+            "selector_key": "060",
+            "status": "success",
+            "value": {
+                "coin_type": "060",
+                "value": address,
+            },
+        }
+    ]);
+    database
+        .insert_record_inventory_current_row(inventory)
+        .await?;
+
+    let payload = identity_lookup_json(
+        &database,
+        json!({
+            "profile": "detail",
+            "inputs": [
+                {
+                    "id": "canonical-coin",
+                    "kind": "name",
+                    "name": "canonical-coin.eth",
+                    "coin_type": 60
+                }
+            ]
+        }),
+    )
+    .await?;
+
+    let record = &payload["results"][0]["record"];
+    assert_eq!(record["primary_address"], json!(address));
+    assert_eq!(record["coin_type_addresses"]["60"], json!(address));
+    assert_eq!(record["coin_type_addresses"].get("060"), None);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn identity_lookup_ignores_signed_retained_addr_coin_type_selectors() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    let logical_name_id = "ens:signed-coin.eth";
+    let resource_id = Uuid::from_u128(0x1d0291);
+    seed_identity_name(
+        &database,
+        logical_name_id,
+        "signed-coin.eth",
+        "signed-coin.eth",
+        "namehash:signed-coin.eth",
+        resource_id,
+        Uuid::from_u128(0x1d0292),
+        Uuid::from_u128(0x1d0293),
+        address,
+        bigname_storage::AddressNameRelation::TokenHolder,
+        35,
+    )
+    .await?;
+
+    let mut inventory = compact_records_inventory_current_row(logical_name_id, resource_id);
+    inventory.selectors = json!([
+        {
+            "record_key": "addr:+60",
+            "record_family": "addr",
+            "selector_key": "+60",
+            "cacheable": true
+        }
+    ]);
+    inventory.explicit_gaps = json!([]);
+    inventory.entries = json!([
+        {
+            "record_key": "addr:+60",
+            "record_family": "addr",
+            "selector_key": "+60",
+            "status": "success",
+            "value": {
+                "coin_type": "+60",
+                "value": address,
+            },
+        }
+    ]);
+    database
+        .insert_record_inventory_current_row(inventory)
+        .await?;
+
+    let payload = identity_lookup_json(
+        &database,
+        json!({
+            "profile": "detail",
+            "inputs": [
+                {
+                    "id": "signed-coin",
+                    "kind": "name",
+                    "name": "signed-coin.eth",
+                    "coin_type": 60
+                }
+            ]
+        }),
+    )
+    .await?;
+
+    let record = &payload["results"][0]["record"];
+    assert_eq!(record["primary_address"], Value::Null);
+    assert_eq!(record["coin_type_addresses"].get("60"), None);
+    assert_eq!(record["coin_type_addresses"].get("+60"), None);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn identity_forward_normalizes_inferred_name_inputs() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let address = "0x0000000000000000000000000000000000000abc";
@@ -1959,6 +2103,209 @@ async fn indexing_status_reports_projection_lag_by_chain() -> Result<()> {
     assert_eq!(
         payload["data"]["chains"]["ethereum-mainnet"]["projection_lag_blocks"],
         json!(0)
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn indexing_status_does_not_stale_unaffected_chain_for_global_cursor_lag() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    sqlx::query(
+        r#"
+        INSERT INTO chain_lineage (
+            chain_id,
+            block_hash,
+            block_number,
+            block_timestamp,
+            canonicality_state
+        )
+        VALUES
+            ('base-mainnet', '0xbase100', 100, '2026-04-17T00:01:40Z', 'canonical'),
+            ('base-mainnet', '0xbase110', 110, '2026-04-17T00:01:50Z', 'canonical'),
+            ('ethereum-mainnet', '0xeth10', 10, '2026-04-17T00:00:10Z', 'canonical'),
+            ('ethereum-mainnet', '0xeth11', 11, '2026-04-17T00:00:11Z', 'canonical')
+        "#,
+    )
+    .execute(&database.pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO chain_checkpoints (
+            chain_id,
+            canonical_block_hash,
+            canonical_block_number,
+            safe_block_hash,
+            safe_block_number,
+            finalized_block_hash,
+            finalized_block_number
+        )
+        VALUES
+            (
+                'base-mainnet',
+                '0xbase110',
+                110,
+                '0xbase110',
+                110,
+                '0xbase110',
+                110
+            ),
+            (
+                'ethereum-mainnet',
+                '0xeth11',
+                11,
+                '0xeth10',
+                10,
+                '0xeth10',
+                10
+            )
+        "#,
+    )
+    .execute(&database.pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO normalized_events (
+            event_identity,
+            namespace,
+            logical_name_id,
+            event_kind,
+            source_family,
+            manifest_version,
+            chain_id,
+            block_number,
+            block_hash,
+            raw_fact_ref,
+            derivation_kind,
+            canonicality_state,
+            before_state,
+            after_state,
+            observed_at
+        )
+        VALUES
+            (
+                'status-base-event-100',
+                'basenames',
+                'basenames:status.base.eth',
+                'NameRegistered',
+                'basenames_base_registry',
+                1,
+                'base-mainnet',
+                100,
+                '0xbase100',
+                '{}'::jsonb,
+                'status-test',
+                'canonical',
+                '{}'::jsonb,
+                '{}'::jsonb,
+                '2026-04-17T00:01:40Z'
+            ),
+            (
+                'status-eth-event-10',
+                'ens',
+                'ens:status.eth',
+                'NameRegistered',
+                'ens_v1_registry_l1',
+                1,
+                'ethereum-mainnet',
+                10,
+                '0xeth10',
+                '{}'::jsonb,
+                'status-test',
+                'canonical',
+                '{}'::jsonb,
+                '{}'::jsonb,
+                '2026-04-17T00:00:10Z'
+            )
+        "#,
+    )
+    .execute(&database.pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO projection_apply_cursors (
+            cursor_name,
+            last_change_id,
+            updated_at
+        )
+        SELECT
+            'normalized_events_to_projection_invalidations',
+            MAX(change_id),
+            '2026-04-17T00:01:40Z'
+        FROM projection_normalized_event_changes
+        "#,
+    )
+    .execute(&database.pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO normalized_events (
+            event_identity,
+            namespace,
+            logical_name_id,
+            event_kind,
+            source_family,
+            manifest_version,
+            chain_id,
+            block_number,
+            block_hash,
+            raw_fact_ref,
+            derivation_kind,
+            canonicality_state,
+            before_state,
+            after_state,
+            observed_at
+        )
+        VALUES (
+            'status-eth-event-11',
+            'ens',
+            'ens:status.eth',
+            'ResolverChanged',
+            'ens_v1_registry_l1',
+            1,
+            'ethereum-mainnet',
+            11,
+            '0xeth11',
+            '{}'::jsonb,
+            'status-test',
+            'canonical',
+            '{}'::jsonb,
+            '{}'::jsonb,
+            '2026-04-17T00:00:11Z'
+        )
+        "#,
+    )
+    .execute(&database.pool)
+    .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/status")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("cross-chain cursor-lag indexing status request failed")?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["data"]["status"], json!("stale"));
+    assert_eq!(
+        payload["data"]["chains"]["base-mainnet"]["latest_projected_block"],
+        json!(110)
+    );
+    assert_eq!(
+        payload["data"]["chains"]["base-mainnet"]["projection_lag_blocks"],
+        json!(0)
+    );
+    assert_eq!(
+        payload["data"]["chains"]["ethereum-mainnet"]["latest_projected_block"],
+        json!(10)
+    );
+    assert_eq!(
+        payload["data"]["chains"]["ethereum-mainnet"]["projection_lag_blocks"],
+        json!(1)
     );
 
     database.cleanup().await?;

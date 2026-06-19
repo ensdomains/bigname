@@ -2,7 +2,11 @@ use super::*;
 use alloy_primitives::{Address, hex};
 
 pub(super) fn parse_history_scope(scope: Option<&str>) -> ApiResult<HistoryScope> {
-    match scope.unwrap_or("both") {
+    let scope = scope
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("both");
+    match scope {
         "surface" => Ok(HistoryScope::Surface),
         "resource" => Ok(HistoryScope::Resource),
         "both" => Ok(HistoryScope::Both),
@@ -15,7 +19,11 @@ pub(super) fn parse_history_scope(scope: Option<&str>) -> ApiResult<HistoryScope
 }
 
 pub(super) fn parse_resolution_mode(mode: Option<&str>) -> ApiResult<ResolutionMode> {
-    match mode.unwrap_or("declared") {
+    let mode = mode
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("declared");
+    match mode {
         "declared" => Ok(ResolutionMode::Declared),
         "verified" => Ok(ResolutionMode::Verified),
         "both" => Ok(ResolutionMode::Both),
@@ -79,15 +87,37 @@ pub(super) fn parse_meta_mode(meta: Option<&str>, default: MetaMode) -> ApiResul
 }
 
 pub(super) fn parse_primary_name_address(address: &str) -> ApiResult<String> {
+    parse_evm_address(address, "address")
+}
+
+pub(super) fn parse_evm_address(address: &str, field: &'static str) -> ApiResult<String> {
     if let Some(normalized) = normalize_standard_evm_address(address.trim()) {
         Ok(normalized)
     } else {
         Err(ApiError {
             status: StatusCode::BAD_REQUEST,
             code: "invalid_input",
-            message: "address must be a 0x-prefixed 20-byte hex string".to_owned(),
+            message: format!("{field} must be a 0x-prefixed 20-byte hex string"),
         })
     }
+}
+
+pub(super) fn parse_exact_name_path_name(namespace: &str, name: &str) -> ApiResult<String> {
+    ensure_public_namespace(namespace)?;
+    let normalized = bigname_domain::normalization::normalize_name(name).map_err(|error| ApiError {
+        status: StatusCode::BAD_REQUEST,
+        code: "invalid_input",
+        message: error.message().to_owned(),
+    })?;
+    if normalized.normalized_name != name {
+        return Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            code: "invalid_input",
+            message: "name path segment must be ENSIP-15 normalized".to_owned(),
+        });
+    }
+
+    Ok(normalized.normalized_name)
 }
 
 pub(super) fn parse_primary_name_namespace(namespace: Option<&str>) -> ApiResult<String> {
@@ -112,15 +142,19 @@ pub(super) fn parse_primary_name_coin_type(coin_type: Option<&str>) -> ApiResult
         });
     };
 
-    if coin_type.as_bytes().iter().all(u8::is_ascii_digit) {
-        Ok(coin_type.to_owned())
-    } else {
-        Err(ApiError {
+    if !coin_type.as_bytes().iter().all(u8::is_ascii_digit) {
+        return Err(ApiError {
             status: StatusCode::BAD_REQUEST,
             code: "invalid_input",
             message: "coin_type must contain only decimal digits".to_owned(),
-        })
+        });
     }
+
+    bigname_storage::canonical_addr_coin_type(coin_type).ok_or_else(|| ApiError {
+        status: StatusCode::BAD_REQUEST,
+        code: "invalid_input",
+        message: "coin_type must fit in an unsigned 64-bit integer".to_owned(),
+    })
 }
 
 pub(super) fn parse_resolution_record_keys(
@@ -187,6 +221,14 @@ pub(super) fn parse_resolution_record_key(record_key: &str) -> Option<Resolution
             record_family: record_key.to_owned(),
             selector_key: None,
         }),
+        Some(("addr", selector)) if !selector.is_empty() => {
+            let selector_key = bigname_storage::canonical_addr_coin_type(selector)?;
+            Some(ResolutionRecordKey {
+                record_key: format!("addr:{selector_key}"),
+                record_family: "addr".to_owned(),
+                selector_key: Some(selector_key),
+            })
+        }
         Some((family, selector)) if is_valid_family(family) && !selector.is_empty() => {
             Some(ResolutionRecordKey {
                 record_key: record_key.to_owned(),
@@ -310,7 +352,11 @@ pub(super) fn parse_address_name_relation(
 pub(super) fn parse_address_names_dedupe_by(
     dedupe_by: Option<&str>,
 ) -> ApiResult<AddressNamesCurrentDedupe> {
-    match dedupe_by.unwrap_or("surface") {
+    let dedupe_by = dedupe_by
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("surface");
+    match dedupe_by {
         "surface" => Ok(AddressNamesCurrentDedupe::Surface),
         "resource" => Ok(AddressNamesCurrentDedupe::Resource),
         _ => Err(ApiError {
@@ -478,5 +524,73 @@ mod tests {
         );
         assert!(parse_primary_name_address("0xABC").is_err());
         assert!(parse_primary_name_address("00000000000000000000000000000000000000AA").is_err());
+    }
+
+    #[test]
+    fn primary_name_coin_type_is_canonicalized_at_parse_boundary() {
+        assert_eq!(
+            must_parse(parse_primary_name_coin_type(Some("060"))),
+            "60"
+        );
+    }
+
+    #[test]
+    fn empty_optional_enum_values_use_route_defaults() {
+        assert_eq!(must_parse(parse_history_scope(Some(""))), HistoryScope::Both);
+        assert_eq!(
+            must_parse(parse_resolution_mode(Some(""))),
+            ResolutionMode::Declared
+        );
+        assert_eq!(
+            must_parse(parse_response_view(Some(""), ResponseView::Full)),
+            ResponseView::Full
+        );
+        assert_eq!(
+            must_parse(parse_meta_mode(Some(""), MetaMode::Full)),
+            MetaMode::Full
+        );
+        assert_eq!(
+            must_parse(parse_address_names_dedupe_by(Some(""))),
+            AddressNamesCurrentDedupe::Surface
+        );
+    }
+
+    #[test]
+    fn exact_name_path_names_reject_non_normalized_or_unnormalizable_input() {
+        assert!(parse_exact_name_path_name("ens", "Alice.eth").is_err());
+        assert_eq!(
+            must_parse(parse_exact_name_path_name("ens", "alice.eth")),
+            "alice.eth"
+        );
+        assert!(parse_exact_name_path_name("ens", "bad name.eth").is_err());
+    }
+
+    #[test]
+    fn resolution_record_keys_reject_overflowing_addr_coin_type() {
+        let error = parse_resolution_record_keys(
+            Some("addr:18446744073709551616"),
+            ResolutionMode::Verified,
+        )
+        .expect_err("overflowing coin_type selectors must be invalid input");
+
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(error.code, "invalid_input");
+    }
+
+    #[test]
+    fn resolution_record_keys_canonicalize_addr_coin_type_before_dedupe() {
+        let error = parse_resolution_record_keys(Some("addr:060,addr:60"), ResolutionMode::Verified)
+            .expect_err("canonical duplicate addr selectors must be rejected");
+
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(error.code, "invalid_input");
+        assert_eq!(error.message, "records must not contain duplicate selectors");
+    }
+
+    fn must_parse<T>(result: ApiResult<T>) -> T {
+        match result {
+            Ok(value) => value,
+            Err(_) => panic!("parser should accept empty optional enum value"),
+        }
     }
 }

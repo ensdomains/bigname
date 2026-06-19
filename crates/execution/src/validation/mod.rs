@@ -33,6 +33,7 @@ pub(crate) fn normalized_request_key(
 pub(crate) enum VerifiedQueryStatus {
     Success,
     NotFound,
+    Unsupported,
     ExecutionFailed,
 }
 

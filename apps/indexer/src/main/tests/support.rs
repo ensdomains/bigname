@@ -189,6 +189,7 @@ const TEST_MANIFEST_EVENT_SIGNATURES: &[&str] = &[
     "TokenResource(uint256,uint256)",
     "Transfer(address,address,uint256)",
     "Transfer(bytes32,address)",
+    "TransferBatch(address,address,address,uint256[],uint256[])",
     "TransferSingle(address,address,address,uint256,uint256)",
     "VersionChanged(bytes32,uint64)",
 ];
@@ -232,7 +233,7 @@ impl TestDatabase {
             .with_context(|| format!("failed to create test database {database_name}"))?;
 
         let pool = PgPoolOptions::new()
-            .max_connections(1)
+            .max_connections(2)
             .connect_with(base_options.database(&database_name))
             .await
             .context("failed to connect indexer test pool")?;
@@ -862,6 +863,112 @@ impl TestDatabase {
         .context("failed to create normalized_events table for indexer tests")?;
         sqlx::query(
             r#"
+                CREATE TABLE projection_invalidations (
+                    projection TEXT NOT NULL,
+                    projection_key TEXT NOT NULL,
+                    key_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    generation BIGINT NOT NULL DEFAULT 0,
+                    first_change_id BIGINT,
+                    last_change_id BIGINT,
+                    first_normalized_event_id BIGINT,
+                    last_normalized_event_id BIGINT,
+                    last_changed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    invalidated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    claim_token UUID,
+                    claimed_at TIMESTAMPTZ,
+                    attempt_count BIGINT NOT NULL DEFAULT 0,
+                    last_failure_reason TEXT,
+                    last_failure_at TIMESTAMPTZ,
+                    PRIMARY KEY (projection, projection_key),
+                    CONSTRAINT projection_invalidations_generation_check CHECK (generation >= 0),
+                    CONSTRAINT projection_invalidations_attempt_check CHECK (attempt_count >= 0),
+                    CONSTRAINT projection_invalidations_change_order_check CHECK (
+                        first_change_id IS NULL
+                        OR last_change_id IS NULL
+                        OR first_change_id <= last_change_id
+                    ),
+                    CONSTRAINT projection_invalidations_event_order_check CHECK (
+                        first_normalized_event_id IS NULL
+                        OR last_normalized_event_id IS NULL
+                        OR first_normalized_event_id <= last_normalized_event_id
+                    ),
+                    CONSTRAINT projection_invalidations_claim_pair_check CHECK (
+                        (claim_token IS NULL AND claimed_at IS NULL)
+                        OR (claim_token IS NOT NULL AND claimed_at IS NOT NULL)
+                    )
+                )
+                "#,
+        )
+        .execute(&pool)
+        .await
+        .context("failed to create projection_invalidations table for indexer tests")?;
+        sqlx::query(
+            r#"
+                CREATE INDEX projection_invalidations_pending_idx
+                    ON projection_invalidations (
+                        projection,
+                        last_changed_at,
+                        projection_key
+                    )
+                    WHERE claim_token IS NULL
+                "#,
+        )
+        .execute(&pool)
+        .await
+        .context("failed to create projection invalidations pending index for indexer tests")?;
+        sqlx::query(
+            r#"
+                CREATE INDEX projection_invalidations_claim_idx
+                    ON projection_invalidations (claim_token)
+                    WHERE claim_token IS NOT NULL
+                "#,
+        )
+        .execute(&pool)
+        .await
+        .context("failed to create projection invalidations claim index for indexer tests")?;
+        sqlx::query(
+            r#"
+                CREATE TABLE label_preimages (
+                    labelhash TEXT NOT NULL,
+                    label TEXT NOT NULL,
+                    normalized_label TEXT NOT NULL,
+                    canonical_display_label TEXT NOT NULL,
+                    source_kind TEXT NOT NULL,
+                    source_priority INTEGER NOT NULL,
+                    provenance JSONB DEFAULT '{}'::jsonb NOT NULL,
+                    observed_at TIMESTAMPTZ DEFAULT now() NOT NULL,
+                    inserted_at TIMESTAMPTZ DEFAULT now() NOT NULL,
+                    CONSTRAINT label_preimages_pkey PRIMARY KEY (labelhash),
+                    CONSTRAINT label_preimages_labelhash_check CHECK (
+                        labelhash ~ '^0x[0-9a-f]{64}$'
+                    ),
+                    CONSTRAINT label_preimages_label_check CHECK (
+                        label <> ''
+                        AND normalized_label <> ''
+                        AND canonical_display_label <> ''
+                        AND position('.' IN normalized_label) = 0
+                    ),
+                    CONSTRAINT label_preimages_source_priority_check CHECK (source_priority >= 0),
+                    CONSTRAINT label_preimages_provenance_check CHECK (
+                        jsonb_typeof(provenance) = 'object'
+                    )
+                )
+                "#,
+        )
+        .execute(&pool)
+        .await
+        .context("failed to create label_preimages table for indexer tests")?;
+        sqlx::query(
+            r#"
+                CREATE INDEX label_preimages_normalized_label_idx
+                    ON label_preimages (normalized_label, labelhash)
+                "#,
+        )
+        .execute(&pool)
+        .await
+        .context("failed to create label preimages normalized label index for indexer tests")?;
+        sqlx::query(
+            r#"
                 CREATE TABLE execution_traces (
                     execution_trace_id UUID PRIMARY KEY,
                     request_type TEXT NOT NULL,
@@ -1346,12 +1453,23 @@ async fn insert_raw_reverse_claimed_log_at_index(
             transaction_index: 0,
             log_index,
             emitting_address: emitting_address.to_ascii_lowercase(),
-            topics: vec![
-                reverse_claimed_topic0(),
-                hex_string(&abi_word_address(claimed_address)),
-                reverse_node_for_address(claimed_address),
-            ],
-            data: Vec::new(),
+            topics: if chain == "base-mainnet" {
+                vec![
+                    name_for_addr_changed_topic0(),
+                    hex_string(&abi_word_address(claimed_address)),
+                ]
+            } else {
+                vec![
+                    reverse_claimed_topic0(),
+                    hex_string(&abi_word_address(claimed_address)),
+                    reverse_node_for_chain(chain, claimed_address),
+                ]
+            },
+            data: if chain == "base-mainnet" {
+                decode_hex_string(&encode_dynamic_string_log_data("alice.base.eth"))
+            } else {
+                Vec::new()
+            },
             canonicality_state,
         }],
     )
@@ -2204,6 +2322,10 @@ fn reverse_claimed_topic0() -> String {
     keccak256_hex(b"ReverseClaimed(address,bytes32)")
 }
 
+fn name_for_addr_changed_topic0() -> String {
+    keccak256_hex(b"NameForAddrChanged(address,string)")
+}
+
 const REVERSE_REGISTRAR_ROLE: &str = "reverse_registrar";
 
 fn reverse_label_for_address(address: &str) -> String {
@@ -2234,6 +2356,26 @@ fn reverse_node_for_address(address: &str) -> String {
     dns_name.extend_from_slice(b"reverse");
     dns_name.push(0);
     namehash_for_dns_name(&dns_name)
+}
+
+fn base_reverse_node_for_address(address: &str) -> String {
+    const BASE_REVERSE_NODE: &str =
+        "0x08d9b0993eb8c4da57c37a4b84a6e384c2623114ff4e9370ed51c9b8935109ba";
+
+    let label_hash = keccak256(reverse_label_for_address(address).as_bytes());
+    let parent = abi_word_bytes32(BASE_REVERSE_NODE);
+    let mut combined = [0u8; 64];
+    combined[..32].copy_from_slice(&parent);
+    combined[32..].copy_from_slice(label_hash.as_slice());
+    hex_string(keccak256(combined).as_slice())
+}
+
+fn reverse_node_for_chain(chain: &str, address: &str) -> String {
+    if chain == "base-mainnet" {
+        base_reverse_node_for_address(address)
+    } else {
+        reverse_node_for_address(address)
+    }
 }
 
 fn namehash_for_dns_name(dns_name: &[u8]) -> String {
@@ -2463,6 +2605,28 @@ fn rpc_reverse_claimed_log_payload(
             reverse_node_for_address(claimed_address)
         ],
         "data": "0x"
+    })
+}
+
+fn rpc_l2_reverse_name_log_payload(
+    block: &ProviderBlock,
+    address: &str,
+    claimed_address: &str,
+    name: &str,
+    log_index: u64,
+) -> Value {
+    json!({
+        "blockHash": block.block_hash.clone(),
+        "blockNumber": format!("0x{:x}", block.block_number),
+        "transactionHash": transaction_hash_for_block(block),
+        "transactionIndex": "0x0",
+        "logIndex": format!("0x{log_index:x}"),
+        "address": address,
+        "topics": [
+            name_for_addr_changed_topic0(),
+            hex_string(&abi_word_address(claimed_address))
+        ],
+        "data": encode_dynamic_string_log_data(name)
     })
 }
 

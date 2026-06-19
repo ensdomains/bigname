@@ -13,17 +13,19 @@ pub(super) fn transition_authority(
 
     history.current_record_version = None;
 
-    if let Some(open_binding) = history.open_binding.take()
-        && open_binding.active_from < effective_time
-    {
-        history.bindings.push(BindingSegment {
-            surface_binding_id: open_binding.surface_binding_id,
-            authority: open_binding.authority.clone(),
-            active_from: open_binding.active_from,
-            active_to: Some(effective_time),
-            anchor_ref: open_binding.anchor_ref.clone(),
-        });
-        if let Some(name) = history.name.as_ref() {
+    if let Some(open_binding) = history.open_binding.take() {
+        if open_binding.active_from < effective_time {
+            history.bindings.push(BindingSegment {
+                surface_binding_id: open_binding.surface_binding_id,
+                authority: open_binding.authority.clone(),
+                active_from: open_binding.active_from,
+                active_to: Some(effective_time),
+                anchor_ref: open_binding.anchor_ref.clone(),
+            });
+        }
+        if open_binding.active_from <= effective_time
+            && let Some(name) = history.name.as_ref()
+        {
             history.events.push(build_boundary_event(
                 reference,
                 BoundaryEventPayload {
@@ -119,6 +121,19 @@ pub(super) fn transition_authority(
             .map(|value| value.binding_manifest_id)
             .or_else(|| before.as_ref().map(|value| value.binding_manifest_id))
             .unwrap_or(0);
+        let mut after_state = json!({
+            "authority_kind": after.as_ref().map(|value| value.kind.as_str()),
+            "authority_key": after.as_ref().map(|value| value.authority_key.clone()),
+        });
+        if after
+            .as_ref()
+            .is_some_and(|value| value.kind == AuthorityKind::RegistryOnly)
+            && let Some(owner) = nonzero_address(history.current_registry_owner.as_deref())
+            && let Some(object) = after_state.as_object_mut()
+        {
+            object.insert("registry_owner".to_owned(), json!(owner));
+        }
+
         history.events.push(build_boundary_event(
             reference,
             BoundaryEventPayload {
@@ -132,10 +147,7 @@ pub(super) fn transition_authority(
                     "authority_kind": before.as_ref().map(|value| value.kind.as_str()),
                     "authority_key": before.as_ref().map(|value| value.authority_key.clone()),
                 }),
-                after_state: json!({
-                    "authority_kind": after.as_ref().map(|value| value.kind.as_str()),
-                    "authority_key": after.as_ref().map(|value| value.authority_key.clone()),
-                }),
+                after_state,
                 identity_suffix: format!(
                     "authority-epoch:{}:{}:{}:{}:{}",
                     reference.block_hash,
@@ -242,6 +254,25 @@ pub(super) fn active_anchor_for_observation(
         return Some(build_registrar_anchor(registration));
     }
     registry_anchor_for_history(history, &reference.chain_id, &history.labelhash)
+}
+
+pub(super) fn clear_stale_wrapper_authority_for_registration_grant(
+    history: &mut NameHistory,
+    reference: &ObservationRef,
+) -> Result<()> {
+    if history.current_wrapper_key.is_none() {
+        return Ok(());
+    }
+    let before_anchor = active_anchor_for_observation(history, reference);
+    history.current_wrapper_key = None;
+    let after_anchor = active_anchor_for_observation(history, reference);
+    transition_authority(
+        history,
+        before_anchor,
+        after_anchor,
+        &reference.as_boundary_ref(),
+        reference.block_timestamp,
+    )
 }
 
 pub(super) fn current_resolver_matches(history: &NameHistory, resolver: &str) -> bool {

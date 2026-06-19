@@ -3,8 +3,8 @@ use std::{collections::BTreeMap, time::Instant};
 use anyhow::{Context, Result, bail};
 use bigname_manifests::{WatchedSourceSelectorKind, WatchedSourceSelectorPlan};
 use bigname_storage::{
-    CanonicalityState, RawCodeHash, RawLog, RawPayloadCacheMetadataUpsert, RawReceipt,
-    RawTransaction, upsert_chain_lineage_blocks, upsert_raw_code_hashes, upsert_raw_logs,
+    CanonicalityState, RawCodeHash, RawLog, RawPayloadCacheMetadataUpsert,
+    upsert_chain_lineage_blocks, upsert_raw_code_hashes, upsert_raw_logs,
     upsert_raw_payload_cache_metadata, upsert_raw_receipts, upsert_raw_transactions,
 };
 use tracing::info;
@@ -15,18 +15,20 @@ use crate::{
         HeaderAuditMode, ensure_provider_bundle_matches_raw_block,
         provider_block_to_lineage_with_header_audit_mode,
         provider_block_to_raw_block_with_header_audit_mode,
-        provider_code_observation_to_raw_code_hash, provider_logs_to_selected_raw_logs,
-        provider_raw_payload_cache_metadata_to_upserts, provider_receipts_to_selected_raw_receipts,
-        provider_transactions_to_selected_raw_transactions,
-        retained_transaction_keys_from_raw_logs, sync_adapter_state_from_persisted_raw_payloads,
+        provider_code_observation_to_raw_code_hash, provider_raw_payload_cache_metadata_to_upserts,
+        sync_adapter_state_from_persisted_raw_payloads,
         sync_adapter_state_from_scoped_persisted_raw_payloads,
     },
 };
 
 #[path = "fetching/canonicality.rs"]
 mod canonicality;
+#[path = "fetching/historical.rs"]
+mod historical;
 #[path = "fetching/log_ranges.rs"]
 mod log_ranges;
+#[path = "fetching/materialization.rs"]
+mod materialization;
 #[path = "fetching/sparse.rs"]
 mod sparse;
 
@@ -37,10 +39,17 @@ use super::{
 };
 use crate::source_scope::SourceScope;
 
-pub(super) use canonicality::{BackfillCanonicalityEvidence, load_backfill_canonicality_evidence};
+pub(crate) use canonicality::{BackfillCanonicalityEvidence, load_backfill_canonicality_evidence};
+pub(crate) use historical::{
+    fill_log_payloads_from_validation_provider, materialize_historical_payload_range,
+};
 use log_ranges::{
     fetch_backfill_logs_by_safe_ranges, selected_addresses_for_materialized_block,
     uses_topic_first_source_family_scan,
+};
+use materialization::{
+    fetch_full_payload_bundles_for_log_blocks, materialize_backfill_block_payloads,
+    selected_code_observation_addresses,
 };
 use sparse::{
     raw_only_sparse_materialization_slices, run_hash_pinned_raw_only_sparse_backfill_range,
@@ -154,7 +163,7 @@ pub(crate) async fn run_hash_pinned_backfill_range(
             !selected_target_addresses_at_block(source_plan, block.block_number).is_empty()
         })
         .unwrap_or(false);
-    let bundles = if fetch_logs_by_safe_ranges || !single_block_needs_bundle_logs {
+    let mut bundles = if fetch_logs_by_safe_ranges || !single_block_needs_bundle_logs {
         provider
             .fetch_block_bundles_without_logs_by_hashes(&resolved_blocks)
             .await
@@ -169,9 +178,30 @@ pub(crate) async fn run_hash_pinned_backfill_range(
             watched_chain.chain, range.from_block, range.to_block
         )
     })?;
+    if fetch_logs_by_safe_ranges {
+        let mut full_payload_bundles_by_hash = fetch_full_payload_bundles_for_log_blocks(
+            provider,
+            &resolved_blocks,
+            &ranged_logs_by_block,
+            &watched_chain.chain,
+            range,
+            "hash-pinned inline",
+        )
+        .await?;
+        for bundle in &mut bundles {
+            if let Some(full_payload_bundle) =
+                full_payload_bundles_by_hash.remove(&bundle.block.block_hash)
+            {
+                *bundle = full_payload_bundle;
+            }
+        }
+        if !full_payload_bundles_by_hash.is_empty() {
+            bail!("provider returned full payloads for unprocessed backfill blocks");
+        }
+    }
     let mut raw_blocks = Vec::with_capacity(resolved_blocks.len());
-    let mut transactions = Vec::<RawTransaction>::new();
-    let mut receipts = Vec::<RawReceipt>::new();
+    let mut transactions = Vec::new();
+    let mut receipts = Vec::new();
     let mut logs = Vec::<RawLog>::new();
     let mut code_hashes = Vec::<RawCodeHash>::new();
     let mut cache_metadata = Vec::<RawPayloadCacheMetadataUpsert>::new();
@@ -215,7 +245,7 @@ pub(crate) async fn run_hash_pinned_backfill_range(
             canonicality_state,
             header_audit_mode,
         ));
-        let block_logs = if fetch_logs_by_safe_ranges {
+        let selection_logs = if fetch_logs_by_safe_ranges {
             ranged_logs_by_block
                 .remove(&resolved_block.block_number)
                 .unwrap_or_default()
@@ -227,40 +257,33 @@ pub(crate) async fn run_hash_pinned_backfill_range(
             selected_target_index,
             topic_filtered_source_family,
             resolved_block.block_number,
-            &block_logs,
+            &selection_logs,
         );
-        let selected_logs = provider_logs_to_selected_raw_logs(
+        let materialized_payloads = materialize_backfill_block_payloads(
             &watched_chain.chain,
             &raw_block,
-            &block_logs,
+            &selection_logs,
+            &bundle.logs,
+            &bundle.transactions,
+            &bundle.receipts,
             &selected_addresses,
         )?;
-        let retained_transaction_keys = retained_transaction_keys_from_raw_logs(&selected_logs);
-        if !selected_logs.is_empty() {
+        if !materialized_payloads.logs.is_empty() {
             cache_metadata.extend(provider_raw_payload_cache_metadata_to_upserts(
                 &watched_chain.chain,
                 &raw_block,
                 &bundle.raw_payloads,
             ));
         }
-        transactions.extend(provider_transactions_to_selected_raw_transactions(
-            &watched_chain.chain,
-            &raw_block,
-            &bundle.transactions,
-            &retained_transaction_keys,
-        )?);
-        receipts.extend(provider_receipts_to_selected_raw_receipts(
-            &watched_chain.chain,
-            &raw_block,
-            &bundle.receipts,
-            &retained_transaction_keys,
-        )?);
-        logs.extend(selected_logs);
+        transactions.extend(materialized_payloads.transactions);
+        receipts.extend(materialized_payloads.receipts);
+        logs.extend(materialized_payloads.logs);
 
-        if !selected_addresses.is_empty() {
+        let code_observation_addresses = selected_code_observation_addresses(&selected_addresses);
+        if !code_observation_addresses.is_empty() {
             code_observation_requests.push(ProviderBlockCodeObservationRequest {
                 block_hash: raw_block.block_hash.clone(),
-                addresses: selected_addresses.iter().cloned().collect(),
+                addresses: code_observation_addresses,
             });
             raw_blocks_by_hash.insert(raw_block.block_hash.clone(), raw_block.clone());
         }

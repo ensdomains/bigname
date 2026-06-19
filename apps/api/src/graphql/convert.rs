@@ -87,8 +87,7 @@ pub(super) fn resolver_from_store(
 }
 
 /// Cache entries of a record family whose value was retained (`status == "success"`), paired with
-/// the retained value. Values may arrive wrapped (`{"value": …}`) on some projection paths —
-/// unwrap one level, matching REST's `compact_record_value`.
+/// the retained value flattened to its wire string.
 fn successful_entries<'a>(
     entries: &'a Value,
     record_family: &'a str,
@@ -96,11 +95,19 @@ fn successful_entries<'a>(
     json_items(entries)
         .filter(move |entry| json_str(entry, "record_family") == Some(record_family))
         .filter(|entry| json_str(entry, "status") == Some("success"))
-        .filter_map(|entry| {
-            let value = entry.get("value")?;
-            let value = value.get("value").unwrap_or(value);
-            Some((entry, value.as_str()?.to_owned()))
-        })
+        .filter_map(|entry| Some((entry, entry_value_string(entry.get("value")?)?)))
+}
+
+/// Flatten a retained cache value to its wire string. Addr values arrive as a bare hex string;
+/// contenthash values arrive as `{"encoding":"hex","bytes":"0x…"}`; some projection paths wrap the
+/// value as `{"value": …}`. Unwrap one `value` level, then accept a bare string or the `bytes` hex
+/// — the raw on-chain hex the subgraph `addresses`/`contentHash` fields expose verbatim.
+fn entry_value_string(value: &Value) -> Option<String> {
+    let value = value.get("value").unwrap_or(value);
+    if let Some(text) = value.as_str() {
+        return Some(text.to_owned());
+    }
+    value.get("bytes").and_then(Value::as_str).map(str::to_owned)
 }
 
 fn json_items(value: &Value) -> impl Iterator<Item = &Value> {

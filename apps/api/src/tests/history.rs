@@ -175,9 +175,9 @@ async fn get_name_history_returns_canonical_only_rows_with_provenance_and_covera
             .and_then(Value::as_str),
         Some("normalized_event_history")
     );
-    assert_eq!(
-        payload.provenance.get("execution_trace_id"),
-        Some(&Value::Null)
+    assert!(
+        payload.provenance.get("execution_trace_id").is_none(),
+        "declared-only history provenance must omit execution_trace_id"
     );
     assert_eq!(
         payload.provenance.get("manifest_versions"),
@@ -309,6 +309,15 @@ async fn get_name_history_returns_canonical_only_rows_with_provenance_and_covera
         .context("name history first page request failed")?;
     assert_eq!(first_page_response.status(), StatusCode::OK);
     let first_page_payload: HistoryResponse = read_json(first_page_response).await?;
+    assert_eq!(
+        first_page_payload
+            .provenance
+            .get("raw_fact_refs")
+            .and_then(Value::as_array)
+            .map(Vec::len),
+        Some(3),
+        "paged history provenance must describe the filtered set, not just the current page"
+    );
     let cursor = first_page_payload
         .page
         .next_cursor
@@ -2996,7 +3005,24 @@ async fn get_resource_permissions_returns_declared_state_collection() -> Result<
     );
     assert_eq!(payload.coverage.enumeration_basis, "resource_permissions");
     assert_eq!(payload.coverage.unsupported_reason, None);
-    assert!(payload.provenance.is_null());
+    assert_eq!(
+        payload
+            .provenance
+            .get("derivation_kind")
+            .and_then(Value::as_str),
+        Some("permissions_current_rebuild")
+    );
+    assert!(
+        payload.provenance.get("execution_trace_id").is_none(),
+        "declared-only permissions provenance must omit execution_trace_id"
+    );
+    let manifest_versions = payload.provenance["manifest_versions"]
+        .as_array()
+        .expect("permissions provenance manifest_versions must be an array");
+    assert!(manifest_versions.iter().any(|manifest| {
+        manifest.get("manifest_version") == Some(&json!(7))
+            && manifest.get("source_family") == Some(&json!("ens_v2_registry_l1"))
+    }));
 
     let resource_row = payload
         .data

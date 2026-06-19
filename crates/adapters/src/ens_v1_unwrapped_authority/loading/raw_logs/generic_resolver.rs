@@ -7,6 +7,7 @@ pub(super) async fn load_generic_resolver_event_raw_logs(
     event_topics: &AuthorityEventTopics,
     restrict_to_block_hashes: bool,
     block_hashes: &[String],
+    transaction_hashes: Option<&[String]>,
     block_range: Option<(i64, i64)>,
 ) -> Result<Vec<AuthorityRawLogRow>> {
     if sources.is_empty() {
@@ -25,6 +26,8 @@ pub(super) async fn load_generic_resolver_event_raw_logs(
     let (has_block_range, from_block, to_block) = block_range
         .map(|(from_block, to_block)| (true, from_block, to_block))
         .unwrap_or((false, 0, 0));
+    let restrict_to_transaction_hashes = transaction_hashes.is_some();
+    let transaction_hashes = transaction_hashes.unwrap_or(&[]);
 
     let rows = sqlx::query(
         r#"
@@ -47,6 +50,7 @@ pub(super) async fn load_generic_resolver_event_raw_logs(
         WHERE rl.chain_id = $1
           AND ($2::BOOLEAN = FALSE OR rl.block_hash = ANY($3::TEXT[]))
           AND ($4::BOOLEAN = FALSE OR rl.block_number BETWEEN $5::BIGINT AND $6::BIGINT)
+          AND ($10::BOOLEAN = FALSE OR rl.transaction_hash = ANY($11::TEXT[]))
           AND lower(rl.topics[1]) = ANY($7::TEXT[])
           AND EXISTS (
               SELECT 1
@@ -74,6 +78,8 @@ pub(super) async fn load_generic_resolver_event_raw_logs(
     .bind(&topic0s)
     .bind(&source_from_blocks)
     .bind(&source_to_blocks)
+    .bind(restrict_to_transaction_hashes)
+    .bind(transaction_hashes)
     .fetch_all(pool)
     .await
     .with_context(|| {

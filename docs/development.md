@@ -1,6 +1,6 @@
 # Development
 
-Local development uses Docker Compose for PostgreSQL and S3-compatible object storage, matching the baseline in `docs/adrs/0001-stack.md`.
+Local development uses Docker Compose for PostgreSQL plus host-side Rust binaries for the API, indexer, and worker.
 
 ## Bootstrap
 
@@ -12,9 +12,6 @@ Local development uses Docker Compose for PostgreSQL and S3-compatible object st
 The compose stack starts:
 
 - PostgreSQL on `127.0.0.1:5432` with database `bigname` and credentials `bigname` / `bigname`
-- MinIO S3 API on `127.0.0.1:9000`
-- MinIO console on `127.0.0.1:9001`
-- a one-shot bootstrap container that creates the `bigname-dev` bucket by default
 
 Stop the local services with `docker compose down`. Add `-v` if you also want to remove the local data volumes.
 
@@ -84,8 +81,7 @@ BIGNAME_INDEXER_CHAIN_RPC_URLS=ethereum-mainnet=http://127.0.0.1:8545,base-mainn
 If both provider source settings are unset, `./scripts/dev-up` still boots the
 processes and the indexer still syncs manifest/watch state, but provider-backed
 head fetch and live ingestion stay idle. Current bootstrap RPC support accepts
-`http://` endpoints only; use a local node or local HTTP proxy for hosted RPC
-providers that expose only HTTPS.
+`http://` and `https://` endpoints.
 
 ## Live API Execution Configuration
 

@@ -120,9 +120,21 @@ pub(super) async fn materialize_authority_histories(
         };
 
         let finalized = finalize_history(history, head_ref)?;
-        if let Some(surface) =
-            build_name_surface(pool, &name, finalized.first_name_ref.as_ref()).await?
-        {
+        let surface = if let Some(reference) = finalized.first_name_ref.as_ref() {
+            build_name_surface(pool, &name, Some(reference)).await?
+        } else {
+            build_name_surface_from_boundary(
+                pool,
+                &name,
+                finalized
+                    .bindings
+                    .first()
+                    .map(|segment| &segment.anchor_ref),
+                "authority_binding_known_name",
+            )
+            .await?
+        };
+        if let Some(surface) = surface {
             identity.push_surface(surface);
         }
 
@@ -132,7 +144,7 @@ pub(super) async fn materialize_authority_histories(
                     pool,
                     deterministic_uuid(&format!(
                         "resource:registry-only:{}:{}",
-                        chain, finalized.labelhash
+                        chain, name.namehash
                     )),
                     None,
                     &registry_anchor.chain_id,
@@ -140,8 +152,9 @@ pub(super) async fn materialize_authority_histories(
                     json!({
                         "adapter": DERIVATION_KIND_ENS_V1_UNWRAPPED_AUTHORITY,
                         "authority_kind": "registry_only",
-                        "authority_key": format!("registry-only:{}:{}", chain, finalized.labelhash),
+                        "authority_key": format!("registry-only:{}:{}", chain, name.namehash),
                         "logical_name_id": name.logical_name_id,
+                        "namehash": name.namehash,
                         "labelhash": finalized.labelhash,
                         "current_registry_owner": finalized.current_registry_owner,
                     }),

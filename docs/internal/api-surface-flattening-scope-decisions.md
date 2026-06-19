@@ -583,16 +583,23 @@ Notes:
 
 ## Final Direction
 
-Chosen product shape:
+Accepted in [ADR 0006](../adrs/0006-api-v2-product-surface.md) as written on
+2026-06-12, after the 2026-06 remediation closed out first per the ADR's
+sequencing.
 
+The decided direction is one vocabulary, one envelope, and three tiers:
+lookup primitives, product reads, and diagnostics. Product routes use the
+shared `data`/`page`/`meta` envelope and keep pipeline vocabulary out of
+product field names, enum values, and error messages; diagnostics routes are
+the public home for pipeline vocabulary.
 
-Must keep:
+The new surface is developed under `/v2` only for implementation and parity
+validation. After the one-time parity gate, it is re-baselined as `v1` in the
+switch release: the old `v1` routes are deleted, `/v2` is renamed to `/v1`,
+and no permanent `/v2` public contract ships.
 
-
-Can delete:
-
-
-Needs docs-first change:
-
-
-Implementation order:
+The deferred vocabulary and envelope decisions from ADR 0003 are resolved by
+ADR 0006's normative naming dictionary, envelope rules, route catalog, and
+rollout gate. The checkbox survey above remains historical planning input; ADR
+0006 is the accepted API direction for these questions. Q36 (raw-fact
+retention) remains storage policy, not an API-surface decision made here.

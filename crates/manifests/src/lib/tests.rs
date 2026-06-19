@@ -1499,6 +1499,90 @@ fn rejects_chain_combo_mismatch() -> Result<()> {
 }
 
 #[test]
+fn rejects_manifest_version_tag_mismatch() -> Result<()> {
+    let test_dir = TestDir::new()?;
+    test_dir.write_manifest(
+        "ens",
+        "ens_v2_registry_l1",
+        "v2",
+        &manifest_contents(
+            "active",
+            "0x0000000000000000000000000000000000000001",
+            "0x00000000000000000000000000000000000000AA",
+            Some("0x00000000000000000000000000000000000000DD"),
+        ),
+    )?;
+
+    let error = load_repository(&test_dir.path).expect_err("version tag mismatch must fail");
+    assert!(
+        error
+            .to_string()
+            .contains("manifest_version 1 does not match version tag v2"),
+        "unexpected error: {error:#}"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn rejects_duplicate_contract_roles() -> Result<()> {
+    let test_dir = TestDir::new()?;
+    let contents = manifest_contents(
+        "active",
+        "0x0000000000000000000000000000000000000001",
+        "0x00000000000000000000000000000000000000AA",
+        Some("0x00000000000000000000000000000000000000DD"),
+    ) + r#"
+[[contracts]]
+role = "registry"
+address = "0x00000000000000000000000000000000000000BB"
+proxy_kind = "none"
+"#;
+    test_dir.write_manifest("ens", "ens_v2_registry_l1", "v1", &contents)?;
+
+    let error = load_repository(&test_dir.path).expect_err("duplicate roles must fail");
+    assert!(
+        error
+            .to_string()
+            .contains("duplicates contract role registry"),
+        "unexpected error: {error:#}"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn rejects_unsupported_normalizer_version() -> Result<()> {
+    let test_dir = TestDir::new()?;
+    test_dir.write_manifest(
+        "ens",
+        "ens_v2_registry_l1",
+        "v1",
+        &manifest_contents(
+            "active",
+            "0x0000000000000000000000000000000000000001",
+            "0x00000000000000000000000000000000000000AA",
+            Some("0x00000000000000000000000000000000000000DD"),
+        )
+        .replacen(
+            "normalizer_version = \"ensip15@ens-normalize-0.1.1\"",
+            "normalizer_version = \"ensip15@unknown\"",
+            1,
+        ),
+    )?;
+
+    let error = load_repository(&test_dir.path).expect_err("unsupported normalizer must fail");
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported normalizer_version ensip15@unknown"),
+        "unexpected error: {error:#}"
+    );
+
+    Ok(())
+}
+
+#[test]
 fn checked_in_sepolia_manifests_load_as_alternate_profile() -> Result<()> {
     let main_repository = load_repository(checked_in_manifest_root("manifests/mainnet"))?;
     let sepolia_repository = load_repository(checked_in_manifest_root("manifests/sepolia"))?;
@@ -1626,6 +1710,7 @@ fn checked_in_sepolia_manifests_load_as_alternate_profile() -> Result<()> {
             "SubregistryUpdated",
             "ResolverUpdated",
             "TokenResource",
+            "EACRolesChanged",
             "TokenRegenerated",
             "ParentUpdated",
         ]
@@ -1933,7 +2018,7 @@ async fn active_manifest_abi_events_derive_topics_from_payload() -> Result<()> {
         active_manifest_id_for_source_family(database.pool(), "ens", "ens_v2_registry_l1").await?;
     let events = load_active_manifest_abi_events(database.pool(), &[registry_manifest_id]).await?;
 
-    assert_eq!(events.len(), 9);
+    assert_eq!(events.len(), 10);
     let label_registered = events
         .iter()
         .find(|event| event.name == "LabelRegistered")
@@ -4217,10 +4302,10 @@ async fn sync_repository_rejects_invalid_proxy_shape_declarations() -> Result<()
         ),
     ];
 
-    for (version_tag, contents, expected_error) in cases {
+    for (case_name, contents, expected_error) in cases {
         let test_dir = TestDir::new()?;
         let database = TestDatabase::new().await?;
-        test_dir.write_manifest("ens", "ens_v2_registry_l1", version_tag, &contents)?;
+        test_dir.write_manifest("ens", "ens_v2_registry_l1", "v1", &contents)?;
 
         let repository = load_repository(&test_dir.path)?;
         let error = sync_repository(database.pool(), &repository)
@@ -4228,7 +4313,7 @@ async fn sync_repository_rejects_invalid_proxy_shape_declarations() -> Result<()
             .expect_err("invalid proxy shape must fail manifest sync");
         assert!(
             error.to_string().contains(expected_error),
-            "unexpected sync error for {version_tag}: {error:#}"
+            "unexpected sync error for {case_name}: {error:#}"
         );
 
         database.cleanup().await?;
@@ -4730,7 +4815,7 @@ async fn checked_in_basenames_manifests_reuse_l1_resolver_address_across_active_
     assert_eq!(summary.status, ManifestSyncStatus::Synced);
     assert_eq!(summary.synced_manifest_count, 8);
     assert_eq!(summary.active_manifest_count, 6);
-    assert_eq!(summary.contract_count, 8);
+    assert_eq!(summary.contract_count, 10);
 
     let active_manifests =
         load_active_manifests_for_namespace(database.pool(), "basenames").await?;

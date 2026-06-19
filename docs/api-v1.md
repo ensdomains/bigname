@@ -47,7 +47,7 @@ Validation:
 - Positions that don't satisfy the requested `consistency` floor return `conflict`.
 - A `(chain_id, block_number, block_hash)` that isn't on stored canonical lineage, or that can't be reconciled across chains as one snapshot, returns `conflict`.
 - A coherent selector whose required projection rows aren't built yet returns `stale` rather than reading raw facts.
-- Persisted-readback routes return `stale` or `not_found` when matching output is absent. The exception is supported ENS verified selectors on `GET /v1/profiles/names/{name}` and `GET /v1/names/{namespace}/{name}/records`, which may execute on demand against the selected snapshot, persist the outcome, and return it. The profile route has no caller-selected `records` parameter: it selects all profile records server-side from declared inventory selectors, explicit gaps, and record-cache entries. It falls back to the bounded app profile set only when a supported declared inventory exists but has no declared selectors, gaps, or cache entries; missing, stale, or explicitly unsupported inventory does not use fallback records.
+- Persisted-readback routes return `stale` or `not_found` when matching output is absent. The exception is supported ENS verified selectors on `GET /v1/profiles/names/{name}` and `GET /v1/names/{namespace}/{name}/records`, which may execute on demand against the selected snapshot, persist the outcome, and return it. The profile route has no caller-selected `records` parameter: it selects profile records server-side from declared inventory selectors, explicit gaps, and record-cache entries that parse into bigname's public selector grammar. It falls back to the bounded app profile set only when a supported declared inventory exists but its public selector set is empty after non-public selector facts are omitted; missing, stale, or explicitly unsupported inventory does not use fallback records.
 - A current-state row may serve a later selected snapshot only when its stored chain context covers the same required chains and no newer canonical input exists for that row through the selected positions; otherwise `stale`.
 - Historical `at` and explicit `chain_positions` reads require projection or execution rows materialized for the exact selected positions. If rewind/rebuild has not produced that snapshot, the route returns `stale`; it never serves provider `latest`, raw facts, or newer current rows as a substitute.
 
@@ -77,7 +77,7 @@ Rules:
 
 - Resolve `at`, `chain_positions`, and `consistency` once before any lookup, topology build, explain build, or execution.
 - Every section in the response uses that one snapshot. Don't combine current binding from one snapshot with topology, inventory, or execution from another.
-- A `name_current` or `record_inventory_current` row whose stored position predates the selected snapshot stays eligible only when no newer canonical input exists for the same `logical_name_id` or `resource_id` through the selected positions, and the chain set matches.
+- A `name_current` or `record_inventory_current` row whose stored position predates the selected snapshot stays eligible only when no newer canonical input exists for the same `logical_name_id` or `resource_id` through the selected positions. Stored rows may carry auxiliary chain positions outside the selected snapshot; they do not make the row ineligible as long as every selected chain position is covered and fresh.
 - `coverage` for `{namespace, name}` matches between `GET /v1/names/{namespace}/{name}` and `GET /v1/coverage/{namespace}/{name}`.
 - The two explain routes resolve the same `logical_name_id`, `resource_id`, `token_lineage_id`, `surface_binding_id`, and `binding_kind` as the exact-name route at the same snapshot.
 - `mode=verified|both`: persisted verified output joins only when its stored chain positions exactly match the selected snapshot. `GET /v1/profiles/names/{name}` executes every server-selected profile record derived from declared state; it never accepts a caller-supplied selector subset. If matching output is missing for a supported ENS selector, the route executes against the selected snapshot, persists the outcome, and returns it. Verified execution never advances positions mid-request.
@@ -144,7 +144,7 @@ Rules:
 - `chain_positions` may carry multiple chains for cross-chain answers.
 - Route-level `coverage` and per-section support are independent: a read may be authoritative while one declared section returns `UnsupportedSummary`.
 - Top-level `provenance` is optional and reserved for explicit diagnostic/full metadata paths. Product routes omit it by default; mixed declared+verified routes may add section-local `provenance` where derivations differ.
-- `meta=none` omits `meta` (collection `page` stays). `meta=summary` includes route-level support, unsupported filters/fields, count metadata, and snapshot summary. `meta=full` adds the full-envelope `coverage`, `chain_positions`, `consistency`, `last_updated`, and route-level `provenance` summaries.
+- `meta=none` omits `meta` (collection `page` stays). `meta=summary` includes route-level support, unsupported filters/fields, count metadata, and snapshot summary. `meta=full` adds the full-envelope `coverage`, `chain_positions`, `consistency`, `last_updated`, and route-level `provenance` summaries where a compact route documents those diagnostics; compact names and role collections currently keep the same compact `meta` object as `meta=summary`.
 - `GET /v1/profiles/names/{name}` is the app full-profile exception to the ordinary full-envelope default: `meta=summary` and `meta=none` return compact profile `data` without internal IDs or routine `normalized_name`, omit top-level coverage/chain/provenance fields, and strip per-query execution provenance. `meta=full` is required for diagnostic exact-name data and envelope metadata.
 - `view=full` returns the full envelope only when the route documents a full view. Compact-only routes keep `view=full` as a reserved input that returns `400 invalid_input`; OpenAPI advertises only `view=compact` for those routes.
 - Compact responses never expose raw facts, full provenance, or projection internals as a substitute for `meta`. Explain detail belongs on explain/audit routes.
@@ -277,7 +277,7 @@ For Basenames, complete family coverage requires a discovered Base resolver to b
 
 ### `ResolutionRecordSelector`
 
-`record_key`, `record_family`, `selector_key`, `cacheable`. `record_key` is the round-trip token used in `records`. `selector_key` is `null` for scalar families, a string otherwise. When non-null, `record_key = record_family + ":" + selector_key`. Numeric domains (coin types) stay textual on the wire.
+`record_key`, `record_family`, `selector_key`, `cacheable`. `record_key` is the round-trip token used in `records`. `selector_key` is `null` for scalar families, a string otherwise. When non-null, `record_key = record_family + ":" + selector_key`. Numeric domains (coin types) stay textual on the wire; `addr:<coin_type>` selectors are canonicalized to unsigned 64-bit decimal text, so `addr:060` and `addr:60` address the same selector/cache identity. This is a bigname public-selector narrowing relative to upstream resolver `uint256 coinType` APIs `(upstream: .refs/ens_v1/contracts/resolvers/profiles/IAddressResolver.sol:L14 @ ens_v1@91c966f)` `(upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L93 @ basenames@1809bbc)`; see `docs/upstream.md` § Known divergences.
 
 ### `ResolutionRecordGap`
 
@@ -320,9 +320,11 @@ For ENSv1 and Basenames, retained current-resolver record events may populate se
 
 `namespace`, `name`, `normalized_name`, `namehash`, `labelhash`, `token_id`, `owner`, `registrant`, `created_at`, `registration_date`, `expiry_date`, `resolver_address`, `record_summaries`, `subname_count`, `record_count`. Used by `GET /v1/names`. `labelhash` and `token_id` appear only when the namespace exposes stable namespace-local token identity. Compact: omits provenance, full coverage, `logical_name_id`, `resource_id`, `surface_binding_id`, projection version, and normalized-event IDs.
 
+`created_at` is the RFC 3339 timestamp of the first observation of the name itself, excluding supplemental cross-name wildcard or transport positions. `registration_date` is the RFC 3339 timestamp of the last `RegistrationGranted` block that started the current or most recently released registration epoch, matching `declared_state.registration.registered_at` when present.
+
 ### `CompactRecordSummary`
 
-`resolver_address`, `text_records`, `known_text_keys`, `avatar`, `content_hash`, `coin_addresses`. `known_text_keys` is declared inventory metadata, not verified enumeration. Value source for `text_records`, `avatar`, `content_hash`, `coin_addresses` follows `mode`: declared cache, verified output, or auto. `mode=auto` uses declared cache only when it can satisfy the requested values from replayable state; explicit declared gaps, unretained declared values, or missing declared selectors fall through to verified output for supported selectors. ENSv1 text records are selector-keyed (e.g. `avatar` is `text:avatar`).[^v1-pres-l20] When `mode=auto|verified|both` has no declared selectors to work from, compact routes may probe the basic app profile set: `addr:60`, `avatar`, `contenthash`, and text keys `description`, `url`, `email`. Fallback text keys that resolve to `not_found` are omitted unless requested explicitly.
+`resolver_address`, `text_records`, `known_text_keys`, `avatar`, `content_hash`, `coin_addresses`. The v1 compact record object keeps those keys present for schema stability; unrequested sections are `null`, and requested sections may also be `null` when the section has no backed value or is unsupported for the selected metadata mode. `known_text_keys` is declared inventory metadata, not verified enumeration. Value source for `text_records`, `avatar`, `content_hash`, `coin_addresses` follows `mode`: declared cache, verified output, or auto. `mode=auto` uses declared cache only when it can satisfy the requested values from replayable state; explicit declared gaps, unretained declared values, or missing declared selectors fall through to verified output for supported selectors. ENSv1 text records are selector-keyed (e.g. `avatar` is `text:avatar`).[^v1-pres-l20] When `mode=auto|verified|both` has no declared selectors to work from, compact routes may probe the basic app profile set: `addr:60`, `avatar`, `contenthash`, and text keys `description`, `url`, `email`. Fallback text keys that resolve to `not_found` are omitted unless requested explicitly.
 
 ### `CompactHistoryEvent`
 
@@ -390,7 +392,7 @@ The actual published routes are listed below. Per-route semantics are in [`api-v
 
 | Route | Purpose |
 | --- | --- |
-| `GET /v1/names/{namespace}/{name}/roles` | Compact role rows for the name's current resource; compact view only. |
+| `GET /v1/names/{namespace}/{name}/roles` | Compact role rows for the name's current resource plus ENSv2 root fallback rows when applicable; compact view only.[^v2-eac-l56][^v2-eac-l187] |
 | `GET /v1/roles` | Compact role rows by account, resource, or name; compact view only. |
 | `GET /v1/resources/lookup` | Compact lookup from `{namespace, name}` to current `resource_id`; compact view only. |
 | `GET /v1/resolvers/{chain_id}/{resolver_address}/overview` | Compact resolver overview. |
@@ -409,13 +411,15 @@ The running API also serves `GET /`, `GET /docs`, and `GET /openapi.json` as hel
 | `GET /v1/names/{namespace}/{name}/children` | `display_name_asc` |
 | `GET /v1/resources/{resource_id}/permissions` | `subject_scope_asc` |
 | `GET /v1/roles` | `account_resource_scope_asc` |
-| `GET /v1/names/{namespace}/{name}/roles` | `account_scope_asc` |
+| `GET /v1/names/{namespace}/{name}/roles` | `account_resource_scope_asc` |
 | `GET /v1/history/names/{namespace}/{name}` | `chain_position_desc` |
 | `GET /v1/history/resources/{resource_id}` | `chain_position_desc` |
 | `GET /v1/history/addresses/{address}` | `chain_position_desc` |
 | `GET /v1/events` | `chain_position_desc` |
 
-Other routes don't honor `cursor` or `page_size`. Surface-first views break ties on `logical_name_id`; resource-grouped address views break on `resource_id`. `page.cursor` echoes the applied cursor or `null` on the first page; `page.next_cursor=null` means no further rows at the requested snapshot. Cursors are stable under replay for the same chain positions.
+Other routes don't honor `cursor` or `page_size`. Surface-first views break ties on `logical_name_id`; resource-grouped address views break on `resource_id`. `page.cursor` echoes the applied cursor or `null` on the first page; `page.next_cursor=null` means no further rows at the requested snapshot. Cursors are stable under replay for the same chain positions. Operational label-preimage imports and retained-fact backfills may repair unknown-label child display names without changing chain positions; cursors captured before that repair may become stale and return `400 invalid_input`.
+
+Deploy note: name-role pagination now orders the `account_resource_scope_asc` text components with bytewise PostgreSQL `COLLATE "C"`, and the cursor envelope version is `2`. Cursors issued before that ordering change fail with `400 invalid_input` after rollout; clients must restart pagination from the first page.
 
 ## Error model
 
@@ -470,3 +474,5 @@ Rules:
 
 [^v2-deploy-ethreg]: (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistry.json:L2 @ ens_v2@554c309)
 [^v2-deploy-ethrc]: (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistrar.json:L2 @ ens_v2@554c309)
+[^v2-eac-l56]: (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L56 @ ens_v2@554c309)
+[^v2-eac-l187]: (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L187 @ ens_v2@554c309)

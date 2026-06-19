@@ -168,7 +168,7 @@ pub(crate) const NORMALIZED_EVENT_REPLAY_CONTRACTS: &[AdapterReplayContract] = &
             "replay_normalized_events_skips_noncanonical_raw_logs_in_selected_block_hashes",
         ],
         closure_replay_supported: true,
-        replay_note: "reverse rows are decoded from the selected ReverseClaimed raw log",
+        replay_note: "reverse rows are decoded from the selected reverse-claim raw log",
     },
     AdapterReplayContract {
         adapter: NormalizedEventReplayAdapter::EnsV1SubregistryDiscovery,
@@ -263,25 +263,19 @@ pub(crate) enum RawFactReplayContractMode {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct RawFactReplayContractPlan {
-    mode: RawFactReplayContractMode,
-}
+pub(crate) struct RawFactReplayContractPlan(RawFactReplayContractMode);
 
 impl RawFactReplayContractPlan {
     pub(crate) const fn stateless_restricted() -> Self {
-        Self {
-            mode: RawFactReplayContractMode::StatelessRestricted,
-        }
+        Self(RawFactReplayContractMode::StatelessRestricted)
     }
 
     pub(crate) const fn full_closure() -> Self {
-        Self {
-            mode: RawFactReplayContractMode::FullClosure,
-        }
+        Self(RawFactReplayContractMode::FullClosure)
     }
 
     pub(crate) fn permits_nonstateless_adapters(self) -> bool {
-        match self.mode {
+        match self.0 {
             RawFactReplayContractMode::StatelessRestricted => false,
             RawFactReplayContractMode::FullClosure => true,
         }
@@ -337,7 +331,6 @@ pub(crate) async fn classify_raw_fact_replay_contract(
         );
     };
     let from_block = *from_block;
-
     let Some((selected_from_block, _)) = raw_log_selection.range else {
         bail!(
             "normalized-event replay selected closure/context-dependent adapter(s) {adapter_list} without a replay range"
@@ -350,13 +343,15 @@ pub(crate) async fn classify_raw_fact_replay_contract(
     }
 
     let closure_source_families = closure_source_families_for_contracts(&nonstateless_contracts);
-    if let Some(closure_start_block) = earliest_required_raw_fact_block(
-        pool,
-        &request.chain,
-        source_scope,
-        &closure_source_families,
-    )
-    .await?
+    if from_block > 0
+        && let Some(closure_start_block) = earliest_required_raw_fact_block(
+            pool,
+            &request.chain,
+            source_scope,
+            &closure_source_families,
+            from_block,
+        )
+        .await?
         && from_block > closure_start_block
     {
         bail!(
@@ -524,6 +519,7 @@ async fn earliest_required_raw_fact_block(
     chain: &str,
     source_scope: &[(String, String, i64, i64)],
     closure_source_families: &[&str],
+    before_block: i64,
 ) -> Result<Option<i64>> {
     let required_scope = source_scope
         .iter()
@@ -562,6 +558,7 @@ async fn earliest_required_raw_fact_block(
               'safe'::canonicality_state,
               'finalized'::canonicality_state
           )
+          AND logs.block_number < $7
           AND logs.canonicality_state IN (
               'canonical'::canonicality_state,
               'safe'::canonicality_state,
@@ -588,6 +585,7 @@ async fn earliest_required_raw_fact_block(
     .bind(GENERIC_SOURCE_SCOPE_ADDRESS)
     .bind(SOURCE_FAMILY_ENS_V1_RESOLVER_L1)
     .bind(&generic_resolver_topic0s)
+    .bind(before_block)
     .fetch_one(pool)
     .await
     .with_context(|| {
@@ -598,9 +596,7 @@ async fn earliest_required_raw_fact_block(
 }
 
 fn source_family_in(source_family: &str, candidates: &[&str]) -> bool {
-    candidates
-        .iter()
-        .any(|candidate| source_family == *candidate)
+    candidates.contains(&source_family)
 }
 
 #[cfg(test)]

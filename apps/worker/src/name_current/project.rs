@@ -320,6 +320,9 @@ pub(super) fn project_facts(
                 facts.authority_key = json_str(&event.after_state, &["authority_key"]);
                 facts.registrant = json_str(&event.after_state, &["registrant"]);
                 facts.expiry = json_i64(&event.after_state, &["expiry"]);
+                facts.registered_at = event
+                    .block_timestamp
+                    .map(|timestamp| timestamp.unix_timestamp());
                 facts.latest_registration_event_kind = Some(event.event_kind.clone());
             }
             "RegistrationRenewed" => {
@@ -349,6 +352,8 @@ pub(super) fn project_facts(
             "AuthorityEpochChanged" => {
                 facts.authority_kind = json_str(&event.after_state, &["authority_kind"]);
                 facts.authority_key = json_str(&event.after_state, &["authority_key"]);
+                facts.registry_owner =
+                    json_str(&event.after_state, &["registry_owner"]).or(facts.registry_owner);
                 facts.latest_control_event_kind = Some(event.event_kind.clone());
             }
             EVENT_KIND_RESOLVER_CHANGED
@@ -434,6 +439,36 @@ pub(super) fn max_timestamp(
             .map(|observation| observation.candidate.timestamp),
     );
     timestamps.into_iter().max()
+}
+
+pub(super) fn min_timestamp(
+    name: &NameSurfaceSeed,
+    current_binding: Option<&CurrentBindingContext>,
+    events: &[RelevantEvent],
+    history_heads: &HistoryHeads,
+    supplemental_chain_observations: &[SupplementalChainObservation],
+) -> Option<OffsetDateTime> {
+    let mut timestamps = Vec::new();
+    if let Some(timestamp) = name.block_timestamp {
+        timestamps.push(timestamp);
+    }
+    if let Some(binding) = current_binding
+        && let Some(timestamp) = binding.block_timestamp
+    {
+        timestamps.push(timestamp);
+    }
+    timestamps.extend(events.iter().filter_map(|event| event.block_timestamp));
+    timestamps.extend(
+        history_heads
+            .iter()
+            .filter_map(|event| event.block_timestamp),
+    );
+    timestamps.extend(
+        supplemental_chain_observations
+            .iter()
+            .map(|observation| observation.candidate.timestamp),
+    );
+    timestamps.into_iter().min()
 }
 
 pub(super) fn chain_slot(chain_id: &str) -> String {

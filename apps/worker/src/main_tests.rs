@@ -7,7 +7,9 @@ use clap::Parser;
 use serde_json::json;
 use sqlx::types::time::OffsetDateTime;
 
-use crate::cli::{Cli, Command, ManifestDriftCommand, RawFactsCommand, ReplayCommand};
+use crate::cli::{
+    Cli, Command, LabelPreimagesCommand, ManifestDriftCommand, RawFactsCommand, ReplayCommand,
+};
 use crate::inspect;
 use crate::manifest_drift::{
     enforce_manifest_drift_audit_exit_policy, manifest_proxy_implementation_candidate_observation,
@@ -96,6 +98,46 @@ fn raw_facts_compact_log_staging_cli_is_available() {
         },
         other => panic!("expected raw-facts command, got {other:?}"),
     }
+}
+
+#[test]
+fn label_preimages_import_ens_rainbow_cli_is_available() {
+    let cli = Cli::parse_from([
+        "bigname-worker",
+        "label-preimages",
+        "import-ens-rainbow",
+        "--batch-size",
+        "1234",
+        "--limit",
+        "5678",
+    ]);
+    assert!(!cli.writes_machine_json());
+
+    match cli.command {
+        Command::LabelPreimages(args) => match args.command {
+            LabelPreimagesCommand::ImportEnsRainbow(args) => {
+                assert_eq!(args.batch_size, Some(1234));
+                assert_eq!(args.limit, Some(5678));
+            }
+        },
+        other => panic!("expected label-preimages command, got {other:?}"),
+    }
+}
+
+#[test]
+fn label_preimages_import_ens_rainbow_rejects_negative_limit() {
+    let error = Cli::try_parse_from([
+        "bigname-worker",
+        "label-preimages",
+        "import-ens-rainbow",
+        "--limit=-1",
+    ])
+    .expect_err("negative rainbow import limit must be rejected");
+
+    assert!(
+        error.to_string().contains("must be non-negative"),
+        "unexpected CLI validation error: {error}"
+    );
 }
 
 #[test]

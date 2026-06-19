@@ -69,6 +69,13 @@ pub(super) fn validate_verified_primary_trace(
         &requested_positions,
         &format!("{context} trace.chain_context.requested_positions"),
     )?;
+    if trace.chain_context.get("requested_positions")
+        != Some(&outcome.cache_key.requested_chain_positions)
+    {
+        bail!(
+            "{context} trace.chain_context.requested_positions must match cache_key.requested_chain_positions"
+        );
+    }
 
     let gateway_digests = required_array(
         Some(&trace.gateway_digests),
@@ -87,6 +94,12 @@ pub(super) fn validate_verified_primary_trace(
         bail!(
             "{context} must include source_family {} in manifest context or cache key",
             verified_primary_execution_source_family(&tuple.namespace)?
+        );
+    }
+    if trace.manifest_context.get("manifest_versions") != Some(&outcome.cache_key.manifest_versions)
+    {
+        bail!(
+            "{context} trace.manifest_context.manifest_versions must match cache_key.manifest_versions"
         );
     }
 

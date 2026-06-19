@@ -111,7 +111,7 @@ pub struct NameCurrentListRow {
 pub struct NameCurrentListPage {
     pub rows: Vec<NameCurrentListRow>,
     pub next_cursor: Option<NameCurrentListCursor>,
-    pub total_count: u64,
+    pub total_count: Option<u64>,
 }
 
 const DEFAULT_NAME_CURRENT_LIST_READ_FILTER: &str = r#"
@@ -133,6 +133,7 @@ const DEFAULT_NAME_CURRENT_LIST_READ_FILTER: &str = r#"
               'safe'::canonicality_state,
               'finalized'::canonicality_state
           )
+          AND binding.active_to IS NULL
           AND (
               nc.token_lineage_id IS NULL
               OR token_lineage.canonicality_state IN (
@@ -161,6 +162,7 @@ const DEFAULT_ADDRESS_NAMES_MEMBERSHIP_READ_FILTER: &str = r#"
       'safe'::canonicality_state,
       'finalized'::canonicality_state
   )
+  AND membership_binding.active_to IS NULL
   AND (
       anc.token_lineage_id IS NULL
       OR membership_token_lineage.canonicality_state IN (
@@ -211,6 +213,7 @@ pub async fn load_name_current_list_page(
     order: NameCurrentListOrder,
     cursor: Option<&NameCurrentListCursor>,
     page_size: u64,
+    include_total_count: bool,
 ) -> Result<NameCurrentListPage> {
     let page_size = checked_page_size_usize(
         page_size,
@@ -222,7 +225,11 @@ pub async fn load_name_current_list_page(
         "name_current list page_size is too large",
         "name_current list page_size exceeds SQL limit",
     )?;
-    let total_count = count_name_current_list(pool, filter).await?;
+    let total_count = if include_total_count {
+        Some(count_name_current_list(pool, filter).await?)
+    } else {
+        None
+    };
 
     let mut builder = QueryBuilder::<Postgres>::new("");
     push_filtered_name_current_cte(&mut builder, filter);

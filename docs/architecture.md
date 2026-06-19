@@ -57,7 +57,7 @@ Stable identity for a public name surface within a namespace, written as `<names
 Stable identity for the backing authority object — the anchor for permission lineage, control lineage, token lineage, and resolver-scoped permissions. Opaque UUID.
 
 - For ENSv2, `resource_id` maps to the upstream permissioned-registry EAC resource, not the current ERC-1155 token ID. The registry exposes `getResource(anyId)` and `getTokenId(anyId)`, emits `TokenResource(tokenId, resource)` when a label is linked, and emits `TokenRegenerated(oldTokenId, newTokenId)` when role changes burn and mint a replacement token while leaving the resource unchanged.[^v2-iperm-l34][^v2-iperm-l67][^v2-iperm-l72][^v2-events-l69][^v2-pr-l451]
-- For ENSv1, `resource_id` is the stable identity for the authority object: registry-only control, registrar-backed registration, or wrapper-backed control. The same `resource_id` persists across holder, controller, resolver, expiry, grace, fuse, and status changes; it rotates when authority moves to a different anchor (registry-only ↔ registrar ↔ wrapper, or full lapse + re-registration). If the prior anchor becomes authoritative again (e.g. unwrap back to the same lease), reuse the prior `resource_id`.
+- For ENSv1, `resource_id` is the stable identity for the authority object: registry-only control, registrar-backed registration, or wrapper-backed control. Registry-only authority is scoped to the full node/namehash, not just the leftmost labelhash, so subnames with the same label under different parents never share a registry-only `resource_id`. The same `resource_id` persists across holder, resolver, expiry, grace, fuse, status, and non-divergent controller changes; it rotates when authority moves to a different anchor (registry-only ↔ registrar ↔ wrapper, live registrar ↔ registry-owner divergence, or full lapse + re-registration). Exact prior-anchor reuse applies only when that prior anchor becomes authoritative again, including unwrap back to the same registrar lease and registry-side convergence back to the same live unreleased registrar lease. It does not imply that all registry owner / token holder convergence collapses history; post-release returns or different holders / controllers stay on distinct anchors.
 - For Basenames, `resource_id` anchors the Base-side authority object even when L1 compatibility transport is involved.[^bn-readme-l69][^bn-readme-l70][^bn-l1resolver-l13]
 
 ### `token_lineage_id`
@@ -83,7 +83,7 @@ Two layers separate public names from backing authority:
 
 Binding kinds: `declared_registry_path`, `linked_subregistry_path`, `resolver_alias_path`, `observed_wildcard_path`, `migration_rebind`, `observed_only`.
 
-ENSv1 authority moves (wrap, unwrap, re-registration) carry the identity change in `resource_id` and `token_lineage_id`; ordinary lifecycle stays `declared_registry_path`. A new `SurfaceBinding` row appears only when the bound `resource_id` changes — transfer and expiry within the same anchor do not.
+ENSv1 authority moves (wrap, unwrap, re-registration) carry the identity change in `resource_id` and `token_lineage_id`; ordinary lifecycle stays `declared_registry_path`. A new `SurfaceBinding` row appears only when the bound `resource_id` changes — transfer and expiry within the same anchor do not. Same-transaction registration setup remains deferred to the registration anchor; it does not define a registry-only `RegistrationGranted` pre-state contract.
 
 | Case | Anchor | `resource_id` | `token_lineage_id` |
 | --- | --- | --- | --- |
@@ -149,12 +149,12 @@ Family ownership is fixed:
 - `ens_v1_resolver_l1` owns the Mainnet PublicResolver and admitted ENS Labs PublicResolver-generation profiles. Generation admission is the gate for complete family coverage, resolver-overview support, latest-only behavior, authorization semantics, and event-to-call parity. Unadmitted resolvers stay `pending` or `unsupported`.[^v1-publicresolver-deploy][^v1-pres-l5][^v1-pres-l13][^v1-pres-l20][^v1-pres-l66][^v1-pres-l114]
 - ENS verified resolution belongs to `ens_execution` at the official Universal Resolver proxy `0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe`,[^ens-docs-univ] not to `ens_v1_registry_l1`. The pinned implementation artifact is recorded under `.refs/`.[^v1-ur-deploy][^v1-ursol-l8] (See [`upstream.md`](upstream.md) for the proxy-vs-implementation divergence.)
 - ENS reverse-claim intake belongs to `ens_v1_reverse_l1` at `0xa58E81fe9b61B5c3fE2AFD33CF304c454AbFc7Cb`.[^v1-revreg-deploy][^v1-revreg-l15][^v1-revreg-l19]
-- ENSv1 `.eth` registrar label intake belongs to `ens_v1_registrar_l1`. BaseRegistrar is the tokenized authority; legacy, wrapped, and current registrar-controller contracts are admitted within the same family for label-bearing registration and renewal observations only.[^subgraph-l145][^subgraph-l170][^subgraph-l226][^v1-ethrc-l116][^v1-ethrc-l133]
+- ENSv1 `.eth` registrar label intake belongs to `ens_v1_registrar_l1`. BaseRegistrar is the tokenized authority; legacy, wrapped, and current registrar-controller contracts are admitted within the same family for label-bearing registration and renewal observations only.[^subgraph-l145][^subgraph-l170][^subgraph-l226][^v1-ethrc-l116][^v1-ethrc-l133] Label preimage intake is shared storage support rather than a new authority source family: proof-checked on-chain preimage observations, retained name surfaces, and optional rainbow-table imports may resolve labelhashes for projection readability, but they do not create exact-name authority, ownership, resolver, record, or primary-name truth.
 - ENSv1 dynamic resolver discovery is required for declared record reads. Canonical nonzero `NewResolver(node, resolver)` from admitted registry emitters becomes a node-to-resolver binding update and a `ens_v1_resolver_l1` contract instance; zero-address closures release only the affected binding.[^v1-ens-l12][^v1-ensreg-l89][^v1-ensreg-l174] Generic resolver-local events (`AddrChanged`, `AddressChanged`, `TextChanged`, `VersionChanged`) feed observed selector/cache state while profile state stays pending.
 - `ENSRegistryOld` is admitted as migration-aware input under `ens_v1_registry_l1`. Old- and current-registry logs are not unioned by latest block: a current-registry `NewOwner` marks a node migrated; later old-registry updates for that node are suppressed except for the root resolver.[^subgraph-l15][^subgraph-l39][^subgraph-l44][^subgraph-ts-l134][^subgraph-ts-l230][^subgraph-ts-l238][^subgraph-ts-l246]
 - ENSv2 `sepolia-dev` admits four families: `ens_v2_root_l1` (`RootRegistry`), `ens_v2_registry_l1` (`ETHRegistry` plus discovered `UserRegistry`), `ens_v2_registrar_l1` (`ETHRegistrar`), `ens_v2_resolver_l1` (`PermissionedResolverImpl`).[^v2-deploy-root][^v2-deploy-ethreg][^v2-deploy-ethrc][^v2-deploy-pres][^v2-userreg-l15][^v2-ethrc-l30][^v2-ethrc-l173] Other `sepolia-dev` artifacts (`UniversalResolverV2`, `ReverseRegistry`, `DNSAliasResolver`, `WrapperRegistryImpl`, `LockedMigrationController`, `HCAFactory`, `StandardRentPriceOracle`, `MockUSDC`, `MockDAI`, `BatchRegistrar`) remain outside admission until a doc-first update.
 - ENSv2 exact-name profile support is only promoted in the `sepolia-dev` profile when `ens_v2_registrar_l1` declares `exact_name_profile = "supported"`. Other profiles or capability states stay unsupported or shadow.
-- Basenames mainnet authority splits across `basenames_base_registry` (`registry` at `0xb94704422c2a1e396835a571837aa5ae53285a95`), `basenames_base_registrar` (`registrar` at `0x03c4738ee98ae44591e1a4a4f3cab6641d95dd9a`), and `basenames_base_resolver` (`resolver` at `0xC6d566A56A1aFf6508b41f6c90ff131615583BCD`).[^bn-readme-l28][^bn-readme-l29][^bn-readme-l34][^bn-registry-l10][^bn-baseregistrar-l15][^bn-l2resolver-l22] `basenames_base_primary` (`reverse_registrar` at `0x79ea96012eea67a83431f1701b3dff7e37f9e282`) is claim-intake only.[^bn-readme-l33][^bn-revreg-l12][^bn-revreg-l150] `basenames_l1_compat` and `basenames_execution` both reference the L1 Resolver at `0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31` for transport and execution respectively.[^bn-readme-l22][^bn-l1resolver-l154][^bn-l1resolver-l173][^bn-l1resolver-l191]
+- Basenames mainnet authority splits across `basenames_base_registry` (`registry` at `0xb94704422c2a1e396835a571837aa5ae53285a95`), `basenames_base_registrar` (`registrar` at `0x03c4738ee98ae44591e1a4a4f3cab6641d95dd9a`, with `legacy_registrar_controller` at `0x4cCb0BB02FCABA27e82a56646E81d8c5bC4119a5` and `upgradeable_registrar_controller` proxy at `0xa7d2607c6BD39Ae9521e514026CBB078405Ab322` admitted for label-bearing registration and renewal observations), and `basenames_base_resolver` (`resolver` at `0xC6d566A56A1aFf6508b41f6c90ff131615583BCD`).[^bn-readme-l28][^bn-readme-l29][^bn-readme-l30][^bn-readme-l34][^bn-readme-l37][^bn-registry-l10][^bn-baseregistrar-l15][^bn-registrar-controller-l180][^bn-registrar-controller-l187][^bn-upgradeable-registrar-controller-l191][^bn-upgradeable-registrar-controller-l198][^bn-l2resolver-l22] `basenames_base_primary` uses the ENSv1 Base `L2ReverseRegistrar` at `0x0000000000D8e504002cC26E3Ec46D81971C1664` for declared primary-name value intake at Base coin type `2147492101`; the Basenames `ReverseRegistrar` at `0x79ea96012eea67a83431f1701b3dff7e37f9e282` is not the primary-name value authority.[^v1-l2rev-base-deploy][^v1-l2rev-base-args][^v1-l2rev-event][^v1-l2rev-nameforaddr][^bn-readme-l33][^bn-revreg-l12][^bn-revreg-l150] `basenames_l1_compat` and `basenames_execution` both reference the L1 Resolver at `0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31` for transport and execution respectively.[^bn-readme-l22][^bn-l1resolver-l154][^bn-l1resolver-l173][^bn-l1resolver-l191]
 - Basenames dynamic Base resolver discovery treats canonical nonzero `NewResolver` from admitted registry emitters as binding updates and `basenames_base_resolver` instances; resolver-local fact consumption requires `L2Resolver`-compatible profile admission.[^bn-registry-l19][^bn-registry-l132][^bn-registry-l223][^bn-l2resolver-l4][^bn-l2resolver-l16][^bn-l2resolver-l29][^bn-l2resolver-l182][^bn-l2resolver-l193][^bn-l2resolver-l209][^bn-l2resolver-l225]
 
 ## Source manifests
@@ -208,7 +208,7 @@ Stages per chain:
 7. projection updates
 8. execution-cache invalidation
 
-Postgres is the hot indexed and replay-focused store. Lineage anchors, selected target logs, replay-required call snapshots, code-hash observations, and compact payload-cache metadata are durable. Large block payloads, non-indexed transaction or receipt bodies, and non-audit raw-log staging rows are evictable cache once their replay contract is satisfied. Empty historical blocks retain only lineage anchors and audit metadata.
+Postgres is the hot indexed and replay-focused store. Lineage anchors, selected target logs and their same-transaction sibling replay context, replay-required call snapshots, code-hash observations, and compact payload-cache metadata are durable. Large block payloads, non-indexed transaction or receipt bodies, and non-audit raw-log staging rows are evictable cache once their replay contract is satisfied. Empty historical blocks retain only lineage anchors and audit metadata.
 
 Backfill enters as bounded persisted jobs with resumable range checkpoints and uses the same stages as live intake. Backfill checkpoint state is operational worker state — it does not promote canonical, safe, or finalized chain checkpoints.
 
@@ -236,13 +236,13 @@ Permissions and control are anchored to `resource_id`, never to surface text. Th
 
 Identity, preimage, discovery: `PreimageObserved`, `NameClassified`, `SurfaceBound`, `SurfaceUnbound`, `ContractDiscovered`, `MetadataChanged`, `SourceManifestUpdated`.
 
-Registration and authority: `RegistrationReserved`, `RegistrationGranted`, `RegistrationRenewed`, `RegistrationReleased`, `ExpiryChanged`, `AuthorityTransferred`, `AuthorityEpochChanged`, `MigrationApplied`, `CommitmentMade`, `PricingPolicyChanged`.
+Registration and authority: `RegistrationReserved`, `RegistrationGranted`, `RegistrarNameRegistered`, `RegistrationRenewed`, `RegistrationReleased`, `ExpiryChanged`, `AuthorityTransferred`, `AuthorityEpochChanged`, `MigrationApplied`, `PricingPolicyChanged`.
 
 Lineage and control: `TokenResourceLinked`, `TokenRegenerated`, `TokenControlTransferred`, `ResolutionEpochChanged`.
 
-Topology and resolution: `ResolverChanged`, `SubregistryChanged`, `ParentChanged`, `AliasChanged`, `WildcardCoverageChanged`, `RecordChanged`, `RecordDeleted`, `RecordVersionChanged`, `RecordInventoryObserved`.
+Topology and resolution: `ResolverChanged`, `SubregistryChanged`, `ParentChanged`, `AliasChanged`, `WildcardCoverageChanged`, `RecordChanged`, `RecordVersionChanged`, `RecordInventoryObserved`.
 
-Permissions: `PermissionChanged`, `RootPermissionChanged`, `DelegateRetainedAfterTransfer`, `PermissionScopeChanged`.
+Permissions: `PermissionChanged`, `RootPermissionChanged`, `PermissionScopeChanged`.
 
 Reverse and primary: `ReverseChanged`, `PrimaryNameClaimed`, `PrimaryNameVerified`, `PrimaryNameInvalidated`.
 
@@ -254,7 +254,15 @@ ENSv2 mappings:
 - `TokenRegenerated` ← upstream `TokenRegenerated(oldTokenId, newTokenId)`. Preserves `resource_id`, `token_lineage_id`, and active surface binding.[^v2-events-l69][^v2-pr-l451]
 - `SubregistryChanged` ← `SubregistryUpdated`; `ParentChanged` ← `ParentUpdated`.[^v2-events-l49][^v2-events-l75]
 - `AliasChanged` ← `PermissionedResolver.AliasChanged`; the alias path stores source and destination DNS-encoded names.[^v2-iperm-resolver-l14][^v2-pres-l230]
-- `PermissionChanged` and `RootPermissionChanged` ← upstream `EACRolesChanged(resource, account, oldRoleBitmap, newRoleBitmap)`. Root-resource permissions stay distinguishable because EAC root roles are checked separately and satisfy resource-level checks via root fallback.[^v2-eac-l19][^v2-eac-l176][^v2-eac-l181]
+- `PermissionChanged` and `RootPermissionChanged` ← upstream `EACRolesChanged(resource, account, oldRoleBitmap, newRoleBitmap)`. Root-resource permissions stay distinguishable because EAC root roles are checked separately and satisfy resource-level checks via root fallback; this taxonomy admission covers normalized-event emission and manifest watch admission, while current-state projection consumption is a separate projection contract.[^v2-eac-l19][^v2-eac-l176][^v2-eac-l181] Registry/root sources decode role bitmaps with the `RegistryRolesLib` vocabulary (`registrar`, `register_reserved`, `set_parent`, `unregister`, `renew`, `set_subregistry`, `set_resolver`, `upgrade`, `can_transfer_admin`, and `admin_` twins), while resolver sources decode with the resolver role vocabulary. Unknown bits are omitted from `effective_powers` rather than surfaced under invented names.[^v2-regroles-l6][^v2-regroles-l9][^v2-regroles-l14][^v2-regroles-l19][^v2-regroles-l24][^v2-regroles-l29][^v2-regroles-l34][^v2-regroles-l39][^v2-regroles-l45][^v2-regroles-l48][^v2-resroles-l7][^v2-resroles-l52]
+- `RegistrarNameRegistered` ← upstream `ETHRegistrar.NameRegistered`; it is registrar-local registration intent and links back to the registry resource when that registry resource has already been observed.[^v2-iethreg-l32]
+
+Taxonomy reconciliation decisions:
+
+- `RecordDeleted` is not a separate normalized kind for the currently admitted sources. Deletes are represented as `RecordChanged` payloads with deletion metadata, so consumers only need one record-change stream.
+- `CommitmentMade` is not admitted in the normalized taxonomy yet. Upstream ENSv2 `ETHRegistrar` emits `CommitmentMade(bytes32 commitment)`, but current manifests and adapters do not consume it, and no current projection depends on commitment history. (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRegistrar.sol:L19 @ ens_v2@554c309)
+- `DelegateRetainedAfterTransfer` is not admitted until a concrete source event and consumer projection are specified. Current permission transfer behavior is represented by `PermissionChanged`, `RootPermissionChanged`, and `PermissionScopeChanged`.
+- ENSv2 ERC-1155 `TransferSingle` and `TransferBatch` remain unsupported for this sepolia-dev taxonomy slice. Upstream registry token updates can emit those ERC-1155 events, but ownership-transfer normalization requires a manifest/admission update outside this taxonomy-only decision. (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L199 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L230 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L232 @ ens_v2@554c309)
 
 ENSv1 wrapper/resolver mappings: `PreimageObserved`, `SurfaceBound`, `SurfaceUnbound`, `AuthorityTransferred`, `ExpiryChanged`, `TokenControlTransferred`, `ResolverChanged`, `PermissionChanged`, `PermissionScopeChanged`, and `RecordChanged` come from admitted NameWrapper and PublicResolver events.[^v1-iname-l27][^v1-iname-l31][^v1-iname-l35][^v1-iname-l37][^v1-iname-l38][^v1-nw-l1022][^v1-nw-l1034][^v1-pres-l20][^v1-pres-l51][^v1-pres-l58] `PermissionScopeChanged` carries wrapper fuse changes that mask effective powers without inventing new subject grants.
 
@@ -333,7 +341,7 @@ Required indexes: by resource, by account, by resolver; permission history by re
 
 For ENS, declared claim precedence is reverse-only through `ens_v1_reverse_l1`.[^v1-revreg-deploy][^v1-revreg-l74][^v1-revreg-l83][^v1-revreg-l84] Persisted `claimed_primary_name.name` comes only from the exact requested `primary_names_current(address, coin_type, namespace)` row's declared normalized claim-identity source, including the projection-owned legacy reverse-resolver hydration exception documented for configured event-silent ENSv1 reverse resolvers. That exception covers admitted reverse tuples and current registry resolver edges whose node hash forward-confirms through `addr:60` on the ENS Universal Resolver to the recovered address at the same hash-pinned checkpoint; the forward check only recovers the address preimage for the reverse node and does not persist verified-primary state.[^v1-revreg-l137][^v1-registry-l137][^v1-nameresolver-l7][^v1-iaddrres-l11][^v1-iur-l44][^v1-iur-l52] The app default tuple (`namespace=ens`, `coin_type=60`) may use a route-local Ethereum Mainnet reverse RPC fallback when that persisted tuple is missing: build the `addr.reverse` node, read its ENS registry resolver, call resolver `name(bytes32)`, normalize the result, and publish provenance as `ens_reverse_rpc` without populating `primary_names_current`.[^v1-registry-deploy][^v1-revreg-l137][^v1-registry-l137][^v1-nameresolver-l7][^v1-nameresolver-l11][^v1-nameresolverimpl-l25] In `mode=verified|both`, that route-local fallback verifies the claimed name with `addr:60` through the ENS Universal Resolver proxy at provider `latest`; it returns verification status without persisting an execution trace.[^v1-ur-deploy][^v1-iur-l44][^v1-iur-l52] Outside exact-row hydration and that fallback, `claimed_primary_name.name` is never synthesized from manifest presence, resolver identity alone, or verified execution.
 
-For Basenames, declared primary-claim intake is `basenames_base_primary` (`reverse_registrar` at `0x79ea96012eea67a83431f1701b3dff7e37f9e282`).[^bn-readme-l33][^bn-revreg-l12][^bn-revreg-l150] It does not replace the Base registry/registrar/resolver families for declared truth on exact-name, address-name, or children reads. Verified primary names enter through `basenames_execution` against the L1 Resolver.[^bn-readme-l22][^bn-l1resolver-l13][^bn-revreg-l193]
+For Basenames, declared primary-name value intake is `basenames_base_primary` at the ENSv1 Base `L2ReverseRegistrar` (`0x0000000000D8e504002cC26E3Ec46D81971C1664`), using the `NameForAddrChanged(address,string)` event and Base coin type `2147492101`.[^v1-l2rev-base-deploy][^v1-l2rev-base-args][^v1-l2rev-event][^v1-l2rev-nameforaddr] It does not replace the Base registry/registrar/resolver families for declared truth on exact-name, address-name, or children reads, and it does not use the Basenames `ReverseRegistrar` as the primary-name value source. Verified primary names enter through `basenames_execution` against the L1 Resolver.[^bn-readme-l22][^bn-l1resolver-l13]
 
 Verified-primary cache identity is `request_type=verified_primary_name` with key `{namespace}:{normalized_address}:{coin_type}`. The matching `primary_names_current` row is the only claim-side lookup/invalidation anchor.
 
@@ -366,7 +374,7 @@ Additive expansion, not a separate route. Adds `role_summary` (one `subjects[*]`
 
 ### Name → children
 
-Default returns declared direct child surfaces. Optional buckets: linked-subregistry, alias-derived, observed wildcard. `subname_count` in the main name summary means declared direct children only.
+Default returns declared direct child nodes. ENSv1 registry edges whose parent surface is known remain children even when the child label is unknown; those rows use the bracketed labelhash placeholder rather than minting exact-name surfaces. Optional buckets: linked-subregistry, alias-derived, observed wildcard. `subname_count` in the main name summary means declared direct children only.
 
 ### Resource → permissions
 
@@ -430,12 +438,14 @@ Wildcard and offchain names cannot be assumed exhaustively enumerable; backfill 
 
 Metrics: chain lag, safe/finalized lag, reorg depth, adapter failure rate, manifest drift, proxy upgrade detection, execution latency, CCIP error rate, verification failure rate, coverage partial rate, replay duration, backfill capacity checks (Postgres size, free disk).
 
-Worker-owned tools (none expose public `v1` routes; none mutate truth):
+Worker-owned tools (none expose public `v1` routes; inspection tools are read-only):
 
 - `bigname-worker inspect canonicality --chain-id <id> --block-hash <hash>` — single-block lineage, canonicality state, parent hash, raw fact counts, normalized-event counts.
-- `bigname-worker inspect ...` — execution traces, manifest drift / proxy alerts, surface bindings, resolver topology, raw facts, manifest versions.
-- replay from checkpoint, backfill source range, rerun projections from normalized events, invalidate execution cache, diff declared vs verified.
-- finalized-head catch-up runs bounded idempotent chunks with capacity preflight (DB size, free disk, configured object-cache budget).
+- `bigname-worker inspect stored-lineage-range --chain-id <id> --from-block <n> --to-block <n>` — stored lineage rows in a bounded block range.
+- `bigname-worker inspect backfill-job --backfill-job-id <id>` — one persisted backfill job plus child ranges.
+- `bigname-worker inspect execution-trace --execution-trace-id <id>` — one persisted execution trace and its persisted steps.
+- `bigname-worker inspect manifest-drift --json` and `bigname-worker inspect watch-plan --json` — persisted manifest/proxy alert observations and runtime watch-plan state.
+- Current projection maintenance is shipped as point-or-full rebuilds for each current projection family, `replay all-current-projections`, execution-cache invalidation commands, and bounded finalized-head/backfill processing with capacity preflight. Range-scoped projection rebuild, historical rewind materialization, surface-binding inspection, resolver-topology inspection, raw-fact inspection beyond canonicality/stored-lineage views, manifest-version inspection, and declared-vs-verified diff tooling are deferred; operators should not treat them as available CLI contracts.
 
 Live manifest drift / proxy upgrade alerting is a worker-owned operational loop. It does not write `normalized_events`, mutate manifests, rewrite discovery, or expose a public route.
 
@@ -457,7 +467,7 @@ Live manifest drift / proxy upgrade alerting is a worker-owned operational loop.
 
 ## Implementation shape
 
-Rust modular monolith. PostgreSQL is the hot indexed/replay store. Hash-addressed object storage for execution artifacts and durable raw payloads. Workers handle ingestion, projection, replay, execution. The public `v1` API is read-only over projections and execution output. A small TypeScript conformance harness checks protocol and consumer-capability behavior.
+Rust modular monolith. PostgreSQL is the hot indexed/replay store for durable replay facts, projections, retained payload metadata, and execution artifacts. Workers handle ingestion, projection, replay, execution. The public `v1` API is read-only over projections and execution output. A standalone Rust conformance package checks protocol and consumer-capability behavior.
 
 Repository layout:
 
@@ -483,7 +493,7 @@ Validate at four layers: raw facts, normalized events, execution traces, public 
 
 - exact Postgres partitioning strategy
 - exact cache invalidation granularity for verified queries
-- which execution artifacts stay inline in Postgres vs object storage
+- whether any execution artifacts should move out of inline Postgres
 - exact raw-payload cache retention windows and which payload classes are durable
 - whether subscriptions ship in the first stable read milestone or after
 
@@ -496,8 +506,10 @@ Validate at four layers: raw facts, normalized events, execution traces, public 
 [^bn-readme-l22]: (upstream: .refs/basenames/README.md:L22 @ basenames@1809bbc)
 [^bn-readme-l28]: (upstream: .refs/basenames/README.md:L28 @ basenames@1809bbc)
 [^bn-readme-l29]: (upstream: .refs/basenames/README.md:L29 @ basenames@1809bbc)
+[^bn-readme-l30]: (upstream: .refs/basenames/README.md:L30 @ basenames@1809bbc)
 [^bn-readme-l33]: (upstream: .refs/basenames/README.md:L33 @ basenames@1809bbc)
 [^bn-readme-l34]: (upstream: .refs/basenames/README.md:L34 @ basenames@1809bbc)
+[^bn-readme-l37]: (upstream: .refs/basenames/README.md:L37 @ basenames@1809bbc)
 [^bn-readme-l69]: (upstream: .refs/basenames/README.md:L69 @ basenames@1809bbc)
 [^bn-readme-l70]: (upstream: .refs/basenames/README.md:L70 @ basenames@1809bbc)
 [^bn-readme-l71]: (upstream: .refs/basenames/README.md:L71 @ basenames@1809bbc)
@@ -512,6 +524,10 @@ Validate at four layers: raw facts, normalized events, execution traces, public 
 [^bn-registry-l132]: (upstream: .refs/basenames/src/L2/Registry.sol:L132 @ basenames@1809bbc)
 [^bn-registry-l223]: (upstream: .refs/basenames/src/L2/Registry.sol:L223 @ basenames@1809bbc)
 [^bn-baseregistrar-l15]: (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L15 @ basenames@1809bbc)
+[^bn-registrar-controller-l180]: (upstream: .refs/basenames/src/L2/RegistrarController.sol:L180 @ basenames@1809bbc)
+[^bn-registrar-controller-l187]: (upstream: .refs/basenames/src/L2/RegistrarController.sol:L187 @ basenames@1809bbc)
+[^bn-upgradeable-registrar-controller-l191]: (upstream: .refs/basenames/src/L2/UpgradeableRegistrarController.sol:L191 @ basenames@1809bbc)
+[^bn-upgradeable-registrar-controller-l198]: (upstream: .refs/basenames/src/L2/UpgradeableRegistrarController.sol:L198 @ basenames@1809bbc)
 [^bn-l2resolver-l4]: (upstream: .refs/basenames/src/L2/L2Resolver.sol:L4 @ basenames@1809bbc)
 [^bn-l2resolver-l16]: (upstream: .refs/basenames/src/L2/L2Resolver.sol:L16 @ basenames@1809bbc)
 [^bn-l2resolver-l22]: (upstream: .refs/basenames/src/L2/L2Resolver.sol:L22 @ basenames@1809bbc)
@@ -522,7 +538,12 @@ Validate at four layers: raw facts, normalized events, execution traces, public 
 [^bn-l2resolver-l225]: (upstream: .refs/basenames/src/L2/L2Resolver.sol:L225 @ basenames@1809bbc)
 [^bn-revreg-l12]: (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L12 @ basenames@1809bbc)
 [^bn-revreg-l150]: (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L150 @ basenames@1809bbc)
+[^bn-revreg-l155]: (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L155 @ basenames@1809bbc)
+[^bn-revreg-l156]: (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L156 @ basenames@1809bbc)
+[^bn-revreg-l157]: (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L157 @ basenames@1809bbc)
 [^bn-revreg-l193]: (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L193 @ basenames@1809bbc)
+[^bn-constants-l12]: (upstream: .refs/basenames/src/util/Constants.sol:L12 @ basenames@1809bbc)
+[^bn-constants-l13]: (upstream: .refs/basenames/src/util/Constants.sol:L13 @ basenames@1809bbc)
 
 [^v1-ens-l12]: (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L12 @ ens_v1@91c966f)
 [^v1-ensreg-l89]: (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L89 @ ens_v1@91c966f)
@@ -581,6 +602,10 @@ Validate at four layers: raw facts, normalized events, execution traces, public 
 [^v1-nameresolver-l7]: (upstream: .refs/ens_v1/contracts/resolvers/profiles/INameResolver.sol:L7 @ ens_v1@91c966f)
 [^v1-nameresolver-l11]: (upstream: .refs/ens_v1/contracts/resolvers/profiles/INameResolver.sol:L11 @ ens_v1@91c966f)
 [^v1-nameresolverimpl-l25]: (upstream: .refs/ens_v1/contracts/resolvers/profiles/NameResolver.sol:L25 @ ens_v1@91c966f)
+[^v1-l2rev-base-deploy]: (upstream: .refs/ens_v1/deployments/base/L2ReverseRegistrar.json:L2 @ ens_v1@91c966f)
+[^v1-l2rev-base-args]: (upstream: .refs/ens_v1/deployments/base/L2ReverseRegistrar.json:L391 @ ens_v1@91c966f)
+[^v1-l2rev-event]: (upstream: .refs/ens_v1/deployments/base/L2ReverseRegistrar.json:L98 @ ens_v1@91c966f)
+[^v1-l2rev-nameforaddr]: (upstream: .refs/ens_v1/deployments/base/L2ReverseRegistrar.json:L154 @ ens_v1@91c966f)
 
 [^v1-aur-l90]: (upstream: .refs/ens_v1/contracts/universalResolver/AbstractUniversalResolver.sol:L90 @ ens_v1@91c966f)
 [^v1-aur-l106]: (upstream: .refs/ens_v1/contracts/universalResolver/AbstractUniversalResolver.sol:L106 @ ens_v1@91c966f)
@@ -641,9 +666,23 @@ Validate at four layers: raw facts, normalized events, execution traces, public 
 [^v2-pr-l536]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L536 @ ens_v2@554c309)
 [^v2-pr-l545]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L545 @ ens_v2@554c309)
 
+[^v2-regroles-l6]: (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L6 @ ens_v2@554c309)
+[^v2-regroles-l9]: (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L9 @ ens_v2@554c309)
+[^v2-regroles-l14]: (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L14 @ ens_v2@554c309)
+[^v2-regroles-l19]: (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L19 @ ens_v2@554c309)
+[^v2-regroles-l24]: (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L24 @ ens_v2@554c309)
+[^v2-regroles-l29]: (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L29 @ ens_v2@554c309)
+[^v2-regroles-l34]: (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L34 @ ens_v2@554c309)
+[^v2-regroles-l39]: (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L39 @ ens_v2@554c309)
+[^v2-regroles-l45]: (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L45 @ ens_v2@554c309)
+[^v2-regroles-l48]: (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L48 @ ens_v2@554c309)
+
 [^v2-iperm-resolver-l14]: (upstream: .refs/ens_v2/contracts/src/resolver/interfaces/IPermissionedResolver.sol:L14 @ ens_v2@554c309)
 [^v2-iethreg-l32]: (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRegistrar.sol:L32 @ ens_v2@554c309)
 [^v2-iethreg-l53]: (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRegistrar.sol:L53 @ ens_v2@554c309)
+
+[^v2-resroles-l7]: (upstream: .refs/ens_v2/contracts/src/resolver/libraries/PermissionedResolverLib.sol:L7 @ ens_v2@554c309)
+[^v2-resroles-l52]: (upstream: .refs/ens_v2/contracts/src/resolver/libraries/PermissionedResolverLib.sol:L52 @ ens_v2@554c309)
 
 [^v2-pres-l38]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L38 @ ens_v2@554c309)
 [^v2-pres-l56]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L56 @ ens_v2@554c309)

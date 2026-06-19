@@ -127,6 +127,8 @@ struct RawLogPosition {
     block_hash: String,
     transaction_hash: String,
     log_index: i64,
+    #[serde(default)]
+    is_wrapper_name_wrapped: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -158,7 +160,9 @@ struct TokenTransferObservation {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct RegistryOwnerObservation {
+    parent_node: Option<String>,
     labelhash: String,
+    namehash: Option<String>,
     owner: String,
     reference: ObservationRef,
 }
@@ -233,6 +237,8 @@ struct WrapperTokenTransferObservation {
     from_address: String,
     to_address: String,
     value: i64,
+    #[serde(default)]
+    transfer_index: Option<i64>,
     reference: ObservationRef,
 }
 
@@ -414,6 +420,8 @@ struct BindingSegment {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct NameHistory {
     name: Option<NameMetadata>,
+    #[serde(default)]
+    namehash: String,
     labelhash: String,
     first_name_ref: Option<ObservationRef>,
     current_registration: Option<RegistrationLease>,

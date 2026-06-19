@@ -10,7 +10,7 @@ pub(super) async fn address_names(
     let dedupe_by = parse_address_names_dedupe_by(query.dedupe_by.as_deref())?;
     let include = parse_address_names_include(query.include.as_deref())?;
     let pagination = parse_pagination(query.cursor.as_deref(), query.page_size)?;
-    let normalized_address = normalize_address(&address);
+    let normalized_address = parse_evm_address(&address, "address")?;
 
     let mut filters = BTreeMap::new();
     if let Some(namespace) = namespace.as_ref() {
@@ -62,6 +62,11 @@ pub(super) async fn address_names(
             "failed to load current address-name collection for address {normalized_address}"
         ))
     })?;
+    let coverage_samples = storage_page
+        .entries
+        .iter()
+        .map(|entry| entry.coverage.clone())
+        .collect::<Vec<_>>();
     let page = page_response_from_storage_cursor(
         &pagination,
         &cursor_spec,
@@ -75,6 +80,7 @@ pub(super) async fn address_names(
             &state.pool,
             &storage_page.entries,
             &storage_page.summary,
+            &coverage_samples,
             page,
         )
         .await?
@@ -87,6 +93,7 @@ pub(super) async fn address_names(
         build_address_names_response_from_summary(
             &storage_page.summary,
             data,
+            &coverage_samples,
             AddressNamesResponseSupplement::default(),
             page,
         )
@@ -100,7 +107,7 @@ pub(super) async fn name_children(
     Query(query): Query<ChildrenQuery>,
     State(state): State<AppState>,
 ) -> ApiResult<Json<JsonValue>> {
-    ensure_public_namespace(&namespace)?;
+    let name = parse_exact_name_path_name(&namespace, &name)?;
 
     let include_counts = parse_children_query(&query)?;
     let view = parse_response_view(query.view.as_deref(), ResponseView::Compact)?;
@@ -195,7 +202,13 @@ pub(super) async fn name_children(
                 .iter()
                 .map(|row| row.child_logical_name_id.clone())
                 .collect::<Vec<_>>();
-            let child_name_rows =
+            let child_surface_lookup_ids = storage_page
+                .rows
+                .iter()
+                .filter(|row| include_counts || row.labelhash.is_none())
+                .map(|row| row.child_logical_name_id.clone())
+                .collect::<Vec<_>>();
+            let child_name_rows = async {
                 bigname_storage::load_name_current_by_logical_name_ids(
                     &state.pool,
                     &child_logical_name_ids,
@@ -213,11 +226,36 @@ pub(super) async fn name_children(
                     ApiError::internal_error(format!(
                         "failed to load compact child collection for name {namespace}/{name}"
                     ))
-                })?;
-            let child_summaries = if include_counts {
-                let summaries = bigname_storage::load_children_current_summaries(
+                })
+            };
+            let child_summaries = async {
+                if include_counts {
+                    bigname_storage::load_children_current_summaries(
+                        &state.pool,
+                        &child_logical_name_ids,
+                    )
+                    .await
+                    .map_err(|load_error| {
+                        error!(
+                            service = "api",
+                            namespace = %namespace,
+                            name = %name,
+                            logical_name_id = %logical_name_id,
+                            error = ?load_error,
+                            "failed to batch load children_current summaries for compact children route"
+                        );
+                        ApiError::internal_error(format!(
+                            "failed to load compact child counts for name {namespace}/{name}"
+                        ))
+                    })
+                } else {
+                    Ok(Vec::new())
+                }
+            };
+            let child_surfaces = async {
+                bigname_storage::load_name_surfaces_by_logical_name_ids(
                     &state.pool,
-                    &child_logical_name_ids,
+                    &child_surface_lookup_ids,
                 )
                 .await
                 .map_err(|load_error| {
@@ -227,49 +265,45 @@ pub(super) async fn name_children(
                         name = %name,
                         logical_name_id = %logical_name_id,
                         error = ?load_error,
-                        "failed to batch load children_current summaries for compact children route"
+                        "failed to batch load child name surfaces for compact children labelhash fallback"
                     );
                     ApiError::internal_error(format!(
-                        "failed to load compact child counts for name {namespace}/{name}"
+                        "failed to load compact child collection for name {namespace}/{name}"
                     ))
-                })?;
-
-                summaries
-                    .into_iter()
-                    .map(|summary| (summary.parent_logical_name_id.clone(), summary))
-                    .collect()
-            } else {
-                BTreeMap::new()
+                })
             };
-            let mut child_labelhashes = BTreeMap::new();
-            for child_logical_name_id in &child_logical_name_ids {
-                let child_surface = load_name_surface(&state.pool, child_logical_name_id)
-                    .await
-                    .map_err(|load_error| {
-                        error!(
-                            service = "api",
-                            namespace = %namespace,
-                            name = %name,
-                            logical_name_id = %logical_name_id,
-                            child_logical_name_id = %child_logical_name_id,
-                            error = ?load_error,
-                            "failed to load name surface for compact child row"
-                        );
-                        ApiError::internal_error(format!(
-                            "failed to load compact child collection for name {namespace}/{name}"
-                        ))
-                    })?;
-                child_labelhashes.insert(
-                    child_logical_name_id.clone(),
-                    child_surface.and_then(|surface| surface.labelhashes.into_iter().next()),
-                );
-            }
 
+            let (child_name_rows, child_summaries, child_surfaces) =
+                tokio::try_join!(child_name_rows, child_summaries, child_surfaces)?;
+            let child_summaries = child_summaries
+                .into_iter()
+                .map(|summary| (summary.parent_logical_name_id.clone(), summary))
+                .collect();
+            let mut child_surface_labelhashes = BTreeMap::new();
+            let mut child_surface_ids = BTreeSet::new();
+            for row in storage_page
+                .rows
+                .iter()
+                .filter(|row| include_counts || row.labelhash.is_none())
+            {
+                if let Some(surface) = child_surfaces.get(&row.child_logical_name_id) {
+                    child_surface_ids.insert(row.child_logical_name_id.clone());
+                    if row.labelhash.is_none() {
+                        child_surface_labelhashes.insert(
+                            row.child_logical_name_id.clone(),
+                            surface.labelhashes.first().cloned(),
+                        );
+                    }
+                } else if row.labelhash.is_none() {
+                    child_surface_labelhashes.insert(row.child_logical_name_id.clone(), None);
+                }
+            }
             Ok(Json(build_compact_children_response(
                 &storage_page.summary,
                 &storage_page.rows,
                 &surface.normalized_name,
-                &child_labelhashes,
+                &child_surface_ids,
+                &child_surface_labelhashes,
                 &child_name_rows,
                 &child_summaries,
                 include_counts,
@@ -361,6 +395,7 @@ async fn build_address_names_response_with_role_summary(
     pool: &PgPool,
     page_entries: &[AddressNameCurrentEntry],
     collection_summary: &bigname_storage::AddressNamesCurrentSummary,
+    coverage_samples: &[JsonValue],
     page: HistoryPageResponse,
 ) -> ApiResult<AddressNamesResponse> {
     let logical_name_ids = page_entries
@@ -456,6 +491,7 @@ async fn build_address_names_response_with_role_summary(
     Ok(build_address_names_response_from_summary(
         collection_summary,
         data,
+        coverage_samples,
         supplement,
         page,
     ))

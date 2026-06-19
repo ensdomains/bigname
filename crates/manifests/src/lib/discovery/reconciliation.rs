@@ -2,6 +2,8 @@
 mod bulk;
 #[path = "reconciliation/existing.rs"]
 mod existing;
+#[path = "reconciliation/support.rs"]
+mod support;
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
@@ -10,8 +12,8 @@ use sqlx::{PgPool, types::Uuid};
 
 use super::admission::DiscoveryAdmissionState;
 use super::loading::{
-    load_discovery_admission_state_with_excluded_source,
-    load_scoped_discovery_admission_state_with_excluded_source,
+    load_discovery_admission_state_with_excluded_source as load_admission_state,
+    load_scoped_discovery_admission_state_with_excluded_source as load_scoped_admission_state,
 };
 use super::provenance::{
     discovery_edge_propagates_role, discovery_edge_provenance, is_zero_address, observation_key,
@@ -34,24 +36,7 @@ use self::existing::{
     load_active_reconciled_discovery_descendant_edges, load_active_reconciled_discovery_edges,
     load_active_reconciled_discovery_edges_by_observation_keys,
 };
-
-fn observation_terminal_states(
-    observations: &[DiscoveryObservation],
-) -> Result<HashMap<String, ObservationTerminalState>> {
-    observations
-        .iter()
-        .map(|observation| {
-            Ok((
-                observation_key(observation)?,
-                ObservationTerminalState {
-                    chain: observation.chain.clone(),
-                    block_number: observation.active_from_block_number,
-                    block_hash: observation.active_from_block_hash.clone(),
-                },
-            ))
-        })
-        .collect()
-}
+use self::support::{lock_discovery_reconciliation, observation_terminal_states};
 
 fn cascade_deactivation_terminal_states(
     existing_edges: &[ExistingReconciledDiscoveryEdge],
@@ -125,17 +110,19 @@ pub async fn reconcile_discovery_observations(
     discovery_source: &str,
     observations: &[DiscoveryObservation],
 ) -> Result<DiscoveryReconciliationSummary> {
+    let mut transaction = pool
+        .begin()
+        .await
+        .context("failed to start discovery-edge reconciliation transaction")?;
+    lock_discovery_reconciliation(transaction.as_mut(), discovery_source).await?;
+
     let admission_state =
-        load_discovery_admission_state_with_excluded_source(pool, Some(discovery_source)).await?;
+        load_admission_state(transaction.as_mut(), Some(discovery_source)).await?;
     let direct_terminal_states_by_key = observation_terminal_states(observations)?;
     let observations_by_key = observations
         .iter()
         .map(|observation| Ok((observation_key(observation)?, observation)))
         .collect::<Result<HashMap<_, _>>>()?;
-    let mut transaction = pool
-        .begin()
-        .await
-        .context("failed to start discovery-edge reconciliation transaction")?;
 
     let (desired_edges, admitted_edges) = resolve_reconciled_discovery_edge_specs(
         &admission_state,
@@ -240,6 +227,13 @@ pub async fn reconcile_scoped_discovery_observations(
             admitted_edges: Vec::new(),
         });
     }
+
+    let mut transaction = pool
+        .begin()
+        .await
+        .context("failed to start scoped discovery-edge reconciliation transaction")?;
+    lock_discovery_reconciliation(transaction.as_mut(), discovery_source).await?;
+
     for observation in observations {
         ensure!(
             observation.discovery_source == discovery_source,
@@ -249,12 +243,9 @@ pub async fn reconcile_scoped_discovery_observations(
         );
     }
 
-    let admission_state = load_scoped_discovery_admission_state_with_excluded_source(
-        pool,
-        Some(discovery_source),
-        observations,
-    )
-    .await?;
+    let admission_state =
+        load_scoped_admission_state(transaction.as_mut(), Some(discovery_source), observations)
+            .await?;
     let direct_terminal_states_by_key = observation_terminal_states(observations)?;
     let observations_by_key = observations
         .iter()
@@ -266,10 +257,6 @@ pub async fn reconcile_scoped_discovery_observations(
         .collect::<Vec<_>>();
     touched_observation_keys.sort();
 
-    let mut transaction = pool
-        .begin()
-        .await
-        .context("failed to start scoped discovery-edge reconciliation transaction")?;
     let (desired_edges, admitted_edges) = resolve_reconciled_discovery_edge_specs(
         &admission_state,
         transaction.as_mut(),

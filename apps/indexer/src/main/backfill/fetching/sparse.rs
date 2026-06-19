@@ -1,12 +1,17 @@
-use std::{collections::BTreeMap, time::Instant};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    time::Instant,
+};
 
 use anyhow::{Context, Result, bail};
 use bigname_manifests::WatchedSourceSelectorPlan;
 use bigname_storage::{
-    RawCodeHash, RawLog, RawReceipt, RawTransaction, upsert_chain_lineage_blocks_without_snapshots,
-    upsert_raw_code_hashes, upsert_raw_logs_without_snapshots,
+    CanonicalityState, RawCodeHash, RawLog, RawPayloadCacheMetadataUpsert, normalize_evm_address,
+    normalize_evm_b256, upsert_chain_lineage_blocks_without_snapshots, upsert_raw_code_hashes,
+    upsert_raw_logs_without_snapshots, upsert_raw_payload_cache_metadata,
     upsert_raw_receipts_without_snapshots, upsert_raw_transactions_without_snapshots,
 };
+use sqlx::Row;
 use tracing::info;
 
 use crate::{
@@ -14,13 +19,17 @@ use crate::{
     reconciliation::{
         HeaderAuditMode, provider_block_to_lineage_with_header_audit_mode,
         provider_block_to_raw_block_with_header_audit_mode,
-        provider_code_observation_to_raw_code_hash, provider_log_to_raw_log,
+        provider_code_observation_to_raw_code_hash, provider_raw_payload_cache_metadata_to_upserts,
         provider_receipt_to_raw_receipt, provider_transaction_to_raw_transaction,
     },
 };
 
 use super::{
     BackfillCanonicalityEvidence, RawOnlySparseBackfillTiming,
+    materialization::{
+        fetch_full_payload_bundles_for_log_blocks, materialize_backfill_block_payloads,
+        missing_transaction_receipt_requests_from_raw_facts,
+    },
     selected_addresses_for_materialized_block, uses_topic_first_source_family_scan,
 };
 use crate::backfill::selection::SelectedTargetIntervalIndex;
@@ -29,7 +38,7 @@ use crate::backfill::{BackfillAdapterSyncMode, BackfillBlockRange, BackfillOutco
 #[path = "sparse/plan.rs"]
 mod plan;
 
-use plan::{SparseCodeObservationPlan, transaction_receipt_requests_from_raw_logs};
+use plan::SparseCodeObservationPlan;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct RawOnlySparseMaterialization {
@@ -210,7 +219,15 @@ pub(super) async fn run_hash_pinned_raw_only_sparse_backfill_range(
     let watched_chain = &source_plan.watched_chain_plan;
     ranged_logs_by_block.retain(|_, logs| !logs.is_empty());
     let topic_filtered_source_family = uses_topic_first_source_family_scan(source_plan);
-    let code_observation_block = None;
+    let mut full_payload_bundles_by_hash = fetch_full_payload_bundles_for_log_blocks(
+        provider,
+        &resolved_blocks,
+        &ranged_logs_by_block,
+        &watched_chain.chain,
+        range,
+        "hash-pinned raw-only sparse",
+    )
+    .await?;
 
     let headers_started = Instant::now();
     let blocks = provider
@@ -225,10 +242,11 @@ pub(super) async fn run_hash_pinned_raw_only_sparse_backfill_range(
     let headers_ms = headers_started.elapsed().as_millis();
 
     let materialize_started = Instant::now();
-    let mut transactions = Vec::<RawTransaction>::new();
-    let mut receipts = Vec::<RawReceipt>::new();
+    let mut transactions = Vec::new();
+    let mut receipts = Vec::new();
     let mut logs = Vec::<RawLog>::new();
     let mut code_hashes = Vec::<RawCodeHash>::new();
+    let mut cache_metadata = Vec::<RawPayloadCacheMetadataUpsert>::new();
     let mut raw_blocks_by_hash = BTreeMap::new();
     let mut lineage_blocks = Vec::with_capacity(resolved_blocks.len());
     let mut code_observation_plan = SparseCodeObservationPlan::default();
@@ -270,7 +288,7 @@ pub(super) async fn run_hash_pinned_raw_only_sparse_backfill_range(
             canonicality_state,
             header_audit_mode,
         ));
-        let block_logs = ranged_logs_by_block
+        let selection_logs = ranged_logs_by_block
             .remove(&resolved_block.block_number)
             .unwrap_or_default();
         let selected_addresses = selected_addresses_for_materialized_block(
@@ -278,19 +296,29 @@ pub(super) async fn run_hash_pinned_raw_only_sparse_backfill_range(
             selected_target_index,
             topic_filtered_source_family,
             resolved_block.block_number,
-            &block_logs,
+            &selection_logs,
         );
-        logs.extend(
-            block_logs
-                .iter()
-                .filter(|log| selected_addresses.contains(&log.address.to_ascii_lowercase()))
-                .map(|log| provider_log_to_raw_log(&watched_chain.chain, &raw_block, log))
-                .collect::<Result<Vec<_>>>()?,
-        );
+        if let Some(full_payload_bundle) = full_payload_bundles_by_hash.remove(&block.block_hash) {
+            cache_metadata.extend(provider_raw_payload_cache_metadata_to_upserts(
+                &watched_chain.chain,
+                &raw_block,
+                &full_payload_bundle.raw_payloads,
+            ));
+            let materialized_payloads = materialize_backfill_block_payloads(
+                &watched_chain.chain,
+                &raw_block,
+                &selection_logs,
+                &full_payload_bundle.logs,
+                &full_payload_bundle.transactions,
+                &full_payload_bundle.receipts,
+                &selected_addresses,
+            )?;
+            transactions.extend(materialized_payloads.transactions);
+            receipts.extend(materialized_payloads.receipts);
+            logs.extend(materialized_payloads.logs);
+        }
 
-        if Some(resolved_block.block_number) == code_observation_block
-            && !selected_addresses.is_empty()
-        {
+        if !selected_addresses.is_empty() {
             code_observation_plan.record(&raw_block, &selected_addresses);
         }
 
@@ -299,9 +327,22 @@ pub(super) async fn run_hash_pinned_raw_only_sparse_backfill_range(
     if !ranged_logs_by_block.is_empty() {
         bail!("provider returned range logs for unprocessed backfill blocks");
     }
+    if !full_payload_bundles_by_hash.is_empty() {
+        bail!("provider returned full payloads for unprocessed sparse backfill blocks");
+    }
     let materialize_ms = materialize_started.elapsed().as_millis();
 
-    let transaction_receipt_requests = transaction_receipt_requests_from_raw_logs(&logs);
+    let stored_code_hash_observations = load_stored_sparse_code_observation_pairs(
+        pool,
+        &watched_chain.chain,
+        &code_observation_plan.block_hashes(),
+        &code_observation_plan.contract_addresses(),
+    )
+    .await?;
+    code_observation_plan.retain_missing_stored_observations(&stored_code_hash_observations);
+
+    let transaction_receipt_requests =
+        missing_transaction_receipt_requests_from_raw_facts(&logs, &transactions, &receipts);
     let transaction_receipts_started = Instant::now();
     let transaction_receipt_pairs = provider
         .fetch_transaction_receipt_pairs_by_hashes(&transaction_receipt_requests)
@@ -337,15 +378,20 @@ pub(super) async fn run_hash_pinned_raw_only_sparse_backfill_range(
     let transaction_materialize_ms = transaction_materialize_started.elapsed().as_millis();
 
     let code_started = Instant::now();
-    let code_observation_batches = provider
-        .fetch_code_observations_at_block_hashes(&code_observation_plan.requests())
-        .await
-        .with_context(|| {
-            format!(
-                "failed to fetch hash-pinned code observation batch for chain {} range {}..={}",
-                watched_chain.chain, range.from_block, range.to_block
-            )
-        })?;
+    let code_observation_requests = code_observation_plan.requests();
+    let code_observation_batches = if code_observation_requests.is_empty() {
+        Vec::new()
+    } else {
+        provider
+            .fetch_code_observations_at_block_hashes(&code_observation_requests)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to fetch hash-pinned code observation batch for chain {} range {}..={}",
+                    watched_chain.chain, range.from_block, range.to_block
+                )
+            })?
+    };
     let code_fetch_ms = code_started.elapsed().as_millis();
     let code_materialize_started = Instant::now();
     for batch in code_observation_batches {
@@ -374,6 +420,9 @@ pub(super) async fn run_hash_pinned_raw_only_sparse_backfill_range(
     let header_anchor_upsert_started = Instant::now();
     upsert_chain_lineage_blocks_without_snapshots(pool, &lineage_blocks).await?;
     let header_anchor_upsert_ms = header_anchor_upsert_started.elapsed().as_millis();
+    let cache_metadata_upsert_started = Instant::now();
+    upsert_raw_payload_cache_metadata(pool, &cache_metadata).await?;
+    let cache_metadata_upsert_ms = cache_metadata_upsert_started.elapsed().as_millis();
     let transactions_upsert_started = Instant::now();
     upsert_raw_transactions_without_snapshots(pool, &transactions).await?;
     let transactions_upsert_ms = transactions_upsert_started.elapsed().as_millis();
@@ -417,6 +466,7 @@ pub(super) async fn run_hash_pinned_raw_only_sparse_backfill_range(
         code_fetch_ms,
         code_materialize_ms,
         header_anchor_upsert_ms,
+        cache_metadata_upsert_ms,
         transactions_upsert_ms,
         receipts_upsert_ms,
         logs_upsert_ms,
@@ -452,6 +502,72 @@ pub(super) async fn run_hash_pinned_raw_only_sparse_backfill_range(
     );
 
     Ok(outcome)
+}
+
+async fn load_stored_sparse_code_observation_pairs(
+    pool: &sqlx::PgPool,
+    chain_id: &str,
+    block_hashes: &[String],
+    contract_addresses: &[String],
+) -> Result<BTreeMap<(String, String), CanonicalityState>> {
+    if block_hashes.is_empty() || contract_addresses.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let block_hashes = block_hashes
+        .iter()
+        .map(|block_hash| normalize_evm_b256(block_hash))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let contract_addresses = contract_addresses
+        .iter()
+        .map(|address| normalize_evm_address(address))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            block_hash,
+            contract_address,
+            canonicality_state::TEXT AS canonicality_state
+        FROM raw_code_hashes
+        WHERE chain_id = $1
+          AND block_hash = ANY($2::TEXT[])
+          AND contract_address = ANY($3::TEXT[])
+        "#,
+    )
+    .bind(chain_id)
+    .bind(&block_hashes)
+    .bind(&contract_addresses)
+    .fetch_all(pool)
+    .await
+    .with_context(|| {
+        format!(
+            "failed to load stored sparse code observations for chain {chain_id} across {} hashes and {} contracts",
+            block_hashes.len(),
+            contract_addresses.len()
+        )
+    })?;
+
+    rows.into_iter()
+        .map(|row| {
+            let block_hash = row
+                .try_get::<String, _>("block_hash")
+                .context("missing block_hash from stored sparse code observation row")?;
+            let contract_address = row
+                .try_get::<String, _>("contract_address")
+                .context("missing contract_address from stored sparse code observation row")?;
+            let canonicality_state = row
+                .try_get::<String, _>("canonicality_state")
+                .context("missing canonicality_state from stored sparse code observation row")?;
+            Ok((
+                (block_hash, contract_address),
+                CanonicalityState::parse(&canonicality_state)?,
+            ))
+        })
+        .collect()
 }
 
 #[cfg(test)]
