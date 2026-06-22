@@ -107,7 +107,10 @@ fn entry_value_string(value: &Value) -> Option<String> {
     if let Some(text) = value.as_str() {
         return Some(text.to_owned());
     }
-    value.get("bytes").and_then(Value::as_str).map(str::to_owned)
+    value
+        .get("bytes")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
 }
 
 fn json_items(value: &Value) -> impl Iterator<Item = &Value> {

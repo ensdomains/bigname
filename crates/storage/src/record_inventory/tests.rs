@@ -459,11 +459,8 @@ async fn load_record_inventory_current_batch_aligns_hits_misses_and_fallback() -
         "0xbatchbob",
         4,
     );
-    upsert_record_inventory_current_rows(
-        database.pool(),
-        &[alice_row.clone(), bob_row.clone()],
-    )
-    .await?;
+    upsert_record_inventory_current_rows(database.pool(), &[alice_row.clone(), bob_row.clone()])
+        .await?;
 
     // carol has a seeded resource but no inventory row; its boundary carries an event pointer, so
     // the read reports a clean miss without attempting the anchor fallback.
