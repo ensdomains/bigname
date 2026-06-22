@@ -880,6 +880,57 @@ async fn graphql_domains_op_offset_paginates_owner_in() -> Result<()> {
 }
 
 #[tokio::test]
+async fn graphql_empty_owner_in_matches_nothing() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_graphql_dashboard_fixture(&database).await?;
+
+    // A non-empty owner_in returns the owner's names...
+    let populated = post_graphql(
+        database.app_state(),
+        r#"query Domains($where: DomainFilter!) { domains(where: $where) { id } }"#,
+        json!({ "where": { "owner_in": [GRAPHQL_OWNER] } }),
+    )
+    .await?;
+    assert!(
+        !populated["data"]["domains"]
+            .as_array()
+            .expect("domains array")
+            .is_empty(),
+        "a non-empty owner_in must return the owner's names"
+    );
+
+    // ...but an EMPTY owner_in matches NOTHING (canonical subgraph `_in` semantics) rather than
+    // silently widening to the whole namespace. Both the list and the connection count must be empty.
+    let empty_list = post_graphql(
+        database.app_state(),
+        r#"query Domains($where: DomainFilter!) { domains(where: $where) { id } }"#,
+        json!({ "where": { "owner_in": [] } }),
+    )
+    .await?;
+    assert_eq!(
+        empty_list["data"]["domains"],
+        json!([]),
+        "empty owner_in must match nothing"
+    );
+
+    let empty_count = post_graphql(
+        database.app_state(),
+        r#"query DomainConnection($where: DomainFilter!) {
+            domainConnection(first: 0, where: $where) { totalCount }
+        }"#,
+        json!({ "where": { "owner_in": [] } }),
+    )
+    .await?;
+    assert_eq!(
+        empty_count["data"]["domainConnection"]["totalCount"],
+        json!(0),
+        "empty owner_in must count nothing"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn graphql_connection_ops_return_total_counts() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_graphql_dashboard_fixture(&database).await?;

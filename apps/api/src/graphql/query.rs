@@ -159,8 +159,11 @@ fn domain_filter_to_storage(filter: Option<DomainFilter>) -> NameCurrentListFilt
 }
 
 /// Build a storage address-membership filter from a single address and/or an address list, under a
-/// fixed relation. A non-empty list takes precedence (subgraph `owner_in`/`registrant_in`);
-/// addresses are lowercased to match the stored `address_names_current` convention.
+/// fixed relation. A *provided* list takes precedence (subgraph `owner_in`/`registrant_in`) and is
+/// honoured exactly — including an empty list, which matches NOTHING (`anc.address = ANY('{}')`),
+/// per canonical subgraph `_in` semantics. Only a *missing* list (`None`) falls back to the scalar
+/// `owner`/`registrant`. Addresses are lowercased to match the stored `address_names_current`
+/// convention.
 fn address_membership(
     single: Option<String>,
     many: Option<Vec<String>>,
@@ -168,15 +171,17 @@ fn address_membership(
 ) -> Option<NameCurrentAddressFilter> {
     let relation = NameCurrentAddressRelationFilter::Relation(relation);
     match many {
-        Some(many) if !many.is_empty() => {
+        Some(many) => {
             let many: Vec<String> = many.into_iter().map(|a| a.to_lowercase()).collect();
             Some(NameCurrentAddressFilter {
-                address: many[0].clone(),
+                // `address` is unused when `addresses` is set (the CTE binds `= ANY($addresses)`);
+                // default it for the empty-list case where there is no first element.
+                address: many.first().cloned().unwrap_or_default(),
                 relation,
                 addresses: Some(many),
             })
         }
-        _ => single.map(|address| NameCurrentAddressFilter {
+        None => single.map(|address| NameCurrentAddressFilter {
             address: address.to_lowercase(),
             relation,
             addresses: None,
