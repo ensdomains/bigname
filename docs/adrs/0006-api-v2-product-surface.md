@@ -168,7 +168,7 @@ Tier 2 — product reads:
 | --- | --- |
 | `GET /v2/names/{name}` | Name profile: the flat record shape plus registration summary. Replaces `/v1/names/{ns}/{name}` + `/v1/profiles/names/{name}`. |
 | `GET /v2/names/{name}/records` | Resolver records. `?source=indexed\|verified\|auto` (`auto` keeps `v1`'s replay-safe-cache-with-verified-fallback policy), `?keys=` selector filter. `?include=inventory` adds the known selector space and unset keys (the record-editing capability) in product vocabulary; deep inventory internals stay on diagnostics. |
-| `GET /v2/names/{name}/subnames` | Direct subnames. `?include=counts`. Replaces `children`. |
+| `GET /v2/names/{name}/subnames` | Direct subnames. `?include=counts`. Replaces `children`. Lists children from the latest projection; as-of child enumeration is deferred to a storage follow-up. |
 | `GET /v2/names/{name}/history` | Name history. `?scope=name\|registration\|both`. |
 | `GET /v2/permissions` | Permission rows by `?name=`, `?registration_id=`, or `?address=` (at least one required; combinable), including registrations that are no longer a name's current one. `?include=lineage` adds per-row grant/revocation lineage and inheritance/transfer behavior. A flat filterable collection in the same style as `/v2/events`. Replaces `/v1/resources/{id}/permissions`, `/v1/roles`, `/v1/names/.../roles`, `/v1/resources/lookup`. |
 | `GET /v2/addresses/{address}/names` | Names related to an address. `?relation=` set filter, `?q=` text filter, `?sort=name\|expires_at\|registered_at`, `?dedupe=name\|registration`, `?include=role_summary` — keeps the `v1` dashboard combination of address relation + text filter + sort. |

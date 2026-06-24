@@ -177,10 +177,19 @@ Field ownership:
 - Purpose: direct subnames.
 - Request parameters: path `name`; query `namespace`, `at`, `finality`,
   `include=counts`, `cursor`, `page_size`.
-- Response shape: `data` is an array of record-shaped subname rows in
-  dictionary vocabulary. `include=counts` adds `subname_count` where
-  supported.
-- Pagination behavior: standard collection pagination.
+- Response shape: `data` is an array of dedicated subname rows in dictionary
+  vocabulary: `name`, `display_name`, `namespace`, `namehash`, `labelhash`,
+  `owner`, `registrant`, `registration_status`, `registered_at`,
+  `created_at`, and `expires_at`. Resolver records are not included here;
+  use `GET /v2/names/{name}/records` for `resolver`, `addresses`,
+  `text_records`, and `content_hash`.
+  `include=counts` adds `subname_count`, the row's direct subname count.
+- Pagination behavior: standard collection pagination by
+  `display_name` ascending.
+- Snapshot behavior: `at` and `finality` are accepted and used to resolve the
+  parent name and `meta.as_of`. The subname list itself reads the latest
+  `children_current` projection; true as-of child enumeration is deferred to a
+  storage follow-up.
 - Status semantics: no direct subnames returns `200` with empty `data`.
   Missing parent names return `404 not_found`.
 - Replaces (v1): `GET /v1/names/{namespace}/{name}/children`.

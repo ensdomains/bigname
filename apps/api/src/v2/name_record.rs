@@ -44,17 +44,7 @@ pub(crate) fn build_name_record(
     chain_id: Option<u64>,
     status: Status,
 ) -> NameRecord {
-    let registration = object_field(&row.declared_summary, "registration");
-
-    let owner = json_address_at_paths(
-        &row.declared_summary,
-        &[&["control", "owner"], &["control", "registry_owner"]],
-    );
-    let registrant = json_address_at_paths(
-        &row.declared_summary,
-        &[&["registration", "registrant"], &["control", "registrant"]],
-    );
-
+    let registration = name_registration_fields(Some(row), &row.namespace);
     let addresses = record_addresses(record_inventory);
     let text_records = record_text_records(record_inventory);
     let content_hash = record_content_hash(record_inventory);
@@ -67,34 +57,13 @@ pub(crate) fn build_name_record(
         // manager/controller source; keep these null until projection enrichment
         // adds canonical fields.
         token_id: None,
-        owner: owner.clone(),
+        owner: registration.owner.clone(),
         manager: None,
-        registrant,
-        registered_at: json_timestamp_at_paths(
-            &row.declared_summary,
-            &[&["registration", "registered_at"]],
-        ),
-        created_at: json_timestamp_at_paths(
-            &row.declared_summary,
-            &[&["registration", "created_at"]],
-        ),
-        expires_at: json_timestamp_at_paths(
-            &row.declared_summary,
-            &[
-                &["registration", "expires_at"],
-                &["registration", "expiry"],
-                &["control", "expires_at"],
-                &["control", "expiry"],
-            ],
-        ),
-        registration_status: classify_registration_status(
-            &row.namespace,
-            registration,
-            owner.as_deref(),
-            row.surface_binding_id.is_some()
-                || row.resource_id.is_some()
-                || row.binding_kind.is_some(),
-        ),
+        registrant: registration.registrant,
+        registered_at: registration.registered_at,
+        created_at: registration.created_at,
+        expires_at: registration.expires_at,
+        registration_status: registration.registration_status,
         name: row.normalized_name.clone(),
         display_name: row.canonical_display_name.clone(),
         namespace: row.namespace.clone(),
@@ -117,6 +86,91 @@ pub(crate) fn build_name_record(
         status,
         unsupported_fields,
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct NameRegistrationFields {
+    pub(super) owner: Option<String>,
+    pub(super) registrant: Option<String>,
+    pub(super) registered_at: Option<String>,
+    pub(super) created_at: Option<String>,
+    pub(super) expires_at: Option<String>,
+    pub(super) registration_status: RegistrationStatus,
+}
+
+pub(super) fn name_registration_fields(
+    row: Option<&NameCurrentRow>,
+    namespace: &str,
+) -> NameRegistrationFields {
+    let Some(row) = row else {
+        return NameRegistrationFields {
+            owner: None,
+            registrant: None,
+            registered_at: None,
+            created_at: None,
+            expires_at: None,
+            registration_status: classify_registration_status(namespace, None, None, false),
+        };
+    };
+
+    let registration = declared_registration(&row.declared_summary);
+    let owner = declared_owner(&row.declared_summary);
+
+    NameRegistrationFields {
+        registrant: declared_registrant(&row.declared_summary),
+        registered_at: declared_registered_at(&row.declared_summary),
+        created_at: declared_created_at(&row.declared_summary),
+        expires_at: declared_expires_at(&row.declared_summary),
+        registration_status: classify_registration_status(
+            &row.namespace,
+            registration,
+            owner.as_deref(),
+            has_binding(row),
+        ),
+        owner,
+    }
+}
+
+pub(super) fn declared_registration(summary: &Value) -> Option<&Value> {
+    object_field(summary, "registration")
+}
+
+pub(super) fn declared_owner(summary: &Value) -> Option<String> {
+    json_address_at_paths(
+        summary,
+        &[&["control", "owner"], &["control", "registry_owner"]],
+    )
+}
+
+pub(super) fn declared_registrant(summary: &Value) -> Option<String> {
+    json_address_at_paths(
+        summary,
+        &[&["registration", "registrant"], &["control", "registrant"]],
+    )
+}
+
+pub(super) fn declared_registered_at(summary: &Value) -> Option<String> {
+    json_timestamp_at_paths(summary, &[&["registration", "registered_at"]])
+}
+
+pub(super) fn declared_created_at(summary: &Value) -> Option<String> {
+    json_timestamp_at_paths(summary, &[&["registration", "created_at"]])
+}
+
+pub(super) fn declared_expires_at(summary: &Value) -> Option<String> {
+    json_timestamp_at_paths(
+        summary,
+        &[
+            &["registration", "expires_at"],
+            &["registration", "expiry"],
+            &["control", "expires_at"],
+            &["control", "expiry"],
+        ],
+    )
+}
+
+fn has_binding(row: &NameCurrentRow) -> bool {
+    row.surface_binding_id.is_some() || row.resource_id.is_some() || row.binding_kind.is_some()
 }
 
 pub(crate) fn classify_registration_status(
