@@ -17,11 +17,12 @@ use crate::{
 };
 
 use super::{
-    Envelope, MAX_PAGE_SIZE, Meta, NameRecord, NameRecords, QueryParams, RequestSource, Source,
-    Status, V2Error, V2Result, VerifiedRecordLookup, as_of_meta, build_auto_name_records,
-    build_indexed_name_records, build_name_record, build_verified_name_records,
-    default_requested_records, indexed_records_requiring_verified_fallback, resolve_v2_snapshot,
-    validate_product_record,
+    Envelope, MAX_PAGE_SIZE, Meta, NameRecord, NameRecords, Page, QueryParams, RequestSource,
+    Source, Status, Subname, V2Error, V2Result, VerifiedRecordLookup, as_of_meta,
+    build_auto_name_records, build_indexed_name_records, build_name_record, build_subname,
+    build_verified_name_records, decode, default_requested_records, encode, encode_at_token,
+    indexed_records_requiring_verified_fallback, resolve_v2_snapshot, subname_cursor_payload,
+    subname_storage_cursor, validate_product_record,
 };
 
 const MAX_RECORD_KEYS: usize = MAX_PAGE_SIZE as usize;
@@ -32,7 +33,7 @@ pub(super) fn router() -> Router<AppState> {
         .route("/v2/status", get(not_implemented))
         .route("/v2/names/{name}", get(get_name_record))
         .route("/v2/names/{name}/records", get(get_name_records))
-        .route("/v2/names/{name}/subnames", get(not_implemented))
+        .route("/v2/names/{name}/subnames", get(get_subnames))
         .route("/v2/names/{name}/history", get(not_implemented))
         .route("/v2/permissions", get(not_implemented))
         .route("/v2/addresses/{address}/names", get(not_implemented))
@@ -65,6 +66,130 @@ pub(super) fn router() -> Router<AppState> {
 
 async fn not_implemented() -> StatusCode {
     StatusCode::NOT_IMPLEMENTED
+}
+
+async fn get_subnames(
+    Path(input_name): Path<String>,
+    params: QueryParams,
+    State(state): State<AppState>,
+) -> V2Result<Json<Envelope<Vec<Subname>>>> {
+    let normalized = normalize_inferred_route_name(&input_name)
+        .map_err(|error| V2Error::invalid_input(error.message))?;
+    let namespace = params
+        .namespace
+        .clone()
+        .unwrap_or_else(|| normalized.namespace.to_owned());
+    let include_counts = subnames_include_counts(&params.include)?;
+
+    let scope = v2_exact_name_snapshot_scope(&state, &namespace).await?;
+    let selected_snapshot =
+        resolve_v2_snapshot(&state.pool, &scope, params.at.as_ref(), params.finality).await?;
+    let parent = load_name_current_for_selected_snapshot(
+        &state.pool,
+        &namespace,
+        &normalized.normalized_name,
+        &selected_snapshot,
+    )
+    .await
+    .map_err(|error| {
+        api_error_to_v2(map_internal_api_error(
+            error,
+            format!(
+                "failed to load subnames for {}/{}",
+                namespace, normalized.normalized_name
+            ),
+        ))
+    })?;
+
+    let snapshot_token = encode_at_token(&selected_snapshot);
+    let storage_cursor = params
+        .cursor
+        .as_deref()
+        .map(|cursor| {
+            let payload = decode(cursor)?;
+            subname_storage_cursor(&payload, &namespace, &snapshot_token)
+        })
+        .transpose()?;
+
+    let storage_page = bigname_storage::load_children_current_page(
+        &state.pool,
+        &parent.logical_name_id,
+        storage_cursor.as_ref(),
+        params.page_size,
+    )
+    .await
+    .map_err(|_| {
+        V2Error::internal_error(format!(
+            "failed to load subnames for {}/{}",
+            namespace, normalized.normalized_name
+        ))
+    })?;
+
+    let child_logical_name_ids = storage_page
+        .rows
+        .iter()
+        .map(|row| row.child_logical_name_id.clone())
+        .collect::<Vec<_>>();
+    let child_name_rows = bigname_storage::load_name_current_by_logical_name_ids(
+        &state.pool,
+        &child_logical_name_ids,
+    )
+    .await
+    .map_err(|_| {
+        V2Error::internal_error(format!(
+            "failed to load subname registration summaries for {}/{}",
+            namespace, normalized.normalized_name
+        ))
+    })?;
+    let child_summaries = if include_counts {
+        bigname_storage::load_children_current_summaries(&state.pool, &child_logical_name_ids)
+            .await
+            .map_err(|_| {
+                V2Error::internal_error(format!(
+                    "failed to load subname counts for {}/{}",
+                    namespace, normalized.normalized_name
+                ))
+            })?
+            .into_iter()
+            .map(|summary| (summary.parent_logical_name_id.clone(), summary))
+            .collect()
+    } else {
+        std::collections::BTreeMap::new()
+    };
+
+    let next_cursor = storage_page
+        .next_cursor
+        .as_ref()
+        .map(|cursor| encode(&subname_cursor_payload(cursor, &namespace, &snapshot_token)));
+    let has_more = next_cursor.is_some();
+    let data = storage_page
+        .rows
+        .iter()
+        .map(|row| {
+            build_subname(
+                row,
+                child_name_rows.get(&row.child_logical_name_id),
+                child_summaries.get(&row.child_logical_name_id),
+                include_counts,
+            )
+        })
+        .collect();
+    let meta = Meta {
+        as_of: Some(as_of_meta(&selected_snapshot)?),
+        ..Meta::default()
+    };
+
+    Ok(Json(Envelope {
+        data,
+        page: Some(Page {
+            cursor: params.cursor.clone(),
+            next_cursor,
+            page_size: params.page_size,
+            total_count: None,
+            has_more,
+        }),
+        meta,
+    }))
 }
 
 async fn get_name_records(
@@ -339,6 +464,17 @@ fn records_include_inventory(include: &[String]) -> V2Result<bool> {
         }
     }
     Ok(include_inventory)
+}
+
+fn subnames_include_counts(include: &[String]) -> V2Result<bool> {
+    let mut include_counts = false;
+    for value in include {
+        match value.as_str() {
+            "counts" => include_counts = true,
+            _ => return Err(V2Error::invalid_input("include must contain only counts")),
+        }
+    }
+    Ok(include_counts)
 }
 
 fn mark_unserved_verified_fields(record: &mut NameRecord) {

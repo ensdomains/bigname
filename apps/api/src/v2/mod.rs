@@ -10,6 +10,7 @@ mod name_records_inventory;
 mod params;
 mod router;
 mod snapshots;
+mod subnames;
 mod vocab;
 
 pub(crate) use chains::{numeric_to_slug, slug_to_numeric};
@@ -29,6 +30,7 @@ pub(crate) use params::{
 pub(crate) use snapshots::{
     as_of_meta, consistency_for_finality, decode_at_token, encode_at_token, resolve_v2_snapshot,
 };
+pub(crate) use subnames::{Subname, build_subname, subname_cursor_payload, subname_storage_cursor};
 pub(crate) use vocab::{
     Completeness, Finality, RegistrationStatus, Relation, Resolver, Source, Status,
 };
