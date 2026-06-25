@@ -6,7 +6,7 @@ use serde::Deserialize;
 
 use super::{
     error::{V2Error, V2Result},
-    vocab::Finality,
+    vocab::{Finality, HistoryScope},
 };
 
 pub(crate) const DEFAULT_PAGE_SIZE: u64 = 50;
@@ -20,6 +20,7 @@ pub(crate) struct RawQueryParams {
     pub(crate) keys: Option<String>,
     pub(crate) namespace: Option<String>,
     pub(crate) include: Option<String>,
+    pub(crate) scope: Option<String>,
     pub(crate) sort: Option<String>,
     pub(crate) order: Option<String>,
     pub(crate) cursor: Option<String>,
@@ -34,6 +35,7 @@ pub(crate) struct QueryParams {
     pub(crate) keys: Option<String>,
     pub(crate) namespace: Option<String>,
     pub(crate) include: Vec<String>,
+    pub(crate) scope: HistoryScope,
     pub(crate) sort: Option<String>,
     pub(crate) order: Option<SortOrder>,
     pub(crate) cursor: Option<String>,
@@ -84,6 +86,7 @@ impl TryFrom<RawQueryParams> for QueryParams {
             keys: trim_to_option(raw.keys),
             namespace: trim_to_option(raw.namespace),
             include: parse_include(raw.include),
+            scope: parse_scope(raw.scope.as_deref())?,
             sort: trim_to_option(raw.sort),
             order: raw.order.as_deref().map(parse_order).transpose()?,
             cursor: trim_to_option(raw.cursor),
@@ -132,6 +135,15 @@ fn parse_order(value: &str) -> V2Result<SortOrder> {
         "asc" => Ok(SortOrder::Asc),
         "desc" => Ok(SortOrder::Desc),
         _ => Err(invalid_parameter("order")),
+    }
+}
+
+fn parse_scope(value: Option<&str>) -> V2Result<HistoryScope> {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        None | Some("both") => Ok(HistoryScope::Both),
+        Some("name") => Ok(HistoryScope::Name),
+        Some("registration") => Ok(HistoryScope::Registration),
+        Some(_) => Err(invalid_parameter("scope")),
     }
 }
 
@@ -212,9 +224,32 @@ mod tests {
                 order: Some("sideways".to_owned()),
                 ..RawQueryParams::default()
             },
+            RawQueryParams {
+                scope: Some("surface".to_owned()),
+                ..RawQueryParams::default()
+            },
         ] {
             let error = parse(raw).expect_err("bad enum value must fail");
             assert_eq!(error.code(), ErrorCode::InvalidInput);
+        }
+    }
+
+    #[test]
+    fn history_scope_defaults_to_both_and_parses_wire_values() {
+        let defaulted = parse(RawQueryParams::default()).expect("default query must parse");
+        assert_eq!(defaulted.scope, HistoryScope::Both);
+
+        for (wire, expected) in [
+            ("name", HistoryScope::Name),
+            ("registration", HistoryScope::Registration),
+            ("both", HistoryScope::Both),
+        ] {
+            let params = parse(RawQueryParams {
+                scope: Some(wire.to_owned()),
+                ..RawQueryParams::default()
+            })
+            .expect("scope value must parse");
+            assert_eq!(params.scope, expected);
         }
     }
 

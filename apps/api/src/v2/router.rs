@@ -21,8 +21,8 @@ use super::{
     Source, Status, Subname, V2Error, V2Result, VerifiedRecordLookup, as_of_meta,
     build_auto_name_records, build_indexed_name_records, build_name_record, build_subname,
     build_verified_name_records, decode, default_requested_records, encode, encode_at_token,
-    indexed_records_requiring_verified_fallback, resolve_v2_snapshot, subname_cursor_payload,
-    subname_storage_cursor, validate_product_record,
+    get_history, indexed_records_requiring_verified_fallback, resolve_v2_snapshot,
+    subname_cursor_payload, subname_storage_cursor, validate_product_record,
 };
 
 const MAX_RECORD_KEYS: usize = MAX_PAGE_SIZE as usize;
@@ -34,7 +34,7 @@ pub(super) fn router() -> Router<AppState> {
         .route("/v2/names/{name}", get(get_name_record))
         .route("/v2/names/{name}/records", get(get_name_records))
         .route("/v2/names/{name}/subnames", get(get_subnames))
-        .route("/v2/names/{name}/history", get(not_implemented))
+        .route("/v2/names/{name}/history", get(get_history))
         .route("/v2/permissions", get(not_implemented))
         .route("/v2/addresses/{address}/names", get(not_implemented))
         .route("/v2/addresses/{address}/primary-name", get(not_implemented))

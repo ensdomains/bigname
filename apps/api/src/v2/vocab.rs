@@ -37,6 +37,39 @@ pub(crate) enum Finality {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
+pub(crate) enum HistoryScope {
+    Name,
+    Registration,
+    Both,
+}
+
+impl HistoryScope {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Name => "name",
+            Self::Registration => "registration",
+            Self::Both => "both",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum HistoryEventType {
+    Registration,
+    Renewal,
+    Release,
+    Expiry,
+    Transfer,
+    Authority,
+    Resolver,
+    Record,
+    PrimaryName,
+    Permission,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum RegistrationStatus {
     Active,
     Wrapped,
@@ -99,6 +132,27 @@ mod tests {
         assert_wire(Finality::Latest, "latest");
         assert_wire(Finality::Safe, "safe");
         assert_wire(Finality::Finalized, "finalized");
+    }
+
+    #[test]
+    fn history_scope_variants_use_exact_wire_spelling() {
+        assert_wire(HistoryScope::Name, "name");
+        assert_wire(HistoryScope::Registration, "registration");
+        assert_wire(HistoryScope::Both, "both");
+    }
+
+    #[test]
+    fn history_event_type_variants_use_exact_wire_spelling() {
+        assert_wire(HistoryEventType::Registration, "registration");
+        assert_wire(HistoryEventType::Renewal, "renewal");
+        assert_wire(HistoryEventType::Release, "release");
+        assert_wire(HistoryEventType::Expiry, "expiry");
+        assert_wire(HistoryEventType::Transfer, "transfer");
+        assert_wire(HistoryEventType::Authority, "authority");
+        assert_wire(HistoryEventType::Resolver, "resolver");
+        assert_wire(HistoryEventType::Record, "record");
+        assert_wire(HistoryEventType::PrimaryName, "primary_name");
+        assert_wire(HistoryEventType::Permission, "permission");
     }
 
     #[test]

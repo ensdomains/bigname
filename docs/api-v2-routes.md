@@ -201,10 +201,28 @@ Field ownership:
 - Purpose: name history.
 - Request parameters: path `name`; query `namespace`, `at`, `finality`,
   `scope=name|registration|both`, `cursor`, `page_size`.
-- Response shape: `data` is an array of compact event rows with friendly
-  `type` vocabulary: `registration`, `renewal`, `transfer`, `authority`,
-  `resolver`, `record`, `primary_name`, `permission`.
-- Pagination behavior: standard collection pagination.
+- Response shape: `data` is an array of dedicated lean event rows:
+  `{type, name, namespace, registration_id, block_number, timestamp,
+  transaction_hash, log_index}`. `registration_id` is present only when the
+  event row is registration-resource anchored. Rows never include before/after
+  state, raw normalized-event payloads, or a `data` change object. Friendly
+  `type` vocabulary: `registration`, `renewal`, `release`, `expiry`,
+  `transfer`, `authority`, `resolver`, `record`, `primary_name`, `permission`.
+  Raw upstream or pipeline event kinds are diagnostics-only and are not emitted
+  by this product route.
+- Pagination behavior: standard newest-first collection pagination by chain
+  position. The cursor is bound to the resolved namespace, parent name, scope,
+  and snapshot token. Product event-type filtering is applied after loading the
+  storage page, so `page_size` is an upper bound on returned product rows; a
+  page may contain fewer than `page_size` rows when non-product normalized
+  events are interleaved.
+- Scope behavior: `scope=name` reads name-surface events only,
+  `scope=registration` reads registration-resource events associated with the
+  requested name, and `scope=both` reads both sets. `scope` defaults to `both`.
+- Snapshot behavior: `at` and `finality` are accepted and used to resolve the
+  parent name and `meta.as_of`. The history list itself reads latest
+  normalized-event history; true as-of history enumeration is deferred to a
+  storage follow-up.
 - Status semantics: no matching history returns `200` with empty `data`.
   Missing names return `404 not_found`.
 - Replaces (v1): `GET /v1/history/names/{namespace}/{name}`.

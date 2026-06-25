@@ -104,4 +104,6 @@ include!("tests/primary_names.rs");
 
 include!("tests/v2_name_record.rs");
 
+include!("tests/v2_history.rs");
+
 include!("tests/openapi.rs");
