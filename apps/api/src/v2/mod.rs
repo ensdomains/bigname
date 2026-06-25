@@ -4,6 +4,7 @@ mod chains;
 mod cursor;
 mod envelope;
 mod error;
+mod history;
 mod name_record;
 mod name_records;
 mod name_records_inventory;
@@ -17,6 +18,10 @@ pub(crate) use chains::{numeric_to_slug, slug_to_numeric};
 pub(crate) use cursor::{Payload as CursorPayload, V2_CURSOR_VERSION, decode, encode};
 pub(crate) use envelope::{AsOf, Envelope, Meta, Page};
 pub(crate) use error::{ErrorBody, ErrorCode, ErrorEnvelope, V2Error, V2Result};
+pub(crate) use history::{
+    HistoryEvent, build_history_event, get_history, history_cursor_payload, history_event_type,
+    history_storage_cursor,
+};
 pub(crate) use name_record::{NameRecord, build_name_record, classify_registration_status};
 pub(crate) use name_records::{
     NameRecords, VerifiedRecordLookup, build_auto_name_records, build_indexed_name_records,
@@ -32,7 +37,8 @@ pub(crate) use snapshots::{
 };
 pub(crate) use subnames::{Subname, build_subname, subname_cursor_payload, subname_storage_cursor};
 pub(crate) use vocab::{
-    Completeness, Finality, RegistrationStatus, Relation, Resolver, Source, Status,
+    Completeness, Finality, HistoryEventType, HistoryScope, RegistrationStatus, Relation, Resolver,
+    Source, Status,
 };
 
 use axum::Router;
