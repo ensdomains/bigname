@@ -86,6 +86,50 @@ pub(crate) enum Relation {
     Registrant,
 }
 
+impl Relation {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Owner => "owner",
+            Self::Manager => "manager",
+            Self::Registrant => "registrant",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AddressNamesDedupe {
+    Name,
+    Registration,
+}
+
+impl AddressNamesDedupe {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Name => "name",
+            Self::Registration => "registration",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AddressNamesSort {
+    Name,
+    ExpiresAt,
+    RegisteredAt,
+}
+
+impl AddressNamesSort {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Name => "name",
+            Self::ExpiresAt => "expires_at",
+            Self::RegisteredAt => "registered_at",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct Resolver {
     pub(crate) chain_id: u64,
@@ -169,5 +213,18 @@ mod tests {
         assert_wire(Relation::Owner, "owner");
         assert_wire(Relation::Manager, "manager");
         assert_wire(Relation::Registrant, "registrant");
+    }
+
+    #[test]
+    fn address_names_dedupe_variants_use_exact_wire_spelling() {
+        assert_wire(AddressNamesDedupe::Name, "name");
+        assert_wire(AddressNamesDedupe::Registration, "registration");
+    }
+
+    #[test]
+    fn address_names_sort_variants_use_exact_wire_spelling() {
+        assert_wire(AddressNamesSort::Name, "name");
+        assert_wire(AddressNamesSort::ExpiresAt, "expires_at");
+        assert_wire(AddressNamesSort::RegisteredAt, "registered_at");
     }
 }

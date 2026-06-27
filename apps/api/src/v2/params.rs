@@ -6,7 +6,7 @@ use serde::Deserialize;
 
 use super::{
     error::{V2Error, V2Result},
-    vocab::{Finality, HistoryScope},
+    vocab::{AddressNamesDedupe, AddressNamesSort, Finality, HistoryScope, Relation},
 };
 
 pub(crate) const DEFAULT_PAGE_SIZE: u64 = 50;
@@ -21,6 +21,9 @@ pub(crate) struct RawQueryParams {
     pub(crate) namespace: Option<String>,
     pub(crate) include: Option<String>,
     pub(crate) scope: Option<String>,
+    pub(crate) relation: Option<String>,
+    pub(crate) q: Option<String>,
+    pub(crate) dedupe: Option<String>,
     pub(crate) sort: Option<String>,
     pub(crate) order: Option<String>,
     pub(crate) cursor: Option<String>,
@@ -36,8 +39,11 @@ pub(crate) struct QueryParams {
     pub(crate) namespace: Option<String>,
     pub(crate) include: Vec<String>,
     pub(crate) scope: HistoryScope,
-    pub(crate) sort: Option<String>,
-    pub(crate) order: Option<SortOrder>,
+    pub(crate) relation: Option<Relation>,
+    pub(crate) q: Option<String>,
+    pub(crate) dedupe: AddressNamesDedupe,
+    pub(crate) sort: AddressNamesSort,
+    pub(crate) order: SortOrder,
     pub(crate) cursor: Option<String>,
     pub(crate) page_size: u64,
 }
@@ -87,8 +93,11 @@ impl TryFrom<RawQueryParams> for QueryParams {
             namespace: trim_to_option(raw.namespace),
             include: parse_include(raw.include),
             scope: parse_scope(raw.scope.as_deref())?,
-            sort: trim_to_option(raw.sort),
-            order: raw.order.as_deref().map(parse_order).transpose()?,
+            relation: parse_relation(raw.relation.as_deref())?,
+            q: trim_to_option(raw.q),
+            dedupe: parse_dedupe(raw.dedupe.as_deref())?,
+            sort: parse_sort(raw.sort.as_deref())?,
+            order: parse_order(raw.order.as_deref())?,
             cursor: trim_to_option(raw.cursor),
             page_size: parse_page_size(raw.page_size)?,
         })
@@ -130,11 +139,20 @@ fn parse_source(value: Option<&str>) -> V2Result<RequestSource> {
     }
 }
 
-fn parse_order(value: &str) -> V2Result<SortOrder> {
-    match value.trim() {
-        "asc" => Ok(SortOrder::Asc),
-        "desc" => Ok(SortOrder::Desc),
-        _ => Err(invalid_parameter("order")),
+fn parse_order(value: Option<&str>) -> V2Result<SortOrder> {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        None | Some("asc") => Ok(SortOrder::Asc),
+        Some("desc") => Ok(SortOrder::Desc),
+        Some(_) => Err(invalid_parameter("order")),
+    }
+}
+
+impl SortOrder {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Asc => "asc",
+            Self::Desc => "desc",
+        }
     }
 }
 
@@ -144,6 +162,33 @@ fn parse_scope(value: Option<&str>) -> V2Result<HistoryScope> {
         Some("name") => Ok(HistoryScope::Name),
         Some("registration") => Ok(HistoryScope::Registration),
         Some(_) => Err(invalid_parameter("scope")),
+    }
+}
+
+fn parse_relation(value: Option<&str>) -> V2Result<Option<Relation>> {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        None => Ok(None),
+        Some("owner") => Ok(Some(Relation::Owner)),
+        Some("manager") => Ok(Some(Relation::Manager)),
+        Some("registrant") => Ok(Some(Relation::Registrant)),
+        Some(_) => Err(invalid_parameter("relation")),
+    }
+}
+
+fn parse_dedupe(value: Option<&str>) -> V2Result<AddressNamesDedupe> {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        None | Some("name") => Ok(AddressNamesDedupe::Name),
+        Some("registration") => Ok(AddressNamesDedupe::Registration),
+        Some(_) => Err(invalid_parameter("dedupe")),
+    }
+}
+
+fn parse_sort(value: Option<&str>) -> V2Result<AddressNamesSort> {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        None | Some("name") => Ok(AddressNamesSort::Name),
+        Some("expires_at") => Ok(AddressNamesSort::ExpiresAt),
+        Some("registered_at") => Ok(AddressNamesSort::RegisteredAt),
+        Some(_) => Err(invalid_parameter("sort")),
     }
 }
 
@@ -225,6 +270,18 @@ mod tests {
                 ..RawQueryParams::default()
             },
             RawQueryParams {
+                relation: Some("token_holder".to_owned()),
+                ..RawQueryParams::default()
+            },
+            RawQueryParams {
+                dedupe: Some("surface".to_owned()),
+                ..RawQueryParams::default()
+            },
+            RawQueryParams {
+                sort: Some("expiry_date".to_owned()),
+                ..RawQueryParams::default()
+            },
+            RawQueryParams {
                 scope: Some("surface".to_owned()),
                 ..RawQueryParams::default()
             },
@@ -232,6 +289,32 @@ mod tests {
             let error = parse(raw).expect_err("bad enum value must fail");
             assert_eq!(error.code(), ErrorCode::InvalidInput);
         }
+    }
+
+    #[test]
+    fn address_name_controls_default_and_parse_wire_values() {
+        let defaulted = parse(RawQueryParams::default()).expect("default query must parse");
+        assert_eq!(defaulted.relation, None);
+        assert_eq!(defaulted.q, None);
+        assert_eq!(defaulted.dedupe, AddressNamesDedupe::Name);
+        assert_eq!(defaulted.sort, AddressNamesSort::Name);
+        assert_eq!(defaulted.order, SortOrder::Asc);
+
+        let params = parse(RawQueryParams {
+            relation: Some("owner".to_owned()),
+            q: Some(" alice ".to_owned()),
+            dedupe: Some("registration".to_owned()),
+            sort: Some("expires_at".to_owned()),
+            order: Some("desc".to_owned()),
+            ..RawQueryParams::default()
+        })
+        .expect("address-name controls must parse");
+
+        assert_eq!(params.relation, Some(Relation::Owner));
+        assert_eq!(params.q, Some("alice".to_owned()));
+        assert_eq!(params.dedupe, AddressNamesDedupe::Registration);
+        assert_eq!(params.sort, AddressNamesSort::ExpiresAt);
+        assert_eq!(params.order, SortOrder::Desc);
     }
 
     #[test]

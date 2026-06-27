@@ -264,15 +264,28 @@ Field ownership:
   `relation`, `q`, `sort=name|expires_at|registered_at`, `order=asc|desc`,
   `dedupe=name|registration`, `include=role_summary`, `cursor`, `page_size`.
   `q` applies prefix matching to the dictionary `name` field; this route does
-  not accept `match`.
-- Response shape: `data` is an array of record-shaped rows. Reverse rows add
-  `is_primary` and `relations`, where `relations` is the subset of
-  `owner`, `manager`, and `registrant` that matched. `include=role_summary`
-  adds `role_summary: [{address, grants}]`, where each `grants` entry is
-  `{grant_scope, powers}`. The same expansion may add `subname_count`,
-  `record_count`, `registration_status`, and `expires_at` when those fields
-  are already available for the row.
-- Pagination behavior: standard collection pagination.
+  not accept `match`. `relation` accepts the v2 vocabulary
+  `owner|manager|registrant`; the storage relations map as
+  token-holder -> `owner`, effective-controller -> `manager`, and
+  registrant -> `registrant`. `dedupe=name` groups by name surface and is the
+  default; `dedupe=registration` groups by registration resource.
+- Response shape: `data` is an array of record-shaped rows with `name`,
+  `display_name`, `namespace`, `namehash`, `owner`, `registrant`,
+  `registration_status`, `registered_at`, `created_at`, and `expires_at`.
+  Address-name rows add `is_primary` and `relations`, where `relations` is the
+  subset of `owner`, `manager`, and `registrant` that matched. Resolver records
+  are not included; use `GET /v2/names/{name}/records` for resolver data.
+  `include=role_summary` adds
+  `role_summary: [{address, grants: [{grant_scope, powers}]}]` grouped by the
+  permission subject address.
+- Pagination behavior: standard collection pagination. Cursors are bound to
+  address, optional namespace filter, relation filter, `q`, dedupe mode, sort,
+  order, and the snapshot token used for `meta.as_of`.
+- Snapshot behavior: `at` and `finality` are accepted and used only to resolve
+  `meta.as_of` (default namespace `ens` when `namespace` is omitted). The
+  address-name collection itself reads the latest `address_names_current`
+  projection; true as-of address-name enumeration is deferred to a storage
+  follow-up.
 - Status semantics: no related names returns `200` with empty `data`.
   Malformed addresses return `400 invalid_input`.
 - Replaces (v1): `GET /v1/addresses/{address}/names` and address-relation
