@@ -88,6 +88,7 @@ async fn get_address_names(
     let storage_dedupe = dedupe_to_storage(params.dedupe);
     let storage_sort = sort_to_storage(params.sort);
     let storage_order = order_to_storage(params.order);
+    let normalized_q = params.q.as_deref().map(str::to_lowercase);
 
     let scope = v2_exact_name_snapshot_scope(&state, snapshot_namespace).await?;
     let selected_snapshot =
@@ -98,7 +99,7 @@ async fn get_address_names(
         namespace: namespace_filter.as_deref(),
         relation: params.relation,
         dedupe: params.dedupe,
-        q: params.q.as_deref(),
+        q: normalized_q.as_deref(),
         sort: params.sort,
         order: params.order,
         snapshot_token: &snapshot_token,
@@ -118,7 +119,7 @@ async fn get_address_names(
         namespace_filter.as_deref(),
         storage_relation,
         storage_dedupe,
-        params.q.as_deref(),
+        normalized_q.as_deref(),
         storage_sort,
         storage_order,
         storage_cursor.as_ref(),

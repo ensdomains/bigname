@@ -263,8 +263,10 @@ Field ownership:
 - Request parameters: path `address`; query `namespace`, `at`, `finality`,
   `relation`, `q`, `sort=name|expires_at|registered_at`, `order=asc|desc`,
   `dedupe=name|registration`, `include=role_summary`, `cursor`, `page_size`.
-  `q` applies prefix matching to the dictionary `name` field; this route does
-  not accept `match`. `relation` accepts the v2 vocabulary
+  `q` applies prefix matching to the dictionary `name` field case-insensitively:
+  the prefix is lowercased to match the normalized name, and full Unicode
+  normalization of partial prefixes is a follow-up. This route does not accept
+  `match`. `relation` accepts the v2 vocabulary
   `owner|manager|registrant`; the storage relations map as
   token-holder -> `owner`, effective-controller -> `manager`, and
   registrant -> `registrant`. `dedupe=name` groups by name surface and is the
