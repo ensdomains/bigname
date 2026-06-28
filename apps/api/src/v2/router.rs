@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -5,7 +7,8 @@ use axum::{
     routing::{get, post},
 };
 use bigname_storage::{
-    RecordInventoryCurrentRow, SelectedSnapshot, SnapshotSelectionErrorKind, SnapshotSelectionScope,
+    PrimaryNameClaimStatus, RecordInventoryCurrentRow, SelectedSnapshot,
+    SnapshotSelectionErrorKind, SnapshotSelectionScope,
 };
 
 use crate::{
@@ -17,12 +20,15 @@ use crate::{
 };
 
 use super::{
-    Envelope, MAX_PAGE_SIZE, Meta, NameRecord, NameRecords, Page, QueryParams, RequestSource,
-    Source, Status, Subname, V2Error, V2Result, VerifiedRecordLookup, as_of_meta,
-    build_auto_name_records, build_indexed_name_records, build_name_record, build_subname,
-    build_verified_name_records, decode, default_requested_records, encode, encode_at_token,
-    get_history, indexed_records_requiring_verified_fallback, resolve_v2_snapshot,
-    subname_cursor_payload, subname_storage_cursor, validate_product_record,
+    AddressName, AddressNamesCursorBinding, Envelope, MAX_PAGE_SIZE, Meta, NameRecord, NameRecords,
+    Page, QueryParams, RequestSource, Source, Status, Subname, V2Error, V2Result,
+    VerifiedRecordLookup, address_names_cursor_payload, address_names_storage_cursor, as_of_meta,
+    build_address_name, build_address_name_role_summary, build_auto_name_records,
+    build_indexed_name_records, build_name_record, build_subname, build_verified_name_records,
+    decode, dedupe_to_storage, default_requested_records, encode, encode_at_token, get_history,
+    indexed_records_requiring_verified_fallback, order_to_storage, relation_to_storage,
+    resolve_v2_snapshot, sort_to_storage, subname_cursor_payload, subname_storage_cursor,
+    validate_product_record,
 };
 
 const MAX_RECORD_KEYS: usize = MAX_PAGE_SIZE as usize;
@@ -36,7 +42,7 @@ pub(super) fn router() -> Router<AppState> {
         .route("/v2/names/{name}/subnames", get(get_subnames))
         .route("/v2/names/{name}/history", get(get_history))
         .route("/v2/permissions", get(not_implemented))
-        .route("/v2/addresses/{address}/names", get(not_implemented))
+        .route("/v2/addresses/{address}/names", get(get_address_names))
         .route("/v2/addresses/{address}/primary-name", get(not_implemented))
         .route("/v2/addresses/{address}/history", get(not_implemented))
         .route("/v2/search", get(not_implemented))
@@ -66,6 +72,167 @@ pub(super) fn router() -> Router<AppState> {
 
 async fn not_implemented() -> StatusCode {
     StatusCode::NOT_IMPLEMENTED
+}
+
+async fn get_address_names(
+    Path(address): Path<String>,
+    params: QueryParams,
+    State(state): State<AppState>,
+) -> V2Result<Json<Envelope<Vec<AddressName>>>> {
+    let normalized_address =
+        crate::parse_evm_address(&address, "address").map_err(api_error_to_v2)?;
+    let namespace_filter = params.namespace.clone();
+    let snapshot_namespace = namespace_filter.as_deref().unwrap_or("ens");
+    let include_role_summary = address_names_include_role_summary(&params.include)?;
+    let storage_relation = params.relation.map(relation_to_storage);
+    let storage_dedupe = dedupe_to_storage(params.dedupe);
+    let storage_sort = sort_to_storage(params.sort);
+    let storage_order = order_to_storage(params.order);
+    let normalized_q = params.q.as_deref().map(str::to_lowercase);
+
+    let scope = v2_exact_name_snapshot_scope(&state, snapshot_namespace).await?;
+    let selected_snapshot =
+        resolve_v2_snapshot(&state.pool, &scope, params.at.as_ref(), params.finality).await?;
+    let snapshot_token = encode_at_token(&selected_snapshot);
+    let cursor_binding = AddressNamesCursorBinding {
+        address: &normalized_address,
+        namespace: namespace_filter.as_deref(),
+        relation: params.relation,
+        dedupe: params.dedupe,
+        q: normalized_q.as_deref(),
+        sort: params.sort,
+        order: params.order,
+        snapshot_token: &snapshot_token,
+    };
+    let storage_cursor = params
+        .cursor
+        .as_deref()
+        .map(|cursor| {
+            let payload = decode(cursor)?;
+            address_names_storage_cursor(&payload, &cursor_binding)
+        })
+        .transpose()?;
+
+    let storage_page = bigname_storage::load_address_names_current_page_sorted(
+        &state.pool,
+        &normalized_address,
+        namespace_filter.as_deref(),
+        storage_relation,
+        storage_dedupe,
+        normalized_q.as_deref(),
+        storage_sort,
+        storage_order,
+        storage_cursor.as_ref(),
+        params.page_size,
+    )
+    .await
+    .map_err(|error| {
+        if storage_cursor.is_some()
+            && error
+                .to_string()
+                .contains("page cursor does not match a grouped entry")
+        {
+            return V2Error::invalid_input("cursor must be a valid pagination cursor");
+        }
+        V2Error::internal_error(format!(
+            "failed to load address names for {normalized_address}"
+        ))
+    })?;
+
+    let logical_name_ids = storage_page
+        .entries
+        .iter()
+        .map(|entry| entry.logical_name_id.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let name_rows =
+        bigname_storage::load_name_current_by_logical_name_ids(&state.pool, &logical_name_ids)
+            .await
+            .map_err(|_| {
+                V2Error::internal_error(format!(
+                    "failed to load address-name registration summaries for {normalized_address}"
+                ))
+            })?;
+    let primary_name = bigname_storage::load_primary_name_current_snapshot(
+        &state.pool,
+        &normalized_address,
+        snapshot_namespace,
+        "60",
+    )
+    .await
+    .map_err(|_| {
+        V2Error::internal_error(format!(
+            "failed to load primary name for address {normalized_address}"
+        ))
+    })?
+    .filter(|snapshot| snapshot.row.claim_status == PrimaryNameClaimStatus::Success)
+    .and_then(|snapshot| {
+        snapshot
+            .normalized_claim_name
+            .map(|name| name.trim().to_owned())
+            .filter(|name| !name.is_empty())
+    });
+    let permissions_by_resource = if include_role_summary {
+        let resource_ids = storage_page
+            .entries
+            .iter()
+            .map(|entry| entry.resource_id)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        bigname_storage::load_permissions_current_by_resource_ids(&state.pool, &resource_ids)
+            .await
+            .map_err(|_| {
+                V2Error::internal_error(format!(
+                    "failed to load address-name role summaries for {normalized_address}"
+                ))
+            })?
+    } else {
+        std::collections::BTreeMap::new()
+    };
+
+    let next_cursor = storage_page
+        .next_cursor
+        .as_ref()
+        .map(|cursor| encode(&address_names_cursor_payload(cursor, &cursor_binding)));
+    let has_more = next_cursor.is_some();
+    let data = storage_page
+        .entries
+        .iter()
+        .map(|entry| {
+            let role_summary = include_role_summary.then(|| {
+                build_address_name_role_summary(
+                    permissions_by_resource
+                        .get(&entry.resource_id)
+                        .map(Vec::as_slice)
+                        .unwrap_or_default(),
+                )
+            });
+            build_address_name(
+                entry,
+                name_rows.get(&entry.logical_name_id),
+                primary_name.as_deref(),
+                role_summary,
+            )
+        })
+        .collect();
+    let meta = Meta {
+        as_of: Some(as_of_meta(&selected_snapshot)?),
+        ..Meta::default()
+    };
+
+    Ok(Json(Envelope {
+        data,
+        page: Some(Page {
+            cursor: params.cursor.clone(),
+            next_cursor,
+            page_size: params.page_size,
+            total_count: None,
+            has_more,
+        }),
+        meta,
+    }))
 }
 
 async fn get_subnames(
@@ -484,6 +651,21 @@ fn subnames_include_counts(include: &[String]) -> V2Result<bool> {
         }
     }
     Ok(include_counts)
+}
+
+fn address_names_include_role_summary(include: &[String]) -> V2Result<bool> {
+    let mut include_role_summary = false;
+    for value in include {
+        match value.as_str() {
+            "role_summary" => include_role_summary = true,
+            _ => {
+                return Err(V2Error::invalid_input(
+                    "include must contain only role_summary",
+                ));
+            }
+        }
+    }
+    Ok(include_role_summary)
 }
 
 fn mark_unserved_verified_fields(record: &mut NameRecord) {

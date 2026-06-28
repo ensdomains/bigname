@@ -1,5 +1,6 @@
 #![allow(dead_code, unused_imports)]
 
+mod address_names;
 mod chains;
 mod cursor;
 mod envelope;
@@ -14,6 +15,11 @@ mod snapshots;
 mod subnames;
 mod vocab;
 
+pub(crate) use address_names::{
+    AddressName, AddressNamesCursorBinding, address_names_cursor_payload,
+    address_names_storage_cursor, build_address_name, build_address_name_role_summary,
+    dedupe_to_storage, order_to_storage, relation_to_storage, sort_to_storage,
+};
 pub(crate) use chains::{numeric_to_slug, slug_to_numeric};
 pub(crate) use cursor::{Payload as CursorPayload, V2_CURSOR_VERSION, decode, encode};
 pub(crate) use envelope::{AsOf, Envelope, Meta, Page};
@@ -37,8 +43,8 @@ pub(crate) use snapshots::{
 };
 pub(crate) use subnames::{Subname, build_subname, subname_cursor_payload, subname_storage_cursor};
 pub(crate) use vocab::{
-    Completeness, Finality, HistoryEventType, HistoryScope, RegistrationStatus, Relation, Resolver,
-    Source, Status,
+    AddressNamesDedupe, AddressNamesSort, Completeness, Finality, HistoryEventType, HistoryScope,
+    RegistrationStatus, Relation, Resolver, Source, Status,
 };
 
 use axum::Router;

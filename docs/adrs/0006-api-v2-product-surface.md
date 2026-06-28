@@ -171,7 +171,7 @@ Tier 2 — product reads:
 | `GET /v2/names/{name}/subnames` | Direct subnames. `?include=counts`. Replaces `children`. Lists children from the latest projection; as-of child enumeration is deferred to a storage follow-up. |
 | `GET /v2/names/{name}/history` | Name history. `?scope=name\|registration\|both`. |
 | `GET /v2/permissions` | Permission rows by `?name=`, `?registration_id=`, or `?address=` (at least one required; combinable), including registrations that are no longer a name's current one. `?include=lineage` adds per-row grant/revocation lineage and inheritance/transfer behavior. A flat filterable collection in the same style as `/v2/events`. Replaces `/v1/resources/{id}/permissions`, `/v1/roles`, `/v1/names/.../roles`, `/v1/resources/lookup`. |
-| `GET /v2/addresses/{address}/names` | Names related to an address. `?relation=` set filter, `?q=` text filter, `?sort=name\|expires_at\|registered_at`, `?dedupe=name\|registration`, `?include=role_summary` — keeps the `v1` dashboard combination of address relation + text filter + sort. |
+| `GET /v2/addresses/{address}/names` | Names related to an address. Implemented in ADR 0006 step 3. `?relation=` uses the v2 product vocabulary `owner\|manager\|registrant` and maps storage token-holder -> `owner`, effective-controller -> `manager`, and registrant -> `registrant`; `?q=` is prefix text filtering, `?sort=name\|expires_at\|registered_at`, `?dedupe=name\|registration`, and `?include=role_summary` keeps the dashboard combination of address relation + text filter + sort. |
 | `GET /v2/addresses/{address}/primary-name` | Primary name. `?coin_type=` (default `60`), `?namespace=` (default `ens`), `?source=`. Replaces `/v1/primary-names/{address}` with the same `{address, coin_type, namespace}` tuple selection. Returns one answer per `source` plus a typed `verification` summary (`{status, name}`, `status` incl. `mismatch`) whenever a persisted or on-demand verified outcome exists — claimed-vs-verified stays one call without parallel state trees. |
 | `GET /v2/addresses/{address}/history` | Address activity history. `?relation=` set filter, `?scope=name\|registration\|both` — keeps `v1`'s anchor selection for separating name-surface events from registration-lifecycle events. |
 | `GET /v2/search` | Name search and suggestions: `?q=` with `?match=prefix\|contains` (default `prefix`), `?namespace=`; paginates with the standard `cursor`/`page_size` like every collection. Split out of `/v1/names`; no availability or pricing semantics. |
@@ -342,6 +342,10 @@ Rules:
   resolve the parent name plus `meta.as_of`, but the collection rows currently
   read the latest projection/history. True as-of child and history enumeration
   is deferred to storage follow-up work.
+- `GET /v2/addresses/{address}/names` also accepts `at` and `finality` only
+  for `meta.as_of` resolution. The address anchor has no parent resource to
+  resolve or 404, and collection rows read the latest address-name projection;
+  true as-of address-name enumeration is deferred to storage follow-up work.
 - Cursors are opaque and versioned but not bound to the route path string, so
   route evolution does not invalidate outstanding cursors. Cursors remain
   stable under replay for the same snapshot.
