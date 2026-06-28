@@ -68,6 +68,43 @@ pub(crate) enum HistoryEventType {
     Permission,
 }
 
+impl HistoryEventType {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Registration => "registration",
+            Self::Renewal => "renewal",
+            Self::Release => "release",
+            Self::Expiry => "expiry",
+            Self::Transfer => "transfer",
+            Self::Authority => "authority",
+            Self::Resolver => "resolver",
+            Self::Record => "record",
+            Self::PrimaryName => "primary_name",
+            Self::Permission => "permission",
+        }
+    }
+
+    pub(crate) const fn storage_event_kinds(self) -> &'static [&'static str] {
+        match self {
+            Self::Registration => &["RegistrationGranted", "LabelRegistered"],
+            Self::Renewal => &["RegistrationRenewed"],
+            Self::Release => &["RegistrationReleased"],
+            Self::Expiry => &["ExpiryChanged"],
+            Self::Transfer => &["TokenControlTransferred"],
+            Self::Authority => &["AuthorityTransferred", "AuthorityEpochChanged"],
+            Self::Resolver => &["ResolverChanged"],
+            Self::Record => &["RecordChanged", "RecordVersionChanged"],
+            Self::PrimaryName => &["ReverseChanged"],
+            Self::Permission => &[
+                "PermissionChanged",
+                "PermissionScopeChanged",
+                "RolesChanged",
+                "EACRolesChanged",
+            ],
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum RegistrationStatus {
@@ -197,6 +234,29 @@ mod tests {
         assert_wire(HistoryEventType::Record, "record");
         assert_wire(HistoryEventType::PrimaryName, "primary_name");
         assert_wire(HistoryEventType::Permission, "permission");
+    }
+
+    #[test]
+    fn history_event_type_storage_kinds_round_trip_to_product_types() {
+        for event_type in [
+            HistoryEventType::Registration,
+            HistoryEventType::Renewal,
+            HistoryEventType::Release,
+            HistoryEventType::Expiry,
+            HistoryEventType::Transfer,
+            HistoryEventType::Authority,
+            HistoryEventType::Resolver,
+            HistoryEventType::Record,
+            HistoryEventType::PrimaryName,
+            HistoryEventType::Permission,
+        ] {
+            for storage_kind in event_type.storage_event_kinds() {
+                assert_eq!(
+                    crate::v2::history_event_type(storage_kind),
+                    Some(event_type)
+                );
+            }
+        }
     }
 
     #[test]
