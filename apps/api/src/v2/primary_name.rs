@@ -1,0 +1,592 @@
+use axum::{
+    Json,
+    extract::{FromRequestParts, Path, Query, State},
+    http::request::Parts,
+};
+use bigname_storage::PrimaryNameClaimStatus;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+use crate::{
+    AppState, OnDemandPrimaryNameClaimState, OnDemandPrimaryNameVerificationState,
+    PrimaryNameLookupState, PrimaryNameTupleState,
+};
+
+use super::{Envelope, Meta, RawQueryParams, Source, Status, V2Error, V2Result, api_error_to_v2};
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct PrimaryName {
+    pub(crate) address: String,
+    pub(crate) coin_type: String,
+    pub(crate) namespace: String,
+    pub(crate) answers: Vec<PrimaryNameAnswer>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) verification: Option<PrimaryNameVerification>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct PrimaryNameAnswer {
+    pub(crate) source: Source,
+    pub(crate) status: Status,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) raw_claim_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) unsupported_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) failure_reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct PrimaryNameVerification {
+    pub(crate) status: Status,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) unsupported_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) failure_reason: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PrimaryNameSourceSelection {
+    Both,
+    Indexed,
+    Verified,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PrimaryNameQueryParams {
+    pub(crate) namespace: String,
+    pub(crate) coin_type: String,
+    pub(crate) source: PrimaryNameSourceSelection,
+}
+
+struct VerifiedAnswer {
+    answer: PrimaryNameAnswer,
+    outcome_exists: bool,
+}
+
+impl<S> FromRequestParts<S> for PrimaryNameQueryParams
+where
+    S: Send + Sync,
+{
+    type Rejection = V2Error;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let Query(raw) = Query::<RawQueryParams>::from_request_parts(parts, state)
+            .await
+            .map_err(|_| V2Error::invalid_input("query parameters are invalid"))?;
+        Self::try_from(raw)
+    }
+}
+
+impl TryFrom<RawQueryParams> for PrimaryNameQueryParams {
+    type Error = V2Error;
+
+    fn try_from(raw: RawQueryParams) -> Result<Self, Self::Error> {
+        if nonempty(raw.at.as_deref()) {
+            return Err(invalid_parameter("at"));
+        }
+        if nonempty(raw.finality.as_deref()) {
+            return Err(invalid_parameter("finality"));
+        }
+
+        Ok(Self {
+            namespace: crate::parse_primary_name_namespace(
+                raw.namespace.as_deref().or(Some("ens")),
+            )
+            .map_err(api_error_to_v2)?,
+            coin_type: crate::parse_primary_name_coin_type(raw.coin_type.as_deref().or(Some("60")))
+                .map_err(api_error_to_v2)?,
+            source: parse_primary_name_source(raw.source.as_deref())?,
+        })
+    }
+}
+
+impl PrimaryNameSourceSelection {
+    pub(crate) const fn resolution_mode(self) -> crate::ResolutionMode {
+        match self {
+            Self::Both => crate::ResolutionMode::Both,
+            Self::Indexed => crate::ResolutionMode::Declared,
+            Self::Verified => crate::ResolutionMode::Verified,
+        }
+    }
+
+    pub(crate) const fn meta_source(self) -> Option<Source> {
+        match self {
+            Self::Both => None,
+            Self::Indexed => Some(Source::Indexed),
+            Self::Verified => Some(Source::Verified),
+        }
+    }
+}
+
+pub(crate) async fn get_primary_name(
+    Path(address): Path<String>,
+    params: PrimaryNameQueryParams,
+    State(state): State<AppState>,
+) -> V2Result<Json<Envelope<PrimaryName>>> {
+    let address = crate::parse_evm_address(&address, "address").map_err(api_error_to_v2)?;
+    let mode = params.source.resolution_mode();
+    let mut lookup_state = crate::load_primary_name_lookup_state(
+        &state.pool,
+        &address,
+        &params.namespace,
+        &params.coin_type,
+        mode,
+    )
+    .await
+    .map_err(api_error_to_v2)?;
+
+    if (mode.includes_declared() || mode.includes_verified())
+        && matches!(
+            lookup_state.tuple_state,
+            PrimaryNameTupleState::TupleMissing
+        )
+    {
+        lookup_state.on_demand_claim = crate::load_on_demand_primary_name_claim(
+            &state,
+            &address,
+            &params.namespace,
+            &params.coin_type,
+        )
+        .await
+        .map_err(api_error_to_v2)?;
+    }
+    if mode.includes_verified()
+        && matches!(
+            lookup_state.tuple_state,
+            PrimaryNameTupleState::TupleMissing
+        )
+        && let OnDemandPrimaryNameClaimState::Found(claim) = &lookup_state.on_demand_claim
+    {
+        lookup_state.on_demand_verified = crate::load_on_demand_primary_name_verification(
+            &state,
+            &address,
+            &params.namespace,
+            &params.coin_type,
+            claim,
+        )
+        .await
+        .map_err(api_error_to_v2)?;
+    }
+
+    Ok(Json(Envelope {
+        data: build_primary_name(
+            address,
+            params.namespace,
+            params.coin_type,
+            params.source,
+            &lookup_state,
+        ),
+        page: None,
+        meta: Meta {
+            source: params.source.meta_source(),
+            ..Meta::default()
+        },
+    }))
+}
+
+pub(crate) fn build_primary_name(
+    address: String,
+    namespace: String,
+    coin_type: String,
+    source: PrimaryNameSourceSelection,
+    lookup_state: &PrimaryNameLookupState,
+) -> PrimaryName {
+    let verified = build_verified_answer(&namespace, lookup_state);
+    let mut answers = Vec::with_capacity(match source {
+        PrimaryNameSourceSelection::Both => 2,
+        PrimaryNameSourceSelection::Indexed | PrimaryNameSourceSelection::Verified => 1,
+    });
+
+    if matches!(
+        source,
+        PrimaryNameSourceSelection::Both | PrimaryNameSourceSelection::Indexed
+    ) {
+        answers.push(build_indexed_answer(lookup_state));
+    }
+    if matches!(
+        source,
+        PrimaryNameSourceSelection::Both | PrimaryNameSourceSelection::Verified
+    ) {
+        answers.push(verified.answer.clone());
+    }
+
+    PrimaryName {
+        address,
+        coin_type,
+        namespace,
+        answers,
+        verification: verified
+            .outcome_exists
+            .then(|| verification_from_answer(&verified.answer)),
+    }
+}
+
+fn build_indexed_answer(lookup_state: &PrimaryNameLookupState) -> PrimaryNameAnswer {
+    match &lookup_state.tuple_state {
+        PrimaryNameTupleState::ProjectionUnavailable => PrimaryNameAnswer::unsupported(
+            Source::Indexed,
+            "declared primary-name claim surface is not yet supported",
+        ),
+        PrimaryNameTupleState::TupleMissing => match &lookup_state.on_demand_claim {
+            OnDemandPrimaryNameClaimState::Found(claim) => {
+                PrimaryNameAnswer::named(Source::Indexed, Status::Ok, &claim.normalized_name)
+            }
+            OnDemandPrimaryNameClaimState::InvalidName(invalid_claim) => {
+                PrimaryNameAnswer::invalid(Source::Indexed, &invalid_claim.raw_name)
+            }
+            _ => PrimaryNameAnswer::new(Source::Indexed, Status::NotFound),
+        },
+        PrimaryNameTupleState::TuplePresent(row) => {
+            let mut answer =
+                PrimaryNameAnswer::new(Source::Indexed, claim_status_to_v2(row.claim_status));
+            if row.claim_status == PrimaryNameClaimStatus::Success
+                && let Some(name) = lookup_state.normalized_claim_name.as_deref()
+            {
+                answer.name = Some(name.to_owned());
+            }
+            if row.claim_status == PrimaryNameClaimStatus::InvalidName {
+                answer.raw_claim_name = row.raw_claim_name.clone();
+            }
+            if row.claim_status == PrimaryNameClaimStatus::Unsupported {
+                answer.unsupported_reason = Some(
+                    "indexed primary-name claim is not supported for the requested tuple"
+                        .to_owned(),
+                );
+            }
+            answer
+        }
+    }
+}
+
+fn build_verified_answer(namespace: &str, lookup_state: &PrimaryNameLookupState) -> VerifiedAnswer {
+    if let Some(persisted) = lookup_state.persisted_verified.as_ref() {
+        return VerifiedAnswer {
+            answer: verified_answer_from_value(&persisted.verified_primary_name, lookup_state),
+            outcome_exists: true,
+        };
+    }
+
+    match &lookup_state.tuple_state {
+        PrimaryNameTupleState::TupleMissing => {
+            if let OnDemandPrimaryNameVerificationState::Verified(on_demand_verified) =
+                &lookup_state.on_demand_verified
+            {
+                return VerifiedAnswer {
+                    answer: verified_answer_from_value(on_demand_verified, lookup_state),
+                    outcome_exists: true,
+                };
+            }
+            VerifiedAnswer {
+                answer: PrimaryNameAnswer::new(Source::Verified, Status::NotFound),
+                outcome_exists: false,
+            }
+        }
+        PrimaryNameTupleState::TuplePresent(_) if primary_name_supported_namespace(namespace) => {
+            VerifiedAnswer {
+                answer: PrimaryNameAnswer::new(Source::Verified, Status::NotFound),
+                outcome_exists: false,
+            }
+        }
+        PrimaryNameTupleState::ProjectionUnavailable | PrimaryNameTupleState::TuplePresent(_) => {
+            VerifiedAnswer {
+                answer: PrimaryNameAnswer::unsupported(
+                    Source::Verified,
+                    "verified primary-name entrypoint is not yet supported",
+                ),
+                outcome_exists: false,
+            }
+        }
+    }
+}
+
+fn verified_answer_from_value(
+    verified_primary_name: &Value,
+    lookup_state: &PrimaryNameLookupState,
+) -> PrimaryNameAnswer {
+    let status = status_from_v1(
+        verified_primary_name
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("execution_failed"),
+    );
+    let mut answer = PrimaryNameAnswer::new(Source::Verified, status);
+    answer.name = primary_name_from_value(verified_primary_name);
+    answer.unsupported_reason = string_field(verified_primary_name.get("unsupported_reason"));
+    answer.failure_reason = string_field(verified_primary_name.get("failure_reason"));
+    if status == Status::InvalidName {
+        answer.raw_claim_name = string_field(verified_primary_name.get("raw_claim_name"))
+            .or_else(|| raw_claim_name(lookup_state));
+    }
+    answer
+}
+
+fn verification_from_answer(answer: &PrimaryNameAnswer) -> PrimaryNameVerification {
+    PrimaryNameVerification {
+        status: answer.status,
+        name: answer.name.clone(),
+        unsupported_reason: answer.unsupported_reason.clone(),
+        failure_reason: answer.failure_reason.clone(),
+    }
+}
+
+impl PrimaryNameAnswer {
+    fn new(source: Source, status: Status) -> Self {
+        Self {
+            source,
+            status,
+            name: None,
+            raw_claim_name: None,
+            unsupported_reason: None,
+            failure_reason: None,
+        }
+    }
+
+    fn named(source: Source, status: Status, name: &str) -> Self {
+        Self {
+            name: Some(name.to_owned()),
+            ..Self::new(source, status)
+        }
+    }
+
+    fn invalid(source: Source, raw_claim_name: &str) -> Self {
+        Self {
+            raw_claim_name: Some(raw_claim_name.to_owned()),
+            ..Self::new(source, Status::InvalidName)
+        }
+    }
+
+    fn unsupported(source: Source, reason: &str) -> Self {
+        Self {
+            unsupported_reason: Some(reason.to_owned()),
+            ..Self::new(source, Status::Unsupported)
+        }
+    }
+}
+
+fn claim_status_to_v2(status: PrimaryNameClaimStatus) -> Status {
+    match status {
+        PrimaryNameClaimStatus::Success => Status::Ok,
+        PrimaryNameClaimStatus::NotFound => Status::NotFound,
+        PrimaryNameClaimStatus::Unsupported => Status::Unsupported,
+        PrimaryNameClaimStatus::InvalidName => Status::InvalidName,
+    }
+}
+
+fn status_from_v1(status: &str) -> Status {
+    match status {
+        "success" | "ok" => Status::Ok,
+        "not_found" => Status::NotFound,
+        "invalid_name" => Status::InvalidName,
+        "mismatch" => Status::Mismatch,
+        "unsupported" => Status::Unsupported,
+        "stale" => Status::Stale,
+        "execution_failed" | "failed" => Status::Failed,
+        _ => Status::Failed,
+    }
+}
+
+fn primary_name_from_value(value: &Value) -> Option<String> {
+    match value.get("name")? {
+        Value::String(name) => Some(name.clone()),
+        Value::Object(name) => name
+            .get("normalized_name")
+            .and_then(Value::as_str)
+            .or_else(|| name.get("name").and_then(Value::as_str))
+            .map(str::to_owned),
+        _ => None,
+    }
+}
+
+fn string_field(value: Option<&Value>) -> Option<String> {
+    value.and_then(Value::as_str).map(str::to_owned)
+}
+
+fn raw_claim_name(lookup_state: &PrimaryNameLookupState) -> Option<String> {
+    match &lookup_state.tuple_state {
+        PrimaryNameTupleState::TuplePresent(row) => row.raw_claim_name.clone(),
+        PrimaryNameTupleState::TupleMissing => match &lookup_state.on_demand_claim {
+            OnDemandPrimaryNameClaimState::InvalidName(claim) => Some(claim.raw_name.clone()),
+            _ => None,
+        },
+        PrimaryNameTupleState::ProjectionUnavailable => None,
+    }
+}
+
+fn primary_name_supported_namespace(namespace: &str) -> bool {
+    matches!(namespace, "ens" | "basenames")
+}
+
+fn parse_primary_name_source(value: Option<&str>) -> V2Result<PrimaryNameSourceSelection> {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        None => Ok(PrimaryNameSourceSelection::Both),
+        Some("indexed") => Ok(PrimaryNameSourceSelection::Indexed),
+        Some("verified") => Ok(PrimaryNameSourceSelection::Verified),
+        Some(_) => Err(invalid_parameter("source")),
+    }
+}
+
+fn nonempty(value: Option<&str>) -> bool {
+    value.map(str::trim).is_some_and(|value| !value.is_empty())
+}
+
+fn invalid_parameter(parameter: &'static str) -> V2Error {
+    V2Error::invalid_input(format!("{parameter} is invalid"))
+}
+
+#[cfg(test)]
+mod tests {
+    use bigname_storage::PrimaryNameCurrentRow;
+    use serde_json::json;
+
+    use crate::{PersistedPrimaryNameVerifiedReadback, v2::ErrorCode};
+
+    use super::*;
+
+    #[test]
+    fn builder_returns_indexed_then_verified_answers_for_both_sources() {
+        let lookup_state = PrimaryNameLookupState {
+            tuple_state: PrimaryNameTupleState::TuplePresent(PrimaryNameCurrentRow {
+                address: "0x0000000000000000000000000000000000000abc".to_owned(),
+                namespace: "ens".to_owned(),
+                coin_type: "60".to_owned(),
+                claim_status: PrimaryNameClaimStatus::Success,
+                raw_claim_name: None,
+                claim_provenance: json!({}),
+            }),
+            normalized_claim_name: Some("alice.eth".to_owned()),
+            on_demand_claim: OnDemandPrimaryNameClaimState::NotAttempted,
+            on_demand_verified: OnDemandPrimaryNameVerificationState::NotAttempted,
+            persisted_verified: Some(PersistedPrimaryNameVerifiedReadback {
+                verified_primary_name: json!({
+                    "status": "mismatch",
+                    "name": {
+                        "logical_name_id": "ens:alice.eth",
+                        "normalized_name": "alice.eth",
+                        "resource_id": "00000000-0000-0000-0000-000000000456"
+                    },
+                    "failure_reason": "resolved_target_mismatch"
+                }),
+                provenance: json!({}),
+                finished_at: sqlx::types::time::OffsetDateTime::UNIX_EPOCH,
+            }),
+        };
+
+        let response = build_primary_name(
+            "0x0000000000000000000000000000000000000abc".to_owned(),
+            "ens".to_owned(),
+            "60".to_owned(),
+            PrimaryNameSourceSelection::Both,
+            &lookup_state,
+        );
+
+        assert_eq!(
+            response.answers,
+            vec![
+                PrimaryNameAnswer::named(Source::Indexed, Status::Ok, "alice.eth"),
+                PrimaryNameAnswer {
+                    failure_reason: Some("resolved_target_mismatch".to_owned()),
+                    ..PrimaryNameAnswer::named(Source::Verified, Status::Mismatch, "alice.eth")
+                },
+            ]
+        );
+        assert_eq!(
+            response.verification,
+            Some(PrimaryNameVerification {
+                status: Status::Mismatch,
+                name: Some("alice.eth".to_owned()),
+                unsupported_reason: None,
+                failure_reason: Some("resolved_target_mismatch".to_owned()),
+            })
+        );
+    }
+
+    #[test]
+    fn builder_narrows_answers_to_requested_source() {
+        let lookup_state = PrimaryNameLookupState {
+            tuple_state: PrimaryNameTupleState::TupleMissing,
+            normalized_claim_name: None,
+            on_demand_claim: OnDemandPrimaryNameClaimState::NotFound,
+            on_demand_verified: OnDemandPrimaryNameVerificationState::NotAttempted,
+            persisted_verified: None,
+        };
+
+        let indexed = build_primary_name(
+            "0x0000000000000000000000000000000000000abc".to_owned(),
+            "ens".to_owned(),
+            "60".to_owned(),
+            PrimaryNameSourceSelection::Indexed,
+            &lookup_state,
+        );
+        let verified = build_primary_name(
+            "0x0000000000000000000000000000000000000abc".to_owned(),
+            "ens".to_owned(),
+            "60".to_owned(),
+            PrimaryNameSourceSelection::Verified,
+            &lookup_state,
+        );
+
+        assert_eq!(
+            indexed.answers,
+            vec![PrimaryNameAnswer::new(Source::Indexed, Status::NotFound)]
+        );
+        assert_eq!(
+            verified.answers,
+            vec![PrimaryNameAnswer::new(Source::Verified, Status::NotFound)]
+        );
+        assert_eq!(indexed.verification, None);
+        assert_eq!(verified.verification, None);
+    }
+
+    #[test]
+    fn primary_name_params_default_tuple_and_source_subset() {
+        let defaulted = PrimaryNameQueryParams::try_from(RawQueryParams::default())
+            .expect("default query must parse");
+        assert_eq!(defaulted.namespace, "ens");
+        assert_eq!(defaulted.coin_type, "60");
+        assert_eq!(defaulted.source, PrimaryNameSourceSelection::Both);
+
+        let indexed = PrimaryNameQueryParams::try_from(RawQueryParams {
+            namespace: Some("ens".to_owned()),
+            coin_type: Some("060".to_owned()),
+            source: Some("indexed".to_owned()),
+            ..RawQueryParams::default()
+        })
+        .expect("indexed primary-name source must parse");
+        assert_eq!(indexed.coin_type, "60");
+        assert_eq!(indexed.source, PrimaryNameSourceSelection::Indexed);
+
+        let verified = PrimaryNameQueryParams::try_from(RawQueryParams {
+            source: Some("verified".to_owned()),
+            ..RawQueryParams::default()
+        })
+        .expect("verified primary-name source must parse");
+        assert_eq!(verified.source, PrimaryNameSourceSelection::Verified);
+    }
+
+    #[test]
+    fn primary_name_params_reject_auto_and_snapshot_controls() {
+        for raw in [
+            RawQueryParams {
+                source: Some("auto".to_owned()),
+                ..RawQueryParams::default()
+            },
+            RawQueryParams {
+                at: Some("2026-06-10T00:00:00Z".to_owned()),
+                ..RawQueryParams::default()
+            },
+            RawQueryParams {
+                finality: Some("safe".to_owned()),
+                ..RawQueryParams::default()
+            },
+        ] {
+            let error = PrimaryNameQueryParams::try_from(raw)
+                .expect_err("bad primary-name query must fail");
+            assert_eq!(error.code(), ErrorCode::InvalidInput);
+        }
+    }
+}

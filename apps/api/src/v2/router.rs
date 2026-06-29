@@ -26,13 +26,13 @@ use super::{
     build_address_name, build_address_name_role_summary, build_auto_name_records,
     build_indexed_name_records, build_name_record, build_subname, build_verified_name_records,
     decode, dedupe_to_storage, default_requested_records, encode, encode_at_token, get_events,
-    get_history, indexed_records_requiring_verified_fallback, order_to_storage,
+    get_history, get_primary_name, indexed_records_requiring_verified_fallback, order_to_storage,
     relation_to_storage, resolve_v2_snapshot, sort_to_storage, subname_cursor_payload,
     subname_storage_cursor, validate_product_record,
 };
 
 const MAX_RECORD_KEYS: usize = MAX_PAGE_SIZE as usize;
-
+const PRIMARY_NAME_ROUTE: &str = "/v2/addresses/{address}/primary-name";
 pub(super) fn router() -> Router<AppState> {
     Router::new()
         .route("/v2/lookup", post(not_implemented))
@@ -43,7 +43,7 @@ pub(super) fn router() -> Router<AppState> {
         .route("/v2/names/{name}/history", get(get_history))
         .route("/v2/permissions", get(not_implemented))
         .route("/v2/addresses/{address}/names", get(get_address_names))
-        .route("/v2/addresses/{address}/primary-name", get(not_implemented))
+        .route(PRIMARY_NAME_ROUTE, get(get_primary_name))
         .route("/v2/addresses/{address}/history", get(not_implemented))
         .route("/v2/search", get(not_implemented))
         .route("/v2/events", get(get_events))
