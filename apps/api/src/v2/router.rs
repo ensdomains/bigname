@@ -26,7 +26,7 @@ use super::{
     build_address_name, build_address_name_role_summary, build_auto_name_records,
     build_indexed_name_records, build_name_record, build_subname, build_verified_name_records,
     decode, dedupe_to_storage, default_requested_records, encode, encode_at_token, get_events,
-    get_history, indexed_records_requiring_verified_fallback, order_to_storage,
+    get_history, get_namespace, indexed_records_requiring_verified_fallback, order_to_storage,
     relation_to_storage, resolve_v2_snapshot, sort_to_storage, subname_cursor_payload,
     subname_storage_cursor, validate_product_record,
 };
@@ -48,7 +48,7 @@ pub(super) fn router() -> Router<AppState> {
         .route("/v2/search", get(not_implemented))
         .route("/v2/events", get(get_events))
         .route("/v2/resolvers/{chain_id}/{address}", get(not_implemented))
-        .route("/v2/namespaces/{namespace}", get(not_implemented))
+        .route("/v2/namespaces/{namespace}", get(get_namespace))
         .route(
             "/v2/diagnostics/names/{name}/coverage",
             get(not_implemented),
