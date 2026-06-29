@@ -3,10 +3,13 @@ use axum::{
     http::request::Parts,
 };
 use serde::Deserialize;
+use sqlx::types::Uuid;
 
 use super::{
     error::{V2Error, V2Result},
-    vocab::{AddressNamesDedupe, AddressNamesSort, Finality, HistoryScope, Relation},
+    vocab::{
+        AddressNamesDedupe, AddressNamesSort, Finality, HistoryEventType, HistoryScope, Relation,
+    },
 };
 
 pub(crate) const DEFAULT_PAGE_SIZE: u64 = 50;
@@ -21,7 +24,14 @@ pub(crate) struct RawQueryParams {
     pub(crate) namespace: Option<String>,
     pub(crate) include: Option<String>,
     pub(crate) scope: Option<String>,
+    #[serde(rename = "type")]
+    pub(crate) event_type: Option<String>,
+    pub(crate) name: Option<String>,
+    pub(crate) registration_id: Option<String>,
+    pub(crate) address: Option<String>,
     pub(crate) relation: Option<String>,
+    pub(crate) from_block: Option<String>,
+    pub(crate) to_block: Option<String>,
     pub(crate) q: Option<String>,
     pub(crate) dedupe: Option<String>,
     pub(crate) sort: Option<String>,
@@ -39,7 +49,13 @@ pub(crate) struct QueryParams {
     pub(crate) namespace: Option<String>,
     pub(crate) include: Vec<String>,
     pub(crate) scope: HistoryScope,
+    pub(crate) event_type: Option<HistoryEventType>,
+    pub(crate) name: Option<String>,
+    pub(crate) registration_id: Option<String>,
+    pub(crate) address: Option<String>,
     pub(crate) relation: Option<Relation>,
+    pub(crate) from_block: Option<i64>,
+    pub(crate) to_block: Option<i64>,
     pub(crate) q: Option<String>,
     pub(crate) dedupe: AddressNamesDedupe,
     pub(crate) sort: AddressNamesSort,
@@ -93,7 +109,13 @@ impl TryFrom<RawQueryParams> for QueryParams {
             namespace: trim_to_option(raw.namespace),
             include: parse_include(raw.include),
             scope: parse_scope(raw.scope.as_deref())?,
+            event_type: parse_event_type(raw.event_type.as_deref())?,
+            name: trim_to_option(raw.name),
+            registration_id: parse_registration_id(raw.registration_id)?,
+            address: parse_address(raw.address)?,
             relation: parse_relation(raw.relation.as_deref())?,
+            from_block: parse_block_bound(raw.from_block, "from_block")?,
+            to_block: parse_block_bound(raw.to_block, "to_block")?,
             q: trim_to_option(raw.q),
             dedupe: parse_dedupe(raw.dedupe.as_deref())?,
             sort: parse_sort(raw.sort.as_deref())?,
@@ -165,6 +187,23 @@ fn parse_scope(value: Option<&str>) -> V2Result<HistoryScope> {
     }
 }
 
+fn parse_event_type(value: Option<&str>) -> V2Result<Option<HistoryEventType>> {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        None => Ok(None),
+        Some("registration") => Ok(Some(HistoryEventType::Registration)),
+        Some("renewal") => Ok(Some(HistoryEventType::Renewal)),
+        Some("release") => Ok(Some(HistoryEventType::Release)),
+        Some("expiry") => Ok(Some(HistoryEventType::Expiry)),
+        Some("transfer") => Ok(Some(HistoryEventType::Transfer)),
+        Some("authority") => Ok(Some(HistoryEventType::Authority)),
+        Some("resolver") => Ok(Some(HistoryEventType::Resolver)),
+        Some("record") => Ok(Some(HistoryEventType::Record)),
+        Some("primary_name") => Ok(Some(HistoryEventType::PrimaryName)),
+        Some("permission") => Ok(Some(HistoryEventType::Permission)),
+        Some(_) => Err(invalid_parameter("type")),
+    }
+}
+
 fn parse_relation(value: Option<&str>) -> V2Result<Option<Relation>> {
     match value.map(str::trim).filter(|value| !value.is_empty()) {
         None => Ok(None),
@@ -173,6 +212,41 @@ fn parse_relation(value: Option<&str>) -> V2Result<Option<Relation>> {
         Some("registrant") => Ok(Some(Relation::Registrant)),
         Some(_) => Err(invalid_parameter("relation")),
     }
+}
+
+fn parse_registration_id(value: Option<String>) -> V2Result<Option<String>> {
+    let Some(value) = trim_to_option(value) else {
+        return Ok(None);
+    };
+
+    Uuid::parse_str(&value)
+        .map(|uuid| Some(uuid.to_string()))
+        .map_err(|_| V2Error::invalid_input("registration_id must be a UUID"))
+}
+
+fn parse_address(value: Option<String>) -> V2Result<Option<String>> {
+    let Some(value) = trim_to_option(value) else {
+        return Ok(None);
+    };
+
+    crate::parse_evm_address(&value, "address")
+        .map(Some)
+        .map_err(|error| V2Error::invalid_input(error.message))
+}
+
+fn parse_block_bound(value: Option<String>, field_name: &'static str) -> V2Result<Option<i64>> {
+    let Some(value) = trim_to_option(value) else {
+        return Ok(None);
+    };
+
+    value
+        .parse::<i64>()
+        .ok()
+        .filter(|value| *value >= 0)
+        .map(Some)
+        .ok_or_else(|| {
+            V2Error::invalid_input(format!("{field_name} must be a non-negative integer"))
+        })
 }
 
 fn parse_dedupe(value: Option<&str>) -> V2Result<AddressNamesDedupe> {
@@ -333,6 +407,62 @@ mod tests {
             })
             .expect("scope value must parse");
             assert_eq!(params.scope, expected);
+        }
+    }
+
+    #[test]
+    fn event_filters_parse_and_normalize_wire_values() {
+        let params = parse(RawQueryParams {
+            event_type: Some("registration".to_owned()),
+            name: Some(" Alice.eth ".to_owned()),
+            registration_id: Some("550e8400-e29b-41d4-a716-446655440000".to_owned()),
+            address: Some("0x00000000000000000000000000000000000000aa".to_owned()),
+            from_block: Some("10".to_owned()),
+            to_block: Some("20".to_owned()),
+            ..RawQueryParams::default()
+        })
+        .expect("event filters must parse");
+
+        assert_eq!(params.event_type, Some(HistoryEventType::Registration));
+        assert_eq!(params.name, Some("Alice.eth".to_owned()));
+        assert_eq!(
+            params.registration_id,
+            Some("550e8400-e29b-41d4-a716-446655440000".to_owned())
+        );
+        assert_eq!(
+            params.address,
+            Some("0x00000000000000000000000000000000000000aa".to_owned())
+        );
+        assert_eq!(params.from_block, Some(10));
+        assert_eq!(params.to_block, Some(20));
+    }
+
+    #[test]
+    fn bad_event_filter_values_are_rejected() {
+        for raw in [
+            RawQueryParams {
+                event_type: Some("registered".to_owned()),
+                ..RawQueryParams::default()
+            },
+            RawQueryParams {
+                registration_id: Some("not-a-uuid".to_owned()),
+                ..RawQueryParams::default()
+            },
+            RawQueryParams {
+                address: Some("0x1234".to_owned()),
+                ..RawQueryParams::default()
+            },
+            RawQueryParams {
+                from_block: Some("-1".to_owned()),
+                ..RawQueryParams::default()
+            },
+            RawQueryParams {
+                to_block: Some("latest".to_owned()),
+                ..RawQueryParams::default()
+            },
+        ] {
+            let error = parse(raw).expect_err("bad event filter must fail");
+            assert_eq!(error.code(), ErrorCode::InvalidInput);
         }
     }
 

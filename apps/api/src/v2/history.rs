@@ -278,7 +278,7 @@ fn history_storage_scope(scope: HistoryScope) -> bigname_storage::HistoryScope {
     }
 }
 
-async fn v2_exact_name_snapshot_scope(
+pub(crate) async fn v2_exact_name_snapshot_scope(
     state: &AppState,
     namespace: &str,
 ) -> V2Result<SnapshotSelectionScope> {
@@ -292,7 +292,7 @@ async fn v2_exact_name_snapshot_scope(
     .map_err(api_error_to_v2)
 }
 
-fn api_error_to_v2(error: ApiError) -> V2Error {
+pub(crate) fn api_error_to_v2(error: ApiError) -> V2Error {
     match error.code {
         "invalid_input" => V2Error::invalid_input(error.message),
         "not_found" => V2Error::not_found(error.message),
@@ -316,7 +316,7 @@ fn invalid_history_cursor() -> V2Error {
     V2Error::invalid_input("cursor must be a valid pagination cursor")
 }
 
-fn format_timestamp(value: OffsetDateTime) -> String {
+pub(crate) fn format_timestamp(value: OffsetDateTime) -> String {
     let value = value.to_offset(UtcOffset::UTC);
     format!(
         "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
