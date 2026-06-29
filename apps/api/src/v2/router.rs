@@ -8,8 +8,7 @@ use crate::AppState;
 
 use super::{
     get_address_history, get_address_names, get_events, get_history, get_name_record,
-    get_name_records, get_namespace, get_permissions, get_primary_name, get_status,
-    get_subnames,
+    get_name_records, get_namespace, get_permissions, get_primary_name, get_status, get_subnames,
 };
 
 pub(super) fn router() -> Router<AppState> {

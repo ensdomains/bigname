@@ -7,7 +7,7 @@ mod write;
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result};
-use sqlx::PgPool;
+use sqlx::{PgPool, types::Uuid};
 
 pub use list::{
     NameCurrentAddressFilter, NameCurrentAddressRelationFilter, NameCurrentListCursor,
@@ -165,6 +165,51 @@ pub async fn load_name_current_by_logical_name_ids(
             Ok((row.logical_name_id.clone(), row))
         })
         .collect()
+}
+
+/// Load the canonical representative current name for each resource (registration).
+///
+/// `name_current.resource_id` is 1:many; this picks one representative per resource using the
+/// `canonical_display_name ASC` tie-break the rest of v2 uses, and returns that picked row's
+/// `normalized_name`.
+pub async fn load_current_names_by_resource_ids(
+    pool: &PgPool,
+    resource_ids: &[Uuid],
+) -> Result<BTreeMap<Uuid, String>> {
+    if resource_ids.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+
+    let rows = sqlx::query_as::<_, (Uuid, String)>(&format!(
+        r#"
+        SELECT DISTINCT ON (nc.resource_id)
+            nc.resource_id,
+            nc.normalized_name
+        FROM name_current nc
+        JOIN name_surfaces surface
+          ON surface.logical_name_id = nc.logical_name_id
+        LEFT JOIN resources resource
+          ON resource.resource_id = nc.resource_id
+        LEFT JOIN surface_bindings binding
+          ON binding.surface_binding_id = nc.surface_binding_id
+        LEFT JOIN token_lineages token_lineage
+          ON token_lineage.token_lineage_id = nc.token_lineage_id
+        WHERE nc.resource_id = ANY($1::UUID[])
+        {DEFAULT_NAME_CURRENT_READ_FILTER}
+        ORDER BY nc.resource_id ASC, nc.canonical_display_name ASC, nc.logical_name_id ASC
+        "#,
+    ))
+    .bind(resource_ids)
+    .fetch_all(pool)
+    .await
+    .with_context(|| {
+        format!(
+            "failed to load current representative names for {} resource_id values",
+            resource_ids.len()
+        )
+    })?;
+
+    Ok(rows.into_iter().collect())
 }
 
 #[cfg(test)]

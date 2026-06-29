@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use axum::{Json, extract::State};
 use bigname_storage::{
@@ -6,7 +6,7 @@ use bigname_storage::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sqlx::{PgPool, Row, types::Uuid};
+use sqlx::{PgPool, types::Uuid};
 
 use crate::{AppState, normalize_inferred_route_name};
 
@@ -97,7 +97,15 @@ pub(crate) async fn get_permissions(
     .await
     .map_err(|_| V2Error::internal_error("failed to load permissions"))?;
 
-    let current_names = load_current_names_by_resource_ids(&state.pool, &storage_page.rows).await?;
+    let resource_ids = storage_page
+        .rows
+        .iter()
+        .map(|row| row.resource_id)
+        .collect::<Vec<_>>();
+    let current_names =
+        bigname_storage::load_current_names_by_resource_ids(&state.pool, &resource_ids)
+            .await
+            .map_err(|_| V2Error::internal_error("failed to load permission names"))?;
     let next_cursor = storage_page.next_cursor.as_ref().map(|cursor| {
         encode(&permissions_cursor_payload(
             cursor,
@@ -286,86 +294,6 @@ fn non_empty_array(value: &Value) -> Option<Value> {
 
 fn non_null_value(value: &Value) -> Option<Value> {
     (!value.is_null()).then(|| value.clone())
-}
-
-async fn load_current_names_by_resource_ids(
-    pool: &PgPool,
-    rows: &[PermissionsCurrentRow],
-) -> V2Result<BTreeMap<Uuid, String>> {
-    let resource_ids = rows
-        .iter()
-        .map(|row| row.resource_id)
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-    if resource_ids.is_empty() {
-        return Ok(BTreeMap::new());
-    }
-
-    let loaded = sqlx::query(
-        r#"
-        SELECT DISTINCT ON (nc.resource_id)
-            nc.resource_id,
-            nc.normalized_name
-        FROM name_current nc
-        JOIN name_surfaces surface
-          ON surface.logical_name_id = nc.logical_name_id
-        LEFT JOIN resources resource
-          ON resource.resource_id = nc.resource_id
-        LEFT JOIN surface_bindings binding
-          ON binding.surface_binding_id = nc.surface_binding_id
-        LEFT JOIN token_lineages token_lineage
-          ON token_lineage.token_lineage_id = nc.token_lineage_id
-        WHERE nc.resource_id = ANY($1::UUID[])
-          AND surface.canonicality_state IN (
-              'canonical'::canonicality_state,
-              'safe'::canonicality_state,
-              'finalized'::canonicality_state
-          )
-          AND (
-              nc.surface_binding_id IS NULL
-              OR (
-                  resource.canonicality_state IN (
-                      'canonical'::canonicality_state,
-                      'safe'::canonicality_state,
-                      'finalized'::canonicality_state
-                  )
-                  AND binding.canonicality_state IN (
-                      'canonical'::canonicality_state,
-                      'safe'::canonicality_state,
-                      'finalized'::canonicality_state
-                  )
-                  AND binding.active_to IS NULL
-                  AND (
-                      nc.token_lineage_id IS NULL
-                      OR token_lineage.canonicality_state IN (
-                          'canonical'::canonicality_state,
-                          'safe'::canonicality_state,
-                          'finalized'::canonicality_state
-                      )
-                  )
-              )
-          )
-        ORDER BY nc.resource_id ASC, nc.namespace ASC, nc.normalized_name ASC, nc.logical_name_id ASC
-        "#,
-    )
-    .bind(&resource_ids)
-    .fetch_all(pool)
-    .await
-    .map_err(|_| V2Error::internal_error("failed to load permission names"))?;
-
-    let mut current_names = BTreeMap::new();
-    for row in loaded {
-        let resource_id: Uuid = row
-            .try_get("resource_id")
-            .map_err(|_| V2Error::internal_error("failed to load permission names"))?;
-        let normalized_name: String = row
-            .try_get("normalized_name")
-            .map_err(|_| V2Error::internal_error("failed to load permission names"))?;
-        current_names.insert(resource_id, normalized_name);
-    }
-
-    Ok(current_names)
 }
 
 fn permissions_cursor_payload(
