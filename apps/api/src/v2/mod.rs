@@ -11,6 +11,7 @@ mod history;
 mod name_record;
 mod name_records;
 mod name_records_inventory;
+mod namespaces;
 mod params;
 mod primary_name;
 mod router;
@@ -44,6 +45,7 @@ pub(crate) use name_records::{
     build_verified_name_records, get_name_records, indexed_records_requiring_verified_fallback,
 };
 pub(crate) use name_records_inventory::{default_requested_records, validate_product_record};
+pub(crate) use namespaces::get_namespace;
 pub(crate) use params::{
     AtSelector, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, QueryParams, RawQueryParams, RequestSource,
     SortOrder,

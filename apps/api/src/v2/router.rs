@@ -8,7 +8,7 @@ use crate::AppState;
 
 use super::{
     get_address_history, get_address_names, get_events, get_history, get_name_record,
-    get_name_records, get_primary_name, get_subnames,
+    get_name_records, get_namespace, get_primary_name, get_subnames,
 };
 
 pub(super) fn router() -> Router<AppState> {
@@ -29,7 +29,7 @@ pub(super) fn router() -> Router<AppState> {
         .route("/v2/search", get(not_implemented))
         .route("/v2/events", get(get_events))
         .route("/v2/resolvers/{chain_id}/{address}", get(not_implemented))
-        .route("/v2/namespaces/{namespace}", get(not_implemented))
+        .route("/v2/namespaces/{namespace}", get(get_namespace))
         .route(
             "/v2/diagnostics/names/{name}/coverage",
             get(not_implemented),
