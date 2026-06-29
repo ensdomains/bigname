@@ -49,11 +49,13 @@ struct ParsedEventsFilter {
     cursor_filters: BTreeMap<String, String>,
 }
 
+/// `namespace` defaults to the name's inferred namespace when `name` is provided
+/// and `namespace` is omitted; otherwise defaults to `ens`.
 pub(crate) async fn get_events(
     params: QueryParams,
     State(state): State<AppState>,
 ) -> V2Result<Json<Envelope<Vec<Event>>>> {
-    let namespace = params.namespace.clone().unwrap_or_else(|| "ens".to_owned());
+    let namespace = resolve_events_namespace(&params)?;
     let parsed = parse_events_filter(&params, &namespace)?;
 
     let scope = v2_exact_name_snapshot_scope(&state, &namespace).await?;
@@ -180,6 +182,16 @@ pub(crate) fn events_storage_cursor(
         normalized_event_id,
         event_identity,
     })
+}
+
+fn resolve_events_namespace(params: &QueryParams) -> V2Result<String> {
+    match (params.namespace.as_deref(), params.name.as_deref()) {
+        (Some(namespace), _) => Ok(namespace.to_owned()),
+        (None, Some(name)) => normalize_inferred_route_name(name)
+            .map(|normalized| normalized.namespace.to_owned())
+            .map_err(|error| V2Error::invalid_input(error.message)),
+        (None, None) => Ok("ens".to_owned()),
+    }
 }
 
 fn parse_events_filter(params: &QueryParams, namespace: &str) -> V2Result<ParsedEventsFilter> {
@@ -342,6 +354,45 @@ mod tests {
             provenance: json!({}),
             coverage: json!({}),
         }
+    }
+
+    #[test]
+    fn resolve_events_namespace_uses_explicit_inferred_or_global_default() {
+        let params = QueryParams::try_from(RawQueryParams {
+            namespace: Some("ens".to_owned()),
+            name: Some("alice.base.eth".to_owned()),
+            ..RawQueryParams::default()
+        })
+        .expect("params must parse");
+        assert_eq!(resolve_events_namespace(&params).expect("namespace"), "ens");
+
+        let params = QueryParams::try_from(RawQueryParams {
+            name: Some("alice.base.eth".to_owned()),
+            ..RawQueryParams::default()
+        })
+        .expect("params must parse");
+        assert_eq!(
+            resolve_events_namespace(&params).expect("namespace"),
+            "basenames"
+        );
+
+        let params = QueryParams::try_from(RawQueryParams {
+            name: Some("alice.eth".to_owned()),
+            ..RawQueryParams::default()
+        })
+        .expect("params must parse");
+        assert_eq!(resolve_events_namespace(&params).expect("namespace"), "ens");
+
+        let params = QueryParams::try_from(RawQueryParams::default()).expect("params must parse");
+        assert_eq!(resolve_events_namespace(&params).expect("namespace"), "ens");
+
+        let params = QueryParams::try_from(RawQueryParams {
+            name: Some("bad name.eth".to_owned()),
+            ..RawQueryParams::default()
+        })
+        .expect("params must parse");
+        let error = resolve_events_namespace(&params).expect_err("invalid name must fail");
+        assert_eq!(error.code(), ErrorCode::InvalidInput);
     }
 
     #[test]
