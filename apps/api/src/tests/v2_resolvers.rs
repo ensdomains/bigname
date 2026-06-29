@@ -222,6 +222,33 @@ async fn v2_get_resolver_reports_unsupported_requested_sections_in_meta() -> Res
 }
 
 #[tokio::test]
+async fn v2_get_resolver_reports_narrowed_unsupported_sections_as_unsupported() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    database.seed_default_ens_snapshot_selector_position().await?;
+    bigname_storage::upsert_resolver_current_rows(
+        &database.pool,
+        &[unsupported_resolver_current_row(
+            "ethereum-mainnet",
+            V2_RESOLVER_ADDRESS,
+        )],
+    )
+    .await?;
+
+    let payload = v2_resolver_payload_for_database(
+        &database,
+        &format!("/v2/resolvers/1/{V2_RESOLVER_ADDRESS}?include=nodes"),
+    )
+    .await?;
+
+    assert_eq!(payload["data"]["nodes"], Value::Null);
+    assert_eq!(payload["meta"]["unsupported_fields"], json!(["nodes"]));
+    assert_eq!(payload["meta"]["completeness"], json!("unsupported"));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn v2_get_resolver_filters_bound_names_by_declared_resolver_chain() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_resolver_bound_names_fixture_with_chains(
@@ -245,6 +272,60 @@ async fn v2_get_resolver_filters_bound_names_by_declared_resolver_chain() -> Res
         .expect("bound_names data must be an array");
 
     assert_eq!(names(rows), vec!["alpha.eth"]);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_resolver_paginates_route_chain_rows_across_interleaved_chains() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_resolver_bound_names_fixture_with_chains(
+        &database,
+        &["ethereum-mainnet", "base-mainnet", "ethereum-mainnet"],
+    )
+    .await?;
+    bigname_storage::upsert_resolver_current_rows(
+        &database.pool,
+        &[resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS)],
+    )
+    .await?;
+
+    let first_page = v2_resolver_payload_for_database(
+        &database,
+        &format!("/v2/resolvers/1/{V2_RESOLVER_ADDRESS}?include=nodes&page_size=1"),
+    )
+    .await?;
+    let first_rows = first_page["data"]["bound_names"]["data"]
+        .as_array()
+        .expect("bound_names data must be an array");
+    assert_eq!(names(first_rows), vec!["alpha.eth"]);
+    let next_cursor = first_page["data"]["bound_names"]["page"]["next_cursor"]
+        .as_str()
+        .expect("first page must provide a nested cursor");
+
+    let second_page = v2_resolver_payload_for_database(
+        &database,
+        &format!("/v2/resolvers/1/{V2_RESOLVER_ADDRESS}?include=nodes&page_size=1&cursor={next_cursor}"),
+    )
+    .await?;
+    let second_rows = second_page["data"]["bound_names"]["data"]
+        .as_array()
+        .expect("bound_names data must be an array");
+
+    assert_eq!(names(second_rows), vec!["gamma.eth"]);
+    assert_eq!(
+        first_rows
+            .iter()
+            .chain(second_rows.iter())
+            .map(|row| row["name"].as_str().expect("row must include name"))
+            .collect::<Vec<_>>(),
+        vec!["alpha.eth", "gamma.eth"]
+    );
+    assert_eq!(
+        second_page["data"]["bound_names"]["page"]["next_cursor"],
+        Value::Null
+    );
 
     database.cleanup().await?;
     Ok(())
@@ -359,7 +440,7 @@ async fn seed_v2_resolver_bound_names_fixture_with_chains(
     let specs = v2_address_name_specs();
     seed_v2_address_name_storage(database, &specs).await?;
 
-    for (spec, resolver_chain) in specs.iter().take(2).zip(resolver_chains.iter().copied()) {
+    for (spec, resolver_chain) in specs.iter().zip(resolver_chains.iter().copied()) {
         database
             .insert_name_current_row(address_name_name_current_row(
                 spec.logical_name_id,

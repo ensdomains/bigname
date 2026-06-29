@@ -320,6 +320,10 @@ fn apply_resolver_support_meta(
 ) {
     let mut fields = Vec::new();
     let mut reason = None;
+    let requested_count = RESOLVER_SECTIONS
+        .iter()
+        .filter(|(field_key, _, _)| include.requests(field_key))
+        .count();
 
     for (field_key, _, summary_key) in RESOLVER_SECTIONS {
         if !include.requests(field_key) {
@@ -338,7 +342,7 @@ fn apply_resolver_support_meta(
     }
 
     if !fields.is_empty() {
-        meta.completeness = Some(if fields.len() == RESOLVER_SECTIONS.len() {
+        meta.completeness = Some(if fields.len() == requested_count {
             Completeness::Unsupported
         } else {
             Completeness::Partial
