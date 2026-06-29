@@ -101,23 +101,24 @@ fn build_namespace(namespace: String, snapshot: NamespaceManifestSnapshot) -> V2
 fn aggregate_capabilities(
     manifests: &[ActiveManifestVersion],
 ) -> V2Result<BTreeMap<String, NamespaceCapability>> {
-    let manifest_count = manifests.len();
-    let mut supported_counts = BTreeMap::<String, usize>::new();
+    let mut capability_counts = BTreeMap::<String, (usize, usize)>::new();
 
     for manifest in manifests {
         for (raw_name, flag) in &manifest.capability_flags {
             let product_name = product_capability_name(raw_name)?.to_owned();
-            let supported_count = supported_counts.entry(product_name).or_default();
+            let (declared_count, supported_count) =
+                capability_counts.entry(product_name).or_default();
+            *declared_count += 1;
             if flag.status == CapabilitySupportStatus::Supported {
                 *supported_count += 1;
             }
         }
     }
 
-    Ok(supported_counts
+    Ok(capability_counts
         .into_iter()
-        .map(|(capability, supported_count)| {
-            let completeness = if supported_count == manifest_count {
+        .map(|(capability, (declared_count, supported_count))| {
+            let completeness = if supported_count == declared_count {
                 Completeness::Full
             } else if supported_count > 0 {
                 Completeness::Partial
@@ -208,15 +209,22 @@ mod tests {
                 [
                     ("declared_children", CapabilitySupportStatus::Supported),
                     ("verified_resolution", CapabilitySupportStatus::Supported),
-                    ("exact_name_profile", CapabilitySupportStatus::Shadow),
                 ],
             ),
             manifest(
                 "ens_l2",
                 "base-mainnet",
                 [
-                    ("declared_children", CapabilitySupportStatus::Supported),
-                    ("exact_name_profile", CapabilitySupportStatus::Unsupported),
+                    ("verified_resolution", CapabilitySupportStatus::Unsupported),
+                    ("name_history", CapabilitySupportStatus::Supported),
+                ],
+            ),
+            manifest(
+                "ens_l3",
+                "ethereum-mainnet",
+                [
+                    ("exact_name_profile", CapabilitySupportStatus::Shadow),
+                    ("name_history", CapabilitySupportStatus::Supported),
                 ],
             ),
         ];
@@ -235,6 +243,13 @@ mod tests {
             capabilities["verified_records"],
             NamespaceCapability {
                 completeness: Completeness::Partial,
+                unsupported_reason: None,
+            }
+        );
+        assert_eq!(
+            capabilities["name_history"],
+            NamespaceCapability {
+                completeness: Completeness::Full,
                 unsupported_reason: None,
             }
         );
