@@ -12,6 +12,7 @@ mod name_record;
 mod name_records;
 mod name_records_inventory;
 mod params;
+mod primary_name;
 mod router;
 mod snapshots;
 mod subnames;
@@ -46,6 +47,10 @@ pub(crate) use name_records_inventory::{default_requested_records, validate_prod
 pub(crate) use params::{
     AtSelector, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, QueryParams, RawQueryParams, RequestSource,
     SortOrder,
+};
+pub(crate) use primary_name::{
+    PrimaryName, PrimaryNameAnswer, PrimaryNameQueryParams, PrimaryNameSourceSelection,
+    PrimaryNameVerification, build_primary_name, get_primary_name,
 };
 pub(crate) use snapshots::{
     as_of_meta, consistency_for_finality, decode_at_token, encode_at_token, resolve_v2_snapshot,
