@@ -140,10 +140,10 @@ pub use name_current::{
     NameCurrentAddressFilter, NameCurrentAddressRelationFilter, NameCurrentListCursor,
     NameCurrentListCursorValue, NameCurrentListFilter, NameCurrentListOrder, NameCurrentListPage,
     NameCurrentListRow, NameCurrentListSort, NameCurrentReplacement, NameCurrentRow,
-    clear_name_current, count_name_current_list, delete_name_current, load_name_current,
-    load_name_current_by_logical_name_ids, load_name_current_for_snapshot,
-    load_name_current_list_page, name_current_list_cursor_from_row, replace_name_current_rows,
-    upsert_name_current_rows,
+    clear_name_current, count_name_current_list, delete_name_current,
+    load_current_names_by_resource_ids, load_name_current, load_name_current_by_logical_name_ids,
+    load_name_current_for_snapshot, load_name_current_list_page, name_current_list_cursor_from_row,
+    replace_name_current_rows, upsert_name_current_rows,
 };
 pub use normalized_events::{
     NormalizedEvent, NormalizedEventUpsertSummary, load_normalized_event_counts_by_kind,

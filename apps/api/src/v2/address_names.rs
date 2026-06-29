@@ -516,7 +516,7 @@ fn option_filter(value: Option<&str>) -> String {
     value.unwrap_or(NONE_FILTER_VALUE).to_owned()
 }
 
-fn permission_scope_value(scope: &PermissionScope) -> Value {
+pub(crate) fn permission_scope_value(scope: &PermissionScope) -> Value {
     json!({
         "kind": scope.kind(),
         "detail": scope.detail(),
