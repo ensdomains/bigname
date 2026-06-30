@@ -11,9 +11,10 @@ use super::query::QueryRoot;
 pub(crate) type SubgraphSchema = Schema<QueryRoot, EmptyMutation, EmptySubscription>;
 
 /// Depth/complexity ceilings. The deepest legitimate documents are GraphiQL's introspection query
-/// (~14 levels through the nested `ofType` fragment) and the Manager's `Domain` fragment (~5);
+/// (~14 levels through the nested `ofType` fragment) and the supported `Domain` shape (~5);
 /// complexity is counted per field selection, so the full introspection document lands in the low
-/// hundreds. The ceilings block pathological nesting / alias-spam without touching real callers.
+/// hundreds. The ceilings block pathological nesting / alias-spam without touching supported
+/// callers.
 const MAX_QUERY_DEPTH: usize = 32;
 const MAX_QUERY_COMPLEXITY: usize = 4_000;
 
@@ -40,7 +41,7 @@ pub(crate) fn graphql_routes(state: AppState) -> Router {
 }
 
 /// Render the schema's SDL (no `AppState` data needed — data does not affect the SDL). Used by the
-/// snapshot test that guards the codegen contract.
+/// snapshot test that guards the compatibility contract.
 #[cfg(test)]
 pub(crate) fn subgraph_sdl() -> String {
     Schema::build(QueryRoot, EmptyMutation, EmptySubscription)

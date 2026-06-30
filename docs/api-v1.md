@@ -445,11 +445,11 @@ Rules:
 
 ## Subgraph-compatible GraphQL endpoint
 
-Separate from the REST contract above, bigname serves a narrow subgraph-compatible read surface at `POST /graphql`. Its purpose is single and explicit: let the ENS Manager dashboard — whose codegen targets the legacy subgraph / zigens GraphQL shape — point at bigname unchanged. It is **not** general subgraph parity and adds no GraphQL field-level guarantees beyond what is documented here.
+Separate from the REST contract above, bigname serves a narrow subgraph-compatible read surface at `POST /graphql`. Its purpose is single and explicit: expose the documented, subgraph-shaped compatibility subset over bigname projections. It is **not** general subgraph parity, not a consumer-replacement declaration, and adds no GraphQL field-level guarantees beyond what is documented here.
 
-- **Operations served:** `domain(id:)`, `domains(where, first, skip, orderBy, orderDirection)`, `domainConnection(first, where) { totalCount }`, `registrationConnection(first, where) { totalCount }`. These are exactly the four the Manager's committed codegen consumes; no other operations are implemented.
+- **Operations served:** `domain(id:)`, `domains(where, first, skip, orderBy, orderDirection)`, `domainConnection(first, where) { totalCount }`, `registrationConnection(first, where) { totalCount }`. These are the only operations in scope; no other GraphQL operations are implemented.
 - **Backing data:** the existing `name_current` and `record_inventory_current` projections — the same source of truth as the REST surface. The GraphQL layer is a shape adapter, not a new index.
-- **Contract owner:** the served selection sets track the Manager's committed codegen, validated against the live zigens schema (`https://graphql.ens.dev`). bigname does not own this contract; field shapes follow the consumer.
+- **Contract owner:** bigname owns this documented compatibility subset. Field shapes are locked by the checked-in GraphQL SDL fixture and endpoint tests; widening the subset requires updating this section and those fixtures together.
 - **Conventions differ from REST:** GraphQL responses use the subgraph's `camelCase` field names and entity shapes (`Domain`, `Resolver`, `Account`, `AddressRecord`), not the `snake_case` v1 wire format. Values are declared on-chain state from the projections; consumers re-validate live values against chain where needed (the "dictionary, not live state" model).
 - **CORS:** the endpoint is unauthenticated and read-only; permissive CORS applies (shared with the v1/v2 REST router).
 

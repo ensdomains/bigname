@@ -15,7 +15,7 @@ fn reject_role_bitmap_filter(role_bitmap: Option<&str>) -> ApiResult<()> {
 }
 
 // Keep in sync with apps/worker replay::CURRENT_PROJECTION_REPLAY_VERSION.
-const CURRENT_PROJECTION_REPLAY_VERSION: i32 = 5;
+const CURRENT_PROJECTION_REPLAY_VERSION: i32 = 6;
 
 fn parse_roles_account(account: Option<&str>) -> Option<String> {
     parse_permissions_subject(account).map(|account| account.to_ascii_lowercase())

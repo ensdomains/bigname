@@ -13,27 +13,25 @@ use super::error::internal_error;
 use super::inputs::{DomainFilter, RegistrationFilter};
 use super::objects::{Domain, DomainConnection, RegistrationConnection};
 
-/// ENS is the Manager's only namespace (Sepolia v2).
+/// The compatibility surface is scoped to ENS names.
 const NAMESPACE: &str = "ens";
 /// Page size for `domains` when the subgraph `first` argument is omitted.
 const DEFAULT_DOMAINS_PAGE_SIZE: u64 = 100;
 /// Ceiling for client-supplied `first`, matching the REST surface's `MAX_PAGE_SIZE` so the public
-/// GraphQL path cannot request an unbounded page. The dashboard sends at most `first: 200`;
-/// larger values are clamped silently (a GraphQL error would break subgraph-shaped callers).
+/// GraphQL path cannot request an unbounded page. Larger values are clamped silently so
+/// subgraph-shaped callers do not receive a GraphQL error for oversized windows.
 const MAX_DOMAINS_PAGE_SIZE: u64 = crate::pagination::MAX_PAGE_SIZE;
-/// Ceiling for client-supplied `skip`. Offset paging over the full Sepolia set stays well under
-/// this (the dashboard walks an owner's names in 200-row windows), while a hostile deep offset
-/// cannot force Postgres to scan an arbitrary prefix of the filtered set.
+/// Ceiling for client-supplied `skip`, so a hostile deep offset cannot force Postgres to scan an
+/// arbitrary prefix of the filtered set.
 const MAX_DOMAINS_SKIP: u64 = 1_000_000;
 
 pub(crate) struct QueryRoot;
 
 #[Object]
 impl QueryRoot {
-    /// `domain(id: String!)` — the Manager passes the ENS *name* string (e.g. `"alice.eth"`); the
-    /// canonical subgraph keys a `Domain` by its EIP-137 namehash. Resolve by name first, then fall
-    /// back to the namehash, so both callers work without inferring intent from the id's shape (a
-    /// namehash-shaped name still resolves as a name, since the name lookup is tried first).
+    /// `domain(id: String!)` accepts either an ENS name string (for example `"alice.eth"`) or a
+    /// namehash. Resolve by name first, then fall back to the namehash, so callers do not have to
+    /// signal which id form they are sending.
     async fn domain(&self, ctx: &Context<'_>, id: String) -> Result<Option<Domain>> {
         let state = ctx.data::<AppState>()?;
         let row = match load_name_current_list_row_by_name(&state.pool, NAMESPACE, &id)
@@ -132,7 +130,7 @@ fn storage_sort(
         DomainOrderBy::CreatedAt => NameCurrentListSort::CreatedAt,
         DomainOrderBy::ExpiryDate => NameCurrentListSort::ExpiryDate,
         DomainOrderBy::RegistrationDate => NameCurrentListSort::RegistrationDate,
-        // `id` has no storage sort column and the dashboard never sends it; map to the name sort.
+        // `id` has no storage sort column; map it to the name sort.
         DomainOrderBy::Id | DomainOrderBy::Name => NameCurrentListSort::Name,
     };
     let order = match order_direction.unwrap_or(OrderDirection::Asc) {
@@ -161,7 +159,7 @@ fn domain_filter_to_storage(filter: Option<DomainFilter>) -> NameCurrentListFilt
 /// Build a storage address-membership filter from a single address and/or an address list, under a
 /// fixed relation. A *provided* list takes precedence (subgraph `owner_in`/`registrant_in`) and is
 /// honoured exactly — including an empty list, which matches NOTHING (`anc.address = ANY('{}')`),
-/// per canonical subgraph `_in` semantics. Only a *missing* list (`None`) falls back to the scalar
+/// per the compatibility contract. Only a *missing* list (`None`) falls back to the scalar
 /// `owner`/`registrant`. Addresses are lowercased to match the stored `address_names_current`
 /// convention.
 fn address_membership(
@@ -189,8 +187,7 @@ fn address_membership(
     }
 }
 
-/// Subgraph `totalCount` is a codegen-pinned `Int`; saturate the storage `u64` count (absurdly
-/// large for the Sepolia scope) into `i32`.
+/// Subgraph `totalCount` is an `Int`; saturate the storage `u64` count into `i32`.
 fn count_to_i32(count: u64) -> i32 {
     i32::try_from(count).unwrap_or(i32::MAX)
 }

@@ -7,7 +7,8 @@ use sqlx::types::time::OffsetDateTime;
 
 use super::EVENT_KIND_RESOLVER_CHANGED;
 use super::json::{
-    format_timestamp, history_pointer_from_event, json_i64, json_str, normalize_resolver_address,
+    format_timestamp, history_pointer_from_event, json_i64, json_i64_field, json_str,
+    normalize_resolver_address,
 };
 use super::types::{
     ChainPositionCandidate, CurrentBindingContext, HistoryHeads, NameSurfaceSeed, ProjectedFacts,
@@ -309,8 +310,8 @@ pub(super) fn project_facts(
         if let Some(status) = json_str(&event.after_state, &["status"]) {
             facts.control_status_substrate = Some(status);
         }
-        if let Some(expiry) = json_i64(&event.after_state, &["expiry"]) {
-            facts.control_expiry_substrate = Some(expiry);
+        if let Some(expiry) = json_i64_field(&event.after_state, &["expiry"]) {
+            facts.control_expiry_substrate = expiry;
         }
 
         match event.event_kind.as_str() {
@@ -319,7 +320,7 @@ pub(super) fn project_facts(
                 facts.authority_kind = json_str(&event.after_state, &["authority_kind"]);
                 facts.authority_key = json_str(&event.after_state, &["authority_key"]);
                 facts.registrant = json_str(&event.after_state, &["registrant"]);
-                facts.expiry = json_i64(&event.after_state, &["expiry"]);
+                facts.expiry = json_i64_field(&event.after_state, &["expiry"]).unwrap_or(None);
                 facts.registered_at = event
                     .block_timestamp
                     .map(|timestamp| timestamp.unix_timestamp());
@@ -329,11 +330,15 @@ pub(super) fn project_facts(
                 if facts.registration_status.as_deref() != Some("released") {
                     facts.registration_status = Some("active".to_owned());
                 }
-                facts.expiry = json_i64(&event.after_state, &["expiry"]).or(facts.expiry);
+                if let Some(expiry) = json_i64_field(&event.after_state, &["expiry"]) {
+                    facts.expiry = expiry;
+                }
                 facts.latest_registration_event_kind = Some(event.event_kind.clone());
             }
             "ExpiryChanged" => {
-                facts.expiry = json_i64(&event.after_state, &["expiry"]).or(facts.expiry);
+                if let Some(expiry) = json_i64_field(&event.after_state, &["expiry"]) {
+                    facts.expiry = expiry;
+                }
                 facts.latest_registration_event_kind = Some(event.event_kind.clone());
             }
             "RegistrationReleased" => {

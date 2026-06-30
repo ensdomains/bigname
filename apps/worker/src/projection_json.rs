@@ -4,6 +4,10 @@ use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use sqlx::types::time::{OffsetDateTime, UtcOffset};
 
+pub(crate) fn unix_timestamp_is_projectable(value: i64) -> bool {
+    OffsetDateTime::from_unix_timestamp(value).is_ok()
+}
+
 pub(crate) fn format_timestamp(value: OffsetDateTime) -> String {
     let value = value.to_offset(UtcOffset::UTC);
     format!(
@@ -28,6 +32,20 @@ pub(crate) fn json_i64(value: &Value, path: &[&str]) -> Option<i64> {
     path.iter()
         .try_fold(value, |current, key| current.get(key))
         .and_then(Value::as_i64)
+}
+
+pub(crate) fn json_i64_field(value: &Value, path: &[&str]) -> Option<Option<i64>> {
+    let field = path
+        .iter()
+        .try_fold(value, |current, key| current.get(key))?;
+    match field {
+        Value::Number(number) => number
+            .as_i64()
+            .filter(|value| unix_timestamp_is_projectable(*value))
+            .map(Some)
+            .or_else(|| number.as_u64().map(|_| None)),
+        _ => None,
+    }
 }
 
 pub(crate) fn dedupe_json_values(values: impl IntoIterator<Item = Value>) -> Result<Vec<Value>> {
@@ -103,14 +121,47 @@ mod tests {
     #[test]
     fn json_i64_reads_real_timestamps_and_drops_the_no_expiry_sentinel() {
         // Decode stays faithful: the raw on-chain `uint64` expiry lands in the event JSON, including
-        // ENSv2's `type(uint64).max` "reserved forever / no expiry" sentinel. The projection reads it
-        // here; an unrepresentable value is treated as absent (`None`) — so a permanent name projects
-        // to a `null` expiry rather than a fabricated far-future date.
+        // ENSv2's `type(uint64).max` permanent reverse-name value. This narrow helper cannot
+        // represent that value as an `i64`, so `json_i64` treats it as absent for callers that only
+        // need a finite timestamp.
+        // (upstream: .refs/ens_v2/contracts/src/reverse-registrar/StandaloneReverseRegistrar.sol:L176 @ ens_v2@554c309)
+        // (upstream: .refs/ens_v2/contracts/src/reverse-registrar/StandaloneReverseRegistrar.sol:L177 @ ens_v2@554c309)
         assert_eq!(
             json_i64(&json!({ "expiry": 1_900_000_000 }), &["expiry"]),
             Some(1_900_000_000)
         );
         assert_eq!(json_i64(&json!({ "expiry": u64::MAX }), &["expiry"]), None);
         assert_eq!(json_i64(&json!({}), &["expiry"]), None);
+    }
+
+    #[test]
+    fn json_i64_field_distinguishes_missing_from_unrepresentable_values() {
+        use super::json_i64_field;
+
+        assert_eq!(
+            json_i64_field(&json!({ "expiry": 1_900_000_000 }), &["expiry"]),
+            Some(Some(1_900_000_000))
+        );
+        assert_eq!(
+            json_i64_field(&json!({ "expiry": i64::MAX }), &["expiry"]),
+            Some(None)
+        );
+        assert_eq!(
+            json_i64_field(&json!({ "expiry": u64::MAX }), &["expiry"]),
+            Some(None)
+        );
+        assert_eq!(
+            json_i64_field(&json!({ "expiry": i64::MAX as u64 + 1 }), &["expiry"]),
+            Some(None)
+        );
+        assert_eq!(
+            json_i64_field(&json!({ "expiry": null }), &["expiry"]),
+            None
+        );
+        assert_eq!(
+            json_i64_field(&json!({ "expiry": "not-a-number" }), &["expiry"]),
+            None
+        );
+        assert_eq!(json_i64_field(&json!({}), &["expiry"]), None);
     }
 }

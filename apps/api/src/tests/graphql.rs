@@ -1,6 +1,6 @@
 // Integration coverage for the native subgraph-compatible GraphQL surface. The SDL-snapshot test
-// guards the codegen contract the Manager depends on; the end-to-end test drives the four dashboard
-// ops through `app_router` + `oneshot` against seeded Sepolia-v2-shaped rows.
+// guards the compatibility contract; the end-to-end tests drive the supported operations through
+// `app_router` + `oneshot` against seeded Sepolia-v2-shaped rows.
 
 const GRAPHQL_OWNER: &str = "0x000000000000000000000000000000000000000a";
 const GRAPHQL_REGISTRANT: &str = "0x000000000000000000000000000000000000000b";
@@ -8,7 +8,7 @@ const GRAPHQL_RESOLVER: &str = "0x000000000000000000000000000000000000def0";
 const GRAPHQL_ALICE_NAMEHASH: &str = "0xa11ce";
 const GRAPHQL_BOB_NAMEHASH: &str = "0xb0b";
 /// TokenHolder for the owner-fallback fixture names (carol, dave) — kept distinct from
-/// `GRAPHQL_OWNER` so the dashboard-op tests' `owner_in` windows stay two-name stable.
+/// `GRAPHQL_OWNER` so the compatibility tests' `owner_in` windows stay two-name stable.
 const GRAPHQL_FALLBACK_HOLDER: &str = "0x000000000000000000000000000000000000000c";
 /// Declared registrant for carol — exercises the `owner → registrant` non-null fallback and the
 /// plural `registrant_in` filter.
@@ -44,7 +44,7 @@ fn graphql_declared_summary(
     })
 }
 
-async fn seed_graphql_dashboard_fixture(database: &TestDatabase) -> Result<()> {
+async fn seed_graphql_compat_fixture(database: &TestDatabase) -> Result<()> {
     let alice_tl = Uuid::from_u128(0x6_a001);
     let alice_res = Uuid::from_u128(0x6_a002);
     let alice_sb = Uuid::from_u128(0x6_a003);
@@ -161,7 +161,7 @@ async fn seed_graphql_dashboard_fixture(database: &TestDatabase) -> Result<()> {
 }
 
 /// Two extra names under `GRAPHQL_FALLBACK_HOLDER` exercising the degenerate summary shapes the
-/// dashboard fixture never hits: carol has no declared owner (only a registrant — the middle leg
+/// compatibility fixture never hits: carol has no declared owner (only a registrant — the middle leg
 /// of the non-null `owner` fallback) and a real expiry; dave has no owner, registrant, expiry, or
 /// created_at at all (zero-address fallback, epoch `createdAt`, NULL-ranked expiry sort).
 async fn seed_graphql_fallback_fixture(database: &TestDatabase) -> Result<()> {
@@ -470,7 +470,7 @@ async fn seed_bob_record_inventory(database: &TestDatabase) -> Result<()> {
 #[tokio::test]
 async fn graphql_domains_list_batches_resolver_records_per_domain() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_graphql_dashboard_fixture(&database).await?;
+    seed_graphql_compat_fixture(&database).await?;
     seed_alice_record_inventory(&database).await?;
     seed_bob_record_inventory(&database).await?;
 
@@ -521,7 +521,7 @@ async fn graphql_domains_list_batches_resolver_records_per_domain() -> Result<()
 #[tokio::test]
 async fn graphql_domains_list_batch_mixes_hit_and_clean_miss() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_graphql_dashboard_fixture(&database).await?;
+    seed_graphql_compat_fixture(&database).await?;
     seed_alice_record_inventory(&database).await?;
     // Deliberately do NOT seed bob's inventory: bob is keyed (has a resolver) but has no row.
 
@@ -704,7 +704,7 @@ async fn post_graphql(state: AppState, query: &str, variables: Value) -> Result<
 
 #[tokio::test]
 async fn graphql_endpoint_answers_cors_preflight_with_wildcard() -> Result<()> {
-    // The Manager dev build calls the endpoint cross-origin, so the browser sends a preflight for
+    // A browser client can call the endpoint cross-origin, so the browser sends a preflight for
     // the application/json POST. The permissive CORS layer must answer it with a wildcard origin
     // (no credentials) or the browser blocks the real request.
     let database = TestDatabase::new_migrated().await?;
@@ -734,7 +734,7 @@ async fn graphql_endpoint_answers_cors_preflight_with_wildcard() -> Result<()> {
 }
 
 #[test]
-fn graphql_sdl_matches_subgraph_codegen_contract() {
+fn graphql_sdl_matches_subgraph_compatibility_contract() {
     let sdl = crate::graphql::subgraph_sdl();
 
     // Golden-file lock: ANY schema change (type/nullability/arg/enum drift) must show up as a
@@ -747,11 +747,11 @@ fn graphql_sdl_matches_subgraph_codegen_contract() {
         "SDL drifted from tests/fixtures/subgraph_schema.graphql — if intentional, re-bless via print_subgraph_sdl_for_blessing"
     );
 
-    // Documentation-level pins for the load-bearing Manager-codegen contract points (redundant
-    // with the golden file; kept so a failure names the broken contract directly).
+    // Documentation-level pins for load-bearing compatibility contract points (redundant with the
+    // golden file; kept so a failure names the broken contract directly).
     assert!(sdl.contains("owner: Account!"), "Domain.owner must be non-null");
-    assert!(sdl.contains("createdAt: Int!"), "Domain.createdAt is codegen-pinned non-null");
-    assert!(sdl.contains("address: String!"), "Resolver.address is codegen-pinned non-null");
+    assert!(sdl.contains("createdAt: Int!"), "Domain.createdAt must be non-null");
+    assert!(sdl.contains("address: String!"), "Resolver.address must be non-null");
 }
 
 /// Bless helper for the golden SDL fixture — prints the live SDL so it can be copied into
@@ -765,7 +765,7 @@ fn print_subgraph_sdl_for_blessing() {
 #[tokio::test]
 async fn graphql_domain_op_returns_subgraph_domain_shape() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_graphql_dashboard_fixture(&database).await?;
+    seed_graphql_compat_fixture(&database).await?;
 
     let payload = post_graphql(
         database.app_state(),
@@ -785,7 +785,7 @@ async fn graphql_domain_op_returns_subgraph_domain_shape() -> Result<()> {
     assert_eq!(domain["name"], json!("Alice.eth"));
     assert_eq!(domain["normalizedName"], json!("alice.eth"));
     assert_eq!(domain["owner"]["id"], json!(GRAPHQL_OWNER));
-    // Codegen pins createdAt/expiryDate to Int — they must serialize as JSON numbers, not strings.
+    // createdAt/expiryDate are GraphQL Ints, so they must serialize as JSON numbers, not strings.
     assert_eq!(domain["createdAt"], json!(1_700_000_000));
     assert_eq!(domain["expiryDate"], json!(1_900_000_000));
     assert!(domain["createdAt"].is_number());
@@ -797,8 +797,8 @@ async fn graphql_domain_op_returns_subgraph_domain_shape() -> Result<()> {
     assert_eq!(domain["resolver"]["addresses"], json!([]));
     assert_eq!(domain["resolver"]["contentHash"], Value::Null);
 
-    // The Manager passes the ENS name string as `id`; the name path resolves the same row that the
-    // namehash query above reached via the fallback.
+    // The name-string `id` path resolves the same row that the namehash query above reached via the
+    // fallback.
     let by_name = post_graphql(
         database.app_state(),
         r#"query Domain($id: String!) {
@@ -829,7 +829,7 @@ async fn graphql_domain_op_returns_subgraph_domain_shape() -> Result<()> {
 #[tokio::test]
 async fn graphql_domains_op_offset_paginates_owner_in() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_graphql_dashboard_fixture(&database).await?;
+    seed_graphql_compat_fixture(&database).await?;
 
     let payload = post_graphql(
         database.app_state(),
@@ -882,7 +882,7 @@ async fn graphql_domains_op_offset_paginates_owner_in() -> Result<()> {
 #[tokio::test]
 async fn graphql_empty_owner_in_matches_nothing() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_graphql_dashboard_fixture(&database).await?;
+    seed_graphql_compat_fixture(&database).await?;
 
     // A non-empty owner_in returns the owner's names...
     let populated = post_graphql(
@@ -899,7 +899,7 @@ async fn graphql_empty_owner_in_matches_nothing() -> Result<()> {
         "a non-empty owner_in must return the owner's names"
     );
 
-    // ...but an EMPTY owner_in matches NOTHING (canonical subgraph `_in` semantics) rather than
+    // ...but an EMPTY owner_in matches NOTHING (the compatibility contract) rather than
     // silently widening to the whole namespace. Both the list and the connection count must be empty.
     let empty_list = post_graphql(
         database.app_state(),
@@ -933,7 +933,7 @@ async fn graphql_empty_owner_in_matches_nothing() -> Result<()> {
 #[tokio::test]
 async fn graphql_connection_ops_return_total_counts() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_graphql_dashboard_fixture(&database).await?;
+    seed_graphql_compat_fixture(&database).await?;
 
     // OwnedNamesCount: registrant B holds alice only.
     let owned = post_graphql(
@@ -975,7 +975,7 @@ async fn graphql_connection_ops_return_total_counts() -> Result<()> {
 #[tokio::test]
 async fn graphql_domain_owner_falls_back_to_registrant_then_zero_address() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_graphql_dashboard_fixture(&database).await?;
+    seed_graphql_compat_fixture(&database).await?;
 
     // Carol has no declared owner — `owner` resolves through the registrant leg of the fallback.
     let carol = post_graphql(
@@ -992,7 +992,7 @@ async fn graphql_domain_owner_falls_back_to_registrant_then_zero_address() -> Re
 
     // Dave has neither owner nor registrant — `owner` stays non-null via the zero-address
     // sentinel, the missing expiry serializes as null, and the missing created_at degenerates to
-    // epoch rather than breaking the codegen-pinned `createdAt: Int!`.
+    // epoch rather than breaking the non-null `createdAt: Int!`.
     let dave = post_graphql(
         database.app_state(),
         r#"query Domain($id: String!) { domain(id: $id) { owner { id } expiryDate createdAt } }"#,
@@ -1010,7 +1010,7 @@ async fn graphql_domain_owner_falls_back_to_registrant_then_zero_address() -> Re
 #[tokio::test]
 async fn graphql_domain_resolver_serves_record_inventory_fields() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_graphql_dashboard_fixture(&database).await?;
+    seed_graphql_compat_fixture(&database).await?;
     seed_alice_record_inventory(&database).await?;
 
     let payload = post_graphql(
@@ -1026,11 +1026,11 @@ async fn graphql_domain_resolver_serves_record_inventory_fields() -> Result<()> 
 
     let resolver = &payload["data"]["domain"]["resolver"];
     assert_eq!(resolver["address"], json!(GRAPHQL_RESOLVER));
-    // texts are the text-family selector KEYS (subgraph semantics) — url is listed even though its
-    // value was not retained.
+    // texts are the text-family selector keys, so url is listed even though its value was not
+    // retained.
     assert_eq!(resolver["texts"], json!(["avatar", "url"]));
     // addresses carry only retained (status=success) addr entries, parsed into {coinType, address}.
-    // The first is an ENSIP-11 EVM coinType (0x80000000 | chainId) — beyond i32 by design.
+    // The first coin type is beyond i32 by design, so it exercises the u32 GraphQL scalar path.
     assert_eq!(
         resolver["addresses"],
         json!([
@@ -1086,7 +1086,7 @@ async fn graphql_domain_resolver_serves_sepolia_records_via_anchor_fallback() ->
 #[tokio::test]
 async fn graphql_domains_op_orders_desc_and_ranks_null_expiry() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_graphql_dashboard_fixture(&database).await?;
+    seed_graphql_compat_fixture(&database).await?;
 
     let names = |payload: &Value| -> Vec<String> {
         payload["data"]["domains"]
@@ -1097,7 +1097,7 @@ async fn graphql_domains_op_orders_desc_and_ranks_null_expiry() -> Result<()> {
             .collect()
     };
 
-    // Descending name order inverts the ascending window the dashboard test pins.
+    // Descending name order inverts the ascending window the compatibility test pins.
     let desc = post_graphql(
         database.app_state(),
         r#"query Domains($where: DomainFilter!, $orderBy: Domain_orderBy, $orderDirection: OrderDirection) {
@@ -1149,7 +1149,7 @@ async fn graphql_domains_op_orders_desc_and_ranks_null_expiry() -> Result<()> {
 #[tokio::test]
 async fn graphql_filters_registrant_in_and_name_contains() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_graphql_dashboard_fixture(&database).await?;
+    seed_graphql_compat_fixture(&database).await?;
 
     // Plural registrant_in unions the Registrant relation across both fixture registrants.
     let owned = post_graphql(

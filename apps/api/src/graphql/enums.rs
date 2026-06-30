@@ -1,8 +1,8 @@
 use async_graphql::Enum;
 
 /// Subgraph `Domain_orderBy`. The underscore + lowercase-`o` type name and the lowercase-camel
-/// value names are pinned by the Manager's committed codegen, so they are set explicitly rather
-/// than relying on async-graphql's default SCREAMING_SNAKE_CASE rename.
+/// value names are set explicitly rather than relying on async-graphql's default
+/// SCREAMING_SNAKE_CASE rename.
 #[derive(Enum, Copy, Clone, Eq, PartialEq)]
 #[graphql(name = "Domain_orderBy")]
 pub(crate) enum DomainOrderBy {
@@ -10,8 +10,8 @@ pub(crate) enum DomainOrderBy {
     CreatedAt,
     #[graphql(name = "expiryDate")]
     ExpiryDate,
-    /// No storage sort column. The dashboard never sends it; declared for the codegen contract and
-    /// mapped to a degenerate (name) sort in the resolver.
+    /// No storage sort column; declared for compatibility and mapped to a degenerate (name) sort in
+    /// the resolver.
     #[graphql(name = "id")]
     Id,
     #[graphql(name = "name")]

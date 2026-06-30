@@ -7,10 +7,9 @@ type Account {
 
 """
 Subgraph `AddressRecord` — a coin-typed address record. `coinType` is `u32`, not `i32`:
-ENSIP-11 EVM coin types set the top bit (`0x80000000 | chainId`, e.g. `2147483658`), which the
-reference endpoint also serves beyond the signed-32-bit range. `coinTypeBig` carries the same
-coin type as a decimal string, mirroring zigens — a safe value for any client that rejects an
-out-of-`Int`-range `coinType`.
+some EVM-style coin types can exceed the signed-32-bit GraphQL `Int` range. `coinTypeBig`
+carries the same coin type as a decimal string for clients that reject an out-of-range
+`coinType` value.
 """
 type AddressRecord {
 	coinType: Int!
@@ -44,9 +43,9 @@ type DomainConnection {
 
 """
 Subgraph `DomainFilter`. Field names that are snake_case in the subgraph schema (`owner_in`,
-`name_contains`) are pinned explicitly; async-graphql would otherwise camelCase them. Only the
-fields the dashboard ops send are honoured by the resolvers (`owner`/`owner_in`, `isMigrated`);
-the rest are declared so unused codegen variables still validate.
+`name_contains`) are pinned explicitly; async-graphql would otherwise camelCase them. Only
+`owner`, `owner_in`, `name`, `name_contains`, and `isMigrated` affect storage filters; the rest
+are declared for compatibility with subgraph-shaped variables.
 """
 input DomainFilter {
 	id: String
@@ -59,15 +58,15 @@ input DomainFilter {
 
 """
 Subgraph `Domain_orderBy`. The underscore + lowercase-`o` type name and the lowercase-camel
-value names are pinned by the Manager's committed codegen, so they are set explicitly rather
-than relying on async-graphql's default SCREAMING_SNAKE_CASE rename.
+value names are set explicitly rather than relying on async-graphql's default
+SCREAMING_SNAKE_CASE rename.
 """
 enum Domain_orderBy {
 	createdAt
 	expiryDate
 	"""
-	No storage sort column. The dashboard never sends it; declared for the codegen contract and
-	mapped to a degenerate (name) sort in the resolver.
+	No storage sort column; declared for compatibility and mapped to a degenerate (name) sort in
+	the resolver.
 	"""
 	id
 	name
@@ -84,10 +83,9 @@ enum OrderDirection {
 
 type QueryRoot {
 	"""
-	`domain(id: String!)` — the Manager passes the ENS *name* string (e.g. `"alice.eth"`); the
-	canonical subgraph keys a `Domain` by its EIP-137 namehash. Resolve by name first, then fall
-	back to the namehash, so both callers work without inferring intent from the id's shape (a
-	namehash-shaped name still resolves as a name, since the name lookup is tried first).
+	`domain(id: String!)` accepts either an ENS name string (for example `"alice.eth"`) or a
+	namehash. Resolve by name first, then fall back to the namehash, so callers do not have to
+	signal which id form they are sending.
 	"""
 	domain(id: String!): Domain
 	"""
@@ -120,8 +118,8 @@ input RegistrationFilter {
 }
 
 """
-Subgraph `Resolver`. `id`/`address` carry the resolver contract address (non-null, matching the
-Manager codegen's `address: string`); the record fields (`texts`/`contentHash`/`addresses`) are
+Subgraph `Resolver`. `id`/`address` carry the resolver contract address; the record fields
+(`texts`/`contentHash`/`addresses`) are
 read from the `record_inventory_current` projection by [`resolver_from_store`] — a name whose
 resolver has no projected records serves the empty shapes.
 """
@@ -144,4 +142,3 @@ directive @skip(if: Boolean!) on FIELD | FRAGMENT_SPREAD | INLINE_FRAGMENT
 schema {
 	query: QueryRoot
 }
-

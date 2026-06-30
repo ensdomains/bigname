@@ -14,10 +14,9 @@ pub(crate) struct Account {
 }
 
 /// Subgraph `AddressRecord` — a coin-typed address record. `coinType` is `u32`, not `i32`:
-/// ENSIP-11 EVM coin types set the top bit (`0x80000000 | chainId`, e.g. `2147483658`), which the
-/// reference endpoint also serves beyond the signed-32-bit range. `coinTypeBig` carries the same
-/// coin type as a decimal string, mirroring zigens — a safe value for any client that rejects an
-/// out-of-`Int`-range `coinType`.
+/// some EVM-style coin types can exceed the signed-32-bit GraphQL `Int` range. `coinTypeBig`
+/// carries the same coin type as a decimal string for clients that reject an out-of-range
+/// `coinType` value.
 #[derive(SimpleObject)]
 #[graphql(name = "AddressRecord")]
 pub(crate) struct AddressRecord {
@@ -28,8 +27,8 @@ pub(crate) struct AddressRecord {
     pub(crate) address: String,
 }
 
-/// Subgraph `Resolver`. `id`/`address` carry the resolver contract address (non-null, matching the
-/// Manager codegen's `address: string`); the record fields (`texts`/`contentHash`/`addresses`) are
+/// Subgraph `Resolver`. `id`/`address` carry the resolver contract address; the record fields
+/// (`texts`/`contentHash`/`addresses`) are
 /// read from the `record_inventory_current` projection by [`resolver_from_store`] — a name whose
 /// resolver has no projected records serves the empty shapes.
 #[derive(SimpleObject)]

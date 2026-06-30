@@ -176,13 +176,27 @@ fn latest_record_cache_entry_value(
     }
 
     // Addr events carry their raw payload verbatim in `address_bytes_hex` (the adapter never
-    // interprets typed coin bytes). The subgraph `Resolver.addr` is exactly this declared on-chain
-    // value as last set via `AddressChanged`, so retaining the raw hex stays faithful to the log;
-    // callers decode per ENSIP-9/11 client-side. Absent the payload there is nothing to retain.
+    // interprets typed coin bytes). ENS resolver events emit the bytes supplied to `setAddr`, so
+    // retaining the raw hex stays faithful to the log.
+    // (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L47 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L59 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L539 @ ens_v2@554c309)
+    // (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L557 @ ens_v2@554c309)
+    // Absent the payload there is nothing to retain.
     //
-    // Empty bytes (`0x`) is ENS's deletion signal for an address record (there is no dedicated
-    // delete), so a cleared coin is a removal, not a `Success("0x")` value — mirror the contenthash
-    // branch above and project it as `NotFound` rather than enumerating a deleted record.
+    // For supported addr profiles, the setters accept an empty bytes payload, retain that raw
+    // payload, and emit it in the selector-specific event. bigname projects a retained empty payload
+    // as a cache miss (`NotFound`) rather than as a successful `"0x"` value.
+    // (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L52 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L59 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L63 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L551 @ ens_v2@554c309)
+    // (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L556 @ ens_v2@554c309)
+    // (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L557 @ ens_v2@554c309)
+    // (upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L57 @ basenames@1809bbc)
+    // (upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L58 @ basenames@1809bbc)
+    // (upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L61 @ basenames@1809bbc)
+    // (upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L65 @ basenames@1809bbc)
     if selector.record_family == SUPPORTED_ADDR_RECORD_FAMILY {
         return object
             .get("address_bytes_hex")
@@ -214,7 +228,7 @@ fn contenthash_hex_is_empty(bytes: &str) -> bool {
     matches!(bytes, "" | "0x")
 }
 
-// Empty address bytes (`0x`) are how ENS clears an address record; treat them as a deletion.
+// Projection cache deletion sentinel for retained empty address bytes.
 fn addr_hex_is_empty(bytes: &str) -> bool {
     matches!(bytes, "" | "0x")
 }

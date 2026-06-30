@@ -1,6 +1,6 @@
 # API v1 Routes
 
-Per-route reference. Conventions, snapshot selection, the response envelope, shared objects, and the error model live in [`api-v1.md`](api-v1.md).
+Per-route reference for the REST route set. Conventions, snapshot selection, the response envelope, shared objects, and the error model live in [`api-v1.md`](api-v1.md). The subgraph-compatible `POST /graphql` compatibility surface is specified separately in [`api-v1.md`](api-v1.md#subgraph-compatible-graphql-endpoint).
 
 ## Route Set Guide
 
