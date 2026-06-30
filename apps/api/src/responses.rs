@@ -8,6 +8,13 @@ include!("responses/collections.rs");
 
 include!("responses/projections.rs");
 
+pub(crate) mod responses {
+    pub(crate) use super::{
+        build_name_authority_control_explain_declared_state, build_name_coverage_declared_state,
+        build_name_surface_binding_explain_declared_state,
+    };
+}
+
 include!("responses/history.rs");
 
 include!("responses/app_facing/names_collection.rs");

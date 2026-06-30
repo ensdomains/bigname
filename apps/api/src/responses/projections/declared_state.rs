@@ -52,7 +52,7 @@ pub(super) fn build_name_declared_state(
     declared_state
 }
 
-pub(super) fn build_name_surface_binding_explain_declared_state(
+pub(crate) fn build_name_surface_binding_explain_declared_state(
     row: &NameCurrentRow,
 ) -> JsonValue {
     let mut declared_state = empty_object();
@@ -73,7 +73,7 @@ pub(super) fn build_name_surface_binding_explain_declared_state(
     declared_state
 }
 
-pub(super) fn build_name_authority_control_explain_declared_state(
+pub(crate) fn build_name_authority_control_explain_declared_state(
     row: &NameCurrentRow,
 ) -> JsonValue {
     let mut declared_state = empty_object();
