@@ -22,7 +22,7 @@ use build::{
 };
 use cursor::{LookupReverseCursorBinding, lookup_reverse_cursor_payload, reverse_identity_sort};
 use dto::{LookupInput, LookupKind, LookupRecord, LookupRequest, LookupResult};
-use head::{load_served_head_meta, served_head_token};
+use head::load_served_head_meta;
 use parse::{
     LookupProfile, LookupQueryParams, ParsedAddressLookup, ParsedNameLookup,
     ensure_lookup_batch_limit, parse_address_input, parse_lookup_json_body, parse_lookup_namespace,
@@ -57,7 +57,6 @@ pub(crate) async fn get_lookup(
     let profile = parse_lookup_profile(body.profile.as_deref())?;
     let namespace = parse_lookup_namespace(body.namespace.as_deref())?;
     let served_head = load_served_head_meta(&state.pool).await?;
-    let served_head_token = served_head_token(&served_head)?;
 
     let mut name_inputs = Vec::new();
     let mut address_inputs = Vec::new();
@@ -72,7 +71,7 @@ pub(crate) async fn get_lookup(
                         "namespace is not supported for address lookup inputs",
                     ));
                 }
-                address_inputs.push(parse_address_input(index, input, &served_head_token)?);
+                address_inputs.push(parse_address_input(index, input)?);
             }
         }
     }
@@ -84,8 +83,7 @@ pub(crate) async fn get_lookup(
             render_feed_lookup_results(&state, &address_inputs, &mut results).await?;
         }
         LookupProfile::Detail => {
-            render_detail_lookup_results(&state, &address_inputs, &served_head_token, &mut results)
-                .await?;
+            render_detail_lookup_results(&state, &address_inputs, &mut results).await?;
         }
     }
 
@@ -251,7 +249,6 @@ async fn render_feed_lookup_results(
 async fn render_detail_lookup_results(
     state: &AppState,
     inputs: &[ParsedAddressLookup],
-    served_head_token: &str,
     results: &mut [Option<LookupResult>],
 ) -> V2Result<()> {
     let storage_inputs = deduped_reverse_storage_inputs(inputs);
@@ -283,7 +280,6 @@ async fn render_detail_lookup_results(
         let has_more = groups.get(&key).is_some_and(|group| group.has_more);
         entries.sort_by(reverse_identity_sort);
         let binding = LookupReverseCursorBinding {
-            served_head: served_head_token,
             address: &input.address,
             coin_type: input.coin_type,
             relation: input.relation,

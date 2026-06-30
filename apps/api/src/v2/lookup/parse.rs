@@ -129,7 +129,6 @@ pub(super) fn parse_name_input(
 pub(super) fn parse_address_input(
     index: usize,
     input: &LookupAddressInput,
-    served_head_token: &str,
 ) -> V2Result<ParsedAddressLookup> {
     let id = required_id(input.id.as_deref())?;
     let address = parse_evm_address(&input.address, "address").map_err(api_error_to_v2)?;
@@ -141,13 +140,8 @@ pub(super) fn parse_address_input(
     let relation = parse_relation(input.relation.as_deref())?;
     let roles = relation_to_storage_roles(relation);
     let page_size = parse_page_size(input.page_size)?;
-    let (page_cursor, page_cursor_token) = parse_reverse_cursor(
-        input.cursor.as_deref(),
-        served_head_token,
-        &address,
-        coin_type,
-        relation,
-    )?;
+    let (page_cursor, page_cursor_token) =
+        parse_reverse_cursor(input.cursor.as_deref(), &address, coin_type, relation)?;
 
     Ok(ParsedAddressLookup {
         index,
@@ -216,7 +210,6 @@ pub(super) fn ensure_lookup_batch_limit(input_count: usize) -> V2Result<()> {
 
 fn parse_reverse_cursor(
     cursor: Option<&str>,
-    served_head_token: &str,
     address: &str,
     coin_type: u64,
     relation: Option<Relation>,
@@ -228,7 +221,6 @@ fn parse_reverse_cursor(
         return Ok((None, None));
     };
     let binding = LookupReverseCursorBinding {
-        served_head: served_head_token,
         address,
         coin_type,
         relation,

@@ -19,7 +19,6 @@ const NAMEHASH_CURSOR: &str = "namehash";
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct LookupReverseCursorBinding<'a> {
-    pub(super) served_head: &'a str,
     pub(super) address: &'a str,
     pub(super) coin_type: u64,
     pub(super) relation: Option<Relation>,
@@ -33,7 +32,7 @@ pub(super) fn lookup_reverse_cursor_payload(
         SORT,
         cursor_filters(binding),
         reverse_identity_cursor_item(record),
-        Some(binding.served_head.to_owned()),
+        None,
     )
 }
 
@@ -42,9 +41,6 @@ pub(super) fn lookup_reverse_storage_cursor(
     binding: &LookupReverseCursorBinding<'_>,
 ) -> V2Result<ReverseIdentityCursor> {
     if payload.sort != SORT {
-        return Err(invalid_lookup_cursor());
-    }
-    if payload.snapshot.as_deref() != Some(binding.served_head) {
         return Err(invalid_lookup_cursor());
     }
     if payload.filters != cursor_filters(binding) {
@@ -166,11 +162,11 @@ fn invalid_lookup_cursor() -> V2Error {
 mod tests {
     use super::*;
     use crate::v2::{decode, encode};
+    use sqlx::types::{Uuid, time::OffsetDateTime};
 
     #[test]
-    fn lookup_reverse_cursor_rejects_binding_mismatch() {
+    fn lookup_reverse_cursor_binds_query_filters_without_snapshot() {
         let binding = LookupReverseCursorBinding {
-            served_head: "head-a",
             address: "0x0000000000000000000000000000000000000abc",
             coin_type: 60,
             relation: Some(Relation::Owner),
@@ -190,16 +186,49 @@ mod tests {
         assert!(lookup_reverse_storage_cursor(&payload, &binding).is_ok());
 
         payload.snapshot = Some("head-b".to_owned());
-        assert!(lookup_reverse_storage_cursor(&payload, &binding).is_err());
+        assert!(lookup_reverse_storage_cursor(&payload, &binding).is_ok());
 
-        payload.snapshot = Some("head-a".to_owned());
+        payload.snapshot = None;
+        assert!(lookup_reverse_storage_cursor(&payload, &binding).is_ok());
+
         payload
             .filters
             .insert(ADDRESS_FILTER.to_owned(), "0xother".to_owned());
         assert!(lookup_reverse_storage_cursor(&payload, &binding).is_err());
 
-        let encoded = encode(&payload);
+        let minted = lookup_reverse_cursor_payload(&reverse_record(), &binding);
+        assert!(minted.snapshot.is_none());
+
+        let encoded = encode(&minted);
         let decoded = decode(&encoded).expect("cursor payload must decode");
-        assert_eq!(decoded.snapshot.as_deref(), Some("head-a"));
+        assert!(decoded.snapshot.is_none());
+    }
+
+    fn reverse_record() -> ReverseIdentityRecordRow {
+        ReverseIdentityRecordRow {
+            name_record: bigname_storage::IdentityNameRecordRow {
+                row: bigname_storage::IdentityNameCurrentRow {
+                    logical_name_id: "ens:alice.eth".to_owned(),
+                    namespace: "ens".to_owned(),
+                    canonical_display_name: "Alice.eth".to_owned(),
+                    normalized_name: "alice.eth".to_owned(),
+                    namehash: "namehash:alice.eth".to_owned(),
+                    labelhash: None,
+                    labelhash_count: None,
+                    resource_id: Some(Uuid::from_u128(0x5a0301)),
+                    record_inventory_boundary_key: None,
+                    declared_summary: serde_json::json!({}),
+                    coverage: serde_json::json!({}),
+                    chain_positions: serde_json::json!({}),
+                    last_recomputed_at: OffsetDateTime::from_unix_timestamp(1)
+                        .expect("test timestamp must be valid"),
+                },
+                record_inventory_current: None,
+                relations: Vec::new(),
+            },
+            relation_facets: vec![bigname_storage::AddressNameRelation::TokenHolder],
+            primary_name: None,
+            requested_coin_type: "60".to_owned(),
+        }
     }
 }

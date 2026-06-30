@@ -162,7 +162,7 @@ async fn v2_lookup_forward_results_are_in_order_with_head_meta() -> Result<()> {
 }
 
 #[tokio::test]
-async fn v2_lookup_reverse_detail_paginates_and_binds_cursor() -> Result<()> {
+async fn v2_lookup_reverse_detail_paginates_after_head_advance() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let address = "0x0000000000000000000000000000000000000abc";
     seed_v2_lookup_reverse_fixture(&database, address).await?;
@@ -205,6 +205,8 @@ async fn v2_lookup_reverse_detail_paginates_and_binds_cursor() -> Result<()> {
         .as_str()
         .expect("first page must include next_cursor");
 
+    advance_v2_lookup_ethereum_head(&database, 43, "0xlookup-advanced").await?;
+
     let second_page = v2_lookup_json(
         &database,
         json!({
@@ -221,6 +223,14 @@ async fn v2_lookup_reverse_detail_paginates_and_binds_cursor() -> Result<()> {
     assert_eq!(
         second_page["data"][0]["page"]["cursor"],
         json!(cursor.to_ascii_lowercase())
+    );
+    assert_eq!(
+        second_page["meta"]["as_of"]["1"],
+        json!({
+            "block_number": 43,
+            "block_hash": "0xlookup-advanced",
+            "timestamp": "2026-04-17T00:00:43Z"
+        })
     );
     assert_eq!(second_page["data"][0]["records"][0]["name"], json!("bob.eth"));
     assert_eq!(
@@ -247,6 +257,51 @@ async fn v2_lookup_reverse_detail_paginates_and_binds_cursor() -> Result<()> {
     assert_eq!(mismatch.status(), StatusCode::BAD_REQUEST);
     let payload: Value = read_json(mismatch).await?;
     assert_eq!(payload["error"]["code"], json!("invalid_input"));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_lookup_omits_chain_with_missing_head_hash() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    database
+        .seed_snapshot_selector_chain_positions(&json!({
+            "ethereum": {
+                "chain_id": "ethereum-mainnet",
+                "block_number": 77,
+                "block_hash": "0xlookup-head",
+                "timestamp": "2026-04-17T00:01:17Z"
+            }
+        }))
+        .await?;
+    drop_canonical_checkpoint_pair_check(&database).await?;
+    sqlx::query(
+        r#"
+        INSERT INTO chain_checkpoints (chain_id, canonical_block_number)
+        VALUES ('base-mainnet', 88)
+        "#,
+    )
+    .execute(&database.pool)
+    .await
+    .context("failed to seed checkpoint row without a canonical hash")?;
+
+    let payload = v2_lookup_json(
+        &database,
+        json!({"inputs": [{"id": "miss", "name": "missing.eth"}]}),
+    )
+    .await?;
+
+    assert_eq!(payload["data"][0]["status"], json!("not_found"));
+    assert_eq!(
+        payload["meta"]["as_of"]["1"],
+        json!({
+            "block_number": 77,
+            "block_hash": "0xlookup-head",
+            "timestamp": "2026-04-17T00:01:17Z"
+        })
+    );
+    assert!(payload["meta"]["as_of"].get("8453").is_none());
 
     database.cleanup().await?;
     Ok(())
@@ -310,6 +365,89 @@ async fn v2_lookup_reverse_feed_miss_and_all_miss_meta() -> Result<()> {
 
     database.cleanup().await?;
     empty_database.cleanup().await?;
+    Ok(())
+}
+
+async fn advance_v2_lookup_ethereum_head(
+    database: &TestDatabase,
+    block_number: i64,
+    block_hash: &str,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO chain_lineage (
+            chain_id,
+            block_hash,
+            block_number,
+            block_timestamp,
+            canonicality_state
+        )
+        VALUES (
+            'ethereum-mainnet',
+            $1,
+            $2,
+            $3::TIMESTAMPTZ,
+            'finalized'::canonicality_state
+        )
+        ON CONFLICT (chain_id, block_hash) DO UPDATE SET
+            block_number = EXCLUDED.block_number,
+            block_timestamp = EXCLUDED.block_timestamp,
+            canonicality_state = EXCLUDED.canonicality_state
+        "#,
+    )
+    .bind(block_hash)
+    .bind(block_number)
+    .bind(format!("2026-04-17T00:00:{:02}Z", block_number % 60))
+    .execute(&database.pool)
+    .await
+    .context("failed to seed advanced lookup head lineage")?;
+
+    sqlx::query(
+        r#"
+        UPDATE chain_checkpoints
+        SET
+            canonical_block_hash = $1,
+            canonical_block_number = $2,
+            safe_block_hash = $1,
+            safe_block_number = $2,
+            finalized_block_hash = $1,
+            finalized_block_number = $2,
+            updated_at = now()
+        WHERE chain_id = 'ethereum-mainnet'
+        "#,
+    )
+    .bind(block_hash)
+    .bind(block_number)
+    .execute(&database.pool)
+    .await
+    .context("failed to advance lookup head checkpoint")?;
+
+    Ok(())
+}
+
+async fn drop_canonical_checkpoint_pair_check(database: &TestDatabase) -> Result<()> {
+    let constraint_name: String = sqlx::query_scalar(
+        r#"
+        SELECT conname
+        FROM pg_constraint
+        WHERE conrelid = 'chain_checkpoints'::regclass
+          AND contype = 'c'
+          AND pg_get_constraintdef(oid) LIKE '%canonical_block_hash%'
+          AND pg_get_constraintdef(oid) LIKE '%canonical_block_number%'
+        "#,
+    )
+    .fetch_one(&database.pool)
+    .await
+    .context("failed to find canonical checkpoint pair check")?;
+    let escaped = constraint_name.replace('"', "\"\"");
+
+    sqlx::query(&format!(
+        r#"ALTER TABLE chain_checkpoints DROP CONSTRAINT "{escaped}""#
+    ))
+    .execute(&database.pool)
+    .await
+    .context("failed to drop canonical checkpoint pair check")?;
+
     Ok(())
 }
 
