@@ -6,11 +6,12 @@ use std::{
 
 use anyhow::{Context, Result};
 use bigname_storage::{
-    ChainLineageBlock, NameSurface, NormalizedEvent, RawBlock, RawLog, Resource, SurfaceBinding,
-    TokenLineage, default_database_url, label_preimage_from_label, load_name_current,
-    upsert_chain_lineage_blocks, upsert_name_current_rows, upsert_name_surfaces,
-    upsert_normalized_events, upsert_raw_blocks, upsert_raw_logs, upsert_resources,
-    upsert_surface_bindings, upsert_token_lineages,
+    ChainLineageBlock, NameCurrentListFilter, NameCurrentListOrder, NameCurrentListSort,
+    NameSurface, NormalizedEvent, RawBlock, RawLog, Resource, SurfaceBinding, TokenLineage,
+    default_database_url, label_preimage_from_label, load_name_current,
+    load_name_current_list_page_offset, upsert_chain_lineage_blocks, upsert_name_current_rows,
+    upsert_name_surfaces, upsert_normalized_events, upsert_raw_blocks, upsert_raw_logs,
+    upsert_resources, upsert_surface_bindings, upsert_token_lineages,
 };
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
@@ -2398,6 +2399,275 @@ async fn rebuild_keeps_same_binding_for_renewal_and_transfer() -> Result<()> {
     );
 
     database.cleanup().await
+}
+
+#[tokio::test]
+async fn rebuild_projects_unrepresentable_ens_v2_expiry_as_null_for_list_reads() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let (registry_manifest_id, _registrar_manifest_id) =
+        seed_ens_v2_exact_name_profile_manifests(database.pool()).await?;
+    let binding =
+        IdentityBinding::new("ens:max.alice.eth", "max.alice.eth", 0x9700, 0x9800, 0x9900);
+
+    seed_raw_blocks(
+        database.pool(),
+        &[
+            raw_block("ethereum-sepolia", "0xmax-surface", 711, 1_717_172_711),
+            raw_block("ethereum-sepolia", "0xmax-link", 712, 1_717_172_712),
+            raw_block("ethereum-sepolia", "0xmax-expiry", 713, 1_717_172_713),
+        ],
+    )
+    .await?;
+    upsert_token_lineages(
+        database.pool(),
+        &[TokenLineage {
+            token_lineage_id: binding.token_lineage_id,
+            chain_id: "ethereum-sepolia".to_owned(),
+            block_hash: "0xmax-link".to_owned(),
+            block_number: 712,
+            provenance: json!({
+                "adapter": ENS_V2_REGISTRY_DERIVATION_KIND,
+                "upstream_resource": "0x0000000000000000000000000000000000000000000000000000000000000eac",
+                "current_token_id": "0x0000000000000000000000000000000000000000000000000000000000000a03",
+            }),
+            canonicality_state: CanonicalityState::Finalized,
+        }],
+    )
+    .await?;
+    upsert_resources(
+        database.pool(),
+        &[Resource {
+            resource_id: binding.resource_id,
+            token_lineage_id: Some(binding.token_lineage_id),
+            chain_id: "ethereum-sepolia".to_owned(),
+            block_hash: "0xmax-link".to_owned(),
+            block_number: 712,
+            provenance: json!({
+                "adapter": ENS_V2_REGISTRY_DERIVATION_KIND,
+                "upstream_resource": "0x0000000000000000000000000000000000000000000000000000000000000eac",
+                "current_token_id": "0x0000000000000000000000000000000000000000000000000000000000000a03",
+            }),
+            canonicality_state: CanonicalityState::Finalized,
+        }],
+    )
+    .await?;
+    upsert_name_surfaces(
+        database.pool(),
+        &[NameSurface {
+            logical_name_id: binding.logical_name_id.clone(),
+            namespace: "ens".to_owned(),
+            input_name: binding.display_name.clone(),
+            canonical_display_name: "Max.alice.eth".to_owned(),
+            normalized_name: binding.display_name.clone(),
+            dns_encoded_name: binding.display_name.as_bytes().to_vec(),
+            namehash: format!("namehash:{}", binding.display_name),
+            labelhashes: labelhashes_for_name(&binding.display_name),
+            normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
+            normalization_warnings: json!([]),
+            normalization_errors: json!([]),
+            chain_id: "ethereum-sepolia".to_owned(),
+            block_hash: "0xmax-surface".to_owned(),
+            block_number: 711,
+            provenance: json!({"adapter": ENS_V2_REGISTRY_DERIVATION_KIND}),
+            canonicality_state: CanonicalityState::Finalized,
+        }],
+    )
+    .await?;
+    upsert_surface_bindings(
+        database.pool(),
+        &[SurfaceBinding {
+            surface_binding_id: binding.surface_binding_id,
+            logical_name_id: binding.logical_name_id.clone(),
+            resource_id: binding.resource_id,
+            binding_kind: SurfaceBindingKind::LinkedSubregistryPath,
+            active_from: timestamp(1_717_172_712),
+            active_to: None,
+            chain_id: "ethereum-sepolia".to_owned(),
+            block_hash: "0xmax-link".to_owned(),
+            block_number: 712,
+            provenance: json!({
+                "adapter": ENS_V2_REGISTRY_DERIVATION_KIND,
+                "binding_kind": "linked_subregistry_path",
+            }),
+            canonicality_state: CanonicalityState::Finalized,
+        }],
+    )
+    .await?;
+    seed_events(
+        database.pool(),
+        &[
+            with_source_manifest_id(
+                ens_v2_registry_event(
+                    &binding,
+                    "max-token-resource",
+                    "TokenResourceLinked",
+                    "0xmax-link",
+                    712,
+                    0,
+                    json!({}),
+                    json!({
+                        "token_id": "0x0000000000000000000000000000000000000000000000000000000000000a03",
+                        "upstream_resource": "0x0000000000000000000000000000000000000000000000000000000000000eac",
+                        "resource_id": binding.resource_id.to_string(),
+                    }),
+                ),
+                registry_manifest_id,
+            ),
+            with_source_manifest_id(
+                ens_v2_registry_event(
+                    &binding,
+                    "max-grant",
+                    "RegistrationGranted",
+                    "0xmax-link",
+                    712,
+                    1,
+                    json!({}),
+                    json!({
+                        "authority_kind": "ens_v2_registry",
+                        "authority_key": "ens-v2-registry:ethereum-sepolia:user-registry:0xeac",
+                        "registrant": "0x0000000000000000000000000000000000000b0b",
+                        "expiry": 1_900_000_000_i64,
+                    }),
+                ),
+                registry_manifest_id,
+            ),
+            with_source_manifest_id(
+                ens_v2_registry_event(
+                    &binding,
+                    "max-expiry",
+                    "ExpiryChanged",
+                    "0xmax-expiry",
+                    713,
+                    0,
+                    json!({ "expiry": 1_900_000_000_i64 }),
+                    json!({ "expiry": u64::MAX }),
+                ),
+                registry_manifest_id,
+            ),
+        ],
+    )
+    .await?;
+
+    rebuild_name_current(database.pool(), Some(&binding.logical_name_id)).await?;
+
+    let row = load_name_current(database.pool(), &binding.logical_name_id)
+        .await?
+        .context("rebuilt ENSv2 max-expiry row must exist")?;
+    assert_eq!(row.declared_summary["registration"]["expiry"], Value::Null);
+    assert_eq!(row.declared_summary["control"]["expiry"], Value::Null);
+
+    let rows = load_name_current_list_page_offset(
+        database.pool(),
+        &NameCurrentListFilter {
+            namespace: Some("ens".to_owned()),
+            ..NameCurrentListFilter::default()
+        },
+        NameCurrentListSort::ExpiryDate,
+        NameCurrentListOrder::Asc,
+        10,
+        0,
+    )
+    .await?;
+    let list_row = rows
+        .iter()
+        .find(|list_row| list_row.row.logical_name_id == binding.logical_name_id)
+        .context("max-expiry row must be readable through the name list")?;
+    assert_eq!(list_row.expiry_date, None);
+
+    database.cleanup().await
+}
+
+#[test]
+fn project_facts_clears_expiry_when_explicit_update_is_uint64_max() -> Result<()> {
+    let mut grant = coverage_event(SOURCE_FAMILY_ENS_V2_REGISTRY_L1, ETHEREUM_SEPOLIA_CHAIN_ID);
+    grant.normalized_event_id = 1;
+    grant.event_kind = "RegistrationGranted".to_owned();
+    grant.after_state = json!({
+        "authority_kind": "ens_v2_registry",
+        "authority_key": "ens-v2-registry:ethereum-sepolia:user-registry:0xeac",
+        "registrant": "0x0000000000000000000000000000000000000b0b",
+        "expiry": 1_900_000_000_i64,
+    });
+
+    let mut renewal = coverage_event(SOURCE_FAMILY_ENS_V2_REGISTRY_L1, ETHEREUM_SEPOLIA_CHAIN_ID);
+    renewal.normalized_event_id = 2;
+    renewal.event_kind = "RegistrationRenewed".to_owned();
+    renewal.after_state = json!({ "expiry": u64::MAX });
+
+    let facts = project_facts(&[grant, renewal], None, &types::HistoryHeads::default())?;
+
+    assert_eq!(facts.registration_status, Some("active".to_owned()));
+    assert_eq!(facts.expiry, None);
+    assert_eq!(facts.control_expiry_substrate, None);
+    assert_eq!(
+        facts.latest_registration_event_kind,
+        Some("RegistrationRenewed".to_owned())
+    );
+
+    Ok(())
+}
+
+#[test]
+fn project_facts_preserves_expiry_when_update_expiry_is_not_projectable() -> Result<()> {
+    let unprojectable_expiries = [Value::Null, json!("not-a-number")];
+
+    for expiry in unprojectable_expiries {
+        let mut grant = coverage_event(SOURCE_FAMILY_ENS_V2_REGISTRY_L1, ETHEREUM_SEPOLIA_CHAIN_ID);
+        grant.normalized_event_id = 1;
+        grant.event_kind = "RegistrationGranted".to_owned();
+        grant.after_state = json!({
+            "authority_kind": "ens_v2_registry",
+            "authority_key": "ens-v2-registry:ethereum-sepolia:user-registry:0xeac",
+            "registrant": "0x0000000000000000000000000000000000000b0b",
+            "expiry": 1_900_000_000_i64,
+        });
+
+        let mut renewal =
+            coverage_event(SOURCE_FAMILY_ENS_V2_REGISTRY_L1, ETHEREUM_SEPOLIA_CHAIN_ID);
+        renewal.normalized_event_id = 2;
+        renewal.event_kind = "RegistrationRenewed".to_owned();
+        renewal.after_state = json!({ "expiry": expiry });
+
+        let facts = project_facts(&[grant, renewal], None, &types::HistoryHeads::default())?;
+
+        assert_eq!(facts.expiry, Some(1_900_000_000));
+        assert_eq!(facts.control_expiry_substrate, Some(1_900_000_000));
+        assert_eq!(
+            facts.latest_registration_event_kind,
+            Some("RegistrationRenewed".to_owned())
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
+fn project_facts_clears_expiry_when_numeric_update_exceeds_finite_timestamp() -> Result<()> {
+    let mut grant = coverage_event(SOURCE_FAMILY_ENS_V2_REGISTRY_L1, ETHEREUM_SEPOLIA_CHAIN_ID);
+    grant.normalized_event_id = 1;
+    grant.event_kind = "RegistrationGranted".to_owned();
+    grant.after_state = json!({
+        "authority_kind": "ens_v2_registry",
+        "authority_key": "ens-v2-registry:ethereum-sepolia:user-registry:0xeac",
+        "registrant": "0x0000000000000000000000000000000000000b0b",
+        "expiry": 1_900_000_000_i64,
+    });
+
+    let mut renewal = coverage_event(SOURCE_FAMILY_ENS_V2_REGISTRY_L1, ETHEREUM_SEPOLIA_CHAIN_ID);
+    renewal.normalized_event_id = 2;
+    renewal.event_kind = "RegistrationRenewed".to_owned();
+    renewal.after_state = json!({ "expiry": i64::MAX });
+
+    let facts = project_facts(&[grant, renewal], None, &types::HistoryHeads::default())?;
+
+    assert_eq!(facts.expiry, None);
+    assert_eq!(facts.control_expiry_substrate, None);
+    assert_eq!(
+        facts.latest_registration_event_kind,
+        Some("RegistrationRenewed".to_owned())
+    );
+
+    Ok(())
 }
 
 #[tokio::test]

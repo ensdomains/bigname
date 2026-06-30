@@ -12,7 +12,7 @@ use super::types::{
 };
 use super::{NAME_CURRENT_DERIVATION_KIND, RECORD_INVENTORY_UNSUPPORTED_REASON, ZERO_ADDRESS};
 
-pub(super) use crate::projection_json::{format_timestamp, json_i64, json_str};
+pub(super) use crate::projection_json::{format_timestamp, json_i64, json_i64_field, json_str};
 
 pub(super) fn build_declared_summary(facts: ProjectedFacts, topology: Option<Value>) -> Value {
     let surface_head = facts

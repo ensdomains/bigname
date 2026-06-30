@@ -46,7 +46,7 @@ Breaking semantic changes mean `v2`. The `v1` contract does not preserve ENSv1 s
 
 ### Subgraph-compatible GraphQL surface
 
-Alongside the REST contract, bigname also serves a narrow, deliberately scoped subgraph-compatible read surface at `POST /graphql`. It is **not** general subgraph parity: it implements only the four operations the ENS Manager dashboard's codegen consumes — `domain`, `domains`, `registrationConnection`, `domainConnection` — over the existing `name_current` and `record_inventory_current` projections, so the Manager can point at bigname unchanged. The served selection sets track the Manager's committed codegen (validated against the live zigens schema), not an internal contract bigname owns. The native `v1` REST surface above remains the primary read contract; the GraphQL surface exists solely to de-risk a Manager cutover. Wire details live in [`api-v1.md`](api-v1.md#subgraph-compatible-graphql-endpoint).
+Alongside the REST contract, bigname also serves a narrow, deliberately scoped subgraph-compatible read surface at `POST /graphql`. It is **not** general subgraph parity: it implements only the documented compatibility operations — `domain`, `domains`, `registrationConnection`, `domainConnection` — over the existing `name_current` and `record_inventory_current` projections. The native `v1` REST surface above remains the primary read contract; the GraphQL surface is a compatibility adapter, not a consumer-replacement declaration. Wire details live in [`api-v1.md`](api-v1.md#subgraph-compatible-graphql-endpoint).
 
 ## Identity model
 

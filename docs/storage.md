@@ -305,6 +305,8 @@ During fresh normalized replay — current projection tables empty, normalized r
 
 Every current-state projection row carries provenance pointers, manifest version, relevant chain positions, canonicality summary, and last-recomputed timestamp.
 
+Current projection timestamp fields are representable Unix-second values or `null`. ENSv2 `type(uint64).max` expiry observations project as `null` rather than a fabricated far-future timestamp; upstream uses that value for never-expiring reverse names, while registry renewal can carry any non-decreasing `uint64` expiry.[^v2-reverse-max-expiry][^v2-registry-renew-expiry] Numeric values that do not fit the projection timestamp representation are not converted into public projection timestamps.
+
 Projection tables may be truncated and rebuilt from canonical facts plus normalized events.
 
 Historical projection materializations are projection-owned caches, not truth. When a worker materializes an `at` or `chain_positions` snapshot, the rows are keyed by the normal projection key plus exact chain-position context or an equivalent snapshot key. They may be bounded and evicted by policy; absence returns `stale`. A historical materialization must never overwrite a newer current row in place, and the API must never fill a missing historical projection from raw facts or provider data.
@@ -383,6 +385,8 @@ Worker-owned, read-only operational tooling reads storage audit helpers and rend
 [^ensnode-null-label]: (upstream: .refs/ensnode/packages/enssdk/src/lib/types/ens.ts:L92 @ ensnode@2017ae6)
 [^graph-ens-rainbow-table]: (upstream: .refs/ens_rainbow/src/main.rs:L36 @ ens_rainbow@bc44492)
 [^graph-ens-rainbow-hash]: (upstream: .refs/ens_rainbow/src/main.rs:L50 @ ens_rainbow@bc44492)
+[^v2-reverse-max-expiry]: (upstream: .refs/ens_v2/contracts/src/reverse-registrar/StandaloneReverseRegistrar.sol:L176 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/reverse-registrar/StandaloneReverseRegistrar.sol:L177 @ ens_v2@554c309)
+[^v2-registry-renew-expiry]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L249 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L254 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L257 @ ens_v2@554c309)
 
 [^bn-l2resolver-l4]: (upstream: .refs/basenames/src/L2/L2Resolver.sol:L4 @ basenames@1809bbc)
 [^bn-l2resolver-l16]: (upstream: .refs/basenames/src/L2/L2Resolver.sol:L16 @ basenames@1809bbc)

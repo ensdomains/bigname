@@ -1,9 +1,9 @@
 use async_graphql::InputObject;
 
 /// Subgraph `DomainFilter`. Field names that are snake_case in the subgraph schema (`owner_in`,
-/// `name_contains`) are pinned explicitly; async-graphql would otherwise camelCase them. Only the
-/// fields the dashboard ops send are honoured by the resolvers (`owner`/`owner_in`, `isMigrated`);
-/// the rest are declared so unused codegen variables still validate.
+/// `name_contains`) are pinned explicitly; async-graphql would otherwise camelCase them. Only
+/// `owner`, `owner_in`, `name`, `name_contains`, and `isMigrated` affect storage filters; the rest
+/// are declared for compatibility with subgraph-shaped variables.
 #[derive(InputObject, Default)]
 #[graphql(name = "DomainFilter")]
 pub(crate) struct DomainFilter {

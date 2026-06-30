@@ -26,9 +26,9 @@ impl From<NameCurrentListRow> for Domain {
             name: Some(row.row.canonical_display_name),
             normalized_name: Some(row.row.normalized_name),
             token_id: non_empty(row.token_id),
-            // The Manager codegen pins `createdAt` non-null (`Int!`); the storage value coalesces
+            // The GraphQL SDL pins `createdAt` non-null (`Int!`); the storage value coalesces
             // registration/history timestamps with the surface block timestamp, so a missing value
-            // is a degenerate row — surface it as epoch rather than break the contract with null.
+            // is a degenerate row. Surface it as epoch rather than break the contract with null.
             created_at: row.created_at.map(unix_seconds_i32).unwrap_or(0),
             expiry_date: row.expiry_date.map(unix_seconds_i32),
             resolver_address: non_empty(row.resolver_address),
@@ -126,9 +126,9 @@ fn non_empty(value: Option<String>) -> Option<String> {
     value.filter(|value| !value.is_empty())
 }
 
-/// Subgraph `createdAt`/`expiryDate` are codegen-pinned `Int`. Saturating to `i32::MAX` keeps the
-/// dashboard rendering for the Sepolia test scope; far-future (post-2038) expiries would need a
-/// wider Manager scalar — out of scope per the plan.
+/// Subgraph `createdAt`/`expiryDate` are `Int`. Saturating to `i32::MAX` keeps the compatibility
+/// surface stable for the Sepolia test scope; far-future (post-2038) expiries would need a wider
+/// scalar, which is outside this narrow endpoint.
 fn unix_seconds_i32(timestamp: OffsetDateTime) -> i32 {
     i32::try_from(timestamp.unix_timestamp()).unwrap_or(i32::MAX)
 }
