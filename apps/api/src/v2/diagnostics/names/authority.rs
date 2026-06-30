@@ -2,15 +2,12 @@ use axum::{
     Json,
     extract::{Path, State},
 };
-use bigname_storage::NameCurrentRow;
 use serde_json::Value as JsonValue;
 
-use crate::AppState;
+use crate::{AppState, responses::build_name_authority_control_explain_declared_state};
 
 use super::{
-    Envelope, QueryParams, V2Result, bind_path_name, declared_authority_section,
-    declared_name_control_section, diagnostic_envelope, empty_object, insert_value_field,
-    resolve_diagnostic_name,
+    Envelope, QueryParams, V2Result, bind_path_name, diagnostic_envelope, resolve_diagnostic_name,
 };
 
 pub(crate) async fn get_name_authority_diagnostic(
@@ -23,21 +20,6 @@ pub(crate) async fn get_name_authority_diagnostic(
     let data = build_name_authority_control_explain_declared_state(&row);
 
     diagnostic_envelope(data, &selected_snapshot)
-}
-
-fn build_name_authority_control_explain_declared_state(row: &NameCurrentRow) -> JsonValue {
-    let mut declared_state = empty_object();
-    insert_value_field(
-        &mut declared_state,
-        "authority",
-        declared_authority_section(row),
-    );
-    insert_value_field(
-        &mut declared_state,
-        "control",
-        declared_name_control_section(&row.declared_summary),
-    );
-    declared_state
 }
 
 #[cfg(test)]

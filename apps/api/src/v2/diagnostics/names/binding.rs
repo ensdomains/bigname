@@ -2,15 +2,12 @@ use axum::{
     Json,
     extract::{Path, State},
 };
-use bigname_storage::NameCurrentRow;
 use serde_json::Value as JsonValue;
 
-use crate::AppState;
+use crate::{AppState, responses::build_name_surface_binding_explain_declared_state};
 
 use super::{
-    Envelope, QueryParams, V2Result, bind_path_name, declared_summary_section, diagnostic_envelope,
-    empty_object, insert_optional_string_field, insert_value_field, resolve_diagnostic_name,
-    unsupported_section,
+    Envelope, QueryParams, V2Result, bind_path_name, diagnostic_envelope, resolve_diagnostic_name,
 };
 
 pub(crate) async fn get_name_binding_diagnostic(
@@ -23,45 +20,6 @@ pub(crate) async fn get_name_binding_diagnostic(
     let data = build_name_surface_binding_explain_declared_state(&row);
 
     diagnostic_envelope(data, &selected_snapshot)
-}
-
-fn build_name_surface_binding_explain_declared_state(row: &NameCurrentRow) -> JsonValue {
-    let mut declared_state = empty_object();
-    insert_value_field(
-        &mut declared_state,
-        "surface_binding",
-        build_name_surface_binding_explain_summary(row),
-    );
-    insert_value_field(
-        &mut declared_state,
-        "history",
-        declared_summary_section(
-            &row.declared_summary,
-            "history",
-            "declared history pointers are not yet projected",
-        ),
-    );
-    declared_state
-}
-
-fn build_name_surface_binding_explain_summary(row: &NameCurrentRow) -> JsonValue {
-    let has_binding_summary = row.surface_binding_id.is_some() || row.binding_kind.is_some();
-    if !has_binding_summary {
-        return unsupported_section("declared surface binding summary is not yet projected");
-    }
-
-    let mut surface_binding = empty_object();
-    insert_optional_string_field(
-        &mut surface_binding,
-        "surface_binding_id",
-        row.surface_binding_id.map(|value| value.to_string()),
-    );
-    insert_optional_string_field(
-        &mut surface_binding,
-        "binding_kind",
-        row.binding_kind.map(|value| value.as_str().to_owned()),
-    );
-    surface_binding
 }
 
 #[cfg(test)]

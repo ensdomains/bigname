@@ -4,12 +4,10 @@ use axum::{
 };
 use serde_json::Value as JsonValue;
 
-use crate::AppState;
+use crate::{AppState, responses::build_name_coverage_declared_state};
 
 use super::{
-    Envelope, QueryParams, V2Result, array_or_empty, bind_path_name, diagnostic_envelope,
-    empty_object, insert_nullable_string_field, insert_string_field, insert_value_field,
-    provenance_field, resolve_diagnostic_name, string_field,
+    Envelope, QueryParams, V2Result, bind_path_name, diagnostic_envelope, resolve_diagnostic_name,
 };
 
 pub(crate) async fn get_name_coverage_diagnostic(
@@ -22,39 +20,6 @@ pub(crate) async fn get_name_coverage_diagnostic(
     let data = build_name_coverage_declared_state(&row.coverage);
 
     diagnostic_envelope(data, &selected_snapshot)
-}
-
-fn build_name_coverage_declared_state(coverage: &JsonValue) -> JsonValue {
-    let mut normalized = empty_object();
-    insert_string_field(
-        &mut normalized,
-        "status",
-        string_field(provenance_field(coverage, "status"))
-            .unwrap_or_else(|| "unsupported".to_owned()),
-    );
-    insert_string_field(
-        &mut normalized,
-        "exhaustiveness",
-        string_field(provenance_field(coverage, "exhaustiveness"))
-            .unwrap_or_else(|| "not_applicable".to_owned()),
-    );
-    insert_value_field(
-        &mut normalized,
-        "source_classes_considered",
-        array_or_empty(provenance_field(coverage, "source_classes_considered")),
-    );
-    insert_string_field(
-        &mut normalized,
-        "enumeration_basis",
-        string_field(provenance_field(coverage, "enumeration_basis"))
-            .unwrap_or_else(|| "exact_name".to_owned()),
-    );
-    insert_nullable_string_field(
-        &mut normalized,
-        "unsupported_reason",
-        string_field(provenance_field(coverage, "unsupported_reason")),
-    );
-    normalized
 }
 
 #[cfg(test)]
