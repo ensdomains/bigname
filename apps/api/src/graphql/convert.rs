@@ -65,6 +65,7 @@ pub(super) fn resolver_from_store(
                     let coin_type = json_str(entry, "selector_key")?.parse::<u32>().ok()?;
                     Some(AddressRecord {
                         coin_type,
+                        coin_type_big: coin_type.to_string(),
                         address: value,
                     })
                 })

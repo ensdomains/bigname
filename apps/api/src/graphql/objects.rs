@@ -15,12 +15,16 @@ pub(crate) struct Account {
 
 /// Subgraph `AddressRecord` — a coin-typed address record. `coinType` is `u32`, not `i32`:
 /// ENSIP-11 EVM coin types set the top bit (`0x80000000 | chainId`, e.g. `2147483658`), which the
-/// reference endpoint also serves beyond the signed-32-bit range.
+/// reference endpoint also serves beyond the signed-32-bit range. `coinTypeBig` carries the same
+/// coin type as a decimal string, mirroring zigens — a safe value for any client that rejects an
+/// out-of-`Int`-range `coinType`.
 #[derive(SimpleObject)]
 #[graphql(name = "AddressRecord")]
 pub(crate) struct AddressRecord {
     #[graphql(name = "coinType")]
     pub(crate) coin_type: u32,
+    #[graphql(name = "coinTypeBig")]
+    pub(crate) coin_type_big: String,
     pub(crate) address: String,
 }
 
