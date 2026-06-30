@@ -36,6 +36,33 @@ pub fn resolution_record_inventory_lookup_key(row: &NameCurrentRow) -> Option<(U
     ))
 }
 
+/// Like [`resolution_record_inventory_lookup_key`], but without the mainnet-profile chain gate:
+/// any single declared chain position is admitted for a name with a supported binding. Backs the
+/// subgraph GraphQL surface, which serves declared record inventory on whatever chain the
+/// deployment indexes (e.g. Sepolia v2), while the verified-resolution REST surface stays scoped
+/// to the mainnet profiles.
+pub fn resolution_record_inventory_lookup_key_any_chain(
+    row: &NameCurrentRow,
+) -> Option<(Uuid, Value)> {
+    let binding_supported = match row.namespace.as_str() {
+        ENS_NAMESPACE => matches!(
+            row.binding_kind,
+            Some(SurfaceBindingKind::DeclaredRegistryPath | SurfaceBindingKind::ResolverAliasPath)
+        ),
+        BASENAMES_NAMESPACE => row.binding_kind == Some(SurfaceBindingKind::DeclaredRegistryPath),
+        _ => false,
+    };
+    if !binding_supported {
+        return None;
+    }
+    let resource_id = row.resource_id?;
+    let chain_position = build_resolution_boundary_chain_position(row)?;
+    Some((
+        resource_id,
+        build_resolution_version_boundary(row, &chain_position),
+    ))
+}
+
 pub fn resolution_record_inventory_lookup_key_for_revalidation(
     row: &NameCurrentRow,
 ) -> Result<Option<(Uuid, Value)>> {

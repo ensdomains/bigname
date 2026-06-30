@@ -175,6 +175,27 @@ fn latest_record_cache_entry_value(
             });
     }
 
+    // Addr events carry their raw payload verbatim in `address_bytes_hex` (the adapter never
+    // interprets typed coin bytes). The subgraph `Resolver.addr` is exactly this declared on-chain
+    // value as last set via `AddressChanged`, so retaining the raw hex stays faithful to the log;
+    // callers decode per ENSIP-9/11 client-side. Absent the payload there is nothing to retain.
+    //
+    // Empty bytes (`0x`) is ENS's deletion signal for an address record (there is no dedicated
+    // delete), so a cleared coin is a removal, not a `Success("0x")` value — mirror the contenthash
+    // branch above and project it as `NotFound` rather than enumerating a deleted record.
+    if selector.record_family == SUPPORTED_ADDR_RECORD_FAMILY {
+        return object
+            .get("address_bytes_hex")
+            .and_then(Value::as_str)
+            .map(|bytes| {
+                if addr_hex_is_empty(bytes) {
+                    RecordCacheEntryValue::NotFound
+                } else {
+                    RecordCacheEntryValue::Success(Value::String(bytes.to_owned()))
+                }
+            });
+    }
+
     None
 }
 
@@ -190,6 +211,11 @@ fn contenthash_value_is_empty(value: &Value) -> bool {
 }
 
 fn contenthash_hex_is_empty(bytes: &str) -> bool {
+    matches!(bytes, "" | "0x")
+}
+
+// Empty address bytes (`0x`) are how ENS clears an address record; treat them as a deletion.
+fn addr_hex_is_empty(bytes: &str) -> bool {
     matches!(bytes, "" | "0x")
 }
 

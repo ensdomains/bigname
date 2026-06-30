@@ -1067,6 +1067,7 @@ async fn name_current_list_address_filter_excludes_closed_membership_bindings() 
             address: Some(NameCurrentAddressFilter {
                 address: address.to_owned(),
                 relation: NameCurrentAddressRelationFilter::Any,
+                addresses: None,
             }),
             ..NameCurrentListFilter::default()
         },

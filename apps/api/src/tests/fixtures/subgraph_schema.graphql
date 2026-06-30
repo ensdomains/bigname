@@ -1,0 +1,147 @@
+"""
+Subgraph `Account` — the lowercased address as `id`.
+"""
+type Account {
+	id: String!
+}
+
+"""
+Subgraph `AddressRecord` — a coin-typed address record. `coinType` is `u32`, not `i32`:
+ENSIP-11 EVM coin types set the top bit (`0x80000000 | chainId`, e.g. `2147483658`), which the
+reference endpoint also serves beyond the signed-32-bit range. `coinTypeBig` carries the same
+coin type as a decimal string, mirroring zigens — a safe value for any client that rejects an
+out-of-`Int`-range `coinType`.
+"""
+type AddressRecord {
+	coinType: Int!
+	coinTypeBig: String!
+	address: String!
+}
+
+type Domain {
+	id: String!
+	name: String
+	normalizedName: String
+	tokenId: String
+	createdAt: Int!
+	expiryDate: Int
+	"""
+	The page's `resolver` reads are coalesced through a DataLoader, so a list of N domains costs
+	one batched `record_inventory_current` query (plus a fallback only for rare exact-key misses)
+	rather than N point reads. Names without a projected inventory row (the common case until the
+	resolver-log sweep lands) serve the empty record shapes without contributing a key.
+	"""
+	resolver: Resolver
+	owner: Account!
+}
+
+"""
+Subgraph `DomainConnection` — only `totalCount` is exercised (`MigratedNamesCount`).
+"""
+type DomainConnection {
+	totalCount: Int
+}
+
+"""
+Subgraph `DomainFilter`. Field names that are snake_case in the subgraph schema (`owner_in`,
+`name_contains`) are pinned explicitly; async-graphql would otherwise camelCase them. Only the
+fields the dashboard ops send are honoured by the resolvers (`owner`/`owner_in`, `isMigrated`);
+the rest are declared so unused codegen variables still validate.
+"""
+input DomainFilter {
+	id: String
+	owner: String
+	owner_in: [String!]
+	name: String
+	name_contains: String
+	isMigrated: Boolean
+}
+
+"""
+Subgraph `Domain_orderBy`. The underscore + lowercase-`o` type name and the lowercase-camel
+value names are pinned by the Manager's committed codegen, so they are set explicitly rather
+than relying on async-graphql's default SCREAMING_SNAKE_CASE rename.
+"""
+enum Domain_orderBy {
+	createdAt
+	expiryDate
+	"""
+	No storage sort column. The dashboard never sends it; declared for the codegen contract and
+	mapped to a degenerate (name) sort in the resolver.
+	"""
+	id
+	name
+	"""
+	Degenerate on Sepolia v2 — no producer writes `registration_date`, so the column is NULL.
+	"""
+	registrationDate
+}
+
+enum OrderDirection {
+	asc
+	desc
+}
+
+type QueryRoot {
+	"""
+	`domain(id: String!)` — the Manager passes the ENS *name* string (e.g. `"alice.eth"`); the
+	canonical subgraph keys a `Domain` by its EIP-137 namehash. Resolve by name first, then fall
+	back to the namehash, so both callers work without inferring intent from the id's shape (a
+	namehash-shaped name still resolves as a name, since the name lookup is tried first).
+	"""
+	domain(id: String!): Domain
+	"""
+	`domains(where, first, skip, orderBy, orderDirection)` — offset-paged list.
+	"""
+	domains(where: DomainFilter, first: Int, skip: Int, orderBy: Domain_orderBy, orderDirection: OrderDirection): [Domain!]!
+	"""
+	`registrationConnection(first: 0, where) { totalCount }` — backs `OwnedNamesCount`.
+	"""
+	registrationConnection(first: Int, where: RegistrationFilter): RegistrationConnection!
+	"""
+	`domainConnection(first: 0, where) { totalCount }` — backs `MigratedNamesCount`.
+	"""
+	domainConnection(first: Int, where: DomainFilter): DomainConnection!
+}
+
+"""
+Subgraph `RegistrationConnection` — only `totalCount` is exercised (`OwnedNamesCount`).
+"""
+type RegistrationConnection {
+	totalCount: Int
+}
+
+"""
+Subgraph `RegistrationFilter`.
+"""
+input RegistrationFilter {
+	registrant: String
+	registrant_in: [String!]
+}
+
+"""
+Subgraph `Resolver`. `id`/`address` carry the resolver contract address (non-null, matching the
+Manager codegen's `address: string`); the record fields (`texts`/`contentHash`/`addresses`) are
+read from the `record_inventory_current` projection by [`resolver_from_store`] — a name whose
+resolver has no projected records serves the empty shapes.
+"""
+type Resolver {
+	id: String!
+	address: String!
+	texts: [String!]
+	contentHash: String
+	addresses: [AddressRecord!]
+}
+
+"""
+Directs the executor to include this field or fragment only when the `if` argument is true.
+"""
+directive @include(if: Boolean!) on FIELD | FRAGMENT_SPREAD | INLINE_FRAGMENT
+"""
+Directs the executor to skip this field or fragment when the `if` argument is true.
+"""
+directive @skip(if: Boolean!) on FIELD | FRAGMENT_SPREAD | INLINE_FRAGMENT
+schema {
+	query: QueryRoot
+}
+

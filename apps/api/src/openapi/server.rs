@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use axum::{Json, response::Html, routing::get};
 use serde_json::{Map as JsonMap, json};
 use sqlx::types::JsonValue;
+use tower_http::cors::CorsLayer;
 use tracing::info;
 
 use crate::{
@@ -52,7 +53,14 @@ pub(crate) fn app_router(state: AppState) -> Router {
         .route("/docs", get(openapi_docs))
         .route("/docs/", get(openapi_docs))
         .merge(crate::v2::router())
-        .with_state(state)
+        .with_state(state.clone())
+        .merge(crate::graphql::graphql_routes(state))
+        // The API is read-only public data served cross-origin to browser clients (the ENS Manager
+        // dev build, deployed on a different origin). Permissive CORS — wildcard origin, no
+        // credentials — lets the browser read responses and answers the GraphQL POST preflight.
+        // This is not access control: the endpoint is unauthenticated and reachable regardless;
+        // CORS only governs whether browser JS on another origin may read the response.
+        .layer(CorsLayer::permissive())
 }
 
 async fn openapi_json() -> Json<JsonValue> {
