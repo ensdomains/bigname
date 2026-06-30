@@ -85,7 +85,7 @@ mod projections {
         coverage::build_name_coverage(coverage)
     }
 
-    pub(super) fn build_name_coverage_declared_state(coverage: &JsonValue) -> JsonValue {
+    pub(crate) fn build_name_coverage_declared_state(coverage: &JsonValue) -> JsonValue {
         coverage::build_name_coverage_declared_state(coverage)
     }
 
@@ -106,13 +106,13 @@ mod projections {
         declared_state::build_name_declared_state(row, record_inventory_row)
     }
 
-    pub(super) fn build_name_surface_binding_explain_declared_state(
+    pub(crate) fn build_name_surface_binding_explain_declared_state(
         row: &NameCurrentRow,
     ) -> JsonValue {
         declared_state::build_name_surface_binding_explain_declared_state(row)
     }
 
-    pub(super) fn build_name_authority_control_explain_declared_state(
+    pub(crate) fn build_name_authority_control_explain_declared_state(
         row: &NameCurrentRow,
     ) -> JsonValue {
         declared_state::build_name_authority_control_explain_declared_state(row)
@@ -190,15 +190,15 @@ fn build_name_coverage(coverage: &JsonValue) -> JsonValue {
     projections::build_name_coverage(coverage)
 }
 
-fn build_name_coverage_declared_state(coverage: &JsonValue) -> JsonValue {
+pub(crate) fn build_name_coverage_declared_state(coverage: &JsonValue) -> JsonValue {
     projections::build_name_coverage_declared_state(coverage)
 }
 
-fn build_name_surface_binding_explain_declared_state(row: &NameCurrentRow) -> JsonValue {
+pub(crate) fn build_name_surface_binding_explain_declared_state(row: &NameCurrentRow) -> JsonValue {
     projections::build_name_surface_binding_explain_declared_state(row)
 }
 
-fn build_name_authority_control_explain_declared_state(row: &NameCurrentRow) -> JsonValue {
+pub(crate) fn build_name_authority_control_explain_declared_state(row: &NameCurrentRow) -> JsonValue {
     projections::build_name_authority_control_explain_declared_state(row)
 }
 
