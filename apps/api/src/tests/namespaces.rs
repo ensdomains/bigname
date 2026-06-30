@@ -543,3 +543,185 @@ async fn get_namespace_manifests_returns_not_found_for_unknown_namespace() -> Re
     database.cleanup().await?;
     Ok(())
 }
+
+#[tokio::test]
+async fn v2_diagnostic_namespace_manifests_returns_raw_active_entries() -> Result<()> {
+    let database = TestDatabase::new(true).await?;
+
+    let ens_l1 = database
+        .insert_manifest(
+            "ens",
+            "ens_v2_registry_l1",
+            "ethereum-mainnet",
+            "ens_v2",
+            1,
+            "active",
+            "ensip15@ens-normalize-0.1.1",
+        )
+        .await?;
+    database
+        .insert_capability_flag(ens_l1, "declared_children", "supported", None)
+        .await?;
+    database
+        .insert_capability_flag(
+            ens_l1,
+            "verified_resolution",
+            "shadow",
+            Some("tracked but not yet served"),
+        )
+        .await?;
+
+    let ens_l2 = database
+        .insert_manifest(
+            "ens",
+            "ens_v2_registry_l2",
+            "base-mainnet",
+            "ens_v2_base",
+            2,
+            "active",
+            "ensip15@ens-normalize-0.1.1",
+        )
+        .await?;
+    database
+        .insert_capability_flag(ens_l2, "declared_children", "unsupported", Some("pending"))
+        .await?;
+
+    let ens_shadow = database
+        .insert_manifest(
+            "ens",
+            "ens_shadow_registry",
+            "ethereum-mainnet",
+            "ens_shadow",
+            3,
+            "shadow",
+            "ensip15@ens-normalize-0.1.1",
+        )
+        .await?;
+    database
+        .insert_capability_flag(ens_shadow, "declared_children", "supported", None)
+        .await?;
+
+    let basenames = database
+        .insert_manifest(
+            "basenames",
+            "base_registry",
+            "base-mainnet",
+            "basenames_v1",
+            1,
+            "active",
+            "ensip15@ens-normalize-0.1.1",
+        )
+        .await?;
+    database
+        .insert_capability_flag(basenames, "declared_children", "supported", None)
+        .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v2/diagnostics/namespaces/ens/manifests")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("v2 diagnostic manifest request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let payload: Value = read_json(response).await?;
+    assert!(payload.get("page").is_none());
+    assert_eq!(payload.get("meta"), Some(&json!({})));
+    assert!(payload.pointer("/meta/as_of").is_none());
+    assert_eq!(payload.pointer("/data/namespace"), Some(&json!("ens")));
+    assert_eq!(
+        payload.pointer("/data/manifests"),
+        Some(&json!([
+            {
+                "manifest_version": 1,
+                "source_family": "ens_v2_registry_l1",
+                "chain": "ethereum-mainnet",
+                "deployment_epoch": "ens_v2",
+                "normalizer_version": "ensip15@ens-normalize-0.1.1",
+                "capability_flags": {
+                    "declared_children": {
+                        "status": "supported",
+                        "notes": null
+                    },
+                    "verified_resolution": {
+                        "status": "shadow",
+                        "notes": "tracked but not yet served"
+                    }
+                }
+            },
+            {
+                "manifest_version": 2,
+                "source_family": "ens_v2_registry_l2",
+                "chain": "base-mainnet",
+                "deployment_epoch": "ens_v2_base",
+                "normalizer_version": "ensip15@ens-normalize-0.1.1",
+                "capability_flags": {
+                    "declared_children": {
+                        "status": "unsupported",
+                        "notes": "pending"
+                    }
+                }
+            }
+        ]))
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_diagnostic_namespace_manifests_returns_not_found_for_unknown_namespace() -> Result<()> {
+    let database = TestDatabase::new(true).await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v2/diagnostics/namespaces/unknown/manifests")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("v2 diagnostic manifest request failed")?;
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let payload: ErrorResponse = read_json(response).await?;
+    assert_eq!(payload.error.code, "not_found");
+    assert_eq!(payload.error.message, "namespace unknown is not supported");
+    assert!(payload.error.details.is_empty());
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_diagnostic_namespace_manifests_rejects_query_params() -> Result<()> {
+    let database = TestDatabase::new(false).await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v2/diagnostics/namespaces/ens/manifests?finality=safe")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("v2 diagnostic manifest request failed")?;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let payload: ErrorResponse = read_json(response).await?;
+    assert_eq!(payload.error.code, "invalid_input");
+    assert_eq!(
+        payload.error.message,
+        "query parameters are not supported on this route"
+    );
+    assert!(payload.error.details.is_empty());
+
+    database.cleanup().await?;
+    Ok(())
+}
