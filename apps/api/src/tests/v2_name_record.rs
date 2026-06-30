@@ -1015,6 +1015,330 @@ async fn v2_get_name_records_uses_envelope_shape() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn v2_get_subnames_returns_record_shaped_rows_in_display_name_order() -> Result<()> {
+    let (database, payload) =
+        v2_subnames_payload("/v2/names/Parent.eth/subnames?page_size=3").await?;
+
+    assert_eq!(payload["page"]["page_size"], json!(3));
+    assert_eq!(payload["page"]["total_count"], Value::Null);
+    assert_eq!(payload["page"]["has_more"], json!(false));
+    assert_eq!(
+        payload["meta"]["as_of"]["1"],
+        json!({
+            "block_number": 80,
+            "block_hash": "0xname50",
+            "timestamp": "2026-04-17T00:00:20Z"
+        })
+    );
+
+    let data = payload["data"]
+        .as_array()
+        .expect("subnames data must be an array");
+    assert_eq!(data.len(), 3);
+    assert_eq!(data[0]["name"], json!("alpha.parent.eth"));
+    assert_eq!(data[1]["name"], json!("beta.parent.eth"));
+    assert_eq!(data[2]["name"], json!("gamma.parent.eth"));
+    assert_eq!(data[0]["display_name"], json!("Alpha.Parent.eth"));
+    assert_eq!(data[0]["namespace"], json!("ens"));
+    assert_eq!(data[0]["namehash"], json!("node:alpha.parent.eth"));
+    assert_eq!(
+        data[0]["labelhash"],
+        json!(labelhash_for_display_name("alpha.parent.eth"))
+    );
+    assert_eq!(
+        data[0]["owner"],
+        json!("0x00000000000000000000000000000000000000aa")
+    );
+    assert_eq!(
+        data[0]["registrant"],
+        json!("0x00000000000000000000000000000000000000ab")
+    );
+    assert_eq!(data[0]["registration_status"], json!("active"));
+    assert_eq!(data[0]["registered_at"], json!("2024-01-02T03:04:05Z"));
+    assert_eq!(data[0]["created_at"], json!("2023-01-02T03:04:05Z"));
+    assert_eq!(data[0]["expires_at"], json!("2027-01-02T03:04:05Z"));
+    assert_eq!(data[1]["registration_status"], json!("released"));
+    assert_eq!(data[2]["registration_status"], json!("unregistered"));
+    assert!(data[0].get("subname_count").is_none());
+    assert!(data[0].get("resolver").is_none());
+    assert!(data[0].get("addresses").is_none());
+    assert!(data[0].get("text_records").is_none());
+    assert!(data[0].get("content_hash").is_none());
+    assert_no_banned_v1_spellings(&payload);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_subnames_paginates_with_opaque_cursor_without_overlap() -> Result<()> {
+    let (database, first_page) =
+        v2_subnames_payload("/v2/names/parent.eth/subnames?page_size=2").await?;
+    let next_cursor = first_page["page"]["next_cursor"]
+        .as_str()
+        .expect("first page must include a next cursor")
+        .to_owned();
+    assert_eq!(first_page["page"]["has_more"], json!(true));
+
+    let second_page = v2_subnames_payload_for_database(
+        &database,
+        &format!("/v2/names/parent.eth/subnames?page_size=2&cursor={next_cursor}"),
+    )
+    .await?;
+
+    assert_eq!(second_page["page"]["cursor"], json!(next_cursor));
+    assert_eq!(second_page["page"]["next_cursor"], Value::Null);
+    assert_eq!(second_page["page"]["has_more"], json!(false));
+    assert_eq!(
+        first_page["data"]
+            .as_array()
+            .expect("first page data")
+            .iter()
+            .map(|row| row["name"].as_str().expect("row name"))
+            .collect::<Vec<_>>(),
+        vec!["alpha.parent.eth", "beta.parent.eth"]
+    );
+    assert_eq!(
+        second_page["data"]
+            .as_array()
+            .expect("second page data")
+            .iter()
+            .map(|row| row["name"].as_str().expect("row name"))
+            .collect::<Vec<_>>(),
+        vec!["gamma.parent.eth"]
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_subnames_rejects_cursor_reused_for_different_parent() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_subnames_fixture(&database).await?;
+    seed_v2_subnames_bound_child(
+        &database,
+        "ens:other.eth",
+        "other.eth",
+        "node:other.eth",
+        79,
+        Uuid::from_u128(0x4030),
+        Uuid::from_u128(0x5030),
+        Uuid::from_u128(0x6030),
+        json!({
+            "registration": {
+                "status": "active",
+                "authority_kind": "registrar"
+            },
+            "control": {
+                "registry_owner": "0x0000000000000000000000000000000000000002"
+            }
+        }),
+    )
+    .await?;
+    seed_v2_subnames_bound_child(
+        &database,
+        "ens:one.other.eth",
+        "one.other.eth",
+        "node:one.other.eth",
+        80,
+        Uuid::from_u128(0x4040),
+        Uuid::from_u128(0x5040),
+        Uuid::from_u128(0x6040),
+        json!({
+            "registration": {
+                "status": "active",
+                "authority_kind": "registrar"
+            },
+            "control": {
+                "registry_owner": "0x0000000000000000000000000000000000000003"
+            }
+        }),
+    )
+    .await?;
+    bigname_storage::upsert_children_current_rows(
+        &database.pool,
+        &[v2_subnames_declared_child_row(
+            "ens:other.eth",
+            "ens:one.other.eth",
+            "one.other.eth",
+            "node:one.other.eth",
+            905,
+            80,
+        )],
+    )
+    .await?;
+
+    let first_page =
+        v2_subnames_payload_for_database(&database, "/v2/names/parent.eth/subnames?page_size=2")
+            .await?;
+    let next_cursor = first_page["page"]["next_cursor"]
+        .as_str()
+        .expect("first page must include a next cursor");
+
+    let response = v2_subnames_response_for_database(
+        &database,
+        &format!("/v2/names/other.eth/subnames?page_size=2&cursor={next_cursor}"),
+    )
+    .await?;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["error"]["code"], json!("invalid_input"));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_subnames_include_counts_adds_child_subname_count_only_when_requested()
+-> Result<()> {
+    let (database, without_counts) =
+        v2_subnames_payload("/v2/names/parent.eth/subnames?page_size=3").await?;
+    assert!(
+        without_counts["data"][0].get("subname_count").is_none(),
+        "subname_count must be omitted by default"
+    );
+
+    let with_counts =
+        v2_subnames_payload_for_database(&database, "/v2/names/parent.eth/subnames?include=counts")
+            .await?;
+    assert_eq!(with_counts["data"][0]["subname_count"], json!(1));
+    assert_eq!(with_counts["data"][1]["subname_count"], json!(0));
+    assert_eq!(with_counts["data"][2]["subname_count"], json!(0));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_subnames_parent_with_zero_children_returns_empty_page() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_subnames_parent(&database, "ens:empty.eth", "empty.eth", "node:empty.eth", 80).await?;
+
+    let payload =
+        v2_subnames_payload_for_database(&database, "/v2/names/empty.eth/subnames").await?;
+
+    assert_eq!(payload["data"], json!([]));
+    assert_eq!(payload["page"]["has_more"], json!(false));
+    assert_eq!(payload["page"]["next_cursor"], Value::Null);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_subnames_missing_parent_returns_not_found() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    database.seed_default_ens_snapshot_selector_position().await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v2/names/missing.eth/subnames")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("v2 missing parent subnames request failed")?;
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["error"]["code"], json!("not_found"));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_subnames_rejects_malformed_cursor() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_subnames_fixture(&database).await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v2/names/parent.eth/subnames?cursor=not-a-cursor")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("v2 malformed subnames cursor request failed")?;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["error"]["code"], json!("invalid_input"));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_subnames_rejects_wrong_sort_or_snapshot_cursor() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_subnames_fixture(&database).await?;
+
+    let wrong_sort = crate::v2::encode(&crate::v2::CursorPayload::new(
+        "wrong",
+        BTreeMap::from([
+            ("namespace".to_owned(), "ens".to_owned()),
+            ("parent".to_owned(), "ens:parent.eth".to_owned()),
+        ]),
+        BTreeMap::from([
+            ("display_name".to_owned(), "alpha.parent.eth".to_owned()),
+            (
+                "child_logical_name_id".to_owned(),
+                "ens:alpha.parent.eth".to_owned(),
+            ),
+        ]),
+        Some("wrong-snapshot".to_owned()),
+    ));
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v2/names/parent.eth/subnames?cursor={wrong_sort}"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("v2 wrong-sort subnames cursor request failed")?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let wrong_snapshot = crate::v2::encode(&crate::v2::CursorPayload::new(
+        "display_name_asc",
+        BTreeMap::from([
+            ("namespace".to_owned(), "ens".to_owned()),
+            ("parent".to_owned(), "ens:parent.eth".to_owned()),
+        ]),
+        BTreeMap::from([
+            ("display_name".to_owned(), "alpha.parent.eth".to_owned()),
+            (
+                "child_logical_name_id".to_owned(),
+                "ens:alpha.parent.eth".to_owned(),
+            ),
+        ]),
+        Some("wrong-snapshot".to_owned()),
+    ));
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v2/names/parent.eth/subnames?cursor={wrong_snapshot}"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("v2 wrong-snapshot subnames cursor request failed")?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
 async fn v2_name_record_payload(uri: &str) -> Result<Value> {
     v2_name_record_payload_with_row(uri, |_| {}).await
 }
@@ -1385,6 +1709,374 @@ async fn seed_v2_alice_name_records_fixture_with_row(
     }
 
     Ok(())
+}
+
+async fn v2_subnames_payload(uri: &str) -> Result<(TestDatabase, Value)> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_subnames_fixture(&database).await?;
+    let payload = v2_subnames_payload_for_database(&database, uri).await?;
+    Ok((database, payload))
+}
+
+async fn v2_subnames_payload_for_database(database: &TestDatabase, uri: &str) -> Result<Value> {
+    let response = v2_subnames_response_for_database(database, uri).await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    read_json(response).await
+}
+
+async fn v2_subnames_response_for_database(
+    database: &TestDatabase,
+    uri: &str,
+) -> Result<Response> {
+    app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(uri)
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("v2 subnames request failed")
+}
+
+async fn seed_v2_subnames_fixture(database: &TestDatabase) -> Result<()> {
+    seed_v2_subnames_parent(database, "ens:parent.eth", "parent.eth", "node:parent.eth", 80)
+        .await?;
+    seed_v2_subnames_bound_child(
+        database,
+        "ens:alpha.parent.eth",
+        "Alpha.Parent.eth",
+        "node:alpha.parent.eth",
+        81,
+        Uuid::from_u128(0x4010),
+        Uuid::from_u128(0x5010),
+        Uuid::from_u128(0x6010),
+        json!({
+            "registration": {
+                "status": "active",
+                "authority_kind": "registrar",
+                "registrant": "0x00000000000000000000000000000000000000aB",
+                "registered_at": "2024-01-02T03:04:05Z",
+                "created_at": "2023-01-02T03:04:05Z",
+                "expiry": "2027-01-02T03:04:05Z"
+            },
+            "control": {
+                "registry_owner": "0x00000000000000000000000000000000000000aA"
+            }
+        }),
+    )
+    .await?;
+    seed_v2_subnames_bound_child(
+        database,
+        "ens:beta.parent.eth",
+        "beta.parent.eth",
+        "node:beta.parent.eth",
+        82,
+        Uuid::from_u128(0x4020),
+        Uuid::from_u128(0x5020),
+        Uuid::from_u128(0x6020),
+        json!({
+            "registration": {
+                "status": "released",
+                "authority_kind": "registrar",
+                "released_at": "2026-02-03T04:05:06Z",
+                "registrant": "0x00000000000000000000000000000000000000bB"
+            },
+            "control": {
+                "registry_owner": "0x00000000000000000000000000000000000000bA"
+            }
+        }),
+    )
+    .await?;
+
+    bigname_storage::upsert_name_surfaces(
+        &database.pool,
+        &[collection_name_surface(
+            "ens:gamma.parent.eth",
+            "gamma.parent.eth",
+            "node:gamma.parent.eth",
+            83,
+        )],
+    )
+    .await?;
+    database
+        .insert_name_current_row(v2_subnames_name_current_row(
+            "ens:gamma.parent.eth",
+            "gamma.parent.eth",
+            "node:gamma.parent.eth",
+            83,
+            None,
+            None,
+            None,
+            json!({}),
+        ))
+        .await?;
+
+    bigname_storage::upsert_name_surfaces(
+        &database.pool,
+        &[collection_name_surface(
+            "ens:delta.alpha.parent.eth",
+            "delta.alpha.parent.eth",
+            "node:delta.alpha.parent.eth",
+            84,
+        )],
+    )
+    .await?;
+
+    bigname_storage::upsert_children_current_rows(
+        &database.pool,
+        &[
+            v2_subnames_declared_child_row(
+                "ens:parent.eth",
+                "ens:gamma.parent.eth",
+                "gamma.parent.eth",
+                "node:gamma.parent.eth",
+                903,
+                83,
+            ),
+            v2_subnames_declared_child_row(
+                "ens:parent.eth",
+                "ens:beta.parent.eth",
+                "beta.parent.eth",
+                "node:beta.parent.eth",
+                902,
+                82,
+            ),
+            v2_subnames_declared_child_row(
+                "ens:parent.eth",
+                "ens:alpha.parent.eth",
+                "Alpha.Parent.eth",
+                "node:alpha.parent.eth",
+                901,
+                81,
+            ),
+            v2_subnames_declared_child_row(
+                "ens:alpha.parent.eth",
+                "ens:delta.alpha.parent.eth",
+                "delta.alpha.parent.eth",
+                "node:delta.alpha.parent.eth",
+                904,
+                84,
+            ),
+        ],
+    )
+    .await?;
+    database
+        .seed_snapshot_selector_chain_positions(&json!({
+            "ethereum": {
+                "chain_id": "ethereum-mainnet",
+                "block_number": 80,
+                "block_hash": "0xname50",
+                "timestamp": "2026-04-17T00:00:20Z"
+            }
+        }))
+        .await?;
+
+    Ok(())
+}
+
+async fn seed_v2_subnames_parent(
+    database: &TestDatabase,
+    logical_name_id: &str,
+    display_name: &str,
+    namehash: &str,
+    block_number: i64,
+) -> Result<()> {
+    seed_v2_subnames_bound_child(
+        database,
+        logical_name_id,
+        display_name,
+        namehash,
+        block_number,
+        Uuid::from_u128(0x4000),
+        Uuid::from_u128(0x5000),
+        Uuid::from_u128(0x6000),
+        json!({
+            "registration": {
+                "status": "active",
+                "authority_kind": "registrar"
+            },
+            "control": {
+                "registry_owner": "0x0000000000000000000000000000000000000001"
+            }
+        }),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn seed_v2_subnames_bound_child(
+    database: &TestDatabase,
+    logical_name_id: &str,
+    display_name: &str,
+    namehash: &str,
+    block_number: i64,
+    resource_id: Uuid,
+    token_lineage_id: Uuid,
+    surface_binding_id: Uuid,
+    declared_summary: Value,
+) -> Result<()> {
+    let normalized_name = normalized_name_from_logical_name_id(logical_name_id);
+    let mut surface = collection_name_surface(
+        logical_name_id,
+        display_name,
+        namehash,
+        block_number,
+    );
+    surface.normalized_name = normalized_name.to_owned();
+    surface.dns_encoded_name = normalized_name.as_bytes().to_vec();
+    surface.labelhashes = labelhash_for_display_name(normalized_name)
+        .into_iter()
+        .collect();
+
+    bigname_storage::upsert_name_surfaces(
+        &database.pool,
+        &[surface],
+    )
+    .await?;
+    bigname_storage::upsert_token_lineages(
+        &database.pool,
+        &[address_name_token_lineage(
+            token_lineage_id,
+            &format!("0xtoken{block_number:02x}"),
+            block_number,
+        )],
+    )
+    .await?;
+    bigname_storage::upsert_resources(
+        &database.pool,
+        &[address_name_resource(
+            resource_id,
+            Some(token_lineage_id),
+            &format!("0xresource{block_number:02x}"),
+            block_number,
+        )],
+    )
+    .await?;
+    bigname_storage::upsert_surface_bindings(
+        &database.pool,
+        &[address_name_surface_binding(
+            surface_binding_id,
+            logical_name_id,
+            resource_id,
+            &format!("0xbinding{block_number:02x}"),
+            block_number,
+            1_717_176_000 + block_number,
+        )],
+    )
+    .await?;
+    database
+        .insert_name_current_row(v2_subnames_name_current_row(
+            logical_name_id,
+            display_name,
+            namehash,
+            block_number,
+            Some(surface_binding_id),
+            Some(resource_id),
+            Some(token_lineage_id),
+            declared_summary,
+        ))
+        .await
+}
+
+fn v2_subnames_declared_child_row(
+    parent_logical_name_id: &str,
+    child_logical_name_id: &str,
+    display_name: &str,
+    namehash: &str,
+    normalized_event_id: i64,
+    block_number: i64,
+) -> bigname_storage::ChildrenCurrentRow {
+    let mut row = declared_child_row(
+        parent_logical_name_id,
+        child_logical_name_id,
+        display_name,
+        namehash,
+        normalized_event_id,
+        block_number,
+    );
+    row.normalized_name = normalized_name_from_logical_name_id(child_logical_name_id).to_owned();
+    row.labelhash = labelhash_for_display_name(&row.normalized_name);
+    row
+}
+
+#[allow(clippy::too_many_arguments)]
+fn v2_subnames_name_current_row(
+    logical_name_id: &str,
+    display_name: &str,
+    namehash: &str,
+    block_number: i64,
+    surface_binding_id: Option<Uuid>,
+    resource_id: Option<Uuid>,
+    token_lineage_id: Option<Uuid>,
+    declared_summary: Value,
+) -> bigname_storage::NameCurrentRow {
+    let (namespace, normalized_name) = split_logical_name_id(logical_name_id);
+    let chain_id = chain_id_for_namespace(namespace);
+    let chain_slot = chain_slot_for_namespace(namespace);
+
+    bigname_storage::NameCurrentRow {
+        logical_name_id: logical_name_id.to_owned(),
+        namespace: namespace.to_owned(),
+        canonical_display_name: display_name.to_owned(),
+        normalized_name: normalized_name.to_owned(),
+        namehash: namehash.to_owned(),
+        surface_binding_id,
+        resource_id,
+        token_lineage_id,
+        binding_kind: surface_binding_id
+            .is_some()
+            .then_some(bigname_storage::SurfaceBindingKind::DeclaredRegistryPath),
+        declared_summary,
+        provenance: json!({
+            "normalized_event_ids": [block_number],
+            "raw_fact_refs": [{
+                "kind": "raw_log",
+                "block_number": block_number,
+            }],
+            "manifest_versions": [{
+                "manifest_version": 1,
+                "source_family": source_family_for_namespace(namespace),
+                "source_manifest_id": null,
+            }],
+            "execution_trace_id": null,
+            "derivation_kind": "name_current_rebuild",
+        }),
+        coverage: json!({
+            "status": "full",
+            "exhaustiveness": "authoritative",
+            "source_classes_considered": [source_family_for_namespace(namespace)],
+            "enumeration_basis": "exact_name",
+            "unsupported_reason": null,
+        }),
+        chain_positions: json!({
+            chain_slot: {
+                "chain_id": chain_id,
+                "block_number": block_number,
+                "block_hash": format!("0xname{block_number:02x}"),
+                "timestamp": format!("2026-04-17T00:00:{:02}Z", block_number % 60),
+            }
+        }),
+        canonicality_summary: json!({
+            "status": "finalized",
+            "chains": {
+                chain_id: "finalized"
+            }
+        }),
+        manifest_version: 1,
+        last_recomputed_at: timestamp(1_717_176_000 + block_number),
+    }
+}
+
+fn split_logical_name_id(logical_name_id: &str) -> (&str, &str) {
+    logical_name_id
+        .split_once(':')
+        .expect("logical_name_id must include namespace")
+}
+
+fn normalized_name_from_logical_name_id(logical_name_id: &str) -> &str {
+    split_logical_name_id(logical_name_id).1
 }
 
 fn resolution_universal_resolver_addr60_response(address: &str) -> Value {

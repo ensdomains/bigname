@@ -177,10 +177,19 @@ Field ownership:
 - Purpose: direct subnames.
 - Request parameters: path `name`; query `namespace`, `at`, `finality`,
   `include=counts`, `cursor`, `page_size`.
-- Response shape: `data` is an array of record-shaped subname rows in
-  dictionary vocabulary. `include=counts` adds `subname_count` where
-  supported.
-- Pagination behavior: standard collection pagination.
+- Response shape: `data` is an array of dedicated subname rows in dictionary
+  vocabulary: `name`, `display_name`, `namespace`, `namehash`, `labelhash`,
+  `owner`, `registrant`, `registration_status`, `registered_at`,
+  `created_at`, and `expires_at`. Resolver records are not included here;
+  use `GET /v2/names/{name}/records` for `resolver`, `addresses`,
+  `text_records`, and `content_hash`.
+  `include=counts` adds `subname_count`, the row's direct subname count.
+- Pagination behavior: standard collection pagination by
+  `display_name` ascending.
+- Snapshot behavior: `at` and `finality` are accepted and used to resolve the
+  parent name and `meta.as_of`. The subname list itself reads the latest
+  `children_current` projection; true as-of child enumeration is deferred to a
+  storage follow-up.
 - Status semantics: no direct subnames returns `200` with empty `data`.
   Missing parent names return `404 not_found`.
 - Replaces (v1): `GET /v1/names/{namespace}/{name}/children`.
@@ -192,10 +201,28 @@ Field ownership:
 - Purpose: name history.
 - Request parameters: path `name`; query `namespace`, `at`, `finality`,
   `scope=name|registration|both`, `cursor`, `page_size`.
-- Response shape: `data` is an array of compact event rows with friendly
-  `type` vocabulary: `registration`, `renewal`, `transfer`, `authority`,
-  `resolver`, `record`, `primary_name`, `permission`.
-- Pagination behavior: standard collection pagination.
+- Response shape: `data` is an array of dedicated lean event rows:
+  `{type, name, namespace, registration_id, block_number, timestamp,
+  transaction_hash, log_index}`. `registration_id` is present only when the
+  event row is registration-resource anchored. Rows never include before/after
+  state, raw normalized-event payloads, or a `data` change object. Friendly
+  `type` vocabulary: `registration`, `renewal`, `release`, `expiry`,
+  `transfer`, `authority`, `resolver`, `record`, `primary_name`, `permission`.
+  Raw upstream or pipeline event kinds are diagnostics-only and are not emitted
+  by this product route.
+- Pagination behavior: standard newest-first collection pagination by chain
+  position. The cursor is bound to the resolved namespace, parent name, scope,
+  and snapshot token. Product event-type filtering is applied after loading the
+  storage page, so `page_size` is an upper bound on returned product rows; a
+  page may contain fewer than `page_size` rows when non-product normalized
+  events are interleaved.
+- Scope behavior: `scope=name` reads name-surface events only,
+  `scope=registration` reads registration-resource events associated with the
+  requested name, and `scope=both` reads both sets. `scope` defaults to `both`.
+- Snapshot behavior: `at` and `finality` are accepted and used to resolve the
+  parent name and `meta.as_of`. The history list itself reads latest
+  normalized-event history; true as-of history enumeration is deferred to a
+  storage follow-up.
 - Status semantics: no matching history returns `200` with empty `data`.
   Missing names return `404 not_found`.
 - Replaces (v1): `GET /v1/history/names/{namespace}/{name}`.
@@ -236,16 +263,31 @@ Field ownership:
 - Request parameters: path `address`; query `namespace`, `at`, `finality`,
   `relation`, `q`, `sort=name|expires_at|registered_at`, `order=asc|desc`,
   `dedupe=name|registration`, `include=role_summary`, `cursor`, `page_size`.
-  `q` applies prefix matching to the dictionary `name` field; this route does
-  not accept `match`.
-- Response shape: `data` is an array of record-shaped rows. Reverse rows add
-  `is_primary` and `relations`, where `relations` is the subset of
-  `owner`, `manager`, and `registrant` that matched. `include=role_summary`
-  adds `role_summary: [{address, grants}]`, where each `grants` entry is
-  `{grant_scope, powers}`. The same expansion may add `subname_count`,
-  `record_count`, `registration_status`, and `expires_at` when those fields
-  are already available for the row.
-- Pagination behavior: standard collection pagination.
+  `q` applies prefix matching to the dictionary `name` field case-insensitively:
+  the prefix is lowercased to match the normalized name, and full Unicode
+  normalization of partial prefixes is a follow-up. This route does not accept
+  `match`. `relation` accepts the v2 vocabulary
+  `owner|manager|registrant`; the storage relations map as
+  token-holder -> `owner`, effective-controller -> `manager`, and
+  registrant -> `registrant`. `dedupe=name` groups by name surface and is the
+  default; `dedupe=registration` groups by registration resource.
+- Response shape: `data` is an array of record-shaped rows with `name`,
+  `display_name`, `namespace`, `namehash`, `owner`, `registrant`,
+  `registration_status`, `registered_at`, `created_at`, and `expires_at`.
+  Address-name rows add `is_primary` and `relations`, where `relations` is the
+  subset of `owner`, `manager`, and `registrant` that matched. Resolver records
+  are not included; use `GET /v2/names/{name}/records` for resolver data.
+  `include=role_summary` adds
+  `role_summary: [{address, grants: [{grant_scope, powers}]}]` grouped by the
+  permission subject address.
+- Pagination behavior: standard collection pagination. Cursors are bound to
+  address, optional namespace filter, relation filter, `q`, dedupe mode, sort,
+  order, and the snapshot token used for `meta.as_of`.
+- Snapshot behavior: `at` and `finality` are accepted and used only to resolve
+  `meta.as_of` (default namespace `ens` when `namespace` is omitted). The
+  address-name collection itself reads the latest `address_names_current`
+  projection; true as-of address-name enumeration is deferred to a storage
+  follow-up.
 - Status semantics: no related names returns `200` with empty `data`.
   Malformed addresses return `400 invalid_input`.
 - Replaces (v1): `GET /v1/addresses/{address}/names` and address-relation

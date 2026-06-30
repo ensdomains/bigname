@@ -55,15 +55,23 @@ fn resource(resource_id: Uuid, token_lineage_id: Option<Uuid>) -> Resource {
 }
 
 fn name_surface(logical_name_id: &str, display_name: &str) -> NameSurface {
+    name_surface_with_normalized_name(logical_name_id, display_name, display_name)
+}
+
+fn name_surface_with_normalized_name(
+    logical_name_id: &str,
+    display_name: &str,
+    normalized_name: &str,
+) -> NameSurface {
     NameSurface {
         logical_name_id: logical_name_id.to_owned(),
         namespace: "ens".to_owned(),
         input_name: display_name.to_owned(),
         canonical_display_name: display_name.to_owned(),
-        normalized_name: display_name.to_owned(),
-        dns_encoded_name: display_name.as_bytes().to_vec(),
-        namehash: format!("namehash:{display_name}"),
-        labelhashes: vec![format!("labelhash:{display_name}")],
+        normalized_name: normalized_name.to_owned(),
+        dns_encoded_name: normalized_name.as_bytes().to_vec(),
+        namehash: format!("namehash:{normalized_name}"),
+        labelhashes: vec![format!("labelhash:{normalized_name}")],
         normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
         normalization_warnings: json!([]),
         normalization_errors: json!([]),
@@ -698,6 +706,133 @@ async fn name_current_batch_loads_found_rows_by_logical_name_id() -> Result<()> 
         NameCurrentRow::load_by_logical_name_ids(database.pool(), &requested).await?,
         loaded
     );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn name_current_resource_representatives_pick_by_display_name_and_return_normalized_name()
+-> Result<()> {
+    let database = test_database().await?;
+    let resource_id = Uuid::from_u128(0xab00);
+    let token_lineage_id = Uuid::from_u128(0xab01);
+    let picked_binding_id = Uuid::from_u128(0xab02);
+    let skipped_binding_id = Uuid::from_u128(0xab03);
+    let hidden_resource_id = Uuid::from_u128(0xab10);
+    let hidden_token_lineage_id = Uuid::from_u128(0xab11);
+    let hidden_binding_id = Uuid::from_u128(0xab12);
+    let picked_logical_name_id = "ens:zeta.eth";
+    let skipped_logical_name_id = "ens:alpha.eth";
+    let hidden_logical_name_id = "ens:hidden.eth";
+
+    assert!(
+        load_current_names_by_resource_ids(database.pool(), &[])
+            .await?
+            .is_empty()
+    );
+
+    upsert_token_lineages(
+        database.pool(),
+        &[
+            token_lineage(token_lineage_id),
+            token_lineage(hidden_token_lineage_id),
+        ],
+    )
+    .await?;
+    upsert_resources(
+        database.pool(),
+        &[
+            resource(resource_id, Some(token_lineage_id)),
+            resource(hidden_resource_id, Some(hidden_token_lineage_id)),
+        ],
+    )
+    .await?;
+    upsert_name_surfaces(
+        database.pool(),
+        &[
+            name_surface_with_normalized_name(picked_logical_name_id, "aaa.eth", "zeta.eth"),
+            name_surface_with_normalized_name(skipped_logical_name_id, "zzz.eth", "alpha.eth"),
+            name_surface(hidden_logical_name_id, "hidden.eth"),
+        ],
+    )
+    .await?;
+    upsert_surface_bindings(
+        database.pool(),
+        &[
+            surface_binding(
+                picked_binding_id,
+                picked_logical_name_id,
+                resource_id,
+                timestamp(1_717_171_700),
+                None,
+                "0xpickedbinding",
+                21_000_003,
+            ),
+            surface_binding(
+                skipped_binding_id,
+                skipped_logical_name_id,
+                resource_id,
+                timestamp(1_717_171_701),
+                None,
+                "0xskippedbinding",
+                21_000_004,
+            ),
+            surface_binding(
+                hidden_binding_id,
+                hidden_logical_name_id,
+                hidden_resource_id,
+                timestamp(1_717_171_702),
+                None,
+                "0xhiddenbinding",
+                21_000_005,
+            ),
+        ],
+    )
+    .await?;
+
+    let mut picked = name_current_row(
+        picked_logical_name_id,
+        picked_binding_id,
+        resource_id,
+        token_lineage_id,
+    );
+    picked.canonical_display_name = "aaa.eth".to_owned();
+    picked.normalized_name = "zeta.eth".to_owned();
+    picked.namehash = "namehash:zeta.eth".to_owned();
+
+    let mut skipped = name_current_row(
+        skipped_logical_name_id,
+        skipped_binding_id,
+        resource_id,
+        token_lineage_id,
+    );
+    skipped.canonical_display_name = "zzz.eth".to_owned();
+    skipped.normalized_name = "alpha.eth".to_owned();
+    skipped.namehash = "namehash:alpha.eth".to_owned();
+
+    let mut hidden = name_current_row(
+        hidden_logical_name_id,
+        hidden_binding_id,
+        hidden_resource_id,
+        hidden_token_lineage_id,
+    );
+    hidden.canonical_display_name = "hidden.eth".to_owned();
+    hidden.normalized_name = "hidden.eth".to_owned();
+    hidden.namehash = "namehash:hidden.eth".to_owned();
+
+    upsert_name_current_rows(database.pool(), &[skipped, picked, hidden]).await?;
+    orphan_resource(&database, hidden_resource_id).await?;
+
+    let loaded =
+        load_current_names_by_resource_ids(database.pool(), &[hidden_resource_id, resource_id])
+            .await?;
+
+    assert_eq!(loaded.len(), 1);
+    assert_eq!(
+        loaded.get(&resource_id).map(String::as_str),
+        Some("zeta.eth")
+    );
+    assert!(!loaded.contains_key(&hidden_resource_id));
 
     database.cleanup().await
 }

@@ -106,4 +106,14 @@ include!("tests/primary_names.rs");
 
 include!("tests/v2_name_record.rs");
 
+include!("tests/v2_history.rs");
+
+include!("tests/v2_address_names.rs");
+
+include!("tests/v2_permissions.rs");
+
+include!("tests/v2_resolvers.rs");
+
+include!("tests/v2_primary_name.rs");
+
 include!("tests/openapi.rs");
