@@ -7,9 +7,10 @@ use axum::{
 use crate::AppState;
 
 use super::{
-    get_address_history, get_address_names, get_diagnostic_namespace_manifests, get_events,
-    get_history, get_lookup, get_name_record, get_name_records, get_namespace, get_permissions,
-    get_primary_name, get_resolver, get_status, get_subnames,
+    get_address_history, get_address_names, get_diagnostic_events,
+    get_diagnostic_namespace_manifests, get_events, get_history, get_lookup, get_name_record,
+    get_name_records, get_namespace, get_permissions, get_primary_name, get_resolver, get_status,
+    get_subnames,
 };
 
 pub(super) fn router() -> Router<AppState> {
@@ -49,7 +50,7 @@ pub(super) fn router() -> Router<AppState> {
             "/v2/diagnostics/namespaces/{namespace}/manifests",
             get(get_diagnostic_namespace_manifests),
         )
-        .route("/v2/diagnostics/events", get(not_implemented))
+        .route("/v2/diagnostics/events", get(get_diagnostic_events))
 }
 
 async fn not_implemented() -> StatusCode {
