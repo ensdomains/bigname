@@ -237,6 +237,82 @@ where
     Ok(contains)
 }
 
+/// Check whether one stored `(chain_id, block_number, block_hash)` is eligible
+/// as an older canonical ancestor of a selected canonical descendant block.
+///
+/// This intentionally avoids walking parent links. `chain_lineage` is
+/// append-only, and reorg repair flips whole losing branches to `orphaned`.
+/// If the selected block is canonical-marked, the candidate is canonical-marked,
+/// and the candidate is the unique canonical/safe/finalized row at that height,
+/// both rows are on the same canonical chain and block-number ordering implies
+/// ancestry. During a mid-reorg window where two rows at the candidate height
+/// are still canonical-marked, uniqueness fails and the caller skips the
+/// candidate conservatively.
+pub(crate) async fn chain_lineage_contains_canonical_ancestor_position<'e, E>(
+    executor: E,
+    chain_id: &str,
+    descendant_hash: &str,
+    descendant_block_number: i64,
+    ancestor_block_number: i64,
+    ancestor_hash: &str,
+) -> Result<bool>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    let contains = sqlx::query_scalar::<_, bool>(
+        r#"
+        WITH canonical_at_candidate_height AS (
+            SELECT block_hash
+            FROM chain_lineage
+            WHERE chain_id = $1
+              AND block_number = $4
+              AND canonicality_state IN (
+                  'canonical'::canonicality_state,
+                  'safe'::canonicality_state,
+                  'finalized'::canonicality_state
+              )
+            LIMIT 2
+        )
+        SELECT
+            EXISTS (
+                SELECT 1
+                FROM chain_lineage
+                WHERE chain_id = $1
+                  AND block_hash = $2
+                  AND block_number = $3
+                  AND canonicality_state IN (
+                      'canonical'::canonicality_state,
+                      'safe'::canonicality_state,
+                      'finalized'::canonicality_state
+                  )
+            )
+            AND (
+                SELECT COUNT(*) = 1
+                FROM canonical_at_candidate_height
+            )
+            AND EXISTS (
+                SELECT 1
+                FROM canonical_at_candidate_height
+                WHERE block_hash = $5
+            )
+        "#,
+    )
+    .bind(chain_id)
+    .bind(descendant_hash)
+    .bind(descendant_block_number)
+    .bind(ancestor_block_number)
+    .bind(ancestor_hash)
+    .fetch_one(executor)
+    .await
+    .with_context(|| {
+        format!(
+            "failed to check canonical lineage uniqueness for chain {chain_id} descendant {descendant_hash} ancestor {ancestor_hash} at block {ancestor_block_number}"
+        )
+    })?;
+
+    Ok(contains)
+}
+
 pub(crate) async fn load_lineage_snapshots_for_hashes<'e, E>(
     executor: E,
     chain_id: &str,
