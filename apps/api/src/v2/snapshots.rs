@@ -13,7 +13,7 @@ use crate::ApiError;
 
 use super::{
     chains::slug_to_numeric,
-    envelope::AsOf,
+    envelope::{AsOf, Meta},
     error::{V2Error, V2Result},
     params::AtSelector,
     vocab::Finality,
@@ -71,6 +71,14 @@ pub(crate) fn as_of_meta(selected: &SelectedSnapshot) -> V2Result<BTreeMap<Strin
     }
 
     Ok(as_of)
+}
+
+pub(crate) fn snapshot_meta(selected: &SelectedSnapshot) -> V2Result<Meta> {
+    Ok(Meta {
+        as_of: Some(as_of_meta(selected)?),
+        as_of_token: Some(encode_at_token(selected)),
+        ..Meta::default()
+    })
 }
 
 pub(crate) async fn resolve_v2_snapshot(
@@ -168,6 +176,14 @@ pub(crate) fn api_error_to_v2_for_resource(
     }
 }
 
+pub(crate) fn sanitized_snapshot_internal_error(
+    error: &SnapshotSelectionError,
+    resource: SnapshotReadResource,
+) -> V2Error {
+    log_sanitized_snapshot_error(error, resource);
+    V2Error::internal_error(internal_snapshot_message(resource))
+}
+
 fn map_snapshot_error_for_resource(
     error: SnapshotSelectionError,
     resource: SnapshotReadResource,
@@ -183,8 +199,7 @@ fn map_snapshot_error_for_resource(
             V2Error::stale(stale_snapshot_message(resource))
         }
         SnapshotSelectionErrorKind::InternalError => {
-            log_sanitized_snapshot_error(&error, resource);
-            V2Error::internal_error(internal_snapshot_message(resource))
+            sanitized_snapshot_internal_error(&error, resource)
         }
     }
 }

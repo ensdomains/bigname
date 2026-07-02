@@ -3,7 +3,7 @@ use axum::{
     extract::{FromRequestParts, Path, State},
     http::request::Parts,
 };
-use bigname_storage::PrimaryNameClaimStatus;
+use bigname_storage::{BASENAMES_NAMESPACE, PrimaryNameClaimStatus};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -14,7 +14,8 @@ use crate::{
 
 use super::{
     Envelope, Meta, PRODUCT_PIPELINE_TERMS, RawQueryParams, Source, Status, V2Error, V2Result,
-    api_error_to_v2, contains_pipeline_vocabulary,
+    api_error_to_v2, contains_pipeline_vocabulary, load_served_head_meta,
+    v2_exact_name_snapshot_scope_with_resolution_auxiliary,
 };
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -179,6 +180,20 @@ pub(crate) async fn get_primary_name(
         .map_err(api_error_to_v2)?;
     }
 
+    let mut meta = if primary_name_uses_on_demand_fallback(&lookup_state) {
+        Meta::default()
+    } else {
+        let snapshot_scope = v2_exact_name_snapshot_scope_with_resolution_auxiliary(
+            &state,
+            &params.namespace,
+            None,
+            params.namespace == BASENAMES_NAMESPACE && lookup_state.persisted_verified.is_some(),
+        )
+        .await?;
+        load_served_head_meta(&state.pool, &snapshot_scope).await?
+    };
+    meta.source = params.source.meta_source();
+
     Ok(Json(Envelope {
         data: build_primary_name(
             address,
@@ -188,11 +203,20 @@ pub(crate) async fn get_primary_name(
             &lookup_state,
         )?,
         page: None,
-        meta: Meta {
-            source: params.source.meta_source(),
-            ..Meta::default()
-        },
+        meta,
     }))
+}
+
+fn primary_name_uses_on_demand_fallback(lookup_state: &PrimaryNameLookupState) -> bool {
+    matches!(
+        lookup_state.on_demand_claim,
+        OnDemandPrimaryNameClaimState::NotFound
+            | OnDemandPrimaryNameClaimState::InvalidName(_)
+            | OnDemandPrimaryNameClaimState::Found(_)
+    ) || matches!(
+        lookup_state.on_demand_verified,
+        OnDemandPrimaryNameVerificationState::Verified(_)
+    )
 }
 
 pub(crate) fn build_primary_name(
