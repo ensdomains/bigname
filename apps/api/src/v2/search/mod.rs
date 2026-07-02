@@ -7,12 +7,13 @@ use axum::{
 };
 use bigname_storage::{
     NameCurrentListCursor, NameCurrentListCursorValue, NameCurrentListFilter, NameCurrentListOrder,
-    NameCurrentListRow, NameCurrentListSort, SnapshotSelectionScope,
+    NameCurrentListRow, NameCurrentListSort, SnapshotPositionRequirement, SnapshotSelectionScope,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::{AppState, PUBLIC_NAMESPACES};
 
+use super::chains::deployment_profile_for_slug;
 use super::{
     AtSelector, CursorPayload, Envelope, Finality, Meta, Page, QueryParams, RawQueryParams,
     RegistrationStatus, V2Error, V2Result, as_of_meta, decode, encode, encode_at_token,
@@ -143,7 +144,8 @@ pub(crate) async fn get_search(
 ) -> V2Result<Json<Envelope<Vec<SearchName>>>> {
     // Search is anchorless: `namespace` filters rows, while `at`/`finality`
     // select response metadata and cursor binding for the latest-row read.
-    let scope = search_snapshot_scope(&state, params.namespace.as_deref()).await?;
+    let scope =
+        search_snapshot_scope(&state, params.namespace.as_deref(), params.at.as_ref()).await?;
     let selected_snapshot =
         resolve_v2_snapshot(&state.pool, &scope, params.at.as_ref(), params.finality).await?;
     let snapshot_token = encode_at_token(&selected_snapshot);
@@ -305,19 +307,41 @@ fn search_filter(params: &SearchQueryParams) -> NameCurrentListFilter {
 async fn search_snapshot_scope(
     state: &AppState,
     namespace: Option<&str>,
+    at: Option<&AtSelector>,
 ) -> V2Result<SnapshotSelectionScope> {
     let Some(namespace) = namespace else {
         let mut requirements = Vec::new();
         for namespace in PUBLIC_NAMESPACES {
-            let scope = v2_exact_name_snapshot_scope(state, namespace).await?;
+            let scope = v2_exact_name_snapshot_scope(state, namespace, at).await?;
             requirements.extend(scope.required_positions().iter().cloned());
         }
+        validate_single_deployment_profile(&requirements)?;
 
         return SnapshotSelectionScope::new(requirements, None)
             .map_err(|error| V2Error::internal_error(error.message()));
     };
 
-    v2_exact_name_snapshot_scope(state, namespace).await
+    v2_exact_name_snapshot_scope(state, namespace, at).await
+}
+
+fn validate_single_deployment_profile(
+    requirements: &[SnapshotPositionRequirement],
+) -> V2Result<()> {
+    let mut profile = None;
+    for requirement in requirements {
+        let requirement_profile =
+            deployment_profile_for_slug(&requirement.chain_id).ok_or_else(|| {
+                V2Error::internal_error("snapshot scope contains an unregistered deployment chain")
+            })?;
+        if profile.is_some_and(|profile| profile != requirement_profile) {
+            return Err(V2Error::conflict(
+                "snapshot selector cannot form one canonical snapshot across deployment profiles",
+            ));
+        }
+        profile = Some(requirement_profile);
+    }
+
+    Ok(())
 }
 
 async fn load_search_storage_page(
