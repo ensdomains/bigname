@@ -1,11 +1,15 @@
 use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result, bail};
-use serde_json::Value;
 use sqlx::Postgres;
 
 use super::super::super::types::NormalizedEvent;
 use super::super::{normalized_event_identity_differences, serialize_jsonb_value};
+use super::ens_v1_registry_event_time_state::{
+    authority_transfer_state_repair_allowed, permission_state_authority_repair_allowed,
+    record_changed_text_value_state_repair_allowed, record_version_state_repair_allowed,
+    registry_only_authority_state_resource_repair_allowed,
+};
 
 pub(crate) async fn repair_ens_v1_unwrapped_authority_registry_event_time_resource_ids(
     executor: &mut sqlx::Transaction<'_, Postgres>,
@@ -256,6 +260,158 @@ pub(crate) async fn repair_ens_v1_unwrapped_authority_registry_event_time_before
     Ok(repaired)
 }
 
+pub(crate) async fn supersede_basenames_registry_boundary_derivation_change_events(
+    executor: &mut sqlx::Transaction<'_, Postgres>,
+    events: &[NormalizedEvent],
+) -> Result<usize> {
+    let mut event_identities = Vec::new();
+    let mut resource_ids = Vec::new();
+    let mut logical_name_ids = Vec::new();
+    let mut block_numbers = Vec::new();
+    let mut block_hashes = Vec::new();
+    let mut event_kinds = Vec::new();
+    let mut raw_fact_refs = Vec::new();
+    let mut before_states = Vec::new();
+    let mut after_states = Vec::new();
+    let mut manifest_versions = Vec::new();
+    let mut source_manifest_ids = Vec::new();
+    let mut source_families = Vec::new();
+
+    for event in events {
+        if !basenames_registry_boundary_derivation_change_candidate(event) {
+            continue;
+        }
+        let (Some(resource_id), Some(logical_name_id), Some(block_number), Some(block_hash)) = (
+            event.resource_id,
+            event.logical_name_id.as_ref(),
+            event.block_number,
+            event.block_hash.as_ref(),
+        ) else {
+            continue;
+        };
+
+        event_identities.push(event.event_identity.clone());
+        resource_ids.push(resource_id);
+        logical_name_ids.push(logical_name_id.clone());
+        block_numbers.push(block_number);
+        block_hashes.push(block_hash.clone());
+        event_kinds.push(event.event_kind.clone());
+        raw_fact_refs.push(serialize_jsonb_value(
+            &event.raw_fact_ref,
+            "failed to serialize Basenames registry boundary supersession raw_fact_ref",
+        )?);
+        before_states.push(serialize_jsonb_value(
+            &event.before_state,
+            "failed to serialize Basenames registry boundary supersession before_state",
+        )?);
+        after_states.push(serialize_jsonb_value(
+            &event.after_state,
+            "failed to serialize Basenames registry boundary supersession after_state",
+        )?);
+        manifest_versions.push(event.manifest_version);
+        source_manifest_ids.push(event.source_manifest_id);
+        source_families.push(event.source_family.clone());
+    }
+
+    if event_identities.is_empty() {
+        return Ok(0);
+    }
+
+    let repair_results =
+        sqlx::query_scalar::<_, String>(include_str!("ens_v1_registry_boundary_supersession.sql"))
+            .bind(&event_identities)
+            .bind(&resource_ids)
+            .bind(&logical_name_ids)
+            .bind(&block_numbers)
+            .bind(&block_hashes)
+            .bind(&event_kinds)
+            .bind(&raw_fact_refs)
+            .bind(&before_states)
+            .bind(&after_states)
+            .bind(&manifest_versions)
+            .bind(&source_manifest_ids)
+            .bind(&source_families)
+            .fetch_all(&mut **executor)
+            .await
+            .context("failed to supersede Basenames registry boundary derivation-change events")?;
+
+    let mut superseded = 0usize;
+    let mut manifest_rejected = Vec::new();
+    let mut resource_rejected = Vec::new();
+    let mut state_rejected = Vec::new();
+    for result in repair_results {
+        if result.strip_prefix("superseded:").is_some() {
+            superseded += 1;
+        } else if let Some(rejection) = result.strip_prefix("manifest_mismatch:") {
+            manifest_rejected.push(rejection.to_owned());
+        } else if let Some(rejection) = result.strip_prefix("resource_mismatch:") {
+            resource_rejected.push(rejection.to_owned());
+        } else if let Some(rejection) = result.strip_prefix("state_mismatch:") {
+            state_rejected.push(rejection.to_owned());
+        } else {
+            bail!("unexpected Basenames registry boundary supersession result: {result}");
+        }
+    }
+    let mut rejection_summaries = Vec::new();
+    if !manifest_rejected.is_empty() {
+        rejection_summaries.push(format!(
+            "manifest metadata mismatches: {}",
+            manifest_rejected.join(", ")
+        ));
+    }
+    if !resource_rejected.is_empty() {
+        rejection_summaries.push(format!(
+            "resource/provenance mismatches: {}",
+            resource_rejected.join(", ")
+        ));
+    }
+    if !state_rejected.is_empty() {
+        rejection_summaries.push(format!(
+            "state verification mismatches: {}",
+            state_rejected.join(", ")
+        ));
+    }
+    if !rejection_summaries.is_empty() {
+        bail!(
+            "Basenames registry boundary derivation-change supersession rejected {}",
+            rejection_summaries.join("; ")
+        );
+    }
+
+    Ok(superseded)
+}
+
+fn basenames_registry_boundary_derivation_change_candidate(event: &NormalizedEvent) -> bool {
+    let base_boundary_event = event.namespace == "basenames"
+        && event.chain_id.as_deref() == Some("base-mainnet")
+        && event.derivation_kind == "ens_v1_unwrapped_authority"
+        && event.transaction_hash.is_none()
+        && event.log_index.is_none()
+        && event.logical_name_id.is_some()
+        && event.resource_id.is_some()
+        && event.block_number.is_some()
+        && event.block_hash.is_some()
+        && event
+            .raw_fact_ref
+            .get("kind")
+            .and_then(|value| value.as_str())
+            == Some("raw_block");
+
+    base_boundary_event
+        && ((event.source_family == "basenames_base_registry"
+            && (matches!(
+                event.event_kind.as_str(),
+                "AuthorityEpochChanged" | "SurfaceBound" | "SurfaceUnbound"
+            ) || (event.event_kind == "ResolverChanged"
+                && event
+                    .after_state
+                    .get("source_event")
+                    .and_then(|value| value.as_str())
+                    == Some("AuthorityEpochChanged"))))
+            || (event.source_family == "basenames_base_registrar"
+                && event.event_kind == "AuthorityEpochChanged"))
+}
+
 pub(crate) fn ens_v1_unwrapped_authority_registry_event_time_resource_id_repair_allowed(
     existing: &NormalizedEvent,
     incoming: &NormalizedEvent,
@@ -264,23 +420,14 @@ pub(crate) fn ens_v1_unwrapped_authority_registry_event_time_resource_id_repair_
     if !registry_event_time_repair_differences_allowed(differing_fields) {
         return false;
     }
-    let source_allowed = (existing.namespace == "ens"
-        && existing.chain_id.as_deref() == Some("ethereum-mainnet")
-        && matches!(
-            existing.source_family.as_str(),
-            "ens_v1_registry_l1" | "ens_v1_registrar_l1" | "ens_v1_resolver_l1"
-        ))
-        || (existing.namespace == "basenames"
-            && existing.chain_id.as_deref() == Some("base-mainnet")
-            && existing.source_family == "basenames_base_registry"
-            && existing.event_kind == "AuthorityTransferred");
     if existing.resource_id.is_none()
         || existing.logical_name_id.is_none()
         || incoming.logical_name_id.is_none()
         || existing.logical_name_id != incoming.logical_name_id
         || existing.block_number.is_none()
         || existing.derivation_kind != "ens_v1_unwrapped_authority"
-        || !source_allowed
+        || !registry_event_time_resource_repair_source_allowed(existing)
+        || basenames_registry_boundary_resolver_event(existing)
         || !matches!(
             existing.event_kind.as_str(),
             "ResolverChanged"
@@ -288,12 +435,20 @@ pub(crate) fn ens_v1_unwrapped_authority_registry_event_time_resource_id_repair_
                 | "RecordVersionChanged"
                 | "PermissionChanged"
                 | "AuthorityTransferred"
+                | "AuthorityEpochChanged"
+                | "SurfaceBound"
+                | "SurfaceUnbound"
         )
     {
         return false;
     }
 
-    if differing_fields.len() == 1 {
+    if differing_fields.len() == 1
+        && !matches!(
+            existing.event_kind.as_str(),
+            "AuthorityEpochChanged" | "SurfaceBound" | "SurfaceUnbound"
+        )
+    {
         return true;
     }
 
@@ -324,9 +479,52 @@ pub(crate) fn ens_v1_unwrapped_authority_registry_event_time_resource_id_repair_
         );
     }
 
+    if matches!(
+        existing.event_kind.as_str(),
+        "AuthorityEpochChanged" | "SurfaceBound" | "SurfaceUnbound"
+    ) {
+        return registry_only_authority_state_resource_repair_allowed(
+            existing.event_kind.as_str(),
+            &existing.before_state,
+            &incoming.before_state,
+            &existing.after_state,
+            &incoming.after_state,
+        );
+    }
+
     existing.event_kind == "PermissionChanged"
         && permission_state_authority_repair_allowed(&existing.before_state, &incoming.before_state)
         && permission_state_authority_repair_allowed(&existing.after_state, &incoming.after_state)
+}
+
+fn registry_event_time_resource_repair_source_allowed(existing: &NormalizedEvent) -> bool {
+    (existing.namespace == "ens"
+        && existing.chain_id.as_deref() == Some("ethereum-mainnet")
+        && matches!(
+            existing.source_family.as_str(),
+            "ens_v1_registry_l1" | "ens_v1_registrar_l1" | "ens_v1_resolver_l1"
+        ))
+        || (existing.namespace == "basenames"
+            && existing.chain_id.as_deref() == Some("base-mainnet")
+            && existing.source_family == "basenames_base_registry"
+            && matches!(
+                existing.event_kind.as_str(),
+                "AuthorityTransferred" | "PermissionChanged" | "ResolverChanged"
+            ))
+}
+
+fn basenames_registry_boundary_resolver_event(event: &NormalizedEvent) -> bool {
+    event.namespace == "basenames"
+        && event.chain_id.as_deref() == Some("base-mainnet")
+        && event.source_family == "basenames_base_registry"
+        && event.event_kind == "ResolverChanged"
+        && event.transaction_hash.is_none()
+        && event.log_index.is_none()
+        && event
+            .after_state
+            .get("source_event")
+            .and_then(|value| value.as_str())
+            == Some("AuthorityEpochChanged")
 }
 
 pub(crate) fn ens_v1_unwrapped_authority_registry_event_time_before_state_repair_allowed(
@@ -398,207 +596,4 @@ fn registry_event_time_repair_differences_allowed(differing_fields: &[&'static s
             | ["resource_id", "after_state"]
             | ["resource_id", "before_state", "after_state"]
     )
-}
-fn authority_transfer_state_repair_allowed(
-    existing_before_state: &Value,
-    incoming_before_state: &Value,
-    existing_after_state: &Value,
-    incoming_after_state: &Value,
-) -> bool {
-    if existing_after_state != incoming_after_state {
-        return false;
-    }
-    if !authority_transfer_owner_transition_allowed(existing_before_state, incoming_before_state) {
-        return false;
-    }
-    let mut existing_without_owner = existing_before_state.clone();
-    if let Some(object) = existing_without_owner.as_object_mut() {
-        object.remove("owner");
-    }
-    let mut incoming_without_owner = incoming_before_state.clone();
-    if let Some(object) = incoming_without_owner.as_object_mut() {
-        object.remove("owner");
-    }
-    existing_without_owner == incoming_without_owner
-}
-fn authority_transfer_owner_transition_allowed(
-    existing_before_state: &Value,
-    incoming_before_state: &Value,
-) -> bool {
-    matches!(
-        (
-            owner_state(existing_before_state),
-            owner_state(incoming_before_state)
-        ),
-        (Some(OwnerState::Known), Some(OwnerState::Known))
-            | (Some(OwnerState::Known), Some(OwnerState::Null))
-            | (Some(OwnerState::Null), Some(OwnerState::Known))
-    )
-}
-enum OwnerState {
-    Known,
-    Null,
-}
-fn owner_state(value: &Value) -> Option<OwnerState> {
-    match value.get("owner")? {
-        Value::Null => Some(OwnerState::Null),
-        Value::String(owner) if !owner.trim().is_empty() => Some(OwnerState::Known),
-        _ => None,
-    }
-}
-fn record_version_state_repair_allowed(
-    existing_before_state: &Value,
-    incoming_before_state: &Value,
-    existing_after_state: &Value,
-    incoming_after_state: &Value,
-) -> bool {
-    if existing_after_state != incoming_after_state {
-        return false;
-    }
-    let Some(after_version) = incoming_after_state
-        .get("record_version")
-        .and_then(Value::as_i64)
-    else {
-        return false;
-    };
-    let mut existing_without_version = existing_before_state.clone();
-    if let Some(object) = existing_without_version.as_object_mut() {
-        object.remove("record_version");
-    }
-    let mut incoming_without_version = incoming_before_state.clone();
-    if let Some(object) = incoming_without_version.as_object_mut() {
-        object.remove("record_version");
-    }
-    if existing_without_version != incoming_without_version {
-        return false;
-    }
-    let existing_version = existing_before_state.get("record_version");
-    let incoming_version = incoming_before_state.get("record_version");
-    let previous_version = match (existing_version, incoming_version) {
-        (Some(Value::Null), Some(value)) => value.as_i64(),
-        (Some(value), Some(Value::Null)) => value.as_i64(),
-        _ => None,
-    };
-    previous_version.and_then(|version| version.checked_add(1)) == Some(after_version)
-}
-fn record_changed_text_value_state_repair_allowed(
-    existing_before_state: &Value,
-    incoming_before_state: &Value,
-    existing_after_state: &Value,
-    incoming_after_state: &Value,
-) -> bool {
-    if existing_before_state != incoming_before_state
-        || !selector_text_record_state(existing_after_state)
-        || !selector_text_record_state(incoming_after_state)
-    {
-        return false;
-    }
-    let existing_value = existing_after_state.get("value").and_then(Value::as_str);
-    let incoming_value = incoming_after_state.get("value").and_then(Value::as_str);
-    if existing_value.is_some() == incoming_value.is_some() {
-        return false;
-    }
-    let mut existing_without_value = existing_after_state.clone();
-    if let Some(object) = existing_without_value.as_object_mut() {
-        object.remove("value");
-    }
-    let mut incoming_without_value = incoming_after_state.clone();
-    if let Some(object) = incoming_without_value.as_object_mut() {
-        object.remove("value");
-    }
-    existing_without_value == incoming_without_value
-}
-fn selector_text_record_state(state: &Value) -> bool {
-    let Some(record_family) = state.get("record_family").and_then(Value::as_str) else {
-        return false;
-    };
-    let Some(record_key) = state.get("record_key").and_then(Value::as_str) else {
-        return false;
-    };
-    let Some(selector_key) = state.get("selector_key").and_then(Value::as_str) else {
-        return false;
-    };
-    record_family == "text" && record_key.starts_with("text:") && !selector_key.is_empty()
-}
-fn permission_state_authority_repair_allowed(
-    existing_state: &Value,
-    incoming_state: &Value,
-) -> bool {
-    if existing_state == incoming_state {
-        return true;
-    }
-    if permission_state_without_authority_sources(existing_state)
-        != permission_state_without_authority_sources(incoming_state)
-    {
-        return false;
-    }
-    let grant_source_repair_allowed = authority_source_unchanged_or_repaired(
-        existing_state.get("grant_source"),
-        incoming_state.get("grant_source"),
-    );
-    let revocation_source_repair_allowed = authority_source_unchanged_or_repaired(
-        existing_state.get("revocation_source"),
-        incoming_state.get("revocation_source"),
-    );
-    grant_source_repair_allowed && revocation_source_repair_allowed
-}
-fn permission_state_without_authority_sources(state: &Value) -> Value {
-    let mut value = state.clone();
-    if let Some(object) = value.as_object_mut() {
-        object.remove("grant_source");
-        object.remove("revocation_source");
-    }
-    value
-}
-fn authority_source_unchanged_or_repaired(
-    existing_source: Option<&Value>,
-    incoming_source: Option<&Value>,
-) -> bool {
-    existing_source == incoming_source
-        || authority_source_transition_allowed(existing_source, incoming_source)
-}
-fn authority_source_transition_allowed(
-    existing_source: Option<&Value>,
-    incoming_source: Option<&Value>,
-) -> bool {
-    let (Some(existing_source), Some(incoming_source)) = (existing_source, incoming_source) else {
-        return false;
-    };
-    existing_source.get("kind").and_then(Value::as_str) == Some("ens_v1_authority")
-        && incoming_source.get("kind").and_then(Value::as_str) == Some("ens_v1_authority")
-        && existing_source
-            .get("authority_kind")
-            .and_then(Value::as_str)
-            .is_some_and(|authority_kind| {
-                matches!(authority_kind, "registrar" | "wrapper" | "registry_only")
-            })
-        && incoming_source
-            .get("authority_kind")
-            .and_then(Value::as_str)
-            .is_some_and(|incoming_authority_kind| {
-                let existing_authority_kind = existing_source
-                    .get("authority_kind")
-                    .and_then(Value::as_str);
-                incoming_authority_kind == "registry_only"
-                    || (existing_authority_kind == Some("registry_only")
-                        && incoming_authority_kind == "registrar")
-            })
-        && existing_source
-            .get("authority_key")
-            .and_then(Value::as_str)
-            .is_some_and(|authority_key| !authority_key.is_empty())
-        && incoming_source
-            .get("authority_key")
-            .and_then(Value::as_str)
-            .is_some_and(|authority_key| !authority_key.is_empty())
-        && existing_source
-            .get("source_event_kind")
-            .and_then(Value::as_str)
-            .is_some_and(|source_event_kind| !source_event_kind.is_empty())
-        && existing_source
-            .get("source_event_kind")
-            .and_then(Value::as_str)
-            == incoming_source
-                .get("source_event_kind")
-                .and_then(Value::as_str)
 }
