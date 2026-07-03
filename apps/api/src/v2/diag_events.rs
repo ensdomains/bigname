@@ -5,12 +5,12 @@ use serde_json::{Value, json};
 
 use crate::AppState;
 
+use super::cursor::invalid_cursor_error;
 use super::events::{parse_events_filter, resolve_events_namespace};
 use super::{
-    Envelope, Meta, Page, QueryParamAllowlist, QueryParams, SnapshotReadResource,
-    StrictQueryParams, V2Error, V2Result, decode, encode, encode_at_token, events_cursor_payload,
-    events_storage_cursor, format_timestamp, resolve_v2_snapshot_for, snapshot_meta,
-    v2_exact_name_snapshot_scope,
+    Envelope, Page, QueryParamAllowlist, SnapshotReadResource, StrictQueryParams, V2Error,
+    V2Result, decode, encode, encode_at_token, events_cursor_payload, events_storage_cursor,
+    format_timestamp, resolve_v2_snapshot_for, snapshot_meta, v2_exact_name_snapshot_scope,
 };
 
 pub(crate) struct DiagnosticEventsQueryParams;
@@ -101,7 +101,7 @@ pub(crate) async fn get_diagnostic_events(
             .downcast_ref::<bigname_storage::InvalidHistoryCursor>()
             .is_some()
         {
-            invalid_diagnostic_events_cursor()
+            invalid_cursor_error()
         } else {
             V2Error::internal_error("failed to load diagnostic events")
         }
@@ -186,17 +186,17 @@ fn build_chain_position(row: &StorageHistoryEvent) -> Value {
 
 fn build_coverage(coverage: &Value) -> Value {
     json!({
-        "status": string_field(coverage.get("status")).unwrap_or_else(|| "unsupported".to_owned()),
-        "exhaustiveness": string_field(coverage.get("exhaustiveness"))
+        "status": str_field(coverage.get("status")).unwrap_or_else(|| "unsupported".to_owned()),
+        "exhaustiveness": str_field(coverage.get("exhaustiveness"))
             .unwrap_or_else(|| "not_applicable".to_owned()),
         "source_classes_considered": coverage
             .get("source_classes_considered")
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default(),
-        "enumeration_basis": string_field(coverage.get("enumeration_basis"))
+        "enumeration_basis": str_field(coverage.get("enumeration_basis"))
             .unwrap_or_else(|| "exact_name".to_owned()),
-        "unsupported_reason": string_field(coverage.get("unsupported_reason")),
+        "unsupported_reason": str_field(coverage.get("unsupported_reason")),
     })
 }
 
@@ -208,12 +208,8 @@ fn ensure_object(value: &Value) -> Value {
     }
 }
 
-fn string_field(value: Option<&Value>) -> Option<String> {
+fn str_field(value: Option<&Value>) -> Option<String> {
     value.and_then(Value::as_str).map(str::to_owned)
-}
-
-fn invalid_diagnostic_events_cursor() -> V2Error {
-    V2Error::invalid_input("cursor must be a valid pagination cursor")
 }
 
 #[cfg(test)]

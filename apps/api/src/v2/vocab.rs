@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use super::{V2Error, V2Result};
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Status {
@@ -77,6 +79,19 @@ pub(crate) enum HistoryEventType {
 }
 
 impl HistoryEventType {
+    pub(crate) const ALL: [Self; 10] = [
+        Self::Registration,
+        Self::Renewal,
+        Self::Release,
+        Self::Expiry,
+        Self::Transfer,
+        Self::Authority,
+        Self::Resolver,
+        Self::Record,
+        Self::PrimaryName,
+        Self::Permission,
+    ];
+
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Registration => "registration",
@@ -179,14 +194,6 @@ impl RelationSet {
 
     pub(crate) fn as_slice(&self) -> &[Relation] {
         &self.relations
-    }
-
-    pub(crate) fn contains(&self, relation: Relation) -> bool {
-        self.relations.contains(&relation)
-    }
-
-    pub(crate) fn single(&self) -> Option<Relation> {
-        (self.relations.len() == 1).then_some(self.relations[0])
     }
 
     pub(crate) fn canonical_value(&self) -> String {
@@ -328,10 +335,39 @@ pub(crate) const PRODUCT_PIPELINE_TERMS: &[&str] = &[
 ];
 
 pub(crate) fn contains_boundary_vocabulary(candidate: &str, terms: &[&str]) -> bool {
-    let normalized_candidate = normalize_pipeline_candidate(candidate);
-    terms
+    !matched_boundary_vocabulary_terms(candidate, terms).is_empty()
+}
+
+const SHARED_PRODUCT_REASON_MAP: &[(&str, &str)] = &[
+    ("projection_read_failed", "read_failed"),
+    (
+        "ensv2_exact_name_profile_shadow",
+        "exact_name_profile_not_supported",
+    ),
+    (
+        "mixed_ensv1_ensv2_exact_name_corpus",
+        "mixed_exact_name_corpus",
+    ),
+];
+
+pub(crate) fn shared_product_reason(
+    reason: &str,
+    pipeline_rejection_log: &'static str,
+    pipeline_rejection_error: &'static str,
+) -> V2Result<String> {
+    if let Some((_, product_reason)) = SHARED_PRODUCT_REASON_MAP
         .iter()
-        .any(|term| pipeline_term_matches(&normalized_candidate, term))
+        .find(|(storage_reason, _)| *storage_reason == reason)
+    {
+        return Ok((*product_reason).to_owned());
+    }
+
+    if contains_boundary_vocabulary(reason, PRODUCT_PIPELINE_TERMS) {
+        tracing::error!(%reason, "{}", pipeline_rejection_log);
+        return Err(V2Error::internal_error(pipeline_rejection_error));
+    }
+
+    Ok(reason.to_owned())
 }
 
 pub(crate) fn matched_boundary_vocabulary_terms<'a>(
@@ -344,17 +380,6 @@ pub(crate) fn matched_boundary_vocabulary_terms<'a>(
         .copied()
         .filter(|term| pipeline_term_matches(&normalized_candidate, term))
         .collect()
-}
-
-pub(crate) fn contains_pipeline_vocabulary(candidate: &str, terms: &[&str]) -> bool {
-    contains_boundary_vocabulary(candidate, terms)
-}
-
-pub(crate) fn matched_pipeline_vocabulary_terms<'a>(
-    candidate: &str,
-    terms: &'a [&'a str],
-) -> Vec<&'a str> {
-    matched_boundary_vocabulary_terms(candidate, terms)
 }
 
 fn pipeline_term_matches(normalized_candidate: &str, term: &str) -> bool {
@@ -529,22 +554,22 @@ mod tests {
     }
 
     #[test]
-    fn pipeline_vocabulary_matching_uses_underscore_boundaries_and_plural_suffixes() {
+    fn boundary_vocabulary_matching_uses_underscore_boundaries_and_plural_suffixes() {
         const TERMS: &[&str] = &["coverage", "raw_fact", "normalized_events"];
 
         assert_eq!(
-            matched_pipeline_vocabulary_terms("insufficient_coverage", TERMS),
+            matched_boundary_vocabulary_terms("insufficient_coverage", TERMS),
             vec!["coverage"]
         );
-        assert!(contains_pipeline_vocabulary("coverage_gap", TERMS));
-        assert!(contains_pipeline_vocabulary("coverages", TERMS));
-        assert!(contains_pipeline_vocabulary("raw facts", TERMS));
-        assert!(contains_pipeline_vocabulary("normalized_event", TERMS));
-        assert!(contains_pipeline_vocabulary(
+        assert!(contains_boundary_vocabulary("coverage_gap", TERMS));
+        assert!(contains_boundary_vocabulary("coverages", TERMS));
+        assert!(contains_boundary_vocabulary("raw facts", TERMS));
+        assert!(contains_boundary_vocabulary("normalized_event", TERMS));
+        assert!(contains_boundary_vocabulary(
             "identity_sidecar_missing",
             PRODUCT_PIPELINE_TERMS
         ));
-        assert!(!contains_pipeline_vocabulary("discoverage", TERMS));
-        assert!(!contains_pipeline_vocabulary("rawfactory", TERMS));
+        assert!(!contains_boundary_vocabulary("discoverage", TERMS));
+        assert!(!contains_boundary_vocabulary("rawfactory", TERMS));
     }
 }
