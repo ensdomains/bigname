@@ -19,7 +19,7 @@ use super::super::{
 use super::{NameRecords, RecordAnswer, VerifiedRecordLookup};
 
 const INDEXED_INVENTORY_UNAVAILABLE_REASON: &str = "inventory_not_available";
-const VERIFIED_NOT_SUPPORTED_REASON: &str = "verified_records_not_supported";
+pub(crate) const VERIFIED_NOT_SUPPORTED_REASON: &str = "verified_records_not_supported";
 
 pub(crate) fn build_indexed_name_records(
     row: &NameCurrentRow,
@@ -297,7 +297,7 @@ fn verified_record_answers(
     verified_lookup: Option<VerifiedRecordLookup>,
 ) -> V2Result<BTreeMap<String, RecordAnswer>> {
     match verified_lookup {
-        Some(VerifiedRecordLookup::Found(outcome)) => {
+        Some(VerifiedRecordLookup::Found { outcome, .. }) => {
             let state = build_resolution_verified_state(row, records, Some(outcome.as_ref()))
                 .map_err(|error| {
                     error!(

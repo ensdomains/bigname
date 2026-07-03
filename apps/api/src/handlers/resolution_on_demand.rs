@@ -1,38 +1,64 @@
 use super::*;
 
+pub(crate) struct VerifiedOutcomeExecutionOptions {
+    pub(crate) use_latest_block_tag: bool,
+    pub(crate) persist_execution: bool,
+    pub(crate) partial_compact_hits: PartialCompactHits,
+}
+
+pub(crate) struct LoadedResolutionVerifiedOutcome {
+    pub(crate) outcome: ExecutionOutcome,
+    pub(crate) origin: ResolutionVerifiedOutcomeOrigin,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ResolutionVerifiedOutcomeOrigin {
+    Persisted,
+    OnDemand,
+}
+
+/// Loads a cached verified outcome or executes on miss using the requested compact-hit policy.
 pub(crate) async fn load_or_execute_resolution_verified_outcome(
     state: &AppState,
     row: &NameCurrentRow,
     records: &[ResolutionRecordKey],
     record_inventory_row: Option<&RecordInventoryCurrentRow>,
     selected_snapshot: &SelectedSnapshot,
-    use_latest_block_tag: bool,
-    persist_execution: bool,
-) -> std::result::Result<Option<ExecutionOutcome>, SnapshotSelectionError> {
-    match lookup_resolution_verified_outcome(
+    options: VerifiedOutcomeExecutionOptions,
+) -> std::result::Result<Option<LoadedResolutionVerifiedOutcome>, SnapshotSelectionError> {
+    let lookup = lookup_resolution_verified_outcome(
         &state.pool,
         row,
         records,
         record_inventory_row,
         selected_snapshot,
+        options.partial_compact_hits,
     )
-    .await?
-    {
-        ResolutionVerifiedOutcomeLookup::Found(outcome) => Ok(Some(outcome)),
+    .await?;
+
+    match lookup {
+        ResolutionVerifiedOutcomeLookup::Found(outcome) => Ok(Some(LoadedResolutionVerifiedOutcome {
+            outcome,
+            origin: ResolutionVerifiedOutcomeOrigin::Persisted,
+        })),
         ResolutionVerifiedOutcomeLookup::NotSupported => Ok(None),
-        ResolutionVerifiedOutcomeLookup::CacheMiss => Ok(Some(
-            execute_ens_verified_resolution_cache_miss(
+        ResolutionVerifiedOutcomeLookup::CacheMiss => {
+            let outcome = execute_ens_verified_resolution_cache_miss(
                 &state.pool,
                 &state.chain_rpc_urls,
                 row,
                 records,
                 record_inventory_row,
                 selected_snapshot,
-                use_latest_block_tag,
-                persist_execution,
+                options.use_latest_block_tag,
+                options.persist_execution,
             )
-            .await?,
-        )),
+            .await?;
+            Ok(Some(LoadedResolutionVerifiedOutcome {
+                outcome,
+                origin: ResolutionVerifiedOutcomeOrigin::OnDemand,
+            }))
+        }
     }
 }
 

@@ -83,11 +83,537 @@ async fn v2_get_name_response_omits_banned_v1_spellings() -> Result<()> {
 }
 
 #[tokio::test]
-async fn v2_get_name_verified_source_uses_in_record_failed_status() -> Result<()> {
-    let payload = v2_name_record_payload("/v2/names/Alice.eth?source=verified").await?;
+async fn v2_get_name_verified_source_reads_persisted_verified_record_fields() -> Result<()> {
+    let verified_address = "0x0000000000000000000000000000000000000fed";
+    let verified_queries = json!([
+        {
+            "record_key": "addr:60",
+            "status": "success",
+            "value": {
+                "coin_type": "60",
+                "value": verified_address
+            },
+            "provenance": {
+                "execution_trace_id": Uuid::from_u128(0x0e7ec7ace00000000000000000000071).to_string()
+            }
+        },
+        {
+            "record_key": "avatar",
+            "status": "success",
+            "value": {
+                "value": "https://verified.example/avatar.png"
+            },
+            "provenance": {
+                "execution_trace_id": Uuid::from_u128(0x0e7ec7ace00000000000000000000071).to_string()
+            }
+        },
+        {
+            "record_key": "contenthash",
+            "status": "success",
+            "value": {
+                "value": "ipfs://verified-alice"
+            },
+            "provenance": {
+                "execution_trace_id": Uuid::from_u128(0x0e7ec7ace00000000000000000000071).to_string()
+            }
+        },
+        {
+            "record_key": "text:description",
+            "status": "success",
+            "value": {
+                "key": "description",
+                "value": "Verified Alice profile"
+            },
+            "provenance": {
+                "execution_trace_id": Uuid::from_u128(0x0e7ec7ace00000000000000000000071).to_string()
+            }
+        }
+    ]);
+    let payload = v2_name_record_payload_with_verified(
+        "/v2/names/Alice.eth?source=verified",
+        Some((V2_PROFILE_VERIFIED_RECORD_KEYS, verified_queries)),
+    )
+    .await?;
 
     assert_eq!(payload["meta"]["source"], json!("verified"));
-    assert_eq!(payload["data"]["status"], json!("failed"));
+    assert_v2_name_snapshot_meta(&payload);
+    assert_eq!(payload["data"]["status"], json!("ok"));
+    assert_eq!(
+        payload["data"]["addresses"],
+        json!({
+            "60": verified_address
+        })
+    );
+    assert_eq!(
+        payload["data"]["text_records"],
+        json!({
+            "avatar": "https://verified.example/avatar.png",
+            "description": "Verified Alice profile"
+        })
+    );
+    assert_eq!(payload["data"]["content_hash"], json!("ipfs://verified-alice"));
+    assert_eq!(payload["data"]["primary_address"], json!(verified_address));
+    assert_eq!(
+        payload["data"]["owner"],
+        json!("0x00000000000000000000000000000000000000bb")
+    );
+    assert_eq!(payload["data"]["primary_name"], json!("alice.eth"));
+    assert!(payload["data"].get("unsupported_fields").is_none());
+    assert!(payload["data"].get("failure_reason").is_none());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_name_verified_source_basenames_uses_auxiliary_snapshot_for_persisted_outcome(
+) -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    let logical_name_id = "basenames:alice.base.eth";
+    let resource_id = Uuid::from_u128(0x9230);
+    let token_lineage_id = Uuid::from_u128(0x9231);
+    let surface_binding_id = Uuid::from_u128(0x9232);
+    let execution_trace_id = Uuid::from_u128(0x0e7ec7ace0000000000000000000007b);
+    let verified_address = "0x0000000000000000000000000000000000000b45";
+    let base_chain_positions = json!({
+        "base": {
+            "chain_id": "base-mainnet",
+            "block_number": 21_000_003,
+            "block_hash": "0xbase-binding",
+            "timestamp": "2026-04-17T00:00:03Z"
+        }
+    });
+    let chain_positions = json!({
+        "base": {
+            "chain_id": "base-mainnet",
+            "block_number": 21_000_003,
+            "block_hash": "0xbase-binding",
+            "timestamp": "2026-04-17T00:00:03Z"
+        },
+        "ethereum": {
+            "chain_id": "ethereum-mainnet",
+            "block_number": 21_000_100,
+            "block_hash": "0xbasenamesl1",
+            "timestamp": "2026-04-17T00:00:03Z"
+        }
+    });
+    let verified_queries = json!([
+        {
+            "record_key": "addr:60",
+            "status": "success",
+            "value": {
+                "coin_type": "60",
+                "value": verified_address
+            },
+            "provenance": {
+                "execution_trace_id": execution_trace_id.to_string()
+            }
+        },
+        {
+            "record_key": "avatar",
+            "status": "success",
+            "value": {
+                "value": "https://verified.example/base-avatar.png"
+            },
+            "provenance": {
+                "execution_trace_id": execution_trace_id.to_string()
+            }
+        },
+        {
+            "record_key": "contenthash",
+            "status": "success",
+            "value": {
+                "value": "ipfs://verified-base"
+            },
+            "provenance": {
+                "execution_trace_id": execution_trace_id.to_string()
+            }
+        },
+        {
+            "record_key": "text:description",
+            "status": "success",
+            "value": {
+                "key": "description",
+                "value": "Verified Basename profile"
+            },
+            "provenance": {
+                "execution_trace_id": execution_trace_id.to_string()
+            }
+        }
+    ]);
+
+    database
+        .seed_snapshot_selector_chain_positions(&chain_positions)
+        .await?;
+    database
+        .seed_name_current_binding(
+            logical_name_id,
+            "basenames",
+            "alice.base.eth",
+            "Alice.base.eth",
+            "namehash:alice.base.eth",
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+
+    let mut row = exact_name_row(
+        logical_name_id,
+        surface_binding_id,
+        resource_id,
+        token_lineage_id,
+    );
+    row.namespace = "basenames".to_owned();
+    row.canonical_display_name = "Alice.base.eth".to_owned();
+    row.normalized_name = "alice.base.eth".to_owned();
+    row.namehash = "namehash:alice.base.eth".to_owned();
+    row.declared_summary = json!({
+        "registration": {
+            "status": "active",
+            "authority_kind": "registrar"
+        },
+        "resolver": {
+            "chain_id": "base-mainnet",
+            "address": "0x0000000000000000000000000000000000000abc",
+            "latest_event_kind": "ResolverChanged"
+        }
+    });
+    row.provenance = json!({
+        "manifest_versions": [basenames_execution_manifest_version()]
+    });
+    row.chain_positions = chain_positions.clone();
+    row.canonicality_summary = json!({
+        "status": "finalized",
+        "chains": {
+            "base-mainnet": "finalized",
+            "ethereum-mainnet": "finalized"
+        }
+    });
+    database.insert_name_current_row(row.clone()).await?;
+
+    let mut inventory = basenames_l2resolver_record_inventory_current_row(logical_name_id, resource_id);
+    inventory.record_version_boundary =
+        basenames_dynamic_resolver_record_inventory_boundary(logical_name_id, resource_id, None, None);
+    inventory.selectors = json!([
+        {
+            "record_key": "addr:60",
+            "record_family": "addr",
+            "selector_key": "60",
+            "cacheable": true
+        },
+        {
+            "record_key": "avatar",
+            "record_family": "avatar",
+            "selector_key": null,
+            "cacheable": true
+        },
+        {
+            "record_key": "contenthash",
+            "record_family": "contenthash",
+            "selector_key": null,
+            "cacheable": true
+        },
+        {
+            "record_key": "text:description",
+            "record_family": "text",
+            "selector_key": "description",
+            "cacheable": true
+        }
+    ]);
+    inventory.entries = json!([
+        {
+            "record_key": "addr:60",
+            "record_family": "addr",
+            "selector_key": "60",
+            "status": "success",
+            "value": {
+                "coin_type": "60",
+                "value": "0x0000000000000000000000000000000000000a11"
+            }
+        },
+        {
+            "record_key": "avatar",
+            "record_family": "avatar",
+            "selector_key": null,
+            "status": "success",
+            "value": {
+                "value": "https://indexed.example/base-avatar.png"
+            }
+        },
+        {
+            "record_key": "contenthash",
+            "record_family": "contenthash",
+            "selector_key": null,
+            "status": "success",
+            "value": {
+                "value": "ipfs://indexed-base"
+            }
+        },
+        {
+            "record_key": "text:description",
+            "record_family": "text",
+            "selector_key": "description",
+            "status": "success",
+            "value": {
+                "key": "description",
+                "value": "Indexed Basename profile"
+            }
+        }
+    ]);
+    inventory.chain_positions = base_chain_positions;
+    inventory.canonicality_summary = json!({
+        "status": "finalized",
+        "chains": {
+            "base-mainnet": "finalized"
+        }
+    });
+    database
+        .insert_record_inventory_current_row(inventory.clone())
+        .await?;
+
+    let requested_records = V2_PROFILE_VERIFIED_RECORD_KEYS
+        .iter()
+        .map(|record_key| {
+            parse_resolution_record_key(record_key)
+                .expect("v2 profile verified selector must parse")
+        })
+        .collect::<Vec<_>>();
+    let cache_key = bigname_storage::build_resolution_execution_cache_key(
+        &row,
+        &requested_records,
+        Some(&inventory),
+        row.chain_positions.clone(),
+    )?;
+    let mut trace = resolution_execution_trace(
+        execution_trace_id,
+        &cache_key.request_key,
+        V2_PROFILE_VERIFIED_RECORD_KEYS,
+        verified_queries.clone(),
+    );
+    trace.namespace = "basenames".to_owned();
+    trace.request_key = cache_key.request_key.clone();
+    trace.chain_context = json!({
+        "requested_positions": cache_key.requested_chain_positions.clone()
+    });
+    trace.manifest_context = json!({
+        "manifest_versions": cache_key.manifest_versions.clone()
+    });
+    trace.contracts_called = json!([
+        {
+            "chain_id": "ethereum-mainnet",
+            "contract_address": "0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31",
+            "selector": "0x9061b923"
+        }
+    ]);
+    trace.gateway_digests = json!(["sha256:basenames-profile"]);
+    let mut outcome = resolution_execution_outcome_with_boundaries(
+        execution_trace_id,
+        &cache_key.request_key,
+        verified_queries,
+        cache_key.topology_version_boundary.clone(),
+        cache_key.record_version_boundary.clone(),
+    );
+    outcome.namespace = "basenames".to_owned();
+    outcome.cache_key = cache_key;
+    upsert_execution_trace(&database.pool, &trace).await?;
+    upsert_execution_outcome(&database.pool, &outcome).await?;
+
+    let verified =
+        v2_name_record_payload_for_database(&database, "/v2/names/alice.base.eth?source=verified")
+            .await?;
+    assert_eq!(verified["meta"]["source"], json!("verified"));
+    assert_v2_name_snapshot_meta_chain_ids(&verified, &["1", "8453"]);
+    assert_v2_name_snapshot_token_slots(&verified, &["base", "ethereum"]);
+    assert_eq!(
+        verified["meta"]["as_of"]["8453"]["block_hash"],
+        json!("0xbase-binding")
+    );
+    assert_eq!(
+        verified["meta"]["as_of"]["1"]["block_hash"],
+        json!("0xbasenamesl1")
+    );
+    assert_eq!(verified["data"]["status"], json!("ok"));
+    assert_eq!(
+        verified["data"]["addresses"],
+        json!({
+            "60": verified_address
+        })
+    );
+    assert_eq!(
+        verified["data"]["text_records"],
+        json!({
+            "avatar": "https://verified.example/base-avatar.png",
+            "description": "Verified Basename profile"
+        })
+    );
+    assert_eq!(verified["data"]["content_hash"], json!("ipfs://verified-base"));
+    assert_eq!(verified["data"]["primary_address"], json!(verified_address));
+    assert!(verified["data"].get("failure_reason").is_none());
+
+    let indexed =
+        v2_name_record_payload_for_database(&database, "/v2/names/alice.base.eth?source=indexed")
+            .await?;
+    assert_eq!(indexed["meta"]["source"], json!("indexed"));
+    assert_v2_name_snapshot_meta_chain_ids(&indexed, &["8453"]);
+    assert_v2_name_snapshot_token_slots(&indexed, &["base"]);
+    assert_eq!(
+        indexed["meta"]["as_of"]["8453"]["block_hash"],
+        json!("0xbase-binding")
+    );
+    assert!(indexed["meta"]["as_of"].get("1").is_none());
+    assert_eq!(
+        indexed["data"]["addresses"],
+        json!({
+            "60": "0x0000000000000000000000000000000000000a11"
+        })
+    );
+    assert_eq!(
+        indexed["data"]["text_records"],
+        json!({
+            "avatar": "https://indexed.example/base-avatar.png",
+            "description": "Indexed Basename profile"
+        })
+    );
+    assert_eq!(indexed["data"]["content_hash"], json!("ipfs://indexed-base"));
+    assert_eq!(
+        indexed["data"]["primary_address"],
+        json!("0x0000000000000000000000000000000000000a11")
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_name_verified_source_basenames_keeps_stale_inventory_when_auxiliary_fallback_misses(
+) -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    let logical_name_id = "basenames:alice.base.eth";
+    let resource_id = Uuid::from_u128(0x9240);
+    let token_lineage_id = Uuid::from_u128(0x9241);
+    let surface_binding_id = Uuid::from_u128(0x9242);
+    let chain_positions = json!({
+        "base": {
+            "chain_id": "base-mainnet",
+            "block_number": 21_000_003,
+            "block_hash": "0xbase-binding",
+            "timestamp": "2026-04-17T00:00:03Z"
+        },
+        "ethereum": {
+            "chain_id": "ethereum-mainnet",
+            "block_number": 21_000_100,
+            "block_hash": "0xbasenamesl1",
+            "timestamp": "2026-04-17T00:00:03Z"
+        }
+    });
+
+    database
+        .seed_snapshot_selector_chain_positions(&chain_positions)
+        .await?;
+    database
+        .seed_name_current_binding(
+            logical_name_id,
+            "basenames",
+            "alice.base.eth",
+            "Alice.base.eth",
+            "namehash:alice.base.eth",
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+
+    let mut row = exact_name_row(
+        logical_name_id,
+        surface_binding_id,
+        resource_id,
+        token_lineage_id,
+    );
+    row.namespace = "basenames".to_owned();
+    row.canonical_display_name = "Alice.base.eth".to_owned();
+    row.normalized_name = "alice.base.eth".to_owned();
+    row.namehash = "namehash:alice.base.eth".to_owned();
+    row.declared_summary = json!({
+        "registration": {
+            "status": "active",
+            "authority_kind": "registrar"
+        },
+        "resolver": {
+            "chain_id": "base-mainnet",
+            "address": "0x0000000000000000000000000000000000000abc",
+            "latest_event_kind": "ResolverChanged"
+        }
+    });
+    row.provenance = json!({
+        "manifest_versions": [basenames_execution_manifest_version()]
+    });
+    row.chain_positions = chain_positions;
+    row.canonicality_summary = json!({
+        "status": "finalized",
+        "chains": {
+            "base-mainnet": "finalized",
+            "ethereum-mainnet": "finalized"
+        }
+    });
+    database.insert_name_current_row(row).await?;
+
+    let mut inventory =
+        basenames_l2resolver_record_inventory_current_row(logical_name_id, resource_id);
+    inventory.record_version_boundary =
+        basenames_dynamic_resolver_record_inventory_boundary(logical_name_id, resource_id, None, None);
+    inventory.chain_positions = json!({
+        "base": {
+            "chain_id": "base-mainnet",
+            "block_number": 21_000_004,
+            "block_hash": "0xbase-stale",
+            "timestamp": "2026-04-17T00:00:04Z"
+        }
+    });
+    inventory.canonicality_summary = json!({
+        "status": "finalized",
+        "chains": {
+            "base-mainnet": "finalized"
+        }
+    });
+    database
+        .insert_record_inventory_current_row(inventory)
+        .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v2/names/alice.base.eth?source=verified")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("v2 stale basenames verified name profile request failed")?;
+    let status = response.status();
+    let payload: Value = read_json(response).await?;
+
+    assert_eq!(status, StatusCode::CONFLICT, "{payload}");
+    assert_eq!(payload["error"]["code"], json!("stale"));
+    assert_eq!(
+        payload["error"]["message"],
+        json!("requested snapshot is not available for name")
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_name_verified_source_cache_miss_reports_stale_without_indexed_record_values(
+) -> Result<()> {
+    let payload = v2_name_record_payload_with_verified("/v2/names/Alice.eth?source=verified", None)
+        .await?;
+
+    assert_eq!(payload["meta"]["source"], json!("verified"));
+    assert_eq!(payload["data"]["status"], json!("stale"));
+    assert_eq!(
+        payload["data"]["failure_reason"],
+        json!("verified_answer_stale_for_snapshot")
+    );
     assert_eq!(
         payload["data"]["unsupported_fields"],
         json!(["addresses", "content_hash", "primary_address", "text_records"])
@@ -96,6 +622,453 @@ async fn v2_get_name_verified_source_uses_in_record_failed_status() -> Result<()
     assert!(payload["data"].get("text_records").is_none());
     assert!(payload["data"].get("content_hash").is_none());
     assert!(payload["data"].get("primary_address").is_none());
+    assert_ne!(
+        payload["data"].get("addresses"),
+        Some(&json!({
+            "60": "0x0000000000000000000000000000000000000def"
+        }))
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_name_verified_source_uses_profile_fallback_for_supported_empty_inventory(
+) -> Result<()> {
+    let verified_address = "0x00000000000000000000000000000000000000f1";
+    let verified_queries = json!([
+        {
+            "record_key": "addr:60",
+            "status": "success",
+            "value": {
+                "coin_type": "60",
+                "value": verified_address
+            },
+            "provenance": {
+                "execution_trace_id": Uuid::from_u128(0x0e7ec7ace00000000000000000000071).to_string()
+            }
+        },
+        {
+            "record_key": "avatar",
+            "status": "success",
+            "value": {
+                "value": "https://verified.example/fallback-avatar.png"
+            },
+            "provenance": {
+                "execution_trace_id": Uuid::from_u128(0x0e7ec7ace00000000000000000000071).to_string()
+            }
+        },
+        {
+            "record_key": "contenthash",
+            "status": "success",
+            "value": {
+                "value": "ipfs://verified-fallback"
+            },
+            "provenance": {
+                "execution_trace_id": Uuid::from_u128(0x0e7ec7ace00000000000000000000071).to_string()
+            }
+        },
+        {
+            "record_key": "text:description",
+            "status": "success",
+            "value": {
+                "key": "description",
+                "value": "Fallback profile"
+            },
+            "provenance": {
+                "execution_trace_id": Uuid::from_u128(0x0e7ec7ace00000000000000000000071).to_string()
+            }
+        },
+        {
+            "record_key": "text:url",
+            "status": "success",
+            "value": {
+                "key": "url",
+                "value": "https://verified.example"
+            },
+            "provenance": {
+                "execution_trace_id": Uuid::from_u128(0x0e7ec7ace00000000000000000000071).to_string()
+            }
+        },
+        {
+            "record_key": "text:email",
+            "status": "success",
+            "value": {
+                "key": "email",
+                "value": "alice@verified.example"
+            },
+            "provenance": {
+                "execution_trace_id": Uuid::from_u128(0x0e7ec7ace00000000000000000000071).to_string()
+            }
+        }
+    ]);
+    let payload = v2_name_record_payload_with_setup(
+        "/v2/names/Alice.eth?source=verified",
+        |_, _, inventory| {
+            inventory.selectors = json!([]);
+            inventory.entries = json!([]);
+            inventory.explicit_gaps = json!([]);
+            inventory.unsupported_families = json!([]);
+        },
+        Some((V2_PROFILE_FALLBACK_RECORD_KEYS, verified_queries)),
+    )
+    .await?;
+
+    assert_eq!(payload["meta"]["source"], json!("verified"));
+    assert_eq!(payload["data"]["status"], json!("ok"));
+    assert_eq!(
+        payload["data"]["addresses"],
+        json!({
+            "60": verified_address
+        })
+    );
+    assert_eq!(
+        payload["data"]["text_records"],
+        json!({
+            "avatar": "https://verified.example/fallback-avatar.png",
+            "description": "Fallback profile",
+            "email": "alice@verified.example",
+            "url": "https://verified.example"
+        })
+    );
+    assert_eq!(payload["data"]["content_hash"], json!("ipfs://verified-fallback"));
+    assert_eq!(payload["data"]["primary_address"], json!(verified_address));
+    assert!(payload["data"].get("unsupported_fields").is_none());
+    assert_ne!(
+        payload["data"]["addresses"]["60"],
+        json!("0x0000000000000000000000000000000000000def")
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_name_verified_source_omits_partially_unsupported_text_records() -> Result<()> {
+    let verified_queries = json!([
+        {
+            "record_key": "addr:60",
+            "status": "success",
+            "value": {
+                "coin_type": "60",
+                "value": "0x00000000000000000000000000000000000000f2"
+            },
+            "provenance": {
+                "execution_trace_id": Uuid::from_u128(0x0e7ec7ace00000000000000000000071).to_string()
+            }
+        },
+        {
+            "record_key": "avatar",
+            "status": "unsupported",
+            "unsupported_reason": "verified_records_not_supported"
+        },
+        {
+            "record_key": "contenthash",
+            "status": "success",
+            "value": {
+                "value": "ipfs://verified-text-partial"
+            },
+            "provenance": {
+                "execution_trace_id": Uuid::from_u128(0x0e7ec7ace00000000000000000000071).to_string()
+            }
+        },
+        {
+            "record_key": "text:description",
+            "status": "success",
+            "value": {
+                "key": "description",
+                "value": "Served description"
+            },
+            "provenance": {
+                "execution_trace_id": Uuid::from_u128(0x0e7ec7ace00000000000000000000071).to_string()
+            }
+        }
+    ]);
+    let payload = v2_name_record_payload_with_verified(
+        "/v2/names/Alice.eth?source=verified",
+        Some((V2_PROFILE_VERIFIED_RECORD_KEYS, verified_queries)),
+    )
+    .await?;
+
+    assert_eq!(payload["meta"]["source"], json!("verified"));
+    assert_eq!(payload["data"]["status"], json!("unsupported"));
+    assert_eq!(
+        payload["data"]["unsupported_reason"],
+        json!("verified_records_not_supported")
+    );
+    assert_eq!(payload["data"]["unsupported_fields"], json!(["text_records"]));
+    assert!(payload["data"].get("text_records").is_none());
+    assert_eq!(
+        payload["data"]["addresses"],
+        json!({
+            "60": "0x00000000000000000000000000000000000000f2"
+        })
+    );
+    assert_eq!(
+        payload["data"]["content_hash"],
+        json!("ipfs://verified-text-partial")
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_name_verified_source_reports_unsupported_without_verified_boundary() -> Result<()> {
+    let payload = v2_name_record_payload_with_row("/v2/names/Alice.eth?source=verified", |row| {
+        row.binding_kind = Some(bigname_storage::SurfaceBindingKind::ObservedOnly);
+    })
+    .await?;
+
+    assert_eq!(payload["meta"]["source"], json!("verified"));
+    assert_eq!(payload["data"]["status"], json!("unsupported"));
+    assert_eq!(
+        payload["data"]["unsupported_reason"],
+        json!("verified_records_not_supported")
+    );
+    assert_eq!(
+        payload["data"]["unsupported_fields"],
+        json!(["addresses", "content_hash", "primary_address", "text_records"])
+    );
+    assert!(payload["data"].get("addresses").is_none());
+    assert!(payload["data"].get("text_records").is_none());
+    assert!(payload["data"].get("content_hash").is_none());
+    assert!(payload["data"].get("primary_address").is_none());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_name_verified_source_executes_on_demand_for_cache_miss() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let execution_block_hash =
+        "0x1111111111111111111111111111111111111111111111111111111111111111";
+
+    seed_v2_alice_name_record_fixture_migrated(
+        &database,
+        |row| {
+            row.chain_positions = json!({
+                "ethereum": {
+                    "chain_id": "ethereum-mainnet",
+                    "block_number": 21_000_003,
+                    "block_hash": execution_block_hash,
+                    "timestamp": "2026-04-17T00:00:03Z"
+                }
+            });
+        },
+        |_, _, inventory| {
+            inventory.selectors = json!([
+                {
+                    "record_key": "addr:60",
+                    "record_family": "addr",
+                    "selector_key": "60",
+                    "cacheable": true
+                }
+            ]);
+            inventory.entries = json!([
+                {
+                    "record_key": "addr:60",
+                    "record_family": "addr",
+                    "selector_key": "60",
+                    "status": "success",
+                    "value": {
+                        "coin_type": "60",
+                        "value": "0x0000000000000000000000000000000000000def"
+                    }
+                }
+            ]);
+            inventory.record_version_boundary["chain_position"]["block_hash"] =
+                json!(execution_block_hash);
+            inventory.chain_positions = json!({
+                "ethereum-mainnet": {
+                    "chain_id": "ethereum-mainnet",
+                    "block_number": 21_000_003,
+                    "block_hash": execution_block_hash,
+                    "timestamp": "2026-04-17T00:00:03Z"
+                }
+            });
+        },
+        None,
+    )
+    .await?;
+    let executed_address = "0x0000000000000000000000000000000000000e0e";
+    let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![
+        resolution_universal_resolver_addr60_response(executed_address),
+    ])
+    .await?;
+    let chain_rpc_urls =
+        bigname_execution::ChainRpcUrls::from_entries(&[format!("ethereum-mainnet={rpc_url}")])?;
+
+    let response = app_router(database.app_state_with_chain_rpc_urls(chain_rpc_urls))
+        .oneshot(
+            Request::builder()
+                .uri("/v2/names/Alice.eth?source=verified")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("v2 on-demand verified name profile request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["meta"]["source"], json!("verified"));
+    assert_v2_name_omits_snapshot_meta(&payload);
+    assert_eq!(payload["data"]["status"], json!("ok"));
+    assert_eq!(
+        payload["data"]["addresses"],
+        json!({
+            "60": executed_address
+        })
+    );
+    assert_eq!(payload["data"]["primary_address"], json!(executed_address));
+    assert_eq!(
+        payload["data"]["unsupported_fields"],
+        json!(["content_hash", "text_records"])
+    );
+    assert_ne!(
+        payload["data"]["addresses"]["60"],
+        json!("0x0000000000000000000000000000000000000def")
+    );
+
+    let rpc_requests = join_primary_name_mock_rpc_requests(rpc_handle).await?;
+    assert_eq!(rpc_requests.len(), 1);
+    assert_eq!(rpc_requests[0]["method"], json!("eth_call"));
+    assert_eq!(
+        rpc_requests[0]["params"][0]["to"],
+        json!(bigname_execution::ENS_UNIVERSAL_RESOLVER_ADDRESS)
+    );
+    assert_eq!(
+        rpc_requests[0]["params"][1],
+        json!({
+            "blockHash": execution_block_hash,
+            "requireCanonical": true
+        })
+    );
+
+    let cached_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v2/names/Alice.eth?source=verified")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("v2 cached verified name profile request failed")?;
+    assert_eq!(cached_response.status(), StatusCode::OK);
+    let cached_payload: Value = read_json(cached_response).await?;
+    assert_v2_name_snapshot_meta(&cached_payload);
+    assert_eq!(cached_payload["data"]["addresses"]["60"], json!(executed_address));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_name_verified_source_executes_when_compact_cache_hit_lacks_avatar() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let compact_verified_queries = json!([
+        {
+            "record_key": "addr:60",
+            "status": "success",
+            "value": {
+                "coin_type": "60",
+                "value": "0x0000000000000000000000000000000000000aaa"
+            },
+            "provenance": {
+                "execution_trace_id": Uuid::from_u128(0x0e7ec7ace00000000000000000000073).to_string()
+            }
+        },
+        {
+            "record_key": "contenthash",
+            "status": "success",
+            "value": {
+                "value": "0xfeed"
+            },
+            "provenance": {
+                "execution_trace_id": Uuid::from_u128(0x0e7ec7ace00000000000000000000073).to_string()
+            }
+        },
+        {
+            "record_key": "text:description",
+            "status": "success",
+            "value": {
+                "key": "description",
+                "value": "compact cached description"
+            },
+            "provenance": {
+                "execution_trace_id": Uuid::from_u128(0x0e7ec7ace00000000000000000000073).to_string()
+            }
+        }
+    ]);
+    seed_v2_alice_name_record_fixture_migrated(
+        &database,
+        |_| {},
+        |_, _, _| {},
+        Some((
+            &["addr:60", "contenthash", "text:description"],
+            compact_verified_queries,
+        )),
+    )
+    .await?;
+
+    let executed_address = "0x0000000000000000000000000000000000000b0b";
+    let executed_avatar = "https://verified.example/on-demand-avatar.png";
+    let executed_contenthash = "0xe3010170";
+    let executed_description = "on-demand profile";
+    let (rpc_url, rpc_handle) = spawn_resolution_verified_profile_mock_rpc(
+        4,
+        executed_address,
+        executed_avatar,
+        executed_contenthash,
+        executed_description,
+    )
+    .await?;
+    let chain_rpc_urls =
+        bigname_execution::ChainRpcUrls::from_entries(&[format!("ethereum-mainnet={rpc_url}")])?;
+
+    let response = app_router(database.app_state_with_chain_rpc_urls(chain_rpc_urls))
+        .oneshot(
+            Request::builder()
+                .uri("/v2/names/Alice.eth?source=verified")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("v2 verified name profile compact-cache fallback request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["meta"]["source"], json!("verified"));
+    assert_eq!(payload["data"]["status"], json!("ok"));
+    assert_eq!(
+        payload["data"]["addresses"],
+        json!({
+            "60": executed_address
+        })
+    );
+    assert_eq!(payload["data"]["primary_address"], json!(executed_address));
+    assert_eq!(
+        payload["data"]["text_records"],
+        json!({
+            "avatar": executed_avatar,
+            "description": executed_description
+        })
+    );
+    assert_eq!(payload["data"]["content_hash"], json!(executed_contenthash));
+    assert!(payload["data"].get("unsupported_fields").is_none());
+    assert!(payload["data"].get("failure_reason").is_none());
+
+    let rpc_requests = join_primary_name_mock_rpc_requests(rpc_handle).await?;
+    assert_eq!(rpc_requests.len(), 4);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_name_default_source_matches_explicit_indexed() -> Result<()> {
+    let default_payload = v2_name_record_payload("/v2/names/Alice.eth").await?;
+    let indexed_payload = v2_name_record_payload("/v2/names/Alice.eth?source=indexed").await?;
+
+    assert_eq!(default_payload, indexed_payload);
 
     Ok(())
 }
@@ -844,6 +1817,270 @@ async fn v2_get_name_records_source_verified_executes_on_demand_for_cache_miss()
             "value": executed_address
         })
     );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_name_records_source_verified_keysless_executes_when_compact_cache_hit_lacks_avatar(
+) -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let compact_verified_queries = json!([
+        {
+            "record_key": "addr:60",
+            "status": "success",
+            "value": {
+                "coin_type": "60",
+                "value": "0x0000000000000000000000000000000000000aaa"
+            },
+            "provenance": {
+                "execution_trace_id": Uuid::from_u128(0x0e7ec7ace00000000000000000000074).to_string()
+            }
+        },
+        {
+            "record_key": "contenthash",
+            "status": "success",
+            "value": {
+                "value": "0xfeed"
+            },
+            "provenance": {
+                "execution_trace_id": Uuid::from_u128(0x0e7ec7ace00000000000000000000074).to_string()
+            }
+        },
+        {
+            "record_key": "text:description",
+            "status": "success",
+            "value": {
+                "key": "description",
+                "value": "compact cached description"
+            },
+            "provenance": {
+                "execution_trace_id": Uuid::from_u128(0x0e7ec7ace00000000000000000000074).to_string()
+            }
+        }
+    ]);
+    seed_v2_alice_name_record_fixture_migrated(
+        &database,
+        |_| {},
+        |_, _, _| {},
+        Some((
+            &["addr:60", "contenthash", "text:description"],
+            compact_verified_queries,
+        )),
+    )
+    .await?;
+
+    let executed_address = "0x0000000000000000000000000000000000000b0c";
+    let executed_avatar = "https://verified.example/records-avatar.png";
+    let executed_contenthash = "0xe3010171";
+    let executed_description = "on-demand records";
+    let (rpc_url, rpc_handle) = spawn_resolution_verified_profile_mock_rpc(
+        4,
+        executed_address,
+        executed_avatar,
+        executed_contenthash,
+        executed_description,
+    )
+    .await?;
+    let chain_rpc_urls =
+        bigname_execution::ChainRpcUrls::from_entries(&[format!("ethereum-mainnet={rpc_url}")])?;
+
+    let response = app_router(database.app_state_with_chain_rpc_urls(chain_rpc_urls))
+        .oneshot(
+            Request::builder()
+                .uri("/v2/names/Alice.eth/records?source=verified")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("v2 verified name records compact-cache fallback request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["meta"]["source"], json!("verified"));
+    assert_eq!(
+        payload["data"]["addresses"],
+        json!({
+            "60": executed_address
+        })
+    );
+    assert_eq!(
+        payload["data"]["text_records"],
+        json!({
+            "avatar": executed_avatar,
+            "description": executed_description
+        })
+    );
+    assert_eq!(payload["data"]["content_hash"], json!(executed_contenthash));
+    assert_eq!(
+        payload["data"]["records"]["avatar"],
+        json!({
+            "status": "ok",
+            "value": executed_avatar
+        })
+    );
+    assert_eq!(
+        payload["data"]["records"]["addr:60"],
+        json!({
+            "status": "ok",
+            "value": executed_address
+        })
+    );
+
+    let rpc_requests = join_primary_name_mock_rpc_requests(rpc_handle).await?;
+    assert_eq!(rpc_requests.len(), 4);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_name_records_source_auto_executes_when_compact_cache_hit_lacks_avatar() -> Result<()>
+{
+    let database = TestDatabase::new_migrated().await?;
+    let compact_verified_queries = json!([
+        {
+            "record_key": "addr:60",
+            "status": "success",
+            "value": {
+                "coin_type": "60",
+                "value": "0x0000000000000000000000000000000000000aaa"
+            },
+            "provenance": {
+                "execution_trace_id": Uuid::from_u128(0x0e7ec7ace00000000000000000000075).to_string()
+            }
+        },
+        {
+            "record_key": "contenthash",
+            "status": "success",
+            "value": {
+                "value": "0xfeed"
+            },
+            "provenance": {
+                "execution_trace_id": Uuid::from_u128(0x0e7ec7ace00000000000000000000075).to_string()
+            }
+        },
+        {
+            "record_key": "text:description",
+            "status": "success",
+            "value": {
+                "key": "description",
+                "value": "compact cached description"
+            },
+            "provenance": {
+                "execution_trace_id": Uuid::from_u128(0x0e7ec7ace00000000000000000000075).to_string()
+            }
+        }
+    ]);
+    seed_v2_alice_name_record_fixture_migrated(
+        &database,
+        |_| {},
+        |_, _, inventory| {
+            inventory.entries = json!([
+                {
+                    "record_key": "addr:60",
+                    "record_family": "addr",
+                    "selector_key": "60",
+                    "status": "unsupported",
+                    "unsupported_reason": "value_not_retained_in_normalized_events"
+                },
+                {
+                    "record_key": "avatar",
+                    "record_family": "avatar",
+                    "selector_key": null,
+                    "status": "unsupported",
+                    "unsupported_reason": "value_not_retained_in_normalized_events"
+                },
+                {
+                    "record_key": "contenthash",
+                    "record_family": "contenthash",
+                    "selector_key": null,
+                    "status": "unsupported",
+                    "unsupported_reason": "value_not_retained_in_normalized_events"
+                },
+                {
+                    "record_key": "text:description",
+                    "record_family": "text",
+                    "selector_key": "description",
+                    "status": "unsupported",
+                    "unsupported_reason": "value_not_retained_in_normalized_events"
+                }
+            ]);
+            inventory.explicit_gaps = json!([]);
+            inventory.unsupported_families = json!([
+                {
+                    "record_family": "avatar",
+                    "unsupported_reason": "value_not_retained_in_normalized_events"
+                }
+            ]);
+        },
+        Some((
+            &["addr:60", "contenthash", "text:description"],
+            compact_verified_queries,
+        )),
+    )
+    .await?;
+
+    let executed_address = "0x0000000000000000000000000000000000000b0d";
+    let executed_avatar = "https://verified.example/auto-avatar.png";
+    let executed_contenthash = "0xe3010172";
+    let executed_description = "on-demand auto";
+    let (rpc_url, rpc_handle) = spawn_resolution_verified_profile_mock_rpc(
+        4,
+        executed_address,
+        executed_avatar,
+        executed_contenthash,
+        executed_description,
+    )
+    .await?;
+    let chain_rpc_urls =
+        bigname_execution::ChainRpcUrls::from_entries(&[format!("ethereum-mainnet={rpc_url}")])?;
+
+    let response = app_router(database.app_state_with_chain_rpc_urls(chain_rpc_urls))
+        .oneshot(
+            Request::builder()
+                .uri("/v2/names/Alice.eth/records?source=auto&keys=addr:60,avatar,contenthash,text:description")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("v2 auto name records compact-cache fallback request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["meta"]["source"], json!("verified"));
+    assert_eq!(
+        payload["data"]["addresses"],
+        json!({
+            "60": executed_address
+        })
+    );
+    assert_eq!(
+        payload["data"]["text_records"],
+        json!({
+            "avatar": executed_avatar,
+            "description": executed_description
+        })
+    );
+    assert_eq!(payload["data"]["content_hash"], json!(executed_contenthash));
+    assert_eq!(
+        payload["data"]["records"]["avatar"],
+        json!({
+            "status": "ok",
+            "value": executed_avatar
+        })
+    );
+    assert_eq!(
+        payload["data"]["records"]["addr:60"],
+        json!({
+            "status": "ok",
+            "value": executed_address
+        })
+    );
+
+    let rpc_requests = join_primary_name_mock_rpc_requests(rpc_handle).await?;
+    assert_eq!(rpc_requests.len(), 4);
 
     database.cleanup().await?;
     Ok(())
@@ -1743,6 +2980,38 @@ async fn v2_name_record_payload(uri: &str) -> Result<Value> {
     v2_name_record_payload_with_row(uri, |_| {}).await
 }
 
+const V2_PROFILE_VERIFIED_RECORD_KEYS: &[&str] =
+    &["addr:60", "avatar", "contenthash", "text:description"];
+const V2_PROFILE_FALLBACK_RECORD_KEYS: &[&str] = &[
+    "addr:60",
+    "avatar",
+    "contenthash",
+    "text:description",
+    "text:url",
+    "text:email",
+];
+
+async fn v2_name_record_payload_with_verified(
+    uri: &str,
+    verified: Option<(&[&str], Value)>,
+) -> Result<Value> {
+    v2_name_record_payload_with_setup(uri, |_, _, _| {}, verified).await
+}
+
+async fn v2_name_record_payload_with_setup(
+    uri: &str,
+    configure_inventory: impl FnOnce(&str, Uuid, &mut bigname_storage::RecordInventoryCurrentRow),
+    verified: Option<(&[&str], Value)>,
+) -> Result<Value> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    seed_v2_alice_name_record_fixture(&database, |_| {}, configure_inventory, verified).await?;
+
+    let payload = v2_name_record_payload_for_database(&database, uri).await?;
+
+    database.cleanup().await?;
+    Ok(payload)
+}
+
 async fn v2_name_record_payload_for_database(
     database: &TestDatabase,
     uri: &str,
@@ -1766,13 +3035,70 @@ async fn v2_name_record_payload_with_row(
     configure_row: impl FnOnce(&mut bigname_storage::NameCurrentRow),
 ) -> Result<Value> {
     let database = TestDatabase::new_with_schemas(false, true).await?;
+    seed_v2_alice_name_record_fixture(&database, configure_row, |_, _, _| {}, None).await?;
+
+    let payload = v2_name_record_payload_for_database(&database, uri).await?;
+
+    database.cleanup().await?;
+    Ok(payload)
+}
+
+async fn seed_v2_alice_name_record_fixture(
+    database: &TestDatabase,
+    configure_row: impl FnOnce(&mut bigname_storage::NameCurrentRow),
+    configure_inventory: impl FnOnce(&str, Uuid, &mut bigname_storage::RecordInventoryCurrentRow),
+    verified: Option<(&[&str], Value)>,
+) -> Result<()> {
+    seed_v2_alice_name_record_fixture_with_binding_mode(
+        database,
+        configure_row,
+        configure_inventory,
+        verified,
+        false,
+    )
+    .await
+}
+
+async fn seed_v2_alice_name_record_fixture_migrated(
+    database: &TestDatabase,
+    configure_row: impl FnOnce(&mut bigname_storage::NameCurrentRow),
+    configure_inventory: impl FnOnce(&str, Uuid, &mut bigname_storage::RecordInventoryCurrentRow),
+    verified: Option<(&[&str], Value)>,
+) -> Result<()> {
+    seed_v2_alice_name_record_fixture_with_binding_mode(
+        database,
+        configure_row,
+        configure_inventory,
+        verified,
+        true,
+    )
+    .await
+}
+
+async fn seed_v2_alice_name_record_fixture_with_binding_mode(
+    database: &TestDatabase,
+    configure_row: impl FnOnce(&mut bigname_storage::NameCurrentRow),
+    configure_inventory: impl FnOnce(&str, Uuid, &mut bigname_storage::RecordInventoryCurrentRow),
+    verified: Option<(&[&str], Value)>,
+    migrated_binding: bool,
+) -> Result<()> {
     let logical_name_id = "ens:alice.eth";
     let resource_id = Uuid::from_u128(0x2200);
     let token_lineage_id = Uuid::from_u128(0x1100);
     let surface_binding_id = Uuid::from_u128(0x3300);
 
-    database
-        .seed_name_current_binding(
+    if migrated_binding {
+        database
+            .seed_name_current_binding_migrated(
+                logical_name_id,
+                resource_id,
+                token_lineage_id,
+                surface_binding_id,
+            )
+            .await?;
+    } else {
+        database
+            .seed_name_current_binding(
             logical_name_id,
             "ens",
             "alice.eth",
@@ -1783,6 +3109,7 @@ async fn v2_name_record_payload_with_row(
             surface_binding_id,
         )
         .await?;
+    }
 
     let mut row = exact_name_row(
         logical_name_id,
@@ -1881,23 +3208,30 @@ async fn v2_name_record_payload_with_row(
             }
         }
     ]);
+    configure_inventory(logical_name_id, resource_id, &mut inventory);
     database.insert_record_inventory_current_row(inventory).await?;
 
-    let response = app_router(database.app_state())
-        .oneshot(
-            Request::builder()
-                .uri(uri)
-                .body(Body::empty())
-                .expect("request must build"),
-        )
-        .await
-        .context("v2 name record request failed")?;
+    if let Some((record_keys, verified_queries)) = verified {
+        let request_key = resolution_execution_request_key(record_keys);
+        let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000071);
+        let trace = resolution_execution_trace(
+            execution_trace_id,
+            &request_key,
+            record_keys,
+            verified_queries.clone(),
+        );
+        let outcome = resolution_execution_outcome(
+            execution_trace_id,
+            &request_key,
+            verified_queries,
+            logical_name_id,
+            resource_id,
+        );
+        upsert_execution_trace(&database.pool, &trace).await?;
+        upsert_execution_outcome(&database.pool, &outcome).await?;
+    }
 
-    assert_eq!(response.status(), StatusCode::OK);
-    let payload: Value = read_json(response).await?;
-
-    database.cleanup().await?;
-    Ok(payload)
+    Ok(())
 }
 
 async fn v2_name_records_payload(uri: &str) -> Result<Value> {
@@ -2547,6 +3881,65 @@ fn normalized_name_from_logical_name_id(logical_name_id: &str) -> &str {
     split_logical_name_id(logical_name_id).1
 }
 
+async fn spawn_resolution_verified_profile_mock_rpc(
+    expected_request_count: usize,
+    address: &str,
+    avatar: &str,
+    contenthash: &str,
+    description: &str,
+) -> Result<(String, tokio::task::JoinHandle<Result<Vec<Value>>>)> {
+    let address_response = resolution_universal_resolver_addr60_response(address);
+    let avatar_response = resolution_universal_resolver_string_response(avatar);
+    let contenthash_response = resolution_universal_resolver_bytes_response(contenthash);
+    let description_response = resolution_universal_resolver_string_response(description);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .context("failed to bind mock verified profile RPC listener")?;
+    let url = format!("http://{}", listener.local_addr()?);
+    let handle = tokio::spawn(async move {
+        let mut requests = Vec::new();
+        for _ in 0..expected_request_count {
+            let (mut socket, _) = listener
+                .accept()
+                .await
+                .context("failed to accept mock verified profile RPC request")?;
+            let request_payload = read_primary_name_mock_rpc_request(&mut socket).await?;
+            let response = match resolution_verified_record_key_from_rpc_request(&request_payload)? {
+                "addr:60" => address_response.clone(),
+                "avatar" => avatar_response.clone(),
+                "contenthash" => contenthash_response.clone(),
+                "text:description" => description_response.clone(),
+                record_key => anyhow::bail!("unexpected verified profile record key {record_key}"),
+            };
+            requests.push(request_payload);
+            write_primary_name_mock_rpc_response(&mut socket, response).await?;
+        }
+        Ok(requests)
+    });
+
+    Ok((url, handle))
+}
+
+fn resolution_verified_record_key_from_rpc_request(request: &Value) -> Result<&'static str> {
+    let calldata = request
+        .pointer("/params/0/data")
+        .and_then(Value::as_str)
+        .context("mock verified profile RPC request must include call data")?;
+
+    if calldata.contains("3b3b57de") {
+        Ok("addr:60")
+    } else if calldata.contains("bc1c58d1") {
+        Ok("contenthash")
+    } else if calldata.contains(&resolution_ascii_hex("avatar")) {
+        Ok("avatar")
+    } else if calldata.contains(&resolution_ascii_hex("description")) {
+        Ok("text:description")
+    } else {
+        anyhow::bail!("unrecognized verified profile RPC calldata {calldata}")
+    }
+}
+
 fn resolution_universal_resolver_addr60_response(address: &str) -> Value {
     json!(format!(
         "0x{}{}{}{}",
@@ -2555,6 +3948,58 @@ fn resolution_universal_resolver_addr60_response(address: &str) -> Value {
         resolution_left_pad_hex("20", 64),
         resolution_padded_address_hex(address),
     ))
+}
+
+fn resolution_universal_resolver_string_response(value: &str) -> Value {
+    resolution_universal_resolver_selector_response(&resolution_abi_dynamic_response(
+        &resolution_ascii_hex(value),
+    ))
+}
+
+fn resolution_universal_resolver_bytes_response(value: &str) -> Value {
+    resolution_universal_resolver_selector_response(&resolution_abi_dynamic_response(
+        value.strip_prefix("0x").unwrap_or(value),
+    ))
+}
+
+fn resolution_universal_resolver_selector_response(selector_response: &str) -> Value {
+    let stripped = selector_response
+        .strip_prefix("0x")
+        .expect("selector response must be 0x-prefixed");
+    assert_eq!(
+        stripped.len() % 2,
+        0,
+        "selector response must contain whole bytes"
+    );
+    json!(format!(
+        "0x{}{}{}{}",
+        resolution_left_pad_hex("40", 64),
+        resolution_padded_address_hex(bigname_execution::ENS_UNIVERSAL_RESOLVER_ADDRESS),
+        resolution_left_pad_hex(&format!("{:x}", stripped.len() / 2), 64),
+        resolution_right_pad_hex(stripped, stripped.len().next_multiple_of(64)),
+    ))
+}
+
+fn resolution_abi_dynamic_response(value_hex: &str) -> String {
+    assert_eq!(
+        value_hex.len() % 2,
+        0,
+        "dynamic ABI value must contain whole bytes"
+    );
+    format!(
+        "0x{}{}{}",
+        resolution_left_pad_hex("20", 64),
+        resolution_left_pad_hex(&format!("{:x}", value_hex.len() / 2), 64),
+        resolution_right_pad_hex(value_hex, value_hex.len().next_multiple_of(64)),
+    )
+}
+
+fn resolution_ascii_hex(value: &str) -> String {
+    value
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn resolution_padded_address_hex(address: &str) -> String {
@@ -2568,6 +4013,75 @@ fn resolution_padded_address_hex(address: &str) -> String {
 fn resolution_left_pad_hex(value: &str, width: usize) -> String {
     assert!(value.len() <= width, "test hex value must fit padded width");
     format!("{value:0>width$}")
+}
+
+fn resolution_right_pad_hex(value: &str, width: usize) -> String {
+    assert!(value.len() <= width, "test hex value must fit padded width");
+    format!("{value:0<width$}")
+}
+
+fn assert_v2_name_snapshot_meta(payload: &Value) {
+    assert!(
+        payload["meta"]["as_of"].is_object(),
+        "name response must include meta.as_of"
+    );
+    let token = payload["meta"]["as_of_token"]
+        .as_str()
+        .expect("name response must include meta.as_of_token");
+    assert!(!token.is_empty(), "meta.as_of_token must not be empty");
+    assert!(
+        token
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~')),
+        "meta.as_of_token must be URL-safe"
+    );
+}
+
+fn assert_v2_name_snapshot_meta_chain_ids(payload: &Value, expected_chain_ids: &[&str]) {
+    assert_v2_name_snapshot_meta(payload);
+    let actual = payload["meta"]["as_of"]
+        .as_object()
+        .expect("name meta.as_of must be an object")
+        .keys()
+        .map(String::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
+    let expected = expected_chain_ids
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(actual, expected);
+}
+
+fn assert_v2_name_snapshot_token_slots(payload: &Value, expected_slots: &[&str]) {
+    let token = payload["meta"]["as_of_token"]
+        .as_str()
+        .expect("name response must include meta.as_of_token");
+    let bigname_storage::SnapshotAt::ResolvedPositions(chain_positions) =
+        crate::v2::decode_at_token(token).expect("name token must decode")
+    else {
+        panic!("name token must contain resolved chain positions");
+    };
+    let actual = chain_positions
+        .as_map()
+        .keys()
+        .map(String::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
+    let expected = expected_slots
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(actual, expected);
+}
+
+fn assert_v2_name_omits_snapshot_meta(payload: &Value) {
+    assert!(
+        payload["meta"].get("as_of").is_none(),
+        "name response must omit meta.as_of"
+    );
+    assert!(
+        payload["meta"].get("as_of_token").is_none(),
+        "name response must omit meta.as_of_token"
+    );
 }
 
 fn assert_no_banned_v1_spellings(value: &Value) {

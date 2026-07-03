@@ -80,7 +80,7 @@ step-3-gate vocabulary needed by the route schemas:
 | `verification` | typed checked-answer summary for claimed-vs-verified answers | `verified_state`, `verified_primary_name` section wrappers |
 | `status` | one result vocabulary: `ok`, `not_found`, `invalid_name`, `mismatch`, `unsupported`, `stale`, `failed` | `ResultStatus`, `IdentityStatus`, `NameRecordStatus`, `unnormalizable_input` (folds into `invalid_name`); `mismatch` kept for verification results |
 | `unsupported_reason` | reason code or short reason string required with `status=unsupported` | `coverage.unsupported_reason`, route-specific unsupported details |
-| `failure_reason` | reason code or short reason string for `failed`, `not_found`, or `mismatch` details | route-specific failure detail fields |
+| `failure_reason` | reason code or short reason string for `failed`, `stale`, `not_found`, or `mismatch` details | route-specific failure detail fields |
 | `completeness` | `full`, `partial`, `unsupported` | `coverage.status` on product routes (full taxonomy moves to diagnostics) |
 | `powers` | effective permission powers; storage `resource_control` is exposed as `registration_control` | `effective_powers` |
 | `unsupported_fields` | fields or expansions that could not be served or proved for a response item | `unsupported_filters`, coverage-derived unsupported field lists |
@@ -160,7 +160,8 @@ Rules:
 - `meta` is always present. Routes that read chain-derived state include
   `meta.as_of` and `meta.as_of_token` when they can attribute at least one
   served snapshot-pinned chain position; control-plane routes (`/v2/status`,
-  `/v2/namespaces/{namespace}`) and primary-name responses served by the
+  `/v2/namespaces/{namespace}`), verified name-profile responses served by the
+  route-local on-demand fallback, and primary-name responses served by the
   route-local on-demand fallback omit both. `meta.as_of` is human-readable
   staleness attribution. `meta.as_of_token` is opaque and is the value to pass
   to `at` when a route supports snapshot replay. `meta.completeness`,
@@ -264,7 +265,8 @@ route:
 Rules:
 
 - `unsupported_reason` is required when `status=unsupported`.
-- `failure_reason` is permitted on `failed`, `not_found`, and `mismatch`.
+- `failure_reason` is permitted on `failed`, `stale`, `not_found`, and
+  `mismatch`.
 - `mismatch` is the verification state where a claimed answer verifies to a
   different value.
 - `completeness` is `full`, `partial`, or `unsupported`.

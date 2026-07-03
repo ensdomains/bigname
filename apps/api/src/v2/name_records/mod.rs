@@ -9,8 +9,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    AppState, ExecutionOutcome, ResolutionVerifiedOutcomeLookup,
-    handler_resolution_on_demand::load_or_execute_resolution_verified_outcome,
+    AppState, ExecutionOutcome, PartialCompactHits, ResolutionVerifiedOutcomeLookup,
+    handler_resolution_on_demand::{
+        ResolutionVerifiedOutcomeOrigin, VerifiedOutcomeExecutionOptions,
+        load_or_execute_resolution_verified_outcome,
+    },
     load_name_current_for_selected_snapshot, load_supported_record_inventory_current_for_snapshot,
     lookup_resolution_verified_outcome, map_internal_api_error, normalize_inferred_route_name,
     parse_resolution_record_key, snapshot_selection_api_error,
@@ -26,8 +29,8 @@ use super::{
 
 mod build;
 pub(crate) use build::{
-    build_auto_name_records, build_indexed_name_records, build_verified_name_records,
-    indexed_records_requiring_verified_fallback,
+    VERIFIED_NOT_SUPPORTED_REASON, build_auto_name_records, build_indexed_name_records,
+    build_verified_name_records, indexed_records_requiring_verified_fallback,
 };
 
 const MAX_RECORD_KEYS: usize = MAX_PAGE_SIZE as usize;
@@ -66,9 +69,24 @@ pub(crate) struct RecordAnswer {
 }
 
 pub(crate) enum VerifiedRecordLookup {
-    Found(Box<ExecutionOutcome>),
+    Found {
+        outcome: Box<ExecutionOutcome>,
+        origin: ResolutionVerifiedOutcomeOrigin,
+    },
     Stale(String),
     NotSupported,
+}
+
+impl VerifiedRecordLookup {
+    pub(crate) fn uses_on_demand_fallback(&self) -> bool {
+        matches!(
+            self,
+            Self::Found {
+                origin: ResolutionVerifiedOutcomeOrigin::OnDemand,
+                ..
+            }
+        )
+    }
 }
 
 pub(crate) async fn get_name_records(
@@ -218,6 +236,25 @@ pub(crate) async fn load_verified_record_lookup(
     records: &[crate::ResolutionRecordKey],
     selected_snapshot: &SelectedSnapshot,
 ) -> V2Result<Option<VerifiedRecordLookup>> {
+    load_verified_record_lookup_for_resource(
+        state,
+        row,
+        record_inventory,
+        records,
+        selected_snapshot,
+        SnapshotReadResource::NameRecords,
+    )
+    .await
+}
+
+pub(crate) async fn load_verified_record_lookup_for_resource(
+    state: &AppState,
+    row: &bigname_storage::NameCurrentRow,
+    record_inventory: Option<&RecordInventoryCurrentRow>,
+    records: &[crate::ResolutionRecordKey],
+    selected_snapshot: &SelectedSnapshot,
+    resource: SnapshotReadResource,
+) -> V2Result<Option<VerifiedRecordLookup>> {
     load_verified_record_lookup_with_persistence(
         state,
         row,
@@ -225,6 +262,7 @@ pub(crate) async fn load_verified_record_lookup(
         records,
         selected_snapshot,
         true,
+        resource,
     )
     .await
 }
@@ -243,6 +281,7 @@ pub(crate) async fn load_ephemeral_verified_record_lookup(
         records,
         selected_snapshot,
         false,
+        SnapshotReadResource::NameRecords,
     )
     .await
 }
@@ -264,11 +303,15 @@ pub(crate) async fn load_persisted_verified_record_lookup(
         records,
         record_inventory,
         selected_snapshot,
+        PartialCompactHits::Serve,
     )
     .await
     {
         Ok(ResolutionVerifiedOutcomeLookup::Found(outcome)) => {
-            Ok(Some(VerifiedRecordLookup::Found(Box::new(outcome))))
+            Ok(Some(VerifiedRecordLookup::Found {
+                outcome: Box::new(outcome),
+                origin: ResolutionVerifiedOutcomeOrigin::Persisted,
+            }))
         }
         Ok(ResolutionVerifiedOutcomeLookup::NotSupported) => {
             Ok(Some(VerifiedRecordLookup::NotSupported))
@@ -288,6 +331,7 @@ async fn load_verified_record_lookup_with_persistence(
     records: &[crate::ResolutionRecordKey],
     selected_snapshot: &SelectedSnapshot,
     persist_execution: bool,
+    resource: SnapshotReadResource,
 ) -> V2Result<Option<VerifiedRecordLookup>> {
     if records.is_empty() {
         return Ok(None);
@@ -299,19 +343,25 @@ async fn load_verified_record_lookup_with_persistence(
         records,
         record_inventory,
         selected_snapshot,
-        false,
-        persist_execution,
+        VerifiedOutcomeExecutionOptions {
+            use_latest_block_tag: false,
+            persist_execution,
+            partial_compact_hits: PartialCompactHits::TreatAsMiss,
+        },
     )
     .await
     {
-        Ok(Some(outcome)) => Ok(Some(VerifiedRecordLookup::Found(Box::new(outcome)))),
+        Ok(Some(loaded)) => Ok(Some(VerifiedRecordLookup::Found {
+            outcome: Box::new(loaded.outcome),
+            origin: loaded.origin,
+        })),
         Ok(None) => Ok(Some(VerifiedRecordLookup::NotSupported)),
         Err(error) if error.kind() == SnapshotSelectionErrorKind::Stale => Ok(Some(
             VerifiedRecordLookup::Stale(VERIFIED_ANSWER_STALE_FOR_SNAPSHOT_REASON.to_owned()),
         )),
         Err(error) => Err(api_error_to_v2_for_resource(
             snapshot_selection_api_error(error),
-            SnapshotReadResource::NameRecords,
+            resource,
         )),
     }
 }
