@@ -166,6 +166,160 @@ async fn backfill_job_create_is_idempotent_and_rejects_range_widening() -> Resul
 }
 
 #[tokio::test]
+async fn backfill_job_accepts_legacy_full_whole_active_with_compact_hash() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let selected_targets = vec![
+        json!({
+            "source_family": "basenames_base_registry",
+            "contract_instance_id": "00000000-0000-0000-0000-000000000001",
+            "address": "0x0000000000000000000000000000000000000001",
+            "effective_from_block": 100,
+            "effective_to_block": 120
+        }),
+        json!({
+            "source_family": "basenames_base_registry",
+            "contract_instance_id": "00000000-0000-0000-0000-000000000002",
+            "address": "0x0000000000000000000000000000000000000002",
+            "effective_from_block": 100,
+            "effective_to_block": 120
+        }),
+    ];
+    let legacy_full_source_identity_hash =
+        "keccak256:0x1111111111111111111111111111111111111111111111111111111111111111";
+    let mut request = backfill_job_create("job-create-compact-source-identity");
+    request.source_identity = json!({
+        "selector_kind": "whole_active_watched_chain",
+        "source_family": null,
+        "requested_watched_targets": [],
+        "selected_targets": selected_targets.clone(),
+        "backfill_provider": "coinbase_cdp_sql",
+        "scan_mode": "coinbase_sql_hash_pinned_logs_v1",
+        "coinbase_sql_plan_version": "base_logs_v2",
+        "validation_provider_required": true,
+        "coinbase_sql_validation_mode": "sample",
+        "topic_filtering": "manifest_abi_topic0_union_v1",
+        "coinbase_sql_topic_plan": {
+            "topic0s_by_source_family": {
+                "basenames_base_registry": ["0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"]
+            },
+            "event_signatures_by_source_family": {
+                "basenames_base_registry": ["NewOwner(bytes32,bytes32,address)"]
+            },
+            "source_families_without_topics": []
+        },
+        "source_identity_hash": legacy_full_source_identity_hash,
+    });
+
+    let created = create_backfill_job(database.pool(), &request).await?;
+    let selected_targets = request
+        .source_identity
+        .get("selected_targets")
+        .and_then(serde_json::Value::as_array)
+        .expect("test source identity has selected_targets");
+    let compact_source_identity = |selected_targets: &[serde_json::Value], hash: &str| {
+        json!({
+            "selector_kind": "whole_active_watched_chain",
+            "source_family": null,
+            "requested_watched_targets": [],
+            "selected_target_count": selected_targets.len(),
+            "selected_targets_digest_algorithm": "keccak256",
+            "selected_targets_digest": validate::selected_targets_digest(selected_targets),
+            "selected_targets_sample": {
+                "first": selected_targets.first(),
+                "last": selected_targets.last(),
+            },
+            "source_identity_payload_format": "selected_targets_digest_v1",
+            "backfill_provider": "coinbase_cdp_sql",
+            "scan_mode": "coinbase_sql_hash_pinned_logs_v1",
+            "coinbase_sql_plan_version": "base_logs_v2",
+            "validation_provider_required": true,
+            "coinbase_sql_validation_mode": "sample",
+            "topic_filtering": "manifest_abi_topic0_union_v1",
+            "coinbase_sql_topic_plan": {
+                "topic0s_by_source_family": {
+                    "basenames_base_registry": ["0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"]
+                },
+                "event_signatures_by_source_family": {
+                    "basenames_base_registry": ["NewOwner(bytes32,bytes32,address)"]
+                },
+                "source_families_without_topics": []
+            },
+            "source_identity_hash": hash,
+        })
+    };
+    let mut compact = request.clone();
+    compact.source_identity = compact_source_identity(
+        selected_targets,
+        "keccak256:0x2222222222222222222222222222222222222222222222222222222222222222",
+    );
+
+    let repeated = create_backfill_job(database.pool(), &compact).await?;
+
+    assert_eq!(repeated.job.backfill_job_id, created.job.backfill_job_id);
+    assert_eq!(
+        repeated.job.source_identity, request.source_identity,
+        "existing full source identity must be reused without rewriting"
+    );
+
+    let mut different_targets = selected_targets.to_vec();
+    *different_targets[1]
+        .get_mut("effective_to_block")
+        .expect("test target has effective_to_block") = json!(121);
+    let mut different_compact = compact.clone();
+    different_compact.source_identity = compact_source_identity(
+        &different_targets,
+        "keccak256:0x3333333333333333333333333333333333333333333333333333333333333333",
+    );
+    let error = create_backfill_job(database.pool(), &different_compact)
+        .await
+        .expect_err("different compact target set must not reuse legacy full job");
+    assert!(
+        error
+            .to_string()
+            .contains("does not match requested immutable job identity"),
+        "unexpected error: {error:#}"
+    );
+
+    let mut provider_drift = compact.clone();
+    provider_drift
+        .source_identity
+        .as_object_mut()
+        .expect("compact source identity is an object")
+        .insert("coinbase_sql_validation_mode".to_owned(), json!("full"));
+    let error = create_backfill_job(database.pool(), &provider_drift)
+        .await
+        .expect_err(
+            "same target set with changed Coinbase SQL fields must not reuse legacy full job",
+        );
+    assert!(
+        error
+            .to_string()
+            .contains("does not match requested immutable job identity"),
+        "unexpected error: {error:#}"
+    );
+
+    let mut missing_sample = compact;
+    missing_sample
+        .source_identity
+        .as_object_mut()
+        .expect("compact source identity is an object")
+        .remove("selected_targets_sample");
+    let error = create_backfill_job(database.pool(), &missing_sample)
+        .await
+        .expect_err(
+            "compact identity without selected_targets_sample must not reuse legacy full job",
+        );
+    assert!(
+        error
+            .to_string()
+            .contains("does not match requested immutable job identity"),
+        "unexpected error: {error:#}"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn backfill_job_reservation_is_idempotent_and_reclaims_expired_leases() -> Result<()> {
     let database = TestDatabase::new().await?;
     let created = create_backfill_job(
